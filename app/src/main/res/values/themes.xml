@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.WatchRSSPhone" parent="Theme.AppCompat.DayNight.NoActionBar" />
+</resources>

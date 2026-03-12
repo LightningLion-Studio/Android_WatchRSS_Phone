@@ -1,0 +1,321 @@
+package com.lightningstudio.watchrss.phone
+
+import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.camera.core.*
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.lifecycle.LifecycleOwner
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import com.google.accompanist.permissions.ExperimentalPermissionsApi
+import com.google.accompanist.permissions.isGranted
+import com.google.accompanist.permissions.rememberPermissionState
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
+import com.lightningstudio.watchrss.phone.network.NetworkManager
+import com.lightningstudio.watchrss.phone.network.QRCodeParser
+import java.util.concurrent.Executors
+
+class QRScanActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            WatchRSSTheme {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    QRScanScreen(
+                        onBack = { finish() },
+                        onQRCodeDetected = { content ->
+                            handleQRCode(content)
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    private fun handleQRCode(content: String) {
+        // 尝试解析为 ip:port
+        val (ip, port) = QRCodeParser.parseQRCode(content)
+
+        if (ip != null && port != null) {
+            // 是我们的二维码，尝试连接
+            NetworkManager.setBaseUrl(ip, port.toInt())
+            NetworkManager.checkHealth { success ->
+                runOnUiThread {
+                    if (success) {
+                        val intent = Intent(this, ConnectedActivity::class.java)
+                        intent.putExtra("ip", ip)
+                        intent.putExtra("port", port)
+                        startActivity(intent)
+                        finish()
+                    } else {
+                        Toast.makeText(this, "连接失败，请联系开发者", Toast.LENGTH_LONG).show()
+                        startActivity(Intent(this, ContactDeveloperActivity::class.java))
+                    }
+                }
+            }
+        } else {
+            // 不是我们的二维码，按普通二维码处理
+            handleGenericQRCode(content)
+        }
+    }
+
+    private fun handleGenericQRCode(content: String) {
+        when {
+            content.startsWith("http://") || content.startsWith("https://") -> {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(content)))
+                finish()
+            }
+            content.startsWith("mailto:") -> {
+                startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse(content)))
+                finish()
+            }
+            content.startsWith("tel:") -> {
+                startActivity(Intent(Intent.ACTION_DIAL, Uri.parse(content)))
+                finish()
+            }
+            content.startsWith("sms:") -> {
+                startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse(content)))
+                finish()
+            }
+            content.startsWith("BEGIN:VCARD") || content.startsWith("MECARD:") -> {
+                val intent = Intent(Intent.ACTION_VIEW)
+                intent.type = "text/x-vcard"
+                intent.putExtra(Intent.EXTRA_TEXT, content)
+                startActivity(intent)
+                finish()
+            }
+            content.startsWith("WIFI:") -> {
+                // Android 10+ 可以直接打开WiFi设置
+                Toast.makeText(this, "WiFi配置: $content", Toast.LENGTH_LONG).show()
+            }
+            content.startsWith("geo:") -> {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(content)))
+                finish()
+            }
+            else -> {
+                // Plain text，显示内容
+                setContent {
+                    WatchRSSTheme {
+                        Surface(
+                            modifier = Modifier.fillMaxSize(),
+                            color = MaterialTheme.colorScheme.background
+                        ) {
+                            PlainTextScreen(
+                                content = content,
+                                onBack = { finish() }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalPermissionsApi::class, ExperimentalMaterial3Api::class)
+@Composable
+fun QRScanScreen(
+    onBack: () -> Unit,
+    onQRCodeDetected: (String) -> Unit
+) {
+    val cameraPermissionState = rememberPermissionState(Manifest.permission.CAMERA)
+    var hasScanned by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        if (!cameraPermissionState.status.isGranted) {
+            cameraPermissionState.launchPermissionRequest()
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        if (cameraPermissionState.status.isGranted) {
+            CameraPreview(
+                onQRCodeDetected = { content ->
+                    if (!hasScanned) {
+                        hasScanned = true
+                        onQRCodeDetected(content)
+                    }
+                }
+            )
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    text = "需要相机权限来扫描二维码",
+                    fontSize = 18.sp,
+                    color = MaterialTheme.colorScheme.onBackground
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(onClick = { cameraPermissionState.launchPermissionRequest() }) {
+                    Text("授予权限")
+                }
+            }
+        }
+
+        // Top bar
+        TopAppBar(
+            title = { Text("扫一扫") },
+            navigationIcon = {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = "返回")
+                }
+            },
+            colors = TopAppBarDefaults.topAppBarColors(
+                containerColor = Color.Transparent
+            )
+        )
+    }
+}
+
+@Composable
+fun CameraPreview(onQRCodeDetected: (String) -> Unit) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalContext.current as LifecycleOwner
+    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+    val executor = remember { Executors.newSingleThreadExecutor() }
+
+    AndroidView(
+        factory = { ctx ->
+            val previewView = PreviewView(ctx)
+            val cameraProvider = cameraProviderFuture.get()
+            val preview = Preview.Builder().build().also {
+                it.setSurfaceProvider(previewView.surfaceProvider)
+            }
+
+            val imageAnalysis = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+
+            val barcodeScanner = BarcodeScanning.getClient()
+
+            imageAnalysis.setAnalyzer(executor) { imageProxy ->
+                val mediaImage = imageProxy.image
+                if (mediaImage != null) {
+                    val image = InputImage.fromMediaImage(
+                        mediaImage,
+                        imageProxy.imageInfo.rotationDegrees
+                    )
+
+                    barcodeScanner.process(image)
+                        .addOnSuccessListener { barcodes ->
+                            for (barcode in barcodes) {
+                                barcode.rawValue?.let { value ->
+                                    onQRCodeDetected(value)
+                                }
+                            }
+                        }
+                        .addOnCompleteListener {
+                            imageProxy.close()
+                        }
+                } else {
+                    imageProxy.close()
+                }
+            }
+
+            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+            try {
+                cameraProvider.unbindAll()
+                cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    cameraSelector,
+                    preview,
+                    imageAnalysis
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
+            previewView
+        },
+        modifier = Modifier.fillMaxSize()
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PlainTextScreen(content: String, onBack: () -> Unit) {
+    val context = LocalContext.current
+
+    Scaffold(
+        topBar = {
+            SmallTopAppBar(
+                title = { Text("扫描结果") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "返回")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(16.dp)
+        ) {
+            SelectionContainer {
+                Text(
+                    text = content,
+                    fontSize = 16.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Button(
+                onClick = {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    val clip = ClipData.newPlainText("QR Code", content)
+                    clipboard.setPrimaryClip(clip)
+                    Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.ContentCopy, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("复制")
+            }
+        }
+    }
+}

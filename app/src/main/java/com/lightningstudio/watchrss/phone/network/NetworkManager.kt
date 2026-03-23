@@ -286,47 +286,85 @@ object QRCodeParser {
         Log.d(TAG, "=== QR Code Parsing Started ===")
         Log.d(TAG, "Raw Content Length: ${rawContent.length}")
         Log.d(TAG, "Raw Content: $rawContent")
+        Log.d(TAG, "Raw Content (hex): ${rawContent.toByteArray().joinToString(" ") { "%02x".format(it) }}")
 
         // 新格式：直接解析 http://ip:port/ 格式的 URL
         if (rawContent.startsWith("http://")) {
+            Log.d(TAG, "✓ Detected http:// prefix")
             try {
                 // 移除 http:// 前缀
                 var urlContent = rawContent.removePrefix("http://")
+                Log.d(TAG, "Step 1 - After removing 'http://': '$urlContent'")
+                Log.d(TAG, "Step 1 - Length: ${urlContent.length}")
 
                 // 移除路径和查询参数（保留 ip:port 部分）
                 val pathIndex = urlContent.indexOf('/')
+                Log.d(TAG, "Step 2 - First '/' found at index: $pathIndex")
+
                 if (pathIndex != -1) {
+                    val beforeCut = urlContent
                     urlContent = urlContent.substring(0, pathIndex)
+                    Log.d(TAG, "Step 2 - Before cut: '$beforeCut'")
+                    Log.d(TAG, "Step 2 - After cut: '$urlContent'")
+                } else {
+                    Log.d(TAG, "Step 2 - No '/' found, keeping full content")
                 }
 
-                Log.d(TAG, "URL Content after cleanup: $urlContent")
+                Log.d(TAG, "Step 3 - Final URL content: '$urlContent'")
 
                 // 解析 ip:port
                 if (urlContent.contains(":")) {
+                    Log.d(TAG, "Step 4 - Contains ':' separator")
                     val parts = urlContent.split(":", limit = 2)
-                    Log.d(TAG, "Split parts: ${parts.size} parts")
+                    Log.d(TAG, "Step 4 - Split result: ${parts.size} parts")
+
                     if (parts.size == 2) {
                         val ip = parts[0]
-                        val portStr = parts[1]
+                        var portStr = parts[1]
+                        Log.d(TAG, "Step 5 - IP string: '$ip'")
+                        Log.d(TAG, "Step 5 - Port string (raw): '$portStr'")
+
+                        // 移除 # 及其后面的内容（如 #同一WiFi#提示信息）
+                        val hashIndex = portStr.indexOf('#')
+                        if (hashIndex != -1) {
+                            portStr = portStr.substring(0, hashIndex)
+                            Log.d(TAG, "Step 5 - Port string (after removing #): '$portStr'")
+                        }
+
                         val port = portStr.toIntOrNull()
-                        Log.d(TAG, "Parsed IP: $ip")
-                        Log.d(TAG, "Parsed Port: $port")
+                        Log.d(TAG, "Step 6 - Port parsed as int: $port")
 
                         // 验证 IP 地址格式和端口号
-                        if (isValidIPv4(ip) && port != null && port in 1..65535) {
+                        val ipValid = isValidIPv4(ip)
+                        val portValid = port != null && port in 1..65535
+
+                        Log.d(TAG, "Step 7 - IP validation: $ipValid")
+                        Log.d(TAG, "Step 7 - Port validation: $portValid")
+
+                        if (ipValid && portValid) {
                             Log.i(TAG, "=== QR Code Parsing Success ===")
-                            Log.i(TAG, "IP: $ip, Port: $port")
+                            Log.i(TAG, "✓ Final IP: $ip")
+                            Log.i(TAG, "✓ Final Port: $port")
                             return Pair(ip, port.toString())
                         } else {
-                            Log.w(TAG, "Invalid IP address format or port number")
-                            Log.w(TAG, "IP valid: ${isValidIPv4(ip)}, Port valid: ${port != null && port in 1..65535}")
+                            Log.w(TAG, "✗ Validation failed")
+                            Log.w(TAG, "  - IP valid: $ipValid (value: '$ip')")
+                            Log.w(TAG, "  - Port valid: $portValid (value: '$portStr', parsed: $port)")
                         }
+                    } else {
+                        Log.w(TAG, "✗ Split didn't produce 2 parts")
                     }
+                } else {
+                    Log.w(TAG, "✗ No ':' separator found in '$urlContent'")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "URL parsing failed: ${e.message}")
+                Log.e(TAG, "✗ Exception during parsing: ${e.message}")
+                Log.e(TAG, "Exception type: ${e.javaClass.simpleName}")
                 e.printStackTrace()
             }
+        } else {
+            Log.w(TAG, "✗ Content doesn't start with 'http://'")
+            Log.w(TAG, "  Actual prefix: '${rawContent.take(10)}'")
         }
 
         Log.e(TAG, "=== QR Code Parsing Failed ===")

@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -26,8 +27,28 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        private const val TAG = "WatchRSS_Main"
+        private const val VERSION = "1.0.2"
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 输出版本号日志
+        Log.i(TAG, "=== WatchRSS Phone App Started ===")
+        Log.i(TAG, "Version: $VERSION")
+        Log.i(TAG, "Package: ${packageName}")
+        try {
+            val versionCode = packageManager.getPackageInfo(packageName, 0).versionCode
+            val versionName = packageManager.getPackageInfo(packageName, 0).versionName
+            Log.i(TAG, "Version Code: $versionCode")
+            Log.i(TAG, "Version Name: $versionName")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get version info: ${e.message}")
+        }
+        Log.i(TAG, "===================================")
+
         setContent {
             WatchRSSTheme {
                 Surface(

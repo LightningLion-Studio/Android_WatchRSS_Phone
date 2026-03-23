@@ -1,6 +1,5 @@
 package com.lightningstudio.watchrss.phone.network
 
-import android.util.Base64
 import android.util.Log
 import com.google.gson.Gson
 import com.lightningstudio.watchrss.phone.model.*
@@ -270,53 +269,68 @@ object NetworkManager {
 object QRCodeParser {
     private const val TAG = "WatchRSS_QRParser"
 
+    /**
+     * 验证是否是有效的 IPv4 地址
+     */
+    private fun isValidIPv4(ip: String): Boolean {
+        val parts = ip.split(".")
+        if (parts.size != 4) return false
+
+        return parts.all { part ->
+            val num = part.toIntOrNull()
+            num != null && num in 0..255
+        }
+    }
+
     fun parseQRCode(rawContent: String): Pair<String?, String?> {
         Log.d(TAG, "=== QR Code Parsing Started ===")
         Log.d(TAG, "Raw Content Length: ${rawContent.length}")
         Log.d(TAG, "Raw Content: $rawContent")
 
-        // 尝试从开头解码base64，失败则去掉第一个字符再试
-        var content = rawContent
-        var attemptCount = 0
-
-        while (content.isNotEmpty()) {
-            attemptCount++
+        // 新格式：直接解析 http://ip:port/ 格式的 URL
+        if (rawContent.startsWith("http://")) {
             try {
-                Log.d(TAG, "Decode Attempt #$attemptCount: trying to decode from position ${rawContent.length - content.length}")
-                val decoded = String(Base64.decode(content, Base64.NO_WRAP))
-                Log.d(TAG, "Decoded String: $decoded")
+                // 移除 http:// 前缀
+                var urlContent = rawContent.removePrefix("http://")
 
-                // 检查是否是 ip:port 格式
-                if (decoded.contains(":")) {
-                    val parts = decoded.split(":")
+                // 移除路径和查询参数（保留 ip:port 部分）
+                val pathIndex = urlContent.indexOf('/')
+                if (pathIndex != -1) {
+                    urlContent = urlContent.substring(0, pathIndex)
+                }
+
+                Log.d(TAG, "URL Content after cleanup: $urlContent")
+
+                // 解析 ip:port
+                if (urlContent.contains(":")) {
+                    val parts = urlContent.split(":", limit = 2)
                     Log.d(TAG, "Split parts: ${parts.size} parts")
                     if (parts.size == 2) {
                         val ip = parts[0]
-                        val port = parts[1].toIntOrNull()
+                        val portStr = parts[1]
+                        val port = portStr.toIntOrNull()
                         Log.d(TAG, "Parsed IP: $ip")
                         Log.d(TAG, "Parsed Port: $port")
 
-                        if (port != null) {
+                        // 验证 IP 地址格式和端口号
+                        if (isValidIPv4(ip) && port != null && port in 1..65535) {
                             Log.i(TAG, "=== QR Code Parsing Success ===")
                             Log.i(TAG, "IP: $ip, Port: $port")
-                            Log.i(TAG, "Total Attempts: $attemptCount")
                             return Pair(ip, port.toString())
                         } else {
-                            Log.w(TAG, "Port is not a valid integer")
+                            Log.w(TAG, "Invalid IP address format or port number")
+                            Log.w(TAG, "IP valid: ${isValidIPv4(ip)}, Port valid: ${port != null && port in 1..65535}")
                         }
                     }
                 }
-                Log.w(TAG, "Decoded content doesn't match ip:port format")
-                return Pair(null, null)
             } catch (e: Exception) {
-                Log.d(TAG, "Decode failed at attempt #$attemptCount: ${e.message}")
-                content = content.drop(1)
+                Log.e(TAG, "URL parsing failed: ${e.message}")
+                e.printStackTrace()
             }
         }
 
         Log.e(TAG, "=== QR Code Parsing Failed ===")
-        Log.e(TAG, "All decode attempts exhausted")
-        Log.e(TAG, "Total Attempts: $attemptCount")
+        Log.e(TAG, "Content doesn't match http://ip:port/ format")
         return Pair(null, null)
     }
 }

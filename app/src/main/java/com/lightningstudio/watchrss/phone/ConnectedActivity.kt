@@ -113,7 +113,8 @@ class ConnectedActivity : ComponentActivity() {
         val knownAbilities = mapOf(
             "dc40517c-a09c-419c-8c4d-d3883258992e" to Pair("0.0.1", RSSInputActivity::class.java),
             "c4bf141f-b0de-46f7-a661-0a3ad0716bce" to Pair("0.0.1", FavoritesActivity::class.java),
-            "f1aa43bd-0fe3-4771-ae6b-d4799ecf84b5" to Pair("0.0.1", WatchLaterActivity::class.java)
+            "f1aa43bd-0fe3-4771-ae6b-d4799ecf84b5" to Pair("0.0.1", WatchLaterActivity::class.java),
+            "a3e72c1d-5f84-4b90-9d16-e8c047f2b3a1" to Pair("0.0.1", LLMConfigActivity::class.java)
         )
 
         val ability = knownAbilities[code]

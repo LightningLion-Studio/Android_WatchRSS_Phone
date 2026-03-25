@@ -217,6 +217,105 @@ object NetworkManager {
         })
     }
 
+    // ── LLM 总结配置 API ─────────────────────────────────────────
+
+    fun getLLMConfig(callback: (LLMConfigGetResponse?) -> Unit) {
+        val url = "$baseUrl/getLLMSummaryConfig"
+        val startTime = System.currentTimeMillis()
+
+        Log.d(TAG, "=== Get LLM Config Request ===")
+        Log.d(TAG, "Method: GET")
+        Log.d(TAG, "URL: $url")
+        Log.d(TAG, "Timestamp: $startTime")
+
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .build()
+
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                val duration = System.currentTimeMillis() - startTime
+                Log.e(TAG, "=== Get LLM Config Failed ===")
+                Log.e(TAG, "URL: $url")
+                Log.e(TAG, "Duration: ${duration}ms")
+                Log.e(TAG, "Error: ${e.message}")
+                e.printStackTrace()
+                callback(null)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val duration = System.currentTimeMillis() - startTime
+                Log.d(TAG, "=== Get LLM Config Response ===")
+                Log.d(TAG, "URL: $url")
+                Log.d(TAG, "Status Code: ${response.code}")
+                Log.d(TAG, "Success: ${response.isSuccessful}")
+                Log.d(TAG, "Duration: ${duration}ms")
+
+                if (response.isSuccessful) {
+                    val body = response.body?.string()
+                    Log.d(TAG, "Response Body: $body")
+                    val result = gson.fromJson(body, LLMConfigGetResponse::class.java)
+                    callback(result)
+                } else {
+                    Log.w(TAG, "Response not successful, returning null")
+                    callback(null)
+                }
+            }
+        })
+    }
+
+    fun postLLMConfig(config: LLMConfigRequest, callback: (LLMConfigResponse?) -> Unit) {
+        val apiUrl = "$baseUrl/setLLMSummaryConfig"
+        val startTime = System.currentTimeMillis()
+        val json = gson.toJson(config)
+        val body = json.toRequestBody("application/json".toMediaType())
+
+        Log.d(TAG, "=== Post LLM Config Request ===")
+        Log.d(TAG, "Method: POST")
+        Log.d(TAG, "URL: $apiUrl")
+        Log.d(TAG, "Content-Type: application/json")
+        // 不打印完整 JSON，避免 apiKey 泄露
+        Log.d(TAG, "Provider: ${config.provider}, Model: ${config.model}, Enabled: ${config.enabled}")
+        Log.d(TAG, "Timestamp: $startTime")
+
+        val request = Request.Builder()
+            .url(apiUrl)
+            .post(body)
+            .build()
+
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                val duration = System.currentTimeMillis() - startTime
+                Log.e(TAG, "=== Post LLM Config Failed ===")
+                Log.e(TAG, "URL: $apiUrl")
+                Log.e(TAG, "Duration: ${duration}ms")
+                Log.e(TAG, "Error: ${e.message}")
+                e.printStackTrace()
+                callback(null)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val duration = System.currentTimeMillis() - startTime
+                Log.d(TAG, "=== Post LLM Config Response ===")
+                Log.d(TAG, "URL: $apiUrl")
+                Log.d(TAG, "Status Code: ${response.code}")
+                Log.d(TAG, "Success: ${response.isSuccessful}")
+                Log.d(TAG, "Duration: ${duration}ms")
+
+                if (response.isSuccessful) {
+                    val responseBody = response.body?.string()
+                    Log.d(TAG, "Response Body: $responseBody")
+                    val result = gson.fromJson(responseBody, LLMConfigResponse::class.java)
+                    callback(result)
+                } else {
+                    Log.w(TAG, "Response not successful, returning null")
+                    callback(null)
+                }
+            }
+        })
+    }
+
     fun getWatchLater(callback: (WatchLaterResponse?) -> Unit) {
         val url = "$baseUrl/getWatchlaterList"
         val startTime = System.currentTimeMillis()

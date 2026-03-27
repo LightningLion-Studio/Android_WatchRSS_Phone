@@ -1,224 +1,143 @@
 package com.lightningstudio.watchrss.phone
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.util.Log
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.animation.*
-import androidx.compose.animation.core.*
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
+import androidx.core.content.ContextCompat
+import com.google.zxing.client.android.Intents
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
+import com.lightningstudio.watchrss.phone.ui.MainScreen
+import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import com.lightningstudio.watchrss.phone.viewmodel.MainViewModel
+import com.lightningstudio.watchrss.phone.viewmodel.MainViewModelFactory
 
 class MainActivity : ComponentActivity() {
-    companion object {
-        private const val TAG = "WatchRSS_Main"
-        private const val VERSION = "1.0.2"
+    private val viewModel: MainViewModel by viewModels {
+        MainViewModelFactory(
+            (application as PhoneCompanionApplication).container.repository,
+            (application as PhoneCompanionApplication).container.guidedSessionManager
+        )
     }
+
+    private var pendingAudioAction: (() -> Unit)? = null
+    private var pendingWifiAction: (() -> Unit)? = null
+
+    private val barcodeLauncher = registerForActivityResult(ScanContract()) { result ->
+        val contents = result.contents ?: return@registerForActivityResult
+        viewModel.connectWithQr(contents)
+    }
+
+    private val cameraPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) {
+                launchQrScanner()
+            }
+        }
+
+    private val audioPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) {
+                pendingAudioAction?.invoke()
+            }
+            pendingAudioAction = null
+        }
+
+    private val wifiPermissionsLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+            if (result.values.all { it }) {
+                pendingWifiAction?.invoke()
+            }
+            pendingWifiAction = null
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 输出版本号日志
         Log.i(TAG, "=== WatchRSS Phone App Started ===")
-        Log.i(TAG, "Version: $VERSION")
-        Log.i(TAG, "Package: ${packageName}")
-        try {
-            val versionCode = packageManager.getPackageInfo(packageName, 0).versionCode
-            val versionName = packageManager.getPackageInfo(packageName, 0).versionName
-            Log.i(TAG, "Version Code: $versionCode")
-            Log.i(TAG, "Version Name: $versionName")
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to get version info: ${e.message}")
-        }
+        Log.i(TAG, "Package: $packageName")
+        runCatching { packageManager.getPackageInfo(packageName, 0) }
+            .onSuccess { packageInfo ->
+                Log.i(TAG, "Version Code: ${packageInfo.longVersionCode}")
+                Log.i(TAG, "Version Name: ${packageInfo.versionName}")
+            }
+            .onFailure { throwable ->
+                Log.w(TAG, "Failed to resolve version info: ${throwable.message}")
+            }
         Log.i(TAG, "===================================")
 
         setContent {
-            WatchRSSTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    MainScreen(
-                        onScanClick = {
-                            startActivity(Intent(this, QRScanActivity::class.java))
-                        },
-                        onBeianClick = {
-                            val intent = Intent(Intent.ACTION_VIEW)
-                            intent.data = Uri.parse("https://beian.miit.gov.cn/")
-                            startActivity(intent)
-                        },
-                        onAboutClick = {
-                            startActivity(Intent(this, AboutActivity::class.java))
-                        }
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun MainScreen(onScanClick: () -> Unit, onBeianClick: () -> Unit, onAboutClick: () -> Unit) {
-    var visible by remember { mutableStateOf(false) }
-
-    LaunchedEffect(Unit) {
-        visible = true
-    }
-
-    Box(
-        modifier = Modifier.fillMaxSize()
-    ) {
-        // 右上角省略号按钮
-        AnimatedVisibility(
-            visible = visible,
-            enter = fadeIn(animationSpec = tween(600, delayMillis = 200)) +
-                    scaleIn(
-                        initialScale = 0.5f,
-                        animationSpec = tween(600, delayMillis = 200, easing = FastOutSlowInEasing)
-                    ),
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(16.dp)
-        ) {
-            IconButton(
-                onClick = onAboutClick,
-                colors = IconButtonDefaults.iconButtonColors(
-                    contentColor = MaterialTheme.colorScheme.primary
-                )
-            ) {
-                Icon(
-                    imageVector = Icons.Default.MoreVert,
-                    contentDescription = "关于",
-                    modifier = Modifier.size(28.dp)
+            WatchRssPhoneTheme {
+                val state by viewModel.uiState.collectAsState()
+                MainScreen(
+                    uiState = state,
+                    onScanQr = { ensureCameraAndScan() },
+                    onRssUrlChange = viewModel::updateRssUrlInput,
+                    onSendRss = viewModel::sendRemoteUrl,
+                    onSendPureSoundRss = viewModel::sendPureSoundRemoteUrl,
+                    onReceivePureSoundSync = { ensureRecordAudioPermission(viewModel::receivePureSoundSync) },
+                    onStartGuidedRemoteInput = { ensureGuidedWifiPermissions(viewModel::startGuidedRemoteInput) },
+                    onStartGuidedFavorites = { ensureGuidedWifiPermissions(viewModel::startGuidedFavoritesSync) },
+                    onStartGuidedWatchLater = { ensureGuidedWifiPermissions(viewModel::startGuidedWatchLaterSync) },
+                    onStopGuidedSession = viewModel::stopGuidedSession,
+                    onSyncFavorites = { viewModel.syncSavedItems(com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType.FAVORITE) },
+                    onSyncWatchLater = { viewModel.syncSavedItems(com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType.WATCH_LATER) },
+                    onDismissMessage = viewModel::clearMessage
                 )
             }
         }
+    }
 
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(32.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+    private fun ensureCameraAndScan() {
+        cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+    }
+
+    private fun ensureRecordAudioPermission(action: () -> Unit) {
+        if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
-            AnimatedVisibility(
-                visible = visible,
-                enter = fadeIn(animationSpec = tween(800)) +
-                        slideInVertically(
-                            initialOffsetY = { -100 },
-                            animationSpec = tween(800, easing = FastOutSlowInEasing)
-                        )
-            ) {
-                Text(
-                    text = "腕上RSS",
-                    fontSize = 48.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
+            action()
+            return
+        }
+        pendingAudioAction = action
+        audioPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+    }
 
-            Spacer(modifier = Modifier.height(64.dp))
-
-            AnimatedVisibility(
-                visible = visible,
-                enter = fadeIn(animationSpec = tween(800, delayMillis = 300)) +
-                        scaleIn(
-                            initialScale = 0.8f,
-                            animationSpec = tween(800, delayMillis = 300, easing = FastOutSlowInEasing)
-                        )
-            ) {
-                Button(
-                    onClick = onScanClick,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(56.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Text(
-                        text = "前往扫一扫",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
+    private fun ensureGuidedWifiPermissions(action: () -> Unit) {
+        val permissions = buildList {
+            add(android.Manifest.permission.ACCESS_FINE_LOCATION)
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                add(android.Manifest.permission.NEARBY_WIFI_DEVICES)
             }
         }
-
-        // 备案号在底部
-        AnimatedVisibility(
-            visible = visible,
-            enter = fadeIn(animationSpec = tween(800, delayMillis = 600)),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 16.dp)
-        ) {
-            BeianNumber(onClick = onBeianClick)
+        val missing = permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != android.content.pm.PackageManager.PERMISSION_GRANTED
         }
+        if (missing.isEmpty()) {
+            action()
+            return
+        }
+        pendingWifiAction = action
+        wifiPermissionsLauncher.launch(missing.toTypedArray())
     }
-}
 
-@Composable
-fun WatchRSSTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = dynamicColorScheme(),
-        content = content
-    )
-}
-
-@Composable
-fun dynamicColorScheme(): ColorScheme {
-    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
-    return if (isDark) {
-        darkColorScheme(
-            primary = androidx.compose.ui.graphics.Color(0xFF90CAF9),
-            secondary = androidx.compose.ui.graphics.Color(0xFFCE93D8),
-            tertiary = androidx.compose.ui.graphics.Color(0xFFA5D6A7)
-        )
-    } else {
-        lightColorScheme(
-            primary = androidx.compose.ui.graphics.Color(0xFF1976D2),
-            secondary = androidx.compose.ui.graphics.Color(0xFF7B1FA2),
-            tertiary = androidx.compose.ui.graphics.Color(0xFF388E3C)
-        )
+    private fun launchQrScanner() {
+        val options = ScanOptions()
+            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+            .setPrompt("扫描手表上的 WatchRSS 二维码")
+            .setBeepEnabled(false)
+            .setOrientationLocked(false)
+            .setCaptureActivity(CaptureActivity::class.java)
+        options.addExtra(Intents.Scan.MISSING_CAMERA_PERMISSION, true)
+        barcodeLauncher.launch(options)
     }
-}
 
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun BeianNumber(onClick: () -> Unit) {
-    val context = LocalContext.current
-    val beianText = "浙ICP备2024111886号-5A"
-
-    Text(
-        text = beianText,
-        fontSize = 12.sp,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.combinedClickable(
-            onClick = onClick,
-            onLongClick = {
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                val clip = ClipData.newPlainText("备案号", beianText)
-                clipboard.setPrimaryClip(clip)
-                Toast.makeText(context, "备案号已复制", Toast.LENGTH_SHORT).show()
-            }
-        )
-    )
+    companion object {
+        private const val TAG = "WatchRSS_Main"
+    }
 }

@@ -485,7 +485,11 @@ private fun createBackCameraCandidate(cameraInfo: CameraInfo): BackCameraCandida
         ?: 0f
 
     val selectorBuilder = CameraSelector.Builder()
-    Camera2Interop.Extender(selectorBuilder).setCameraId(cameraId)
+        .addCameraFilter { cameraInfos ->
+            cameraInfos.filter { info ->
+                Camera2CameraInfo.from(info).cameraId == cameraId
+            }
+        }
 
     return BackCameraCandidate(
         cameraId = cameraId,

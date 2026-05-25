@@ -1,9 +1,12 @@
 package com.lightningstudio.watchrss.phone.connection.guided
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.wifi.SoftApConfiguration
 import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import com.lightningstudio.watchrss.phone.acoustic.AcousticCodec
@@ -19,8 +22,9 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import java.security.SecureRandom
 import java.util.Locale
-import java.util.UUID
+import java.util.concurrent.Executor
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -31,6 +35,8 @@ data class GuidedSessionState(
     val host: String,
     val port: Int,
     val token: String,
+    val usesHotspot: Boolean,
+    val payload: ByteArray,
     val packet: AcousticPacket
 )
 
@@ -40,6 +46,9 @@ class PhoneGuidedSessionManager(
 ) {
     private val appContext = context.applicationContext
     private val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+    private val connectivityManager =
+        appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    private val random = SecureRandom()
 
     private var reservation: WifiManager.LocalOnlyHotspotReservation? = null
     private var server: GuidedSessionServer? = null
@@ -50,7 +59,7 @@ class PhoneGuidedSessionManager(
     ): GuidedSessionState = withContext(Dispatchers.Main) {
         stopSession()
 
-        val token = UUID.randomUUID().toString()
+        val token = randomCode(TOKEN_LENGTH)
         val guidedServer = GuidedSessionServer(
             repository = repository,
             ability = ability,
@@ -60,21 +69,60 @@ class PhoneGuidedSessionManager(
         guidedServer.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
 
         try {
-            val hotspotReservation = startHotspotInternal()
-            val config = hotspotReservation.softApConfiguration
-            val ssid = resolveSsid(config, hotspotReservation.wifiConfiguration)
-            val passphrase = resolvePassphrase(config, hotspotReservation.wifiConfiguration)
-            val host = resolveHotspotHost() ?: DEFAULT_HOTSPOT_HOST
-            val packet = AcousticCodec.encode(
-                AcousticConnectionProtocol.buildGuidedWifi(
+            resolveCurrentWifiTarget()?.let { target ->
+                val payload = AcousticConnectionProtocol.buildGuidedWifi(
                     ability = ability,
-                    ssid = ssid,
-                    passphrase = passphrase,
-                    host = host,
+                    ssid = target.ssid,
+                    passphrase = "",
+                    host = target.host,
                     port = guidedServer.listeningPort,
                     token = token
                 )
+                val packet = AcousticCodec.encode(payload)
+
+                server = guidedServer
+
+                return@withContext GuidedSessionState(
+                    ability = ability,
+                    ssid = target.ssid,
+                    passphrase = "",
+                    host = target.host,
+                    port = guidedServer.listeningPort,
+                    token = token,
+                    usesHotspot = false,
+                    payload = payload,
+                    packet = packet
+                )
+            }
+
+            val shortConfig = createShortHotspotConfig()
+            var activeShortConfig: ShortHotspotConfig? = null
+            val hotspotReservation = shortConfig
+                ?.let { config ->
+                    runCatching {
+                        startHotspotWithConfigInternal(config.configuration)
+                    }.onSuccess {
+                        activeShortConfig = config
+                    }.getOrNull()
+                }
+                ?: startHotspotInternal()
+            val config = hotspotReservation.softApConfiguration
+            val ssid = resolveSsid(config, hotspotReservation.wifiConfiguration, activeShortConfig?.ssid)
+            val passphrase = resolvePassphrase(
+                config = config,
+                wifiConfiguration = hotspotReservation.wifiConfiguration,
+                fallback = activeShortConfig?.passphrase
             )
+            val host = resolveHotspotHost() ?: DEFAULT_HOTSPOT_HOST
+            val payload = AcousticConnectionProtocol.buildGuidedWifi(
+                ability = ability,
+                ssid = ssid,
+                passphrase = passphrase,
+                host = host,
+                port = guidedServer.listeningPort,
+                token = token
+            )
+            val packet = AcousticCodec.encode(payload)
 
             reservation = hotspotReservation
             server = guidedServer
@@ -86,11 +134,80 @@ class PhoneGuidedSessionManager(
                 host = host,
                 port = guidedServer.listeningPort,
                 token = token,
+                usesHotspot = true,
+                payload = payload,
                 packet = packet
             )
         } catch (throwable: Throwable) {
             guidedServer.stop()
             throw throwable
+        }
+    }
+
+    private fun createShortHotspotConfig(): ShortHotspotConfig? {
+        val ssid = "W${randomCode(SHORT_SSID_SUFFIX_LENGTH)}"
+        val passphrase = randomCode(SHORT_PASSPHRASE_LENGTH)
+        return runCatching {
+            val builder = SoftApConfiguration.Builder()
+            builder.javaClass
+                .getMethod("setSsid", String::class.java)
+                .invoke(builder, ssid)
+            builder.javaClass
+                .getMethod(
+                    "setPassphrase",
+                    String::class.java,
+                    Int::class.javaPrimitiveType!!
+                )
+                .invoke(builder, passphrase, SoftApConfiguration.SECURITY_TYPE_WPA2_PSK)
+            ShortHotspotConfig(
+                configuration = builder.build(),
+                ssid = ssid,
+                passphrase = passphrase
+            )
+        }.getOrNull()
+    }
+
+    private suspend fun startHotspotWithConfigInternal(
+        config: SoftApConfiguration
+    ): WifiManager.LocalOnlyHotspotReservation {
+        return suspendCancellableCoroutine { continuation ->
+            val callback = object : WifiManager.LocalOnlyHotspotCallback() {
+                override fun onStarted(reservation: WifiManager.LocalOnlyHotspotReservation) {
+                    if (!continuation.isCompleted) {
+                        continuation.resume(reservation)
+                    }
+                }
+
+                override fun onFailed(reason: Int) {
+                    if (!continuation.isCompleted) {
+                        continuation.resumeWithException(
+                            IllegalStateException("手机热点启动失败，原因码：$reason")
+                        )
+                    }
+                }
+            }
+
+            runCatching {
+                if (Build.VERSION.SDK_INT >= 36) {
+                    wifiManager.startLocalOnlyHotspotWithConfiguration(
+                        config,
+                        appContext.mainExecutor,
+                        callback
+                    )
+                } else {
+                    val method = wifiManager.javaClass.getMethod(
+                        "startLocalOnlyHotspot",
+                        SoftApConfiguration::class.java,
+                        Executor::class.java,
+                        WifiManager.LocalOnlyHotspotCallback::class.java
+                    )
+                    method.invoke(wifiManager, config, appContext.mainExecutor, callback)
+                }
+            }.onFailure { throwable ->
+                if (!continuation.isCompleted) {
+                    continuation.resumeWithException(throwable)
+                }
+            }
         }
     }
 
@@ -128,19 +245,23 @@ class PhoneGuidedSessionManager(
 
     private fun resolveSsid(
         config: SoftApConfiguration,
-        wifiConfiguration: WifiConfiguration?
+        wifiConfiguration: WifiConfiguration?,
+        fallback: String?
     ): String {
         return config.ssid
             ?: wifiConfiguration?.SSID?.trim('"')
+            ?: fallback
             ?: error("无法获取手机热点 SSID")
     }
 
     private fun resolvePassphrase(
         config: SoftApConfiguration,
-        wifiConfiguration: WifiConfiguration?
+        wifiConfiguration: WifiConfiguration?,
+        fallback: String?
     ): String {
         return config.passphrase
             ?: wifiConfiguration?.preSharedKey?.trim('"')
+            ?: fallback
             ?: error("无法获取手机热点密码")
     }
 
@@ -164,6 +285,31 @@ class PhoneGuidedSessionManager(
             }
         }
         return null
+    }
+
+    private fun resolveCurrentWifiTarget(): CurrentWifiTarget? {
+        val activeNetwork = connectivityManager.activeNetwork ?: return null
+        val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork) ?: return null
+        if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+            return null
+        }
+
+        val host = connectivityManager.getLinkProperties(activeNetwork)
+            ?.linkAddresses
+            ?.asSequence()
+            ?.map { it.address }
+            ?.filterIsInstance<Inet4Address>()
+            ?.firstOrNull { address ->
+                !address.isLoopbackAddress && address.isSiteLocalAddress
+            }
+            ?.hostAddress
+            ?: return null
+        val ssid = wifiManager.connectionInfo
+            ?.ssid
+            ?.trim('"')
+            ?.takeUnless { it.isBlank() || it == "<unknown ssid>" }
+            .orEmpty()
+        return CurrentWifiTarget(ssid = ssid, host = host)
     }
 
     private class GuidedSessionServer(
@@ -234,7 +380,30 @@ class PhoneGuidedSessionManager(
         }
     }
 
+    private fun randomCode(length: Int): String {
+        return buildString(length) {
+            repeat(length) {
+                append(SHORT_CODE_ALPHABET[random.nextInt(SHORT_CODE_ALPHABET.length)])
+            }
+        }
+    }
+
+    private data class ShortHotspotConfig(
+        val configuration: SoftApConfiguration,
+        val ssid: String,
+        val passphrase: String
+    )
+
+    private data class CurrentWifiTarget(
+        val ssid: String,
+        val host: String
+    )
+
     companion object {
         private const val DEFAULT_HOTSPOT_HOST = "192.168.43.1"
+        private const val TOKEN_LENGTH = 8
+        private const val SHORT_SSID_SUFFIX_LENGTH = 3
+        private const val SHORT_PASSPHRASE_LENGTH = 8
+        private const val SHORT_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
     }
 }

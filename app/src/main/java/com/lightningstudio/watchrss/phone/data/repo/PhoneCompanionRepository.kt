@@ -1,87 +1,97 @@
 package com.lightningstudio.watchrss.phone.data.repo
 
-import android.util.Base64
+import com.lightningstudio.watchrss.phone.data.db.PhoneArticleDao
+import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
+import com.lightningstudio.watchrss.phone.data.importer.ImportedWebArticle
+import com.lightningstudio.watchrss.phone.data.importer.WebArticleImporter
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
-import com.lightningstudio.watchrss.phone.data.model.WatchAbility
-import com.lightningstudio.watchrss.phone.data.model.WatchEndpoint
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
-import org.json.JSONObject
+import java.lang.Long.max
 import java.net.URI
 
 class PhoneCompanionRepository(
-    private val client: OkHttpClient,
-    private val savedItemDao: PhoneSavedItemDao
+    private val savedItemDao: PhoneSavedItemDao,
+    private val articleDao: PhoneArticleDao,
+    private val deviceId: String,
+    private val webArticleImporter: suspend (String) -> ImportedWebArticle = { input ->
+        WebArticleImporter().importUrl(input)
+    }
 ) {
     fun observeSavedItems(type: PhoneSavedItemType): Flow<List<PhoneSavedItemEntity>> {
         return savedItemDao.observeByType(type.name)
     }
 
-    fun parseEndpointFromQr(rawText: String): WatchEndpoint {
-        val payload = rawText.trim()
-        val hostPort = when {
-            payload.contains('\n') -> {
-                val encoded = payload.substringAfterLast('\n').trim()
-                String(Base64.decode(encoded, Base64.NO_WRAP), Charsets.UTF_8)
-            }
-            else -> payload
+    fun observeSavedArticles(type: PhoneSavedItemType): Flow<List<PhoneArticleEntity>> {
+        return when (type) {
+            PhoneSavedItemType.FAVORITE -> articleDao.observeFavorites()
+            PhoneSavedItemType.WATCH_LATER -> articleDao.observeWatchLater()
         }
-        val host = hostPort.substringBefore(':').trim()
-        val port = hostPort.substringAfter(':').trim().toIntOrNull()
-            ?: error("二维码中未包含有效端口")
-        require(host.isNotBlank()) { "二维码中未包含有效地址" }
-        return WatchEndpoint(host = host, port = port)
     }
 
-    fun fetchAbilities(endpoint: WatchEndpoint): List<WatchAbility> {
-        val responseJson = executeJsonGet("${endpoint.baseUrl}/getAbilities")
-        val data = responseJson.optJSONArray("abilities") ?: JSONArray()
-        return buildList {
-            for (index in 0 until data.length()) {
-                val item = data.optJSONObject(index) ?: continue
-                add(
-                    WatchAbility(
-                        code = item.optString("code"),
-                        name = item.optString("name"),
-                        version = item.optString("version")
-                    )
+    fun observeRecentArticles(limit: Int = 20): Flow<List<PhoneArticleEntity>> {
+        return articleDao.observeRecent(limit)
+    }
+
+    fun observeArticle(articleId: String): Flow<PhoneArticleEntity?> {
+        return articleDao.observeById(articleId)
+    }
+
+    suspend fun importWebArticle(input: String, type: PhoneSavedItemType): PhoneArticleEntity =
+        withContext(Dispatchers.IO) {
+            val imported = webArticleImporter(input)
+            saveImportedArticle(imported, type)
+        }
+
+    suspend fun toggleSaved(article: PhoneArticleEntity, type: PhoneSavedItemType): PhoneArticleEntity =
+        withContext(Dispatchers.IO) {
+            val current = articleDao.getById(article.articleId) ?: article
+            val now = System.currentTimeMillis()
+            val updated = when (type) {
+                PhoneSavedItemType.FAVORITE -> current.copy(
+                    favoriteSaved = !current.favoriteSaved,
+                    favoriteChangedAt = now,
+                    favoriteSortOrder = if (!current.favoriteSaved) now else current.favoriteSortOrder,
+                    updatedAt = now,
+                    sourceDeviceId = deviceId,
+                    deleted = false
                 )
+                PhoneSavedItemType.WATCH_LATER -> current.copy(
+                    watchLaterSaved = !current.watchLaterSaved,
+                    watchLaterChangedAt = now,
+                    watchLaterSortOrder = if (!current.watchLaterSaved) now else current.watchLaterSortOrder,
+                    updatedAt = now,
+                    sourceDeviceId = deviceId,
+                    deleted = false
+                )
+            }.markDeletedIfEmpty(now)
+            articleDao.upsert(updated)
+            updated
+        }
+
+    suspend fun getArticlesForSync(): List<PhoneArticleEntity> = withContext(Dispatchers.IO) {
+        articleDao.getAllForSync()
+    }
+
+    suspend fun mergeArticlesFromSync(incoming: List<PhoneArticleEntity>): Int = withContext(Dispatchers.IO) {
+        var merged = 0
+        incoming.forEach { remote ->
+            val local = articleDao.getById(remote.articleId)
+            val next = if (local == null) {
+                remote
+            } else {
+                mergeArticle(local, remote)
+            }
+            if (local != next) {
+                articleDao.upsert(next)
+                merged += 1
             }
         }
-    }
-
-    fun verifyHealth(endpoint: WatchEndpoint) {
-        val json = executeJsonGet("${endpoint.baseUrl}/health")
-        require(json.optString("status") == "ok") { "手表连接检查失败" }
-    }
-
-    fun sendRemoteUrl(endpoint: WatchEndpoint, url: String) {
-        val payload = JSONObject().apply {
-            put("url", url)
-        }.toString()
-        val request = Request.Builder()
-            .url("${endpoint.baseUrl}/remoteEnterRSSURL")
-            .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .build()
-        client.newCall(request).execute().use { response ->
-            require(response.isSuccessful) { "发送 RSS 失败：${response.code}" }
-            val body = response.body?.string().orEmpty()
-            val json = JSONObject(body.ifBlank { "{}" })
-            require(json.optBoolean("success", true)) { json.optString("message", "发送 RSS 失败") }
-        }
-    }
-
-    suspend fun syncSavedItems(endpoint: WatchEndpoint, type: PhoneSavedItemType): Int {
-        val responseJson = executeJsonGet("${endpoint.baseUrl}${type.wirePath}")
-        require(responseJson.optBoolean("success", true)) { responseJson.optString("message", "同步失败") }
-        val data = responseJson.optJSONArray("data") ?: JSONArray()
-        return replaceSavedItems(type, data)
+        merged
     }
 
     suspend fun replaceSavedItems(type: PhoneSavedItemType, data: JSONArray): Int {
@@ -117,18 +127,129 @@ class PhoneCompanionRepository(
         }
         savedItemDao.deleteByType(type.name)
         savedItemDao.upsertAll(entities)
+        entities.forEach { entity ->
+            val imported = ImportedWebArticle(
+                articleId = WebArticleImporter.stableArticleId(entity.link),
+                url = entity.link,
+                title = entity.title,
+                siteName = entity.channelTitle,
+                excerpt = entity.summary,
+                contentHtml = null,
+                contentText = entity.summary,
+                imageUrl = null,
+                contentHash = WebArticleImporter.sha256(entity.summary.ifBlank { entity.link })
+            )
+            saveImportedArticle(imported, type, timestamp = syncedAt)
+        }
         return entities.size
     }
 
-    private fun executeJsonGet(url: String): JSONObject {
-        val request = Request.Builder()
-            .url(url)
-            .get()
-            .build()
-        client.newCall(request).execute().use { response ->
-            require(response.isSuccessful) { "请求失败：${response.code}" }
-            return JSONObject(response.body?.string().orEmpty().ifBlank { "{}" })
+    private suspend fun saveImportedArticle(
+        imported: ImportedWebArticle,
+        type: PhoneSavedItemType,
+        timestamp: Long = System.currentTimeMillis()
+    ): PhoneArticleEntity {
+        val current = articleDao.getById(imported.articleId)
+        val base = current ?: PhoneArticleEntity(
+            articleId = imported.articleId,
+            sourceDeviceId = deviceId,
+            url = imported.url,
+            title = imported.title,
+            siteName = imported.siteName,
+            excerpt = imported.excerpt,
+            contentHtml = imported.contentHtml,
+            contentText = imported.contentText,
+            imageUrl = imported.imageUrl,
+            contentHash = imported.contentHash,
+            importedAt = timestamp,
+            updatedAt = timestamp,
+            favoriteSaved = false,
+            favoriteChangedAt = 0L,
+            favoriteSortOrder = 0L,
+            watchLaterSaved = false,
+            watchLaterChangedAt = 0L,
+            watchLaterSortOrder = 0L,
+            deleted = false,
+            deletedAt = 0L
+        )
+        val withContent = base.copy(
+            sourceDeviceId = deviceId,
+            url = imported.url,
+            title = imported.title,
+            siteName = imported.siteName,
+            excerpt = imported.excerpt,
+            contentHtml = imported.contentHtml,
+            contentText = imported.contentText,
+            imageUrl = imported.imageUrl,
+            contentHash = imported.contentHash,
+            updatedAt = timestamp,
+            deleted = false
+        )
+        val saved = when (type) {
+            PhoneSavedItemType.FAVORITE -> withContent.copy(
+                favoriteSaved = true,
+                favoriteChangedAt = timestamp,
+                favoriteSortOrder = timestamp
+            )
+            PhoneSavedItemType.WATCH_LATER -> withContent.copy(
+                watchLaterSaved = true,
+                watchLaterChangedAt = timestamp,
+                watchLaterSortOrder = timestamp
+            )
         }
+        articleDao.upsert(saved)
+        return saved
+    }
+
+    private fun mergeArticle(local: PhoneArticleEntity, remote: PhoneArticleEntity): PhoneArticleEntity {
+        val metadata = if (remote.updatedAt > local.updatedAt) remote else local
+        val favoriteFromRemote = remote.isStateNewerThan(local, PhoneSavedItemType.FAVORITE)
+        val watchLaterFromRemote = remote.isStateNewerThan(local, PhoneSavedItemType.WATCH_LATER)
+        val favoriteSaved = if (favoriteFromRemote) remote.favoriteSaved else local.favoriteSaved
+        val favoriteChangedAt = if (favoriteFromRemote) remote.favoriteChangedAt else local.favoriteChangedAt
+        val favoriteSortOrder = if (favoriteFromRemote) remote.favoriteSortOrder else local.favoriteSortOrder
+        val watchLaterSaved = if (watchLaterFromRemote) remote.watchLaterSaved else local.watchLaterSaved
+        val watchLaterChangedAt = if (watchLaterFromRemote) remote.watchLaterChangedAt else local.watchLaterChangedAt
+        val watchLaterSortOrder = if (watchLaterFromRemote) remote.watchLaterSortOrder else local.watchLaterSortOrder
+        val remoteDeletedNewer = remote.deletedAt > local.deletedAt ||
+            (remote.deletedAt == local.deletedAt && remote.deleted && remote.sourceDeviceId > local.sourceDeviceId)
+        val deleted = when {
+            favoriteSaved || watchLaterSaved -> false
+            remoteDeletedNewer -> remote.deleted
+            else -> local.deleted
+        }
+        val deletedAt = max(local.deletedAt, remote.deletedAt)
+        return metadata.copy(
+            favoriteSaved = favoriteSaved,
+            favoriteChangedAt = favoriteChangedAt,
+            favoriteSortOrder = favoriteSortOrder,
+            watchLaterSaved = watchLaterSaved,
+            watchLaterChangedAt = watchLaterChangedAt,
+            watchLaterSortOrder = watchLaterSortOrder,
+            deleted = deleted,
+            deletedAt = deletedAt
+        )
+    }
+
+    private fun PhoneArticleEntity.isStateNewerThan(
+        other: PhoneArticleEntity,
+        type: PhoneSavedItemType
+    ): Boolean {
+        val ownChangedAt = when (type) {
+            PhoneSavedItemType.FAVORITE -> favoriteChangedAt
+            PhoneSavedItemType.WATCH_LATER -> watchLaterChangedAt
+        }
+        val otherChangedAt = when (type) {
+            PhoneSavedItemType.FAVORITE -> other.favoriteChangedAt
+            PhoneSavedItemType.WATCH_LATER -> other.watchLaterChangedAt
+        }
+        return ownChangedAt > otherChangedAt ||
+            (ownChangedAt == otherChangedAt && sourceDeviceId > other.sourceDeviceId)
+    }
+
+    private fun PhoneArticleEntity.markDeletedIfEmpty(timestamp: Long): PhoneArticleEntity {
+        if (favoriteSaved || watchLaterSaved) return copy(deleted = false)
+        return copy(deleted = true, deletedAt = timestamp)
     }
 
     private fun hostLabel(link: String): String {

@@ -4,21 +4,23 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-WatchRSS Phone is an Android companion app for OPPO Watch RSS reader. It enables users to connect their phone to the watch app via QR code scanning and manage RSS feeds, favorites, and watch-later items remotely.
+WatchRSS Phone is an Android companion app for the OPPO Watch RSS reader. The app supports a single formal connection flow: Bluetooth sync over Android public RFCOMM APIs. The watch opens a short-lived RFCOMM server and the phone connects to the already paired watch to exchange the local article library, favorites, and watch-later data.
+
+Do not reintroduce QR scanning, manual IP/port WiFi connection, acoustic-guided WiFi, or pure-sound data transfer as app connection modes unless explicitly requested.
 
 ## Technology Stack
 
-- **Language**: Kotlin 1.9.21
+- **Language**: Kotlin 2.0.21
 - **UI Framework**: Jetpack Compose with Material3
-- **Build System**: Gradle 8.2 with Kotlin DSL
+- **Build System**: Gradle 8.13 with Kotlin DSL
 - **Min SDK**: 30 (Android 11)
 - **Target SDK**: 34 (Android 14)
 - **Key Libraries**:
-  - CameraX + ML Kit for QR code scanning
-  - OkHttp for networking
-  - Gson for JSON serialization
+  - Android Bluetooth RFCOMM APIs for the phone-watch sync channel
+  - Room for local article, favorites, and watch-later storage
+  - OkHttp + Jsoup for phone-side webpage import and readable article extraction
   - Coil for image loading
-  - ZXing for QR code generation
+  - ZXing Core for contact QR code generation
 
 ## Build Commands
 
@@ -42,57 +44,46 @@ WatchRSS Phone is an Android companion app for OPPO Watch RSS reader. It enables
 ## Architecture
 
 ### Activity Flow
-1. **MainActivity**: Entry point with QR scan button
-2. **QRScanActivity**: Scans QR code containing Base64-encoded "ip:port"
-3. **ConnectedActivity**: Main hub after successful connection, provides access to:
-   - RSS URL input
-   - Favorites list
-   - Watch Later list
 
-### Network Layer
-- **NetworkManager** (singleton): Centralized HTTP client using OkHttp
-  - Base URL set dynamically from QR code: `http://{ip}:{port}`
-  - 5-second timeouts for all operations
-  - Comprehensive logging with TAG "WatchRSS_Network"
-  - API endpoints:
-    - `GET /health` - Connection health check
-    - `GET /getCurrentActivationAbility` - Get watch app info
-    - `POST /remoteEnterRSSURL` - Send RSS URL to watch
-    - `GET /getFavorites` - Fetch favorites list
-    - `GET /getWatchlaterList` - Fetch watch-later list
+1. **MainActivity**: Entry point; requests Bluetooth permissions and hosts the Compose main screen.
+2. **MainScreen**: Provides webpage import and Bluetooth sync actions:
+   - import a webpage into local favorites
+   - import a webpage into local watch-later
+   - run one manual bidirectional sync with the watch
 
-### QR Code Format
-- **QRCodeParser**: Parses Base64-encoded QR codes
-  - Expected format: Base64(`{ip}:{port}`)
-  - Implements fallback decoding (strips leading characters if decode fails)
-  - Returns `Pair<String?, String?>` for IP and port
+### Bluetooth Sync Layer
 
-### Data Models
-All models in `model/Models.kt`:
-- `AbilityResponse`: Watch app capability info
-- `RSSUrlRequest/Response`: RSS URL submission
-- `FavoriteItem/FavoritesResponse`: Favorites data
-- `WatchLaterItem/WatchLaterResponse`: Watch-later data
+- **PhoneBluetoothSyncManager** builds product actions, exports local articles, and merges watch responses.
+- **PhoneBluetoothSyncClient** selects the bonded watch and exchanges one RFCOMM JSON request/response.
+- **BluetoothSyncProtocol** defines the shared service UUID, action names, max frame size, and length-prefixed JSON frame format.
+- Product actions:
+  - `remoteInput` - phone sends the RSS URL entered on the phone
+  - `pullSavedItems` - phone pulls favorites or watch-later items from the watch
+  - `syncLibrary` - phone and watch exchange compressed article records plus per-list save state
+
+### Data Layer
+
+- **PhoneCompanionRepository** is local-data focused:
+  - imports webpages into `phone_articles`
+  - observes local favorites and watch-later articles from Room
+  - merges incoming Bluetooth article state with per-list last-writer-wins timestamps
+- Saved item models live under `data/db` and `data/model`.
 
 ### UI Theme
-- Custom `WatchRSSTheme` with dynamic color scheme
-- Light mode: Primary #1976D2 (blue)
-- Dark mode: Primary #90CAF9 (light blue)
-- Uses Material3 design system
+
+- Custom `WatchRssPhoneTheme` with Material3.
+- Chinese language is used in UI strings (app name: "腕上RSS").
 
 ## Code Conventions
 
 - Package structure: `com.lightningstudio.watchrss.phone`
-- Activities use Jetpack Compose exclusively (no XML layouts)
-- Network callbacks use OkHttp's async `Callback` interface
-- All network operations include detailed logging
-- Chinese language used in UI strings (app name: "腕上RSS")
+- Activities use Jetpack Compose exclusively (no XML layouts).
+- Keep connection UI and ViewModel logic scoped to Bluetooth sync.
+- Avoid adding camera, QR scanner, record-audio, WiFi hotspot, or direct watch HTTP client dependencies unless the product direction changes.
 
 ## Important Notes
 
-- This is a phone companion app; the watch app runs separately on OPPO Watch
-- Network communication is local (same WiFi network) via HTTP
-- QR code must be generated by the watch app
-- No authentication mechanism - relies on local network security
-- Camera permission required for QR scanning
-- Internet permission required for network communication
+- This is a phone companion app; the watch app runs separately on OPPO Watch.
+- Communication uses already paired Bluetooth and a short-lived watch-side RFCOMM listener.
+- Required runtime permission on Android 12+ is `BLUETOOTH_CONNECT`.
+- Do not add OPPO/HeyTap closed SDK dependencies; this is a GPLv3-compatible public-API implementation.

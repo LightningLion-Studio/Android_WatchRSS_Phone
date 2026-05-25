@@ -167,7 +167,7 @@ fun AboutSection() {
             )
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "腕上RSS是一款专为OPPO Watch设计的RSS阅读器配套应用。通过扫描二维码快速连接手表，您可以轻松管理RSS订阅源、查看收藏内容和稍后阅读列表。",
+                text = "腕上RSS是一款专为OPPO Watch设计的RSS阅读器配套应用。通过声波引导 WiFi 会话连接手表，您可以轻松管理RSS订阅源、查看收藏内容和稍后阅读列表。",
                 fontSize = 14.sp,
                 lineHeight = 20.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -181,7 +181,7 @@ fun AboutSection() {
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "• 快速扫码连接手表\n• 添加RSS订阅源\n• 查看收藏文章\n• 管理稍后阅读列表",
+                text = "• 声波引导 WiFi 连接手表\n• 添加RSS订阅源\n• 查看收藏文章\n• 管理稍后阅读列表",
                 fontSize = 14.sp,
                 lineHeight = 20.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -294,9 +294,9 @@ fun PrivacyPolicySection() {
             Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = "• 本地通信：应用仅在您的手机和手表之间建立本地网络连接，数据不经过第三方服务器\n" +
-                        "• 加密传输：所有数据传输均采用安全加密协议\n" +
+                        "• 声波引导：热点与临时会话信息仅用于本次连接\n" +
                         "• 无云存储：您的订阅数据仅存储在本地设备，不上传至云端\n" +
-                        "• 权限最小化：应用仅请求必要的相机权限（用于扫码）和网络权限（用于本地通信）",
+                        "• 权限最小化：应用仅请求必要的网络和 WiFi 权限（用于本地通信与引导连接）",
                 fontSize = 13.sp,
                 lineHeight = 18.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant

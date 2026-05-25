@@ -14,11 +14,11 @@
 
 ## 📖 项目简介
 
-腕上RSS 手机端是配合 OPPO Watch 上的 RSS 阅读器使用的伴侣应用。通过扫描手表生成的二维码，您可以在手机上轻松管理 RSS 订阅源、查看收藏和稍后观看列表。
+腕上RSS 手机端是配合 OPPO Watch 上的 RSS 阅读器使用的伴侣应用。应用通过已配对蓝牙连接手表，您可以在手机上输入 RSS 订阅源、同步收藏和稍后观看列表。
 
 ## ✨ 主要功能
 
-- 🔍 **二维码扫描连接** - 扫描手表生成的二维码快速建立连接
+- 📡 **蓝牙同步连接** - 手机通过 Android 公开蓝牙 RFCOMM API 与已配对手表交换数据
 - 📡 **远程输入 RSS 链接** - 在手机上输入 RSS 订阅地址，同步到手表
 - ⭐ **收藏管理** - 查看和管理在手表上收藏的文章
 - 🕐 **稍后观看** - 管理标记为稍后观看的内容
@@ -27,9 +27,8 @@
 ## 📱 系统要求
 
 - Android 11 (API 30) 或更高版本
-- 相机权限（用于扫描二维码）
-- 网络权限（用于与手表通信）
-- 需要与 OPPO Watch 处于同一 WiFi 网络
+- 手机与手表已完成系统蓝牙配对
+- 蓝牙连接权限
 
 ## 🚀 快速开始
 
@@ -37,9 +36,9 @@
 
 1. 从 [Releases 页面](https://github.com/LightningLion-Studio/Android_WatchRSS_Phone/releases) 下载最新版本的 APK
 2. 在手机上安装应用
-3. 打开应用，点击"前往扫一扫"
-4. 扫描 OPPO Watch 上显示的二维码
-5. 连接成功后即可开始使用
+3. 在手表端打开“连接手机 > 蓝牙同步”
+4. 在手机端选择发送 RSS、同步收藏或同步稍后观看
+5. 手机通过蓝牙连接手表并完成数据交换
 
 ### 开发者构建
 
@@ -60,53 +59,44 @@ cd Android_WatchRSS_Phone
 
 ## 🛠️ 技术栈
 
-- **开发语言**: Kotlin 1.9.21
+- **开发语言**: Kotlin 2.0.21
 - **UI 框架**: Jetpack Compose + Material3
-- **构建工具**: Gradle 8.2
+- **构建工具**: Gradle 8.13
 - **核心库**:
-  - CameraX - 相机功能
-  - ML Kit - 二维码识别
-  - OkHttp - 网络请求
-  - Gson - JSON 解析
+  - Android Bluetooth RFCOMM - 手机与手表蓝牙数据通道
+  - Room - 本地文章、收藏、稍后观看缓存
+  - OkHttp + Jsoup - 网页抓取与正文提取
   - Coil - 图片加载
-  - ZXing - 二维码生成
+  - ZXing Core - 联系方式二维码生成
 
 ## 📂 项目结构
 
 ```
 app/src/main/java/com/lightningstudio/watchrss/phone/
 ├── MainActivity.kt              # 主界面
-├── QRScanActivity.kt           # 二维码扫描
-├── ConnectedActivity.kt        # 连接后的主界面
-├── RSSInputActivity.kt         # RSS 输入界面
-├── FavoritesActivity.kt        # 收藏列表
-├── WatchLaterActivity.kt       # 稍后观看列表
 ├── AboutActivity.kt            # 关于页面
 ├── ContactDeveloperActivity.kt # 联系开发者
-├── model/
-│   └── Models.kt               # 数据模型
-└── network/
-    └── NetworkManager.kt       # 网络管理器
+├── acoustic/                   # 旧声波调试/兼容代码
+├── connection/                 # 蓝牙同步与兼容连接协议
+├── data/                       # 本地数据库与仓库
+└── ui/                         # Compose 主界面
 ```
 
-## 🔌 API 接口
+## 🔌 连接协议
 
-应用通过 HTTP 与手表通信，基础 URL 格式：`http://{ip}:{port}`
+应用只保留蓝牙同步作为正式连接方式：手表端开启 RFCOMM 服务，手机端连接已配对手表并发送长度前缀 JSON 帧。
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/health` | GET | 健康检查 |
-| `/getCurrentActivationAbility` | GET | 获取手表应用信息 |
-| `/remoteEnterRSSURL` | POST | 发送 RSS 链接到手表 |
-| `/getFavorites` | GET | 获取收藏列表 |
-| `/getWatchlaterList` | GET | 获取稍后观看列表 |
+| 动作 | 说明 |
+|------|------|
+| `remoteInput` | 手机发送 RSS 链接到手表 |
+| `pullSavedItems` | 手机从手表拉取收藏或稍后观看列表 |
+| `syncLibrary` | 手机与手表双向同步收藏、稍后再看和导入文章正文 |
 
 ## 🔐 安全说明
 
-- 应用使用本地网络通信（HTTP），无需互联网连接
-- 手机和手表必须在同一 WiFi 网络下
-- 二维码包含 Base64 编码的连接信息（IP:端口）
-- 无用户认证机制，依赖本地网络安全
+- 应用使用系统已配对蓝牙连接，不依赖互联网或本地 WiFi
+- 不引入厂商闭源 SDK，仅使用 Android 公开蓝牙 API
+- 蓝牙消息限制最大帧大小，避免异常大载荷
 
 ## 📄 许可证
 

@@ -2,9 +2,13 @@ package com.lightningstudio.watchrss.phone.data.repo
 
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
+import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceDao
+import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
+import com.lightningstudio.watchrss.phone.data.importer.ImportedRssSource
 import com.lightningstudio.watchrss.phone.data.importer.ImportedWebArticle
+import com.lightningstudio.watchrss.phone.data.importer.RssSourceImporter
 import com.lightningstudio.watchrss.phone.data.importer.WebArticleImporter
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import kotlinx.coroutines.Dispatchers
@@ -14,12 +18,21 @@ import org.json.JSONArray
 import java.lang.Long.max
 import java.net.URI
 
+data class PhoneRssSourceImportResult(
+    val source: PhoneRssSourceEntity,
+    val articleCount: Int
+)
+
 class PhoneCompanionRepository(
     private val savedItemDao: PhoneSavedItemDao,
     private val articleDao: PhoneArticleDao,
+    private val rssSourceDao: PhoneRssSourceDao,
     private val deviceId: String,
     private val webArticleImporter: suspend (String) -> ImportedWebArticle = { input ->
         WebArticleImporter().importUrl(input)
+    },
+    private val rssSourceImporter: suspend (String) -> ImportedRssSource = { input ->
+        RssSourceImporter().importUrl(input)
     }
 ) {
     fun observeSavedItems(type: PhoneSavedItemType): Flow<List<PhoneSavedItemEntity>> {
@@ -37,14 +50,81 @@ class PhoneCompanionRepository(
         return articleDao.observeRecent(limit)
     }
 
+    fun observeIndependentArticles(): Flow<List<PhoneArticleEntity>> {
+        return articleDao.observeIndependent()
+    }
+
+    fun observeRssSources(): Flow<List<PhoneRssSourceEntity>> {
+        return rssSourceDao.observeActive()
+    }
+
+    fun observeRssArticles(): Flow<List<PhoneArticleEntity>> {
+        return articleDao.observeRssArticles()
+    }
+
     fun observeArticle(articleId: String): Flow<PhoneArticleEntity?> {
         return articleDao.observeById(articleId)
     }
 
-    suspend fun importWebArticle(input: String, type: PhoneSavedItemType): PhoneArticleEntity =
+    suspend fun importWebArticle(input: String): PhoneArticleEntity =
         withContext(Dispatchers.IO) {
             val imported = webArticleImporter(input)
-            saveImportedArticle(imported, type)
+            saveImportedArticle(imported, type = null, independent = true)
+        }
+
+    suspend fun addRssSource(input: String): PhoneRssSourceImportResult =
+        withContext(Dispatchers.IO) {
+            val imported = rssSourceImporter(input)
+            val now = System.currentTimeMillis()
+            val existing = rssSourceDao.getByUrl(imported.url)
+            val source = PhoneRssSourceEntity(
+                url = imported.url,
+                sourceDeviceId = deviceId,
+                title = imported.title.ifBlank { hostLabel(imported.url) },
+                description = imported.description,
+                siteUrl = imported.siteUrl,
+                imageUrl = imported.imageUrl,
+                createdAt = existing?.createdAt ?: now,
+                updatedAt = now,
+                sortOrder = existing?.sortOrder?.takeIf { it > 0L } ?: now,
+                deleted = false,
+                deletedAt = 0L
+            )
+            rssSourceDao.upsert(source)
+            val articles = imported.items.mapIndexed { index, item ->
+                val timestamp = now - index
+                PhoneArticleEntity(
+                    articleId = WebArticleImporter.stableArticleId(item.url),
+                    sourceDeviceId = deviceId,
+                    url = item.url,
+                    title = item.title.ifBlank { item.url },
+                    siteName = source.title,
+                    excerpt = item.excerpt,
+                    contentHtml = item.contentHtml,
+                    contentText = item.contentText,
+                    imageUrl = item.imageUrl,
+                    contentHash = WebArticleImporter.sha256(item.contentHtml ?: item.contentText.ifBlank { item.url }),
+                    importedAt = timestamp,
+                    updatedAt = timestamp,
+                    independentSaved = false,
+                    independentChangedAt = 0L,
+                    independentSortOrder = 0L,
+                    rssSourceUrl = source.url,
+                    rssSourceTitle = source.title,
+                    favoriteSaved = false,
+                    favoriteChangedAt = 0L,
+                    favoriteSortOrder = 0L,
+                    watchLaterSaved = false,
+                    watchLaterChangedAt = 0L,
+                    watchLaterSortOrder = 0L,
+                    deleted = false,
+                    deletedAt = 0L
+                )
+            }
+            if (articles.isNotEmpty()) {
+                articleDao.upsertAll(articles)
+            }
+            PhoneRssSourceImportResult(source, articles.size)
         }
 
     suspend fun toggleSaved(article: PhoneArticleEntity, type: PhoneSavedItemType): PhoneArticleEntity =
@@ -77,6 +157,10 @@ class PhoneCompanionRepository(
         articleDao.getAllForSync()
     }
 
+    suspend fun getRssSourcesForSync(): List<PhoneRssSourceEntity> = withContext(Dispatchers.IO) {
+        rssSourceDao.getAllForSync()
+    }
+
     suspend fun mergeArticlesFromSync(incoming: List<PhoneArticleEntity>): Int = withContext(Dispatchers.IO) {
         var merged = 0
         incoming.forEach { remote ->
@@ -93,6 +177,24 @@ class PhoneCompanionRepository(
         }
         merged
     }
+
+    suspend fun mergeRssSourcesFromSync(incoming: List<PhoneRssSourceEntity>): Int =
+        withContext(Dispatchers.IO) {
+            var merged = 0
+            incoming.forEach { remote ->
+                val local = rssSourceDao.getByUrl(remote.url)
+                val next = if (local == null || remote.isNewerThan(local)) {
+                    remote
+                } else {
+                    local
+                }
+                if (local != next) {
+                    rssSourceDao.upsert(next)
+                    merged += 1
+                }
+            }
+            merged
+        }
 
     suspend fun replaceSavedItems(type: PhoneSavedItemType, data: JSONArray): Int {
         val syncedAt = System.currentTimeMillis()
@@ -139,14 +241,15 @@ class PhoneCompanionRepository(
                 imageUrl = null,
                 contentHash = WebArticleImporter.sha256(entity.summary.ifBlank { entity.link })
             )
-            saveImportedArticle(imported, type, timestamp = syncedAt)
+            saveImportedArticle(imported, type = type, independent = false, timestamp = syncedAt)
         }
         return entities.size
     }
 
     private suspend fun saveImportedArticle(
         imported: ImportedWebArticle,
-        type: PhoneSavedItemType,
+        type: PhoneSavedItemType?,
+        independent: Boolean,
         timestamp: Long = System.currentTimeMillis()
     ): PhoneArticleEntity {
         val current = articleDao.getById(imported.articleId)
@@ -163,6 +266,11 @@ class PhoneCompanionRepository(
             contentHash = imported.contentHash,
             importedAt = timestamp,
             updatedAt = timestamp,
+            independentSaved = false,
+            independentChangedAt = 0L,
+            independentSortOrder = 0L,
+            rssSourceUrl = null,
+            rssSourceTitle = null,
             favoriteSaved = false,
             favoriteChangedAt = 0L,
             favoriteSortOrder = 0L,
@@ -185,6 +293,15 @@ class PhoneCompanionRepository(
             updatedAt = timestamp,
             deleted = false
         )
+        val withIndependent = if (independent) {
+            withContent.copy(
+                independentSaved = true,
+                independentChangedAt = timestamp,
+                independentSortOrder = timestamp
+            )
+        } else {
+            withContent
+        }
         val saved = when (type) {
             PhoneSavedItemType.FAVORITE -> withContent.copy(
                 favoriteSaved = true,
@@ -196,6 +313,7 @@ class PhoneCompanionRepository(
                 watchLaterChangedAt = timestamp,
                 watchLaterSortOrder = timestamp
             )
+            null -> withIndependent
         }
         articleDao.upsert(saved)
         return saved
@@ -205,21 +323,34 @@ class PhoneCompanionRepository(
         val metadata = if (remote.updatedAt > local.updatedAt) remote else local
         val favoriteFromRemote = remote.isStateNewerThan(local, PhoneSavedItemType.FAVORITE)
         val watchLaterFromRemote = remote.isStateNewerThan(local, PhoneSavedItemType.WATCH_LATER)
+        val independentFromRemote = remote.isIndependentStateNewerThan(local)
         val favoriteSaved = if (favoriteFromRemote) remote.favoriteSaved else local.favoriteSaved
         val favoriteChangedAt = if (favoriteFromRemote) remote.favoriteChangedAt else local.favoriteChangedAt
         val favoriteSortOrder = if (favoriteFromRemote) remote.favoriteSortOrder else local.favoriteSortOrder
         val watchLaterSaved = if (watchLaterFromRemote) remote.watchLaterSaved else local.watchLaterSaved
         val watchLaterChangedAt = if (watchLaterFromRemote) remote.watchLaterChangedAt else local.watchLaterChangedAt
         val watchLaterSortOrder = if (watchLaterFromRemote) remote.watchLaterSortOrder else local.watchLaterSortOrder
+        val independentSaved = if (independentFromRemote) remote.independentSaved else local.independentSaved
+        val independentChangedAt = if (independentFromRemote) remote.independentChangedAt else local.independentChangedAt
+        val independentSortOrder = if (independentFromRemote) remote.independentSortOrder else local.independentSortOrder
+        val rssSourceUrl = remote.rssSourceUrl?.takeIf { it.isNotBlank() }
+            ?: local.rssSourceUrl?.takeIf { it.isNotBlank() }
+        val rssSourceTitle = remote.rssSourceTitle?.takeIf { it.isNotBlank() }
+            ?: local.rssSourceTitle?.takeIf { it.isNotBlank() }
         val remoteDeletedNewer = remote.deletedAt > local.deletedAt ||
             (remote.deletedAt == local.deletedAt && remote.deleted && remote.sourceDeviceId > local.sourceDeviceId)
         val deleted = when {
-            favoriteSaved || watchLaterSaved -> false
+            favoriteSaved || watchLaterSaved || independentSaved || !rssSourceUrl.isNullOrBlank() -> false
             remoteDeletedNewer -> remote.deleted
             else -> local.deleted
         }
         val deletedAt = max(local.deletedAt, remote.deletedAt)
         return metadata.copy(
+            independentSaved = independentSaved,
+            independentChangedAt = independentChangedAt,
+            independentSortOrder = independentSortOrder,
+            rssSourceUrl = rssSourceUrl,
+            rssSourceTitle = rssSourceTitle,
             favoriteSaved = favoriteSaved,
             favoriteChangedAt = favoriteChangedAt,
             favoriteSortOrder = favoriteSortOrder,
@@ -247,9 +378,21 @@ class PhoneCompanionRepository(
             (ownChangedAt == otherChangedAt && sourceDeviceId > other.sourceDeviceId)
     }
 
+    private fun PhoneArticleEntity.isIndependentStateNewerThan(other: PhoneArticleEntity): Boolean {
+        return independentChangedAt > other.independentChangedAt ||
+            (independentChangedAt == other.independentChangedAt && sourceDeviceId > other.sourceDeviceId)
+    }
+
     private fun PhoneArticleEntity.markDeletedIfEmpty(timestamp: Long): PhoneArticleEntity {
-        if (favoriteSaved || watchLaterSaved) return copy(deleted = false)
+        if (favoriteSaved || watchLaterSaved || independentSaved || !rssSourceUrl.isNullOrBlank()) {
+            return copy(deleted = false)
+        }
         return copy(deleted = true, deletedAt = timestamp)
+    }
+
+    private fun PhoneRssSourceEntity.isNewerThan(other: PhoneRssSourceEntity): Boolean {
+        return updatedAt > other.updatedAt ||
+            (updatedAt == other.updatedAt && sourceDeviceId > other.sourceDeviceId)
     }
 
     private fun hostLabel(link: String): String {

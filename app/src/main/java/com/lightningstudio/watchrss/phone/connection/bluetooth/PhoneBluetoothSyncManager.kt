@@ -55,21 +55,28 @@ class PhoneBluetoothSyncManager(
 
     suspend fun syncLibrary(): PhoneBluetoothSyncResult {
         val localArticles = repository.getArticlesForSync()
+        val localSources = repository.getRssSourcesForSync()
         val exchange = exchange(
             LibrarySyncPayload.buildRequest(
                 deviceId = deviceId,
-                articles = localArticles
+                articles = localArticles,
+                rssSources = localSources
             )
         )
         requireSuccess(exchange.response)
         val received = LibrarySyncPayload.parseArticles(exchange.response)
+        val receivedSources = LibrarySyncPayload.parseRssSources(exchange.response)
         val merged = repository.mergeArticlesFromSync(received)
+        val mergedSources = repository.mergeRssSourcesFromSync(receivedSources)
         return PhoneBluetoothSyncResult(
             deviceName = exchange.deviceName,
             libraryStats = LibrarySyncStats(
                 sent = localArticles.size,
                 received = received.size,
-                merged = merged
+                merged = merged,
+                sourcesSent = localSources.size,
+                sourcesReceived = receivedSources.size,
+                sourcesMerged = mergedSources
             )
         )
     }

@@ -54,8 +54,8 @@ class MainActivity : ComponentActivity() {
                 MainScreen(
                     uiState = state,
                     onUrlChange = viewModel::updateUrlInput,
-                    onImportFavorite = viewModel::importToFavorites,
-                    onImportWatchLater = viewModel::importToWatchLater,
+                    onImportArticle = viewModel::importIndependentArticle,
+                    onAddRssSource = viewModel::addRssSource,
                     onSyncLibrary = { ensureBluetoothPermissions(viewModel::syncLibraryByBluetooth) },
                     onOpenArticle = { article ->
                         startActivity(ArticleReaderActivity.createIntent(this, article.articleId))

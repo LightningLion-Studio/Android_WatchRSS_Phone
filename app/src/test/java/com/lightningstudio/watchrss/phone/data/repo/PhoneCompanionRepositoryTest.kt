@@ -2,8 +2,13 @@ package com.lightningstudio.watchrss.phone.data.repo
 
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
+import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceDao
+import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
+import com.lightningstudio.watchrss.phone.data.importer.ImportedRssItem
+import com.lightningstudio.watchrss.phone.data.importer.ImportedRssSource
+import com.lightningstudio.watchrss.phone.data.importer.ImportedWebArticle
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
@@ -21,6 +26,7 @@ class PhoneCompanionRepositoryTest {
         val repository = PhoneCompanionRepository(
             savedItemDao = dao,
             articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
             deviceId = "test-phone"
         )
 
@@ -60,6 +66,7 @@ class PhoneCompanionRepositoryTest {
         val repository = PhoneCompanionRepository(
             savedItemDao = dao,
             articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
             deviceId = "test-phone"
         )
 
@@ -84,6 +91,78 @@ class PhoneCompanionRepositoryTest {
         assertTrue(savedItem.syncedAt > 0L)
     }
 
+    @Test
+    fun importWebArticle_savesAsIndependentArticle() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone",
+            webArticleImporter = {
+                ImportedWebArticle(
+                    articleId = "article-1",
+                    url = "https://example.com/post",
+                    title = "独立标题",
+                    siteName = "example.com",
+                    excerpt = "摘要",
+                    contentHtml = null,
+                    contentText = "正文",
+                    imageUrl = null,
+                    contentHash = "hash"
+                )
+            }
+        )
+
+        val article = repository.importWebArticle("https://example.com/post")
+
+        assertEquals("独立标题", article.title)
+        assertTrue(article.independentSaved)
+        assertEquals(false, article.favoriteSaved)
+        assertEquals(false, article.watchLaterSaved)
+    }
+
+    @Test
+    fun addRssSource_savesSourceAndChannelArticles() = runBlocking {
+        val sourceDao = FakePhoneRssSourceDao()
+        val articleDao = FakePhoneArticleDao()
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone",
+            rssSourceImporter = {
+                ImportedRssSource(
+                    url = "https://example.com/feed.xml",
+                    title = "示例源",
+                    description = "源描述",
+                    siteUrl = "https://example.com",
+                    imageUrl = null,
+                    items = listOf(
+                        ImportedRssItem(
+                            url = "https://example.com/a",
+                            title = "频道文章",
+                            excerpt = "摘要",
+                            contentHtml = null,
+                            contentText = "正文",
+                            imageUrl = null,
+                            guid = "a"
+                        )
+                    )
+                )
+            }
+        )
+
+        val result = repository.addRssSource("https://example.com/feed.xml")
+
+        assertEquals(1, result.articleCount)
+        assertEquals("示例源", sourceDao.sources.single().title)
+        val article = articleDao.items.single()
+        assertEquals("https://example.com/feed.xml", article.rssSourceUrl)
+        assertEquals("示例源", article.rssSourceTitle)
+        assertEquals(false, article.independentSaved)
+    }
+
     private class FakePhoneSavedItemDao : PhoneSavedItemDao {
         var items: List<PhoneSavedItemEntity> = emptyList()
 
@@ -103,6 +182,10 @@ class PhoneCompanionRepositoryTest {
 
         override fun observeRecent(limit: Int): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
+        override fun observeIndependent(): Flow<List<PhoneArticleEntity>> = emptyFlow()
+
+        override fun observeRssArticles(): Flow<List<PhoneArticleEntity>> = emptyFlow()
+
         override fun observeFavorites(): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
         override fun observeWatchLater(): Flow<List<PhoneArticleEntity>> = emptyFlow()
@@ -121,6 +204,26 @@ class PhoneCompanionRepositoryTest {
 
         override suspend fun upsertAll(articles: List<PhoneArticleEntity>) {
             articles.forEach { upsert(it) }
+        }
+    }
+
+    private class FakePhoneRssSourceDao : PhoneRssSourceDao {
+        var sources: List<PhoneRssSourceEntity> = emptyList()
+
+        override fun observeActive(): Flow<List<PhoneRssSourceEntity>> = emptyFlow()
+
+        override suspend fun getByUrl(url: String): PhoneRssSourceEntity? {
+            return sources.firstOrNull { it.url == url }
+        }
+
+        override suspend fun getAllForSync(): List<PhoneRssSourceEntity> = sources
+
+        override suspend fun upsert(source: PhoneRssSourceEntity) {
+            sources = sources.filterNot { it.url == source.url } + source
+        }
+
+        override suspend fun upsertAll(sources: List<PhoneRssSourceEntity>) {
+            sources.forEach { upsert(it) }
         }
     }
 }

@@ -21,6 +21,24 @@ interface PhoneArticleDao {
     @Query(
         """
         SELECT * FROM phone_articles
+        WHERE deleted = 0 AND independentSaved = 1
+        ORDER BY independentSortOrder DESC, independentChangedAt DESC, title ASC
+        """
+    )
+    fun observeIndependent(): Flow<List<PhoneArticleEntity>>
+
+    @Query(
+        """
+        SELECT * FROM phone_articles
+        WHERE deleted = 0 AND rssSourceUrl IS NOT NULL AND rssSourceUrl != ''
+        ORDER BY updatedAt DESC, importedAt DESC, title ASC
+        """
+    )
+    fun observeRssArticles(): Flow<List<PhoneArticleEntity>>
+
+    @Query(
+        """
+        SELECT * FROM phone_articles
         WHERE deleted = 0 AND favoriteSaved = 1
         ORDER BY favoriteSortOrder DESC, favoriteChangedAt DESC, title ASC
         """

@@ -45,10 +45,21 @@ class PhoneBluetoothSyncClient(
         }
 
         val socket = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
-        socket.use {
-            it.connect()
-            BluetoothSyncProtocol.writeFrame(it.outputStream, request)
-            val response = BluetoothSyncProtocol.readFrame(it.inputStream)
+        try {
+            socket.connect()
+            BluetoothSyncProtocol.writeFrame(socket.outputStream, request)
+            val response = BluetoothSyncProtocol.readFrame(socket.inputStream)
+            runCatching {
+                BluetoothSyncProtocol.writeFrame(
+                    socket.outputStream,
+                    JSONObject().apply {
+                        put("action", BluetoothSyncProtocol.ACTION_ACK)
+                        put("success", true)
+                    }
+                )
+            }.onFailure { throwable ->
+                Log.w(TAG, "response ack skipped: ${throwable.message}")
+            }
             Log.i(TAG, "exchange complete response=$response")
             return BluetoothSyncExchange(
                 deviceName = device.name.orEmpty(),
@@ -56,6 +67,12 @@ class PhoneBluetoothSyncClient(
                 request = request,
                 response = response
             )
+        } finally {
+            runCatching {
+                socket.close()
+            }.onFailure { throwable ->
+                Log.w(TAG, "socket close ignored after exchange: ${throwable.message}")
+            }
         }
     }
 

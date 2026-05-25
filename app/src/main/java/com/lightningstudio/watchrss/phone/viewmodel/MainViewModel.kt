@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
+import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,9 +19,19 @@ data class MainUiState(
     val isBusy: Boolean = false,
     val message: String? = null,
     val error: String? = null,
-    val recentArticles: List<PhoneArticleEntity> = emptyList(),
+    val rssSources: List<PhoneRssSourceEntity> = emptyList(),
+    val rssArticles: List<PhoneArticleEntity> = emptyList(),
+    val independentArticles: List<PhoneArticleEntity> = emptyList(),
     val favorites: List<PhoneArticleEntity> = emptyList(),
     val watchLater: List<PhoneArticleEntity> = emptyList()
+)
+
+private data class LibraryLists(
+    val rssSources: List<PhoneRssSourceEntity>,
+    val rssArticles: List<PhoneArticleEntity>,
+    val independentArticles: List<PhoneArticleEntity>,
+    val favorites: List<PhoneArticleEntity>,
+    val watchLater: List<PhoneArticleEntity>
 )
 
 class MainViewModel(
@@ -31,18 +42,28 @@ class MainViewModel(
 
     val uiState: StateFlow<MainUiState> = combine(
         combine(
-            repository.observeRecentArticles(),
+            repository.observeRssSources(),
+            repository.observeRssArticles(),
+            repository.observeIndependentArticles(),
             repository.observeSavedArticles(PhoneSavedItemType.FAVORITE),
             repository.observeSavedArticles(PhoneSavedItemType.WATCH_LATER)
-        ) { recent, favorites, watchLater ->
-            Triple(recent, favorites, watchLater)
+        ) { rssSources, rssArticles, independentArticles, favorites, watchLater ->
+            LibraryLists(
+                rssSources = rssSources,
+                rssArticles = rssArticles,
+                independentArticles = independentArticles,
+                favorites = favorites,
+                watchLater = watchLater
+            )
         },
         sessionState
     ) { lists, state ->
         state.copy(
-            recentArticles = lists.first,
-            favorites = lists.second,
-            watchLater = lists.third
+            rssSources = lists.rssSources,
+            rssArticles = lists.rssArticles,
+            independentArticles = lists.independentArticles,
+            favorites = lists.favorites,
+            watchLater = lists.watchLater
         )
     }.stateIn(
         viewModelScope,
@@ -58,12 +79,26 @@ class MainViewModel(
         sessionState.value = sessionState.value.copy(message = null, error = null)
     }
 
-    fun importToFavorites() {
-        importWebArticle(PhoneSavedItemType.FAVORITE)
+    fun importIndependentArticle() {
+        importWebArticle()
     }
 
-    fun importToWatchLater() {
-        importWebArticle(PhoneSavedItemType.WATCH_LATER)
+    fun addRssSource() {
+        val url = sessionState.value.urlInput.trim()
+        if (url.isBlank()) {
+            sessionState.value = sessionState.value.copy(error = "请输入 RSS 源地址")
+            return
+        }
+        viewModelScope.launch {
+            runBusy("正在添加 RSS 源…") {
+                val result = repository.addRssSource(url)
+                sessionState.value = sessionState.value.copy(
+                    message = "已添加 RSS 源：${result.source.title}，导入 ${result.articleCount} 篇",
+                    error = null,
+                    urlInput = ""
+                )
+            }
+        }
     }
 
     fun toggleFavorite(article: PhoneArticleEntity) {
@@ -81,7 +116,7 @@ class MainViewModel(
                 val stats = result.libraryStats
                 sessionState.value = sessionState.value.copy(
                     message = if (stats != null) {
-                        "已与 ${result.deviceName.ifBlank { "手表" }} 同步：发送 ${stats.sent}，收到 ${stats.received}，合并 ${stats.merged}"
+                        "已与 ${result.deviceName.ifBlank { "手表" }} 同步：文章发送 ${stats.sent}，收到 ${stats.received}，合并 ${stats.merged}；RSS源发送 ${stats.sourcesSent}，收到 ${stats.sourcesReceived}，合并 ${stats.sourcesMerged}"
                     } else {
                         "已与 ${result.deviceName.ifBlank { "手表" }} 同步"
                     },
@@ -129,7 +164,7 @@ class MainViewModel(
         }
     }
 
-    private fun importWebArticle(type: PhoneSavedItemType) {
+    private fun importWebArticle() {
         val url = sessionState.value.urlInput.trim()
         if (url.isBlank()) {
             sessionState.value = sessionState.value.copy(error = "请输入网页地址")
@@ -137,9 +172,9 @@ class MainViewModel(
         }
         viewModelScope.launch {
             runBusy("正在导入网页…") {
-                val article = repository.importWebArticle(url, type)
+                val article = repository.importWebArticle(url)
                 sessionState.value = sessionState.value.copy(
-                    message = "已导入到${type.displayName}：${article.title}",
+                    message = "已导入到独立文章：${article.title}",
                     error = null,
                     urlInput = ""
                 )

@@ -17,6 +17,7 @@ object BluetoothSyncProtocol {
     const val ACTION_REMOTE_INPUT = "remoteInput"
     const val ACTION_PULL_SAVED_ITEMS = "pullSavedItems"
     const val ACTION_SYNC_LIBRARY = "syncLibrary"
+    const val ACTION_ACK = "ack"
 
     private const val MAX_FRAME_BYTES = 2 * 1024 * 1024
 

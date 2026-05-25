@@ -8,6 +8,8 @@ import androidx.room.PrimaryKey
     tableName = "phone_articles",
     indices = [
         Index(value = ["url"]),
+        Index(value = ["independentSaved", "independentSortOrder"]),
+        Index(value = ["rssSourceUrl", "updatedAt"]),
         Index(value = ["favoriteSaved", "favoriteSortOrder"]),
         Index(value = ["watchLaterSaved", "watchLaterSortOrder"])
     ]
@@ -25,6 +27,11 @@ data class PhoneArticleEntity(
     val contentHash: String,
     val importedAt: Long,
     val updatedAt: Long,
+    val independentSaved: Boolean,
+    val independentChangedAt: Long,
+    val independentSortOrder: Long,
+    val rssSourceUrl: String?,
+    val rssSourceTitle: String?,
     val favoriteSaved: Boolean,
     val favoriteChangedAt: Long,
     val favoriteSortOrder: Long,

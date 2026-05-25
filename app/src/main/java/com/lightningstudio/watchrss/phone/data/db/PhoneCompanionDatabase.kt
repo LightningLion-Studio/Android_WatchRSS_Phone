@@ -8,14 +8,16 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 @Database(
     entities = [
         PhoneSavedItemEntity::class,
-        PhoneArticleEntity::class
+        PhoneArticleEntity::class,
+        PhoneRssSourceEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
     abstract fun phoneSavedItemDao(): PhoneSavedItemDao
     abstract fun phoneArticleDao(): PhoneArticleDao
+    abstract fun phoneRssSourceDao(): PhoneRssSourceDao
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -49,6 +51,45 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
                 database.execSQL("CREATE INDEX IF NOT EXISTS index_phone_articles_url ON phone_articles(url)")
                 database.execSQL("CREATE INDEX IF NOT EXISTS index_phone_articles_favoriteSaved_favoriteSortOrder ON phone_articles(favoriteSaved, favoriteSortOrder)")
                 database.execSQL("CREATE INDEX IF NOT EXISTS index_phone_articles_watchLaterSaved_watchLaterSortOrder ON phone_articles(watchLaterSaved, watchLaterSortOrder)")
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE phone_articles ADD COLUMN independentSaved INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE phone_articles ADD COLUMN independentChangedAt INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE phone_articles ADD COLUMN independentSortOrder INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE phone_articles ADD COLUMN rssSourceUrl TEXT")
+                database.execSQL("ALTER TABLE phone_articles ADD COLUMN rssSourceTitle TEXT")
+                database.execSQL(
+                    """
+                    UPDATE phone_articles
+                    SET independentSaved = 1,
+                        independentChangedAt = updatedAt,
+                        independentSortOrder = updatedAt
+                    WHERE deleted = 0 AND favoriteSaved = 0 AND watchLaterSaved = 0
+                    """.trimIndent()
+                )
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_phone_articles_independentSaved_independentSortOrder ON phone_articles(independentSaved, independentSortOrder)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_phone_articles_rssSourceUrl_updatedAt ON phone_articles(rssSourceUrl, updatedAt)")
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS phone_rss_sources (
+                        url TEXT NOT NULL PRIMARY KEY,
+                        sourceDeviceId TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        siteUrl TEXT,
+                        imageUrl TEXT,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        sortOrder INTEGER NOT NULL,
+                        deleted INTEGER NOT NULL,
+                        deletedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_phone_rss_sources_deleted_sortOrder ON phone_rss_sources(deleted, sortOrder)")
             }
         }
     }

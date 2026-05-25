@@ -17,7 +17,10 @@ class PhoneCompanionContainer(context: Context) {
             appContext,
             PhoneCompanionDatabase::class.java,
             "watchrss-phone.db"
-        ).addMigrations(PhoneCompanionDatabase.MIGRATION_1_2)
+        ).addMigrations(
+            PhoneCompanionDatabase.MIGRATION_1_2,
+            PhoneCompanionDatabase.MIGRATION_2_3
+        )
             .build()
     }
 
@@ -33,6 +36,7 @@ class PhoneCompanionContainer(context: Context) {
         PhoneCompanionRepository(
             savedItemDao = database.phoneSavedItemDao(),
             articleDao = database.phoneArticleDao(),
+            rssSourceDao = database.phoneRssSourceDao(),
             deviceId = deviceIdentity.deviceId,
             webArticleImporter = webArticleImporter::importUrl
         )

@@ -7,6 +7,7 @@ import com.lightningstudio.watchrss.phone.connection.guided.PhoneGuidedSessionMa
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
 import com.lightningstudio.watchrss.phone.data.importer.AndroidWebArticleImporter
 import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
+import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 
 class PhoneCompanionContainer(context: Context) {
@@ -26,6 +27,10 @@ class PhoneCompanionContainer(context: Context) {
 
     private val deviceIdentity: PhoneDeviceIdentity by lazy {
         PhoneDeviceIdentity(appContext)
+    }
+
+    val bluetoothDebugLog: BluetoothDebugLog by lazy {
+        BluetoothDebugLog(appContext)
     }
 
     private val webArticleImporter: AndroidWebArticleImporter by lazy {
@@ -53,7 +58,8 @@ class PhoneCompanionContainer(context: Context) {
         PhoneBluetoothSyncManager(
             context = appContext,
             repository = repository,
-            deviceId = deviceIdentity.deviceId
+            deviceId = deviceIdentity.deviceId,
+            debugLog = bluetoothDebugLog
         )
     }
 }

@@ -7,13 +7,15 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.ui.MainScreen
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModel
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModelFactory
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels {
@@ -33,10 +35,33 @@ class MainActivity : ComponentActivity() {
             pendingBluetoothAction = null
         }
 
+    private val exportBluetoothLogLauncher =
+        registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+            if (uri == null) {
+                viewModel.showMessage("已取消导出蓝牙日志")
+                return@registerForActivityResult
+            }
+            lifecycleScope.launch {
+                runCatching {
+                    (application as PhoneCompanionApplication)
+                        .container
+                        .bluetoothDebugLog
+                        .exportTo(contentResolver, uri)
+                }.onSuccess { bytes ->
+                    viewModel.showMessage("蓝牙日志已导出：$bytes 字节")
+                }.onFailure { throwable ->
+                    Log.e(TAG, "Failed to export bluetooth log", throwable)
+                    viewModel.showError("蓝牙日志导出失败：${throwable.message ?: "未知错误"}")
+                }
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val container = (application as PhoneCompanionApplication).container
 
         Log.i(TAG, "=== WatchRSS Phone App Started ===")
+        container.bluetoothDebugLog.append("MainActivity started")
         Log.i(TAG, "Package: $packageName")
         runCatching { packageManager.getPackageInfo(packageName, 0) }
             .onSuccess { packageInfo ->
@@ -57,6 +82,7 @@ class MainActivity : ComponentActivity() {
                     onImportArticle = viewModel::importIndependentArticle,
                     onAddRssSource = viewModel::addRssSource,
                     onSyncLibrary = { ensureBluetoothPermissions(viewModel::syncLibraryByBluetooth) },
+                    onExportBluetoothLog = ::exportBluetoothLog,
                     onOpenArticle = { article ->
                         startActivity(ArticleReaderActivity.createIntent(this, article.articleId))
                     },
@@ -90,6 +116,11 @@ class MainActivity : ComponentActivity() {
         }
         pendingBluetoothAction = action
         bluetoothPermissionsLauncher.launch(missing.toTypedArray())
+    }
+
+    private fun exportBluetoothLog() {
+        val fileName = "watchrss-phone-bluetooth-${System.currentTimeMillis()}.txt"
+        exportBluetoothLogLauncher.launch(fileName)
     }
 
     private fun handleInboundIntent(intent: Intent?) {

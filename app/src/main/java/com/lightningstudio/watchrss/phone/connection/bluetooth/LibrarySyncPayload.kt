@@ -19,10 +19,26 @@ data class LibrarySyncStats(
     val sourcesMerged: Int = 0
 )
 
+data class ArticleSyncManifestEntry(
+    val articleId: String,
+    val contentHash: String,
+    val updatedAt: Long,
+    val independentChangedAt: Long,
+    val favoriteChangedAt: Long,
+    val watchLaterChangedAt: Long,
+    val deletedAt: Long
+)
+
 object LibrarySyncPayload {
-    const val PROTOCOL_VERSION = 3
+    const val PROTOCOL_VERSION = 4
 
     fun buildRequest(
+        deviceId: String,
+        articles: List<PhoneArticleEntity>,
+        rssSources: List<PhoneRssSourceEntity> = emptyList()
+    ): JSONObject = buildManifestRequest(deviceId, articles, rssSources)
+
+    fun buildManifestRequest(
         deviceId: String,
         articles: List<PhoneArticleEntity>,
         rssSources: List<PhoneRssSourceEntity> = emptyList()
@@ -30,10 +46,43 @@ object LibrarySyncPayload {
         return JSONObject().apply {
             put("version", PROTOCOL_VERSION)
             put("action", BluetoothSyncProtocol.ACTION_SYNC_LIBRARY)
+            put("phase", PHASE_MANIFEST)
+            put("deviceId", deviceId)
+            put("sentAt", System.currentTimeMillis())
+            put("articleManifest", articles.toManifestJsonArray())
+            put("rssSources", rssSources.toSourceJsonArray())
+        }
+    }
+
+    fun buildManifestResponse(
+        deviceId: String,
+        articles: List<PhoneArticleEntity>,
+        rssSources: List<PhoneRssSourceEntity> = emptyList(),
+        stats: JSONObject? = null
+    ): JSONObject {
+        return JSONObject().apply {
+            put("success", true)
+            put("version", PROTOCOL_VERSION)
+            put("action", BluetoothSyncProtocol.ACTION_SYNC_LIBRARY)
+            put("phase", PHASE_MANIFEST)
+            put("deviceId", deviceId)
+            put("sentAt", System.currentTimeMillis())
+            put("articleManifest", articles.toManifestJsonArray())
+            put("rssSources", rssSources.toSourceJsonArray())
+            if (stats != null) {
+                put("stats", stats)
+            }
+        }
+    }
+
+    fun buildArticlesRequest(deviceId: String, articles: List<PhoneArticleEntity>): JSONObject {
+        return JSONObject().apply {
+            put("version", PROTOCOL_VERSION)
+            put("action", BluetoothSyncProtocol.ACTION_SYNC_LIBRARY)
+            put("phase", PHASE_ARTICLES)
             put("deviceId", deviceId)
             put("sentAt", System.currentTimeMillis())
             put("articles", articles.toJsonArray())
-            put("rssSources", rssSources.toSourceJsonArray())
         }
     }
 
@@ -47,6 +96,7 @@ object LibrarySyncPayload {
             put("success", true)
             put("version", PROTOCOL_VERSION)
             put("action", BluetoothSyncProtocol.ACTION_SYNC_LIBRARY)
+            put("phase", PHASE_COMPLETE)
             put("deviceId", deviceId)
             put("sentAt", System.currentTimeMillis())
             put("articles", articles.toJsonArray())
@@ -54,6 +104,47 @@ object LibrarySyncPayload {
             if (stats != null) {
                 put("stats", stats)
             }
+        }
+    }
+
+    fun parseArticleManifest(payload: JSONObject): List<ArticleSyncManifestEntry> {
+        return parseArticleManifest(payload.optJSONArray("articleManifest") ?: JSONArray())
+    }
+
+    fun parseArticleManifest(array: JSONArray): List<ArticleSyncManifestEntry> {
+        return buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val articleId = item.optString("articleId").trim()
+                if (articleId.isBlank()) continue
+                add(
+                    ArticleSyncManifestEntry(
+                        articleId = articleId,
+                        contentHash = item.optString("contentHash").trim(),
+                        updatedAt = item.optLong("updatedAt"),
+                        independentChangedAt = item.optLong("independentChangedAt"),
+                        favoriteChangedAt = item.optLong("favoriteChangedAt"),
+                        watchLaterChangedAt = item.optLong("watchLaterChangedAt"),
+                        deletedAt = item.optLong("deletedAt")
+                    )
+                )
+            }
+        }
+    }
+
+    fun filterArticlesNeedingSync(
+        localArticles: List<PhoneArticleEntity>,
+        remoteManifest: List<ArticleSyncManifestEntry>
+    ): List<PhoneArticleEntity> {
+        val remoteById = remoteManifest.associateBy { it.articleId }
+        return localArticles.filter { article ->
+            val remote = remoteById[article.articleId] ?: return@filter true
+            article.contentHash != remote.contentHash ||
+                article.updatedAt > remote.updatedAt ||
+                article.independentChangedAt > remote.independentChangedAt ||
+                article.favoriteChangedAt > remote.favoriteChangedAt ||
+                article.watchLaterChangedAt > remote.watchLaterChangedAt ||
+                article.deletedAt > remote.deletedAt
         }
     }
 
@@ -147,11 +238,31 @@ object LibrarySyncPayload {
         }
     }
 
+    private fun List<PhoneArticleEntity>.toManifestJsonArray(): JSONArray {
+        return JSONArray().also { array ->
+            forEach { article ->
+                array.put(article.toManifestJson())
+            }
+        }
+    }
+
     private fun List<PhoneArticleEntity>.toJsonArray(): JSONArray {
         return JSONArray().also { array ->
             forEach { article ->
                 array.put(article.toJson())
             }
+        }
+    }
+
+    private fun PhoneArticleEntity.toManifestJson(): JSONObject {
+        return JSONObject().apply {
+            put("articleId", articleId)
+            put("contentHash", contentHash)
+            put("updatedAt", updatedAt)
+            put("independentChangedAt", independentChangedAt)
+            put("favoriteChangedAt", favoriteChangedAt)
+            put("watchLaterChangedAt", watchLaterChangedAt)
+            put("deletedAt", deletedAt)
         }
     }
 
@@ -226,4 +337,8 @@ object LibrarySyncPayload {
             gzip.readBytes().toString(Charsets.UTF_8)
         }
     }
+
+    private const val PHASE_MANIFEST = "manifest"
+    private const val PHASE_ARTICLES = "articles"
+    private const val PHASE_COMPLETE = "complete"
 }

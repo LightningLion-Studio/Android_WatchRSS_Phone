@@ -50,6 +50,7 @@ fun MainScreen(
     onImportArticle: () -> Unit,
     onAddRssSource: () -> Unit,
     onSyncLibrary: () -> Unit,
+    onExportBluetoothLog: () -> Unit,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
     onToggleFavorite: (PhoneArticleEntity) -> Unit,
     onToggleWatchLater: (PhoneArticleEntity) -> Unit,
@@ -86,6 +87,7 @@ fun MainScreen(
                 onImportArticle = onImportArticle,
                 onAddRssSource = onAddRssSource,
                 onSyncLibrary = onSyncLibrary,
+                onExportBluetoothLog = onExportBluetoothLog,
                 onOpenRssSources = { page = MainPage.RSS_SOURCES },
                 onOpenFavorites = { page = MainPage.FAVORITES },
                 onOpenWatchLater = { page = MainPage.WATCH_LATER },
@@ -158,6 +160,7 @@ private fun HomePage(
     onImportArticle: () -> Unit,
     onAddRssSource: () -> Unit,
     onSyncLibrary: () -> Unit,
+    onExportBluetoothLog: () -> Unit,
     onOpenRssSources: () -> Unit,
     onOpenFavorites: () -> Unit,
     onOpenWatchLater: () -> Unit,
@@ -182,7 +185,8 @@ private fun HomePage(
         onUrlChange = onUrlChange,
         onImportArticle = onImportArticle,
         onAddRssSource = onAddRssSource,
-        onSyncLibrary = onSyncLibrary
+        onSyncLibrary = onSyncLibrary,
+        onExportBluetoothLog = onExportBluetoothLog
     )
 
     LibraryEntryCard(
@@ -242,7 +246,8 @@ private fun ImportAndSyncCard(
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
     onAddRssSource: () -> Unit,
-    onSyncLibrary: () -> Unit
+    onSyncLibrary: () -> Unit,
+    onExportBluetoothLog: () -> Unit
 ) {
     Card {
         Column(
@@ -269,6 +274,13 @@ private fun ImportAndSyncCard(
             }
             Button(onClick = onSyncLibrary, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
                 Text(text = "同步手表")
+            }
+            OutlinedButton(
+                onClick = onExportBluetoothLog,
+                enabled = enabled,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(text = "导出蓝牙日志")
             }
         }
     }

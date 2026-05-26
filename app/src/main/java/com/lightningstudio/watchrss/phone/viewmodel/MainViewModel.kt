@@ -79,6 +79,14 @@ class MainViewModel(
         sessionState.value = sessionState.value.copy(message = null, error = null)
     }
 
+    fun showMessage(message: String) {
+        sessionState.value = sessionState.value.copy(message = message, error = null)
+    }
+
+    fun showError(error: String) {
+        sessionState.value = sessionState.value.copy(error = error)
+    }
+
     fun importIndependentArticle() {
         importWebArticle()
     }

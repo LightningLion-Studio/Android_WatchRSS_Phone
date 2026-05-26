@@ -67,8 +67,12 @@ class DebugBluetoothSyncActivity : ComponentActivity() {
                     }
                 }
                 val request = buildRequest(action, typeName)
+                val container = (application as PhoneCompanionApplication).container
                 val exchange = withContext(Dispatchers.IO) {
-                    PhoneBluetoothSyncClient(applicationContext).exchange(
+                    PhoneBluetoothSyncClient(
+                        context = applicationContext,
+                        debugLog = container.bluetoothDebugLog
+                    ).exchange(
                         request = request,
                         deviceAddress = deviceAddress,
                         deviceNameHint = deviceNameHint

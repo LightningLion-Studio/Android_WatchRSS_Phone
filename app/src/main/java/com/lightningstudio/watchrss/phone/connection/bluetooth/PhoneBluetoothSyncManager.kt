@@ -1,9 +1,12 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import android.content.Context
+import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
+import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
@@ -18,9 +21,10 @@ data class PhoneBluetoothSyncResult(
 class PhoneBluetoothSyncManager(
     context: Context,
     private val repository: PhoneCompanionRepository,
-    private val deviceId: String
+    private val deviceId: String,
+    private val debugLog: BluetoothDebugLog
 ) {
-    private val client = PhoneBluetoothSyncClient(context.applicationContext)
+    private val client = PhoneBluetoothSyncClient(context.applicationContext, debugLog)
 
     suspend fun sendRemoteInput(url: String): PhoneBluetoothSyncResult {
         val exchange = exchange(
@@ -56,36 +60,85 @@ class PhoneBluetoothSyncManager(
     suspend fun syncLibrary(): PhoneBluetoothSyncResult {
         val localArticles = repository.getArticlesForSync()
         val localSources = repository.getRssSourcesForSync()
-        val exchange = exchange(
-            LibrarySyncPayload.buildRequest(
-                deviceId = deviceId,
-                articles = localArticles,
-                rssSources = localSources
+        var sentArticles = emptyList<PhoneArticleEntity>()
+        debugLog.append("syncLibrary start localArticles=${localArticles.size} localSources=${localSources.size}")
+        return runCatching {
+            val exchange = exchangeLibrary(
+                LibrarySyncPayload.buildManifestRequest(
+                    deviceId = deviceId,
+                    articles = localArticles,
+                    rssSources = localSources
+                ),
+                buildArticlesRequest = { manifestResponse ->
+                    requireSuccess(manifestResponse)
+                    val remoteManifest = LibrarySyncPayload.parseArticleManifest(manifestResponse)
+                    sentArticles = LibrarySyncPayload.filterArticlesNeedingSync(localArticles, remoteManifest)
+                    debugLog.append(
+                        "syncLibrary manifest received remoteManifest=${remoteManifest.size} diffArticles=${sentArticles.size}"
+                    )
+                    LibrarySyncPayload.buildArticlesRequest(
+                        deviceId = deviceId,
+                        articles = sentArticles
+                    )
+                }
             )
-        )
-        requireSuccess(exchange.response)
-        val received = LibrarySyncPayload.parseArticles(exchange.response)
-        val receivedSources = LibrarySyncPayload.parseRssSources(exchange.response)
-        val merged = repository.mergeArticlesFromSync(received)
-        val mergedSources = repository.mergeRssSourcesFromSync(receivedSources)
-        return PhoneBluetoothSyncResult(
-            deviceName = exchange.deviceName,
-            libraryStats = LibrarySyncStats(
-                sent = localArticles.size,
-                received = received.size,
-                merged = merged,
-                sourcesSent = localSources.size,
-                sourcesReceived = receivedSources.size,
-                sourcesMerged = mergedSources
+            requireSuccess(exchange.response)
+            val received = LibrarySyncPayload.parseArticles(exchange.response)
+            val receivedSources = LibrarySyncPayload.parseRssSources(exchange.manifestResponse)
+            val merged = repository.mergeArticlesFromSync(received)
+            val mergedSources = repository.mergeRssSourcesFromSync(receivedSources)
+            debugLog.append(
+                "syncLibrary complete device=${exchange.deviceName} sent=${sentArticles.size} received=${received.size} merged=$merged sourcesSent=${localSources.size} sourcesReceived=${receivedSources.size} sourcesMerged=$mergedSources"
             )
-        )
+            PhoneBluetoothSyncResult(
+                deviceName = exchange.deviceName,
+                libraryStats = LibrarySyncStats(
+                    sent = sentArticles.size,
+                    received = received.size,
+                    merged = merged,
+                    sourcesSent = localSources.size,
+                    sourcesReceived = receivedSources.size,
+                    sourcesMerged = mergedSources
+                )
+            )
+        }.onFailure { throwable ->
+            debugLog.append("syncLibrary failed: ${throwable.message}", throwable)
+        }.getOrThrow()
     }
 
-    private suspend fun exchange(request: JSONObject): BluetoothSyncExchange {
-        return withTimeout(CONNECT_TIMEOUT_MS) {
-            withContext(Dispatchers.IO) {
-                client.exchange(request)
+    private suspend fun exchange(
+        request: JSONObject,
+        timeoutMs: Long = QUICK_EXCHANGE_TIMEOUT_MS
+    ): BluetoothSyncExchange {
+        return try {
+            withTimeout(timeoutMs) {
+                withContext(Dispatchers.IO) {
+                    client.exchange(request)
+                }
             }
+        } catch (exception: TimeoutCancellationException) {
+            throw IllegalStateException(
+                "蓝牙同步超时，请确认手表端应用已打开并保持亮屏后重试",
+                exception
+            )
+        }
+    }
+
+    private suspend fun exchangeLibrary(
+        request: JSONObject,
+        buildArticlesRequest: (JSONObject) -> JSONObject
+    ): BluetoothLibrarySyncExchange {
+        return try {
+            withTimeout(LIBRARY_SYNC_TIMEOUT_MS) {
+                withContext(Dispatchers.IO) {
+                    client.exchangeLibrary(request, buildArticlesRequest)
+                }
+            }
+        } catch (exception: TimeoutCancellationException) {
+            throw IllegalStateException(
+                "蓝牙同步超时，请确认手表端应用已打开并保持亮屏后重试",
+                exception
+            )
         }
     }
 
@@ -96,6 +149,7 @@ class PhoneBluetoothSyncManager(
     }
 
     companion object {
-        private const val CONNECT_TIMEOUT_MS = 30_000L
+        private const val QUICK_EXCHANGE_TIMEOUT_MS = 30_000L
+        private const val LIBRARY_SYNC_TIMEOUT_MS = 120_000L
     }
 }

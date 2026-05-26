@@ -154,7 +154,7 @@ class PhoneCompanionRepository(
         }
 
     suspend fun getArticlesForSync(): List<PhoneArticleEntity> = withContext(Dispatchers.IO) {
-        articleDao.getAllForSync()
+        articleDao.getAllForSync().filter { it.shouldSyncThroughLibrary() }
     }
 
     suspend fun getRssSourcesForSync(): List<PhoneRssSourceEntity> = withContext(Dispatchers.IO) {
@@ -388,6 +388,16 @@ class PhoneCompanionRepository(
             return copy(deleted = false)
         }
         return copy(deleted = true, deletedAt = timestamp)
+    }
+
+    private fun PhoneArticleEntity.shouldSyncThroughLibrary(): Boolean {
+        return independentSaved ||
+            favoriteSaved ||
+            watchLaterSaved ||
+            deleted ||
+            independentChangedAt > 0L ||
+            favoriteChangedAt > 0L ||
+            watchLaterChangedAt > 0L
     }
 
     private fun PhoneRssSourceEntity.isNewerThan(other: PhoneRssSourceEntity): Boolean {

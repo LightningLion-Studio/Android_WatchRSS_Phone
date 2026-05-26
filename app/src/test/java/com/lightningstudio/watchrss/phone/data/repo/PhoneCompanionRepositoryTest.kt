@@ -163,6 +163,84 @@ class PhoneCompanionRepositoryTest {
         assertEquals(false, article.independentSaved)
     }
 
+    @Test
+    fun getArticlesForSync_excludesPlainRssSourceArticles() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        articleDao.items = listOf(
+            article(
+                id = "plain-rss",
+                rssSourceUrl = "https://example.com/feed.xml"
+            ),
+            article(
+                id = "saved-rss",
+                rssSourceUrl = "https://example.com/feed.xml",
+                favoriteSaved = true,
+                favoriteChangedAt = 10L
+            ),
+            article(
+                id = "removed-save-state",
+                rssSourceUrl = "https://example.com/feed.xml",
+                favoriteChangedAt = 20L
+            ),
+            article(
+                id = "independent",
+                independentSaved = true,
+                independentChangedAt = 30L
+            )
+        )
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        val ids = repository.getArticlesForSync().map { it.articleId }.toSet()
+
+        assertEquals(setOf("saved-rss", "removed-save-state", "independent"), ids)
+    }
+
+    private fun article(
+        id: String,
+        rssSourceUrl: String? = null,
+        independentSaved: Boolean = false,
+        independentChangedAt: Long = 0L,
+        favoriteSaved: Boolean = false,
+        favoriteChangedAt: Long = 0L,
+        watchLaterSaved: Boolean = false,
+        watchLaterChangedAt: Long = 0L,
+        deleted: Boolean = false,
+        deletedAt: Long = 0L
+    ): PhoneArticleEntity {
+        return PhoneArticleEntity(
+            articleId = id,
+            sourceDeviceId = "test-phone",
+            url = "https://example.com/$id",
+            title = id,
+            siteName = "example.com",
+            excerpt = "",
+            contentHtml = null,
+            contentText = "正文",
+            imageUrl = null,
+            contentHash = "hash-$id",
+            importedAt = 1L,
+            updatedAt = maxOf(independentChangedAt, favoriteChangedAt, watchLaterChangedAt, 1L),
+            independentSaved = independentSaved,
+            independentChangedAt = independentChangedAt,
+            independentSortOrder = independentChangedAt,
+            rssSourceUrl = rssSourceUrl,
+            rssSourceTitle = rssSourceUrl?.let { "示例源" },
+            favoriteSaved = favoriteSaved,
+            favoriteChangedAt = favoriteChangedAt,
+            favoriteSortOrder = favoriteChangedAt,
+            watchLaterSaved = watchLaterSaved,
+            watchLaterChangedAt = watchLaterChangedAt,
+            watchLaterSortOrder = watchLaterChangedAt,
+            deleted = deleted,
+            deletedAt = deletedAt
+        )
+    }
+
     private class FakePhoneSavedItemDao : PhoneSavedItemDao {
         var items: List<PhoneSavedItemEntity> = emptyList()
 

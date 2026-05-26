@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GRADLEW="${ROOT_DIR}/gradlew"
+VERSION_FILE="${ROOT_DIR}/app/build.gradle.kts"
+APK_DIR="${ROOT_DIR}/app/build/outputs/apk/release"
+OUTPUT_DIR="${ROOT_DIR}"
+
+version_name=""
+clean_first=false
+
+usage() {
+    cat <<'EOF'
+Usage:
+  ./releasemake --version-name <version> [--clean] [--output-dir <path>]
+
+Options:
+  -v, --version-name <version>  Set release versionName. Required.
+      --clean                   Run `./gradlew clean` before assembling.
+  -o, --output-dir <path>       Copy the release APK to this directory. Defaults to repo root.
+  -h, --help                    Show this help message.
+
+Example:
+  ./releasemake --version-name 1.2.0
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -v|--version-name)
+            if [[ $# -lt 2 ]]; then
+                echo "$1 requires a value" >&2
+                exit 1
+            fi
+            version_name="$2"
+            shift 2
+            ;;
+        --version-name=*)
+            version_name="${1#*=}"
+            shift
+            ;;
+        --clean)
+            clean_first=true
+            shift
+            ;;
+        -o|--output-dir)
+            if [[ $# -lt 2 ]]; then
+                echo "$1 requires a path" >&2
+                exit 1
+            fi
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --output-dir=*)
+            OUTPUT_DIR="${1#*=}"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [[ -z "${version_name}" ]]; then
+    echo "--version-name is required" >&2
+    usage >&2
+    exit 1
+fi
+
+if [[ ! "${version_name}" =~ ^[0-9A-Za-z._+-]+$ ]]; then
+    echo "versionName may only contain letters, numbers, dot, underscore, plus, and hyphen" >&2
+    exit 1
+fi
+
+if [[ ! -x "${GRADLEW}" ]]; then
+    echo "gradlew not found or not executable: ${GRADLEW}" >&2
+    exit 1
+fi
+
+if [[ ! -f "${VERSION_FILE}" ]]; then
+    echo "Version file not found: ${VERSION_FILE}" >&2
+    exit 1
+fi
+
+version_code_count="$(grep -Ec '^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*[0-9]+[[:space:]]*$' "${VERSION_FILE}")"
+version_name_count="$(grep -Ec '^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"[^"]*"[[:space:]]*$' "${VERSION_FILE}")"
+
+if [[ "${version_code_count}" != "1" || "${version_name_count}" != "1" ]]; then
+    echo "Expected exactly one versionCode and one versionName assignment in ${VERSION_FILE}" >&2
+    exit 1
+fi
+
+current_version_code="$(sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$/\1/p' "${VERSION_FILE}")"
+current_version_name="$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]*)"[[:space:]]*$/\1/p' "${VERSION_FILE}")"
+new_version_code="$((current_version_code + 1))"
+
+backup_file="$(mktemp)"
+cp "${VERSION_FILE}" "${backup_file}"
+restore_on_failure=true
+
+cleanup() {
+    local status=$?
+    if [[ "${status}" -ne 0 && "${restore_on_failure}" == "true" ]]; then
+        cp "${backup_file}" "${VERSION_FILE}"
+        echo "Build failed; restored ${VERSION_FILE}" >&2
+    fi
+    rm -f "${backup_file}"
+}
+trap cleanup EXIT
+
+NEW_VERSION_CODE="${new_version_code}" NEW_VERSION_NAME="${version_name}" perl -0pi -e '
+    s/^([ \t]*versionCode[ \t]*=[ \t]*)\d+[ \t]*$/$1$ENV{NEW_VERSION_CODE}/m;
+    s/^([ \t]*versionName[ \t]*=[ \t]*)"[^"]*"[ \t]*$/$1"$ENV{NEW_VERSION_NAME}"/m;
+' "${VERSION_FILE}"
+
+echo "Bumped versionCode: ${current_version_code} -> ${new_version_code}"
+echo "Set versionName: ${current_version_name} -> ${version_name}"
+
+if [[ "${clean_first}" == "true" ]]; then
+    "${GRADLEW}" clean
+fi
+
+"${GRADLEW}" :app:assembleRelease
+
+apk_path="${APK_DIR}/app-release.apk"
+if [[ ! -f "${apk_path}" ]]; then
+    apk_path="${APK_DIR}/app-release-unsigned.apk"
+fi
+
+if [[ ! -f "${apk_path}" ]]; then
+    echo "Release APK not found under ${APK_DIR}" >&2
+    exit 1
+fi
+
+mkdir -p "${OUTPUT_DIR}"
+release_date="$(date +%Y%m%d)"
+output_apk="${OUTPUT_DIR}/phone-release-${release_date}-${version_name}.apk"
+cp "${apk_path}" "${output_apk}"
+
+restore_on_failure=false
+
+cat <<EOF
+Release APK is ready.
+Version code: ${new_version_code}
+Version name: ${version_name}
+APK: ${output_apk}
+EOF

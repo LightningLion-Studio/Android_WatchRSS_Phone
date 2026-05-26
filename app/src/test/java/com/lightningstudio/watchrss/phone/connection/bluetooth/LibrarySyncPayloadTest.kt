@@ -105,6 +105,34 @@ class LibrarySyncPayloadTest {
     }
 
     @Test
+    fun buildArticleRequestFrames_splitsLargeArticleSetAndCombinesFrames() {
+        val articles = (1..4).map { index ->
+            testArticle(
+                articleId = "article-$index",
+                contentText = pseudoRandomText(seed = index, length = 700_000)
+            )
+        }
+
+        val frames = LibrarySyncPayload.buildArticleRequestFrames(
+            deviceId = "phone",
+            articles = articles,
+            useBatches = true
+        )
+
+        assertTrue(frames.size > 1)
+        frames.forEachIndexed { index, frame ->
+            assertTrue(BluetoothSyncProtocol.encodedSize(frame) <= BluetoothSyncProtocol.MAX_FRAME_BYTES)
+            assertEquals(index, frame.getInt("batchIndex"))
+            assertEquals(frames.size, frame.getInt("batchCount"))
+            assertEquals(articles.size, frame.getInt("totalArticles"))
+        }
+
+        val combined = LibrarySyncPayload.combineArticlePayloads(frames)
+        val parsed = LibrarySyncPayload.parseArticles(combined)
+        assertEquals(articles.map { it.articleId }, parsed.map { it.articleId })
+    }
+
+    @Test
     fun filterArticlesNeedingSync_usesManifestTimestampsAndHash() {
         val article = PhoneArticleEntity(
             articleId = "article-1",
@@ -152,5 +180,48 @@ class LibrarySyncPayloadTest {
             listOf(article),
             LibrarySyncPayload.filterArticlesNeedingSync(listOf(article), listOf(staleRemote))
         )
+    }
+
+    private fun testArticle(
+        articleId: String,
+        contentText: String
+    ): PhoneArticleEntity {
+        return PhoneArticleEntity(
+            articleId = articleId,
+            sourceDeviceId = "phone",
+            url = "https://example.com/$articleId",
+            title = articleId,
+            siteName = "example.com",
+            excerpt = "摘要",
+            contentHtml = null,
+            contentText = contentText,
+            imageUrl = null,
+            contentHash = "hash-$articleId",
+            importedAt = 10L,
+            updatedAt = 20L,
+            independentSaved = true,
+            independentChangedAt = 20L,
+            independentSortOrder = 20L,
+            rssSourceUrl = null,
+            rssSourceTitle = null,
+            favoriteSaved = false,
+            favoriteChangedAt = 0L,
+            favoriteSortOrder = 0L,
+            watchLaterSaved = false,
+            watchLaterChangedAt = 0L,
+            watchLaterSortOrder = 0L,
+            deleted = false,
+            deletedAt = 0L
+        )
+    }
+
+    private fun pseudoRandomText(seed: Int, length: Int): String {
+        var value = seed
+        return buildString(length) {
+            repeat(length) {
+                value = value * 1103515245 + 12345
+                append((33 + ((value ushr 16) % 90)).toChar())
+            }
+        }
     }
 }

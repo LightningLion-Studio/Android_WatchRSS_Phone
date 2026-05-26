@@ -155,8 +155,8 @@ object LibrarySyncPayload {
         useBatches: Boolean
     ): List<JSONObject> {
         val requestById = articleRequests.associateBy { it.articleId }
-        val articleItems = articles.map { article ->
-            article.toChunkedJson(requestById[article.articleId])
+        val articleItems = articles.flatMap { article ->
+            article.toChunkedJsonItems(requestById[article.articleId])
         }
         if (!useBatches) {
             return listOf(buildChunkedArticlesRequest(deviceId, articleItems, bodyRequests))
@@ -188,8 +188,8 @@ object LibrarySyncPayload {
         useBatches: Boolean
     ): List<JSONObject> {
         val requestById = articleRequests.associateBy { it.articleId }
-        val articleItems = articles.map { article ->
-            article.toChunkedJson(requestById[article.articleId])
+        val articleItems = articles.flatMap { article ->
+            article.toChunkedJsonItems(requestById[article.articleId])
         }
         if (!useBatches) {
             return listOf(buildChunkedResponse(deviceId, articleItems, stats))
@@ -421,36 +421,52 @@ object LibrarySyncPayload {
     }
 
     fun parseChunkedArticles(array: JSONArray): List<ChunkedArticlePayload> {
-        return buildList {
-            for (index in 0 until array.length()) {
-                val item = array.optJSONObject(index) ?: continue
-                val article = parseArticles(JSONArray().put(item)).firstOrNull() ?: continue
-                val body = item.optJSONObject("body") ?: JSONObject()
-                val chunks = body.optJSONArray("chunks") ?: JSONArray()
-                add(
-                    ChunkedArticlePayload(
-                        article = article,
-                        bodyHash = body.optString("bodyHash").trim().ifBlank { article.contentHash },
-                        bodyByteCount = body.optLong("bodyByteCount"),
-                        chunkSize = body.optInt("chunkSize"),
-                        chunkHashes = body.optStringArray("chunkHashes"),
-                        chunks = buildList {
-                            for (chunkIndex in 0 until chunks.length()) {
-                                val chunk = chunks.optJSONObject(chunkIndex) ?: continue
-                                val encoded = chunk.optString("data").takeIf { it.isNotBlank() } ?: continue
-                                add(
-                                    ArticleBodyChunk(
-                                        index = chunk.optInt("index"),
-                                        hash = chunk.optString("hash").trim(),
-                                        bytes = ArticleSyncBody.decodeChunkData(encoded)
-                                    )
-                                )
-                            }
-                        }
-                    )
+        val byArticleId = linkedMapOf<String, ChunkedArticlePayload>()
+        for (index in 0 until array.length()) {
+            val item = array.optJSONObject(index) ?: continue
+            val article = parseArticles(JSONArray().put(item)).firstOrNull() ?: continue
+            val body = item.optJSONObject("body") ?: JSONObject()
+            val chunks = body.optJSONArray("chunks") ?: JSONArray()
+            val payload = ChunkedArticlePayload(
+                article = article,
+                bodyHash = body.optString("bodyHash").trim().ifBlank { article.contentHash },
+                bodyByteCount = body.optLong("bodyByteCount"),
+                chunkSize = body.optInt("chunkSize"),
+                chunkHashes = body.optStringArray("chunkHashes"),
+                chunks = buildList {
+                    for (chunkIndex in 0 until chunks.length()) {
+                        val chunk = chunks.optJSONObject(chunkIndex) ?: continue
+                        val encoded = chunk.optString("data").takeIf { it.isNotBlank() } ?: continue
+                        add(
+                            ArticleBodyChunk(
+                                index = chunk.optInt("index"),
+                                hash = chunk.optString("hash").trim(),
+                                bytes = ArticleSyncBody.decodeChunkData(encoded)
+                            )
+                        )
+                    }
+                }
+            )
+            val existing = byArticleId[article.articleId]
+            byArticleId[article.articleId] = if (existing == null) {
+                payload
+            } else {
+                require(
+                    existing.bodyHash == payload.bodyHash &&
+                        existing.chunkSize == payload.chunkSize &&
+                        existing.chunkHashes == payload.chunkHashes
+                ) {
+                    "同步正文分块元数据冲突：${article.articleId}"
+                }
+                existing.copy(
+                    article = payload.article,
+                    chunks = (existing.chunks + payload.chunks)
+                        .distinctBy { it.index }
+                        .sortedBy { it.index }
                 )
             }
         }
+        return byArticleId.values.toList()
     }
 
     fun parseArticles(array: JSONArray): List<PhoneArticleEntity> {
@@ -657,8 +673,44 @@ object LibrarySyncPayload {
         }
     }
 
-    private fun PhoneArticleEntity.toChunkedJson(request: ArticleBodyRequest?): JSONObject {
+    private fun PhoneArticleEntity.toChunkedJsonItems(request: ArticleBodyRequest?): List<JSONObject> {
         val metadata = ArticleSyncBody.metadataFor(this)
+        val bodyRequest = request ?: ArticleBodyRequest(
+            articleId = articleId,
+            bodyHash = metadata.bodyHash,
+            chunkIndexes = metadata.chunkHashes.indices.toList()
+        )
+        val chunks = ArticleSyncBody.chunksForRequest(this, bodyRequest)
+        if (chunks.isEmpty()) {
+            return listOf(toChunkedJson(metadata, emptyList()))
+        }
+        val items = mutableListOf<JSONObject>()
+        var current = mutableListOf<ArticleBodyChunk>()
+        chunks.forEach { chunk ->
+            val candidate = current + chunk
+            val candidateJson = toChunkedJson(metadata, candidate)
+            val candidateSize = BluetoothSyncProtocol.encodedSize(candidateJson)
+            if (candidateSize > ARTICLE_BATCH_TARGET_BYTES && current.isNotEmpty()) {
+                items += toChunkedJson(metadata, current)
+                current = mutableListOf(chunk)
+            } else {
+                current = candidate.toMutableList()
+            }
+            val singleSize = BluetoothSyncProtocol.encodedSize(toChunkedJson(metadata, listOf(chunk)))
+            require(singleSize <= ARTICLE_BATCH_TARGET_BYTES) {
+                "单个正文分块蓝牙消息过大：${title.ifBlank { url }.take(40)}（$singleSize 字节）"
+            }
+        }
+        if (current.isNotEmpty()) {
+            items += toChunkedJson(metadata, current)
+        }
+        return items
+    }
+
+    private fun PhoneArticleEntity.toChunkedJson(
+        metadata: ArticleBodyMetadata,
+        chunks: List<ArticleBodyChunk>
+    ): JSONObject {
         return toJson().apply {
             remove("contentHtmlGzip")
             remove("contentTextGzip")
@@ -672,14 +724,7 @@ object LibrarySyncPayload {
                     put(
                         "chunks",
                         JSONArray().also { array ->
-                            ArticleSyncBody.chunksForRequest(
-                                article = this@toChunkedJson,
-                                request = request ?: ArticleBodyRequest(
-                                    articleId = articleId,
-                                    bodyHash = metadata.bodyHash,
-                                    chunkIndexes = metadata.chunkHashes.indices.toList()
-                                )
-                            ).forEach { chunk ->
+                            chunks.forEach { chunk ->
                                 array.put(
                                     JSONObject().apply {
                                         put("index", chunk.index)

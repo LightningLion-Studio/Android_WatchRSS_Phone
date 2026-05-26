@@ -248,6 +248,39 @@ class LibrarySyncPayloadTest {
         assertEquals(emptyList<Int>(), parsed.chunks.map { it.index })
     }
 
+    @Test
+    fun chunkedBodyRequest_splitsHugeArticleAcrossFramesAndRebuildsBody() {
+        val article = testArticle(
+            articleId = "article-huge",
+            contentText = pseudoRandomText(
+                seed = 42,
+                length = BluetoothSyncProtocol.MAX_FRAME_BYTES + ArticleSyncBody.CHUNK_SIZE_BYTES
+            )
+        )
+        val metadata = ArticleSyncBody.metadataFor(article)
+
+        val frames = LibrarySyncPayload.buildChunkedArticleRequestFrames(
+            deviceId = "phone",
+            articles = listOf(article),
+            articleRequests = listOf(
+                ArticleBodyRequest(
+                    articleId = article.articleId,
+                    bodyHash = metadata.bodyHash,
+                    chunkIndexes = metadata.chunkHashes.indices.toList()
+                )
+            ),
+            bodyRequests = emptyList(),
+            useBatches = true
+        )
+        val combined = LibrarySyncPayload.combineArticlePayloads(frames)
+        val parsed = LibrarySyncPayload.parseChunkedArticles(combined).single()
+        val rebuilt = ArticleSyncBody.rebuildBody(null, parsed)
+
+        assertTrue(frames.size > 1)
+        assertTrue(frames.all { BluetoothSyncProtocol.encodedSize(it) <= BluetoothSyncProtocol.MAX_FRAME_BYTES })
+        assertEquals(article.contentText, rebuilt.second)
+    }
+
     private fun testArticle(
         articleId: String,
         contentText: String

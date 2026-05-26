@@ -59,7 +59,7 @@ class LocalContentImporterTest {
 
         assertEquals(LocalContentImportKind.EPUB, result.kind)
         assertEquals("示例书名", result.source.title)
-        assertTrue(result.source.url.startsWith("${ImportedContentIds.ROOT_SOURCE_URL}/epub/"))
+        assertTrue(result.source.url.startsWith("${ImportedContentIds.EPUB_SOURCE_ROOT_URL}/"))
         assertEquals(listOf("第一章", "第二章"), result.source.items.map { it.title })
         assertTrue(result.source.items[0].contentText.contains("第一章正文"))
         assertTrue(result.source.items[1].contentText.contains("第二章正文"))

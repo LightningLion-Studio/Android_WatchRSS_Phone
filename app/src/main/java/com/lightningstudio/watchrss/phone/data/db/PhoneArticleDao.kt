@@ -16,7 +16,8 @@ interface PhoneArticleDao {
                independentSortOrder, rssSourceUrl, rssSourceTitle,
                favoriteSaved, favoriteChangedAt, favoriteSortOrder,
                watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
-               deleted, deletedAt
+               deleted, deletedAt, syncBodyHash, syncBodyByteCount,
+               syncChunkSize, syncChunkHashesJson, syncMetadataHash
         FROM phone_articles
         WHERE deleted = 0
         ORDER BY updatedAt DESC, importedAt DESC
@@ -33,7 +34,8 @@ interface PhoneArticleDao {
                independentSortOrder, rssSourceUrl, rssSourceTitle,
                favoriteSaved, favoriteChangedAt, favoriteSortOrder,
                watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
-               deleted, deletedAt
+               deleted, deletedAt, syncBodyHash, syncBodyByteCount,
+               syncChunkSize, syncChunkHashesJson, syncMetadataHash
         FROM phone_articles
         WHERE deleted = 0 AND independentSaved = 1
         ORDER BY independentSortOrder DESC, independentChangedAt DESC, title ASC
@@ -67,18 +69,23 @@ interface PhoneArticleDao {
                phone_articles.watchLaterChangedAt AS watchLaterChangedAt,
                phone_articles.watchLaterSortOrder AS watchLaterSortOrder,
                phone_articles.deleted AS deleted,
-               phone_articles.deletedAt AS deletedAt
+               phone_articles.deletedAt AS deletedAt,
+               phone_articles.syncBodyHash AS syncBodyHash,
+               phone_articles.syncBodyByteCount AS syncBodyByteCount,
+               phone_articles.syncChunkSize AS syncChunkSize,
+               phone_articles.syncChunkHashesJson AS syncChunkHashesJson,
+               phone_articles.syncMetadataHash AS syncMetadataHash
         FROM phone_articles
         LEFT JOIN phone_rss_sources ON phone_rss_sources.url = phone_articles.rssSourceUrl
         WHERE phone_articles.deleted = 0
           AND phone_articles.rssSourceUrl IS NOT NULL
           AND phone_articles.rssSourceUrl != ''
-          AND phone_articles.rssSourceUrl NOT LIKE :importedContentPrefix
+          AND phone_articles.rssSourceUrl != :importedContentSourceUrl
           AND COALESCE(phone_rss_sources.deleted, 0) = 0
         ORDER BY phone_articles.updatedAt DESC, phone_articles.importedAt DESC, phone_articles.title ASC
         """
     )
-    fun observeRssArticles(importedContentPrefix: String): Flow<List<PhoneArticleEntity>>
+    fun observeRssArticles(importedContentSourceUrl: String): Flow<List<PhoneArticleEntity>>
 
     @Query(
         """
@@ -106,13 +113,18 @@ interface PhoneArticleDao {
                phone_articles.watchLaterChangedAt AS watchLaterChangedAt,
                phone_articles.watchLaterSortOrder AS watchLaterSortOrder,
                phone_articles.deleted AS deleted,
-               phone_articles.deletedAt AS deletedAt
+               phone_articles.deletedAt AS deletedAt,
+               phone_articles.syncBodyHash AS syncBodyHash,
+               phone_articles.syncBodyByteCount AS syncBodyByteCount,
+               phone_articles.syncChunkSize AS syncChunkSize,
+               phone_articles.syncChunkHashesJson AS syncChunkHashesJson,
+               phone_articles.syncMetadataHash AS syncMetadataHash
         FROM phone_articles
         LEFT JOIN phone_rss_sources ON phone_rss_sources.url = phone_articles.rssSourceUrl
         WHERE phone_articles.deleted = 0
           AND (
-              phone_articles.url LIKE :importedContentPrefix
-              OR phone_articles.rssSourceUrl LIKE :importedContentPrefix
+              phone_articles.rssSourceUrl = :importedContentSourceUrl
+              OR phone_articles.url LIKE :importedTextArticlePrefix
           )
           AND COALESCE(phone_rss_sources.deleted, 0) = 0
         ORDER BY phone_articles.rssSourceTitle ASC,
@@ -121,7 +133,10 @@ interface PhoneArticleDao {
                  phone_articles.title ASC
         """
     )
-    fun observeImportedContentArticles(importedContentPrefix: String): Flow<List<PhoneArticleEntity>>
+    fun observeImportedContentArticles(
+        importedContentSourceUrl: String,
+        importedTextArticlePrefix: String
+    ): Flow<List<PhoneArticleEntity>>
 
     @Query(
         """
@@ -131,7 +146,8 @@ interface PhoneArticleDao {
                independentSortOrder, rssSourceUrl, rssSourceTitle,
                favoriteSaved, favoriteChangedAt, favoriteSortOrder,
                watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
-               deleted, deletedAt
+               deleted, deletedAt, syncBodyHash, syncBodyByteCount,
+               syncChunkSize, syncChunkHashesJson, syncMetadataHash
         FROM phone_articles
         WHERE deleted = 0 AND favoriteSaved = 1
         ORDER BY favoriteSortOrder DESC, favoriteChangedAt DESC, title ASC
@@ -147,7 +163,8 @@ interface PhoneArticleDao {
                independentSortOrder, rssSourceUrl, rssSourceTitle,
                favoriteSaved, favoriteChangedAt, favoriteSortOrder,
                watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
-               deleted, deletedAt
+               deleted, deletedAt, syncBodyHash, syncBodyByteCount,
+               syncChunkSize, syncChunkHashesJson, syncMetadataHash
         FROM phone_articles
         WHERE deleted = 0 AND watchLaterSaved = 1
         ORDER BY watchLaterSortOrder DESC, watchLaterChangedAt DESC, title ASC
@@ -167,7 +184,7 @@ interface PhoneArticleDao {
     @Query("SELECT * FROM phone_articles")
     suspend fun getAllForSync(): List<PhoneArticleEntity>
 
-    @Query("UPDATE phone_articles SET title = :title, updatedAt = :updatedAt WHERE articleId = :articleId")
+    @Query("UPDATE phone_articles SET title = :title, updatedAt = :updatedAt, syncMetadataHash = '' WHERE articleId = :articleId")
     suspend fun updateTitle(articleId: String, title: String, updatedAt: Long)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)

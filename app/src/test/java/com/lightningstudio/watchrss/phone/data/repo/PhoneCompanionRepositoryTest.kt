@@ -1,5 +1,7 @@
 package com.lightningstudio.watchrss.phone.data.repo
 
+import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncManifestEntry
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceDao
@@ -300,6 +302,7 @@ class PhoneCompanionRepositoryTest {
         val result = repository.importLocalContent("book.epub", "application/epub+zip", byteArrayOf(1))
 
         assertEquals(1, result.articleCount)
+        assertTrue(result.source.url.startsWith(ImportedContentIds.EPUB_SOURCE_ROOT_URL))
         val storedArticle = articleDao.items.single()
         assertTrue(contentStore.isMarker(storedArticle.contentHtml.orEmpty()))
         assertEquals("正文", storedArticle.contentText)
@@ -432,6 +435,176 @@ class PhoneCompanionRepositoryTest {
         assertEquals(setOf(imported.articleId), repository.getArticlesForSync().map { it.articleId }.toSet())
     }
 
+    @Test
+    fun prepareDeleteConflictResolutions_keepPhoneSendsFreshLocalVersion() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val local = article(
+            id = "article-1",
+            favoriteSaved = true,
+            favoriteChangedAt = 10L
+        )
+        val remoteDeleted = local.copy(
+            sourceDeviceId = "watch",
+            favoriteSaved = false,
+            favoriteChangedAt = 100L,
+            deleted = true,
+            deletedAt = 100L
+        ).toManifestEntry()
+        articleDao.items = listOf(local)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        val plan = repository.prepareDeleteConflictResolutions(
+            remoteManifest = listOf(remoteDeleted),
+            resolutions = mapOf(local.articleId to PhoneSyncConflictResolution.KEEP_PHONE)
+        )
+
+        val updated = articleDao.items.single()
+        assertEquals(setOf(local.articleId), plan.outgoingArticleIds)
+        assertEquals(false, updated.deleted)
+        assertTrue(updated.updatedAt > remoteDeleted.deletedAt)
+        assertEquals("test-phone", updated.sourceDeviceId)
+    }
+
+    @Test
+    fun prepareDeleteConflictResolutions_deleteContentMarksLocalTombstoneForSync() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val local = article(id = "article-1", favoriteSaved = true, favoriteChangedAt = 10L)
+        val remoteDeleted = local.copy(
+            sourceDeviceId = "watch",
+            favoriteSaved = false,
+            favoriteChangedAt = 100L,
+            deleted = true,
+            deletedAt = 100L
+        ).toManifestEntry()
+        articleDao.items = listOf(local)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        val plan = repository.prepareDeleteConflictResolutions(
+            remoteManifest = listOf(remoteDeleted),
+            resolutions = mapOf(local.articleId to PhoneSyncConflictResolution.DELETE_CONTENT)
+        )
+
+        val updated = articleDao.items.single()
+        assertEquals(setOf(local.articleId), plan.outgoingArticleIds)
+        assertTrue(updated.deleted)
+        assertEquals(false, updated.favoriteSaved)
+        assertTrue(updated.deletedAt > remoteDeleted.deletedAt)
+    }
+
+    @Test
+    fun prepareDeleteConflictResolutions_mergeContentRequestsWatchWhenPhoneDeleted() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val localDeleted = article(
+            id = "article-1",
+            deleted = true,
+            deletedAt = 100L
+        )
+        val remoteKept = localDeleted.copy(
+            sourceDeviceId = "watch",
+            favoriteSaved = true,
+            favoriteChangedAt = 50L,
+            deleted = false,
+            deletedAt = 0L
+        ).toManifestEntry()
+        articleDao.items = listOf(localDeleted)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        val plan = repository.prepareDeleteConflictResolutions(
+            remoteManifest = listOf(remoteKept),
+            resolutions = mapOf(localDeleted.articleId to PhoneSyncConflictResolution.MERGE_CONTENT)
+        )
+
+        assertEquals(emptySet<String>(), plan.outgoingArticleIds)
+        assertEquals(listOf(localDeleted.articleId), plan.forcedRemoteRequests.map { it.articleId })
+        assertEquals(
+            PhoneSyncConflictResolution.MERGE_CONTENT,
+            plan.mergeResolutions[localDeleted.articleId]
+        )
+    }
+
+    @Test
+    fun mergeArticlesFromSync_keepWatchRestoresRemoteAfterLocalDelete() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val localDeleted = article(
+            id = "article-1",
+            title = "本地已删",
+            deleted = true,
+            deletedAt = 100L
+        )
+        val remoteKept = article(
+            id = "article-1",
+            title = "手表保留",
+            favoriteSaved = true,
+            favoriteChangedAt = 50L
+        ).copy(sourceDeviceId = "watch")
+        articleDao.items = listOf(localDeleted)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        repository.mergeArticlesFromSync(
+            incoming = listOf(remoteKept),
+            conflictResolutions = mapOf(localDeleted.articleId to PhoneSyncConflictResolution.KEEP_WATCH)
+        )
+
+        val updated = articleDao.items.single()
+        assertEquals(false, updated.deleted)
+        assertEquals("手表保留", updated.title)
+        assertTrue(updated.favoriteSaved)
+    }
+
+    @Test
+    fun clearImportedContent_marksOnlyTxtRootArticlesAsDeletedTombstones() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val txt = article(
+            id = "txt",
+            url = ImportedContentIds.txtArticleUrl("txt-1"),
+            rssSourceUrl = ImportedContentIds.ROOT_SOURCE_URL
+        )
+        val epub = article(
+            id = "epub",
+            url = ImportedContentIds.epubChapterUrl("book", 1, "chapter-1"),
+            rssSourceUrl = ImportedContentIds.epubSourceUrl("book")
+        )
+        articleDao.items = listOf(txt, epub)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        val cleared = repository.clearImportedContent()
+
+        assertEquals(1, cleared)
+        val deletedTxt = articleDao.items.first { it.articleId == txt.articleId }
+        val keptEpub = articleDao.items.first { it.articleId == epub.articleId }
+        assertTrue(deletedTxt.deleted)
+        assertEquals(false, keptEpub.deleted)
+        assertEquals(
+            setOf(txt.articleId, epub.articleId),
+            repository.getArticlesForSync().map { it.articleId }.toSet()
+        )
+    }
+
     private fun article(
         id: String,
         url: String = "https://example.com/$id",
@@ -478,6 +651,20 @@ class PhoneCompanionRepositoryTest {
         )
     }
 
+    private fun PhoneArticleEntity.toManifestEntry(): ArticleSyncManifestEntry {
+        return ArticleSyncManifestEntry(
+            articleId = articleId,
+            sourceDeviceId = sourceDeviceId,
+            contentHash = contentHash,
+            updatedAt = updatedAt,
+            independentChangedAt = independentChangedAt,
+            favoriteChangedAt = favoriteChangedAt,
+            watchLaterChangedAt = watchLaterChangedAt,
+            deletedAt = deletedAt,
+            deleted = deleted
+        )
+    }
+
     private class FakePhoneSavedItemDao : PhoneSavedItemDao {
         var items: List<PhoneSavedItemEntity> = emptyList()
 
@@ -499,9 +686,12 @@ class PhoneCompanionRepositoryTest {
 
         override fun observeIndependent(): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
-        override fun observeRssArticles(importedContentPrefix: String): Flow<List<PhoneArticleEntity>> = emptyFlow()
+        override fun observeRssArticles(importedContentSourceUrl: String): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
-        override fun observeImportedContentArticles(importedContentPrefix: String): Flow<List<PhoneArticleEntity>> = emptyFlow()
+        override fun observeImportedContentArticles(
+            importedContentSourceUrl: String,
+            importedTextArticlePrefix: String
+        ): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
         override fun observeFavorites(): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
@@ -545,7 +735,7 @@ class PhoneCompanionRepositoryTest {
     private class FakePhoneRssSourceDao : PhoneRssSourceDao {
         var sources: List<PhoneRssSourceEntity> = emptyList()
 
-        override fun observeActive(importedContentPrefix: String): Flow<List<PhoneRssSourceEntity>> = emptyFlow()
+        override fun observeActive(importedContentSourceUrl: String): Flow<List<PhoneRssSourceEntity>> = emptyFlow()
 
         override suspend fun getByUrl(url: String): PhoneRssSourceEntity? {
             return sources.firstOrNull { it.url == url }

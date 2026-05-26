@@ -117,9 +117,9 @@ class PhoneBluetoothSyncClient(
     }
 
     @SuppressLint("MissingPermission")
-    fun exchangeLibrary(
+    suspend fun exchangeLibrary(
         manifestRequest: JSONObject,
-        buildArticleRequests: (JSONObject, Boolean) -> List<JSONObject>,
+        buildArticleRequests: suspend (JSONObject, Boolean) -> List<JSONObject>,
         deviceAddress: String? = null,
         deviceNameHint: String? = null,
         sessionId: String = BluetoothDebugLog.newSessionId("bt-library"),
@@ -540,6 +540,7 @@ class PhoneBluetoothSyncClient(
             put("${prefix}Message", payload.optString("message").ifBlank { null })
             put("${prefix}ArticleManifestCount", payload.optJSONArray("articleManifest")?.length())
             put("${prefix}ArticleCount", payload.optJSONArray("articles")?.length())
+            put("${prefix}BodyRequestCount", payload.optJSONArray("bodyRequests")?.length())
             put("${prefix}RssSourceCount", payload.optJSONArray("rssSources")?.length())
             put("${prefix}ItemCount", payload.optJSONArray("items")?.length())
             put("${prefix}Count", if (payload.has("count")) payload.optInt("count") else null)

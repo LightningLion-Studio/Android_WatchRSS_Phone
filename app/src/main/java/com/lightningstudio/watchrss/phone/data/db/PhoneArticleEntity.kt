@@ -11,7 +11,8 @@ import androidx.room.PrimaryKey
         Index(value = ["independentSaved", "independentSortOrder"]),
         Index(value = ["rssSourceUrl", "updatedAt"]),
         Index(value = ["favoriteSaved", "favoriteSortOrder"]),
-        Index(value = ["watchLaterSaved", "watchLaterSortOrder"])
+        Index(value = ["watchLaterSaved", "watchLaterSortOrder"]),
+        Index(value = ["syncBodyHash"])
     ]
 )
 data class PhoneArticleEntity(
@@ -39,5 +40,10 @@ data class PhoneArticleEntity(
     val watchLaterChangedAt: Long,
     val watchLaterSortOrder: Long,
     val deleted: Boolean,
-    val deletedAt: Long
+    val deletedAt: Long,
+    val syncBodyHash: String = "",
+    val syncBodyByteCount: Long = 0L,
+    val syncChunkSize: Int = 0,
+    val syncChunkHashesJson: String = "",
+    val syncMetadataHash: String = ""
 )

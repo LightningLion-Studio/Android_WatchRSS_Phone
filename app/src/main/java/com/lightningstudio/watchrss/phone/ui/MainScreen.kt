@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -36,9 +37,11 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
+import com.lightningstudio.watchrss.phone.viewmodel.MainConflictPromptUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainUiState
 import com.lightningstudio.watchrss.phone.viewmodel.MainSyncProgressUi
 
@@ -57,7 +60,8 @@ fun MainScreen(
     uiState: MainUiState,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
-    onImportLocalContent: () -> Unit,
+    onImportTxtContent: () -> Unit,
+    onImportEpubContent: () -> Unit,
     onAddRssSource: () -> Unit,
     onSyncLibrary: () -> Unit,
     onExportBluetoothLog: () -> Unit,
@@ -68,6 +72,9 @@ fun MainScreen(
     onToggleRssSourcePinned: (PhoneRssSourceEntity) -> Unit,
     onDeleteRssSource: (PhoneRssSourceEntity) -> Unit,
     onDeleteArticle: (PhoneArticleEntity) -> Unit,
+    onClearImportedContent: () -> Unit,
+    onChooseConflictResolution: (PhoneSyncConflictResolution) -> Unit,
+    onShowManualConflictOptions: () -> Unit,
     onDismissMessage: () -> Unit
 ) {
     val uriHandler = LocalUriHandler.current
@@ -99,7 +106,8 @@ fun MainScreen(
                 articlesBySource = articlesBySource,
                 onUrlChange = onUrlChange,
                 onImportArticle = onImportArticle,
-                onImportLocalContent = onImportLocalContent,
+                onImportTxtContent = onImportTxtContent,
+                onImportEpubContent = onImportEpubContent,
                 onAddRssSource = onAddRssSource,
                 onSyncLibrary = onSyncLibrary,
                 onExportBluetoothLog = onExportBluetoothLog,
@@ -134,7 +142,10 @@ fun MainScreen(
                 onToggleFavorite = onToggleFavorite,
                 onToggleWatchLater = onToggleWatchLater,
                 onDeleteArticle = onDeleteArticle,
-                canDeleteArticle = ::canDeleteArticle
+                canDeleteArticle = ::canDeleteArticle,
+                headerActionLabel = "清空",
+                onHeaderAction = onClearImportedContent,
+                headerActionEnabled = uiState.importedContentArticles.isNotEmpty()
             )
 
             MainPage.WATCH_LATER -> ArticleListPage(
@@ -190,6 +201,13 @@ fun MainScreen(
             )
         }
     }
+    uiState.conflictPrompt?.let { prompt ->
+        DeleteConflictDialog(
+            prompt = prompt,
+            onChooseResolution = onChooseConflictResolution,
+            onShowManualOptions = onShowManualConflictOptions
+        )
+    }
 }
 
 @Composable
@@ -198,7 +216,8 @@ private fun HomePage(
     articlesBySource: Map<String, List<PhoneArticleEntity>>,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
-    onImportLocalContent: () -> Unit,
+    onImportTxtContent: () -> Unit,
+    onImportEpubContent: () -> Unit,
     onAddRssSource: () -> Unit,
     onSyncLibrary: () -> Unit,
     onExportBluetoothLog: () -> Unit,
@@ -227,7 +246,8 @@ private fun HomePage(
         enabled = !uiState.isBusy,
         onUrlChange = onUrlChange,
         onImportArticle = onImportArticle,
-        onImportLocalContent = onImportLocalContent,
+        onImportTxtContent = onImportTxtContent,
+        onImportEpubContent = onImportEpubContent,
         onAddRssSource = onAddRssSource,
         onSyncLibrary = onSyncLibrary,
         onExportBluetoothLog = onExportBluetoothLog
@@ -303,12 +323,87 @@ private fun StatusCard(
 }
 
 @Composable
+private fun DeleteConflictDialog(
+    prompt: MainConflictPromptUi,
+    onChooseResolution: (PhoneSyncConflictResolution) -> Unit,
+    onShowManualOptions: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = {},
+        title = {
+            Text(if (prompt.manual) "保留/删除" else "双端内容有冲突，请选择处理方式")
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                val countText = "检测到 ${prompt.conflicts.size} 篇内容一端已删除，另一端仍保留。"
+                Text(text = countText, style = MaterialTheme.typography.bodyMedium)
+                prompt.conflicts.firstOrNull()?.let { conflict ->
+                    Text(
+                        text = conflict.title.ifBlank { conflict.url },
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (prompt.manual) {
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { onChooseResolution(PhoneSyncConflictResolution.KEEP_WATCH) }
+                    ) {
+                        Text("保留手表版本")
+                    }
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { onChooseResolution(PhoneSyncConflictResolution.KEEP_PHONE) }
+                    ) {
+                        Text("保留手机版本")
+                    }
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { onChooseResolution(PhoneSyncConflictResolution.DELETE_CONTENT) }
+                    ) {
+                        Text("删除")
+                    }
+                } else {
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { onChooseResolution(PhoneSyncConflictResolution.KEEP_LATEST) }
+                    ) {
+                        Text("保留最新操作")
+                    }
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { onChooseResolution(PhoneSyncConflictResolution.MERGE_CONTENT) }
+                    ) {
+                        Text("合并内容")
+                    }
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { onChooseResolution(PhoneSyncConflictResolution.DELETE_CONTENT) }
+                    ) {
+                        Text("删除内容")
+                    }
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = onShowManualOptions
+                    ) {
+                        Text("手动")
+                    }
+                }
+            }
+        },
+        confirmButton = {}
+    )
+}
+
+@Composable
 private fun ImportAndSyncCard(
     urlInput: String,
     enabled: Boolean,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
-    onImportLocalContent: () -> Unit,
+    onImportTxtContent: () -> Unit,
+    onImportEpubContent: () -> Unit,
     onAddRssSource: () -> Unit,
     onSyncLibrary: () -> Unit,
     onExportBluetoothLog: () -> Unit
@@ -332,9 +427,12 @@ private fun ImportAndSyncCard(
                 Button(onClick = onImportArticle, enabled = enabled) {
                     Text(text = "添加独立文章")
                 }
-                Button(onClick = onImportLocalContent, enabled = enabled) {
+                Button(onClick = onImportTxtContent, enabled = enabled) {
                     Text(text = "导入内容")
                 }
+            }
+            Button(onClick = onImportEpubContent, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+                Text(text = "导入 EPUB")
             }
             Button(onClick = onAddRssSource, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
                 Text(text = "添加 RSS 源")
@@ -539,9 +637,18 @@ private fun ArticleListPage(
     onToggleFavorite: (PhoneArticleEntity) -> Unit,
     onToggleWatchLater: (PhoneArticleEntity) -> Unit,
     onDeleteArticle: (PhoneArticleEntity) -> Unit,
-    canDeleteArticle: (PhoneArticleEntity) -> Boolean
+    canDeleteArticle: (PhoneArticleEntity) -> Boolean,
+    headerActionLabel: String? = null,
+    onHeaderAction: (() -> Unit)? = null,
+    headerActionEnabled: Boolean = false
 ) {
-    PageHeader(title = "$title (${articles.size})", onBack = onBack)
+    PageHeader(
+        title = "$title (${articles.size})",
+        onBack = onBack,
+        actionLabel = headerActionLabel,
+        actionEnabled = headerActionEnabled,
+        onAction = onHeaderAction
+    )
     if (articles.isEmpty()) {
         Text(text = emptyText, style = MaterialTheme.typography.bodyMedium)
         return
@@ -562,7 +669,10 @@ private fun ArticleListPage(
 @Composable
 private fun PageHeader(
     title: String,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    actionLabel: String? = null,
+    actionEnabled: Boolean = false,
+    onAction: (() -> Unit)? = null
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -577,6 +687,14 @@ private fun PageHeader(
             fontWeight = FontWeight.Bold,
             modifier = Modifier.weight(1f)
         )
+        if (actionLabel != null && onAction != null) {
+            OutlinedButton(
+                onClick = onAction,
+                enabled = actionEnabled
+            ) {
+                Text(text = actionLabel)
+            }
+        }
     }
 }
 

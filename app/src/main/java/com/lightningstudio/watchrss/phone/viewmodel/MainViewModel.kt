@@ -4,11 +4,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncProgress
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncDeleteConflict
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.importer.LocalContentImportKind
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -27,12 +30,18 @@ data class MainUiState(
     val independentArticles: List<PhoneArticleEntity> = emptyList(),
     val importedContentArticles: List<PhoneArticleEntity> = emptyList(),
     val favorites: List<PhoneArticleEntity> = emptyList(),
-    val watchLater: List<PhoneArticleEntity> = emptyList()
+    val watchLater: List<PhoneArticleEntity> = emptyList(),
+    val conflictPrompt: MainConflictPromptUi? = null
 )
 
 data class MainSyncProgressUi(
     val phase: String,
     val percent: Int
+)
+
+data class MainConflictPromptUi(
+    val conflicts: List<PhoneSyncDeleteConflict>,
+    val manual: Boolean = false
 )
 
 private data class LibraryLists(
@@ -56,6 +65,7 @@ class MainViewModel(
     private val bluetoothSyncManager: PhoneBluetoothSyncManager
 ) : ViewModel() {
     private val sessionState = MutableStateFlow(MainUiState())
+    private var conflictResolutionDeferred: CompletableDeferred<PhoneSyncConflictResolution>? = null
 
     val uiState: StateFlow<MainUiState> = combine(
         combine(
@@ -128,12 +138,12 @@ class MainViewModel(
 
     fun importLocalContent(fileName: String, mimeType: String?, bytes: ByteArray) {
         viewModelScope.launch {
-            runBusy("正在导入小说…") {
+            runBusy("正在导入文件…") {
                 val result = repository.importLocalContent(fileName, mimeType, bytes)
                 sessionState.value = sessionState.value.copy(
                     message = when (result.kind) {
                         LocalContentImportKind.TXT -> "已导入 TXT 到导入内容，文章 ${result.articleCount} 篇"
-                        LocalContentImportKind.EPUB -> "已导入 EPUB：${result.source.title}，章节 ${result.articleCount} 篇"
+                        LocalContentImportKind.EPUB -> "已导入 EPUB 频道：${result.source.title}，章节 ${result.articleCount} 篇"
                     },
                     error = null
                 )
@@ -219,6 +229,18 @@ class MainViewModel(
         }
     }
 
+    fun clearImportedContent() {
+        viewModelScope.launch {
+            runBusy("正在清空导入内容…") {
+                val deletedCount = repository.clearImportedContent()
+                sessionState.value = sessionState.value.copy(
+                    message = "已清空导入内容：$deletedCount 篇",
+                    error = null
+                )
+            }
+        }
+    }
+
     fun syncLibraryByBluetooth() {
         viewModelScope.launch {
             sessionState.value = sessionState.value.copy(
@@ -228,7 +250,10 @@ class MainViewModel(
                 syncProgress = MainSyncProgressUi(phase = "建立连接中", percent = 0)
             )
             runCatching {
-                val result = bluetoothSyncManager.syncLibrary(::updateLibrarySyncProgress)
+                val result = bluetoothSyncManager.syncLibrary(
+                    onProgress = ::updateLibrarySyncProgress,
+                    resolveDeleteConflicts = ::resolveDeleteConflicts
+                )
                 val stats = result.libraryStats
                 sessionState.value = sessionState.value.copy(
                     message = if (stats != null) {
@@ -242,11 +267,23 @@ class MainViewModel(
             }.onFailure { throwable ->
                 sessionState.value = sessionState.value.copy(
                     error = throwable.message ?: "操作失败",
-                    syncProgress = null
+                    syncProgress = null,
+                    conflictPrompt = null
                 )
             }
-            sessionState.value = sessionState.value.copy(isBusy = false)
+            conflictResolutionDeferred?.complete(PhoneSyncConflictResolution.KEEP_LATEST)
+            conflictResolutionDeferred = null
+            sessionState.value = sessionState.value.copy(isBusy = false, conflictPrompt = null)
         }
+    }
+
+    fun chooseConflictResolution(resolution: PhoneSyncConflictResolution) {
+        conflictResolutionDeferred?.complete(resolution)
+    }
+
+    fun showManualConflictOptions() {
+        val prompt = sessionState.value.conflictPrompt ?: return
+        sessionState.value = sessionState.value.copy(conflictPrompt = prompt.copy(manual = true))
     }
 
     fun sendRemoteInputByBluetooth() {
@@ -321,12 +358,41 @@ class MainViewModel(
         }
     }
 
+    private suspend fun resolveDeleteConflicts(
+        conflicts: List<PhoneSyncDeleteConflict>
+    ): Map<String, PhoneSyncConflictResolution> {
+        conflictResolutionDeferred?.complete(PhoneSyncConflictResolution.KEEP_LATEST)
+        val deferred = CompletableDeferred<PhoneSyncConflictResolution>()
+        conflictResolutionDeferred = deferred
+        sessionState.value = sessionState.value.copy(
+            isBusy = true,
+            message = "双端内容有冲突，请选择处理方式",
+            error = null,
+            syncProgress = null,
+            conflictPrompt = MainConflictPromptUi(conflicts = conflicts)
+        )
+        return try {
+            val resolution = deferred.await()
+            conflicts.associate { conflict -> conflict.articleId to resolution }
+        } finally {
+            if (conflictResolutionDeferred === deferred) {
+                conflictResolutionDeferred = null
+            }
+            sessionState.value = sessionState.value.copy(
+                message = "信息传输中",
+                conflictPrompt = null,
+                syncProgress = MainSyncProgressUi(phase = "信息传输中", percent = 30)
+            )
+        }
+    }
+
     private suspend fun runBusy(busyMessage: String, block: suspend () -> Unit) {
         sessionState.value = sessionState.value.copy(
             isBusy = true,
             message = busyMessage,
             error = null,
-            syncProgress = null
+            syncProgress = null,
+            conflictPrompt = null
         )
         runCatching { block() }
             .onFailure { throwable ->

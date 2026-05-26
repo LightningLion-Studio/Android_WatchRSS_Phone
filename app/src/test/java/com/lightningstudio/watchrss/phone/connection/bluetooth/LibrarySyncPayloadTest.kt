@@ -184,6 +184,70 @@ class LibrarySyncPayloadTest {
         )
     }
 
+    @Test
+    fun chunkedBodyRequest_sendsOnlyChangedChunksAndRebuildsBody() {
+        val chunkSize = ArticleSyncBody.CHUNK_SIZE_BYTES
+        val oldArticle = testArticle(
+            articleId = "article-large",
+            contentText = "A".repeat(chunkSize) + "B".repeat(chunkSize) + "C".repeat(64)
+        )
+        val newArticle = oldArticle.copy(
+            contentText = "A".repeat(chunkSize) + "D".repeat(chunkSize) + "C".repeat(64),
+            updatedAt = oldArticle.updatedAt + 1
+        )
+        val localManifest = oldArticle.toManifestEntry()
+        val remoteManifest = newArticle.toManifestEntry()
+
+        val requests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+            localManifest = listOf(localManifest),
+            remoteManifest = listOf(remoteManifest)
+        )
+        val frames = LibrarySyncPayload.buildChunkedArticleRequestFrames(
+            deviceId = "phone",
+            articles = listOf(newArticle),
+            articleRequests = requests,
+            bodyRequests = emptyList(),
+            useBatches = true
+        )
+        val parsed = LibrarySyncPayload.parseChunkedArticles(
+            LibrarySyncPayload.combineArticlePayloads(frames)
+        ).single()
+        val rebuilt = ArticleSyncBody.rebuildBody(oldArticle, parsed)
+
+        assertTrue(requests.single().chunkIndexes.isNotEmpty())
+        assertTrue(requests.single().chunkIndexes.size < remoteManifest.chunkHashes.size)
+        assertEquals(requests.single().chunkIndexes, parsed.chunks.map { it.index })
+        assertEquals(newArticle.contentText, rebuilt.second)
+    }
+
+    @Test
+    fun chunkedBodyRequest_withMetadataOnlyRequestSendsNoChunks() {
+        val article = testArticle(
+            articleId = "article-1",
+            contentText = "正文"
+        )
+        val metadata = ArticleSyncBody.metadataFor(article)
+        val frames = LibrarySyncPayload.buildChunkedArticleRequestFrames(
+            deviceId = "phone",
+            articles = listOf(article),
+            articleRequests = listOf(
+                ArticleBodyRequest(
+                    articleId = article.articleId,
+                    bodyHash = metadata.bodyHash,
+                    chunkIndexes = emptyList()
+                )
+            ),
+            bodyRequests = emptyList(),
+            useBatches = true
+        )
+
+        val parsed = LibrarySyncPayload.parseChunkedArticles(
+            LibrarySyncPayload.combineArticlePayloads(frames)
+        ).single()
+
+        assertEquals(emptyList<Int>(), parsed.chunks.map { it.index })
+    }
+
     private fun testArticle(
         articleId: String,
         contentText: String
@@ -225,5 +289,24 @@ class LibrarySyncPayloadTest {
                 append((33 + ((value ushr 16) % 90)).toChar())
             }
         }
+    }
+
+    private fun PhoneArticleEntity.toManifestEntry(): ArticleSyncManifestEntry {
+        val metadata = ArticleSyncBody.metadataFor(this)
+        return ArticleSyncManifestEntry(
+            articleId = articleId,
+            sourceDeviceId = sourceDeviceId,
+            contentHash = contentHash,
+            updatedAt = updatedAt,
+            independentChangedAt = independentChangedAt,
+            favoriteChangedAt = favoriteChangedAt,
+            watchLaterChangedAt = watchLaterChangedAt,
+            deletedAt = deletedAt,
+            bodyHash = metadata.bodyHash,
+            bodyByteCount = metadata.bodyByteCount,
+            chunkSize = metadata.chunkSize,
+            chunkHashes = metadata.chunkHashes,
+            metadataHash = metadata.metadataHash
+        )
     }
 }

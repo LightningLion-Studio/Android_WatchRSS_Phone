@@ -3,13 +3,14 @@ package com.lightningstudio.watchrss.phone.data.model
 object ImportedContentIds {
     const val ROOT_SOURCE_URL = "https://watchrss.local/import-content"
     const val ROOT_SOURCE_TITLE = "导入内容"
+    const val EPUB_SOURCE_ROOT_URL = "https://watchrss.local/import-epub"
 
     fun txtArticleUrl(contentKey: String): String {
         return "$ROOT_SOURCE_URL/txt/$contentKey"
     }
 
     fun epubSourceUrl(bookKey: String): String {
-        return "$ROOT_SOURCE_URL/epub/$bookKey"
+        return "$EPUB_SOURCE_ROOT_URL/$bookKey"
     }
 
     fun epubChapterUrl(bookKey: String, chapterIndex: Int, chapterKey: String): String {
@@ -18,6 +19,14 @@ object ImportedContentIds {
     }
 
     fun isImportedContentUrl(url: String?): Boolean {
-        return url?.trim()?.lowercase()?.startsWith(ROOT_SOURCE_URL) == true
+        val normalized = url?.trim()?.lowercase() ?: return false
+        return normalized.startsWith(ROOT_SOURCE_URL) ||
+            normalized.startsWith(EPUB_SOURCE_ROOT_URL)
+    }
+
+    fun isImportedEpubSourceUrl(url: String?): Boolean {
+        val normalized = url?.trim()?.lowercase() ?: return false
+        return normalized.startsWith(EPUB_SOURCE_ROOT_URL) ||
+            normalized.startsWith("$ROOT_SOURCE_URL/epub/")
     }
 }

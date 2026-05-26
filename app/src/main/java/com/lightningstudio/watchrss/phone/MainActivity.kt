@@ -63,7 +63,7 @@ class MainActivity : ComponentActivity() {
     private val importLocalContentLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri == null) {
-                viewModel.showMessage("已取消导入小说")
+                viewModel.showMessage("已取消导入文件")
                 return@registerForActivityResult
             }
             lifecycleScope.launch {
@@ -77,7 +77,7 @@ class MainActivity : ComponentActivity() {
                     )
                 }.onFailure { throwable ->
                     Log.e(TAG, "Failed to read local content", throwable)
-                    viewModel.showError("小说导入失败：${throwable.message ?: "未知错误"}")
+                    viewModel.showError("文件导入失败：${throwable.message ?: "未知错误"}")
                 }
             }
         }
@@ -106,7 +106,8 @@ class MainActivity : ComponentActivity() {
                     uiState = state,
                     onUrlChange = viewModel::updateUrlInput,
                     onImportArticle = viewModel::importIndependentArticle,
-                    onImportLocalContent = ::selectLocalContent,
+                    onImportTxtContent = ::selectTxtContent,
+                    onImportEpubContent = ::selectEpubContent,
                     onAddRssSource = viewModel::addRssSource,
                     onSyncLibrary = { ensureBluetoothPermissions(viewModel::syncLibraryByBluetooth) },
                     onExportBluetoothLog = ::exportBluetoothLog,
@@ -119,6 +120,9 @@ class MainActivity : ComponentActivity() {
                     onToggleRssSourcePinned = viewModel::toggleRssSourcePinned,
                     onDeleteRssSource = viewModel::deleteRssSource,
                     onDeleteArticle = viewModel::deleteArticle,
+                    onClearImportedContent = viewModel::clearImportedContent,
+                    onChooseConflictResolution = viewModel::chooseConflictResolution,
+                    onShowManualConflictOptions = viewModel::showManualConflictOptions,
                     onDismissMessage = viewModel::clearMessage
                 )
             }
@@ -154,11 +158,18 @@ class MainActivity : ComponentActivity() {
         exportBluetoothLogLauncher.launch(fileName)
     }
 
-    private fun selectLocalContent() {
+    private fun selectTxtContent() {
         importLocalContentLauncher.launch(
             arrayOf(
                 "text/plain",
-                "text/*",
+                "text/*"
+            )
+        )
+    }
+
+    private fun selectEpubContent() {
+        importLocalContentLauncher.launch(
+            arrayOf(
                 "application/epub+zip",
                 "application/octet-stream",
                 "*/*"

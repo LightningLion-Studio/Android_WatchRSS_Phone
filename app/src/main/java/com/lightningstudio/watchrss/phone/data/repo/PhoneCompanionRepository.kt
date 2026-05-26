@@ -1,5 +1,12 @@
 package com.lightningstudio.watchrss.phone.data.repo
 
+import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncBody
+import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyRequest
+import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncManifestEntry
+import com.lightningstudio.watchrss.phone.connection.bluetooth.ChunkedArticlePayload
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictPlan
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncDeleteConflict
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceDao
@@ -72,15 +79,18 @@ class PhoneCompanionRepository(
     }
 
     fun observeImportedContentArticles(): Flow<List<PhoneArticleEntity>> {
-        return articleDao.observeImportedContentArticles(importedContentPrefix())
+        return articleDao.observeImportedContentArticles(
+            importedContentSourceUrl(),
+            importedTextArticlePrefix()
+        )
     }
 
     fun observeRssSources(): Flow<List<PhoneRssSourceEntity>> {
-        return rssSourceDao.observeActive(importedContentPrefix())
+        return rssSourceDao.observeActive(importedContentSourceUrl())
     }
 
     fun observeRssArticles(): Flow<List<PhoneArticleEntity>> {
-        return articleDao.observeRssArticles(importedContentPrefix())
+        return articleDao.observeRssArticles(importedContentSourceUrl())
     }
 
     fun observeArticle(articleId: String): Flow<PhoneArticleEntity?> {
@@ -196,11 +206,37 @@ class PhoneCompanionRepository(
         articleDao.upsert(current.markDeletedByUser(now))
     }
 
+    suspend fun clearImportedContent(): Int = withContext(Dispatchers.IO) {
+        val importedArticles = articleDao.getByRssSourceUrl(ImportedContentIds.ROOT_SOURCE_URL)
+            .filterNot { it.deleted }
+        val now = System.currentTimeMillis()
+        importedArticles.forEachIndexed { index, article ->
+            articleDao.upsert(article.markDeletedByUser(now + index))
+        }
+        importedArticles.size
+    }
+
     suspend fun getArticlesForSync(): List<PhoneArticleEntity> = withContext(Dispatchers.IO) {
         articleDao.getAllForSync()
             .filter { it.shouldSyncThroughLibrary() }
             .map { it.hydrateExternalText() }
     }
+
+    suspend fun getArticleManifestsForSync(): List<ArticleSyncManifestEntry> = withContext(Dispatchers.IO) {
+        articleDao.getAllForSync()
+            .filter { it.shouldSyncThroughLibrary() }
+            .map { it.ensureSyncMetadata() }
+            .map { it.toSyncManifestEntry() }
+    }
+
+    suspend fun getArticlesForSync(articleIds: Collection<String>): List<PhoneArticleEntity> =
+        withContext(Dispatchers.IO) {
+            val idSet = articleIds.toSet()
+            if (idSet.isEmpty()) return@withContext emptyList()
+            articleDao.getAllForSync()
+                .filter { it.articleId in idSet }
+                .map { it.hydrateExternalText().withCurrentSyncMetadata() }
+        }
 
     suspend fun getRssSourcesForSync(): List<PhoneRssSourceEntity> = withContext(Dispatchers.IO) {
         rssSourceDao.getAllForSync()
@@ -227,14 +263,83 @@ class PhoneCompanionRepository(
         repaired
     }
 
-    suspend fun mergeArticlesFromSync(incoming: List<PhoneArticleEntity>): Int = withContext(Dispatchers.IO) {
+    suspend fun findDeleteConflicts(remoteManifest: List<ArticleSyncManifestEntry>): List<PhoneSyncDeleteConflict> =
+        withContext(Dispatchers.IO) {
+            remoteManifest.mapNotNull { remote ->
+                val local = articleDao.getById(remote.articleId) ?: return@mapNotNull null
+                buildDeleteConflict(local, remote)
+            }
+        }
+
+    suspend fun prepareDeleteConflictResolutions(
+        remoteManifest: List<ArticleSyncManifestEntry>,
+        resolutions: Map<String, PhoneSyncConflictResolution>
+    ): PhoneSyncConflictPlan = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        val outgoingArticleIds = linkedSetOf<String>()
+        val forcedRemoteRequests = mutableListOf<ArticleBodyRequest>()
+        val suppressedRemoteArticleIds = linkedSetOf<String>()
+        val mergeResolutions = linkedMapOf<String, PhoneSyncConflictResolution>()
+        remoteManifest.forEachIndexed { index, remote ->
+            val local = articleDao.getById(remote.articleId)?.hydrateExternalText() ?: return@forEachIndexed
+            if (buildDeleteConflict(local, remote) == null) return@forEachIndexed
+            val resolution = resolutions[remote.articleId] ?: PhoneSyncConflictResolution.KEEP_LATEST
+            when (deleteConflictAction(local, remote, resolution)) {
+                ConflictAction.PHONE -> {
+                    val updated = local.stampKeptByConflict(now + index)
+                    articleDao.upsert(updated.withCurrentSyncMetadata().externalizeLargeLocalContent())
+                    outgoingArticleIds += updated.articleId
+                    suppressedRemoteArticleIds += updated.articleId
+                }
+                ConflictAction.WATCH -> {
+                    suppressedRemoteArticleIds += remote.articleId
+                    if (remote.deleted) {
+                        val updated = local.applyRemoteDelete(remote)
+                        if (updated != local) {
+                            articleDao.upsert(updated.withCurrentSyncMetadata().externalizeLargeLocalContent())
+                        }
+                    } else {
+                        forcedRemoteRequests += remote.toFullBodyRequest()
+                        mergeResolutions[remote.articleId] = if (resolution == PhoneSyncConflictResolution.MERGE_CONTENT) {
+                            PhoneSyncConflictResolution.MERGE_CONTENT
+                        } else {
+                            PhoneSyncConflictResolution.KEEP_WATCH
+                        }
+                    }
+                }
+                ConflictAction.DELETE -> {
+                    val updated = local.markDeletedByUser(now + index)
+                    articleDao.upsert(updated.withCurrentSyncMetadata().externalizeLargeLocalContent())
+                    outgoingArticleIds += updated.articleId
+                    suppressedRemoteArticleIds += updated.articleId
+                }
+            }
+        }
+        PhoneSyncConflictPlan(
+            outgoingArticleIds = outgoingArticleIds,
+            forcedRemoteRequests = forcedRemoteRequests,
+            suppressedRemoteArticleIds = suppressedRemoteArticleIds,
+            mergeResolutions = mergeResolutions
+        )
+    }
+
+    suspend fun mergeArticlesFromSync(
+        incoming: List<PhoneArticleEntity>,
+        conflictResolutions: Map<String, PhoneSyncConflictResolution> = emptyMap()
+    ): Int = withContext(Dispatchers.IO) {
         var merged = 0
         incoming.forEach { remote ->
             val local = articleDao.getById(remote.articleId)
+            val preparedRemote = remote.withCurrentSyncMetadata()
             val next = if (local == null) {
-                remote
+                preparedRemote
             } else {
-                mergeArticle(local, remote)
+                val localHydrated = local.hydrateExternalText()
+                mergeArticle(
+                    local = localHydrated,
+                    remote = preparedRemote,
+                    conflictResolution = conflictResolutions[remote.articleId]
+                )
             }
             if (local != next) {
                 articleDao.upsert(next.externalizeLargeLocalContent())
@@ -243,6 +348,48 @@ class PhoneCompanionRepository(
         }
         merged
     }
+
+    suspend fun mergeChunkedArticlesFromSync(
+        incoming: List<ChunkedArticlePayload>,
+        conflictResolutions: Map<String, PhoneSyncConflictResolution> = emptyMap()
+    ): Int =
+        withContext(Dispatchers.IO) {
+            var merged = 0
+            incoming.forEach { payload ->
+                val local = articleDao.getById(payload.article.articleId)
+                val localHydrated = local?.hydrateExternalText()
+                val (contentHtml, contentText) = ArticleSyncBody.rebuildBody(localHydrated, payload)
+                val preparedRemote = payload.article.copy(
+                    contentHtml = contentHtml,
+                    contentText = contentText,
+                    syncBodyHash = payload.bodyHash,
+                    syncBodyByteCount = payload.bodyByteCount,
+                    syncChunkSize = payload.chunkSize,
+                    syncChunkHashesJson = payload.chunkHashes.toJsonString(),
+                    syncMetadataHash = ArticleSyncBody.metadataHashFor(payload.article)
+                )
+                val next = if (localHydrated == null) {
+                    preparedRemote
+                } else {
+                    mergeArticle(
+                        local = localHydrated,
+                        remote = preparedRemote,
+                        conflictResolution = conflictResolutions[payload.article.articleId]
+                    )
+                }.copy(
+                    syncBodyHash = payload.bodyHash,
+                    syncBodyByteCount = payload.bodyByteCount,
+                    syncChunkSize = payload.chunkSize,
+                    syncChunkHashesJson = payload.chunkHashes.toJsonString(),
+                    syncMetadataHash = ArticleSyncBody.metadataHashFor(payload.article)
+                )
+                if (local != next) {
+                    articleDao.upsert(next.externalizeLargeLocalContent())
+                    merged += 1
+                }
+            }
+            merged
+        }
 
     suspend fun mergeRssSourcesFromSync(incoming: List<PhoneRssSourceEntity>): Int =
         withContext(Dispatchers.IO) {
@@ -381,7 +528,7 @@ class PhoneCompanionRepository(
             )
             null -> withIndependent
         }
-        val stored = saved.externalizeLargeLocalContent()
+        val stored = saved.withCurrentSyncMetadata().externalizeLargeLocalContent()
         articleDao.upsert(stored)
         return stored
     }
@@ -446,6 +593,7 @@ class PhoneCompanionRepository(
                 deletedAt = 0L
             )
                 .withSavedStateFrom(existingByUrl[item.url] ?: existingByContentHash[WebArticleImporter.sha256(item.contentHtml ?: item.contentText.ifBlank { item.url })])
+                .withCurrentSyncMetadata()
                 .externalizeLargeLocalContent()
         }
         if (replaceExistingArticles) {
@@ -562,10 +710,35 @@ class PhoneCompanionRepository(
     }
 
     private fun String.isImportedEpubSourceUrl(): Boolean {
-        return trim().lowercase().startsWith("${ImportedContentIds.ROOT_SOURCE_URL}/epub/")
+        return ImportedContentIds.isImportedEpubSourceUrl(this)
     }
 
-    private fun mergeArticle(local: PhoneArticleEntity, remote: PhoneArticleEntity): PhoneArticleEntity {
+    private enum class ConflictAction {
+        PHONE,
+        WATCH,
+        DELETE
+    }
+
+    private fun mergeArticle(
+        local: PhoneArticleEntity,
+        remote: PhoneArticleEntity,
+        conflictResolution: PhoneSyncConflictResolution? = null
+    ): PhoneArticleEntity {
+        return when (conflictResolution) {
+            null,
+            PhoneSyncConflictResolution.KEEP_LATEST -> mergeArticleByLatest(local, remote)
+            PhoneSyncConflictResolution.KEEP_PHONE -> local.stampKeptByConflict(
+                timestamp = maxOf(local.latestOperationAt(), remote.latestOperationAt()) + 1L
+            )
+            PhoneSyncConflictResolution.KEEP_WATCH -> remote
+            PhoneSyncConflictResolution.DELETE_CONTENT -> mergeArticleByLatest(local, remote).markDeletedByUser(
+                timestamp = maxOf(local.latestOperationAt(), remote.latestOperationAt()) + 1L
+            )
+            PhoneSyncConflictResolution.MERGE_CONTENT -> mergeArticleContent(local, remote)
+        }
+    }
+
+    private fun mergeArticleByLatest(local: PhoneArticleEntity, remote: PhoneArticleEntity): PhoneArticleEntity {
         val metadata = if (remote.updatedAt > local.updatedAt) remote else local
         val favoriteFromRemote = remote.isStateNewerThan(local, PhoneSavedItemType.FAVORITE)
         val watchLaterFromRemote = remote.isStateNewerThan(local, PhoneSavedItemType.WATCH_LATER)
@@ -610,6 +783,149 @@ class PhoneCompanionRepository(
             deleted = deleted,
             deletedAt = deletedAt
         )
+    }
+
+    private fun mergeArticleContent(local: PhoneArticleEntity, remote: PhoneArticleEntity): PhoneArticleEntity {
+        val base = when {
+            !remote.deleted -> remote
+            !local.deleted -> local
+            else -> mergeArticleByLatest(local, remote)
+        }
+        val favoriteSaved = local.favoriteSaved || remote.favoriteSaved
+        val watchLaterSaved = local.watchLaterSaved || remote.watchLaterSaved
+        val independentSaved = local.independentSaved || remote.independentSaved
+        return base.copy(
+            independentSaved = independentSaved,
+            independentChangedAt = maxOf(local.independentChangedAt, remote.independentChangedAt),
+            independentSortOrder = maxOf(local.independentSortOrder, remote.independentSortOrder),
+            rssSourceUrl = base.rssSourceUrl?.takeIf { it.isNotBlank() }
+                ?: local.rssSourceUrl?.takeIf { it.isNotBlank() }
+                ?: remote.rssSourceUrl?.takeIf { it.isNotBlank() },
+            rssSourceTitle = base.rssSourceTitle?.takeIf { it.isNotBlank() }
+                ?: local.rssSourceTitle?.takeIf { it.isNotBlank() }
+                ?: remote.rssSourceTitle?.takeIf { it.isNotBlank() },
+            favoriteSaved = favoriteSaved,
+            favoriteChangedAt = maxOf(local.favoriteChangedAt, remote.favoriteChangedAt),
+            favoriteSortOrder = maxOf(local.favoriteSortOrder, remote.favoriteSortOrder),
+            watchLaterSaved = watchLaterSaved,
+            watchLaterChangedAt = maxOf(local.watchLaterChangedAt, remote.watchLaterChangedAt),
+            watchLaterSortOrder = maxOf(local.watchLaterSortOrder, remote.watchLaterSortOrder),
+            deleted = false,
+            deletedAt = 0L
+        )
+    }
+
+    private fun buildDeleteConflict(
+        local: PhoneArticleEntity,
+        remote: ArticleSyncManifestEntry
+    ): PhoneSyncDeleteConflict? {
+        if (local.deleted == remote.deleted) return null
+        if (local.deletedAt <= 0L && remote.deletedAt <= 0L) return null
+        return PhoneSyncDeleteConflict(
+            articleId = local.articleId,
+            title = local.title.ifBlank { local.url },
+            url = local.url,
+            phoneDeleted = local.deleted,
+            watchDeleted = remote.deleted
+        )
+    }
+
+    private fun deleteConflictAction(
+        local: PhoneArticleEntity,
+        remote: ArticleSyncManifestEntry,
+        resolution: PhoneSyncConflictResolution
+    ): ConflictAction {
+        return when (resolution) {
+            PhoneSyncConflictResolution.DELETE_CONTENT -> ConflictAction.DELETE
+            PhoneSyncConflictResolution.MERGE_CONTENT -> if (local.deleted && !remote.deleted) {
+                ConflictAction.WATCH
+            } else {
+                ConflictAction.PHONE
+            }
+            PhoneSyncConflictResolution.KEEP_PHONE -> if (local.deleted) {
+                ConflictAction.DELETE
+            } else {
+                ConflictAction.PHONE
+            }
+            PhoneSyncConflictResolution.KEEP_WATCH -> ConflictAction.WATCH
+            PhoneSyncConflictResolution.KEEP_LATEST -> {
+                val remoteNewer = remote.isNewerThan(local)
+                when {
+                    remoteNewer -> ConflictAction.WATCH
+                    local.deleted -> ConflictAction.DELETE
+                    else -> ConflictAction.PHONE
+                }
+            }
+        }
+    }
+
+    private fun PhoneArticleEntity.stampKeptByConflict(timestamp: Long): PhoneArticleEntity {
+        return copy(
+            sourceDeviceId = deviceId,
+            updatedAt = timestamp,
+            independentChangedAt = if (independentSaved || independentChangedAt > 0L) {
+                timestamp
+            } else {
+                independentChangedAt
+            },
+            independentSortOrder = if (independentSaved) timestamp else independentSortOrder,
+            favoriteChangedAt = if (favoriteSaved || favoriteChangedAt > 0L) {
+                timestamp
+            } else {
+                favoriteChangedAt
+            },
+            favoriteSortOrder = if (favoriteSaved) timestamp else favoriteSortOrder,
+            watchLaterChangedAt = if (watchLaterSaved || watchLaterChangedAt > 0L) {
+                timestamp
+            } else {
+                watchLaterChangedAt
+            },
+            watchLaterSortOrder = if (watchLaterSaved) timestamp else watchLaterSortOrder,
+            deleted = false,
+            deletedAt = 0L
+        )
+    }
+
+    private fun PhoneArticleEntity.applyRemoteDelete(remote: ArticleSyncManifestEntry): PhoneArticleEntity {
+        val timestamp = remote.deletedAt.takeIf { it > 0L } ?: remote.latestOperationAt()
+        return copy(
+            sourceDeviceId = remote.sourceDeviceId.ifBlank { sourceDeviceId },
+            updatedAt = maxOf(remote.updatedAt, timestamp),
+            independentSaved = false,
+            independentChangedAt = remote.independentChangedAt,
+            independentSortOrder = 0L,
+            favoriteSaved = false,
+            favoriteChangedAt = remote.favoriteChangedAt,
+            favoriteSortOrder = 0L,
+            watchLaterSaved = false,
+            watchLaterChangedAt = remote.watchLaterChangedAt,
+            watchLaterSortOrder = 0L,
+            deleted = true,
+            deletedAt = timestamp
+        )
+    }
+
+    private fun ArticleSyncManifestEntry.toFullBodyRequest(): ArticleBodyRequest {
+        return ArticleBodyRequest(
+            articleId = articleId,
+            bodyHash = bodyHash,
+            chunkIndexes = chunkHashes.indices.toList()
+        )
+    }
+
+    private fun ArticleSyncManifestEntry.isNewerThan(local: PhoneArticleEntity): Boolean {
+        val remoteChangedAt = latestOperationAt()
+        val localChangedAt = local.latestOperationAt()
+        return remoteChangedAt > localChangedAt ||
+            (remoteChangedAt == localChangedAt && sourceDeviceId > local.sourceDeviceId)
+    }
+
+    private fun PhoneArticleEntity.latestOperationAt(): Long {
+        return maxOf(updatedAt, independentChangedAt, favoriteChangedAt, watchLaterChangedAt, deletedAt)
+    }
+
+    private fun ArticleSyncManifestEntry.latestOperationAt(): Long {
+        return maxOf(updatedAt, independentChangedAt, favoriteChangedAt, watchLaterChangedAt, deletedAt)
     }
 
     private fun PhoneArticleEntity.isStateNewerThan(
@@ -667,6 +983,56 @@ class PhoneCompanionRepository(
             watchLaterSortOrder = 0L,
             deleted = true,
             deletedAt = timestamp
+        )
+    }
+
+    private suspend fun PhoneArticleEntity.ensureSyncMetadata(): PhoneArticleEntity {
+        val currentMetadataHash = ArticleSyncBody.metadataHashFor(this)
+        if (
+            syncBodyHash.isNotBlank() &&
+            syncChunkSize == ArticleSyncBody.CHUNK_SIZE_BYTES &&
+            syncChunkHashesJson.isNotBlank()
+        ) {
+            if (syncMetadataHash == currentMetadataHash) return this
+            val updated = copy(syncMetadataHash = currentMetadataHash)
+            articleDao.upsert(updated)
+            return updated
+        }
+        val hydrated = hydrateExternalText()
+        val updated = withSyncMetadata(ArticleSyncBody.metadataFor(hydrated))
+        articleDao.upsert(updated)
+        return updated
+    }
+
+    private fun PhoneArticleEntity.withCurrentSyncMetadata(): PhoneArticleEntity {
+        return withSyncMetadata(ArticleSyncBody.metadataFor(this))
+    }
+
+    private fun PhoneArticleEntity.withSyncMetadata(metadata: com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyMetadata): PhoneArticleEntity {
+        return copy(
+            syncBodyHash = metadata.bodyHash,
+            syncBodyByteCount = metadata.bodyByteCount,
+            syncChunkSize = metadata.chunkSize,
+            syncChunkHashesJson = metadata.chunkHashes.toJsonString(),
+            syncMetadataHash = metadata.metadataHash
+        )
+    }
+
+    private fun PhoneArticleEntity.toSyncManifestEntry(): ArticleSyncManifestEntry {
+        return ArticleSyncManifestEntry(
+            articleId = articleId,
+            sourceDeviceId = sourceDeviceId,
+            contentHash = contentHash,
+            updatedAt = updatedAt,
+            independentChangedAt = independentChangedAt,
+            favoriteChangedAt = favoriteChangedAt,
+            watchLaterChangedAt = watchLaterChangedAt,
+            deletedAt = deletedAt,
+            bodyHash = syncBodyHash.ifBlank { contentHash },
+            bodyByteCount = syncBodyByteCount,
+            chunkSize = syncChunkSize,
+            chunkHashes = syncChunkHashesJson.toStringList(),
+            metadataHash = syncMetadataHash.ifBlank { ArticleSyncBody.metadataHashFor(this) }
         )
     }
 
@@ -736,7 +1102,25 @@ class PhoneCompanionRepository(
             (updatedAt == other.updatedAt && sourceDeviceId > other.sourceDeviceId)
     }
 
-    private fun importedContentPrefix(): String = "${ImportedContentIds.ROOT_SOURCE_URL}%"
+    private fun importedContentSourceUrl(): String = ImportedContentIds.ROOT_SOURCE_URL
+
+    private fun importedTextArticlePrefix(): String = "${ImportedContentIds.ROOT_SOURCE_URL}/txt/%"
+
+    private fun List<String>.toJsonString(): String {
+        return JSONArray().also { array ->
+            forEach(array::put)
+        }.toString()
+    }
+
+    private fun String.toStringList(): List<String> {
+        if (isBlank()) return emptyList()
+        val array = runCatching { JSONArray(this) }.getOrNull() ?: return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                array.optString(index).trim().takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }
+    }
 
     private fun hostLabel(link: String): String {
         return runCatching { URI(link).host.orEmpty().removePrefix("www.") }

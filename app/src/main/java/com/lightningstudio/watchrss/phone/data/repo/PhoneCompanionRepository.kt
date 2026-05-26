@@ -80,17 +80,23 @@ class PhoneCompanionRepository(
 
     fun observeImportedContentArticles(): Flow<List<PhoneArticleEntity>> {
         return articleDao.observeImportedContentArticles(
-            importedContentSourceUrl(),
-            importedTextArticlePrefix()
+            importedContentUrlPrefix(),
+            importedEpubUrlPrefix()
         )
     }
 
     fun observeRssSources(): Flow<List<PhoneRssSourceEntity>> {
-        return rssSourceDao.observeActive(importedContentSourceUrl())
+        return rssSourceDao.observeActive(
+            importedContentUrlPrefix(),
+            importedEpubUrlPrefix()
+        )
     }
 
     fun observeRssArticles(): Flow<List<PhoneArticleEntity>> {
-        return articleDao.observeRssArticles(importedContentSourceUrl())
+        return articleDao.observeRssArticles(
+            importedContentUrlPrefix(),
+            importedEpubUrlPrefix()
+        )
     }
 
     fun observeArticle(articleId: String): Flow<PhoneArticleEntity?> {
@@ -189,6 +195,13 @@ class PhoneCompanionRepository(
     suspend fun deleteRssSource(sourceUrl: String) = withContext(Dispatchers.IO) {
         val source = rssSourceDao.getByUrl(sourceUrl) ?: return@withContext
         val now = System.currentTimeMillis()
+        if (ImportedContentIds.isImportedContentUrl(sourceUrl)) {
+            articleDao.getByRssSourceUrl(sourceUrl)
+                .filterNot { it.deleted }
+                .forEachIndexed { index, article ->
+                    articleDao.upsert(article.markDeletedByUser(now + index))
+                }
+        }
         rssSourceDao.upsert(
             source.copy(
                 sourceDeviceId = deviceId,
@@ -240,6 +253,7 @@ class PhoneCompanionRepository(
 
     suspend fun getRssSourcesForSync(): List<PhoneRssSourceEntity> = withContext(Dispatchers.IO) {
         rssSourceDao.getAllForSync()
+            .filterNot { ImportedContentIds.isImportedContentUrl(it.url) }
     }
 
     suspend fun repairImportedContentTitles(): Int = withContext(Dispatchers.IO) {
@@ -259,6 +273,30 @@ class PhoneCompanionRepository(
                 )
                 repaired += 1
             }
+        }
+        repaired
+    }
+
+    suspend fun repairImportedContentSourceStates(): Int = withContext(Dispatchers.IO) {
+        val sources = rssSourceDao.getAllForSync()
+            .filter { ImportedContentIds.isImportedContentUrl(it.url) }
+        var repaired = 0
+        sources.forEach { source ->
+            val liveArticles = articleDao.getByRssSourceUrl(source.url)
+                .filterNot { it.deleted }
+            if (liveArticles.isEmpty() || !source.deleted) return@forEach
+            val latestArticleUpdate = liveArticles.maxOf { article ->
+                maxOf(article.updatedAt, article.importedAt)
+            }
+            rssSourceDao.upsert(
+                source.copy(
+                    sourceDeviceId = deviceId,
+                    updatedAt = maxOf(source.updatedAt, latestArticleUpdate),
+                    deleted = false,
+                    deletedAt = 0L
+                )
+            )
+            repaired += 1
         }
         repaired
     }
@@ -358,7 +396,11 @@ class PhoneCompanionRepository(
             incoming.forEach { payload ->
                 val local = articleDao.getById(payload.article.articleId)
                 val localHydrated = local?.hydrateExternalText()
-                val (contentHtml, contentText) = ArticleSyncBody.rebuildBody(localHydrated, payload)
+                val (contentHtml, contentText) = if (payload.article.deleted) {
+                    localHydrated?.contentHtml to localHydrated?.contentText.orEmpty()
+                } else {
+                    ArticleSyncBody.rebuildBody(localHydrated, payload)
+                }
                 val preparedRemote = payload.article.copy(
                     contentHtml = contentHtml,
                     contentText = contentText,
@@ -395,6 +437,7 @@ class PhoneCompanionRepository(
         withContext(Dispatchers.IO) {
             var merged = 0
             incoming.forEach { remote ->
+                if (ImportedContentIds.isImportedContentUrl(remote.url)) return@forEach
                 val local = rssSourceDao.getByUrl(remote.url)
                 val next = if (local == null || remote.isNewerThan(local)) {
                     remote
@@ -987,19 +1030,18 @@ class PhoneCompanionRepository(
     }
 
     private suspend fun PhoneArticleEntity.ensureSyncMetadata(): PhoneArticleEntity {
-        val currentMetadataHash = ArticleSyncBody.metadataHashFor(this)
-        if (
-            syncBodyHash.isNotBlank() &&
-            syncChunkSize == ArticleSyncBody.CHUNK_SIZE_BYTES &&
-            syncChunkHashesJson.isNotBlank()
-        ) {
-            if (syncMetadataHash == currentMetadataHash) return this
-            val updated = copy(syncMetadataHash = currentMetadataHash)
-            articleDao.upsert(updated)
-            return updated
-        }
         val hydrated = hydrateExternalText()
-        val updated = withSyncMetadata(ArticleSyncBody.metadataFor(hydrated))
+        val metadata = ArticleSyncBody.metadataFor(hydrated)
+        if (
+            syncBodyHash == metadata.bodyHash &&
+            syncBodyByteCount == metadata.bodyByteCount &&
+            syncChunkSize == metadata.chunkSize &&
+            syncChunkHashesJson.toStringList() == metadata.chunkHashes &&
+            syncMetadataHash == metadata.metadataHash
+        ) {
+            return this
+        }
+        val updated = withSyncMetadata(metadata)
         articleDao.upsert(updated)
         return updated
     }
@@ -1102,9 +1144,9 @@ class PhoneCompanionRepository(
             (updatedAt == other.updatedAt && sourceDeviceId > other.sourceDeviceId)
     }
 
-    private fun importedContentSourceUrl(): String = ImportedContentIds.ROOT_SOURCE_URL
+    private fun importedContentUrlPrefix(): String = "${ImportedContentIds.ROOT_SOURCE_URL}%"
 
-    private fun importedTextArticlePrefix(): String = "${ImportedContentIds.ROOT_SOURCE_URL}/txt/%"
+    private fun importedEpubUrlPrefix(): String = "${ImportedContentIds.EPUB_SOURCE_ROOT_URL}%"
 
     private fun List<String>.toJsonString(): String {
         return JSONArray().also { array ->

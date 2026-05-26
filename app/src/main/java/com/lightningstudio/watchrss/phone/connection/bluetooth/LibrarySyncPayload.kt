@@ -319,15 +319,29 @@ object LibrarySyncPayload {
         val localById = localManifest.associateBy { it.articleId }
         return remoteManifest.mapNotNull { remote ->
             val local = localById[remote.articleId]
-            val needsMetadata = local == null ||
-                remote.metadataHash != local.metadataHash ||
-                remote.updatedAt > local.updatedAt ||
-                remote.independentChangedAt > local.independentChangedAt ||
-                remote.favoriteChangedAt > local.favoriteChangedAt ||
-                remote.watchLaterChangedAt > local.watchLaterChangedAt ||
-                remote.deletedAt > local.deletedAt ||
-                remote.deleted != local.deleted
-            val needsBody = local == null || remote.bodyHash != local.bodyHash
+            val remoteMetadataNewer = local == null ||
+                remote.updatedAt > local.updatedAt
+            val needsMetadata = if (remote.deleted) {
+                local == null ||
+                    !local.deleted ||
+                    remote.deletedAt > local.deletedAt ||
+                    remote.independentChangedAt > local.independentChangedAt ||
+                    remote.favoriteChangedAt > local.favoriteChangedAt ||
+                    remote.watchLaterChangedAt > local.watchLaterChangedAt
+            } else {
+                local == null ||
+                    (remote.metadataHash != local.metadataHash && remoteMetadataNewer) ||
+                    remote.updatedAt > local.updatedAt ||
+                    remote.independentChangedAt > local.independentChangedAt ||
+                    remote.favoriteChangedAt > local.favoriteChangedAt ||
+                    remote.watchLaterChangedAt > local.watchLaterChangedAt ||
+                    remote.deletedAt > local.deletedAt ||
+                    remote.deleted != local.deleted
+            }
+            val hasReusableLocalBody = local != null &&
+                remote.bodyHash == local.bodyHash &&
+                local.chunkHashes.isNotEmpty()
+            val needsBody = !remote.deleted && !hasReusableLocalBody
             if (!needsMetadata && !needsBody) return@mapNotNull null
             val localHashes = local?.chunkHashes.orEmpty().toSet()
             val chunkIndexes = if (needsBody) {

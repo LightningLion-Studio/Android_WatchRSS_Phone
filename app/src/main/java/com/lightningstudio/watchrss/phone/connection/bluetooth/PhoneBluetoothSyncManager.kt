@@ -122,6 +122,7 @@ class PhoneBluetoothSyncManager(
         }
     ): PhoneBluetoothSyncResult {
         reportProgress(onProgress, PhoneBluetoothSyncStage.CONNECTING, 0)
+        repository.repairImportedContentSourceStates()
         val localManifest = repository.getArticleManifestsForSync()
         val localSources = repository.getRssSourcesForSync()
         reportProgress(onProgress, PhoneBluetoothSyncStage.CONNECTING, 8)

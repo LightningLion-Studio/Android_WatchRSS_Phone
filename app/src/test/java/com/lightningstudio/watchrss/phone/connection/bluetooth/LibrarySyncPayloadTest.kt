@@ -221,6 +221,113 @@ class LibrarySyncPayloadTest {
     }
 
     @Test
+    fun chunkedBodyRequest_requestsFullBodyWhenLocalChunkHashesAreMissing() {
+        val article = testArticle(
+            articleId = "article-1",
+            contentText = "正文"
+        )
+        val remoteManifest = article.toManifestEntry()
+        val localManifest = remoteManifest.copy(chunkHashes = emptyList())
+
+        val requests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+            localManifest = listOf(localManifest),
+            remoteManifest = listOf(remoteManifest)
+        )
+
+        assertEquals(remoteManifest.chunkHashes.indices.toList(), requests.single().chunkIndexes)
+    }
+
+    @Test
+    fun chunkedBodyRequest_doesNotRequestBodyForDeletedRemoteArticle() {
+        val article = testArticle(
+            articleId = "article-deleted",
+            contentText = "正文"
+        )
+        val remoteManifest = article.toManifestEntry().copy(
+            deleted = true,
+            deletedAt = 30L
+        )
+
+        val requests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+            localManifest = emptyList(),
+            remoteManifest = listOf(remoteManifest)
+        )
+
+        assertEquals(emptyList<Int>(), requests.single().chunkIndexes)
+    }
+
+    @Test
+    fun chunkedBodyRequest_ignoresDeletedTombstoneMetadataDrift() {
+        val remoteManifest = testArticle(
+            articleId = "article-deleted",
+            contentText = "正文"
+        ).toManifestEntry().copy(
+            updatedAt = 100L,
+            deleted = true,
+            deletedAt = 30L,
+            metadataHash = "remote-metadata"
+        )
+        val localManifest = remoteManifest.copy(
+            updatedAt = 1L,
+            bodyHash = "local-body",
+            chunkHashes = emptyList(),
+            metadataHash = "local-metadata"
+        )
+
+        val requests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+            localManifest = listOf(localManifest),
+            remoteManifest = listOf(remoteManifest)
+        )
+
+        assertEquals(emptyList<ArticleBodyRequest>(), requests)
+    }
+
+    @Test
+    fun chunkedBodyRequest_ignoresOlderRemoteMetadataDrift() {
+        val localManifest = testArticle(
+            articleId = "article-1",
+            contentText = "正文"
+        ).toManifestEntry().copy(
+            updatedAt = 100L,
+            metadataHash = "local-metadata"
+        )
+        val remoteManifest = localManifest.copy(
+            updatedAt = 90L,
+            metadataHash = "remote-metadata"
+        )
+
+        val requests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+            localManifest = listOf(localManifest),
+            remoteManifest = listOf(remoteManifest)
+        )
+
+        assertEquals(emptyList<ArticleBodyRequest>(), requests)
+    }
+
+    @Test
+    fun chunkedBodyRequest_ignoresSameTimestampMetadataDrift() {
+        val localManifest = testArticle(
+            articleId = "article-1",
+            contentText = "正文"
+        ).toManifestEntry().copy(
+            sourceDeviceId = "a-device",
+            updatedAt = 100L,
+            metadataHash = "local-metadata"
+        )
+        val remoteManifest = localManifest.copy(
+            sourceDeviceId = "z-device",
+            metadataHash = "remote-metadata"
+        )
+
+        val requests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+            localManifest = listOf(localManifest),
+            remoteManifest = listOf(remoteManifest)
+        )
+
+        assertEquals(emptyList<ArticleBodyRequest>(), requests)
+    }
+
+    @Test
     fun chunkedBodyRequest_withMetadataOnlyRequestSendsNoChunks() {
         val article = testArticle(
             articleId = "article-1",

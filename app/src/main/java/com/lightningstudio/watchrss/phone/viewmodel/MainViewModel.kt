@@ -112,6 +112,7 @@ class MainViewModel(
 
     init {
         viewModelScope.launch {
+            runCatching { repository.repairImportedContentSourceStates() }
             runCatching { repository.repairImportedContentTitles() }
         }
     }

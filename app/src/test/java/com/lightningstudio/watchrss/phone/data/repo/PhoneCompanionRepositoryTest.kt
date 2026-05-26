@@ -605,6 +605,159 @@ class PhoneCompanionRepositoryTest {
         )
     }
 
+    @Test
+    fun importedContentSources_areNotSyncedAsRssSources() = runBlocking {
+        val imported = source(
+            url = ImportedContentIds.epubSourceUrl("book"),
+            title = "三体全集",
+            deleted = true,
+            updatedAt = 100L
+        )
+        val regular = source(url = "https://example.com/feed.xml")
+        val sourceDao = FakePhoneRssSourceDao().apply {
+            sources = listOf(imported, regular)
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = FakePhoneArticleDao(),
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone"
+        )
+
+        val exported = repository.getRssSourcesForSync()
+        val merged = repository.mergeRssSourcesFromSync(
+            listOf(imported.copy(sourceDeviceId = "watch", updatedAt = 200L))
+        )
+
+        assertEquals(listOf(regular.url), exported.map { it.url })
+        assertEquals(0, merged)
+        assertEquals(true, sourceDao.sources.first { it.url == imported.url }.deleted)
+    }
+
+    @Test
+    fun repairImportedContentSourceStates_restoresDeletedSourceWithLiveArticles() = runBlocking {
+        val sourceUrl = ImportedContentIds.epubSourceUrl("three-body")
+        val sourceDao = FakePhoneRssSourceDao().apply {
+            sources = listOf(
+                source(
+                    url = sourceUrl,
+                    title = "三体全集",
+                    deleted = true,
+                    deletedAt = 50L,
+                    updatedAt = 50L
+                )
+            )
+        }
+        val articleDao = FakePhoneArticleDao().apply {
+            items = listOf(
+                article(
+                    id = "chapter",
+                    url = ImportedContentIds.epubChapterUrl("three-body", 1, "chapter"),
+                    rssSourceUrl = sourceUrl,
+                    importedAt = 120L
+                )
+            )
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone"
+        )
+
+        val repaired = repository.repairImportedContentSourceStates()
+
+        val repairedSource = sourceDao.sources.single()
+        assertEquals(1, repaired)
+        assertEquals(false, repairedSource.deleted)
+        assertEquals(0L, repairedSource.deletedAt)
+        assertEquals("test-phone", repairedSource.sourceDeviceId)
+        assertEquals(120L, repairedSource.updatedAt)
+    }
+
+    @Test
+    fun deleteRssSource_marksImportedContentArticlesDeleted() = runBlocking {
+        val sourceUrl = ImportedContentIds.epubSourceUrl("three-body")
+        val sourceDao = FakePhoneRssSourceDao().apply {
+            sources = listOf(source(url = sourceUrl, title = "三体全集"))
+        }
+        val articleDao = FakePhoneArticleDao().apply {
+            items = listOf(
+                article(
+                    id = "chapter",
+                    url = ImportedContentIds.epubChapterUrl("three-body", 1, "chapter"),
+                    rssSourceUrl = sourceUrl
+                )
+            )
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone"
+        )
+
+        repository.deleteRssSource(sourceUrl)
+
+        assertEquals(true, articleDao.items.single().deleted)
+        assertEquals(true, sourceDao.sources.single().deleted)
+    }
+
+    @Test
+    fun getArticleManifestsForSync_recomputesStaleBodyMetadata() = runBlocking {
+        val sourceUrl = ImportedContentIds.ROOT_SOURCE_URL
+        val articleDao = FakePhoneArticleDao().apply {
+            items = listOf(
+                article(
+                    id = "stale",
+                    url = ImportedContentIds.txtArticleUrl("stale"),
+                    rssSourceUrl = sourceUrl,
+                    contentText = "新的正文"
+                ).copy(
+                    syncBodyHash = "stale-hash",
+                    syncBodyByteCount = 18L,
+                    syncChunkSize = 131_072,
+                    syncChunkHashesJson = """["stale-hash"]""",
+                    syncMetadataHash = "stale-metadata"
+                )
+            )
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        val manifest = repository.getArticleManifestsForSync().single()
+
+        assertEquals(false, manifest.chunkHashes.contains("stale-hash"))
+        assertEquals(false, articleDao.items.single().syncChunkHashesJson.contains("stale-hash"))
+    }
+
+    private fun source(
+        url: String,
+        title: String = "示例源",
+        deleted: Boolean = false,
+        deletedAt: Long = 0L,
+        updatedAt: Long = 1L
+    ): PhoneRssSourceEntity {
+        return PhoneRssSourceEntity(
+            url = url,
+            sourceDeviceId = "test-phone",
+            title = title,
+            description = "",
+            siteUrl = null,
+            imageUrl = null,
+            createdAt = 1L,
+            updatedAt = updatedAt,
+            sortOrder = updatedAt,
+            isPinned = false,
+            deleted = deleted,
+            deletedAt = deletedAt
+        )
+    }
+
     private fun article(
         id: String,
         url: String = "https://example.com/$id",
@@ -686,11 +839,14 @@ class PhoneCompanionRepositoryTest {
 
         override fun observeIndependent(): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
-        override fun observeRssArticles(importedContentSourceUrl: String): Flow<List<PhoneArticleEntity>> = emptyFlow()
+        override fun observeRssArticles(
+            importedContentPrefix: String,
+            importedEpubPrefix: String
+        ): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
         override fun observeImportedContentArticles(
-            importedContentSourceUrl: String,
-            importedTextArticlePrefix: String
+            importedContentPrefix: String,
+            importedEpubPrefix: String
         ): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
         override fun observeFavorites(): Flow<List<PhoneArticleEntity>> = emptyFlow()
@@ -735,7 +891,10 @@ class PhoneCompanionRepositoryTest {
     private class FakePhoneRssSourceDao : PhoneRssSourceDao {
         var sources: List<PhoneRssSourceEntity> = emptyList()
 
-        override fun observeActive(importedContentSourceUrl: String): Flow<List<PhoneRssSourceEntity>> = emptyFlow()
+        override fun observeActive(
+            importedContentPrefix: String,
+            importedEpubPrefix: String
+        ): Flow<List<PhoneRssSourceEntity>> = emptyFlow()
 
         override suspend fun getByUrl(url: String): PhoneRssSourceEntity? {
             return sources.firstOrNull { it.url == url }

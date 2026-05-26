@@ -20,6 +20,7 @@ data class PhoneRssSourceEntity(
     val createdAt: Long,
     val updatedAt: Long,
     val sortOrder: Long,
+    val isPinned: Boolean,
     val deleted: Boolean,
     val deletedAt: Long
 )

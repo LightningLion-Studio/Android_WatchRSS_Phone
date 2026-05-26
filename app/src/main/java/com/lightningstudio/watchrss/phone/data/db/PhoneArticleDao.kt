@@ -43,19 +43,85 @@ interface PhoneArticleDao {
 
     @Query(
         """
-        SELECT articleId, sourceDeviceId, url, title, siteName, excerpt,
-               NULL AS contentHtml, '' AS contentText, imageUrl, contentHash,
-               importedAt, updatedAt, independentSaved, independentChangedAt,
-               independentSortOrder, rssSourceUrl, rssSourceTitle,
-               favoriteSaved, favoriteChangedAt, favoriteSortOrder,
-               watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
-               deleted, deletedAt
+        SELECT phone_articles.articleId AS articleId,
+               phone_articles.sourceDeviceId AS sourceDeviceId,
+               phone_articles.url AS url,
+               phone_articles.title AS title,
+               phone_articles.siteName AS siteName,
+               phone_articles.excerpt AS excerpt,
+               NULL AS contentHtml,
+               '' AS contentText,
+               phone_articles.imageUrl AS imageUrl,
+               phone_articles.contentHash AS contentHash,
+               phone_articles.importedAt AS importedAt,
+               phone_articles.updatedAt AS updatedAt,
+               phone_articles.independentSaved AS independentSaved,
+               phone_articles.independentChangedAt AS independentChangedAt,
+               phone_articles.independentSortOrder AS independentSortOrder,
+               phone_articles.rssSourceUrl AS rssSourceUrl,
+               phone_articles.rssSourceTitle AS rssSourceTitle,
+               phone_articles.favoriteSaved AS favoriteSaved,
+               phone_articles.favoriteChangedAt AS favoriteChangedAt,
+               phone_articles.favoriteSortOrder AS favoriteSortOrder,
+               phone_articles.watchLaterSaved AS watchLaterSaved,
+               phone_articles.watchLaterChangedAt AS watchLaterChangedAt,
+               phone_articles.watchLaterSortOrder AS watchLaterSortOrder,
+               phone_articles.deleted AS deleted,
+               phone_articles.deletedAt AS deletedAt
         FROM phone_articles
-        WHERE deleted = 0 AND rssSourceUrl IS NOT NULL AND rssSourceUrl != ''
-        ORDER BY updatedAt DESC, importedAt DESC, title ASC
+        LEFT JOIN phone_rss_sources ON phone_rss_sources.url = phone_articles.rssSourceUrl
+        WHERE phone_articles.deleted = 0
+          AND phone_articles.rssSourceUrl IS NOT NULL
+          AND phone_articles.rssSourceUrl != ''
+          AND phone_articles.rssSourceUrl NOT LIKE :importedContentPrefix
+          AND COALESCE(phone_rss_sources.deleted, 0) = 0
+        ORDER BY phone_articles.updatedAt DESC, phone_articles.importedAt DESC, phone_articles.title ASC
         """
     )
-    fun observeRssArticles(): Flow<List<PhoneArticleEntity>>
+    fun observeRssArticles(importedContentPrefix: String): Flow<List<PhoneArticleEntity>>
+
+    @Query(
+        """
+        SELECT phone_articles.articleId AS articleId,
+               phone_articles.sourceDeviceId AS sourceDeviceId,
+               phone_articles.url AS url,
+               phone_articles.title AS title,
+               phone_articles.siteName AS siteName,
+               phone_articles.excerpt AS excerpt,
+               NULL AS contentHtml,
+               '' AS contentText,
+               phone_articles.imageUrl AS imageUrl,
+               phone_articles.contentHash AS contentHash,
+               phone_articles.importedAt AS importedAt,
+               phone_articles.updatedAt AS updatedAt,
+               phone_articles.independentSaved AS independentSaved,
+               phone_articles.independentChangedAt AS independentChangedAt,
+               phone_articles.independentSortOrder AS independentSortOrder,
+               phone_articles.rssSourceUrl AS rssSourceUrl,
+               phone_articles.rssSourceTitle AS rssSourceTitle,
+               phone_articles.favoriteSaved AS favoriteSaved,
+               phone_articles.favoriteChangedAt AS favoriteChangedAt,
+               phone_articles.favoriteSortOrder AS favoriteSortOrder,
+               phone_articles.watchLaterSaved AS watchLaterSaved,
+               phone_articles.watchLaterChangedAt AS watchLaterChangedAt,
+               phone_articles.watchLaterSortOrder AS watchLaterSortOrder,
+               phone_articles.deleted AS deleted,
+               phone_articles.deletedAt AS deletedAt
+        FROM phone_articles
+        LEFT JOIN phone_rss_sources ON phone_rss_sources.url = phone_articles.rssSourceUrl
+        WHERE phone_articles.deleted = 0
+          AND (
+              phone_articles.url LIKE :importedContentPrefix
+              OR phone_articles.rssSourceUrl LIKE :importedContentPrefix
+          )
+          AND COALESCE(phone_rss_sources.deleted, 0) = 0
+        ORDER BY phone_articles.rssSourceTitle ASC,
+                 phone_articles.updatedAt DESC,
+                 phone_articles.importedAt DESC,
+                 phone_articles.title ASC
+        """
+    )
+    fun observeImportedContentArticles(importedContentPrefix: String): Flow<List<PhoneArticleEntity>>
 
     @Query(
         """

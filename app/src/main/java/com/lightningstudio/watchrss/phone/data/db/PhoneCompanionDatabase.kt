@@ -12,7 +12,7 @@ import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
         PhoneArticleEntity::class,
         PhoneRssSourceEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
@@ -107,6 +107,14 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
                           OR length(COALESCE(contentHtml, '')) > 120000
                       )
                     """.trimIndent()
+                )
+            }
+        }
+
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "ALTER TABLE phone_rss_sources ADD COLUMN isPinned INTEGER NOT NULL DEFAULT 0"
                 )
             }
         }

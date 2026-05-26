@@ -322,6 +322,7 @@ class PhoneCompanionRepositoryTest {
                     createdAt = 1L,
                     updatedAt = 1L,
                     sortOrder = 1L,
+                    isPinned = false,
                     deleted = false,
                     deletedAt = 0L
                 )
@@ -404,6 +405,33 @@ class PhoneCompanionRepositoryTest {
         assertEquals(setOf("saved-rss", "removed-save-state", "independent", "imported-content"), ids)
     }
 
+    @Test
+    fun deleteArticle_marksImportedContentAsDeletedTombstone() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val imported = article(
+            id = "imported-content",
+            url = ImportedContentIds.txtArticleUrl("txt-1"),
+            rssSourceUrl = ImportedContentIds.ROOT_SOURCE_URL,
+            favoriteSaved = true,
+            favoriteChangedAt = 10L
+        )
+        articleDao.items = listOf(imported)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        repository.deleteArticle(imported.articleId)
+
+        val deleted = articleDao.items.single()
+        assertTrue(deleted.deleted)
+        assertEquals(false, deleted.favoriteSaved)
+        assertEquals(ImportedContentIds.ROOT_SOURCE_URL, deleted.rssSourceUrl)
+        assertEquals(setOf(imported.articleId), repository.getArticlesForSync().map { it.articleId }.toSet())
+    }
+
     private fun article(
         id: String,
         url: String = "https://example.com/$id",
@@ -471,7 +499,9 @@ class PhoneCompanionRepositoryTest {
 
         override fun observeIndependent(): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
-        override fun observeRssArticles(): Flow<List<PhoneArticleEntity>> = emptyFlow()
+        override fun observeRssArticles(importedContentPrefix: String): Flow<List<PhoneArticleEntity>> = emptyFlow()
+
+        override fun observeImportedContentArticles(importedContentPrefix: String): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
         override fun observeFavorites(): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
@@ -515,7 +545,7 @@ class PhoneCompanionRepositoryTest {
     private class FakePhoneRssSourceDao : PhoneRssSourceDao {
         var sources: List<PhoneRssSourceEntity> = emptyList()
 
-        override fun observeActive(): Flow<List<PhoneRssSourceEntity>> = emptyFlow()
+        override fun observeActive(importedContentPrefix: String): Flow<List<PhoneRssSourceEntity>> = emptyFlow()
 
         override suspend fun getByUrl(url: String): PhoneRssSourceEntity? {
             return sources.firstOrNull { it.url == url }

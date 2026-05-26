@@ -87,6 +87,7 @@ class LibrarySyncPayloadTest {
             createdAt = 1L,
             updatedAt = 2L,
             sortOrder = 2L,
+            isPinned = true,
             deleted = false,
             deletedAt = 0L
         )
@@ -100,6 +101,7 @@ class LibrarySyncPayloadTest {
         assertEquals(article.contentHash, manifest.contentHash)
         assertEquals(article.favoriteChangedAt, manifest.favoriteChangedAt)
         assertEquals(source.title, parsedSource.title)
+        assertEquals(source.isPinned, parsedSource.isPinned)
         assertEquals("syncLibrary", request.getString("action"))
         assertEquals("manifest", request.getString("phase"))
     }

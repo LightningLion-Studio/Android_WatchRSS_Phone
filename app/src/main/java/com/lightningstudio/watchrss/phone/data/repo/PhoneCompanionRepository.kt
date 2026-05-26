@@ -71,12 +71,16 @@ class PhoneCompanionRepository(
         return articleDao.observeIndependent()
     }
 
+    fun observeImportedContentArticles(): Flow<List<PhoneArticleEntity>> {
+        return articleDao.observeImportedContentArticles(importedContentPrefix())
+    }
+
     fun observeRssSources(): Flow<List<PhoneRssSourceEntity>> {
-        return rssSourceDao.observeActive()
+        return rssSourceDao.observeActive(importedContentPrefix())
     }
 
     fun observeRssArticles(): Flow<List<PhoneArticleEntity>> {
-        return articleDao.observeRssArticles()
+        return articleDao.observeRssArticles(importedContentPrefix())
     }
 
     fun observeArticle(articleId: String): Flow<PhoneArticleEntity?> {
@@ -142,6 +146,55 @@ class PhoneCompanionRepository(
             articleDao.upsert(updated)
             updated
         }
+
+    suspend fun moveRssSourceToTop(sourceUrl: String) = withContext(Dispatchers.IO) {
+        val source = rssSourceDao.getByUrl(sourceUrl) ?: return@withContext
+        val now = System.currentTimeMillis()
+        rssSourceDao.upsert(
+            source.copy(
+                sourceDeviceId = deviceId,
+                updatedAt = now,
+                sortOrder = now,
+                deleted = false,
+                deletedAt = 0L
+            )
+        )
+    }
+
+    suspend fun setRssSourcePinned(sourceUrl: String, pinned: Boolean) = withContext(Dispatchers.IO) {
+        val source = rssSourceDao.getByUrl(sourceUrl) ?: return@withContext
+        val now = System.currentTimeMillis()
+        rssSourceDao.upsert(
+            source.copy(
+                sourceDeviceId = deviceId,
+                updatedAt = now,
+                sortOrder = if (pinned) now else source.sortOrder,
+                isPinned = pinned,
+                deleted = false,
+                deletedAt = 0L
+            )
+        )
+    }
+
+    suspend fun deleteRssSource(sourceUrl: String) = withContext(Dispatchers.IO) {
+        val source = rssSourceDao.getByUrl(sourceUrl) ?: return@withContext
+        val now = System.currentTimeMillis()
+        rssSourceDao.upsert(
+            source.copy(
+                sourceDeviceId = deviceId,
+                updatedAt = now,
+                isPinned = false,
+                deleted = true,
+                deletedAt = now
+            )
+        )
+    }
+
+    suspend fun deleteArticle(articleId: String) = withContext(Dispatchers.IO) {
+        val current = articleDao.getById(articleId) ?: return@withContext
+        val now = System.currentTimeMillis()
+        articleDao.upsert(current.markDeletedByUser(now))
+    }
 
     suspend fun getArticlesForSync(): List<PhoneArticleEntity> = withContext(Dispatchers.IO) {
         articleDao.getAllForSync()
@@ -358,6 +411,7 @@ class PhoneCompanionRepository(
             createdAt = existing?.createdAt ?: now,
             updatedAt = now,
             sortOrder = existing?.sortOrder?.takeIf { it > 0L } ?: now,
+            isPinned = existing?.isPinned ?: false,
             deleted = false,
             deletedAt = 0L
         )
@@ -531,8 +585,12 @@ class PhoneCompanionRepository(
             ?: local.rssSourceTitle?.takeIf { it.isNotBlank() }
         val remoteDeletedNewer = remote.deletedAt > local.deletedAt ||
             (remote.deletedAt == local.deletedAt && remote.deleted && remote.sourceDeviceId > local.sourceDeviceId)
+        val isImportedContentArticle = ImportedContentIds.isImportedContentUrl(rssSourceUrl) ||
+            ImportedContentIds.isImportedContentUrl(remote.url) ||
+            ImportedContentIds.isImportedContentUrl(local.url)
         val deleted = when {
-            favoriteSaved || watchLaterSaved || independentSaved || !rssSourceUrl.isNullOrBlank() -> false
+            favoriteSaved || watchLaterSaved || independentSaved -> false
+            !rssSourceUrl.isNullOrBlank() && !isImportedContentArticle -> false
             remoteDeletedNewer -> remote.deleted
             else -> local.deleted
         }
@@ -580,6 +638,36 @@ class PhoneCompanionRepository(
             return copy(deleted = false)
         }
         return copy(deleted = true, deletedAt = timestamp)
+    }
+
+    private fun PhoneArticleEntity.markDeletedByUser(timestamp: Long): PhoneArticleEntity {
+        return copy(
+            sourceDeviceId = deviceId,
+            updatedAt = timestamp,
+            independentSaved = false,
+            independentChangedAt = if (independentSaved || independentChangedAt > 0L) {
+                timestamp
+            } else {
+                independentChangedAt
+            },
+            independentSortOrder = 0L,
+            favoriteSaved = false,
+            favoriteChangedAt = if (favoriteSaved || favoriteChangedAt > 0L) {
+                timestamp
+            } else {
+                favoriteChangedAt
+            },
+            favoriteSortOrder = 0L,
+            watchLaterSaved = false,
+            watchLaterChangedAt = if (watchLaterSaved || watchLaterChangedAt > 0L) {
+                timestamp
+            } else {
+                watchLaterChangedAt
+            },
+            watchLaterSortOrder = 0L,
+            deleted = true,
+            deletedAt = timestamp
+        )
     }
 
     private fun PhoneArticleEntity.shouldSyncThroughLibrary(): Boolean {
@@ -647,6 +735,8 @@ class PhoneCompanionRepository(
         return updatedAt > other.updatedAt ||
             (updatedAt == other.updatedAt && sourceDeviceId > other.sourceDeviceId)
     }
+
+    private fun importedContentPrefix(): String = "${ImportedContentIds.ROOT_SOURCE_URL}%"
 
     private fun hostLabel(link: String): String {
         return runCatching { URI(link).host.orEmpty().removePrefix("www.") }

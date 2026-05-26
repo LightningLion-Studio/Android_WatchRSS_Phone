@@ -1,8 +1,11 @@
 package com.lightningstudio.watchrss.phone.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,6 +18,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -43,6 +48,7 @@ private enum class MainPage {
     FAVORITES,
     WATCH_LATER,
     INDEPENDENT,
+    IMPORTED_CONTENT,
     CHANNEL
 }
 
@@ -58,6 +64,10 @@ fun MainScreen(
     onOpenArticle: (PhoneArticleEntity) -> Unit,
     onToggleFavorite: (PhoneArticleEntity) -> Unit,
     onToggleWatchLater: (PhoneArticleEntity) -> Unit,
+    onMoveRssSourceToTop: (PhoneRssSourceEntity) -> Unit,
+    onToggleRssSourcePinned: (PhoneRssSourceEntity) -> Unit,
+    onDeleteRssSource: (PhoneRssSourceEntity) -> Unit,
+    onDeleteArticle: (PhoneArticleEntity) -> Unit,
     onDismissMessage: () -> Unit
 ) {
     val uriHandler = LocalUriHandler.current
@@ -97,6 +107,7 @@ fun MainScreen(
                 onOpenFavorites = { page = MainPage.FAVORITES },
                 onOpenWatchLater = { page = MainPage.WATCH_LATER },
                 onOpenIndependent = { page = MainPage.INDEPENDENT },
+                onOpenImportedContent = { page = MainPage.IMPORTED_CONTENT },
                 onDismissMessage = onDismissMessage
             )
 
@@ -107,7 +118,10 @@ fun MainScreen(
                 onOpenSource = { source ->
                     selectedSourceUrl = source.url
                     page = MainPage.CHANNEL
-                }
+                },
+                onMoveToTop = onMoveRssSourceToTop,
+                onTogglePinned = onToggleRssSourcePinned,
+                onDelete = onDeleteRssSource
             )
 
             MainPage.FAVORITES -> ArticleListPage(
@@ -118,7 +132,9 @@ fun MainScreen(
                 onOpenArticle = onOpenArticle,
                 onOpenOriginalLink = { uriHandler.openUri(it) },
                 onToggleFavorite = onToggleFavorite,
-                onToggleWatchLater = onToggleWatchLater
+                onToggleWatchLater = onToggleWatchLater,
+                onDeleteArticle = onDeleteArticle,
+                canDeleteArticle = ::canDeleteArticle
             )
 
             MainPage.WATCH_LATER -> ArticleListPage(
@@ -129,7 +145,9 @@ fun MainScreen(
                 onOpenArticle = onOpenArticle,
                 onOpenOriginalLink = { uriHandler.openUri(it) },
                 onToggleFavorite = onToggleFavorite,
-                onToggleWatchLater = onToggleWatchLater
+                onToggleWatchLater = onToggleWatchLater,
+                onDeleteArticle = onDeleteArticle,
+                canDeleteArticle = ::canDeleteArticle
             )
 
             MainPage.INDEPENDENT -> ArticleListPage(
@@ -140,7 +158,22 @@ fun MainScreen(
                 onOpenArticle = onOpenArticle,
                 onOpenOriginalLink = { uriHandler.openUri(it) },
                 onToggleFavorite = onToggleFavorite,
-                onToggleWatchLater = onToggleWatchLater
+                onToggleWatchLater = onToggleWatchLater,
+                onDeleteArticle = onDeleteArticle,
+                canDeleteArticle = ::canDeleteArticle
+            )
+
+            MainPage.IMPORTED_CONTENT -> ArticleListPage(
+                title = "导入内容",
+                emptyText = "暂无导入内容",
+                articles = uiState.importedContentArticles,
+                onBack = { page = MainPage.HOME },
+                onOpenArticle = onOpenArticle,
+                onOpenOriginalLink = { uriHandler.openUri(it) },
+                onToggleFavorite = onToggleFavorite,
+                onToggleWatchLater = onToggleWatchLater,
+                onDeleteArticle = onDeleteArticle,
+                canDeleteArticle = ::canDeleteArticle
             )
 
             MainPage.CHANNEL -> ArticleListPage(
@@ -151,7 +184,9 @@ fun MainScreen(
                 onOpenArticle = onOpenArticle,
                 onOpenOriginalLink = { uriHandler.openUri(it) },
                 onToggleFavorite = onToggleFavorite,
-                onToggleWatchLater = onToggleWatchLater
+                onToggleWatchLater = onToggleWatchLater,
+                onDeleteArticle = onDeleteArticle,
+                canDeleteArticle = ::canDeleteArticle
             )
         }
     }
@@ -171,6 +206,7 @@ private fun HomePage(
     onOpenFavorites: () -> Unit,
     onOpenWatchLater: () -> Unit,
     onOpenIndependent: () -> Unit,
+    onOpenImportedContent: () -> Unit,
     onDismissMessage: () -> Unit
 ) {
     Text(
@@ -203,10 +239,12 @@ private fun HomePage(
         favoriteCount = uiState.favorites.size,
         watchLaterCount = uiState.watchLater.size,
         independentCount = uiState.independentArticles.size,
+        importedContentCount = uiState.importedContentArticles.size,
         onOpenChannels = onOpenChannels,
         onOpenFavorites = onOpenFavorites,
         onOpenWatchLater = onOpenWatchLater,
-        onOpenIndependent = onOpenIndependent
+        onOpenIndependent = onOpenIndependent,
+        onOpenImportedContent = onOpenImportedContent
     )
 }
 
@@ -294,12 +332,12 @@ private fun ImportAndSyncCard(
                 Button(onClick = onImportArticle, enabled = enabled) {
                     Text(text = "添加独立文章")
                 }
-                Button(onClick = onAddRssSource, enabled = enabled) {
-                    Text(text = "添加 RSS 源")
+                Button(onClick = onImportLocalContent, enabled = enabled) {
+                    Text(text = "导入内容")
                 }
             }
-            Button(onClick = onImportLocalContent, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
-                Text(text = "导入小说")
+            Button(onClick = onAddRssSource, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+                Text(text = "添加 RSS 源")
             }
             Button(onClick = onSyncLibrary, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
                 Text(text = "同步手表")
@@ -322,10 +360,12 @@ private fun LibraryEntryCard(
     favoriteCount: Int,
     watchLaterCount: Int,
     independentCount: Int,
+    importedContentCount: Int,
     onOpenChannels: () -> Unit,
     onOpenFavorites: () -> Unit,
     onOpenWatchLater: () -> Unit,
-    onOpenIndependent: () -> Unit
+    onOpenIndependent: () -> Unit,
+    onOpenImportedContent: () -> Unit
 ) {
     Card {
         Column(
@@ -352,6 +392,11 @@ private fun LibraryEntryCard(
                 title = "独立文章",
                 subtitle = "$independentCount 篇",
                 onClick = onOpenIndependent
+            )
+            LibraryEntryRow(
+                title = "导入内容",
+                subtitle = "$importedContentCount 篇",
+                onClick = onOpenImportedContent
             )
         }
     }
@@ -383,7 +428,10 @@ private fun ChannelsPage(
     sources: List<PhoneRssSourceEntity>,
     articlesBySource: Map<String, List<PhoneArticleEntity>>,
     onBack: () -> Unit,
-    onOpenSource: (PhoneRssSourceEntity) -> Unit
+    onOpenSource: (PhoneRssSourceEntity) -> Unit,
+    onMoveToTop: (PhoneRssSourceEntity) -> Unit,
+    onTogglePinned: (PhoneRssSourceEntity) -> Unit,
+    onDelete: (PhoneRssSourceEntity) -> Unit
 ) {
     PageHeader(title = "频道", onBack = onBack)
     if (sources.isEmpty()) {
@@ -394,45 +442,87 @@ private fun ChannelsPage(
         SourceRow(
             source = source,
             articleCount = articlesBySource[source.url].orEmpty().size,
-            onClick = { onOpenSource(source) }
+            onClick = { onOpenSource(source) },
+            onMoveToTop = { onMoveToTop(source) },
+            onTogglePinned = { onTogglePinned(source) },
+            onDelete = { onDelete(source) }
         )
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SourceRow(
     source: PhoneRssSourceEntity,
     articleCount: Int,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onMoveToTop: () -> Unit,
+    onTogglePinned: () -> Unit,
+    onDelete: () -> Unit
 ) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+    var menuExpanded by remember { mutableStateOf(false) }
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = { menuExpanded = true }
+                )
         ) {
-            Text(
-                text = source.title.ifBlank { source.url },
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            source.description.takeIf { it.isNotBlank() }?.let {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
                 Text(
-                    text = it,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    text = source.title.ifBlank { source.url },
+                    style = MaterialTheme.typography.titleMedium,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
+                source.description.takeIf { it.isNotBlank() }?.let {
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Text(
+                    text = buildString {
+                        if (source.isPinned) append("已置顶 · ")
+                        append("$articleCount 篇文章")
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
-            Text(
-                text = "$articleCount 篇文章",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+        }
+        DropdownMenu(
+            expanded = menuExpanded,
+            onDismissRequest = { menuExpanded = false }
+        ) {
+            DropdownMenuItem(
+                text = { Text(text = "移到顶部") },
+                onClick = {
+                    menuExpanded = false
+                    onMoveToTop()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text(text = if (source.isPinned) "取消置顶" else "置顶") },
+                onClick = {
+                    menuExpanded = false
+                    onTogglePinned()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text(text = "删除") },
+                onClick = {
+                    menuExpanded = false
+                    onDelete()
+                }
             )
         }
     }
@@ -447,7 +537,9 @@ private fun ArticleListPage(
     onOpenArticle: (PhoneArticleEntity) -> Unit,
     onOpenOriginalLink: (String) -> Unit,
     onToggleFavorite: (PhoneArticleEntity) -> Unit,
-    onToggleWatchLater: (PhoneArticleEntity) -> Unit
+    onToggleWatchLater: (PhoneArticleEntity) -> Unit,
+    onDeleteArticle: (PhoneArticleEntity) -> Unit,
+    canDeleteArticle: (PhoneArticleEntity) -> Boolean
 ) {
     PageHeader(title = "$title (${articles.size})", onBack = onBack)
     if (articles.isEmpty()) {
@@ -460,7 +552,9 @@ private fun ArticleListPage(
             onOpenArticle = onOpenArticle,
             onOpenOriginalLink = onOpenOriginalLink,
             onToggleFavorite = onToggleFavorite,
-            onToggleWatchLater = onToggleWatchLater
+            onToggleWatchLater = onToggleWatchLater,
+            onDeleteArticle = onDeleteArticle,
+            canDeleteArticle = canDeleteArticle(article)
         )
     }
 }
@@ -486,64 +580,95 @@ private fun PageHeader(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ArticleRow(
     article: PhoneArticleEntity,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
     onOpenOriginalLink: (String) -> Unit,
     onToggleFavorite: (PhoneArticleEntity) -> Unit,
-    onToggleWatchLater: (PhoneArticleEntity) -> Unit
+    onToggleWatchLater: (PhoneArticleEntity) -> Unit,
+    onDeleteArticle: (PhoneArticleEntity) -> Unit,
+    canDeleteArticle: Boolean
 ) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onOpenArticle(article) }
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text(
-                text = article.title.ifBlank { article.url },
-                style = MaterialTheme.typography.bodyLarge,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            val sourceLabel = article.rssSourceTitle?.takeIf { it.isNotBlank() } ?: article.siteName
-            if (sourceLabel.isNotBlank()) {
-                Text(
-                    text = sourceLabel,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+    var menuExpanded by remember { mutableStateOf(false) }
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = { onOpenArticle(article) },
+                    onLongClick = {
+                        if (canDeleteArticle) {
+                            menuExpanded = true
+                        }
+                    }
                 )
-            }
-            val summary = article.excerpt.ifBlank { article.contentText }
-            if (summary.isNotBlank()) {
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
                 Text(
-                    text = summary,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 3,
+                    text = article.title.ifBlank { article.url },
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { onToggleFavorite(article) }) {
-                    Text(text = if (article.favoriteSaved) "取消收藏" else "收藏")
+                val sourceLabel = article.rssSourceTitle?.takeIf { it.isNotBlank() } ?: article.siteName
+                if (sourceLabel.isNotBlank()) {
+                    Text(
+                        text = sourceLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
-                OutlinedButton(onClick = { onToggleWatchLater(article) }) {
-                    Text(text = if (article.watchLaterSaved) "移出稍后" else "稍后再看")
+                val summary = article.excerpt.ifBlank { article.contentText }
+                if (summary.isNotBlank()) {
+                    Text(
+                        text = summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
-                if (article.url.isNotBlank() && !ImportedContentIds.isImportedContentUrl(article.url)) {
-                    OutlinedButton(
-                        onClick = { onOpenOriginalLink(article.url) },
-                        enabled = true
-                    ) {
-                        Text(text = "原网页")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { onToggleFavorite(article) }) {
+                        Text(text = if (article.favoriteSaved) "取消收藏" else "收藏")
+                    }
+                    OutlinedButton(onClick = { onToggleWatchLater(article) }) {
+                        Text(text = if (article.watchLaterSaved) "移出稍后" else "稍后再看")
+                    }
+                    if (article.url.isNotBlank() && !ImportedContentIds.isImportedContentUrl(article.url)) {
+                        OutlinedButton(
+                            onClick = { onOpenOriginalLink(article.url) },
+                            enabled = true
+                        ) {
+                            Text(text = "原网页")
+                        }
                     }
                 }
+                Spacer(modifier = Modifier.height(2.dp))
             }
-            Spacer(modifier = Modifier.height(2.dp))
+        }
+        DropdownMenu(
+            expanded = menuExpanded,
+            onDismissRequest = { menuExpanded = false }
+        ) {
+            DropdownMenuItem(
+                text = { Text(text = "删除") },
+                onClick = {
+                    menuExpanded = false
+                    onDeleteArticle(article)
+                }
+            )
         }
     }
+}
+
+private fun canDeleteArticle(article: PhoneArticleEntity): Boolean {
+    return article.independentSaved ||
+        ImportedContentIds.isImportedContentUrl(article.url) ||
+        ImportedContentIds.isImportedContentUrl(article.rssSourceUrl)
 }

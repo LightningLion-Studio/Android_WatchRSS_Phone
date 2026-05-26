@@ -12,10 +12,11 @@ interface PhoneRssSourceDao {
         """
         SELECT * FROM phone_rss_sources
         WHERE deleted = 0
-        ORDER BY sortOrder DESC, updatedAt DESC, title ASC
+          AND url NOT LIKE :importedContentPrefix
+        ORDER BY isPinned DESC, sortOrder DESC, updatedAt DESC, title ASC
         """
     )
-    fun observeActive(): Flow<List<PhoneRssSourceEntity>>
+    fun observeActive(importedContentPrefix: String): Flow<List<PhoneRssSourceEntity>>
 
     @Query("SELECT * FROM phone_rss_sources WHERE url = :url LIMIT 1")
     suspend fun getByUrl(url: String): PhoneRssSourceEntity?

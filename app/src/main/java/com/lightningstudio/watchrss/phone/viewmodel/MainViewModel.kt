@@ -25,6 +25,7 @@ data class MainUiState(
     val rssSources: List<PhoneRssSourceEntity> = emptyList(),
     val rssArticles: List<PhoneArticleEntity> = emptyList(),
     val independentArticles: List<PhoneArticleEntity> = emptyList(),
+    val importedContentArticles: List<PhoneArticleEntity> = emptyList(),
     val favorites: List<PhoneArticleEntity> = emptyList(),
     val watchLater: List<PhoneArticleEntity> = emptyList()
 )
@@ -38,8 +39,16 @@ private data class LibraryLists(
     val rssSources: List<PhoneRssSourceEntity>,
     val rssArticles: List<PhoneArticleEntity>,
     val independentArticles: List<PhoneArticleEntity>,
+    val importedContentArticles: List<PhoneArticleEntity>,
     val favorites: List<PhoneArticleEntity>,
     val watchLater: List<PhoneArticleEntity>
+)
+
+private data class LibraryContentLists(
+    val rssSources: List<PhoneRssSourceEntity>,
+    val rssArticles: List<PhoneArticleEntity>,
+    val independentArticles: List<PhoneArticleEntity>,
+    val importedContentArticles: List<PhoneArticleEntity>
 )
 
 class MainViewModel(
@@ -50,16 +59,27 @@ class MainViewModel(
 
     val uiState: StateFlow<MainUiState> = combine(
         combine(
-            repository.observeRssSources(),
-            repository.observeRssArticles(),
-            repository.observeIndependentArticles(),
+            combine(
+                repository.observeRssSources(),
+                repository.observeRssArticles(),
+                repository.observeIndependentArticles(),
+                repository.observeImportedContentArticles()
+            ) { rssSources, rssArticles, independentArticles, importedContentArticles ->
+                LibraryContentLists(
+                    rssSources = rssSources,
+                    rssArticles = rssArticles,
+                    independentArticles = independentArticles,
+                    importedContentArticles = importedContentArticles
+                )
+            },
             repository.observeSavedArticles(PhoneSavedItemType.FAVORITE),
             repository.observeSavedArticles(PhoneSavedItemType.WATCH_LATER)
-        ) { rssSources, rssArticles, independentArticles, favorites, watchLater ->
+        ) { content, favorites, watchLater ->
             LibraryLists(
-                rssSources = rssSources,
-                rssArticles = rssArticles,
-                independentArticles = independentArticles,
+                rssSources = content.rssSources,
+                rssArticles = content.rssArticles,
+                independentArticles = content.independentArticles,
+                importedContentArticles = content.importedContentArticles,
                 favorites = favorites,
                 watchLater = watchLater
             )
@@ -70,6 +90,7 @@ class MainViewModel(
             rssSources = lists.rssSources,
             rssArticles = lists.rssArticles,
             independentArticles = lists.independentArticles,
+            importedContentArticles = lists.importedContentArticles,
             favorites = lists.favorites,
             watchLater = lists.watchLater
         )
@@ -144,6 +165,58 @@ class MainViewModel(
 
     fun toggleWatchLater(article: PhoneArticleEntity) {
         toggleSaved(article, PhoneSavedItemType.WATCH_LATER)
+    }
+
+    fun moveRssSourceToTop(source: PhoneRssSourceEntity) {
+        viewModelScope.launch {
+            runBusy("正在调整频道顺序…") {
+                repository.moveRssSourceToTop(source.url)
+                sessionState.value = sessionState.value.copy(
+                    message = "已移到顶部：${source.title.ifBlank { source.url }}",
+                    error = null
+                )
+            }
+        }
+    }
+
+    fun toggleRssSourcePinned(source: PhoneRssSourceEntity) {
+        viewModelScope.launch {
+            runBusy("正在更新频道置顶…") {
+                repository.setRssSourcePinned(source.url, !source.isPinned)
+                sessionState.value = sessionState.value.copy(
+                    message = if (source.isPinned) {
+                        "已取消置顶：${source.title.ifBlank { source.url }}"
+                    } else {
+                        "已置顶：${source.title.ifBlank { source.url }}"
+                    },
+                    error = null
+                )
+            }
+        }
+    }
+
+    fun deleteRssSource(source: PhoneRssSourceEntity) {
+        viewModelScope.launch {
+            runBusy("正在删除频道…") {
+                repository.deleteRssSource(source.url)
+                sessionState.value = sessionState.value.copy(
+                    message = "已删除频道：${source.title.ifBlank { source.url }}",
+                    error = null
+                )
+            }
+        }
+    }
+
+    fun deleteArticle(article: PhoneArticleEntity) {
+        viewModelScope.launch {
+            runBusy("正在删除内容…") {
+                repository.deleteArticle(article.articleId)
+                sessionState.value = sessionState.value.copy(
+                    message = "已删除：${article.title.ifBlank { article.url }}",
+                    error = null
+                )
+            }
+        }
     }
 
     fun syncLibraryByBluetooth() {

@@ -115,6 +115,10 @@ class MainActivity : ComponentActivity() {
                     },
                     onToggleFavorite = viewModel::toggleFavorite,
                     onToggleWatchLater = viewModel::toggleWatchLater,
+                    onMoveRssSourceToTop = viewModel::moveRssSourceToTop,
+                    onToggleRssSourcePinned = viewModel::toggleRssSourcePinned,
+                    onDeleteRssSource = viewModel::deleteRssSource,
+                    onDeleteArticle = viewModel::deleteArticle,
                     onDismissMessage = viewModel::clearMessage
                 )
             }

@@ -1,7 +1,9 @@
 package com.lightningstudio.watchrss.phone
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -15,7 +17,9 @@ import com.lightningstudio.watchrss.phone.ui.MainScreen
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModel
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModelFactory
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels {
@@ -56,6 +60,28 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+    private val importLocalContentLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri == null) {
+                viewModel.showMessage("已取消导入小说")
+                return@registerForActivityResult
+            }
+            lifecycleScope.launch {
+                runCatching {
+                    readSelectedLocalContent(uri)
+                }.onSuccess { file ->
+                    viewModel.importLocalContent(
+                        fileName = file.fileName,
+                        mimeType = file.mimeType,
+                        bytes = file.bytes
+                    )
+                }.onFailure { throwable ->
+                    Log.e(TAG, "Failed to read local content", throwable)
+                    viewModel.showError("小说导入失败：${throwable.message ?: "未知错误"}")
+                }
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val container = (application as PhoneCompanionApplication).container
@@ -80,6 +106,7 @@ class MainActivity : ComponentActivity() {
                     uiState = state,
                     onUrlChange = viewModel::updateUrlInput,
                     onImportArticle = viewModel::importIndependentArticle,
+                    onImportLocalContent = ::selectLocalContent,
                     onAddRssSource = viewModel::addRssSource,
                     onSyncLibrary = { ensureBluetoothPermissions(viewModel::syncLibraryByBluetooth) },
                     onExportBluetoothLog = ::exportBluetoothLog,
@@ -123,6 +150,41 @@ class MainActivity : ComponentActivity() {
         exportBluetoothLogLauncher.launch(fileName)
     }
 
+    private fun selectLocalContent() {
+        importLocalContentLauncher.launch(
+            arrayOf(
+                "text/plain",
+                "text/*",
+                "application/epub+zip",
+                "application/octet-stream",
+                "*/*"
+            )
+        )
+    }
+
+    private suspend fun readSelectedLocalContent(uri: Uri): SelectedLocalContent =
+        withContext(Dispatchers.IO) {
+            val fileName = queryDisplayName(uri)
+                ?: uri.lastPathSegment?.substringAfterLast('/')
+                ?: "未命名文件"
+            val mimeType = contentResolver.getType(uri)
+            val bytes = contentResolver.openInputStream(uri)
+                ?.use { input -> input.readBytes() }
+                ?: error("无法读取文件")
+            SelectedLocalContent(fileName, mimeType, bytes)
+        }
+
+    private fun queryDisplayName(uri: Uri): String? {
+        return runCatching {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { cursor ->
+                    if (!cursor.moveToFirst()) return@use null
+                    val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (index >= 0) cursor.getString(index) else null
+                }
+        }.getOrNull()?.takeIf { it.isNotBlank() }
+    }
+
     private fun handleInboundIntent(intent: Intent?) {
         val url = extractInboundUrl(intent) ?: return
         viewModel.updateUrlInput(url)
@@ -148,3 +210,9 @@ class MainActivity : ComponentActivity() {
         private val URL_PATTERN = Regex("""https?://\S+""")
     }
 }
+
+private data class SelectedLocalContent(
+    val fileName: String,
+    val mimeType: String?,
+    val bytes: ByteArray
+)

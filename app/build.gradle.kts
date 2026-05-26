@@ -23,8 +23,8 @@ android {
         applicationId = "com.lightningstudio.watchrss.phone"
         minSdk = 30
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.0.1"
+        versionCode = 5
+        versionName = "0.0.1-1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -45,6 +45,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            if (hasKeystoreProperties) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+
         release {
             isMinifyEnabled = true
             isShrinkResources = true

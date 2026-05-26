@@ -6,9 +6,13 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
+import com.lightningstudio.watchrss.phone.data.importer.ImportedLocalContent
 import com.lightningstudio.watchrss.phone.data.importer.ImportedRssItem
 import com.lightningstudio.watchrss.phone.data.importer.ImportedRssSource
 import com.lightningstudio.watchrss.phone.data.importer.ImportedWebArticle
+import com.lightningstudio.watchrss.phone.data.importer.LocalContentImportKind
+import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
+import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
@@ -164,6 +168,201 @@ class PhoneCompanionRepositoryTest {
     }
 
     @Test
+    fun importLocalContent_savesImportedChannelArticle() = runBlocking {
+        val sourceDao = FakePhoneRssSourceDao()
+        val articleDao = FakePhoneArticleDao()
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone",
+            localContentImporter = { _, _, _ ->
+                ImportedLocalContent(
+                    kind = LocalContentImportKind.TXT,
+                    source = ImportedRssSource(
+                        url = ImportedContentIds.ROOT_SOURCE_URL,
+                        title = ImportedContentIds.ROOT_SOURCE_TITLE,
+                        description = "导入",
+                        siteUrl = null,
+                        imageUrl = null,
+                        items = listOf(
+                            ImportedRssItem(
+                                url = ImportedContentIds.txtArticleUrl("txt-1"),
+                                title = "本地小说",
+                                excerpt = "摘要",
+                                contentHtml = "<article><p>正文</p></article>",
+                                contentText = "正文",
+                                imageUrl = null,
+                                guid = "txt-1"
+                            )
+                        )
+                    )
+                )
+            }
+        )
+
+        val result = repository.importLocalContent("novel.txt", "text/plain", byteArrayOf(1))
+
+        assertEquals(LocalContentImportKind.TXT, result.kind)
+        assertEquals(ImportedContentIds.ROOT_SOURCE_TITLE, sourceDao.sources.single().title)
+        val article = articleDao.items.single()
+        assertEquals(ImportedContentIds.ROOT_SOURCE_URL, article.rssSourceUrl)
+        assertEquals(false, article.independentSaved)
+        assertEquals(false, article.favoriteSaved)
+        assertEquals(false, article.watchLaterSaved)
+    }
+
+    @Test
+    fun importLocalContent_externalizesLargeTxtWithoutSplitting() = runBlocking {
+        val sourceDao = FakePhoneRssSourceDao()
+        val articleDao = FakePhoneArticleDao()
+        val contentStore = FakeArticleContentStore()
+        val longText = buildString {
+            repeat(130_000) { append('字') }
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone",
+            localContentImporter = { _, _, _ ->
+                ImportedLocalContent(
+                    kind = LocalContentImportKind.TXT,
+                    source = ImportedRssSource(
+                        url = ImportedContentIds.ROOT_SOURCE_URL,
+                        title = ImportedContentIds.ROOT_SOURCE_TITLE,
+                        description = "导入",
+                        siteUrl = null,
+                        imageUrl = null,
+                        items = listOf(
+                            ImportedRssItem(
+                                url = ImportedContentIds.txtArticleUrl("txt-large"),
+                                title = "长篇小说",
+                                excerpt = "摘要",
+                                contentHtml = null,
+                                contentText = longText,
+                                imageUrl = null,
+                                guid = "txt-large"
+                            )
+                        )
+                    )
+                )
+            },
+            articleContentStore = contentStore
+        )
+
+        val result = repository.importLocalContent("novel.txt", "text/plain", byteArrayOf(1))
+
+        assertEquals(1, result.articleCount)
+        val storedArticle = articleDao.items.single()
+        assertTrue(contentStore.isMarker(storedArticle.contentText))
+        assertEquals(longText, contentStore.loadText(storedArticle.contentText))
+        assertEquals(longText, repository.getArticlesForSync().single().contentText)
+    }
+
+    @Test
+    fun importLocalContent_externalizesLargeEpubChapterWithoutSplitting() = runBlocking {
+        val sourceDao = FakePhoneRssSourceDao()
+        val articleDao = FakePhoneArticleDao()
+        val contentStore = FakeArticleContentStore()
+        val longHtml = "<article><p>${"字".repeat(130_000)}</p></article>"
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone",
+            localContentImporter = { _, _, _ ->
+                ImportedLocalContent(
+                    kind = LocalContentImportKind.EPUB,
+                    source = ImportedRssSource(
+                        url = ImportedContentIds.epubSourceUrl("book-large"),
+                        title = "长篇 EPUB",
+                        description = "导入",
+                        siteUrl = null,
+                        imageUrl = null,
+                        items = listOf(
+                            ImportedRssItem(
+                                url = ImportedContentIds.epubChapterUrl("book-large", 1, "chapter-large"),
+                                title = "第一章",
+                                excerpt = "摘要",
+                                contentHtml = longHtml,
+                                contentText = "正文",
+                                imageUrl = null,
+                                guid = "chapter-large"
+                            )
+                        )
+                    )
+                )
+            },
+            articleContentStore = contentStore
+        )
+
+        val result = repository.importLocalContent("book.epub", "application/epub+zip", byteArrayOf(1))
+
+        assertEquals(1, result.articleCount)
+        val storedArticle = articleDao.items.single()
+        assertTrue(contentStore.isMarker(storedArticle.contentHtml.orEmpty()))
+        assertEquals("正文", storedArticle.contentText)
+        assertEquals(longHtml, contentStore.loadText(storedArticle.contentHtml.orEmpty()))
+        assertEquals(longHtml, repository.getArticlesForSync().single().contentHtml)
+    }
+
+    @Test
+    fun repairImportedContentTitles_usesExistingHtmlTocAndTextFallback() = runBlocking {
+        val sourceUrl = ImportedContentIds.epubSourceUrl("three-body")
+        val sourceDao = FakePhoneRssSourceDao().apply {
+            sources = listOf(
+                PhoneRssSourceEntity(
+                    url = sourceUrl,
+                    sourceDeviceId = "test-phone",
+                    title = "三体全集",
+                    description = "导入",
+                    siteUrl = null,
+                    imageUrl = null,
+                    createdAt = 1L,
+                    updatedAt = 1L,
+                    sortOrder = 1L,
+                    deleted = false,
+                    deletedAt = 0L
+                )
+            )
+        }
+        val articleDao = FakePhoneArticleDao().apply {
+            items = listOf(
+                article(
+                    id = "toc",
+                    url = "$sourceUrl/chapter/0001",
+                    rssSourceUrl = sourceUrl,
+                    title = "Contents",
+                    contentHtml = """
+                        <article>
+                          <a href="part0001.html">§§第一章 科学边界</a>
+                          <a href="part0002.html">§§第二章 台 球</a>
+                          <a href="part0003.html">§§第三章 射手和农场主</a>
+                        </article>
+                    """.trimIndent(),
+                    contentText = "目录",
+                    importedAt = 4L
+                ),
+                article(id = "c1", url = "$sourceUrl/chapter/0002", rssSourceUrl = sourceUrl, title = "未知", importedAt = 3L),
+                article(id = "c2", url = "$sourceUrl/chapter/0003", rssSourceUrl = sourceUrl, title = "未知", importedAt = 2L),
+                article(id = "c3", url = "$sourceUrl/chapter/0004", rssSourceUrl = sourceUrl, title = "未知", contentText = "第三章 射手和农场主\n正文", importedAt = 1L)
+            )
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone"
+        )
+
+        val repaired = repository.repairImportedContentTitles()
+
+        assertEquals(4, repaired)
+        assertEquals(listOf("目录", "第一章 科学边界", "第二章 台 球", "第三章 射手和农场主"), articleDao.items.sortedByDescending { it.importedAt }.map { it.title })
+    }
+
+    @Test
     fun getArticlesForSync_excludesPlainRssSourceArticles() = runBlocking {
         val articleDao = FakePhoneArticleDao()
         articleDao.items = listOf(
@@ -186,6 +385,11 @@ class PhoneCompanionRepositoryTest {
                 id = "independent",
                 independentSaved = true,
                 independentChangedAt = 30L
+            ),
+            article(
+                id = "imported-content",
+                url = ImportedContentIds.txtArticleUrl("txt-1"),
+                rssSourceUrl = ImportedContentIds.ROOT_SOURCE_URL
             )
         )
         val repository = PhoneCompanionRepository(
@@ -197,11 +401,16 @@ class PhoneCompanionRepositoryTest {
 
         val ids = repository.getArticlesForSync().map { it.articleId }.toSet()
 
-        assertEquals(setOf("saved-rss", "removed-save-state", "independent"), ids)
+        assertEquals(setOf("saved-rss", "removed-save-state", "independent", "imported-content"), ids)
     }
 
     private fun article(
         id: String,
+        url: String = "https://example.com/$id",
+        title: String = id,
+        contentHtml: String? = null,
+        contentText: String = "正文",
+        importedAt: Long = 1L,
         rssSourceUrl: String? = null,
         independentSaved: Boolean = false,
         independentChangedAt: Long = 0L,
@@ -215,15 +424,15 @@ class PhoneCompanionRepositoryTest {
         return PhoneArticleEntity(
             articleId = id,
             sourceDeviceId = "test-phone",
-            url = "https://example.com/$id",
-            title = id,
+            url = url,
+            title = title,
             siteName = "example.com",
             excerpt = "",
-            contentHtml = null,
-            contentText = "正文",
+            contentHtml = contentHtml,
+            contentText = contentText,
             imageUrl = null,
             contentHash = "hash-$id",
-            importedAt = 1L,
+            importedAt = importedAt,
             updatedAt = maxOf(independentChangedAt, favoriteChangedAt, watchLaterChangedAt, 1L),
             independentSaved = independentSaved,
             independentChangedAt = independentChangedAt,
@@ -272,9 +481,23 @@ class PhoneCompanionRepositoryTest {
             return items.firstOrNull { it.articleId == articleId }
         }
 
+        override suspend fun getByRssSourceUrl(rssSourceUrl: String): List<PhoneArticleEntity> {
+            return items.filter { it.rssSourceUrl == rssSourceUrl }
+        }
+
         override fun observeById(articleId: String): Flow<PhoneArticleEntity?> = emptyFlow()
 
         override suspend fun getAllForSync(): List<PhoneArticleEntity> = items
+
+        override suspend fun updateTitle(articleId: String, title: String, updatedAt: Long) {
+            items = items.map { article ->
+                if (article.articleId == articleId) {
+                    article.copy(title = title, updatedAt = updatedAt)
+                } else {
+                    article
+                }
+            }
+        }
 
         override suspend fun upsert(article: PhoneArticleEntity) {
             items = items.filterNot { it.articleId == article.articleId } + article
@@ -282,6 +505,10 @@ class PhoneCompanionRepositoryTest {
 
         override suspend fun upsertAll(articles: List<PhoneArticleEntity>) {
             articles.forEach { upsert(it) }
+        }
+
+        override suspend fun deleteByRssSourceUrl(rssSourceUrl: String) {
+            items = items.filterNot { it.rssSourceUrl == rssSourceUrl }
         }
     }
 
@@ -303,5 +530,21 @@ class PhoneCompanionRepositoryTest {
         override suspend fun upsertAll(sources: List<PhoneRssSourceEntity>) {
             sources.forEach { upsert(it) }
         }
+    }
+
+    private class FakeArticleContentStore : ArticleContentStore {
+        private val texts = mutableMapOf<String, String>()
+
+        override fun markerFor(articleId: String): String = "fake-local-text:$articleId"
+
+        override fun isMarker(value: String): Boolean = value.startsWith("fake-local-text:")
+
+        override fun storeText(articleId: String, text: String): String {
+            val marker = markerFor(articleId)
+            texts[marker] = text
+            return marker
+        }
+
+        override fun loadText(marker: String): String? = texts[marker]
     }
 }

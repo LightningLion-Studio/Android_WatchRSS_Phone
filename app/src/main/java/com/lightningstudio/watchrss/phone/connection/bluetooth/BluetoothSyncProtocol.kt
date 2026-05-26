@@ -1,8 +1,6 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import org.json.JSONObject
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.InputStream
@@ -19,10 +17,10 @@ object BluetoothSyncProtocol {
     const val ACTION_SYNC_LIBRARY = "syncLibrary"
     const val ACTION_ACK = "ack"
 
-    private const val MAX_FRAME_BYTES = 2 * 1024 * 1024
+    const val MAX_FRAME_BYTES = 2 * 1024 * 1024
 
     fun readFrame(input: InputStream): JSONObject {
-        val dataInput = DataInputStream(BufferedInputStream(input))
+        val dataInput = DataInputStream(input)
         val length = dataInput.readInt()
         require(length in 1..MAX_FRAME_BYTES) { "蓝牙消息长度异常：$length" }
         val bytes = ByteArray(length)
@@ -31,11 +29,16 @@ object BluetoothSyncProtocol {
     }
 
     fun writeFrame(output: OutputStream, payload: JSONObject) {
-        val bytes = payload.toString().toByteArray(Charsets.UTF_8)
+        val bytes = encodeFrame(payload)
         require(bytes.size <= MAX_FRAME_BYTES) { "蓝牙消息过大：${bytes.size}" }
-        val dataOutput = DataOutputStream(BufferedOutputStream(output))
+        val dataOutput = DataOutputStream(output)
         dataOutput.writeInt(bytes.size)
         dataOutput.write(bytes)
         dataOutput.flush()
     }
+
+    fun encodedSize(payload: JSONObject): Int = encodeFrame(payload).size
+
+    private fun encodeFrame(payload: JSONObject): ByteArray =
+        payload.toString().toByteArray(Charsets.UTF_8)
 }

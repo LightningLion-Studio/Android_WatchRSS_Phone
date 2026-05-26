@@ -6,6 +6,7 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyn
 import com.lightningstudio.watchrss.phone.connection.guided.PhoneGuidedSessionManager
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
 import com.lightningstudio.watchrss.phone.data.importer.AndroidWebArticleImporter
+import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
@@ -20,7 +21,8 @@ class PhoneCompanionContainer(context: Context) {
             "watchrss-phone.db"
         ).addMigrations(
             PhoneCompanionDatabase.MIGRATION_1_2,
-            PhoneCompanionDatabase.MIGRATION_2_3
+            PhoneCompanionDatabase.MIGRATION_2_3,
+            PhoneCompanionDatabase.MIGRATION_3_4
         )
             .build()
     }
@@ -37,13 +39,18 @@ class PhoneCompanionContainer(context: Context) {
         AndroidWebArticleImporter(appContext)
     }
 
+    private val articleContentStore: FileArticleContentStore by lazy {
+        FileArticleContentStore(appContext)
+    }
+
     val repository: PhoneCompanionRepository by lazy {
         PhoneCompanionRepository(
             savedItemDao = database.phoneSavedItemDao(),
             articleDao = database.phoneArticleDao(),
             rssSourceDao = database.phoneRssSourceDao(),
             deviceId = deviceIdentity.deviceId,
-            webArticleImporter = webArticleImporter::importUrl
+            webArticleImporter = webArticleImporter::importUrl,
+            articleContentStore = articleContentStore
         )
     }
 

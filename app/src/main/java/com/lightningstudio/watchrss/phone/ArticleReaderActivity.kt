@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
@@ -29,6 +30,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
+import com.lightningstudio.watchrss.phone.data.importer.WebArticleImporter
+import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 
 class ArticleReaderActivity : ComponentActivity() {
@@ -46,6 +49,14 @@ class ArticleReaderActivity : ComponentActivity() {
                     article = article,
                     invalidArticleId = articleId.isBlank(),
                     onBack = { finish() },
+                    onOpenImportedArticle = { url ->
+                        val targetId = runCatching {
+                            WebArticleImporter.stableArticleId(url)
+                        }.getOrNull()
+                        if (targetId != null) {
+                            startActivity(createIntent(this, targetId))
+                        }
+                    },
                     onOpenOriginal = { url ->
                         startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                     }
@@ -70,6 +81,7 @@ private fun ArticleReaderScreen(
     article: PhoneArticleEntity?,
     invalidArticleId: Boolean,
     onBack: () -> Unit,
+    onOpenImportedArticle: (String) -> Unit,
     onOpenOriginal: (String) -> Unit
 ) {
     Surface(modifier = Modifier.fillMaxSize()) {
@@ -124,16 +136,16 @@ private fun ArticleReaderScreen(
                 Button(onClick = onBack) {
                     Text(text = "返回")
                 }
-                Button(
-                    onClick = { onOpenOriginal(safeArticle.url) },
-                    enabled = safeArticle.url.isNotBlank()
-                ) {
-                    Text(text = "原网页")
+                if (safeArticle.url.isNotBlank() && !ImportedContentIds.isImportedContentUrl(safeArticle.url)) {
+                    Button(onClick = { onOpenOriginal(safeArticle.url) }) {
+                        Text(text = "原网页")
+                    }
                 }
             }
             if (!safeArticle.contentHtml.isNullOrBlank()) {
                 HtmlArticleView(
                     article = safeArticle,
+                    onOpenImportedArticle = onOpenImportedArticle,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
@@ -155,6 +167,7 @@ private fun ArticleReaderScreen(
 @Composable
 private fun HtmlArticleView(
     article: PhoneArticleEntity,
+    onOpenImportedArticle: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val html = remember(article.articleId, article.contentHash, article.updatedAt) {
@@ -164,7 +177,27 @@ private fun HtmlArticleView(
         modifier = modifier,
         factory = { context ->
             WebView(context).apply {
-                webViewClient = WebViewClient()
+                webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView?,
+                        request: WebResourceRequest?
+                    ): Boolean {
+                        return shouldOpenImportedArticle(
+                            targetUrl = request?.url?.toString(),
+                            currentUrl = article.url,
+                            onOpenImportedArticle = onOpenImportedArticle
+                        )
+                    }
+
+                    @Suppress("OVERRIDE_DEPRECATION")
+                    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                        return shouldOpenImportedArticle(
+                            targetUrl = url,
+                            currentUrl = article.url,
+                            onOpenImportedArticle = onOpenImportedArticle
+                        )
+                    }
+                }
                 settings.javaScriptEnabled = false
                 settings.domStorageEnabled = false
                 settings.loadsImagesAutomatically = true
@@ -176,6 +209,18 @@ private fun HtmlArticleView(
             webView.loadDataWithBaseURL(article.url, html, "text/html", "UTF-8", null)
         }
     )
+}
+
+private fun shouldOpenImportedArticle(
+    targetUrl: String?,
+    currentUrl: String,
+    onOpenImportedArticle: (String) -> Unit
+): Boolean {
+    val url = targetUrl?.trim().orEmpty()
+    if (!ImportedContentIds.isImportedContentUrl(url)) return false
+    if (url.substringBefore('#') == currentUrl.substringBefore('#')) return false
+    onOpenImportedArticle(url)
+    return true
 }
 
 @Composable

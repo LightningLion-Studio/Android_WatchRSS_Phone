@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
 
 class BluetoothDebugLog(context: Context) {
     private val appContext = context.applicationContext
@@ -17,10 +18,33 @@ class BluetoothDebugLog(context: Context) {
         get() = File(appContext.filesDir, FILE_NAME)
 
     fun append(message: String, throwable: Throwable? = null) {
+        appendEvent(
+            event = "message",
+            fields = mapOf("text" to message),
+            throwable = throwable
+        )
+    }
+
+    fun appendEvent(
+        event: String,
+        sessionId: String? = null,
+        fields: Map<String, Any?> = emptyMap(),
+        throwable: Throwable? = null
+    ) {
         val entry = buildString {
             append(Instant.now().toString())
-            append(' ')
-            append(message)
+            append(" event=")
+            append(event.escapeValue())
+            if (!sessionId.isNullOrBlank()) {
+                append(" session=")
+                append(sessionId.escapeValue())
+            }
+            fields.forEach { (key, value) ->
+                append(' ')
+                append(key.filter { it.isLetterOrDigit() || it == '_' || it == '-' })
+                append('=')
+                append(value.formatValue())
+            }
             appendLine()
             if (throwable != null) {
                 append(Log.getStackTraceString(throwable))
@@ -72,9 +96,49 @@ class BluetoothDebugLog(context: Context) {
         file.writeText(text.takeLast(TRIM_TO_CHARS))
     }
 
-    private companion object {
+    private fun Any?.formatValue(): String {
+        return when (this) {
+            null -> "null"
+            is Number,
+            is Boolean -> toString()
+            else -> toString().escapeValue()
+        }
+    }
+
+    private fun String.escapeValue(): String {
+        val clipped = if (length > MAX_VALUE_CHARS) {
+            take(MAX_VALUE_CHARS) + "...<truncated>"
+        } else {
+            this
+        }
+        return buildString {
+            append('"')
+            clipped.forEach { char ->
+                when (char) {
+                    '\\' -> append("\\\\")
+                    '"' -> append("\\\"")
+                    '\n' -> append("\\n")
+                    '\r' -> append("\\r")
+                    '\t' -> append("\\t")
+                    else -> append(char)
+                }
+            }
+            append('"')
+        }
+    }
+
+    companion object {
+        private val sessionCounter = AtomicInteger(0)
+
+        fun newSessionId(prefix: String): String {
+            val safePrefix = prefix.filter { it.isLetterOrDigit() || it == '-' || it == '_' }
+                .ifBlank { "bt" }
+            return "$safePrefix-${System.currentTimeMillis().toString(36)}-${sessionCounter.incrementAndGet()}"
+        }
+
         private const val FILE_NAME = "bluetooth_debug.log"
         private const val MAX_LOG_BYTES = 512 * 1024
         private const val TRIM_TO_CHARS = 256 * 1024
+        private const val MAX_VALUE_CHARS = 600
     }
 }

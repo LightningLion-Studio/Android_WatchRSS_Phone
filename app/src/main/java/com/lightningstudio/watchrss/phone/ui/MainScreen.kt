@@ -15,6 +15,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -32,15 +33,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
+import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.viewmodel.MainUiState
+import com.lightningstudio.watchrss.phone.viewmodel.MainSyncProgressUi
 
 private enum class MainPage {
     HOME,
-    RSS_SOURCES,
+    CHANNELS,
     FAVORITES,
     WATCH_LATER,
     INDEPENDENT,
-    RSS_CHANNEL
+    CHANNEL
 }
 
 @Composable
@@ -48,6 +51,7 @@ fun MainScreen(
     uiState: MainUiState,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
+    onImportLocalContent: () -> Unit,
     onAddRssSource: () -> Unit,
     onSyncLibrary: () -> Unit,
     onExportBluetoothLog: () -> Unit,
@@ -85,23 +89,24 @@ fun MainScreen(
                 articlesBySource = articlesBySource,
                 onUrlChange = onUrlChange,
                 onImportArticle = onImportArticle,
+                onImportLocalContent = onImportLocalContent,
                 onAddRssSource = onAddRssSource,
                 onSyncLibrary = onSyncLibrary,
                 onExportBluetoothLog = onExportBluetoothLog,
-                onOpenRssSources = { page = MainPage.RSS_SOURCES },
+                onOpenChannels = { page = MainPage.CHANNELS },
                 onOpenFavorites = { page = MainPage.FAVORITES },
                 onOpenWatchLater = { page = MainPage.WATCH_LATER },
                 onOpenIndependent = { page = MainPage.INDEPENDENT },
                 onDismissMessage = onDismissMessage
             )
 
-            MainPage.RSS_SOURCES -> RssSourcesPage(
+            MainPage.CHANNELS -> ChannelsPage(
                 sources = uiState.rssSources,
                 articlesBySource = articlesBySource,
                 onBack = { page = MainPage.HOME },
                 onOpenSource = { source ->
                     selectedSourceUrl = source.url
-                    page = MainPage.RSS_CHANNEL
+                    page = MainPage.CHANNEL
                 }
             )
 
@@ -138,8 +143,8 @@ fun MainScreen(
                 onToggleWatchLater = onToggleWatchLater
             )
 
-            MainPage.RSS_CHANNEL -> ArticleListPage(
-                title = selectedSource?.title ?: "RSS 频道",
+            MainPage.CHANNEL -> ArticleListPage(
+                title = selectedSource?.title ?: "频道",
                 emptyText = "此频道暂无文章",
                 articles = selectedSourceUrl?.let { articlesBySource[it] }.orEmpty(),
                 onBack = goHome,
@@ -158,10 +163,11 @@ private fun HomePage(
     articlesBySource: Map<String, List<PhoneArticleEntity>>,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
+    onImportLocalContent: () -> Unit,
     onAddRssSource: () -> Unit,
     onSyncLibrary: () -> Unit,
     onExportBluetoothLog: () -> Unit,
-    onOpenRssSources: () -> Unit,
+    onOpenChannels: () -> Unit,
     onOpenFavorites: () -> Unit,
     onOpenWatchLater: () -> Unit,
     onOpenIndependent: () -> Unit,
@@ -176,6 +182,7 @@ private fun HomePage(
     StatusCard(
         message = uiState.message,
         error = uiState.error,
+        syncProgress = uiState.syncProgress,
         onDismissMessage = onDismissMessage
     )
 
@@ -184,6 +191,7 @@ private fun HomePage(
         enabled = !uiState.isBusy,
         onUrlChange = onUrlChange,
         onImportArticle = onImportArticle,
+        onImportLocalContent = onImportLocalContent,
         onAddRssSource = onAddRssSource,
         onSyncLibrary = onSyncLibrary,
         onExportBluetoothLog = onExportBluetoothLog
@@ -195,7 +203,7 @@ private fun HomePage(
         favoriteCount = uiState.favorites.size,
         watchLaterCount = uiState.watchLater.size,
         independentCount = uiState.independentArticles.size,
-        onOpenRssSources = onOpenRssSources,
+        onOpenChannels = onOpenChannels,
         onOpenFavorites = onOpenFavorites,
         onOpenWatchLater = onOpenWatchLater,
         onOpenIndependent = onOpenIndependent
@@ -206,6 +214,7 @@ private fun HomePage(
 private fun StatusCard(
     message: String?,
     error: String?,
+    syncProgress: MainSyncProgressUi?,
     onDismissMessage: () -> Unit
 ) {
     Card(
@@ -220,12 +229,28 @@ private fun StatusCard(
                 text = "导入网页、添加 RSS 源后，可手动与已配对手表双向同步资料库。",
                 style = MaterialTheme.typography.bodyMedium
             )
-            message?.takeIf { it.isNotBlank() }?.let {
+            if (syncProgress != null) {
                 Text(
-                    text = it,
+                    text = syncProgress.phase,
                     style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.clickable(onClick = onDismissMessage)
+                    fontWeight = FontWeight.Medium
                 )
+                LinearProgressIndicator(
+                    progress = { syncProgress.percent / 100f },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    text = "进度:${syncProgress.percent}%",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            } else {
+                message?.takeIf { it.isNotBlank() }?.let {
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.clickable(onClick = onDismissMessage)
+                    )
+                }
             }
             error?.takeIf { it.isNotBlank() }?.let {
                 Text(
@@ -245,6 +270,7 @@ private fun ImportAndSyncCard(
     enabled: Boolean,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
+    onImportLocalContent: () -> Unit,
     onAddRssSource: () -> Unit,
     onSyncLibrary: () -> Unit,
     onExportBluetoothLog: () -> Unit
@@ -272,6 +298,9 @@ private fun ImportAndSyncCard(
                     Text(text = "添加 RSS 源")
                 }
             }
+            Button(onClick = onImportLocalContent, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+                Text(text = "导入小说")
+            }
             Button(onClick = onSyncLibrary, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
                 Text(text = "同步手表")
             }
@@ -293,7 +322,7 @@ private fun LibraryEntryCard(
     favoriteCount: Int,
     watchLaterCount: Int,
     independentCount: Int,
-    onOpenRssSources: () -> Unit,
+    onOpenChannels: () -> Unit,
     onOpenFavorites: () -> Unit,
     onOpenWatchLater: () -> Unit,
     onOpenIndependent: () -> Unit
@@ -305,9 +334,9 @@ private fun LibraryEntryCard(
         ) {
             Text(text = "资料库", style = MaterialTheme.typography.titleMedium)
             LibraryEntryRow(
-                title = "RSS源",
+                title = "频道",
                 subtitle = "$rssSourceCount 个频道，$rssArticleCount 篇文章",
-                onClick = onOpenRssSources
+                onClick = onOpenChannels
             )
             LibraryEntryRow(
                 title = "收藏",
@@ -350,15 +379,15 @@ private fun LibraryEntryRow(
 }
 
 @Composable
-private fun RssSourcesPage(
+private fun ChannelsPage(
     sources: List<PhoneRssSourceEntity>,
     articlesBySource: Map<String, List<PhoneArticleEntity>>,
     onBack: () -> Unit,
     onOpenSource: (PhoneRssSourceEntity) -> Unit
 ) {
-    PageHeader(title = "RSS源", onBack = onBack)
+    PageHeader(title = "频道", onBack = onBack)
     if (sources.isEmpty()) {
-        Text(text = "暂无 RSS 源", style = MaterialTheme.typography.bodyMedium)
+        Text(text = "暂无频道", style = MaterialTheme.typography.bodyMedium)
         return
     }
     sources.forEach { source ->
@@ -505,11 +534,13 @@ private fun ArticleRow(
                 OutlinedButton(onClick = { onToggleWatchLater(article) }) {
                     Text(text = if (article.watchLaterSaved) "移出稍后" else "稍后再看")
                 }
-                OutlinedButton(
-                    onClick = { onOpenOriginalLink(article.url) },
-                    enabled = article.url.isNotBlank()
-                ) {
-                    Text(text = "原网页")
+                if (article.url.isNotBlank() && !ImportedContentIds.isImportedContentUrl(article.url)) {
+                    OutlinedButton(
+                        onClick = { onOpenOriginalLink(article.url) },
+                        enabled = true
+                    ) {
+                        Text(text = "原网页")
+                    }
                 }
             }
             Spacer(modifier = Modifier.height(2.dp))

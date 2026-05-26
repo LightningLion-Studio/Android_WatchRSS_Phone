@@ -10,7 +10,14 @@ import kotlinx.coroutines.flow.Flow
 interface PhoneArticleDao {
     @Query(
         """
-        SELECT * FROM phone_articles
+        SELECT articleId, sourceDeviceId, url, title, siteName, excerpt,
+               NULL AS contentHtml, '' AS contentText, imageUrl, contentHash,
+               importedAt, updatedAt, independentSaved, independentChangedAt,
+               independentSortOrder, rssSourceUrl, rssSourceTitle,
+               favoriteSaved, favoriteChangedAt, favoriteSortOrder,
+               watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
+               deleted, deletedAt
+        FROM phone_articles
         WHERE deleted = 0
         ORDER BY updatedAt DESC, importedAt DESC
         LIMIT :limit
@@ -20,7 +27,14 @@ interface PhoneArticleDao {
 
     @Query(
         """
-        SELECT * FROM phone_articles
+        SELECT articleId, sourceDeviceId, url, title, siteName, excerpt,
+               NULL AS contentHtml, '' AS contentText, imageUrl, contentHash,
+               importedAt, updatedAt, independentSaved, independentChangedAt,
+               independentSortOrder, rssSourceUrl, rssSourceTitle,
+               favoriteSaved, favoriteChangedAt, favoriteSortOrder,
+               watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
+               deleted, deletedAt
+        FROM phone_articles
         WHERE deleted = 0 AND independentSaved = 1
         ORDER BY independentSortOrder DESC, independentChangedAt DESC, title ASC
         """
@@ -29,7 +43,14 @@ interface PhoneArticleDao {
 
     @Query(
         """
-        SELECT * FROM phone_articles
+        SELECT articleId, sourceDeviceId, url, title, siteName, excerpt,
+               NULL AS contentHtml, '' AS contentText, imageUrl, contentHash,
+               importedAt, updatedAt, independentSaved, independentChangedAt,
+               independentSortOrder, rssSourceUrl, rssSourceTitle,
+               favoriteSaved, favoriteChangedAt, favoriteSortOrder,
+               watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
+               deleted, deletedAt
+        FROM phone_articles
         WHERE deleted = 0 AND rssSourceUrl IS NOT NULL AND rssSourceUrl != ''
         ORDER BY updatedAt DESC, importedAt DESC, title ASC
         """
@@ -38,7 +59,14 @@ interface PhoneArticleDao {
 
     @Query(
         """
-        SELECT * FROM phone_articles
+        SELECT articleId, sourceDeviceId, url, title, siteName, excerpt,
+               NULL AS contentHtml, '' AS contentText, imageUrl, contentHash,
+               importedAt, updatedAt, independentSaved, independentChangedAt,
+               independentSortOrder, rssSourceUrl, rssSourceTitle,
+               favoriteSaved, favoriteChangedAt, favoriteSortOrder,
+               watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
+               deleted, deletedAt
+        FROM phone_articles
         WHERE deleted = 0 AND favoriteSaved = 1
         ORDER BY favoriteSortOrder DESC, favoriteChangedAt DESC, title ASC
         """
@@ -47,7 +75,14 @@ interface PhoneArticleDao {
 
     @Query(
         """
-        SELECT * FROM phone_articles
+        SELECT articleId, sourceDeviceId, url, title, siteName, excerpt,
+               NULL AS contentHtml, '' AS contentText, imageUrl, contentHash,
+               importedAt, updatedAt, independentSaved, independentChangedAt,
+               independentSortOrder, rssSourceUrl, rssSourceTitle,
+               favoriteSaved, favoriteChangedAt, favoriteSortOrder,
+               watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
+               deleted, deletedAt
+        FROM phone_articles
         WHERE deleted = 0 AND watchLaterSaved = 1
         ORDER BY watchLaterSortOrder DESC, watchLaterChangedAt DESC, title ASC
         """
@@ -57,15 +92,24 @@ interface PhoneArticleDao {
     @Query("SELECT * FROM phone_articles WHERE articleId = :articleId LIMIT 1")
     suspend fun getById(articleId: String): PhoneArticleEntity?
 
+    @Query("SELECT * FROM phone_articles WHERE rssSourceUrl = :rssSourceUrl")
+    suspend fun getByRssSourceUrl(rssSourceUrl: String): List<PhoneArticleEntity>
+
     @Query("SELECT * FROM phone_articles WHERE articleId = :articleId LIMIT 1")
     fun observeById(articleId: String): Flow<PhoneArticleEntity?>
 
     @Query("SELECT * FROM phone_articles")
     suspend fun getAllForSync(): List<PhoneArticleEntity>
 
+    @Query("UPDATE phone_articles SET title = :title, updatedAt = :updatedAt WHERE articleId = :articleId")
+    suspend fun updateTitle(articleId: String, title: String, updatedAt: Long)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(article: PhoneArticleEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(articles: List<PhoneArticleEntity>)
+
+    @Query("DELETE FROM phone_articles WHERE rssSourceUrl = :rssSourceUrl")
+    suspend fun deleteByRssSourceUrl(rssSourceUrl: String)
 }

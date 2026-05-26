@@ -2,12 +2,14 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
@@ -25,7 +27,8 @@ data class BluetoothLibrarySyncExchange(
     val deviceAddress: String,
     val request: JSONObject,
     val manifestResponse: JSONObject,
-    val articlesRequest: JSONObject,
+    val articleRequestFrames: List<JSONObject>,
+    val responseFrames: List<JSONObject>,
     val response: JSONObject
 )
 
@@ -37,35 +40,58 @@ class PhoneBluetoothSyncClient(
     fun exchange(
         request: JSONObject,
         deviceAddress: String? = null,
-        deviceNameHint: String? = null
+        deviceNameHint: String? = null,
+        sessionId: String = BluetoothDebugLog.newSessionId("bt-quick")
     ): BluetoothSyncExchange {
-        requireBluetoothConnectPermission()
-        val adapter = context.getSystemService(BluetoothManager::class.java)
-            ?.adapter
-            ?: error("此设备没有蓝牙适配器")
-        require(adapter.isEnabled) { "蓝牙未开启" }
-
-        val device = selectBondedWatchDevice(
-            devices = adapter.bondedDevices.orEmpty(),
-            deviceAddress = deviceAddress,
-            deviceNameHint = deviceNameHint
+        val totalStartedAt = SystemClock.elapsedRealtime()
+        var socket: BluetoothSocket? = null
+        var selectedDevice: BluetoothDevice? = null
+        debugLog.appendEvent(
+            event = "bt.exchange.start",
+            sessionId = sessionId,
+            fields = payloadFields("request", request) + mapOf(
+                "uuid" to BluetoothSyncProtocol.SERVICE_UUID,
+                "deviceNameHint" to deviceNameHint.orEmpty(),
+                "targetAddress" to deviceAddress.orEmpty()
+            )
         )
-        Log.i(TAG, "connecting to name=${device.name} address=${device.address} uuid=${BluetoothSyncProtocol.SERVICE_UUID}")
-        if (canCancelDiscovery()) {
-            runCatching { adapter.cancelDiscovery() }
-                .onFailure { Log.w(TAG, "cancelDiscovery skipped: ${it.message}") }
-        }
-
-        val socket = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
         try {
-            debugLog.append("exchange connect start device=${device.name} address=${device.address} action=${request.optString("action")}")
-            socket.connect()
-            debugLog.append("exchange connected device=${device.name} address=${device.address}")
-            BluetoothSyncProtocol.writeFrame(socket.outputStream, request)
-            val response = BluetoothSyncProtocol.readFrame(socket.inputStream)
-            writeResponseAck(socket)
+            requireBluetoothConnectPermission()
+            val adapter = context.getSystemService(BluetoothManager::class.java)
+                ?.adapter
+                ?: error("此设备没有蓝牙适配器")
+            require(adapter.isEnabled) { "蓝牙未开启" }
+
+            val bondedDevices = adapter.bondedDevices.orEmpty()
+            logAdapterSnapshot(sessionId, adapter, bondedDevices)
+            val device = selectBondedWatchDevice(
+                devices = bondedDevices,
+                deviceAddress = deviceAddress,
+                deviceNameHint = deviceNameHint
+            )
+            selectedDevice = device
+            debugLog.appendEvent("bt.device.selected", sessionId, deviceFields(device))
+            Log.i(TAG, "connecting to name=${device.name} address=${device.address} uuid=${BluetoothSyncProtocol.SERVICE_UUID}")
+            cancelDiscoveryLogged(adapter, sessionId)
+
+            val createStartedAt = SystemClock.elapsedRealtime()
+            socket = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
+            debugLog.appendEvent(
+                event = "bt.socket.create.success",
+                sessionId = sessionId,
+                fields = deviceFields(device) + mapOf("elapsedMs" to elapsedSince(createStartedAt))
+            )
+            connectLogged(socket, sessionId, device)
+            writeFrameLogged(socket, sessionId, "request", request)
+            val response = readFrameLogged(socket, sessionId, "response")
+            writeResponseAck(socket, sessionId)
             Log.i(TAG, "exchange complete response=$response")
-            debugLog.append("exchange complete device=${device.name} action=${request.optString("action")} success=${response.optBoolean("success", true)}")
+            debugLog.appendEvent(
+                event = "bt.exchange.complete",
+                sessionId = sessionId,
+                fields = deviceFields(device) + payloadFields("response", response) +
+                    mapOf("elapsedMs" to elapsedSince(totalStartedAt))
+            )
             return BluetoothSyncExchange(
                 deviceName = device.name.orEmpty(),
                 deviceAddress = device.address,
@@ -73,92 +99,188 @@ class PhoneBluetoothSyncClient(
                 response = response
             )
         } catch (throwable: Throwable) {
-            debugLog.append(
-                "exchange failed device=${device.name} address=${device.address} action=${request.optString("action")} message=${throwable.message}",
-                throwable
+            debugLog.appendEvent(
+                event = "bt.exchange.failed",
+                sessionId = sessionId,
+                fields = payloadFields("request", request) + (selectedDevice?.let { deviceFields(it) } ?: emptyMap()) +
+                    mapOf(
+                        "elapsedMs" to elapsedSince(totalStartedAt),
+                        "errorClass" to throwable::class.java.name,
+                        "message" to throwable.message.orEmpty()
+                    ),
+                throwable = throwable
             )
             throw throwable
         } finally {
-            runCatching {
-                socket.close()
-            }.onFailure { throwable ->
-                Log.w(TAG, "socket close ignored after exchange: ${throwable.message}")
-            }
+            socket?.let { closeSocketLogged(it, sessionId, "exchange") }
         }
     }
 
     @SuppressLint("MissingPermission")
     fun exchangeLibrary(
         manifestRequest: JSONObject,
-        buildArticlesRequest: (JSONObject) -> JSONObject,
+        buildArticleRequests: (JSONObject, Boolean) -> List<JSONObject>,
         deviceAddress: String? = null,
-        deviceNameHint: String? = null
+        deviceNameHint: String? = null,
+        sessionId: String = BluetoothDebugLog.newSessionId("bt-library"),
+        onProgress: (PhoneBluetoothSyncProgress) -> Unit = {}
     ): BluetoothLibrarySyncExchange {
-        requireBluetoothConnectPermission()
-        val adapter = context.getSystemService(BluetoothManager::class.java)
-            ?.adapter
-            ?: error("此设备没有蓝牙适配器")
-        require(adapter.isEnabled) { "蓝牙未开启" }
-
-        val device = selectBondedWatchDevice(
-            devices = adapter.bondedDevices.orEmpty(),
-            deviceAddress = deviceAddress,
-            deviceNameHint = deviceNameHint
+        val totalStartedAt = SystemClock.elapsedRealtime()
+        var socket: BluetoothSocket? = null
+        var selectedDevice: BluetoothDevice? = null
+        onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.CONNECTING, 5))
+        debugLog.appendEvent(
+            event = "bt.library.start",
+            sessionId = sessionId,
+            fields = payloadFields("manifestRequest", manifestRequest) + mapOf(
+                "uuid" to BluetoothSyncProtocol.SERVICE_UUID,
+                "deviceNameHint" to deviceNameHint.orEmpty(),
+                "targetAddress" to deviceAddress.orEmpty()
+            )
         )
-        Log.i(TAG, "connecting library sync to name=${device.name} address=${device.address} uuid=${BluetoothSyncProtocol.SERVICE_UUID}")
-        if (canCancelDiscovery()) {
-            runCatching { adapter.cancelDiscovery() }
-                .onFailure { Log.w(TAG, "cancelDiscovery skipped: ${it.message}") }
-        }
-
-        val socket = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
         try {
-            debugLog.append("library exchange connect start device=${device.name} address=${device.address}")
-            socket.connect()
-            debugLog.append("library exchange connected device=${device.name} address=${device.address}")
-            BluetoothSyncProtocol.writeFrame(socket.outputStream, manifestRequest)
-            val manifestResponse = BluetoothSyncProtocol.readFrame(socket.inputStream)
+            requireBluetoothConnectPermission()
+            val adapter = context.getSystemService(BluetoothManager::class.java)
+                ?.adapter
+                ?: error("此设备没有蓝牙适配器")
+            require(adapter.isEnabled) { "蓝牙未开启" }
+
+            val bondedDevices = adapter.bondedDevices.orEmpty()
+            logAdapterSnapshot(sessionId, adapter, bondedDevices)
+            val device = selectBondedWatchDevice(
+                devices = bondedDevices,
+                deviceAddress = deviceAddress,
+                deviceNameHint = deviceNameHint
+            )
+            selectedDevice = device
+            debugLog.appendEvent("bt.device.selected", sessionId, deviceFields(device))
+            Log.i(TAG, "connecting library sync to name=${device.name} address=${device.address} uuid=${BluetoothSyncProtocol.SERVICE_UUID}")
+            cancelDiscoveryLogged(adapter, sessionId)
+
+            val createStartedAt = SystemClock.elapsedRealtime()
+            socket = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
+            debugLog.appendEvent(
+                event = "bt.socket.create.success",
+                sessionId = sessionId,
+                fields = deviceFields(device) + mapOf("elapsedMs" to elapsedSince(createStartedAt))
+            )
+            connectLogged(socket, sessionId, device)
+            onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.CONNECTING, 20))
+            writeFrameLogged(socket, sessionId, "manifestRequest", manifestRequest)
+            onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.TRANSFERRING, 25))
+            val manifestResponse = readFrameLogged(socket, sessionId, "manifestResponse")
             if (!manifestResponse.optBoolean("success", true)) {
-                debugLog.append("library exchange manifest rejected response=$manifestResponse")
-                writeResponseAck(socket)
+                debugLog.appendEvent(
+                    event = "bt.library.manifest.rejected",
+                    sessionId = sessionId,
+                    fields = payloadFields("manifestResponse", manifestResponse) +
+                        mapOf("elapsedMs" to elapsedSince(totalStartedAt))
+                )
+                writeResponseAck(socket, sessionId)
                 return BluetoothLibrarySyncExchange(
                     deviceName = device.name.orEmpty(),
                     deviceAddress = device.address,
                     request = manifestRequest,
                     manifestResponse = manifestResponse,
-                    articlesRequest = JSONObject(),
+                    articleRequestFrames = emptyList(),
+                    responseFrames = listOf(manifestResponse),
                     response = manifestResponse
                 )
             }
-            val articlesRequest = buildArticlesRequest(manifestResponse)
-            BluetoothSyncProtocol.writeFrame(socket.outputStream, articlesRequest)
-            val response = BluetoothSyncProtocol.readFrame(socket.inputStream)
-            writeResponseAck(socket)
+            val supportsArticleBatches = manifestResponse.optBoolean("supportsArticleBatches", false)
+            val articleRequests = buildArticleRequests(manifestResponse, supportsArticleBatches)
+            debugLog.appendEvent(
+                event = "bt.library.articles.request.built",
+                sessionId = sessionId,
+                fields = batchFields("articlesRequest", articleRequests)
+            )
+            articleRequests.forEachIndexed { index, articleRequest ->
+                onProgress(
+                    PhoneBluetoothSyncProgress(
+                        PhoneBluetoothSyncStage.TRANSFERRING,
+                        percentBetween(30, 58, index, articleRequests.size)
+                    )
+                )
+                writeFrameLogged(
+                    socket = socket,
+                    sessionId = sessionId,
+                    label = batchLabel("articlesRequest", index, articleRequests.size),
+                    payload = articleRequest
+                )
+                onProgress(
+                    PhoneBluetoothSyncProgress(
+                        PhoneBluetoothSyncStage.TRANSFERRING,
+                        percentBetween(30, 58, index + 1, articleRequests.size)
+                    )
+                )
+            }
+            val responseFrames = readLibraryResponseFrames(socket, sessionId, onProgress)
+            val response = LibrarySyncPayload.combineArticlePayloads(responseFrames)
+            onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.VERIFYING, 88))
+            writeResponseAck(socket, sessionId)
             Log.i(TAG, "library exchange complete manifest=$manifestResponse response=$response")
-            debugLog.append(
-                "library exchange complete device=${device.name} manifestCount=${manifestResponse.optJSONArray("articleManifest")?.length() ?: 0} sentArticles=${articlesRequest.optJSONArray("articles")?.length() ?: 0} receivedArticles=${response.optJSONArray("articles")?.length() ?: 0}"
+            debugLog.appendEvent(
+                event = "bt.library.complete",
+                sessionId = sessionId,
+                fields = deviceFields(device) + payloadFields("manifestResponse", manifestResponse) +
+                    batchFields("articlesRequest", articleRequests) + batchFields("libraryResponse", responseFrames) +
+                    payloadFields("combinedLibraryResponse", response) +
+                    mapOf("elapsedMs" to elapsedSince(totalStartedAt))
             )
             return BluetoothLibrarySyncExchange(
                 deviceName = device.name.orEmpty(),
                 deviceAddress = device.address,
                 request = manifestRequest,
                 manifestResponse = manifestResponse,
-                articlesRequest = articlesRequest,
+                articleRequestFrames = articleRequests,
+                responseFrames = responseFrames,
                 response = response
             )
         } catch (throwable: Throwable) {
-            debugLog.append(
-                "library exchange failed device=${device.name} address=${device.address} message=${throwable.message}",
-                throwable
+            debugLog.appendEvent(
+                event = "bt.library.failed",
+                sessionId = sessionId,
+                fields = payloadFields("manifestRequest", manifestRequest) +
+                    (selectedDevice?.let { deviceFields(it) } ?: emptyMap()) +
+                    mapOf(
+                        "elapsedMs" to elapsedSince(totalStartedAt),
+                        "errorClass" to throwable::class.java.name,
+                        "message" to throwable.message.orEmpty()
+                    ),
+                throwable = throwable
             )
             throw throwable
         } finally {
-            runCatching {
-                socket.close()
-            }.onFailure { throwable ->
-                Log.w(TAG, "socket close ignored after library exchange: ${throwable.message}")
-            }
+            socket?.let { closeSocketLogged(it, sessionId, "library") }
         }
+    }
+
+    private fun readLibraryResponseFrames(
+        socket: BluetoothSocket,
+        sessionId: String,
+        onProgress: (PhoneBluetoothSyncProgress) -> Unit
+    ): List<JSONObject> {
+        onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.TRANSFERRING, 60))
+        val first = readFrameLogged(socket, sessionId, "libraryResponse")
+        val batchCount = first.optInt("batchCount", 1).coerceAtLeast(1)
+        val frames = mutableListOf(first)
+        onProgress(
+            PhoneBluetoothSyncProgress(
+                PhoneBluetoothSyncStage.TRANSFERRING,
+                percentBetween(60, 84, frames.size, batchCount)
+            )
+        )
+        while (frames.size < batchCount) {
+            val index = frames.size
+            frames += readFrameLogged(socket, sessionId, batchLabel("libraryResponse", index, batchCount))
+            onProgress(
+                PhoneBluetoothSyncProgress(
+                    PhoneBluetoothSyncStage.TRANSFERRING,
+                    percentBetween(60, 84, frames.size, batchCount)
+                )
+            )
+        }
+        return frames
     }
 
     @SuppressLint("MissingPermission")
@@ -209,11 +331,161 @@ class PhoneBluetoothSyncClient(
         ) == PackageManager.PERMISSION_GRANTED
     }
 
-    private fun writeResponseAck(socket: BluetoothSocket) {
+    @SuppressLint("MissingPermission")
+    private fun logAdapterSnapshot(
+        sessionId: String,
+        adapter: BluetoothAdapter,
+        devices: Set<BluetoothDevice>
+    ) {
+        val deviceSummaries = devices
+            .sortedBy { it.name.orEmpty() }
+            .joinToString(separator = "|") { device ->
+                "${device.name.orEmpty()}@${device.address}#uuids=${device.uuids?.size ?: 0}"
+            }
+        debugLog.appendEvent(
+            event = "bt.adapter.snapshot",
+            sessionId = sessionId,
+            fields = mapOf(
+                "enabled" to adapter.isEnabled,
+                "bondedCount" to devices.size,
+                "bondedDevices" to deviceSummaries
+            )
+        )
+    }
+
+    private fun cancelDiscoveryLogged(adapter: BluetoothAdapter, sessionId: String) {
+        if (!canCancelDiscovery()) {
+            debugLog.appendEvent(
+                event = "bt.discovery.cancel.skipped",
+                sessionId = sessionId,
+                fields = mapOf("reason" to "missing BLUETOOTH_SCAN permission")
+            )
+            return
+        }
+        val startedAt = SystemClock.elapsedRealtime()
+        runCatching { adapter.cancelDiscovery() }
+            .onSuccess { canceled ->
+                debugLog.appendEvent(
+                    event = "bt.discovery.cancel.success",
+                    sessionId = sessionId,
+                    fields = mapOf(
+                        "result" to canceled,
+                        "elapsedMs" to elapsedSince(startedAt)
+                    )
+                )
+            }
+            .onFailure { throwable ->
+                Log.w(TAG, "cancelDiscovery skipped: ${throwable.message}")
+                debugLog.appendEvent(
+                    event = "bt.discovery.cancel.failed",
+                    sessionId = sessionId,
+                    fields = mapOf(
+                        "elapsedMs" to elapsedSince(startedAt),
+                        "errorClass" to throwable::class.java.name,
+                        "message" to throwable.message.orEmpty()
+                    ),
+                    throwable = throwable
+                )
+            }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun connectLogged(socket: BluetoothSocket, sessionId: String, device: BluetoothDevice) {
+        val startedAt = SystemClock.elapsedRealtime()
+        debugLog.appendEvent("bt.socket.connect.start", sessionId, deviceFields(device))
+        try {
+            socket.connect()
+            debugLog.appendEvent(
+                event = "bt.socket.connect.success",
+                sessionId = sessionId,
+                fields = deviceFields(device) + mapOf("elapsedMs" to elapsedSince(startedAt))
+            )
+        } catch (throwable: Throwable) {
+            debugLog.appendEvent(
+                event = "bt.socket.connect.failed",
+                sessionId = sessionId,
+                fields = deviceFields(device) + mapOf(
+                    "elapsedMs" to elapsedSince(startedAt),
+                    "errorClass" to throwable::class.java.name,
+                    "message" to throwable.message.orEmpty()
+                ),
+                throwable = throwable
+            )
+            throw throwable
+        }
+    }
+
+    private fun writeFrameLogged(
+        socket: BluetoothSocket,
+        sessionId: String,
+        label: String,
+        payload: JSONObject
+    ) {
+        val startedAt = SystemClock.elapsedRealtime()
+        val fields = payloadFields(label, payload)
+        debugLog.appendEvent("bt.frame.write.start", sessionId, mapOf("label" to label) + fields)
+        try {
+            BluetoothSyncProtocol.writeFrame(socket.outputStream, payload)
+            debugLog.appendEvent(
+                event = "bt.frame.write.success",
+                sessionId = sessionId,
+                fields = mapOf("label" to label, "elapsedMs" to elapsedSince(startedAt)) + fields
+            )
+        } catch (throwable: Throwable) {
+            debugLog.appendEvent(
+                event = "bt.frame.write.failed",
+                sessionId = sessionId,
+                fields = mapOf(
+                    "label" to label,
+                    "elapsedMs" to elapsedSince(startedAt),
+                    "errorClass" to throwable::class.java.name,
+                    "message" to throwable.message.orEmpty()
+                ) + fields,
+                throwable = throwable
+            )
+            throw throwable
+        }
+    }
+
+    private fun readFrameLogged(
+        socket: BluetoothSocket,
+        sessionId: String,
+        label: String
+    ): JSONObject {
+        val startedAt = SystemClock.elapsedRealtime()
+        debugLog.appendEvent("bt.frame.read.start", sessionId, mapOf("label" to label))
+        return try {
+            BluetoothSyncProtocol.readFrame(socket.inputStream).also { payload ->
+                debugLog.appendEvent(
+                    event = "bt.frame.read.success",
+                    sessionId = sessionId,
+                    fields = mapOf("label" to label, "elapsedMs" to elapsedSince(startedAt)) +
+                        payloadFields(label, payload)
+                )
+            }
+        } catch (throwable: Throwable) {
+            debugLog.appendEvent(
+                event = "bt.frame.read.failed",
+                sessionId = sessionId,
+                fields = mapOf(
+                    "label" to label,
+                    "elapsedMs" to elapsedSince(startedAt),
+                    "errorClass" to throwable::class.java.name,
+                    "message" to throwable.message.orEmpty()
+                ),
+                throwable = throwable
+            )
+            throw throwable
+        }
+    }
+
+    private fun writeResponseAck(socket: BluetoothSocket, sessionId: String) {
         runCatching {
-            BluetoothSyncProtocol.writeFrame(
-                socket.outputStream,
-                JSONObject().apply {
+            writeFrameLogged(
+                socket = socket,
+                sessionId = sessionId,
+                label = "ack",
+                payload = JSONObject().apply {
                     put("action", BluetoothSyncProtocol.ACTION_ACK)
                     put("success", true)
                 }
@@ -222,6 +494,92 @@ class PhoneBluetoothSyncClient(
             Log.w(TAG, "response ack skipped: ${throwable.message}")
         }
     }
+
+    private fun closeSocketLogged(socket: BluetoothSocket, sessionId: String, owner: String) {
+        val startedAt = SystemClock.elapsedRealtime()
+        runCatching {
+            socket.close()
+        }.onSuccess {
+            debugLog.appendEvent(
+                event = "bt.socket.close.success",
+                sessionId = sessionId,
+                fields = mapOf("owner" to owner, "elapsedMs" to elapsedSince(startedAt))
+            )
+        }.onFailure { throwable ->
+            Log.w(TAG, "socket close ignored after $owner exchange: ${throwable.message}")
+            debugLog.appendEvent(
+                event = "bt.socket.close.failed",
+                sessionId = sessionId,
+                fields = mapOf(
+                    "owner" to owner,
+                    "elapsedMs" to elapsedSince(startedAt),
+                    "errorClass" to throwable::class.java.name,
+                    "message" to throwable.message.orEmpty()
+                ),
+                throwable = throwable
+            )
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun deviceFields(device: BluetoothDevice): Map<String, Any?> {
+        return mapOf(
+            "deviceName" to device.name.orEmpty(),
+            "deviceAddress" to device.address,
+            "deviceUuidCount" to (device.uuids?.size ?: 0)
+        )
+    }
+
+    private fun payloadFields(prefix: String, payload: JSONObject): Map<String, Any?> {
+        return buildMap {
+            put("${prefix}Bytes", runCatching { BluetoothSyncProtocol.encodedSize(payload) }.getOrDefault(-1))
+            put("${prefix}Action", payload.optString("action").ifBlank { null })
+            put("${prefix}Version", if (payload.has("version")) payload.optInt("version") else null)
+            put("${prefix}Phase", payload.optString("phase").ifBlank { null })
+            put("${prefix}Success", if (payload.has("success")) payload.optBoolean("success") else null)
+            put("${prefix}Message", payload.optString("message").ifBlank { null })
+            put("${prefix}ArticleManifestCount", payload.optJSONArray("articleManifest")?.length())
+            put("${prefix}ArticleCount", payload.optJSONArray("articles")?.length())
+            put("${prefix}RssSourceCount", payload.optJSONArray("rssSources")?.length())
+            put("${prefix}ItemCount", payload.optJSONArray("items")?.length())
+            put("${prefix}Count", if (payload.has("count")) payload.optInt("count") else null)
+            put("${prefix}Applied", if (payload.has("applied")) payload.optInt("applied") else null)
+            put("${prefix}SourcesApplied", if (payload.has("sourcesApplied")) payload.optInt("sourcesApplied") else null)
+            put("${prefix}BatchIndex", if (payload.has("batchIndex")) payload.optInt("batchIndex") else null)
+            put("${prefix}BatchCount", if (payload.has("batchCount")) payload.optInt("batchCount") else null)
+            put("${prefix}TotalArticles", if (payload.has("totalArticles")) payload.optInt("totalArticles") else null)
+        }
+    }
+
+    private fun batchFields(prefix: String, payloads: List<JSONObject>): Map<String, Any?> {
+        val articleCount = payloads.sumOf { it.optJSONArray("articles")?.length() ?: 0 }
+        val bytes = payloads.sumOf { payload ->
+            runCatching { BluetoothSyncProtocol.encodedSize(payload) }.getOrDefault(0)
+        }
+        val maxBytes = payloads.maxOfOrNull { payload ->
+            runCatching { BluetoothSyncProtocol.encodedSize(payload) }.getOrDefault(0)
+        } ?: 0
+        return mapOf(
+            "${prefix}FrameCount" to payloads.size,
+            "${prefix}TotalBytes" to bytes,
+            "${prefix}MaxFrameBytes" to maxBytes,
+            "${prefix}ArticleCount" to articleCount
+        )
+    }
+
+    private fun batchLabel(prefix: String, index: Int, count: Int): String {
+        if (count <= 1) return prefix
+        return "$prefix[${index + 1}/$count]"
+    }
+
+    private fun percentBetween(start: Int, end: Int, completed: Int, total: Int): Int {
+        val safeTotal = total.coerceAtLeast(1)
+        val ratio = completed.coerceIn(0, safeTotal).toFloat() / safeTotal.toFloat()
+        return (start + ((end - start) * ratio)).toInt().coerceIn(0, 100)
+    }
+
+    private fun elapsedSince(startedAt: Long): Long =
+        SystemClock.elapsedRealtime() - startedAt
 
     companion object {
         private const val TAG = "WatchRSS_BtSyncClient"

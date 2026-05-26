@@ -2,9 +2,11 @@ package com.lightningstudio.watchrss.phone.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncProgress
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
+import com.lightningstudio.watchrss.phone.data.importer.LocalContentImportKind
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,11 +21,17 @@ data class MainUiState(
     val isBusy: Boolean = false,
     val message: String? = null,
     val error: String? = null,
+    val syncProgress: MainSyncProgressUi? = null,
     val rssSources: List<PhoneRssSourceEntity> = emptyList(),
     val rssArticles: List<PhoneArticleEntity> = emptyList(),
     val independentArticles: List<PhoneArticleEntity> = emptyList(),
     val favorites: List<PhoneArticleEntity> = emptyList(),
     val watchLater: List<PhoneArticleEntity> = emptyList()
+)
+
+data class MainSyncProgressUi(
+    val phase: String,
+    val percent: Int
 )
 
 private data class LibraryLists(
@@ -71,6 +79,12 @@ class MainViewModel(
         MainUiState()
     )
 
+    init {
+        viewModelScope.launch {
+            runCatching { repository.repairImportedContentTitles() }
+        }
+    }
+
     fun updateUrlInput(value: String) {
         sessionState.value = sessionState.value.copy(urlInput = value)
     }
@@ -89,6 +103,21 @@ class MainViewModel(
 
     fun importIndependentArticle() {
         importWebArticle()
+    }
+
+    fun importLocalContent(fileName: String, mimeType: String?, bytes: ByteArray) {
+        viewModelScope.launch {
+            runBusy("正在导入小说…") {
+                val result = repository.importLocalContent(fileName, mimeType, bytes)
+                sessionState.value = sessionState.value.copy(
+                    message = when (result.kind) {
+                        LocalContentImportKind.TXT -> "已导入 TXT 到导入内容，文章 ${result.articleCount} 篇"
+                        LocalContentImportKind.EPUB -> "已导入 EPUB：${result.source.title}，章节 ${result.articleCount} 篇"
+                    },
+                    error = null
+                )
+            }
+        }
     }
 
     fun addRssSource() {
@@ -119,8 +148,14 @@ class MainViewModel(
 
     fun syncLibraryByBluetooth() {
         viewModelScope.launch {
-            runBusy("正在通过蓝牙双向同步…") {
-                val result = bluetoothSyncManager.syncLibrary()
+            sessionState.value = sessionState.value.copy(
+                isBusy = true,
+                message = "建立连接中",
+                error = null,
+                syncProgress = MainSyncProgressUi(phase = "建立连接中", percent = 0)
+            )
+            runCatching {
+                val result = bluetoothSyncManager.syncLibrary(::updateLibrarySyncProgress)
                 val stats = result.libraryStats
                 sessionState.value = sessionState.value.copy(
                     message = if (stats != null) {
@@ -128,9 +163,16 @@ class MainViewModel(
                     } else {
                         "已与 ${result.deviceName.ifBlank { "手表" }} 同步"
                     },
-                    error = null
+                    error = null,
+                    syncProgress = null
+                )
+            }.onFailure { throwable ->
+                sessionState.value = sessionState.value.copy(
+                    error = throwable.message ?: "操作失败",
+                    syncProgress = null
                 )
             }
+            sessionState.value = sessionState.value.copy(isBusy = false)
         }
     }
 
@@ -207,12 +249,29 @@ class MainViewModel(
     }
 
     private suspend fun runBusy(busyMessage: String, block: suspend () -> Unit) {
-        sessionState.value = sessionState.value.copy(isBusy = true, message = busyMessage, error = null)
+        sessionState.value = sessionState.value.copy(
+            isBusy = true,
+            message = busyMessage,
+            error = null,
+            syncProgress = null
+        )
         runCatching { block() }
             .onFailure { throwable ->
                 sessionState.value = sessionState.value.copy(error = throwable.message ?: "操作失败")
         }
-        sessionState.value = sessionState.value.copy(isBusy = false)
+        sessionState.value = sessionState.value.copy(isBusy = false, syncProgress = null)
+    }
+
+    private fun updateLibrarySyncProgress(progress: PhoneBluetoothSyncProgress) {
+        val percent = progress.percent.coerceIn(0, 100)
+        sessionState.value = sessionState.value.copy(
+            message = progress.stage.displayName,
+            error = null,
+            syncProgress = MainSyncProgressUi(
+                phase = progress.stage.displayName,
+                percent = percent
+            )
+        )
     }
 
     override fun onCleared() {

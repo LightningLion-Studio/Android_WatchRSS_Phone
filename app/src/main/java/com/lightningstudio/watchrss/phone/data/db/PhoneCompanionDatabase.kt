@@ -4,6 +4,7 @@ import androidx.room.Database
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 
 @Database(
     entities = [
@@ -11,7 +12,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PhoneArticleEntity::class,
         PhoneRssSourceEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
@@ -90,6 +91,23 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
                     """.trimIndent()
                 )
                 database.execSQL("CREATE INDEX IF NOT EXISTS index_phone_rss_sources_deleted_sortOrder ON phone_rss_sources(deleted, sortOrder)")
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                val importedRoot = ImportedContentIds.ROOT_SOURCE_URL.replace("'", "''")
+                database.execSQL(
+                    """
+                    DELETE FROM phone_articles
+                    WHERE rssSourceUrl = '$importedRoot'
+                      AND (
+                          length(COALESCE(contentHtml, '')) + length(contentText) > 180000
+                          OR length(contentText) > 120000
+                          OR length(COALESCE(contentHtml, '')) > 120000
+                      )
+                    """.trimIndent()
+                )
             }
         }
     }

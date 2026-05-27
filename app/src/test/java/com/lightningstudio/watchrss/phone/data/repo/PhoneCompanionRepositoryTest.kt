@@ -606,16 +606,16 @@ class PhoneCompanionRepositoryTest {
     }
 
     @Test
-    fun importedContentSources_areNotSyncedAsRssSources() = runBlocking {
-        val imported = source(
-            url = ImportedContentIds.epubSourceUrl("book"),
-            title = "三体全集",
+    fun importedTextRootSource_isNotSyncedAsRssSource() = runBlocking {
+        val importedText = source(
+            url = ImportedContentIds.ROOT_SOURCE_URL,
+            title = ImportedContentIds.ROOT_SOURCE_TITLE,
             deleted = true,
             updatedAt = 100L
         )
         val regular = source(url = "https://example.com/feed.xml")
         val sourceDao = FakePhoneRssSourceDao().apply {
-            sources = listOf(imported, regular)
+            sources = listOf(importedText, regular)
         }
         val repository = PhoneCompanionRepository(
             savedItemDao = FakePhoneSavedItemDao(),
@@ -626,12 +626,50 @@ class PhoneCompanionRepositoryTest {
 
         val exported = repository.getRssSourcesForSync()
         val merged = repository.mergeRssSourcesFromSync(
-            listOf(imported.copy(sourceDeviceId = "watch", updatedAt = 200L))
+            listOf(importedText.copy(sourceDeviceId = "watch", updatedAt = 200L))
         )
 
         assertEquals(listOf(regular.url), exported.map { it.url })
         assertEquals(0, merged)
-        assertEquals(true, sourceDao.sources.first { it.url == imported.url }.deleted)
+        assertEquals(true, sourceDao.sources.first { it.url == importedText.url }.deleted)
+    }
+
+    @Test
+    fun importedEpubSources_areSyncedAsRssSources() = runBlocking {
+        val importedEpub = source(
+            url = ImportedContentIds.epubSourceUrl("book"),
+            title = "三体全集",
+            deleted = true,
+            updatedAt = 100L
+        )
+        val legacyImportedEpub = source(
+            url = "${ImportedContentIds.ROOT_SOURCE_URL}/epub/legacy-book",
+            title = "旧版导入书籍",
+            deleted = true,
+            updatedAt = 100L
+        )
+        val regular = source(url = "https://example.com/feed.xml")
+        val sourceDao = FakePhoneRssSourceDao().apply {
+            sources = listOf(importedEpub, legacyImportedEpub, regular)
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = FakePhoneArticleDao(),
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone"
+        )
+
+        val exported = repository.getRssSourcesForSync()
+        val merged = repository.mergeRssSourcesFromSync(
+            listOf(importedEpub.copy(sourceDeviceId = "watch", deleted = false, updatedAt = 200L))
+        )
+
+        assertEquals(
+            listOf(importedEpub.url, legacyImportedEpub.url, regular.url),
+            exported.map { it.url }
+        )
+        assertEquals(1, merged)
+        assertEquals(false, sourceDao.sources.first { it.url == importedEpub.url }.deleted)
     }
 
     @Test
@@ -840,13 +878,13 @@ class PhoneCompanionRepositoryTest {
         override fun observeIndependent(): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
         override fun observeRssArticles(
-            importedContentPrefix: String,
-            importedEpubPrefix: String
+            importedTextSourceUrl: String,
+            importedTextArticlePrefix: String
         ): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
         override fun observeImportedContentArticles(
-            importedContentPrefix: String,
-            importedEpubPrefix: String
+            importedTextSourceUrl: String,
+            importedTextArticlePrefix: String
         ): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
         override fun observeFavorites(): Flow<List<PhoneArticleEntity>> = emptyFlow()
@@ -892,8 +930,7 @@ class PhoneCompanionRepositoryTest {
         var sources: List<PhoneRssSourceEntity> = emptyList()
 
         override fun observeActive(
-            importedContentPrefix: String,
-            importedEpubPrefix: String
+            importedTextSourceUrl: String
         ): Flow<List<PhoneRssSourceEntity>> = emptyFlow()
 
         override suspend fun getByUrl(url: String): PhoneRssSourceEntity? {

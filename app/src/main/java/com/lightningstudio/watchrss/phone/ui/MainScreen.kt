@@ -60,8 +60,7 @@ fun MainScreen(
     uiState: MainUiState,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
-    onImportTxtContent: () -> Unit,
-    onImportEpubContent: () -> Unit,
+    onImportFile: () -> Unit,
     onAddRssSource: () -> Unit,
     onSyncLibrary: () -> Unit,
     onExportBluetoothLog: () -> Unit,
@@ -106,8 +105,7 @@ fun MainScreen(
                 articlesBySource = articlesBySource,
                 onUrlChange = onUrlChange,
                 onImportArticle = onImportArticle,
-                onImportTxtContent = onImportTxtContent,
-                onImportEpubContent = onImportEpubContent,
+                onImportFile = onImportFile,
                 onAddRssSource = onAddRssSource,
                 onSyncLibrary = onSyncLibrary,
                 onExportBluetoothLog = onExportBluetoothLog,
@@ -216,8 +214,7 @@ private fun HomePage(
     articlesBySource: Map<String, List<PhoneArticleEntity>>,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
-    onImportTxtContent: () -> Unit,
-    onImportEpubContent: () -> Unit,
+    onImportFile: () -> Unit,
     onAddRssSource: () -> Unit,
     onSyncLibrary: () -> Unit,
     onExportBluetoothLog: () -> Unit,
@@ -246,8 +243,7 @@ private fun HomePage(
         enabled = !uiState.isBusy,
         onUrlChange = onUrlChange,
         onImportArticle = onImportArticle,
-        onImportTxtContent = onImportTxtContent,
-        onImportEpubContent = onImportEpubContent,
+        onImportFile = onImportFile,
         onAddRssSource = onAddRssSource,
         onSyncLibrary = onSyncLibrary,
         onExportBluetoothLog = onExportBluetoothLog
@@ -402,8 +398,7 @@ private fun ImportAndSyncCard(
     enabled: Boolean,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
-    onImportTxtContent: () -> Unit,
-    onImportEpubContent: () -> Unit,
+    onImportFile: () -> Unit,
     onAddRssSource: () -> Unit,
     onSyncLibrary: () -> Unit,
     onExportBluetoothLog: () -> Unit
@@ -427,12 +422,9 @@ private fun ImportAndSyncCard(
                 Button(onClick = onImportArticle, enabled = enabled) {
                     Text(text = "添加独立文章")
                 }
-                Button(onClick = onImportTxtContent, enabled = enabled) {
-                    Text(text = "导入内容")
+                Button(onClick = onImportFile, enabled = enabled) {
+                    Text(text = "导入文件")
                 }
-            }
-            Button(onClick = onImportEpubContent, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
-                Text(text = "导入 EPUB")
             }
             Button(onClick = onAddRssSource, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
                 Text(text = "添加 RSS 源")

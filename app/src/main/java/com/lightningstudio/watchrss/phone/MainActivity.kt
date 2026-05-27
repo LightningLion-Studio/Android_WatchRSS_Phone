@@ -106,8 +106,7 @@ class MainActivity : ComponentActivity() {
                     uiState = state,
                     onUrlChange = viewModel::updateUrlInput,
                     onImportArticle = viewModel::importIndependentArticle,
-                    onImportTxtContent = ::selectTxtContent,
-                    onImportEpubContent = ::selectEpubContent,
+                    onImportFile = ::selectLocalFile,
                     onAddRssSource = viewModel::addRssSource,
                     onSyncLibrary = { ensureBluetoothPermissions(viewModel::syncLibraryByBluetooth) },
                     onExportBluetoothLog = ::exportBluetoothLog,
@@ -158,18 +157,11 @@ class MainActivity : ComponentActivity() {
         exportBluetoothLogLauncher.launch(fileName)
     }
 
-    private fun selectTxtContent() {
+    private fun selectLocalFile() {
         importLocalContentLauncher.launch(
             arrayOf(
                 "text/plain",
-                "text/*"
-            )
-        )
-    }
-
-    private fun selectEpubContent() {
-        importLocalContentLauncher.launch(
-            arrayOf(
+                "text/*",
                 "application/epub+zip",
                 "application/octet-stream",
                 "*/*"

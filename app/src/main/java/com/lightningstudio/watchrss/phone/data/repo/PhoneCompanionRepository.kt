@@ -80,22 +80,21 @@ class PhoneCompanionRepository(
 
     fun observeImportedContentArticles(): Flow<List<PhoneArticleEntity>> {
         return articleDao.observeImportedContentArticles(
-            importedContentUrlPrefix(),
-            importedEpubUrlPrefix()
+            importedTextSourceUrl(),
+            importedTextArticlePrefix()
         )
     }
 
     fun observeRssSources(): Flow<List<PhoneRssSourceEntity>> {
         return rssSourceDao.observeActive(
-            importedContentUrlPrefix(),
-            importedEpubUrlPrefix()
+            importedTextSourceUrl()
         )
     }
 
     fun observeRssArticles(): Flow<List<PhoneArticleEntity>> {
         return articleDao.observeRssArticles(
-            importedContentUrlPrefix(),
-            importedEpubUrlPrefix()
+            importedTextSourceUrl(),
+            importedTextArticlePrefix()
         )
     }
 
@@ -253,7 +252,7 @@ class PhoneCompanionRepository(
 
     suspend fun getRssSourcesForSync(): List<PhoneRssSourceEntity> = withContext(Dispatchers.IO) {
         rssSourceDao.getAllForSync()
-            .filterNot { ImportedContentIds.isImportedContentUrl(it.url) }
+            .filterNot { ImportedContentIds.isImportedTextSourceUrl(it.url) }
     }
 
     suspend fun repairImportedContentTitles(): Int = withContext(Dispatchers.IO) {
@@ -437,7 +436,7 @@ class PhoneCompanionRepository(
         withContext(Dispatchers.IO) {
             var merged = 0
             incoming.forEach { remote ->
-                if (ImportedContentIds.isImportedContentUrl(remote.url)) return@forEach
+                if (ImportedContentIds.isImportedTextSourceUrl(remote.url)) return@forEach
                 val local = rssSourceDao.getByUrl(remote.url)
                 val next = if (local == null || remote.isNewerThan(local)) {
                     remote
@@ -1144,9 +1143,9 @@ class PhoneCompanionRepository(
             (updatedAt == other.updatedAt && sourceDeviceId > other.sourceDeviceId)
     }
 
-    private fun importedContentUrlPrefix(): String = "${ImportedContentIds.ROOT_SOURCE_URL}%"
+    private fun importedTextSourceUrl(): String = ImportedContentIds.ROOT_SOURCE_URL
 
-    private fun importedEpubUrlPrefix(): String = "${ImportedContentIds.EPUB_SOURCE_ROOT_URL}%"
+    private fun importedTextArticlePrefix(): String = "${ImportedContentIds.ROOT_SOURCE_URL}/txt/%"
 
     private fun List<String>.toJsonString(): String {
         return JSONArray().also { array ->

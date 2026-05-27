@@ -80,15 +80,15 @@ interface PhoneArticleDao {
         WHERE phone_articles.deleted = 0
           AND phone_articles.rssSourceUrl IS NOT NULL
           AND phone_articles.rssSourceUrl != ''
-          AND phone_articles.rssSourceUrl NOT LIKE :importedContentPrefix
-          AND phone_articles.rssSourceUrl NOT LIKE :importedEpubPrefix
+          AND phone_articles.rssSourceUrl != :importedTextSourceUrl
+          AND phone_articles.url NOT LIKE :importedTextArticlePrefix
           AND COALESCE(phone_rss_sources.deleted, 0) = 0
         ORDER BY phone_articles.updatedAt DESC, phone_articles.importedAt DESC, phone_articles.title ASC
         """
     )
     fun observeRssArticles(
-        importedContentPrefix: String,
-        importedEpubPrefix: String
+        importedTextSourceUrl: String,
+        importedTextArticlePrefix: String
     ): Flow<List<PhoneArticleEntity>>
 
     @Query(
@@ -127,10 +127,8 @@ interface PhoneArticleDao {
         LEFT JOIN phone_rss_sources ON phone_rss_sources.url = phone_articles.rssSourceUrl
         WHERE phone_articles.deleted = 0
           AND (
-              phone_articles.rssSourceUrl LIKE :importedContentPrefix
-              OR phone_articles.rssSourceUrl LIKE :importedEpubPrefix
-              OR phone_articles.url LIKE :importedContentPrefix
-              OR phone_articles.url LIKE :importedEpubPrefix
+              phone_articles.rssSourceUrl = :importedTextSourceUrl
+              OR phone_articles.url LIKE :importedTextArticlePrefix
           )
         ORDER BY phone_articles.rssSourceTitle ASC,
                  phone_articles.updatedAt DESC,
@@ -139,8 +137,8 @@ interface PhoneArticleDao {
         """
     )
     fun observeImportedContentArticles(
-        importedContentPrefix: String,
-        importedEpubPrefix: String
+        importedTextSourceUrl: String,
+        importedTextArticlePrefix: String
     ): Flow<List<PhoneArticleEntity>>
 
     @Query(

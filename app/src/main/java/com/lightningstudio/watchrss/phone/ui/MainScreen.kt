@@ -418,26 +418,50 @@ private fun ImportAndSyncCard(
                 singleLine = true,
                 enabled = enabled
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onImportArticle, enabled = enabled) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = onImportArticle,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f)
+                ) {
                     Text(text = "添加独立文章")
                 }
-                Button(onClick = onImportFile, enabled = enabled) {
-                    Text(text = "导入文件")
+                Button(
+                    onClick = onAddRssSource,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(text = "添加 RSS 源")
                 }
             }
-            Button(onClick = onAddRssSource, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
-                Text(text = "添加 RSS 源")
-            }
-            Button(onClick = onSyncLibrary, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
-                Text(text = "同步手表")
-            }
-            OutlinedButton(
-                onClick = onExportBluetoothLog,
-                enabled = enabled,
-                modifier = Modifier.fillMaxWidth()
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text(text = "导出蓝牙日志")
+                Button(
+                    onClick = onImportFile,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(text = "导入文件")
+                }
+                Button(
+                    onClick = onSyncLibrary,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(text = "同步手表")
+                }
+                OutlinedButton(
+                    onClick = onExportBluetoothLog,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(text = "导出日志")
+                }
             }
         }
     }

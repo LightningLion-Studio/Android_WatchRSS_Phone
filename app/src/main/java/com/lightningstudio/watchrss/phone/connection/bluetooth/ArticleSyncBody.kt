@@ -2,8 +2,12 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.Base64
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
 
 data class ArticleBodyMetadata(
     val bodyHash: String,
@@ -52,6 +56,7 @@ data class ChunkedArticlePayload(
 
 object ArticleSyncBody {
     const val CHUNK_SIZE_BYTES = 128 * 1024
+    private const val BODY_ENCODING_VERSION = 2
 
     fun metadataFor(article: PhoneArticleEntity): ArticleBodyMetadata {
         val bodyBytes = encodeBody(article.contentHtml, article.contentText)
@@ -67,6 +72,7 @@ object ArticleSyncBody {
 
     fun metadataHashFor(article: PhoneArticleEntity): String {
         val json = JSONObject().apply {
+            put("bodyEncodingVersion", BODY_ENCODING_VERSION)
             put("articleId", article.articleId)
             put("sourceDeviceId", article.sourceDeviceId)
             put("url", article.url)
@@ -147,16 +153,29 @@ object ArticleSyncBody {
         Base64.getDecoder().decode(value)
 
     private fun encodeBody(contentHtml: String?, contentText: String): ByteArray {
-        return JSONObject().apply {
+        val rawBody = JSONObject().apply {
             put("contentHtml", contentHtml)
             put("contentText", contentText)
         }.toString().toByteArray(Charsets.UTF_8)
+        return gzip(rawBody)
     }
 
     private fun decodeBody(bytes: ByteArray): Pair<String?, String> {
-        val json = JSONObject(bytes.toString(Charsets.UTF_8))
+        val rawBody = runCatching { gunzip(bytes) }.getOrElse { bytes }
+        val json = JSONObject(rawBody.toString(Charsets.UTF_8))
         return json.optString("contentHtml").ifBlank { null } to json.optString("contentText")
     }
+
+    private fun gzip(bytes: ByteArray): ByteArray {
+        val out = ByteArrayOutputStream()
+        GZIPOutputStream(out).use { gzip ->
+            gzip.write(bytes)
+        }
+        return out.toByteArray()
+    }
+
+    private fun gunzip(bytes: ByteArray): ByteArray =
+        GZIPInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
 
     private fun chunkBytes(bytes: ByteArray): List<ByteArray> {
         if (bytes.isEmpty()) return listOf(ByteArray(0))

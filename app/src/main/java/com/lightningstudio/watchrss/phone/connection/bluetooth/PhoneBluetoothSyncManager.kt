@@ -167,7 +167,8 @@ class PhoneBluetoothSyncManager(
                         val phoneRequests = mergeBodyRequests(
                             defaultRequests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
                                 localManifest = localManifest,
-                                remoteManifest = remoteManifest
+                                remoteManifest = remoteManifest,
+                                maxBodyRequestChunks = LibrarySyncPayload.MAX_BODY_REQUEST_CHUNKS_PER_SYNC
                             ).filterNot { it.articleId in conflictPlan.suppressedRemoteArticleIds },
                             forcedRequests = conflictPlan.forcedRemoteRequests
                         )

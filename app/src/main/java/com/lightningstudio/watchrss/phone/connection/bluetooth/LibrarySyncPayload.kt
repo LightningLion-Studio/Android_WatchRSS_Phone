@@ -39,6 +39,7 @@ data class ArticleSyncManifestEntry(
 object LibrarySyncPayload {
     const val PROTOCOL_VERSION = 5
     const val LEGACY_PROTOCOL_VERSION = 4
+    const val MAX_BODY_REQUEST_CHUNKS_PER_SYNC = 24
 
     fun buildRequest(
         deviceId: String,
@@ -314,7 +315,8 @@ object LibrarySyncPayload {
 
     fun buildBodyRequestsForRemoteArticles(
         localManifest: List<ArticleSyncManifestEntry>,
-        remoteManifest: List<ArticleSyncManifestEntry>
+        remoteManifest: List<ArticleSyncManifestEntry>,
+        maxBodyRequestChunks: Int = Int.MAX_VALUE
     ): List<ArticleBodyRequest> {
         val localById = localManifest.associateBy { it.articleId }
         return remoteManifest.mapNotNull { remote ->
@@ -356,7 +358,7 @@ object LibrarySyncPayload {
                 bodyHash = remote.bodyHash,
                 chunkIndexes = chunkIndexes
             )
-        }
+        }.limitBodyRequestChunks(maxBodyRequestChunks)
     }
 
     fun parseBodyRequests(payload: JSONObject): List<ArticleBodyRequest> {
@@ -571,29 +573,41 @@ object LibrarySyncPayload {
 
         val chunks = mutableListOf<List<JSONObject>>()
         var current = mutableListOf<JSONObject>()
-        articleItems.forEach { article ->
-            val candidate = current + article
-            val candidatePayload = buildPayload(candidate.toRawJsonArray(), 0, MAX_BATCH_COUNT_FOR_SIZING, totalArticles)
-            val candidateSize = BluetoothSyncProtocol.encodedSize(candidatePayload)
-            if (candidateSize > ARTICLE_BATCH_TARGET_BYTES && current.isNotEmpty()) {
+        var currentBytes = 0
+        val articleSizes = articleItems.map(BluetoothSyncProtocol::encodedSize)
+        articleItems.forEachIndexed { index, article ->
+            val articleSize = articleSizes[index]
+            if (current.isNotEmpty() && currentBytes + articleSize > ARTICLE_BATCH_TARGET_BYTES) {
                 chunks += current
                 current = mutableListOf(article)
+                currentBytes = articleSize
             } else {
-                current = candidate.toMutableList()
-            }
-            val singlePayload = buildPayload(listOf(article).toRawJsonArray(), 0, MAX_BATCH_COUNT_FOR_SIZING, totalArticles)
-            val singleSize = BluetoothSyncProtocol.encodedSize(singlePayload)
-            require(singleSize <= BluetoothSyncProtocol.MAX_FRAME_BYTES) {
-                "单篇文章蓝牙消息过大：${article.optString("title").ifBlank { article.optString("url") }.take(40)}（$singleSize 字节）"
+                current.add(article)
+                currentBytes += articleSize
             }
         }
         if (current.isNotEmpty()) {
             chunks += current
         }
 
-        val batchCount = chunks.size.coerceAtLeast(1)
-        return chunks.mapIndexed { index, chunk ->
-            buildPayload(chunk.toRawJsonArray(), index, batchCount, totalArticles)
+        while (true) {
+            val batchCount = chunks.size.coerceAtLeast(1)
+            val payloads = chunks.mapIndexed { index, chunk ->
+                buildPayload(chunk.toRawJsonArray(), index, batchCount, totalArticles)
+            }
+            val oversizedIndex = payloads.indexOfFirst { payload ->
+                BluetoothSyncProtocol.encodedSize(payload) > BluetoothSyncProtocol.MAX_FRAME_BYTES
+            }
+            if (oversizedIndex < 0) return payloads
+            val oversized = chunks[oversizedIndex]
+            require(oversized.size > 1) {
+                val item = oversized.first()
+                val payloadSize = BluetoothSyncProtocol.encodedSize(payloads[oversizedIndex])
+                "单篇文章蓝牙消息过大：${item.optString("title").ifBlank { item.optString("url") }.take(40)}（$payloadSize 字节）"
+            }
+            val midpoint = oversized.size / 2
+            chunks[oversizedIndex] = oversized.take(midpoint)
+            chunks.add(oversizedIndex + 1, oversized.drop(midpoint))
         }
     }
 
@@ -657,7 +671,7 @@ object LibrarySyncPayload {
         }
     }
 
-    private fun PhoneArticleEntity.toJson(): JSONObject {
+    private fun PhoneArticleEntity.toJson(includeBody: Boolean = true): JSONObject {
         return JSONObject().apply {
             put("articleId", articleId)
             put("sourceDeviceId", sourceDeviceId)
@@ -665,8 +679,10 @@ object LibrarySyncPayload {
             put("title", title)
             put("siteName", siteName)
             put("excerpt", excerpt)
-            putCompressedString("contentHtmlGzip", contentHtml)
-            putCompressedString("contentTextGzip", contentText)
+            if (includeBody) {
+                putCompressedString("contentHtmlGzip", contentHtml)
+                putCompressedString("contentTextGzip", contentText)
+            }
             put("imageUrl", imageUrl)
             put("contentHash", contentHash)
             put("importedAt", importedAt)
@@ -698,36 +714,14 @@ object LibrarySyncPayload {
         if (chunks.isEmpty()) {
             return listOf(toChunkedJson(metadata, emptyList()))
         }
-        val items = mutableListOf<JSONObject>()
-        var current = mutableListOf<ArticleBodyChunk>()
-        chunks.forEach { chunk ->
-            val candidate = current + chunk
-            val candidateJson = toChunkedJson(metadata, candidate)
-            val candidateSize = BluetoothSyncProtocol.encodedSize(candidateJson)
-            if (candidateSize > ARTICLE_BATCH_TARGET_BYTES && current.isNotEmpty()) {
-                items += toChunkedJson(metadata, current)
-                current = mutableListOf(chunk)
-            } else {
-                current = candidate.toMutableList()
-            }
-            val singleSize = BluetoothSyncProtocol.encodedSize(toChunkedJson(metadata, listOf(chunk)))
-            require(singleSize <= ARTICLE_BATCH_TARGET_BYTES) {
-                "单个正文分块蓝牙消息过大：${title.ifBlank { url }.take(40)}（$singleSize 字节）"
-            }
-        }
-        if (current.isNotEmpty()) {
-            items += toChunkedJson(metadata, current)
-        }
-        return items
+        return chunks.map { chunk -> toChunkedJson(metadata, listOf(chunk)) }
     }
 
     private fun PhoneArticleEntity.toChunkedJson(
         metadata: ArticleBodyMetadata,
         chunks: List<ArticleBodyChunk>
     ): JSONObject {
-        return toJson().apply {
-            remove("contentHtmlGzip")
-            remove("contentTextGzip")
+        return toJson(includeBody = false).apply {
             put(
                 "body",
                 JSONObject().apply {
@@ -801,6 +795,29 @@ object LibrarySyncPayload {
                 )
             }
         }
+    }
+
+    private fun List<ArticleBodyRequest>.limitBodyRequestChunks(maxChunks: Int): List<ArticleBodyRequest> {
+        if (maxChunks == Int.MAX_VALUE) return this
+        if (maxChunks <= 0) return filter { it.chunkIndexes.isEmpty() }
+        var usedChunks = 0
+        val limited = mutableListOf<ArticleBodyRequest>()
+        for (request in this) {
+            val chunkCount = request.chunkIndexes.size
+            if (chunkCount == 0) {
+                limited += request
+                continue
+            }
+            if (usedChunks == 0 && chunkCount > maxChunks) {
+                limited += request
+                usedChunks += chunkCount
+                continue
+            }
+            if (usedChunks + chunkCount > maxChunks) continue
+            limited += request
+            usedChunks += chunkCount
+        }
+        return limited
     }
 
     private fun JSONObject.optStringArray(name: String): List<String> {

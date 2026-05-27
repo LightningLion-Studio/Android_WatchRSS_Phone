@@ -7,6 +7,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,11 +22,13 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -70,6 +73,8 @@ fun MainScreen(
     onMoveRssSourceToTop: (PhoneRssSourceEntity) -> Unit,
     onToggleRssSourcePinned: (PhoneRssSourceEntity) -> Unit,
     onDeleteRssSource: (PhoneRssSourceEntity) -> Unit,
+    onRefreshAllRssSources: () -> Unit,
+    onRefreshRssSource: (PhoneRssSourceEntity) -> Unit,
     onDeleteArticle: (PhoneArticleEntity) -> Unit,
     onClearImportedContent: () -> Unit,
     onChooseConflictResolution: (PhoneSyncConflictResolution) -> Unit,
@@ -92,111 +97,125 @@ fun MainScreen(
         goHome()
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
+    Box(modifier = Modifier.fillMaxSize()) {
         when (page) {
-            MainPage.HOME -> HomePage(
-                uiState = uiState,
-                articlesBySource = articlesBySource,
-                onUrlChange = onUrlChange,
-                onImportArticle = onImportArticle,
-                onImportFile = onImportFile,
-                onAddRssSource = onAddRssSource,
-                onSyncLibrary = onSyncLibrary,
-                onExportBluetoothLog = onExportBluetoothLog,
-                onOpenChannels = { page = MainPage.CHANNELS },
-                onOpenFavorites = { page = MainPage.FAVORITES },
-                onOpenWatchLater = { page = MainPage.WATCH_LATER },
-                onOpenIndependent = { page = MainPage.INDEPENDENT },
-                onOpenImportedContent = { page = MainPage.IMPORTED_CONTENT },
-                onDismissMessage = onDismissMessage
-            )
+            MainPage.HOME -> PageColumn {
+                HomePage(
+                    uiState = uiState,
+                    articlesBySource = articlesBySource,
+                    onUrlChange = onUrlChange,
+                    onImportArticle = onImportArticle,
+                    onImportFile = onImportFile,
+                    onAddRssSource = onAddRssSource,
+                    onSyncLibrary = onSyncLibrary,
+                    onExportBluetoothLog = onExportBluetoothLog,
+                    onOpenChannels = { page = MainPage.CHANNELS },
+                    onOpenFavorites = { page = MainPage.FAVORITES },
+                    onOpenWatchLater = { page = MainPage.WATCH_LATER },
+                    onOpenIndependent = { page = MainPage.INDEPENDENT },
+                    onOpenImportedContent = { page = MainPage.IMPORTED_CONTENT },
+                    onDismissMessage = onDismissMessage
+                )
+            }
 
-            MainPage.CHANNELS -> ChannelsPage(
-                sources = uiState.rssSources,
-                articlesBySource = articlesBySource,
-                onBack = { page = MainPage.HOME },
-                onOpenSource = { source ->
-                    selectedSourceUrl = source.url
-                    page = MainPage.CHANNEL
-                },
-                onMoveToTop = onMoveRssSourceToTop,
-                onTogglePinned = onToggleRssSourcePinned,
-                onDelete = onDeleteRssSource
-            )
+            MainPage.CHANNELS -> RefreshablePageColumn(
+                isRefreshing = uiState.refreshingRssSourceUrls.isNotEmpty(),
+                onRefresh = onRefreshAllRssSources
+            ) {
+                ChannelsPage(
+                    sources = uiState.rssSources,
+                    articlesBySource = articlesBySource,
+                    onBack = { page = MainPage.HOME },
+                    onOpenSource = { source ->
+                        selectedSourceUrl = source.url
+                        page = MainPage.CHANNEL
+                    },
+                    onMoveToTop = onMoveRssSourceToTop,
+                    onTogglePinned = onToggleRssSourcePinned,
+                    onDelete = onDeleteRssSource
+                )
+            }
 
-            MainPage.FAVORITES -> ArticleListPage(
-                title = "收藏",
-                emptyText = "暂无收藏",
-                articles = uiState.favorites,
-                onBack = { page = MainPage.HOME },
-                onOpenArticle = onOpenArticle,
-                onOpenOriginalLink = { uriHandler.openUri(it) },
-                onToggleFavorite = onToggleFavorite,
-                onToggleWatchLater = onToggleWatchLater,
-                onDeleteArticle = onDeleteArticle,
-                canDeleteArticle = ::canDeleteArticle,
-                headerActionLabel = "清空",
-                onHeaderAction = onClearImportedContent,
-                headerActionEnabled = uiState.importedContentArticles.isNotEmpty()
-            )
+            MainPage.FAVORITES -> PageColumn {
+                ArticleListPage(
+                    title = "收藏",
+                    emptyText = "暂无收藏",
+                    articles = uiState.favorites,
+                    onBack = { page = MainPage.HOME },
+                    onOpenArticle = onOpenArticle,
+                    onOpenOriginalLink = { uriHandler.openUri(it) },
+                    onToggleFavorite = onToggleFavorite,
+                    onToggleWatchLater = onToggleWatchLater,
+                    onDeleteArticle = onDeleteArticle,
+                    canDeleteArticle = ::canDeleteArticle,
+                    headerActionLabel = "清空",
+                    onHeaderAction = onClearImportedContent,
+                    headerActionEnabled = uiState.importedContentArticles.isNotEmpty()
+                )
+            }
 
-            MainPage.WATCH_LATER -> ArticleListPage(
-                title = "稍后再看",
-                emptyText = "暂无稍后再看",
-                articles = uiState.watchLater,
-                onBack = { page = MainPage.HOME },
-                onOpenArticle = onOpenArticle,
-                onOpenOriginalLink = { uriHandler.openUri(it) },
-                onToggleFavorite = onToggleFavorite,
-                onToggleWatchLater = onToggleWatchLater,
-                onDeleteArticle = onDeleteArticle,
-                canDeleteArticle = ::canDeleteArticle
-            )
+            MainPage.WATCH_LATER -> PageColumn {
+                ArticleListPage(
+                    title = "稍后再看",
+                    emptyText = "暂无稍后再看",
+                    articles = uiState.watchLater,
+                    onBack = { page = MainPage.HOME },
+                    onOpenArticle = onOpenArticle,
+                    onOpenOriginalLink = { uriHandler.openUri(it) },
+                    onToggleFavorite = onToggleFavorite,
+                    onToggleWatchLater = onToggleWatchLater,
+                    onDeleteArticle = onDeleteArticle,
+                    canDeleteArticle = ::canDeleteArticle
+                )
+            }
 
-            MainPage.INDEPENDENT -> ArticleListPage(
-                title = "独立文章",
-                emptyText = "暂无独立文章",
-                articles = uiState.independentArticles,
-                onBack = { page = MainPage.HOME },
-                onOpenArticle = onOpenArticle,
-                onOpenOriginalLink = { uriHandler.openUri(it) },
-                onToggleFavorite = onToggleFavorite,
-                onToggleWatchLater = onToggleWatchLater,
-                onDeleteArticle = onDeleteArticle,
-                canDeleteArticle = ::canDeleteArticle
-            )
+            MainPage.INDEPENDENT -> PageColumn {
+                ArticleListPage(
+                    title = "独立文章",
+                    emptyText = "暂无独立文章",
+                    articles = uiState.independentArticles,
+                    onBack = { page = MainPage.HOME },
+                    onOpenArticle = onOpenArticle,
+                    onOpenOriginalLink = { uriHandler.openUri(it) },
+                    onToggleFavorite = onToggleFavorite,
+                    onToggleWatchLater = onToggleWatchLater,
+                    onDeleteArticle = onDeleteArticle,
+                    canDeleteArticle = ::canDeleteArticle
+                )
+            }
 
-            MainPage.IMPORTED_CONTENT -> ArticleListPage(
-                title = "导入内容",
-                emptyText = "暂无导入内容",
-                articles = uiState.importedContentArticles,
-                onBack = { page = MainPage.HOME },
-                onOpenArticle = onOpenArticle,
-                onOpenOriginalLink = { uriHandler.openUri(it) },
-                onToggleFavorite = onToggleFavorite,
-                onToggleWatchLater = onToggleWatchLater,
-                onDeleteArticle = onDeleteArticle,
-                canDeleteArticle = ::canDeleteArticle
-            )
+            MainPage.IMPORTED_CONTENT -> PageColumn {
+                ArticleListPage(
+                    title = "导入内容",
+                    emptyText = "暂无导入内容",
+                    articles = uiState.importedContentArticles,
+                    onBack = { page = MainPage.HOME },
+                    onOpenArticle = onOpenArticle,
+                    onOpenOriginalLink = { uriHandler.openUri(it) },
+                    onToggleFavorite = onToggleFavorite,
+                    onToggleWatchLater = onToggleWatchLater,
+                    onDeleteArticle = onDeleteArticle,
+                    canDeleteArticle = ::canDeleteArticle
+                )
+            }
 
-            MainPage.CHANNEL -> ArticleListPage(
-                title = selectedSource?.title ?: "频道",
-                emptyText = "此频道暂无文章",
-                articles = selectedSourceUrl?.let { articlesBySource[it] }.orEmpty(),
-                onBack = goHome,
-                onOpenArticle = onOpenArticle,
-                onOpenOriginalLink = { uriHandler.openUri(it) },
-                onToggleFavorite = onToggleFavorite,
-                onToggleWatchLater = onToggleWatchLater,
-                onDeleteArticle = onDeleteArticle,
-                canDeleteArticle = ::canDeleteArticle
-            )
+            MainPage.CHANNEL -> RefreshablePageColumn(
+                isRefreshing = selectedSourceUrl?.let { it in uiState.refreshingRssSourceUrls } == true,
+                onRefresh = { selectedSource?.let(onRefreshRssSource) }
+            ) {
+                ArticleListPage(
+                    title = selectedSource?.title ?: "频道",
+                    emptyText = "此频道暂无文章",
+                    articles = selectedSourceUrl?.let { articlesBySource[it] }.orEmpty(),
+                    onBack = goHome,
+                    onOpenArticle = onOpenArticle,
+                    onOpenOriginalLink = { uriHandler.openUri(it) },
+                    onToggleFavorite = onToggleFavorite,
+                    onToggleWatchLater = onToggleWatchLater,
+                    onDeleteArticle = onDeleteArticle,
+                    canDeleteArticle = ::canDeleteArticle
+                )
+            }
         }
     }
     uiState.conflictPrompt?.let { prompt ->
@@ -205,6 +224,36 @@ fun MainScreen(
             onChooseResolution = onChooseConflictResolution,
             onShowManualOptions = onShowManualConflictOptions
         )
+    }
+}
+
+@Composable
+private fun PageColumn(
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        content = content
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RefreshablePageColumn(
+    isRefreshing: Boolean,
+    onRefresh: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    PullToRefreshBox(
+        isRefreshing = isRefreshing,
+        onRefresh = onRefresh,
+        modifier = Modifier.fillMaxSize()
+    ) {
+        PageColumn(content = content)
     }
 }
 

@@ -130,6 +130,8 @@ class MainActivity : ComponentActivity() {
                     onMoveRssSourceToTop = viewModel::moveRssSourceToTop,
                     onToggleRssSourcePinned = viewModel::toggleRssSourcePinned,
                     onDeleteRssSource = viewModel::deleteRssSource,
+                    onRefreshAllRssSources = viewModel::refreshAllRssSources,
+                    onRefreshRssSource = viewModel::refreshRssSource,
                     onDeleteArticle = viewModel::deleteArticle,
                     onClearImportedContent = viewModel::clearImportedContent,
                     onChooseConflictResolution = viewModel::chooseConflictResolution,

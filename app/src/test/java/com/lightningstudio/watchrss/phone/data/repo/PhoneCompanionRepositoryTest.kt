@@ -170,6 +170,106 @@ class PhoneCompanionRepositoryTest {
     }
 
     @Test
+    fun refreshRssSource_reimportsFeedAndPreservesSavedState() = runBlocking {
+        val sourceDao = FakePhoneRssSourceDao()
+        val articleDao = FakePhoneArticleDao()
+        var importCount = 0
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone",
+            rssSourceImporter = { input ->
+                importCount += 1
+                ImportedRssSource(
+                    url = input,
+                    title = if (importCount == 1) "示例源" else "示例源更新",
+                    description = "源描述",
+                    siteUrl = "https://example.com",
+                    imageUrl = null,
+                    items = buildList {
+                        add(
+                            ImportedRssItem(
+                                url = "https://example.com/a",
+                                title = if (importCount == 1) "频道文章" else "频道文章更新",
+                                excerpt = "摘要",
+                                contentHtml = null,
+                                contentText = "正文",
+                                imageUrl = null,
+                                guid = "a"
+                            )
+                        )
+                        if (importCount > 1) {
+                            add(
+                                ImportedRssItem(
+                                    url = "https://example.com/b",
+                                    title = "新增文章",
+                                    excerpt = "摘要",
+                                    contentHtml = null,
+                                    contentText = "正文",
+                                    imageUrl = null,
+                                    guid = "b"
+                                )
+                            )
+                        }
+                    }
+                )
+            }
+        )
+        repository.addRssSource("https://example.com/feed.xml")
+        val existingArticle = articleDao.items.single()
+        articleDao.upsert(
+            existingArticle.copy(
+                favoriteSaved = true,
+                favoriteChangedAt = 123L,
+                favoriteSortOrder = 123L
+            )
+        )
+
+        val result = repository.refreshRssSource("https://example.com/feed.xml")
+
+        assertEquals(2, result.articleCount)
+        assertEquals("示例源更新", sourceDao.sources.single().title)
+        val refreshedArticle = articleDao.items.first { it.url == "https://example.com/a" }
+        assertEquals("频道文章更新", refreshedArticle.title)
+        assertTrue(refreshedArticle.favoriteSaved)
+        assertEquals(123L, refreshedArticle.favoriteChangedAt)
+        assertTrue(articleDao.items.any { it.url == "https://example.com/b" })
+    }
+
+    @Test
+    fun refreshRssSource_rejectsImportedContentChannels() = runBlocking {
+        val sourceUrl = ImportedContentIds.epubSourceUrl("book")
+        val sourceDao = FakePhoneRssSourceDao().apply {
+            sources = listOf(source(sourceUrl, title = "本地书籍"))
+        }
+        var importCount = 0
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = FakePhoneArticleDao(),
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone",
+            rssSourceImporter = {
+                importCount += 1
+                ImportedRssSource(
+                    url = it,
+                    title = "不应抓取",
+                    description = "",
+                    siteUrl = null,
+                    imageUrl = null,
+                    items = emptyList()
+                )
+            }
+        )
+
+        val result = runCatching { repository.refreshRssSource(sourceUrl) }
+
+        assertTrue(result.isFailure)
+        assertEquals("本地导入频道无需从 RSS 源刷新", result.exceptionOrNull()?.message)
+        assertEquals(0, importCount)
+    }
+
+    @Test
     fun importLocalContent_savesImportedChannelArticle() = runBlocking {
         val sourceDao = FakePhoneRssSourceDao()
         val articleDao = FakePhoneArticleDao()

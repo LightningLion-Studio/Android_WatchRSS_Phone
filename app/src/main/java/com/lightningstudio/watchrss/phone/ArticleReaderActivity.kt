@@ -9,6 +9,12 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,9 +28,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -33,6 +44,7 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.importer.WebArticleImporter
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import kotlinx.coroutines.flow.collect
 
 class ArticleReaderActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -114,38 +126,39 @@ private fun ArticleReaderScreen(
             }
             return@Surface
         }
+        var topContentVisible by remember(safeArticle.articleId) { mutableStateOf(true) }
+        val onReaderScrollChanged = remember(safeArticle.articleId) {
+            { currentScrollY: Int, previousScrollY: Int ->
+                when {
+                    currentScrollY <= 0 -> topContentVisible = true
+                    currentScrollY > previousScrollY -> topContentVisible = false
+                    currentScrollY < previousScrollY -> topContentVisible = true
+                }
+            }
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .padding(20.dp)
         ) {
-            Text(
-                text = safeArticle.title.ifBlank { safeArticle.url },
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
-            )
-            safeArticle.siteName.takeIf { it.isNotBlank() }?.let {
-                Text(
-                    text = it,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+            AnimatedVisibility(
+                visible = topContentVisible,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                ReaderTopContent(
+                    article = safeArticle,
+                    onBack = onBack,
+                    onOpenOriginal = onOpenOriginal,
+                    modifier = Modifier.padding(bottom = 12.dp)
                 )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onBack) {
-                    Text(text = "返回")
-                }
-                if (safeArticle.url.isNotBlank() && !ImportedContentIds.isImportedContentUrl(safeArticle.url)) {
-                    Button(onClick = { onOpenOriginal(safeArticle.url) }) {
-                        Text(text = "原网页")
-                    }
-                }
             }
             if (!safeArticle.contentHtml.isNullOrBlank()) {
                 HtmlArticleView(
                     article = safeArticle,
                     onOpenImportedArticle = onOpenImportedArticle,
+                    onScrollChanged = onReaderScrollChanged,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
@@ -155,6 +168,7 @@ private fun ArticleReaderScreen(
                     text = safeArticle.contentText
                         .ifBlank { safeArticle.excerpt }
                         .ifBlank { safeArticle.url },
+                    onScrollChanged = onReaderScrollChanged,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
@@ -165,14 +179,60 @@ private fun ArticleReaderScreen(
 }
 
 @Composable
+private fun ReaderTopContent(
+    article: PhoneArticleEntity,
+    onBack: () -> Unit,
+    onOpenOriginal: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            text = article.title.ifBlank { article.url },
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold
+        )
+        article.siteName.takeIf { it.isNotBlank() }?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onBack) {
+                Text(text = "返回")
+            }
+            if (article.url.isNotBlank() && !ImportedContentIds.isImportedContentUrl(article.url)) {
+                Button(onClick = { onOpenOriginal(article.url) }) {
+                    Text(text = "原网页")
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun HtmlArticleView(
     article: PhoneArticleEntity,
     onOpenImportedArticle: (String) -> Unit,
+    onScrollChanged: (currentScrollY: Int, previousScrollY: Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val html = remember(article.articleId, article.contentHash, article.updatedAt) {
         buildReaderHtml(article)
     }
+    val loadKey = remember(article.articleId, article.contentHash, article.updatedAt, article.url) {
+        ReaderWebContentKey(
+            articleId = article.articleId,
+            contentHash = article.contentHash,
+            updatedAt = article.updatedAt,
+            url = article.url
+        )
+    }
+    val currentOnScrollChanged by rememberUpdatedState(onScrollChanged)
     AndroidView(
         modifier = modifier,
         factory = { context ->
@@ -203,13 +263,28 @@ private fun HtmlArticleView(
                 settings.loadsImagesAutomatically = true
                 settings.builtInZoomControls = false
                 settings.displayZoomControls = false
+                setOnScrollChangeListener { _, _, scrollY, _, oldScrollY ->
+                    if (scrollY != oldScrollY) {
+                        currentOnScrollChanged(scrollY, oldScrollY)
+                    }
+                }
             }
         },
         update = { webView ->
-            webView.loadDataWithBaseURL(article.url, html, "text/html", "UTF-8", null)
+            if (webView.tag != loadKey) {
+                webView.tag = loadKey
+                webView.loadDataWithBaseURL(article.url, html, "text/html", "UTF-8", null)
+            }
         }
     )
 }
+
+private data class ReaderWebContentKey(
+    val articleId: String,
+    val contentHash: String,
+    val updatedAt: Long,
+    val url: String
+)
 
 private fun shouldOpenImportedArticle(
     targetUrl: String?,
@@ -226,13 +301,36 @@ private fun shouldOpenImportedArticle(
 @Composable
 private fun PlainArticleView(
     text: String,
+    onScrollChanged: (currentScrollY: Int, previousScrollY: Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val scrollState = rememberScrollState()
+    TrackReaderScrollDirection(
+        scrollState = scrollState,
+        onScrollChanged = onScrollChanged
+    )
     Text(
         text = text,
         style = MaterialTheme.typography.bodyLarge,
-        modifier = modifier.verticalScroll(rememberScrollState())
+        modifier = modifier.verticalScroll(scrollState)
     )
+}
+
+@Composable
+private fun TrackReaderScrollDirection(
+    scrollState: ScrollState,
+    onScrollChanged: (currentScrollY: Int, previousScrollY: Int) -> Unit
+) {
+    val currentOnScrollChanged by rememberUpdatedState(onScrollChanged)
+    LaunchedEffect(scrollState) {
+        var previousScrollY = scrollState.value
+        snapshotFlow { scrollState.value }.collect { currentScrollY ->
+            if (currentScrollY != previousScrollY) {
+                currentOnScrollChanged(currentScrollY, previousScrollY)
+            }
+            previousScrollY = currentScrollY
+        }
+    }
 }
 
 private fun buildReaderHtml(article: PhoneArticleEntity): String {

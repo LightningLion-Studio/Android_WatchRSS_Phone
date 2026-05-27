@@ -151,6 +151,16 @@ class PhoneCompanionRepository(
             saveImportedSource(imported)
         }
 
+    suspend fun refreshRssSource(sourceUrl: String): PhoneRssSourceImportResult =
+        withContext(Dispatchers.IO) {
+            val source = rssSourceDao.getByUrl(sourceUrl) ?: error("频道不存在")
+            require(!ImportedContentIds.isImportedContentUrl(source.url)) {
+                "本地导入频道无需从 RSS 源刷新"
+            }
+            val imported = rssSourceImporter(source.url)
+            saveImportedSource(imported.copy(url = source.url))
+        }
+
     suspend fun importLocalContent(
         fileName: String,
         mimeType: String?,
@@ -771,11 +781,7 @@ class PhoneCompanionRepository(
     ): PhoneRssSourceImportResult {
         val now = System.currentTimeMillis()
         val existing = rssSourceDao.getByUrl(imported.url)
-        val existingArticles = if (replaceExistingArticles) {
-            articleDao.getByRssSourceUrl(imported.url)
-        } else {
-            emptyList()
-        }
+        val existingArticles = articleDao.getByRssSourceUrl(imported.url)
         val existingByContentHash = existingArticles
             .filter { it.contentHash.isNotBlank() }
             .associateBy { it.contentHash }

@@ -9,6 +9,7 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncDeleteCo
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.importer.LocalContentImportKind
+import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import kotlinx.coroutines.CompletableDeferred
@@ -17,6 +18,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class MainUiState(
@@ -31,6 +33,7 @@ data class MainUiState(
     val importedContentArticles: List<PhoneArticleEntity> = emptyList(),
     val favorites: List<PhoneArticleEntity> = emptyList(),
     val watchLater: List<PhoneArticleEntity> = emptyList(),
+    val refreshingRssSourceUrls: Set<String> = emptySet(),
     val conflictPrompt: MainConflictPromptUi? = null
 )
 
@@ -166,6 +169,80 @@ class MainViewModel(
                     error = null,
                     urlInput = ""
                 )
+            }
+        }
+    }
+
+    fun refreshAllRssSources() {
+        val sources = uiState.value.rssSources
+            .filterNot { ImportedContentIds.isImportedContentUrl(it.url) }
+        if (sources.isEmpty()) {
+            sessionState.value = sessionState.value.copy(
+                message = "暂无可刷新的 RSS 源",
+                error = null
+            )
+            return
+        }
+        val urls = sources.map { it.url }.toSet()
+        if (urls.any { it in sessionState.value.refreshingRssSourceUrls }) return
+        viewModelScope.launch {
+            markRssSourcesRefreshing(urls, "正在刷新 RSS 源…")
+            var refreshedCount = 0
+            val failures = mutableListOf<String>()
+            sources.forEach { source ->
+                runCatching {
+                    repository.refreshRssSource(source.url)
+                    refreshedCount += 1
+                }.onFailure { throwable ->
+                    val name = source.title.ifBlank { source.url }
+                    failures += "$name：${throwable.message ?: "刷新失败"}"
+                }
+            }
+            sessionState.update { state ->
+                state.copy(
+                    message = if (failures.isEmpty()) {
+                        "已刷新 RSS 源：$refreshedCount 个"
+                    } else {
+                        "已刷新 $refreshedCount 个 RSS 源，失败 ${failures.size} 个"
+                    },
+                    error = failures.firstOrNull(),
+                    refreshingRssSourceUrls = state.refreshingRssSourceUrls - urls
+                )
+            }
+        }
+    }
+
+    fun refreshRssSource(source: PhoneRssSourceEntity) {
+        if (ImportedContentIds.isImportedContentUrl(source.url)) {
+            sessionState.value = sessionState.value.copy(
+                message = "本地导入频道无需从 RSS 源刷新",
+                error = null
+            )
+            return
+        }
+        if (source.url in sessionState.value.refreshingRssSourceUrls) return
+        viewModelScope.launch {
+            markRssSourcesRefreshing(
+                urls = setOf(source.url),
+                message = "正在刷新频道：${source.title.ifBlank { source.url }}"
+            )
+            runCatching {
+                repository.refreshRssSource(source.url)
+            }.onSuccess { result ->
+                sessionState.update { state ->
+                    state.copy(
+                        message = "已刷新频道：${result.source.title.ifBlank { result.source.url }}，拉取 ${result.articleCount} 篇",
+                        error = null,
+                        refreshingRssSourceUrls = state.refreshingRssSourceUrls - source.url
+                    )
+                }
+            }.onFailure { throwable ->
+                sessionState.update { state ->
+                    state.copy(
+                        error = throwable.message ?: "刷新失败",
+                        refreshingRssSourceUrls = state.refreshingRssSourceUrls - source.url
+                    )
+                }
             }
         }
     }
@@ -356,6 +433,17 @@ class MainViewModel(
                     error = null
                 )
             }
+        }
+    }
+
+    private fun markRssSourcesRefreshing(urls: Set<String>, message: String) {
+        sessionState.update { state ->
+            state.copy(
+                message = message,
+                error = null,
+                syncProgress = null,
+                refreshingRssSourceUrls = state.refreshingRssSourceUrls + urls
+            )
         }
     }
 

@@ -9,17 +9,16 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -36,8 +35,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
@@ -45,6 +50,7 @@ import com.lightningstudio.watchrss.phone.data.importer.WebArticleImporter
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.flow.collect
+import kotlin.math.roundToInt
 
 class ArticleReaderActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -126,52 +132,78 @@ private fun ArticleReaderScreen(
             }
             return@Surface
         }
-        var topContentVisible by remember(safeArticle.articleId) { mutableStateOf(true) }
-        val onReaderScrollChanged = remember(safeArticle.articleId) {
-            { currentScrollY: Int, previousScrollY: Int ->
-                when {
-                    currentScrollY <= 0 -> topContentVisible = true
-                    currentScrollY > previousScrollY -> topContentVisible = false
-                    currentScrollY < previousScrollY -> topContentVisible = true
+        var topContentHeightPx by remember(safeArticle.articleId) { mutableStateOf(0f) }
+        var topContentCollapsePx by remember(safeArticle.articleId) { mutableStateOf(0f) }
+        val onReaderScrollChanged = { currentScrollY: Int, previousScrollY: Int ->
+            val scrollDelta = currentScrollY - previousScrollY
+            when {
+                topContentHeightPx <= 0f -> Unit
+                currentScrollY <= 0 -> topContentCollapsePx = 0f
+                scrollDelta != 0 -> {
+                    topContentCollapsePx = (topContentCollapsePx + scrollDelta)
+                        .coerceIn(0f, topContentHeightPx)
                 }
             }
         }
+        val visibleTopContentHeightPx = (topContentHeightPx - topContentCollapsePx)
+            .coerceAtLeast(0f)
+        val topContentProgress = if (topContentHeightPx > 0f) {
+            visibleTopContentHeightPx / topContentHeightPx
+        } else {
+            1f
+        }
+        val density = LocalDensity.current
+        val readerTopPaddingDp = with(density) { topContentHeightPx.toDp() }
+        val readerTopPaddingCssPx = readerTopPaddingDp.value.roundToInt()
 
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(20.dp)
+                .clipToBounds()
         ) {
-            AnimatedVisibility(
-                visible = topContentVisible,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
-            ) {
-                ReaderTopContent(
-                    article = safeArticle,
-                    onBack = onBack,
-                    onOpenOriginal = onOpenOriginal,
-                    modifier = Modifier.padding(bottom = 12.dp)
-                )
-            }
             if (!safeArticle.contentHtml.isNullOrBlank()) {
                 HtmlArticleView(
                     article = safeArticle,
+                    topPaddingCssPx = readerTopPaddingCssPx,
                     onOpenImportedArticle = onOpenImportedArticle,
                     onScrollChanged = onReaderScrollChanged,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
+                    modifier = Modifier.fillMaxSize()
                 )
             } else {
                 PlainArticleView(
                     text = safeArticle.contentText
                         .ifBlank { safeArticle.excerpt }
                         .ifBlank { safeArticle.url },
+                    topPadding = readerTopPaddingDp,
                     onScrollChanged = onReaderScrollChanged,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .offset {
+                        IntOffset(
+                            x = 0,
+                            y = -topContentCollapsePx.roundToInt()
+                        )
+                    }
+                    .graphicsLayer { alpha = topContentProgress }
+                    .onSizeChanged { size ->
+                        topContentHeightPx = size.height.toFloat()
+                        topContentCollapsePx = topContentCollapsePx.coerceIn(
+                            0f,
+                            topContentHeightPx
+                        )
+                    },
+                color = MaterialTheme.colorScheme.surface
+            ) {
+                ReaderTopContent(
+                    article = safeArticle,
+                    onBack = onBack,
+                    onOpenOriginal = onOpenOriginal,
+                    modifier = Modifier.padding(bottom = 12.dp)
                 )
             }
         }
@@ -217,19 +249,27 @@ private fun ReaderTopContent(
 @Composable
 private fun HtmlArticleView(
     article: PhoneArticleEntity,
+    topPaddingCssPx: Int,
     onOpenImportedArticle: (String) -> Unit,
     onScrollChanged: (currentScrollY: Int, previousScrollY: Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val html = remember(article.articleId, article.contentHash, article.updatedAt) {
-        buildReaderHtml(article)
+    val html = remember(article.articleId, article.contentHash, article.updatedAt, topPaddingCssPx) {
+        buildReaderHtml(article, topPaddingCssPx)
     }
-    val loadKey = remember(article.articleId, article.contentHash, article.updatedAt, article.url) {
+    val loadKey = remember(
+        article.articleId,
+        article.contentHash,
+        article.updatedAt,
+        article.url,
+        topPaddingCssPx
+    ) {
         ReaderWebContentKey(
             articleId = article.articleId,
             contentHash = article.contentHash,
             updatedAt = article.updatedAt,
-            url = article.url
+            url = article.url,
+            topPaddingCssPx = topPaddingCssPx
         )
     }
     val currentOnScrollChanged by rememberUpdatedState(onScrollChanged)
@@ -283,7 +323,8 @@ private data class ReaderWebContentKey(
     val articleId: String,
     val contentHash: String,
     val updatedAt: Long,
-    val url: String
+    val url: String,
+    val topPaddingCssPx: Int
 )
 
 private fun shouldOpenImportedArticle(
@@ -301,6 +342,7 @@ private fun shouldOpenImportedArticle(
 @Composable
 private fun PlainArticleView(
     text: String,
+    topPadding: Dp,
     onScrollChanged: (currentScrollY: Int, previousScrollY: Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -309,11 +351,15 @@ private fun PlainArticleView(
         scrollState = scrollState,
         onScrollChanged = onScrollChanged
     )
-    Text(
-        text = text,
-        style = MaterialTheme.typography.bodyLarge,
+    Column(
         modifier = modifier.verticalScroll(scrollState)
-    )
+    ) {
+        Spacer(modifier = Modifier.height(topPadding))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyLarge
+        )
+    }
 }
 
 @Composable
@@ -333,7 +379,7 @@ private fun TrackReaderScrollDirection(
     }
 }
 
-private fun buildReaderHtml(article: PhoneArticleEntity): String {
+private fun buildReaderHtml(article: PhoneArticleEntity, topPaddingCssPx: Int): String {
     val title = escapeHtml(article.title.ifBlank { article.url })
     val site = escapeHtml(article.siteName)
     val body = article.contentHtml.orEmpty()
@@ -346,7 +392,7 @@ private fun buildReaderHtml(article: PhoneArticleEntity): String {
           <style>
             body {
               margin: 0;
-              padding: 0 0 32px 0;
+              padding: ${topPaddingCssPx}px 0 32px 0;
               color: #202124;
               background: #ffffff;
               font-family: system-ui, -apple-system, "Noto Sans CJK SC", sans-serif;

@@ -438,6 +438,6 @@ class PhoneBluetoothSyncManager(
 
     companion object {
         private const val QUICK_EXCHANGE_TIMEOUT_MS = 30_000L
-        private const val LIBRARY_SYNC_TIMEOUT_MS = 300_000L
+        private const val LIBRARY_SYNC_TIMEOUT_MS = 900_000L
     }
 }

@@ -1475,7 +1475,7 @@ class PhoneCompanionRepository(
     }
 
     companion object {
-        private const val CHANGE_SEQUENCE_PROTOCOL_VERSION = 6
+        private const val CHANGE_SEQUENCE_PROTOCOL_VERSION = 8
         private const val DEFAULT_LIBRARY_PEER_ID = "watch"
         private const val FULL_SNAPSHOT_INTERVAL_MS = 7L * 24L * 60L * 60L * 1000L
         private const val SYNC_KIND_ARTICLE = "article"

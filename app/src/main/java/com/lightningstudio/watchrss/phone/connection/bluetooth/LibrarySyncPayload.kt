@@ -45,9 +45,9 @@ data class LibraryChangeSequence(
 )
 
 object LibrarySyncPayload {
-    const val PROTOCOL_VERSION = 6
+    const val PROTOCOL_VERSION = 8
     const val LEGACY_PROTOCOL_VERSION = 4
-    const val MAX_BODY_REQUEST_CHUNKS_PER_SYNC = 24
+    const val MAX_BODY_REQUEST_CHUNKS_PER_SYNC = Int.MAX_VALUE
 
     fun buildRequest(
         deviceId: String,

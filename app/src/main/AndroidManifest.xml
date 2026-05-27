@@ -47,6 +47,10 @@
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />
         <activity
+            android:name=".PlatformWebViewActivity"
+            android:exported="false"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
             android:name=".ContactDeveloperActivity"
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />

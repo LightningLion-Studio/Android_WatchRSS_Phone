@@ -22,4 +22,19 @@ interface SyncChangeLogDao {
         """
     )
     suspend fun entityIdsChangedAfter(kind: String, afterSeq: Long): List<String>
+
+    @Query(
+        """
+        SELECT entityId, MAX(changedAt) AS changedAt
+        FROM sync_change_log
+        WHERE kind = :kind AND entityId IN (:entityIds)
+        GROUP BY entityId
+        """
+    )
+    suspend fun maxChangedAtByEntityIds(kind: String, entityIds: List<String>): List<SyncChangeLogEntityState>
 }
+
+data class SyncChangeLogEntityState(
+    val entityId: String,
+    val changedAt: Long
+)

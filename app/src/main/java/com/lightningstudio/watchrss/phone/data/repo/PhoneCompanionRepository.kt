@@ -15,6 +15,7 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
 import com.lightningstudio.watchrss.phone.data.db.SyncChangeLogDao
 import com.lightningstudio.watchrss.phone.data.db.SyncChangeLogEntity
+import com.lightningstudio.watchrss.phone.data.db.SyncChangeLogEntityState
 import com.lightningstudio.watchrss.phone.data.db.SyncPeerStateDao
 import com.lightningstudio.watchrss.phone.data.db.SyncPeerStateEntity
 import com.lightningstudio.watchrss.phone.data.importer.ImportedLocalContent
@@ -62,6 +63,10 @@ private object NoopSyncChangeLogDao : SyncChangeLogDao {
     override suspend fun insert(change: SyncChangeLogEntity): Long = 0L
     override suspend fun maxSeq(): Long = 0L
     override suspend fun entityIdsChangedAfter(kind: String, afterSeq: Long): List<String> = emptyList()
+    override suspend fun maxChangedAtByEntityIds(
+        kind: String,
+        entityIds: List<String>
+    ): List<SyncChangeLogEntityState> = emptyList()
 }
 
 private object NoopSyncPeerStateDao : SyncPeerStateDao {
@@ -324,8 +329,9 @@ class PhoneCompanionRepository(
             val normalizedPeerId = peerDeviceId.ifBlank { DEFAULT_LIBRARY_PEER_ID }
             val peerState = syncPeerStateDao.get(normalizedPeerId)
             val now = System.currentTimeMillis()
-            val maxSeq = syncChangeLogDao.maxSeq()
             val fullArticleManifest = getArticleManifestsForSync()
+            repairMissingArticleChangeLogEntries(fullArticleManifest)
+            val maxSeq = syncChangeLogDao.maxSeq()
             val peerAckedSeq = peerState?.lastLocalSeqAckedByPeer ?: 0L
             val fullSnapshotReason = when {
                 peerState == null -> "newPeer"
@@ -393,6 +399,38 @@ class PhoneCompanionRepository(
                 updatedAt = now
             )
         )
+    }
+
+    private suspend fun repairMissingArticleChangeLogEntries(
+        articleManifest: List<ArticleSyncManifestEntry>
+    ) {
+        val candidates = articleManifest
+            .asSequence()
+            .filterNot { it.deleted }
+            .filter { it.latestOperationAt() > 0L }
+            .distinctBy { it.articleId }
+            .toList()
+        if (candidates.isEmpty()) return
+
+        val loggedChangedAt = syncChangeLogDao.maxChangedAtByEntityIds(
+            kind = SYNC_KIND_ARTICLE,
+            entityIds = candidates.map { it.articleId }
+        ).associate { it.entityId to it.changedAt }
+        val now = System.currentTimeMillis()
+        candidates.forEach { article ->
+            val changedAt = article.latestOperationAt()
+            if (changedAt <= (loggedChangedAt[article.articleId] ?: 0L)) return@forEach
+            syncChangeLogDao.insert(
+                SyncChangeLogEntity(
+                    kind = SYNC_KIND_ARTICLE,
+                    entityId = article.articleId,
+                    changedAt = changedAt,
+                    originDeviceId = article.sourceDeviceId.ifBlank { deviceId },
+                    reason = "repairState",
+                    createdAt = now
+                )
+            )
+        }
     }
 
     suspend fun repairImportedContentTitles(): Int = withContext(Dispatchers.IO) {

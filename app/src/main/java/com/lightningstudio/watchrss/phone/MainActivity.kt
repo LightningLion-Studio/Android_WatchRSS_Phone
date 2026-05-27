@@ -15,6 +15,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.ui.MainScreen
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModel
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModelFactory
 import kotlinx.coroutines.Dispatchers
@@ -111,7 +112,18 @@ class MainActivity : ComponentActivity() {
                     onSyncLibrary = { ensureBluetoothPermissions(viewModel::syncLibraryByBluetooth) },
                     onExportBluetoothLog = ::exportBluetoothLog,
                     onOpenArticle = { article ->
-                        startActivity(ArticleReaderActivity.createIntent(this, article.articleId))
+                        val platform = PlatformLinkRouter.detect(article.url)
+                        if (platform != null) {
+                            startActivity(
+                                PlatformWebViewActivity.createIntent(
+                                    context = this,
+                                    title = article.title.ifBlank { article.url },
+                                    url = article.url
+                                )
+                            )
+                        } else {
+                            startActivity(ArticleReaderActivity.createIntent(this, article.articleId))
+                        }
                     },
                     onToggleFavorite = viewModel::toggleFavorite,
                     onToggleWatchLater = viewModel::toggleWatchLater,

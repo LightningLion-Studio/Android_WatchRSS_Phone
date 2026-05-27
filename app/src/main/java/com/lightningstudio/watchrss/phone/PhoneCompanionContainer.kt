@@ -24,7 +24,8 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_2_3,
             PhoneCompanionDatabase.MIGRATION_3_4,
             PhoneCompanionDatabase.MIGRATION_4_5,
-            PhoneCompanionDatabase.MIGRATION_5_6
+            PhoneCompanionDatabase.MIGRATION_5_6,
+            PhoneCompanionDatabase.MIGRATION_6_7
         )
             .build()
     }
@@ -51,6 +52,8 @@ class PhoneCompanionContainer(context: Context) {
             articleDao = database.phoneArticleDao(),
             rssSourceDao = database.phoneRssSourceDao(),
             deviceId = deviceIdentity.deviceId,
+            syncChangeLogDao = database.syncChangeLogDao(),
+            syncPeerStateDao = database.syncPeerStateDao(),
             webArticleImporter = webArticleImporter::importUrl,
             articleContentStore = articleContentStore
         )

@@ -10,15 +10,19 @@ import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
     entities = [
         PhoneSavedItemEntity::class,
         PhoneArticleEntity::class,
-        PhoneRssSourceEntity::class
+        PhoneRssSourceEntity::class,
+        SyncChangeLogEntity::class,
+        SyncPeerStateEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
     abstract fun phoneSavedItemDao(): PhoneSavedItemDao
     abstract fun phoneArticleDao(): PhoneArticleDao
     abstract fun phoneRssSourceDao(): PhoneRssSourceDao
+    abstract fun syncChangeLogDao(): SyncChangeLogDao
+    abstract fun syncPeerStateDao(): SyncPeerStateDao
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -127,6 +131,38 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
                 database.execSQL("ALTER TABLE phone_articles ADD COLUMN syncChunkHashesJson TEXT NOT NULL DEFAULT ''")
                 database.execSQL("ALTER TABLE phone_articles ADD COLUMN syncMetadataHash TEXT NOT NULL DEFAULT ''")
                 database.execSQL("CREATE INDEX IF NOT EXISTS index_phone_articles_syncBodyHash ON phone_articles(syncBodyHash)")
+            }
+        }
+
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS sync_change_log (
+                        seq INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        kind TEXT NOT NULL,
+                        entityId TEXT NOT NULL,
+                        changedAt INTEGER NOT NULL,
+                        originDeviceId TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_sync_change_log_kind_entityId ON sync_change_log(kind, entityId)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_sync_change_log_seq ON sync_change_log(seq)")
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS sync_peer_state (
+                        peerDeviceId TEXT NOT NULL PRIMARY KEY,
+                        lastLocalSeqAckedByPeer INTEGER NOT NULL DEFAULT 0,
+                        lastRemoteSeqApplied INTEGER NOT NULL DEFAULT 0,
+                        lastFullSyncAt INTEGER NOT NULL DEFAULT 0,
+                        lastProtocolVersion INTEGER NOT NULL DEFAULT 0,
+                        updatedAt INTEGER NOT NULL DEFAULT 0
+                    )
+                    """.trimIndent()
+                )
             }
         }
     }

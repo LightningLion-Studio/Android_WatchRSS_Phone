@@ -92,9 +92,20 @@ class LibrarySyncPayloadTest {
             deletedAt = 0L
         )
 
-        val request = LibrarySyncPayload.buildManifestRequest("phone", listOf(article), listOf(source))
+        val request = LibrarySyncPayload.buildManifestRequest(
+            deviceId = "phone",
+            articles = listOf(article),
+            rssSources = listOf(source),
+            changeSequence = LibraryChangeSequence(
+                fromSeqExclusive = 7L,
+                toSeqInclusive = 9L,
+                fullSnapshot = false,
+                fallbackReason = ""
+            )
+        )
         val manifest = LibrarySyncPayload.parseArticleManifest(request).single()
         val parsedSource = LibrarySyncPayload.parseRssSources(request).single()
+        val changeSequence = LibrarySyncPayload.parseChangeSequence(request)
 
         assertEquals(0, LibrarySyncPayload.parseArticles(request).size)
         assertEquals(article.articleId, manifest.articleId)
@@ -102,6 +113,10 @@ class LibrarySyncPayloadTest {
         assertEquals(article.favoriteChangedAt, manifest.favoriteChangedAt)
         assertEquals(source.title, parsedSource.title)
         assertEquals(source.isPinned, parsedSource.isPinned)
+        assertTrue(LibrarySyncPayload.supportsChangeSequences(request))
+        assertEquals(7L, changeSequence.fromSeqExclusive)
+        assertEquals(9L, changeSequence.toSeqInclusive)
+        assertEquals(false, changeSequence.fullSnapshot)
         assertEquals("syncLibrary", request.getString("action"))
         assertEquals("manifest", request.getString("phase"))
     }

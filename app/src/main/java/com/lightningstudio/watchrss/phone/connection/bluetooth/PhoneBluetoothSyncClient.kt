@@ -118,7 +118,8 @@ class PhoneBluetoothSyncClient(
 
     @SuppressLint("MissingPermission")
     suspend fun exchangeLibrary(
-        manifestRequest: JSONObject,
+        manifestRequest: JSONObject? = null,
+        buildManifestRequest: (suspend (BluetoothDevice) -> JSONObject)? = null,
         buildArticleRequests: suspend (JSONObject, Boolean) -> List<JSONObject>,
         deviceAddress: String? = null,
         deviceNameHint: String? = null,
@@ -132,7 +133,7 @@ class PhoneBluetoothSyncClient(
         debugLog.appendEvent(
             event = "bt.library.start",
             sessionId = sessionId,
-            fields = payloadFields("manifestRequest", manifestRequest) + mapOf(
+            fields = (manifestRequest?.let { payloadFields("manifestRequest", it) } ?: emptyMap()) + mapOf(
                 "uuid" to BluetoothSyncProtocol.SERVICE_UUID,
                 "deviceNameHint" to deviceNameHint.orEmpty(),
                 "targetAddress" to deviceAddress.orEmpty()
@@ -153,7 +154,11 @@ class PhoneBluetoothSyncClient(
                 deviceNameHint = deviceNameHint
             )
             selectedDevice = device
+            val request = manifestRequest
+                ?: buildManifestRequest?.invoke(device)
+                ?: error("缺少资料库同步请求")
             debugLog.appendEvent("bt.device.selected", sessionId, deviceFields(device))
+            debugLog.appendEvent("bt.library.manifest.prepared", sessionId, payloadFields("manifestRequest", request))
             Log.i(TAG, "connecting library sync to name=${device.name} address=${device.address} uuid=${BluetoothSyncProtocol.SERVICE_UUID}")
             cancelDiscoveryLogged(adapter, sessionId)
 
@@ -166,7 +171,7 @@ class PhoneBluetoothSyncClient(
             )
             connectLogged(socket, sessionId, device)
             onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.CONNECTING, 20))
-            writeFrameLogged(socket, sessionId, "manifestRequest", manifestRequest)
+            writeFrameLogged(socket, sessionId, "manifestRequest", request)
             onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.TRANSFERRING, 25))
             val manifestResponse = readFrameLogged(socket, sessionId, "manifestResponse")
             if (!manifestResponse.optBoolean("success", true)) {
@@ -178,12 +183,12 @@ class PhoneBluetoothSyncClient(
                 )
                 writeResponseAck(socket, sessionId)
                 return BluetoothLibrarySyncExchange(
-                    deviceName = device.name.orEmpty(),
-                    deviceAddress = device.address,
-                    request = manifestRequest,
-                    manifestResponse = manifestResponse,
-                    articleRequestFrames = emptyList(),
-                    responseFrames = listOf(manifestResponse),
+                deviceName = device.name.orEmpty(),
+                deviceAddress = device.address,
+                request = request,
+                manifestResponse = manifestResponse,
+                articleRequestFrames = emptyList(),
+                responseFrames = listOf(manifestResponse),
                     response = manifestResponse
                 )
             }
@@ -230,7 +235,7 @@ class PhoneBluetoothSyncClient(
             return BluetoothLibrarySyncExchange(
                 deviceName = device.name.orEmpty(),
                 deviceAddress = device.address,
-                request = manifestRequest,
+                request = request,
                 manifestResponse = manifestResponse,
                 articleRequestFrames = articleRequests,
                 responseFrames = responseFrames,
@@ -240,7 +245,7 @@ class PhoneBluetoothSyncClient(
             debugLog.appendEvent(
                 event = "bt.library.failed",
                 sessionId = sessionId,
-                fields = payloadFields("manifestRequest", manifestRequest) +
+                fields = (manifestRequest?.let { payloadFields("manifestRequest", it) } ?: emptyMap()) +
                     (selectedDevice?.let { deviceFields(it) } ?: emptyMap()) +
                     mapOf(
                         "elapsedMs" to elapsedSince(totalStartedAt),

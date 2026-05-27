@@ -13,6 +13,10 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
+import com.lightningstudio.watchrss.phone.data.db.SyncChangeLogDao
+import com.lightningstudio.watchrss.phone.data.db.SyncChangeLogEntity
+import com.lightningstudio.watchrss.phone.data.db.SyncPeerStateDao
+import com.lightningstudio.watchrss.phone.data.db.SyncPeerStateEntity
 import com.lightningstudio.watchrss.phone.data.importer.ImportedLocalContent
 import com.lightningstudio.watchrss.phone.data.importer.ImportedRssSource
 import com.lightningstudio.watchrss.phone.data.importer.LocalContentImportKind
@@ -43,11 +47,35 @@ data class PhoneLocalContentImportResult(
     val kind: LocalContentImportKind
 )
 
+data class PhoneLibrarySyncWindow(
+    val articleManifest: List<ArticleSyncManifestEntry>,
+    val fullArticleManifest: List<ArticleSyncManifestEntry>,
+    val rssSources: List<PhoneRssSourceEntity>,
+    val fullSnapshot: Boolean,
+    val fromSeqExclusive: Long,
+    val toSeqInclusive: Long,
+    val peerAckedSeq: Long,
+    val fallbackReason: String
+)
+
+private object NoopSyncChangeLogDao : SyncChangeLogDao {
+    override suspend fun insert(change: SyncChangeLogEntity): Long = 0L
+    override suspend fun maxSeq(): Long = 0L
+    override suspend fun entityIdsChangedAfter(kind: String, afterSeq: Long): List<String> = emptyList()
+}
+
+private object NoopSyncPeerStateDao : SyncPeerStateDao {
+    override suspend fun get(peerDeviceId: String): SyncPeerStateEntity? = null
+    override suspend fun upsert(state: SyncPeerStateEntity) = Unit
+}
+
 class PhoneCompanionRepository(
     private val savedItemDao: PhoneSavedItemDao,
     private val articleDao: PhoneArticleDao,
     private val rssSourceDao: PhoneRssSourceDao,
     private val deviceId: String,
+    private val syncChangeLogDao: SyncChangeLogDao = NoopSyncChangeLogDao,
+    private val syncPeerStateDao: SyncPeerStateDao = NoopSyncPeerStateDao,
     private val webArticleImporter: suspend (String) -> ImportedWebArticle = { input ->
         WebArticleImporter().importUrl(input)
     },
@@ -159,28 +187,28 @@ class PhoneCompanionRepository(
                 )
             }.markDeletedIfEmpty(now)
             articleDao.upsert(updated)
+            recordArticleChange(updated.articleId, "sourceState", now)
             updated
         }
 
     suspend fun moveRssSourceToTop(sourceUrl: String) = withContext(Dispatchers.IO) {
         val source = rssSourceDao.getByUrl(sourceUrl) ?: return@withContext
         val now = System.currentTimeMillis()
-        rssSourceDao.upsert(
-            source.copy(
+        val updated = source.copy(
                 sourceDeviceId = deviceId,
                 updatedAt = now,
                 sortOrder = now,
                 deleted = false,
                 deletedAt = 0L
             )
-        )
+        rssSourceDao.upsert(updated)
+        recordRssSourceChange(updated.url, "sourceState", now)
     }
 
     suspend fun setRssSourcePinned(sourceUrl: String, pinned: Boolean) = withContext(Dispatchers.IO) {
         val source = rssSourceDao.getByUrl(sourceUrl) ?: return@withContext
         val now = System.currentTimeMillis()
-        rssSourceDao.upsert(
-            source.copy(
+        val updated = source.copy(
                 sourceDeviceId = deviceId,
                 updatedAt = now,
                 sortOrder = if (pinned) now else source.sortOrder,
@@ -188,7 +216,8 @@ class PhoneCompanionRepository(
                 deleted = false,
                 deletedAt = 0L
             )
-        )
+        rssSourceDao.upsert(updated)
+        recordRssSourceChange(updated.url, "sourceState", now)
     }
 
     suspend fun deleteRssSource(sourceUrl: String) = withContext(Dispatchers.IO) {
@@ -198,24 +227,28 @@ class PhoneCompanionRepository(
             articleDao.getByRssSourceUrl(sourceUrl)
                 .filterNot { it.deleted }
                 .forEachIndexed { index, article ->
-                    articleDao.upsert(article.markDeletedByUser(now + index))
+                    val deletedArticle = article.markDeletedByUser(now + index)
+                    articleDao.upsert(deletedArticle)
+                    recordArticleChange(deletedArticle.articleId, "delete", now + index)
                 }
         }
-        rssSourceDao.upsert(
-            source.copy(
+        val deletedSource = source.copy(
                 sourceDeviceId = deviceId,
                 updatedAt = now,
                 isPinned = false,
                 deleted = true,
                 deletedAt = now
             )
-        )
+        rssSourceDao.upsert(deletedSource)
+        recordRssSourceChange(deletedSource.url, "delete", now)
     }
 
     suspend fun deleteArticle(articleId: String) = withContext(Dispatchers.IO) {
         val current = articleDao.getById(articleId) ?: return@withContext
         val now = System.currentTimeMillis()
-        articleDao.upsert(current.markDeletedByUser(now))
+        val deleted = current.markDeletedByUser(now)
+        articleDao.upsert(deleted)
+        recordArticleChange(deleted.articleId, "delete", now)
     }
 
     suspend fun clearImportedContent(): Int = withContext(Dispatchers.IO) {
@@ -223,7 +256,9 @@ class PhoneCompanionRepository(
             .filterNot { it.deleted }
         val now = System.currentTimeMillis()
         importedArticles.forEachIndexed { index, article ->
-            articleDao.upsert(article.markDeletedByUser(now + index))
+            val deleted = article.markDeletedByUser(now + index)
+            articleDao.upsert(deleted)
+            recordArticleChange(deleted.articleId, "delete", now + index)
         }
         importedArticles.size
     }
@@ -237,6 +272,21 @@ class PhoneCompanionRepository(
     suspend fun getArticleManifestsForSync(): List<ArticleSyncManifestEntry> = withContext(Dispatchers.IO) {
         articleDao.getAllForSync()
             .filter { it.shouldSyncThroughLibrary() }
+            .map { article ->
+                if (article.needsSyncMetadataRefresh()) {
+                    article.ensureSyncMetadata()
+                } else {
+                    article
+                }
+            }
+            .map { it.toSyncManifestEntry() }
+    }
+
+    private suspend fun getArticleManifestsForSync(articleIds: Collection<String>): List<ArticleSyncManifestEntry> {
+        val idSet = articleIds.toSet()
+        if (idSet.isEmpty()) return emptyList()
+        return articleDao.getAllForSync()
+            .filter { it.articleId in idSet && it.shouldSyncThroughLibrary() }
             .map { article ->
                 if (article.needsSyncMetadataRefresh()) {
                     article.ensureSyncMetadata()
@@ -261,6 +311,90 @@ class PhoneCompanionRepository(
             .filterNot { ImportedContentIds.isImportedTextSourceUrl(it.url) }
     }
 
+    private suspend fun getRssSourcesForSync(sourceUrls: Collection<String>): List<PhoneRssSourceEntity> {
+        val urlSet = sourceUrls.toSet()
+        if (urlSet.isEmpty()) return emptyList()
+        return rssSourceDao.getAllForSync()
+            .filter { it.url in urlSet }
+            .filterNot { ImportedContentIds.isImportedTextSourceUrl(it.url) }
+    }
+
+    suspend fun prepareLibrarySyncWindow(peerDeviceId: String): PhoneLibrarySyncWindow =
+        withContext(Dispatchers.IO) {
+            val normalizedPeerId = peerDeviceId.ifBlank { DEFAULT_LIBRARY_PEER_ID }
+            val peerState = syncPeerStateDao.get(normalizedPeerId)
+            val now = System.currentTimeMillis()
+            val maxSeq = syncChangeLogDao.maxSeq()
+            val fullArticleManifest = getArticleManifestsForSync()
+            val peerAckedSeq = peerState?.lastLocalSeqAckedByPeer ?: 0L
+            val fullSnapshotReason = when {
+                peerState == null -> "newPeer"
+                peerState.lastProtocolVersion < CHANGE_SEQUENCE_PROTOCOL_VERSION -> "peerProtocol"
+                peerState.lastFullSyncAt <= 0L -> "noFullSnapshot"
+                now - peerState.lastFullSyncAt >= FULL_SNAPSHOT_INTERVAL_MS -> "periodicFull"
+                else -> ""
+            }
+            if (fullSnapshotReason.isNotBlank()) {
+                return@withContext PhoneLibrarySyncWindow(
+                    articleManifest = fullArticleManifest,
+                    fullArticleManifest = fullArticleManifest,
+                    rssSources = getRssSourcesForSync(),
+                    fullSnapshot = true,
+                    fromSeqExclusive = 0L,
+                    toSeqInclusive = maxSeq,
+                    peerAckedSeq = peerAckedSeq,
+                    fallbackReason = fullSnapshotReason
+                )
+            }
+
+            val changedArticleIds = syncChangeLogDao.entityIdsChangedAfter(
+                kind = SYNC_KIND_ARTICLE,
+                afterSeq = peerAckedSeq
+            )
+            val changedSourceUrls = syncChangeLogDao.entityIdsChangedAfter(
+                kind = SYNC_KIND_RSS_SOURCE,
+                afterSeq = peerAckedSeq
+            )
+            PhoneLibrarySyncWindow(
+                articleManifest = getArticleManifestsForSync(changedArticleIds),
+                fullArticleManifest = fullArticleManifest,
+                rssSources = getRssSourcesForSync(changedSourceUrls),
+                fullSnapshot = false,
+                fromSeqExclusive = peerAckedSeq,
+                toSeqInclusive = maxSeq,
+                peerAckedSeq = peerAckedSeq,
+                fallbackReason = ""
+            )
+        }
+
+    suspend fun markLibrarySyncSuccess(
+        peerDeviceId: String,
+        localSeqToInclusive: Long,
+        remoteSeqToInclusive: Long,
+        remoteProtocolVersion: Int,
+        fullSnapshot: Boolean
+    ) = withContext(Dispatchers.IO) {
+        val normalizedPeerId = peerDeviceId.ifBlank { DEFAULT_LIBRARY_PEER_ID }
+        val now = System.currentTimeMillis()
+        val current = syncPeerStateDao.get(normalizedPeerId)
+        syncPeerStateDao.upsert(
+            SyncPeerStateEntity(
+                peerDeviceId = normalizedPeerId,
+                lastLocalSeqAckedByPeer = maxOf(
+                    current?.lastLocalSeqAckedByPeer ?: 0L,
+                    localSeqToInclusive
+                ),
+                lastRemoteSeqApplied = maxOf(
+                    current?.lastRemoteSeqApplied ?: 0L,
+                    remoteSeqToInclusive
+                ),
+                lastFullSyncAt = if (fullSnapshot) now else current?.lastFullSyncAt ?: 0L,
+                lastProtocolVersion = remoteProtocolVersion,
+                updatedAt = now
+            )
+        )
+    }
+
     suspend fun repairImportedContentTitles(): Int = withContext(Dispatchers.IO) {
         val sources = rssSourceDao.getAllForSync()
             .filter { it.url.isImportedEpubSourceUrl() }
@@ -271,11 +405,13 @@ class PhoneCompanionRepository(
                 .sortedByDescending { it.importedAt }
             val updates = inferImportedEpubTitleUpdates(articles)
             updates.forEach { (articleId, title) ->
+                val updatedAt = System.currentTimeMillis() + repaired
                 articleDao.updateTitle(
                     articleId = articleId,
                     title = title,
-                    updatedAt = System.currentTimeMillis() + repaired
+                    updatedAt = updatedAt
                 )
+                recordArticleChange(articleId, "metadata", updatedAt)
                 repaired += 1
             }
         }
@@ -293,14 +429,14 @@ class PhoneCompanionRepository(
             val latestArticleUpdate = liveArticles.maxOf { article ->
                 maxOf(article.updatedAt, article.importedAt)
             }
-            rssSourceDao.upsert(
-                source.copy(
+            val repairedSource = source.copy(
                     sourceDeviceId = deviceId,
                     updatedAt = maxOf(source.updatedAt, latestArticleUpdate),
                     deleted = false,
                     deletedAt = 0L
                 )
-            )
+            rssSourceDao.upsert(repairedSource)
+            recordRssSourceChange(repairedSource.url, "sourceState", repairedSource.updatedAt)
             repaired += 1
         }
         repaired
@@ -331,6 +467,7 @@ class PhoneCompanionRepository(
                 ConflictAction.PHONE -> {
                     val updated = local.stampKeptByConflict(now + index)
                     articleDao.upsert(updated.withCurrentSyncMetadata().externalizeLargeLocalContent())
+                    recordArticleChange(updated.articleId, "conflictResolution", now + index)
                     outgoingArticleIds += updated.articleId
                     suppressedRemoteArticleIds += updated.articleId
                 }
@@ -353,6 +490,7 @@ class PhoneCompanionRepository(
                 ConflictAction.DELETE -> {
                     val updated = local.markDeletedByUser(now + index)
                     articleDao.upsert(updated.withCurrentSyncMetadata().externalizeLargeLocalContent())
+                    recordArticleChange(updated.articleId, "conflictResolution", now + index)
                     outgoingArticleIds += updated.articleId
                     suppressedRemoteArticleIds += updated.articleId
                 }
@@ -450,6 +588,13 @@ class PhoneCompanionRepository(
                     local
                 }
                 if (local != next) {
+                    if (next.deleted && ImportedContentIds.isImportedContentUrl(next.url)) {
+                        articleDao.getByRssSourceUrl(next.url)
+                            .filterNot { it.deleted }
+                            .forEachIndexed { index, article ->
+                                articleDao.upsert(article.applyRemoteSourceDelete(next, index))
+                            }
+                    }
                     rssSourceDao.upsert(next)
                     merged += 1
                 }
@@ -578,6 +723,7 @@ class PhoneCompanionRepository(
         }
         val stored = saved.withCurrentSyncMetadata().externalizeLargeLocalContent()
         articleDao.upsert(stored)
+        recordArticleChange(stored.articleId, "upsert", timestamp)
         return stored
     }
 
@@ -611,6 +757,7 @@ class PhoneCompanionRepository(
             deletedAt = 0L
         )
         rssSourceDao.upsert(source)
+        recordRssSourceChange(source.url, "upsert", now)
         val articles = imported.items.mapIndexed { index, item ->
             val timestamp = now - index
             PhoneArticleEntity(
@@ -649,6 +796,9 @@ class PhoneCompanionRepository(
         }
         if (articles.isNotEmpty()) {
             articleDao.upsertAll(articles)
+            articles.forEach { article ->
+                recordArticleChange(article.articleId, "upsert", article.updatedAt)
+            }
         }
         return PhoneRssSourceImportResult(source, articles.size)
     }
@@ -662,6 +812,42 @@ class PhoneCompanionRepository(
             watchLaterSaved = existing.watchLaterSaved,
             watchLaterChangedAt = existing.watchLaterChangedAt,
             watchLaterSortOrder = existing.watchLaterSortOrder
+        )
+    }
+
+    private suspend fun recordArticleChange(
+        articleId: String,
+        reason: String,
+        changedAt: Long = System.currentTimeMillis()
+    ) {
+        if (articleId.isBlank()) return
+        syncChangeLogDao.insert(
+            SyncChangeLogEntity(
+                kind = SYNC_KIND_ARTICLE,
+                entityId = articleId,
+                changedAt = changedAt,
+                originDeviceId = deviceId,
+                reason = reason,
+                createdAt = System.currentTimeMillis()
+            )
+        )
+    }
+
+    private suspend fun recordRssSourceChange(
+        sourceUrl: String,
+        reason: String,
+        changedAt: Long = System.currentTimeMillis()
+    ) {
+        if (sourceUrl.isBlank() || ImportedContentIds.isImportedTextSourceUrl(sourceUrl)) return
+        syncChangeLogDao.insert(
+            SyncChangeLogEntity(
+                kind = SYNC_KIND_RSS_SOURCE,
+                entityId = sourceUrl,
+                changedAt = changedAt,
+                originDeviceId = deviceId,
+                reason = reason,
+                createdAt = System.currentTimeMillis()
+            )
         )
     }
 
@@ -1034,6 +1220,28 @@ class PhoneCompanionRepository(
         )
     }
 
+    private fun PhoneArticleEntity.applyRemoteSourceDelete(
+        source: PhoneRssSourceEntity,
+        offset: Int
+    ): PhoneArticleEntity {
+        val timestamp = (source.deletedAt.takeIf { it > 0L } ?: source.updatedAt) + offset
+        return copy(
+            sourceDeviceId = source.sourceDeviceId.ifBlank { sourceDeviceId },
+            updatedAt = maxOf(updatedAt, timestamp),
+            independentSaved = false,
+            independentChangedAt = if (independentChangedAt > 0L) timestamp else independentChangedAt,
+            independentSortOrder = 0L,
+            favoriteSaved = false,
+            favoriteChangedAt = if (favoriteChangedAt > 0L) timestamp else favoriteChangedAt,
+            favoriteSortOrder = 0L,
+            watchLaterSaved = false,
+            watchLaterChangedAt = if (watchLaterChangedAt > 0L) timestamp else watchLaterChangedAt,
+            watchLaterSortOrder = 0L,
+            deleted = true,
+            deletedAt = timestamp
+        )
+    }
+
     private suspend fun PhoneArticleEntity.ensureSyncMetadata(): PhoneArticleEntity {
         val hydrated = hydrateExternalText()
         val metadata = ArticleSyncBody.metadataFor(hydrated)
@@ -1186,6 +1394,11 @@ class PhoneCompanionRepository(
     }
 
     companion object {
+        private const val CHANGE_SEQUENCE_PROTOCOL_VERSION = 6
+        private const val DEFAULT_LIBRARY_PEER_ID = "watch"
+        private const val FULL_SNAPSHOT_INTERVAL_MS = 7L * 24L * 60L * 60L * 1000L
+        private const val SYNC_KIND_ARTICLE = "article"
+        private const val SYNC_KIND_RSS_SOURCE = "rssSource"
         private const val MAX_INLINE_CONTENT_CHARS = 100_000
         private const val MAX_REPAIRED_TITLE_CHARS = 80
         private const val MIN_HTML_TOC_LINKS = 3

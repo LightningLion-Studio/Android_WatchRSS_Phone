@@ -36,8 +36,15 @@ data class ArticleSyncManifestEntry(
     val metadataHash: String = ""
 )
 
+data class LibraryChangeSequence(
+    val fromSeqExclusive: Long,
+    val toSeqInclusive: Long,
+    val fullSnapshot: Boolean,
+    val fallbackReason: String = ""
+)
+
 object LibrarySyncPayload {
-    const val PROTOCOL_VERSION = 5
+    const val PROTOCOL_VERSION = 6
     const val LEGACY_PROTOCOL_VERSION = 4
     const val MAX_BODY_REQUEST_CHUNKS_PER_SYNC = 24
 
@@ -50,7 +57,8 @@ object LibrarySyncPayload {
     fun buildManifestRequest(
         deviceId: String,
         articles: List<PhoneArticleEntity>,
-        rssSources: List<PhoneRssSourceEntity> = emptyList()
+        rssSources: List<PhoneRssSourceEntity> = emptyList(),
+        changeSequence: LibraryChangeSequence? = null
     ): JSONObject {
         return JSONObject().apply {
             put("version", PROTOCOL_VERSION)
@@ -58,17 +66,20 @@ object LibrarySyncPayload {
             put("phase", PHASE_MANIFEST)
             put("supportsArticleBatches", true)
             put("supportsChunkedBodies", true)
+            put("supportsChangeSequences", true)
             put("deviceId", deviceId)
             put("sentAt", System.currentTimeMillis())
             put("articleManifest", articles.toManifestJsonArray())
             put("rssSources", rssSources.toSourceJsonArray())
+            putChangeSequence(changeSequence)
         }
     }
 
     fun buildManifestRequestFromEntries(
         deviceId: String,
         articleManifest: List<ArticleSyncManifestEntry>,
-        rssSources: List<PhoneRssSourceEntity> = emptyList()
+        rssSources: List<PhoneRssSourceEntity> = emptyList(),
+        changeSequence: LibraryChangeSequence? = null
     ): JSONObject {
         return JSONObject().apply {
             put("version", PROTOCOL_VERSION)
@@ -76,10 +87,12 @@ object LibrarySyncPayload {
             put("phase", PHASE_MANIFEST)
             put("supportsArticleBatches", true)
             put("supportsChunkedBodies", true)
+            put("supportsChangeSequences", true)
             put("deviceId", deviceId)
             put("sentAt", System.currentTimeMillis())
             put("articleManifest", articleManifest.toEntryJsonArray())
             put("rssSources", rssSources.toSourceJsonArray())
+            putChangeSequence(changeSequence)
         }
     }
 
@@ -87,7 +100,8 @@ object LibrarySyncPayload {
         deviceId: String,
         articles: List<PhoneArticleEntity>,
         rssSources: List<PhoneRssSourceEntity> = emptyList(),
-        stats: JSONObject? = null
+        stats: JSONObject? = null,
+        changeSequence: LibraryChangeSequence? = null
     ): JSONObject {
         return JSONObject().apply {
             put("success", true)
@@ -96,10 +110,12 @@ object LibrarySyncPayload {
             put("phase", PHASE_MANIFEST)
             put("supportsArticleBatches", true)
             put("supportsChunkedBodies", true)
+            put("supportsChangeSequences", true)
             put("deviceId", deviceId)
             put("sentAt", System.currentTimeMillis())
             put("articleManifest", articles.toManifestJsonArray())
             put("rssSources", rssSources.toSourceJsonArray())
+            putChangeSequence(changeSequence)
             if (stats != null) {
                 put("stats", stats)
             }
@@ -400,6 +416,21 @@ object LibrarySyncPayload {
         return parseRssSources(payload.optJSONArray("rssSources") ?: JSONArray())
     }
 
+    fun supportsChangeSequences(payload: JSONObject): Boolean {
+        return payload.optBoolean("supportsChangeSequences", false) &&
+            payload.optInt("version") >= PROTOCOL_VERSION
+    }
+
+    fun parseChangeSequence(payload: JSONObject): LibraryChangeSequence {
+        val range = payload.optJSONObject("changeSeqRange") ?: JSONObject()
+        return LibraryChangeSequence(
+            fromSeqExclusive = range.optLong("fromExclusive"),
+            toSeqInclusive = range.optLong("toInclusive"),
+            fullSnapshot = payload.optBoolean("fullSnapshot", true),
+            fallbackReason = payload.optString("fallbackReason").trim()
+        )
+    }
+
     fun parseRssSources(array: JSONArray): List<PhoneRssSourceEntity> {
         return buildList {
             for (index in 0 until array.length()) {
@@ -623,6 +654,20 @@ object LibrarySyncPayload {
         if (totalArticles != null) {
             put("totalArticles", totalArticles)
         }
+    }
+
+    private fun JSONObject.putChangeSequence(changeSequence: LibraryChangeSequence?) {
+        if (changeSequence == null) return
+        put("supportsChangeSequences", true)
+        put("fullSnapshot", changeSequence.fullSnapshot)
+        put("fallbackReason", changeSequence.fallbackReason)
+        put(
+            "changeSeqRange",
+            JSONObject().apply {
+                put("fromExclusive", changeSequence.fromSeqExclusive)
+                put("toInclusive", changeSequence.toSeqInclusive)
+            }
+        )
     }
 
     private fun PhoneArticleEntity.toManifestJson(): JSONObject {

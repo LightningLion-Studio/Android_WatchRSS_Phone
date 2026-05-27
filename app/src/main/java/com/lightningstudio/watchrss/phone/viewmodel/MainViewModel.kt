@@ -34,7 +34,8 @@ data class MainUiState(
     val favorites: List<PhoneArticleEntity> = emptyList(),
     val watchLater: List<PhoneArticleEntity> = emptyList(),
     val refreshingRssSourceUrls: Set<String> = emptySet(),
-    val conflictPrompt: MainConflictPromptUi? = null
+    val conflictPrompt: MainConflictPromptUi? = null,
+    val sharedImportPrompt: SharedImportPromptUi? = null
 )
 
 data class MainSyncProgressUi(
@@ -45,6 +46,19 @@ data class MainSyncProgressUi(
 data class MainConflictPromptUi(
     val conflicts: List<PhoneSyncDeleteConflict>,
     val manual: Boolean = false
+)
+
+enum class SharedImportPromptKind {
+    LINK,
+    FILE
+}
+
+data class SharedImportPromptUi(
+    val kind: SharedImportPromptKind,
+    val url: String = "",
+    val fileName: String = "",
+    val mimeType: String? = null,
+    val uriString: String = ""
 )
 
 private data class LibraryLists(
@@ -137,7 +151,57 @@ class MainViewModel(
     }
 
     fun importIndependentArticle() {
-        importWebArticle()
+        importWebArticle(sessionState.value.urlInput.trim())
+    }
+
+    fun showSharedLinkPrompt(url: String) {
+        val normalized = url.trim()
+        if (normalized.isBlank()) return
+        sessionState.value = sessionState.value.copy(
+            urlInput = normalized,
+            message = null,
+            error = null,
+            sharedImportPrompt = SharedImportPromptUi(
+                kind = SharedImportPromptKind.LINK,
+                url = normalized
+            )
+        )
+    }
+
+    fun showSharedFilePrompt(fileName: String, mimeType: String?, uriString: String) {
+        if (uriString.isBlank()) return
+        sessionState.value = sessionState.value.copy(
+            message = null,
+            error = null,
+            sharedImportPrompt = SharedImportPromptUi(
+                kind = SharedImportPromptKind.FILE,
+                fileName = fileName.ifBlank { "未命名文件" },
+                mimeType = mimeType,
+                uriString = uriString
+            )
+        )
+    }
+
+    fun dismissSharedImportPrompt() {
+        sessionState.value = sessionState.value.copy(sharedImportPrompt = null)
+    }
+
+    fun importSharedLinkAsIndependent(url: String) {
+        val normalized = url.trim()
+        sessionState.value = sessionState.value.copy(
+            sharedImportPrompt = null,
+            urlInput = normalized
+        )
+        importWebArticle(normalized)
+    }
+
+    fun importSharedLinkAsRss(url: String) {
+        val normalized = url.trim()
+        sessionState.value = sessionState.value.copy(
+            sharedImportPrompt = null,
+            urlInput = normalized
+        )
+        addRssSource(normalized)
     }
 
     fun importLocalContent(fileName: String, mimeType: String?, bytes: ByteArray) {
@@ -156,7 +220,10 @@ class MainViewModel(
     }
 
     fun addRssSource() {
-        val url = sessionState.value.urlInput.trim()
+        addRssSource(sessionState.value.urlInput.trim())
+    }
+
+    private fun addRssSource(url: String) {
         if (url.isBlank()) {
             sessionState.value = sessionState.value.copy(error = "请输入 RSS 源地址")
             return
@@ -402,8 +469,7 @@ class MainViewModel(
         }
     }
 
-    private fun importWebArticle() {
-        val url = sessionState.value.urlInput.trim()
+    private fun importWebArticle(url: String) {
         if (url.isBlank()) {
             sessionState.value = sessionState.value.copy(error = "请输入网页地址")
             return

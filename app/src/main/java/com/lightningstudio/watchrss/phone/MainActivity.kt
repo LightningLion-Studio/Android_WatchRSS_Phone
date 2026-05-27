@@ -2,6 +2,7 @@ package com.lightningstudio.watchrss.phone
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.util.Log
@@ -18,6 +19,7 @@ import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModel
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModelFactory
+import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptUi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -109,6 +111,10 @@ class MainActivity : ComponentActivity() {
                     onImportArticle = viewModel::importIndependentArticle,
                     onImportFile = ::selectLocalFile,
                     onAddRssSource = viewModel::addRssSource,
+                    onImportSharedLinkAsArticle = viewModel::importSharedLinkAsIndependent,
+                    onImportSharedLinkAsRss = viewModel::importSharedLinkAsRss,
+                    onConfirmSharedFileImport = ::importSharedFile,
+                    onDismissSharedImport = viewModel::dismissSharedImportPrompt,
                     onSyncLibrary = { ensureBluetoothPermissions(viewModel::syncLibraryByBluetooth) },
                     onExportBluetoothLog = ::exportBluetoothLog,
                     onOpenArticle = { article ->
@@ -183,12 +189,40 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private suspend fun readSelectedLocalContent(uri: Uri): SelectedLocalContent =
+    private fun importSharedFile(prompt: SharedImportPromptUi) {
+        val uri = runCatching { Uri.parse(prompt.uriString) }.getOrNull()
+        if (uri == null) {
+            viewModel.dismissSharedImportPrompt()
+            viewModel.showError("文件地址无效")
+            return
+        }
+        viewModel.dismissSharedImportPrompt()
+        viewModel.showMessage("正在读取文件…")
+        lifecycleScope.launch {
+            runCatching {
+                readSelectedLocalContent(uri, prompt.mimeType)
+            }.onSuccess { file ->
+                viewModel.importLocalContent(
+                    fileName = file.fileName,
+                    mimeType = file.mimeType,
+                    bytes = file.bytes
+                )
+            }.onFailure { throwable ->
+                Log.e(TAG, "Failed to read shared local content", throwable)
+                viewModel.showError("文件导入失败：${throwable.message ?: "未知错误"}")
+            }
+        }
+    }
+
+    private suspend fun readSelectedLocalContent(
+        uri: Uri,
+        fallbackMimeType: String? = null
+    ): SelectedLocalContent =
         withContext(Dispatchers.IO) {
             val fileName = queryDisplayName(uri)
                 ?: uri.lastPathSegment?.substringAfterLast('/')
                 ?: "未命名文件"
-            val mimeType = contentResolver.getType(uri)
+            val mimeType = contentResolver.getType(uri) ?: fallbackMimeType
             val bytes = contentResolver.openInputStream(uri)
                 ?.use { input -> input.readBytes() }
                 ?: error("无法读取文件")
@@ -207,30 +241,142 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleInboundIntent(intent: Intent?) {
-        val url = extractInboundUrl(intent) ?: return
-        viewModel.updateUrlInput(url)
+        if (intent == null) return
+        val url = extractInboundUrl(intent)
+        val fileUri = extractInboundFileUri(intent)
+        if (fileUri != null) {
+            lifecycleScope.launch {
+                var inspectError: Throwable? = null
+                val handled = runCatching {
+                    showInboundFilePrompt(fileUri, intent.type)
+                }.onFailure { throwable ->
+                    inspectError = throwable
+                    Log.e(TAG, "Failed to inspect shared local content", throwable)
+                }.getOrDefault(false)
+                if (!handled) {
+                    if (url != null) {
+                        viewModel.showSharedLinkPrompt(url)
+                    } else {
+                        val errorMessage = inspectError?.message
+                        viewModel.showError(
+                            if (errorMessage.isNullOrBlank()) {
+                                "只支持导入 TXT 或 EPUB 文件"
+                            } else {
+                                "无法读取文件：$errorMessage"
+                            }
+                        )
+                    }
+                }
+            }
+            return
+        }
+        if (url != null) {
+            viewModel.showSharedLinkPrompt(url)
+        }
     }
 
     private fun extractInboundUrl(intent: Intent?): String? {
         if (intent == null) return null
-        return when (intent.action) {
-            Intent.ACTION_VIEW -> intent.dataString
-            Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
+        val text = when (intent.action) {
+            Intent.ACTION_VIEW -> intent.dataString?.takeIf { value ->
+                value.startsWith("http://") || value.startsWith("https://")
+            }
+            Intent.ACTION_SEND -> intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+                ?: firstClipText(intent)
             else -> null
-        }?.lineSequence()
+        }
+        return text?.lineSequence()
             ?.firstOrNull { line ->
                 line.contains("http://") || line.contains("https://")
             }
             ?.let { line ->
-                URL_PATTERN.find(line)?.value ?: line.trim()
+                URL_PATTERN.find(line)?.value?.trimUrlTail() ?: line.trim()
             }
     }
+
+    private fun extractInboundFileUri(intent: Intent): Uri? {
+        return when (intent.action) {
+            Intent.ACTION_VIEW -> intent.data?.takeIf(::isReadableLocalUri)
+            Intent.ACTION_SEND -> streamUriExtra(intent)?.takeIf(::isReadableLocalUri)
+                ?: firstClipUri(intent)?.takeIf(::isReadableLocalUri)
+            else -> null
+        }
+    }
+
+    private suspend fun showInboundFilePrompt(uri: Uri, intentMimeType: String?): Boolean {
+        val file = withContext(Dispatchers.IO) {
+            val fileName = queryDisplayName(uri)
+                ?: uri.lastPathSegment?.substringAfterLast('/')
+                ?: "未命名文件"
+            val mimeType = contentResolver.getType(uri) ?: intentMimeType
+            if (!isSupportedLocalContent(fileName, mimeType)) return@withContext null
+            InboundLocalFile(
+                fileName = fileName,
+                mimeType = mimeType,
+                uriString = uri.toString()
+            )
+        } ?: return false
+        viewModel.showSharedFilePrompt(
+            fileName = file.fileName,
+            mimeType = file.mimeType,
+            uriString = file.uriString
+        )
+        return true
+    }
+
+    private fun streamUriExtra(intent: Intent): Uri? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
+        }
+    }
+
+    private fun firstClipUri(intent: Intent): Uri? {
+        val clipData = intent.clipData ?: return null
+        return (0 until clipData.itemCount)
+            .asSequence()
+            .mapNotNull { index -> clipData.getItemAt(index).uri }
+            .firstOrNull()
+    }
+
+    private fun firstClipText(intent: Intent): String? {
+        val clipData = intent.clipData ?: return null
+        return (0 until clipData.itemCount)
+            .asSequence()
+            .mapNotNull { index -> clipData.getItemAt(index).text?.toString() }
+            .firstOrNull { it.isNotBlank() }
+    }
+
+    private fun isReadableLocalUri(uri: Uri): Boolean {
+        val scheme = uri.scheme?.lowercase() ?: return false
+        return scheme == "content" || scheme == "file"
+    }
+
+    private fun isSupportedLocalContent(fileName: String, mimeType: String?): Boolean {
+        val lowerName = fileName.lowercase()
+        val lowerMime = mimeType.orEmpty().lowercase()
+        return lowerName.endsWith(".txt") ||
+            lowerName.endsWith(".epub") ||
+            lowerMime.startsWith("text/") ||
+            lowerMime == "application/epub+zip"
+    }
+
+    private fun String.trimUrlTail(): String =
+        trimEnd('.', ',', ';', ':', '!', '?', ')', ']', '}', '>', '。', '，', '；', '：', '！', '？', '）', '】', '》')
 
     companion object {
         private const val TAG = "WatchRSS_Main"
         private val URL_PATTERN = Regex("""https?://\S+""")
     }
 }
+
+private data class InboundLocalFile(
+    val fileName: String,
+    val mimeType: String?,
+    val uriString: String
+)
 
 private data class SelectedLocalContent(
     val fileName: String,

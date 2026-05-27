@@ -47,6 +47,8 @@ import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.viewmodel.MainConflictPromptUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainUiState
 import com.lightningstudio.watchrss.phone.viewmodel.MainSyncProgressUi
+import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptKind
+import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptUi
 
 private enum class MainPage {
     HOME,
@@ -65,6 +67,10 @@ fun MainScreen(
     onImportArticle: () -> Unit,
     onImportFile: () -> Unit,
     onAddRssSource: () -> Unit,
+    onImportSharedLinkAsArticle: (String) -> Unit,
+    onImportSharedLinkAsRss: (String) -> Unit,
+    onConfirmSharedFileImport: (SharedImportPromptUi) -> Unit,
+    onDismissSharedImport: () -> Unit,
     onSyncLibrary: () -> Unit,
     onExportBluetoothLog: () -> Unit,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
@@ -223,6 +229,15 @@ fun MainScreen(
             prompt = prompt,
             onChooseResolution = onChooseConflictResolution,
             onShowManualOptions = onShowManualConflictOptions
+        )
+    }
+    uiState.sharedImportPrompt?.let { prompt ->
+        SharedImportDialog(
+            prompt = prompt,
+            onImportLinkAsArticle = onImportSharedLinkAsArticle,
+            onImportLinkAsRss = onImportSharedLinkAsRss,
+            onConfirmFileImport = onConfirmSharedFileImport,
+            onDismiss = onDismissSharedImport
         )
     }
 }
@@ -438,6 +453,95 @@ private fun DeleteConflictDialog(
             }
         },
         confirmButton = {}
+    )
+}
+
+@Composable
+private fun SharedImportDialog(
+    prompt: SharedImportPromptUi,
+    onImportLinkAsArticle: (String) -> Unit,
+    onImportLinkAsRss: (String) -> Unit,
+    onConfirmFileImport: (SharedImportPromptUi) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = when (prompt.kind) {
+                    SharedImportPromptKind.LINK -> "导入链接"
+                    SharedImportPromptKind.FILE -> "导入文件"
+                }
+            )
+        },
+        text = {
+            when (prompt.kind) {
+                SharedImportPromptKind.LINK -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "请选择导入方式",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = prompt.url,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                SharedImportPromptKind.FILE -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = prompt.fileName.ifBlank { "未命名文件" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    prompt.mimeType?.takeIf { it.isNotBlank() }?.let { mimeType ->
+                        Text(
+                            text = mimeType,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                when (prompt.kind) {
+                    SharedImportPromptKind.LINK -> {
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { onImportLinkAsRss(prompt.url) }
+                        ) {
+                            Text("添加 RSS 源")
+                        }
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { onImportLinkAsArticle(prompt.url) }
+                        ) {
+                            Text("添加独立文章")
+                        }
+                    }
+                    SharedImportPromptKind.FILE -> {
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { onConfirmFileImport(prompt) }
+                        ) {
+                            Text("导入")
+                        }
+                    }
+                }
+                OutlinedButton(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = onDismiss
+                ) {
+                    Text("取消")
+                }
+            }
+        }
     )
 }
 

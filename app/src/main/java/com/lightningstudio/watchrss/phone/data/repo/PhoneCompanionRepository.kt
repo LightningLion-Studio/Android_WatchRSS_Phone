@@ -237,7 +237,13 @@ class PhoneCompanionRepository(
     suspend fun getArticleManifestsForSync(): List<ArticleSyncManifestEntry> = withContext(Dispatchers.IO) {
         articleDao.getAllForSync()
             .filter { it.shouldSyncThroughLibrary() }
-            .map { it.ensureSyncMetadata() }
+            .map { article ->
+                if (article.needsSyncMetadataRefresh()) {
+                    article.ensureSyncMetadata()
+                } else {
+                    article
+                }
+            }
             .map { it.toSyncManifestEntry() }
     }
 
@@ -1075,6 +1081,16 @@ class PhoneCompanionRepository(
             chunkHashes = syncChunkHashesJson.toStringList(),
             metadataHash = syncMetadataHash.ifBlank { ArticleSyncBody.metadataHashFor(this) }
         )
+    }
+
+    private fun PhoneArticleEntity.needsSyncMetadataRefresh(): Boolean {
+        if (deleted) return false
+        return syncBodyHash.isBlank() ||
+            syncBodyByteCount <= 0L ||
+            syncChunkSize <= 0 ||
+            syncChunkHashesJson.toStringList().isEmpty() ||
+            syncMetadataHash.isBlank() ||
+            syncMetadataHash != ArticleSyncBody.metadataHashFor(this)
     }
 
     private fun PhoneArticleEntity.shouldSyncThroughLibrary(): Boolean {

@@ -33,7 +33,8 @@ data class ArticleSyncManifestEntry(
     val bodyByteCount: Long = 0L,
     val chunkSize: Int = 0,
     val chunkHashes: List<String> = emptyList(),
-    val metadataHash: String = ""
+    val metadataHash: String = "",
+    val bodyAvailable: Boolean = true
 )
 
 data class LibraryChangeSequence(
@@ -322,7 +323,8 @@ object LibrarySyncPayload {
                         bodyByteCount = item.optLong("bodyByteCount"),
                         chunkSize = item.optInt("chunkSize"),
                         chunkHashes = item.optStringArray("chunkHashes"),
-                        metadataHash = item.optString("metadataHash").trim()
+                        metadataHash = item.optString("metadataHash").trim(),
+                        bodyAvailable = item.optBoolean("bodyAvailable", true)
                     )
                 )
             }
@@ -357,11 +359,19 @@ object LibrarySyncPayload {
                     remote.deleted != local.deleted
             }
             val hasReusableLocalBody = local != null &&
+                local.bodyAvailable &&
                 remote.bodyHash == local.bodyHash &&
                 local.chunkHashes.isNotEmpty()
-            val needsBody = !remote.deleted && !hasReusableLocalBody
+            if (!remote.deleted && !remote.bodyAvailable && !hasReusableLocalBody) {
+                return@mapNotNull null
+            }
+            val needsBody = !remote.deleted && remote.bodyAvailable && !hasReusableLocalBody
             if (!needsMetadata && !needsBody) return@mapNotNull null
-            val localHashes = local?.chunkHashes.orEmpty().toSet()
+            val localHashes = if (local?.bodyAvailable == true) {
+                local.chunkHashes.toSet()
+            } else {
+                emptySet()
+            }
             val chunkIndexes = if (needsBody) {
                 remote.chunkHashes.mapIndexedNotNull { index, hash ->
                     index.takeIf { hash !in localHashes }
@@ -686,6 +696,7 @@ object LibrarySyncPayload {
             put("chunkSize", syncChunkSize)
             put("chunkHashes", JSONArray(syncChunkHashesJson.optJsonStringList()))
             put("metadataHash", syncMetadataHash.ifBlank { ArticleSyncBody.metadataHashFor(this@toManifestJson) })
+            put("bodyAvailable", true)
         }
     }
 
@@ -713,6 +724,7 @@ object LibrarySyncPayload {
             put("chunkSize", chunkSize)
             put("chunkHashes", JSONArray(chunkHashes))
             put("metadataHash", metadataHash)
+            put("bodyAvailable", bodyAvailable)
         }
     }
 

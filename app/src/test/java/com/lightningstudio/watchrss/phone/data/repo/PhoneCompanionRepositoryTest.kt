@@ -873,6 +873,42 @@ class PhoneCompanionRepositoryTest {
         assertEquals(false, articleDao.items.single().syncChunkHashesJson.contains("stale-hash"))
     }
 
+    @Test
+    fun getArticleManifestsForSync_marksMissingExternalBodyUnavailable() = runBlocking {
+        val sourceUrl = ImportedContentIds.ROOT_SOURCE_URL
+        val articleDao = FakePhoneArticleDao().apply {
+            items = listOf(
+                article(
+                    id = "missing-body",
+                    url = ImportedContentIds.txtArticleUrl("missing-body"),
+                    rssSourceUrl = sourceUrl,
+                    contentText = "fake-local-text:missing-body-text"
+                ).copy(
+                    syncBodyHash = "cached-body",
+                    syncBodyByteCount = 1024L,
+                    syncChunkSize = 131_072,
+                    syncChunkHashesJson = """["cached-chunk"]""",
+                    syncMetadataHash = "cached-metadata"
+                )
+            )
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone",
+            articleContentStore = FakeArticleContentStore()
+        )
+
+        val manifest = repository.getArticleManifestsForSync().single()
+        val outgoing = repository.getArticlesForSync(listOf("missing-body"))
+
+        assertEquals(false, manifest.bodyAvailable)
+        assertEquals("cached-body", manifest.bodyHash)
+        assertEquals(emptyList<PhoneArticleEntity>(), outgoing)
+        assertEquals("cached-body", articleDao.items.single().syncBodyHash)
+    }
+
     private fun source(
         url: String,
         title: String = "示例源",

@@ -17,6 +17,9 @@ object BluetoothSyncProtocol {
     const val ACTION_SYNC_LIBRARY = "syncLibrary"
     const val ACTION_ACK = "ack"
 
+    const val ACK_PHASE_RECEIVED = "received"
+    const val ACK_PHASE_APPLIED = "applied"
+
     const val MAX_FRAME_BYTES = 2 * 1024 * 1024
 
     fun readFrame(input: InputStream): JSONObject {

@@ -59,6 +59,11 @@ data class PhoneLibrarySyncWindow(
     val fallbackReason: String
 )
 
+private data class SyncHydratedArticle(
+    val article: PhoneArticleEntity,
+    val bodyAvailable: Boolean
+)
+
 private object NoopSyncChangeLogDao : SyncChangeLogDao {
     override suspend fun insert(change: SyncChangeLogEntity): Long = 0L
     override suspend fun maxSeq(): Long = 0L
@@ -281,20 +286,13 @@ class PhoneCompanionRepository(
     suspend fun getArticlesForSync(): List<PhoneArticleEntity> = withContext(Dispatchers.IO) {
         articleDao.getAllForSync()
             .filter { it.shouldSyncThroughLibrary() }
-            .map { it.hydrateExternalText() }
+            .mapNotNull { it.articleForBodyExport() }
     }
 
     suspend fun getArticleManifestsForSync(): List<ArticleSyncManifestEntry> = withContext(Dispatchers.IO) {
         articleDao.getAllForSync()
             .filter { it.shouldSyncThroughLibrary() }
-            .map { article ->
-                if (article.needsSyncMetadataRefresh()) {
-                    article.ensureSyncMetadata()
-                } else {
-                    article
-                }
-            }
-            .map { it.toSyncManifestEntry() }
+            .map { it.syncManifestEntryForExport() }
     }
 
     private suspend fun getArticleManifestsForSync(articleIds: Collection<String>): List<ArticleSyncManifestEntry> {
@@ -302,14 +300,7 @@ class PhoneCompanionRepository(
         if (idSet.isEmpty()) return emptyList()
         return articleDao.getAllForSync()
             .filter { it.articleId in idSet && it.shouldSyncThroughLibrary() }
-            .map { article ->
-                if (article.needsSyncMetadataRefresh()) {
-                    article.ensureSyncMetadata()
-                } else {
-                    article
-                }
-            }
-            .map { it.toSyncManifestEntry() }
+            .map { it.syncManifestEntryForExport() }
     }
 
     suspend fun getArticlesForSync(articleIds: Collection<String>): List<PhoneArticleEntity> =
@@ -318,7 +309,7 @@ class PhoneCompanionRepository(
             if (idSet.isEmpty()) return@withContext emptyList()
             articleDao.getAllForSync()
                 .filter { it.articleId in idSet }
-                .map { it.hydrateExternalText().withCurrentSyncMetadata() }
+                .mapNotNull { it.articleForBodyExport() }
         }
 
     suspend fun getRssSourcesForSync(): List<PhoneRssSourceEntity> = withContext(Dispatchers.IO) {
@@ -527,11 +518,13 @@ class PhoneCompanionRepository(
                             articleDao.upsert(updated.withCurrentSyncMetadata().externalizeLargeLocalContent())
                         }
                     } else {
-                        forcedRemoteRequests += remote.toFullBodyRequest()
-                        mergeResolutions[remote.articleId] = if (resolution == PhoneSyncConflictResolution.MERGE_CONTENT) {
-                            PhoneSyncConflictResolution.MERGE_CONTENT
-                        } else {
-                            PhoneSyncConflictResolution.KEEP_WATCH
+                        if (remote.bodyAvailable) {
+                            forcedRemoteRequests += remote.toFullBodyRequest()
+                            mergeResolutions[remote.articleId] = if (resolution == PhoneSyncConflictResolution.MERGE_CONTENT) {
+                                PhoneSyncConflictResolution.MERGE_CONTENT
+                            } else {
+                                PhoneSyncConflictResolution.KEEP_WATCH
+                            }
                         }
                     }
                 }
@@ -1286,8 +1279,9 @@ class PhoneCompanionRepository(
         )
     }
 
-    private suspend fun PhoneArticleEntity.ensureSyncMetadata(): PhoneArticleEntity {
-        val hydrated = hydrateExternalText()
+    private suspend fun PhoneArticleEntity.ensureSyncMetadata(
+        hydrated: PhoneArticleEntity = hydrateExternalText()
+    ): PhoneArticleEntity {
         val metadata = ArticleSyncBody.metadataFor(hydrated)
         if (
             syncBodyHash == metadata.bodyHash &&
@@ -1301,6 +1295,24 @@ class PhoneCompanionRepository(
         val updated = withSyncMetadata(metadata)
         articleDao.upsert(updated)
         return updated
+    }
+
+    private suspend fun PhoneArticleEntity.syncManifestEntryForExport(): ArticleSyncManifestEntry {
+        if (deleted) {
+            return toSyncManifestEntry(bodyAvailable = true)
+        }
+        val hydrated = hydrateExternalTextForSync()
+        if (!hydrated.bodyAvailable) {
+            return toSyncManifestEntry(bodyAvailable = false)
+        }
+        return ensureSyncMetadata(hydrated.article).toSyncManifestEntry(bodyAvailable = true)
+    }
+
+    private fun PhoneArticleEntity.articleForBodyExport(): PhoneArticleEntity? {
+        if (deleted) return hydrateExternalText().withCurrentSyncMetadata()
+        val hydrated = hydrateExternalTextForSync()
+        if (!hydrated.bodyAvailable) return null
+        return hydrated.article.withCurrentSyncMetadata()
     }
 
     private fun PhoneArticleEntity.withCurrentSyncMetadata(): PhoneArticleEntity {
@@ -1317,7 +1329,7 @@ class PhoneCompanionRepository(
         )
     }
 
-    private fun PhoneArticleEntity.toSyncManifestEntry(): ArticleSyncManifestEntry {
+    private fun PhoneArticleEntity.toSyncManifestEntry(bodyAvailable: Boolean = true): ArticleSyncManifestEntry {
         return ArticleSyncManifestEntry(
             articleId = articleId,
             sourceDeviceId = sourceDeviceId,
@@ -1331,7 +1343,8 @@ class PhoneCompanionRepository(
             bodyByteCount = syncBodyByteCount,
             chunkSize = syncChunkSize,
             chunkHashes = syncChunkHashesJson.toStringList(),
-            metadataHash = syncMetadataHash.ifBlank { ArticleSyncBody.metadataHashFor(this) }
+            metadataHash = syncMetadataHash.ifBlank { ArticleSyncBody.metadataHashFor(this) },
+            bodyAvailable = bodyAvailable
         )
     }
 
@@ -1389,6 +1402,30 @@ class PhoneCompanionRepository(
             contentText
         }
         return copy(contentHtml = html, contentText = text)
+    }
+
+    private fun PhoneArticleEntity.hydrateExternalTextForSync(): SyncHydratedArticle {
+        val store = articleContentStore ?: return SyncHydratedArticle(this, bodyAvailable = true)
+        var bodyAvailable = true
+        val html = contentHtml?.let { value ->
+            if (store.isMarker(value)) {
+                store.loadText(value) ?: run {
+                    bodyAvailable = false
+                    value
+                }
+            } else {
+                value
+            }
+        }
+        val text = if (store.isMarker(contentText)) {
+            store.loadText(contentText) ?: run {
+                bodyAvailable = false
+                contentText
+            }
+        } else {
+            contentText
+        }
+        return SyncHydratedArticle(copy(contentHtml = html, contentText = text), bodyAvailable)
     }
 
     private fun PhoneArticleEntity.shouldExternalizeLocalContent(store: ArticleContentStore): Boolean {

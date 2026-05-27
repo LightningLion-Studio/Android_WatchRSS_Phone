@@ -252,6 +252,39 @@ class LibrarySyncPayloadTest {
     }
 
     @Test
+    fun chunkedBodyRequest_requestsFullBodyWhenLocalBodyIsUnavailable() {
+        val article = testArticle(
+            articleId = "article-1",
+            contentText = "正文"
+        )
+        val remoteManifest = article.toManifestEntry()
+        val localManifest = remoteManifest.copy(bodyAvailable = false)
+
+        val requests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+            localManifest = listOf(localManifest),
+            remoteManifest = listOf(remoteManifest)
+        )
+
+        assertEquals(remoteManifest.chunkHashes.indices.toList(), requests.single().chunkIndexes)
+    }
+
+    @Test
+    fun chunkedBodyRequest_doesNotRequestUnavailableRemoteBody() {
+        val article = testArticle(
+            articleId = "article-1",
+            contentText = "正文"
+        )
+        val remoteManifest = article.toManifestEntry().copy(bodyAvailable = false)
+
+        val requests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+            localManifest = emptyList(),
+            remoteManifest = listOf(remoteManifest)
+        )
+
+        assertEquals(emptyList<ArticleBodyRequest>(), requests)
+    }
+
+    @Test
     fun chunkedBodyRequest_limitsBodyRequestsByWholeArticles() {
         val requests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
             localManifest = emptyList(),

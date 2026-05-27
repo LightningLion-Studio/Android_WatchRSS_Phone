@@ -13,6 +13,9 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import org.json.JSONObject
 
 data class BluetoothSyncExchange(
@@ -37,7 +40,7 @@ class PhoneBluetoothSyncClient(
     private val debugLog: BluetoothDebugLog
 ) {
     @SuppressLint("MissingPermission")
-    fun exchange(
+    suspend fun exchange(
         request: JSONObject,
         deviceAddress: String? = null,
         deviceNameHint: String? = null,
@@ -46,6 +49,11 @@ class PhoneBluetoothSyncClient(
         val totalStartedAt = SystemClock.elapsedRealtime()
         var socket: BluetoothSocket? = null
         var selectedDevice: BluetoothDevice? = null
+        val cancellationHandle = installSocketCancellationLogger(
+            sessionId = sessionId,
+            owner = "exchange",
+            socketProvider = { socket }
+        )
         debugLog.appendEvent(
             event = "bt.exchange.start",
             sessionId = sessionId,
@@ -84,7 +92,8 @@ class PhoneBluetoothSyncClient(
             connectLogged(socket, sessionId, device)
             writeFrameLogged(socket, sessionId, "request", request)
             val response = readFrameLogged(socket, sessionId, "response")
-            writeResponseAck(socket, sessionId)
+            writeResponseAck(socket, sessionId, success = true, applied = true)
+            rememberSuccessfulDevice(device, sessionId)
             Log.i(TAG, "exchange complete response=$response")
             debugLog.appendEvent(
                 event = "bt.exchange.complete",
@@ -112,6 +121,7 @@ class PhoneBluetoothSyncClient(
             )
             throw throwable
         } finally {
+            cancellationHandle?.dispose()
             socket?.let { closeSocketLogged(it, sessionId, "exchange") }
         }
     }
@@ -124,11 +134,17 @@ class PhoneBluetoothSyncClient(
         deviceAddress: String? = null,
         deviceNameHint: String? = null,
         sessionId: String = BluetoothDebugLog.newSessionId("bt-library"),
-        onProgress: (PhoneBluetoothSyncProgress) -> Unit = {}
+        onProgress: (PhoneBluetoothSyncProgress) -> Unit = {},
+        applyResponse: suspend (BluetoothLibrarySyncExchange) -> Unit = {}
     ): BluetoothLibrarySyncExchange {
         val totalStartedAt = SystemClock.elapsedRealtime()
         var socket: BluetoothSocket? = null
         var selectedDevice: BluetoothDevice? = null
+        val cancellationHandle = installSocketCancellationLogger(
+            sessionId = sessionId,
+            owner = "library",
+            socketProvider = { socket }
+        )
         onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.CONNECTING, 5))
         debugLog.appendEvent(
             event = "bt.library.start",
@@ -181,14 +197,14 @@ class PhoneBluetoothSyncClient(
                     fields = payloadFields("manifestResponse", manifestResponse) +
                         mapOf("elapsedMs" to elapsedSince(totalStartedAt))
                 )
-                writeResponseAck(socket, sessionId)
+                writeResponseAck(socket, sessionId, success = true, applied = true)
                 return BluetoothLibrarySyncExchange(
-                deviceName = device.name.orEmpty(),
-                deviceAddress = device.address,
-                request = request,
-                manifestResponse = manifestResponse,
-                articleRequestFrames = emptyList(),
-                responseFrames = listOf(manifestResponse),
+                    deviceName = device.name.orEmpty(),
+                    deviceAddress = device.address,
+                    request = request,
+                    manifestResponse = manifestResponse,
+                    articleRequestFrames = emptyList(),
+                    responseFrames = listOf(manifestResponse),
                     response = manifestResponse
                 )
             }
@@ -222,7 +238,29 @@ class PhoneBluetoothSyncClient(
             val responseFrames = readLibraryResponseFrames(socket, sessionId, onProgress)
             val response = LibrarySyncPayload.combineArticlePayloads(responseFrames)
             onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.VERIFYING, 88))
-            writeResponseAck(socket, sessionId)
+            val exchange = BluetoothLibrarySyncExchange(
+                deviceName = device.name.orEmpty(),
+                deviceAddress = device.address,
+                request = request,
+                manifestResponse = manifestResponse,
+                articleRequestFrames = articleRequests,
+                responseFrames = responseFrames,
+                response = response
+            )
+            try {
+                applyResponse(exchange)
+                writeResponseAck(socket, sessionId, success = true, applied = true)
+                rememberSuccessfulDevice(device, sessionId)
+            } catch (throwable: Throwable) {
+                writeResponseAck(
+                    socket = socket,
+                    sessionId = sessionId,
+                    success = false,
+                    applied = false,
+                    message = throwable.message
+                )
+                throw throwable
+            }
             Log.i(TAG, "library exchange complete manifest=$manifestResponse response=$response")
             debugLog.appendEvent(
                 event = "bt.library.complete",
@@ -232,15 +270,7 @@ class PhoneBluetoothSyncClient(
                     payloadFields("combinedLibraryResponse", response) +
                     mapOf("elapsedMs" to elapsedSince(totalStartedAt))
             )
-            return BluetoothLibrarySyncExchange(
-                deviceName = device.name.orEmpty(),
-                deviceAddress = device.address,
-                request = request,
-                manifestResponse = manifestResponse,
-                articleRequestFrames = articleRequests,
-                responseFrames = responseFrames,
-                response = response
-            )
+            return exchange
         } catch (throwable: Throwable) {
             debugLog.appendEvent(
                 event = "bt.library.failed",
@@ -256,6 +286,7 @@ class PhoneBluetoothSyncClient(
             )
             throw throwable
         } finally {
+            cancellationHandle?.dispose()
             socket?.let { closeSocketLogged(it, sessionId, "library") }
         }
     }
@@ -267,7 +298,14 @@ class PhoneBluetoothSyncClient(
     ): List<JSONObject> {
         onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.TRANSFERRING, 60))
         val first = readFrameLogged(socket, sessionId, "libraryResponse")
-        val batchCount = first.optInt("batchCount", 1).coerceAtLeast(1)
+        if (!first.optBoolean("success", true)) return listOf(first)
+        val batchCount = validateBatchFrame(
+            frame = first,
+            label = "libraryResponse",
+            expectedPhase = PHASE_COMPLETE,
+            expectedIndex = 0,
+            expectedBatchCount = null
+        )
         val frames = mutableListOf(first)
         onProgress(
             PhoneBluetoothSyncProgress(
@@ -277,7 +315,15 @@ class PhoneBluetoothSyncClient(
         )
         while (frames.size < batchCount) {
             val index = frames.size
-            frames += readFrameLogged(socket, sessionId, batchLabel("libraryResponse", index, batchCount))
+            val frame = readFrameLogged(socket, sessionId, batchLabel("libraryResponse", index, batchCount))
+            validateBatchFrame(
+                frame = frame,
+                label = "libraryResponse",
+                expectedPhase = PHASE_COMPLETE,
+                expectedIndex = index,
+                expectedBatchCount = batchCount
+            )
+            frames += frame
             onProgress(
                 PhoneBluetoothSyncProgress(
                     PhoneBluetoothSyncStage.TRANSFERRING,
@@ -308,6 +354,9 @@ class PhoneBluetoothSyncClient(
         val hint = deviceNameHint?.trim()?.lowercase().orEmpty()
         if (hint.isNotEmpty()) {
             devices.firstOrNull { it.name.orEmpty().lowercase().contains(hint) }?.let { return it }
+        }
+        cachedDeviceAddress()?.let { cachedAddress ->
+            devices.firstOrNull { it.address.equals(cachedAddress, ignoreCase = true) }?.let { return it }
         }
         return devices
             .sortedBy { it.name.orEmpty() }
@@ -485,6 +534,16 @@ class PhoneBluetoothSyncClient(
     }
 
     private fun writeResponseAck(socket: BluetoothSocket, sessionId: String) {
+        writeResponseAck(socket, sessionId, success = true, applied = true)
+    }
+
+    private fun writeResponseAck(
+        socket: BluetoothSocket,
+        sessionId: String,
+        success: Boolean,
+        applied: Boolean,
+        message: String? = null
+    ) {
         runCatching {
             writeFrameLogged(
                 socket = socket,
@@ -492,7 +551,10 @@ class PhoneBluetoothSyncClient(
                 label = "ack",
                 payload = JSONObject().apply {
                     put("action", BluetoothSyncProtocol.ACTION_ACK)
-                    put("success", true)
+                    put("phase", BluetoothSyncProtocol.ACK_PHASE_APPLIED)
+                    put("success", success)
+                    put("applied", applied)
+                    message?.takeIf { it.isNotBlank() }?.let { put("message", it) }
                 }
             )
         }.onFailure { throwable ->
@@ -524,6 +586,88 @@ class PhoneBluetoothSyncClient(
                 throwable = throwable
             )
         }
+    }
+
+    private suspend fun installSocketCancellationLogger(
+        sessionId: String,
+        owner: String,
+        socketProvider: () -> BluetoothSocket?
+    ) = currentCoroutineContext()[Job]?.invokeOnCompletion { cause ->
+        if (cause !is CancellationException) return@invokeOnCompletion
+        val socket = socketProvider() ?: return@invokeOnCompletion
+        val startedAt = SystemClock.elapsedRealtime()
+        runCatching {
+            socket.close()
+        }.onSuccess {
+            debugLog.appendEvent(
+                event = "bt.socket.close.cancelled",
+                sessionId = sessionId,
+                fields = mapOf(
+                    "owner" to owner,
+                    "elapsedMs" to elapsedSince(startedAt),
+                    "message" to cause.message.orEmpty()
+                )
+            )
+        }.onFailure { throwable ->
+            debugLog.appendEvent(
+                event = "bt.socket.close.cancelled.failed",
+                sessionId = sessionId,
+                fields = mapOf(
+                    "owner" to owner,
+                    "elapsedMs" to elapsedSince(startedAt),
+                    "errorClass" to throwable::class.java.name,
+                    "message" to throwable.message.orEmpty()
+                ),
+                throwable = throwable
+            )
+        }
+    }
+
+    private fun validateBatchFrame(
+        frame: JSONObject,
+        label: String,
+        expectedPhase: String,
+        expectedIndex: Int,
+        expectedBatchCount: Int?
+    ): Int {
+        require(frame.optString("action") == BluetoothSyncProtocol.ACTION_SYNC_LIBRARY) {
+            "$label 批次动作异常：${frame.optString("action")}"
+        }
+        require(frame.optString("phase") == expectedPhase) {
+            "$label 批次阶段异常：${frame.optString("phase")}"
+        }
+        val batchCount = frame.optInt("batchCount", 1)
+        require(batchCount in 1..MAX_SYNC_BATCH_FRAMES) {
+            "$label 批次数异常：$batchCount"
+        }
+        expectedBatchCount?.let { expected ->
+            require(batchCount == expected) {
+                "$label 批次数不一致：$batchCount/$expected"
+            }
+        }
+        if (batchCount > 1 || frame.has("batchIndex") || frame.has("batchCount")) {
+            require(frame.has("batchIndex") && frame.has("batchCount")) {
+                "$label 批次字段不完整"
+            }
+            require(frame.optInt("batchIndex") == expectedIndex) {
+                "$label 批次序号异常：${frame.optInt("batchIndex")}，期望 $expectedIndex"
+            }
+        }
+        return batchCount
+    }
+
+    private fun cachedDeviceAddress(): String? =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_LAST_DEVICE_ADDRESS, null)
+            ?.takeIf { it.isNotBlank() }
+
+    @SuppressLint("MissingPermission")
+    private fun rememberSuccessfulDevice(device: BluetoothDevice, sessionId: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_LAST_DEVICE_ADDRESS, device.address)
+            .apply()
+        debugLog.appendEvent("bt.device.cache.updated", sessionId, deviceFields(device))
     }
 
     @SuppressLint("MissingPermission")
@@ -589,5 +733,9 @@ class PhoneBluetoothSyncClient(
 
     companion object {
         private const val TAG = "WatchRSS_BtSyncClient"
+        private const val PHASE_COMPLETE = "complete"
+        private const val MAX_SYNC_BATCH_FRAMES = 256
+        private const val PREFS_NAME = "watchrss_bluetooth_sync"
+        private const val KEY_LAST_DEVICE_ADDRESS = "last_successful_device_address"
     }
 }

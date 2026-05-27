@@ -127,6 +127,10 @@ class PhoneBluetoothSyncManager(
         reportProgress(onProgress, PhoneBluetoothSyncStage.CONNECTING, 8)
         var sentArticles = emptyList<PhoneArticleEntity>()
         var receivedArticles = 0
+        var merged = 0
+        var receivedSourcesCount = 0
+        var mergedSources = 0
+        var remoteSeqApplied = 0L
         var conflictMergeResolutions = emptyMap<String, PhoneSyncConflictResolution>()
         var syncWindow: PhoneLibrarySyncWindow? = null
         val sessionId = BluetoothDebugLog.newSessionId("syncLibrary")
@@ -253,40 +257,45 @@ class PhoneBluetoothSyncManager(
                     frames
                 },
                 onProgress = onProgress,
-                sessionId = sessionId
+                sessionId = sessionId,
+                applyResponse = { exchange ->
+                    val window = syncWindow ?: error("同步窗口尚未准备")
+                    reportProgress(onProgress, PhoneBluetoothSyncStage.VERIFYING, 90)
+                    requireSuccess(exchange.response)
+                    val chunkedResponse = exchange.response.optInt("version") > LibrarySyncPayload.LEGACY_PROTOCOL_VERSION &&
+                        exchange.response.optJSONArray("articles") != null &&
+                        (exchange.response.optJSONArray("articles")?.let { array ->
+                            (0 until array.length()).any { index ->
+                                array.optJSONObject(index)?.has("body") == true
+                            }
+                        } == true)
+                    val received = if (chunkedResponse) {
+                        val chunked = LibrarySyncPayload.parseChunkedArticles(exchange.response)
+                        receivedArticles = chunked.size
+                        repository.mergeChunkedArticlesFromSync(chunked, conflictMergeResolutions)
+                    } else {
+                        val articles = LibrarySyncPayload.parseArticles(exchange.response)
+                        receivedArticles = articles.size
+                        repository.mergeArticlesFromSync(articles, conflictMergeResolutions)
+                    }
+                    val receivedSources = LibrarySyncPayload.parseRssSources(exchange.manifestResponse)
+                    reportProgress(onProgress, PhoneBluetoothSyncStage.VERIFYING, 94)
+                    merged = received
+                    receivedSourcesCount = receivedSources.size
+                    mergedSources = repository.mergeRssSourcesFromSync(receivedSources)
+                    val remoteChangeSequence = LibrarySyncPayload.parseChangeSequence(exchange.manifestResponse)
+                    remoteSeqApplied = remoteChangeSequence.toSeqInclusive
+                    repository.markLibrarySyncSuccess(
+                        peerDeviceId = exchange.deviceAddress.ifBlank { exchange.deviceName },
+                        localSeqToInclusive = window.toSeqInclusive,
+                        remoteSeqToInclusive = remoteChangeSequence.toSeqInclusive,
+                        remoteProtocolVersion = exchange.manifestResponse.optInt("version"),
+                        fullSnapshot = window.fullSnapshot || remoteChangeSequence.fullSnapshot
+                    )
+                    reportProgress(onProgress, PhoneBluetoothSyncStage.VERIFYING, 100)
+                }
             )
             val window = syncWindow ?: error("同步窗口尚未准备")
-            reportProgress(onProgress, PhoneBluetoothSyncStage.VERIFYING, 90)
-            requireSuccess(exchange.response)
-            val chunkedResponse = exchange.response.optInt("version") > LibrarySyncPayload.LEGACY_PROTOCOL_VERSION &&
-                exchange.response.optJSONArray("articles") != null &&
-                (exchange.response.optJSONArray("articles")?.let { array ->
-                    (0 until array.length()).any { index ->
-                        array.optJSONObject(index)?.has("body") == true
-                    }
-                } == true)
-            val received = if (chunkedResponse) {
-                val chunked = LibrarySyncPayload.parseChunkedArticles(exchange.response)
-                receivedArticles = chunked.size
-                repository.mergeChunkedArticlesFromSync(chunked, conflictMergeResolutions)
-            } else {
-                val articles = LibrarySyncPayload.parseArticles(exchange.response)
-                receivedArticles = articles.size
-                repository.mergeArticlesFromSync(articles, conflictMergeResolutions)
-            }
-            val receivedSources = LibrarySyncPayload.parseRssSources(exchange.manifestResponse)
-            reportProgress(onProgress, PhoneBluetoothSyncStage.VERIFYING, 94)
-            val merged = received
-            val mergedSources = repository.mergeRssSourcesFromSync(receivedSources)
-            val remoteChangeSequence = LibrarySyncPayload.parseChangeSequence(exchange.manifestResponse)
-            repository.markLibrarySyncSuccess(
-                peerDeviceId = exchange.deviceAddress.ifBlank { exchange.deviceName },
-                localSeqToInclusive = window.toSeqInclusive,
-                remoteSeqToInclusive = remoteChangeSequence.toSeqInclusive,
-                remoteProtocolVersion = exchange.manifestResponse.optInt("version"),
-                fullSnapshot = window.fullSnapshot || remoteChangeSequence.fullSnapshot
-            )
-            reportProgress(onProgress, PhoneBluetoothSyncStage.VERIFYING, 100)
             debugLog.appendEvent(
                 event = "sync.library.complete",
                 sessionId = sessionId,
@@ -296,11 +305,11 @@ class PhoneBluetoothSyncManager(
                     "received" to receivedArticles,
                     "merged" to merged,
                     "sourcesSent" to window.rssSources.size,
-                    "sourcesReceived" to receivedSources.size,
+                    "sourcesReceived" to receivedSourcesCount,
                     "sourcesMerged" to mergedSources,
                     "localSeqMax" to window.toSeqInclusive,
                     "peerAckedSeq" to window.peerAckedSeq,
-                    "remoteSeqApplied" to remoteChangeSequence.toSeqInclusive,
+                    "remoteSeqApplied" to remoteSeqApplied,
                     "deltaArticleCount" to window.articleManifest.size,
                     "deltaSourceCount" to window.rssSources.size,
                     "fullSnapshot" to window.fullSnapshot,
@@ -314,7 +323,7 @@ class PhoneBluetoothSyncManager(
                     received = receivedArticles,
                     merged = merged,
                     sourcesSent = window.rssSources.size,
-                    sourcesReceived = receivedSources.size,
+                    sourcesReceived = receivedSourcesCount,
                     sourcesMerged = mergedSources
                 )
             )
@@ -360,7 +369,8 @@ class PhoneBluetoothSyncManager(
         buildManifestRequest: suspend (String) -> JSONObject,
         buildArticleRequests: suspend (JSONObject, Boolean) -> List<JSONObject>,
         onProgress: (PhoneBluetoothSyncProgress) -> Unit,
-        sessionId: String
+        sessionId: String,
+        applyResponse: suspend (BluetoothLibrarySyncExchange) -> Unit
     ): BluetoothLibrarySyncExchange {
         return try {
             withTimeout(LIBRARY_SYNC_TIMEOUT_MS) {
@@ -371,7 +381,8 @@ class PhoneBluetoothSyncManager(
                         },
                         buildArticleRequests = buildArticleRequests,
                         sessionId = sessionId,
-                        onProgress = onProgress
+                        onProgress = onProgress,
+                        applyResponse = applyResponse
                     )
                 }
             }

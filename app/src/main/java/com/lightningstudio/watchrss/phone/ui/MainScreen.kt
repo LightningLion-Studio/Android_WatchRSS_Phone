@@ -44,6 +44,8 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflict
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
+import com.lightningstudio.watchrss.phone.viewmodel.MainBluetoothDevicePromptUi
+import com.lightningstudio.watchrss.phone.viewmodel.MainBluetoothDeviceUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainConflictPromptUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainUiState
 import com.lightningstudio.watchrss.phone.viewmodel.MainSyncProgressUi
@@ -72,6 +74,8 @@ fun MainScreen(
     onConfirmSharedFileImport: (SharedImportPromptUi) -> Unit,
     onDismissSharedImport: () -> Unit,
     onSyncLibrary: () -> Unit,
+    onChooseBluetoothDevice: (MainBluetoothDeviceUi) -> Unit,
+    onDismissBluetoothDevicePrompt: () -> Unit,
     onExportBluetoothLog: () -> Unit,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
     onToggleFavorite: (PhoneArticleEntity) -> Unit,
@@ -238,6 +242,13 @@ fun MainScreen(
             onImportLinkAsRss = onImportSharedLinkAsRss,
             onConfirmFileImport = onConfirmSharedFileImport,
             onDismiss = onDismissSharedImport
+        )
+    }
+    uiState.bluetoothDevicePrompt?.let { prompt ->
+        BluetoothDeviceChooserDialog(
+            prompt = prompt,
+            onChooseDevice = onChooseBluetoothDevice,
+            onDismiss = onDismissBluetoothDevicePrompt
         )
     }
 }
@@ -453,6 +464,53 @@ private fun DeleteConflictDialog(
             }
         },
         confirmButton = {}
+    )
+}
+
+@Composable
+private fun BluetoothDeviceChooserDialog(
+    prompt: MainBluetoothDevicePromptUi,
+    onChooseDevice: (MainBluetoothDeviceUi) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择同步手表") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "检测到多块已打开 WatchRSS 的手表，请选择本次同步目标。",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                prompt.devices.forEach { device ->
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { onChooseDevice(device) }
+                    ) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                text = device.name.ifBlank { "未知手表" },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = device.address,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
     )
 }
 

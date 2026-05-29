@@ -38,6 +38,43 @@ class PhoneBluetoothSyncManager(
 ) {
     private val client = PhoneBluetoothSyncClient(context.applicationContext, debugLog)
 
+    suspend fun probeLibrarySyncTargets(
+        onProbe: (completed: Int, total: Int) -> Unit = { _, _ -> }
+    ): List<PhoneBluetoothWatchDevice> {
+        val sessionId = BluetoothDebugLog.newSessionId("syncLibraryProbe")
+        debugLog.appendEvent(
+            event = "sync.library.probe.start",
+            sessionId = sessionId,
+            fields = mapOf("protocol" to LibrarySyncPayload.PROTOCOL_VERSION)
+        )
+        return runCatching {
+            withContext(Dispatchers.IO) {
+                client.probeLibrarySyncDevices(
+                    deviceId = deviceId,
+                    sessionId = sessionId,
+                    onProbe = { completed, total, _ ->
+                        onProbe(completed, total)
+                    }
+                )
+            }.filter { it.reachable }
+                .map { it.device }
+                .also { devices ->
+                    debugLog.appendEvent(
+                        event = "sync.library.probe.complete",
+                        sessionId = sessionId,
+                        fields = mapOf("reachable" to devices.size)
+                    )
+                }
+        }.onFailure { throwable ->
+            debugLog.appendEvent(
+                event = "sync.library.probe.failed",
+                sessionId = sessionId,
+                fields = failureFields(throwable),
+                throwable = throwable
+            )
+        }.getOrThrow()
+    }
+
     suspend fun sendRemoteInput(url: String): PhoneBluetoothSyncResult {
         val sessionId = BluetoothDebugLog.newSessionId("remoteInput")
         debugLog.appendEvent(
@@ -117,6 +154,7 @@ class PhoneBluetoothSyncManager(
     }
 
     suspend fun syncLibrary(
+        deviceAddress: String? = null,
         onProgress: (PhoneBluetoothSyncProgress) -> Unit = {},
         resolveDeleteConflicts: suspend (List<PhoneSyncDeleteConflict>) -> Map<String, PhoneSyncConflictResolution> = {
             emptyMap()
@@ -137,7 +175,10 @@ class PhoneBluetoothSyncManager(
         debugLog.appendEvent(
             event = "sync.library.start",
             sessionId = sessionId,
-            fields = mapOf("protocol" to LibrarySyncPayload.PROTOCOL_VERSION)
+            fields = mapOf(
+                "protocol" to LibrarySyncPayload.PROTOCOL_VERSION,
+                "targetAddress" to deviceAddress.orEmpty()
+            )
         )
         return runCatching {
             val exchange = exchangeLibrary(
@@ -256,6 +297,7 @@ class PhoneBluetoothSyncManager(
                     }
                     frames
                 },
+                deviceAddress = deviceAddress,
                 onProgress = onProgress,
                 sessionId = sessionId,
                 applyResponse = { exchange ->
@@ -368,6 +410,7 @@ class PhoneBluetoothSyncManager(
     private suspend fun exchangeLibrary(
         buildManifestRequest: suspend (String) -> JSONObject,
         buildArticleRequests: suspend (JSONObject, Boolean) -> List<JSONObject>,
+        deviceAddress: String? = null,
         onProgress: (PhoneBluetoothSyncProgress) -> Unit,
         sessionId: String,
         applyResponse: suspend (BluetoothLibrarySyncExchange) -> Unit
@@ -380,6 +423,7 @@ class PhoneBluetoothSyncManager(
                             buildManifestRequest(device.address.ifBlank { device.name.orEmpty().ifBlank { "watch" } })
                         },
                         buildArticleRequests = buildArticleRequests,
+                        deviceAddress = deviceAddress,
                         sessionId = sessionId,
                         onProgress = onProgress,
                         applyResponse = applyResponse

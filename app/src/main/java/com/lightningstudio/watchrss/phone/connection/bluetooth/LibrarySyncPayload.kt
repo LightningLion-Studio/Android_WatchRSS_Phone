@@ -198,6 +198,13 @@ object LibrarySyncPayload {
         }
     }
 
+    fun buildEmptyArticlesProbeRequest(deviceId: String): JSONObject =
+        buildChunkedArticlesRequest(
+            deviceId = deviceId,
+            articleItems = emptyList(),
+            bodyRequests = emptyList()
+        )
+
     fun buildChunkedResponseFrames(
         deviceId: String,
         articles: List<PhoneArticleEntity>,

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncProgress
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothWatchDevice
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncDeleteConflict
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
@@ -13,6 +14,7 @@ import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -35,6 +37,7 @@ data class MainUiState(
     val watchLater: List<PhoneArticleEntity> = emptyList(),
     val refreshingRssSourceUrls: Set<String> = emptySet(),
     val conflictPrompt: MainConflictPromptUi? = null,
+    val bluetoothDevicePrompt: MainBluetoothDevicePromptUi? = null,
     val sharedImportPrompt: SharedImportPromptUi? = null
 )
 
@@ -46,6 +49,15 @@ data class MainSyncProgressUi(
 data class MainConflictPromptUi(
     val conflicts: List<PhoneSyncDeleteConflict>,
     val manual: Boolean = false
+)
+
+data class MainBluetoothDevicePromptUi(
+    val devices: List<MainBluetoothDeviceUi>
+)
+
+data class MainBluetoothDeviceUi(
+    val name: String,
+    val address: String
 )
 
 enum class SharedImportPromptKind {
@@ -390,36 +402,102 @@ class MainViewModel(
         viewModelScope.launch {
             sessionState.value = sessionState.value.copy(
                 isBusy = true,
-                message = "建立连接中",
+                message = "探测手表中",
                 error = null,
-                syncProgress = MainSyncProgressUi(phase = "建立连接中", percent = 0)
+                syncProgress = MainSyncProgressUi(phase = "探测手表中", percent = 0),
+                bluetoothDevicePrompt = null,
+                conflictPrompt = null
             )
-            runCatching {
-                val result = bluetoothSyncManager.syncLibrary(
-                    onProgress = ::updateLibrarySyncProgress,
-                    resolveDeleteConflicts = ::resolveDeleteConflicts
-                )
-                val stats = result.libraryStats
+            val reachableDevices = runCatching {
+                bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress)
+            }.getOrElse { throwable ->
                 sessionState.value = sessionState.value.copy(
-                    message = if (stats != null) {
-                        "已与 ${result.deviceName.ifBlank { "手表" }} 同步：文章发送 ${stats.sent}，收到 ${stats.received}，合并 ${stats.merged}；RSS源发送 ${stats.sourcesSent}，收到 ${stats.sourcesReceived}，合并 ${stats.sourcesMerged}"
-                    } else {
-                        "已与 ${result.deviceName.ifBlank { "手表" }} 同步"
-                    },
-                    error = null,
-                    syncProgress = null
-                )
-            }.onFailure { throwable ->
-                sessionState.value = sessionState.value.copy(
+                    isBusy = false,
                     error = throwable.message ?: "操作失败",
                     syncProgress = null,
+                    bluetoothDevicePrompt = null,
                     conflictPrompt = null
                 )
+                return@launch
             }
-            conflictResolutionDeferred?.complete(PhoneSyncConflictResolution.KEEP_LATEST)
-            conflictResolutionDeferred = null
-            sessionState.value = sessionState.value.copy(isBusy = false, conflictPrompt = null)
+            when (reachableDevices.size) {
+                0 -> {
+                    sessionState.value = sessionState.value.copy(
+                        isBusy = false,
+                        message = null,
+                        error = "未找到已打开 WatchRSS 的已配对手表，请在手表端打开应用并保持亮屏后重试",
+                        syncProgress = null,
+                        bluetoothDevicePrompt = null
+                    )
+                }
+                1 -> {
+                    delay(400L)
+                    runLibrarySync(reachableDevices.single().address)
+                }
+                else -> {
+                    sessionState.value = sessionState.value.copy(
+                        isBusy = false,
+                        message = "发现 ${reachableDevices.size} 块可同步手表",
+                        error = null,
+                        syncProgress = null,
+                        bluetoothDevicePrompt = MainBluetoothDevicePromptUi(
+                            devices = reachableDevices.map { it.toUi() }
+                        )
+                    )
+                }
+            }
         }
+    }
+
+    fun chooseBluetoothDeviceForSync(device: MainBluetoothDeviceUi) {
+        viewModelScope.launch {
+            sessionState.value = sessionState.value.copy(bluetoothDevicePrompt = null)
+            runLibrarySync(device.address)
+        }
+    }
+
+    fun dismissBluetoothDevicePrompt() {
+        sessionState.value = sessionState.value.copy(
+            bluetoothDevicePrompt = null,
+            message = null,
+            syncProgress = null
+        )
+    }
+
+    private suspend fun runLibrarySync(deviceAddress: String?) {
+        sessionState.value = sessionState.value.copy(
+            isBusy = true,
+            message = "建立连接中",
+            error = null,
+            syncProgress = MainSyncProgressUi(phase = "建立连接中", percent = 0),
+            bluetoothDevicePrompt = null
+        )
+        runCatching {
+            val result = bluetoothSyncManager.syncLibrary(
+                deviceAddress = deviceAddress,
+                onProgress = ::updateLibrarySyncProgress,
+                resolveDeleteConflicts = ::resolveDeleteConflicts
+            )
+            val stats = result.libraryStats
+            sessionState.value = sessionState.value.copy(
+                message = if (stats != null) {
+                    "已与 ${result.deviceName.ifBlank { "手表" }} 同步：文章发送 ${stats.sent}，收到 ${stats.received}，合并 ${stats.merged}；RSS源发送 ${stats.sourcesSent}，收到 ${stats.sourcesReceived}，合并 ${stats.sourcesMerged}"
+                } else {
+                    "已与 ${result.deviceName.ifBlank { "手表" }} 同步"
+                },
+                error = null,
+                syncProgress = null
+            )
+        }.onFailure { throwable ->
+            sessionState.value = sessionState.value.copy(
+                error = throwable.message ?: "操作失败",
+                syncProgress = null,
+                conflictPrompt = null
+            )
+        }
+        conflictResolutionDeferred?.complete(PhoneSyncConflictResolution.KEEP_LATEST)
+        conflictResolutionDeferred = null
+        sessionState.value = sessionState.value.copy(isBusy = false, conflictPrompt = null)
     }
 
     fun chooseConflictResolution(resolution: PhoneSyncConflictResolution) {
@@ -547,7 +625,8 @@ class MainViewModel(
             message = busyMessage,
             error = null,
             syncProgress = null,
-            conflictPrompt = null
+            conflictPrompt = null,
+            bluetoothDevicePrompt = null
         )
         runCatching { block() }
             .onFailure { throwable ->
@@ -567,6 +646,25 @@ class MainViewModel(
             )
         )
     }
+
+    private fun updateBluetoothProbeProgress(completed: Int, total: Int) {
+        val safeTotal = total.coerceAtLeast(1)
+        val percent = ((completed.coerceIn(0, safeTotal).toFloat() / safeTotal.toFloat()) * 100).toInt()
+        sessionState.value = sessionState.value.copy(
+            message = "探测手表中（$completed/$total）",
+            error = null,
+            syncProgress = MainSyncProgressUi(
+                phase = "探测手表中",
+                percent = percent.coerceIn(0, 100)
+            )
+        )
+    }
+
+    private fun PhoneBluetoothWatchDevice.toUi(): MainBluetoothDeviceUi =
+        MainBluetoothDeviceUi(
+            name = name.ifBlank { "未知手表" },
+            address = address
+        )
 
     override fun onCleared() {
         super.onCleared()

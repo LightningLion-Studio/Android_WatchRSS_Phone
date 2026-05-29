@@ -116,6 +116,8 @@ class MainActivity : ComponentActivity() {
                     onConfirmSharedFileImport = ::importSharedFile,
                     onDismissSharedImport = viewModel::dismissSharedImportPrompt,
                     onSyncLibrary = { ensureBluetoothPermissions(viewModel::syncLibraryByBluetooth) },
+                    onChooseBluetoothDevice = viewModel::chooseBluetoothDeviceForSync,
+                    onDismissBluetoothDevicePrompt = viewModel::dismissBluetoothDevicePrompt,
                     onExportBluetoothLog = ::exportBluetoothLog,
                     onOpenArticle = { article ->
                         val platform = PlatformLinkRouter.detect(article.url)

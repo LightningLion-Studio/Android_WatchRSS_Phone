@@ -15,7 +15,9 @@ import androidx.core.content.ContextCompat
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
 data class BluetoothSyncExchange(
@@ -35,10 +37,79 @@ data class BluetoothLibrarySyncExchange(
     val response: JSONObject
 )
 
+data class PhoneBluetoothWatchDevice(
+    val name: String,
+    val address: String,
+    val uuidCount: Int
+)
+
+data class PhoneBluetoothWatchProbeResult(
+    val device: PhoneBluetoothWatchDevice,
+    val reachable: Boolean,
+    val message: String? = null
+)
+
 class PhoneBluetoothSyncClient(
     private val context: Context,
     private val debugLog: BluetoothDebugLog
 ) {
+    @SuppressLint("MissingPermission")
+    suspend fun probeLibrarySyncDevices(
+        deviceId: String,
+        sessionId: String = BluetoothDebugLog.newSessionId("bt-library-probe"),
+        perDeviceTimeoutMs: Long = DEFAULT_DEVICE_PROBE_TIMEOUT_MS,
+        onProbe: (completed: Int, total: Int, result: PhoneBluetoothWatchProbeResult) -> Unit = { _, _, _ -> }
+    ): List<PhoneBluetoothWatchProbeResult> {
+        val startedAt = SystemClock.elapsedRealtime()
+        debugLog.appendEvent(
+            event = "bt.library.probe.start",
+            sessionId = sessionId,
+            fields = mapOf("perDeviceTimeoutMs" to perDeviceTimeoutMs)
+        )
+        requireBluetoothConnectPermission()
+        val adapter = context.getSystemService(BluetoothManager::class.java)
+            ?.adapter
+            ?: error("此设备没有蓝牙适配器")
+        require(adapter.isEnabled) { "蓝牙未开启" }
+
+        val bondedDevices = adapter.bondedDevices.orEmpty()
+        logAdapterSnapshot(sessionId, adapter, bondedDevices)
+        val candidates = sortedWatchDevices(bondedDevices)
+        if (candidates.isEmpty()) {
+            debugLog.appendEvent(
+                event = "bt.library.probe.complete",
+                sessionId = sessionId,
+                fields = mapOf(
+                    "candidates" to 0,
+                    "reachable" to 0,
+                    "elapsedMs" to elapsedSince(startedAt)
+                )
+            )
+            return emptyList()
+        }
+
+        val results = candidates.mapIndexed { index, device ->
+            probeLibrarySyncDevice(
+                device = device,
+                deviceId = deviceId,
+                sessionId = "$sessionId-${index + 1}",
+                timeoutMs = perDeviceTimeoutMs
+            ).also { result ->
+                onProbe(index + 1, candidates.size, result)
+            }
+        }
+        debugLog.appendEvent(
+            event = "bt.library.probe.complete",
+            sessionId = sessionId,
+            fields = mapOf(
+                "candidates" to candidates.size,
+                "reachable" to results.count { it.reachable },
+                "elapsedMs" to elapsedSince(startedAt)
+            )
+        )
+        return results
+    }
+
     @SuppressLint("MissingPermission")
     suspend fun exchange(
         request: JSONObject,
@@ -135,7 +206,9 @@ class PhoneBluetoothSyncClient(
         deviceNameHint: String? = null,
         sessionId: String = BluetoothDebugLog.newSessionId("bt-library"),
         onProgress: (PhoneBluetoothSyncProgress) -> Unit = {},
-        applyResponse: suspend (BluetoothLibrarySyncExchange) -> Unit = {}
+        applyResponse: suspend (BluetoothLibrarySyncExchange) -> Unit = {},
+        ackApplied: Boolean = true,
+        rememberDeviceOnSuccess: Boolean = true
     ): BluetoothLibrarySyncExchange {
         val totalStartedAt = SystemClock.elapsedRealtime()
         var socket: BluetoothSocket? = null
@@ -249,8 +322,10 @@ class PhoneBluetoothSyncClient(
             )
             try {
                 applyResponse(exchange)
-                writeResponseAck(socket, sessionId, success = true, applied = true)
-                rememberSuccessfulDevice(device, sessionId)
+                writeResponseAck(socket, sessionId, success = true, applied = ackApplied)
+                if (rememberDeviceOnSuccess) {
+                    rememberSuccessfulDevice(device, sessionId)
+                }
             } catch (throwable: Throwable) {
                 writeResponseAck(
                     socket = socket,
@@ -289,6 +364,59 @@ class PhoneBluetoothSyncClient(
             cancellationHandle?.dispose()
             socket?.let { closeSocketLogged(it, sessionId, "library") }
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun probeLibrarySyncDevice(
+        device: BluetoothDevice,
+        deviceId: String,
+        sessionId: String,
+        timeoutMs: Long
+    ): PhoneBluetoothWatchProbeResult {
+        debugLog.appendEvent(
+            event = "bt.library.probe.device.start",
+            sessionId = sessionId,
+            fields = deviceFields(device) + mapOf("timeoutMs" to timeoutMs)
+        )
+        val result = runCatching {
+            withTimeout(timeoutMs) {
+                exchangeLibrary(
+                    manifestRequest = buildProbeManifestRequest(deviceId),
+                    buildArticleRequests = { _, _ ->
+                        listOf(LibrarySyncPayload.buildEmptyArticlesProbeRequest(deviceId))
+                    },
+                    deviceAddress = device.address,
+                    sessionId = sessionId,
+                    onProgress = {},
+                    ackApplied = false,
+                    rememberDeviceOnSuccess = false
+                )
+            }
+        }
+        val probe = result.fold(
+            onSuccess = {
+                PhoneBluetoothWatchProbeResult(
+                    device = device.toWatchDevice(),
+                    reachable = true
+                )
+            },
+            onFailure = { throwable ->
+                PhoneBluetoothWatchProbeResult(
+                    device = device.toWatchDevice(),
+                    reachable = false,
+                    message = probeFailureMessage(throwable)
+                )
+            }
+        )
+        debugLog.appendEvent(
+            event = "bt.library.probe.device.complete",
+            sessionId = sessionId,
+            fields = deviceFields(device) + mapOf(
+                "reachable" to probe.reachable,
+                "message" to probe.message.orEmpty()
+            )
+        )
+        return probe
     }
 
     private fun readLibraryResponseFrames(
@@ -358,14 +486,21 @@ class PhoneBluetoothSyncClient(
         cachedDeviceAddress()?.let { cachedAddress ->
             devices.firstOrNull { it.address.equals(cachedAddress, ignoreCase = true) }?.let { return it }
         }
-        return devices
-            .sortedBy { it.name.orEmpty() }
-            .firstOrNull { device ->
-                val name = device.name.orEmpty()
-                name.contains("watch", ignoreCase = true) ||
-                    name.contains("OPPO", ignoreCase = true)
-            }
+        return sortedWatchDevices(devices).firstOrNull()
             ?: error("未找到已配对手表蓝牙设备")
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun sortedWatchDevices(devices: Set<BluetoothDevice>): List<BluetoothDevice> =
+        devices
+            .sortedBy { it.name.orEmpty() }
+            .filter(::looksLikeWatchDevice)
+
+    @SuppressLint("MissingPermission")
+    private fun looksLikeWatchDevice(device: BluetoothDevice): Boolean {
+        val name = device.name.orEmpty()
+        return name.contains("watch", ignoreCase = true) ||
+            name.contains("OPPO", ignoreCase = true)
     }
 
     private fun requireBluetoothConnectPermission() {
@@ -661,6 +796,26 @@ class PhoneBluetoothSyncClient(
             .getString(KEY_LAST_DEVICE_ADDRESS, null)
             ?.takeIf { it.isNotBlank() }
 
+    private fun buildProbeManifestRequest(deviceId: String): JSONObject =
+        LibrarySyncPayload.buildManifestRequestFromEntries(
+            deviceId = deviceId,
+            articleManifest = emptyList(),
+            rssSources = emptyList(),
+            changeSequence = LibraryChangeSequence(
+                fromSeqExclusive = 0L,
+                toSeqInclusive = 0L,
+                fullSnapshot = true,
+                fallbackReason = "probe"
+            )
+        )
+
+    private fun probeFailureMessage(throwable: Throwable): String =
+        when (throwable) {
+            is TimeoutCancellationException -> "探测超时"
+            else -> throwable.message?.takeIf { it.isNotBlank() }
+                ?: throwable::class.java.simpleName
+        }
+
     @SuppressLint("MissingPermission")
     private fun rememberSuccessfulDevice(device: BluetoothDevice, sessionId: String) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -678,6 +833,14 @@ class PhoneBluetoothSyncClient(
             "deviceUuidCount" to (device.uuids?.size ?: 0)
         )
     }
+
+    @SuppressLint("MissingPermission")
+    private fun BluetoothDevice.toWatchDevice(): PhoneBluetoothWatchDevice =
+        PhoneBluetoothWatchDevice(
+            name = name.orEmpty(),
+            address = address,
+            uuidCount = uuids?.size ?: 0
+        )
 
     private fun payloadFields(prefix: String, payload: JSONObject): Map<String, Any?> {
         return buildMap {
@@ -735,6 +898,7 @@ class PhoneBluetoothSyncClient(
         private const val TAG = "WatchRSS_BtSyncClient"
         private const val PHASE_COMPLETE = "complete"
         private const val MAX_SYNC_BATCH_FRAMES = 256
+        private const val DEFAULT_DEVICE_PROBE_TIMEOUT_MS = 4_000L
         private const val PREFS_NAME = "watchrss_bluetooth_sync"
         private const val KEY_LAST_DEVICE_ADDRESS = "last_successful_device_address"
     }

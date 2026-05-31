@@ -27,7 +27,9 @@ enum class PhoneBluetoothSyncStage(val displayName: String) {
 
 data class PhoneBluetoothSyncProgress(
     val stage: PhoneBluetoothSyncStage,
-    val percent: Int
+    val percent: Int,
+    val bytesTransferred: Long = 0L,
+    val bytesPerSecond: Long = 0L
 )
 
 class PhoneBluetoothSyncManager(

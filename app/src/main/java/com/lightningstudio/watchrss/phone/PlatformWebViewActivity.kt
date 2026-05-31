@@ -4,7 +4,10 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.graphics.RenderEffect
+import android.graphics.RuntimeShader
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -15,13 +18,20 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -32,7 +42,10 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -40,6 +53,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkKind
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import com.kyant.backdrop.*
+import com.kyant.backdrop.backdrops.*
+import com.kyant.backdrop.effects.*
 
 class PlatformWebViewActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -89,25 +105,145 @@ private fun PlatformWebViewScreen(
         webView?.goBack()
     }
 
-    Surface(modifier = Modifier.fillMaxSize()) {
-        Column(
+    val backgroundColor = MaterialTheme.colorScheme.background
+    val surfaceColorArgb = MaterialTheme.colorScheme.surface.toArgb()
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        val backdrop = rememberLayerBackdrop {
+            drawRect(backgroundColor)
+            drawContent()
+        }
+
+        // WebView 内容区域
+        Box(
             modifier = Modifier
+                .layerBackdrop(backdrop)
                 .fillMaxSize()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .padding(20.dp)
         ) {
-            Text(
-                text = title.ifBlank { url },
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onBack) {
-                    Text(text = "返回")
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = title.ifBlank { url },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (progress in 1..99) {
+                    LinearProgressIndicator(
+                        progress = { progress / 100f },
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
-                Button(
+                PlatformWebView(
+                    url = url,
+                    platform = platform,
+                    onCreated = { webView = it },
+                    onProgress = { progress = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                )
+            }
+        }
+
+        // 顶部 ProgressiveBlur
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.TopCenter)
+                .drawBackdrop(
+                    backdrop = backdrop,
+                    shape = { androidx.compose.ui.graphics.RectangleShape },
+                    effects = {
+                        blur(4f.dp.toPx())
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            effect(
+                                RenderEffect.createRuntimeShaderEffect(
+                                    obtainRuntimeShader(
+                                        "AlphaMaskTop",
+                                        """
+uniform shader content;
+uniform float2 size;
+layout(color) uniform half4 tint;
+uniform float tintIntensity;
+
+half4 main(float2 coord) {
+    float blurAlpha = smoothstep(size.y, size.y * 0.5, coord.y);
+    float tintAlpha = smoothstep(size.y, size.y * 0.5, coord.y);
+    return mix(content.eval(coord) * blurAlpha, tint * tintAlpha, tintIntensity);
+}
+                                        """.trimIndent()
+                                    ).apply {
+                                        setFloatUniform("size", size.width, size.height)
+                                        setColorUniform("tint", surfaceColorArgb)
+                                        setFloatUniform("tintIntensity", 0.8f)
+                                    },
+                                    "content"
+                                )
+                            )
+                        }
+                    },
+                    onDrawSurface = {
+                        drawRect(Color.White.copy(alpha = 0.3f))
+                    }
+                )
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                }
+                Text(
+                    text = title.ifBlank { url },
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = onOpenExternal) {
+                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "外部打开")
+                }
+            }
+        }
+
+        // 底部液态玻璃按钮
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .drawBackdrop(
+                    backdrop = backdrop,
+                    shape = { androidx.compose.foundation.shape.RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp) },
+                    effects = {
+                        vibrancy()
+                        blur(8f.dp.toPx())
+                        lens(16f.dp.toPx(), 32f.dp.toPx())
+                    },
+                    onDrawSurface = {
+                        drawRect(Color.White.copy(alpha = 0.5f))
+                    }
+                )
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                GlassButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+                    Text("返回")
+                }
+                GlassButton(
                     onClick = {
                         if (webView?.canGoBack() == true) {
                             webView?.goBack()
@@ -117,27 +253,36 @@ private fun PlatformWebViewScreen(
                     },
                     enabled = canGoBack
                 ) {
-                    Text(text = "上一页")
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+                    Text("上一页")
                 }
-                Button(onClick = onOpenExternal) {
-                    Text(text = "外部打开")
+                GlassButton(onClick = onOpenExternal) {
+                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
+                    Text("外部打开")
                 }
             }
-            if (progress in 1..99) {
-                LinearProgressIndicator(
-                    progress = { progress / 100f },
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            PlatformWebView(
-                url = url,
-                platform = platform,
-                onCreated = { webView = it },
-                onProgress = { progress = it },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            )
+        }
+    }
+}
+
+@Composable
+private fun GlassButton(
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+    content: @Composable RowScope.() -> Unit
+) {
+    Box(
+        modifier = modifier
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            content()
         }
     }
 }
@@ -193,9 +338,9 @@ private fun PlatformWebView(
 
 private fun buildUserAgent(base: String?, platform: PlatformLinkKind?): String {
     val suffix = when (platform) {
-        PlatformLinkKind.BILI -> "WatchRSSPhone/BiliWebView"
-        PlatformLinkKind.DOUYIN -> "WatchRSSPhone/DouyinWebView"
-        null -> "WatchRSSPhone/WebView"
+        PlatformLinkKind.BILI -> "腕上RSS手机端/BiliWebView"
+        PlatformLinkKind.DOUYIN -> "腕上RSS手机端/DouyinWebView"
+        null -> "腕上RSS手机端/WebView"
     }
     return listOfNotNull(base?.takeIf { it.isNotBlank() }, suffix).joinToString(" ")
 }

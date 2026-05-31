@@ -30,6 +30,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+        </activity>
+        <activity
+            android:name=".HomeActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.WatchRSS">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -115,7 +121,25 @@
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />
         <activity
+            android:name=".RssActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
+            android:name=".GuideActivity"
+            android:exported="false"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
+            android:name=".ListPageActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
             android:name=".PlatformWebViewActivity"
+            android:exported="false"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
+            android:name=".GuideWebViewActivity"
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />
         <activity

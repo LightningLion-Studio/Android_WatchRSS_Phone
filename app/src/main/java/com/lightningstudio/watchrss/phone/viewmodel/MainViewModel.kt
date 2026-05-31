@@ -15,7 +15,10 @@ import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -43,7 +46,9 @@ data class MainUiState(
 
 data class MainSyncProgressUi(
     val phase: String,
-    val percent: Int
+    val percent: Int,
+    val bytesTransferred: Long = 0L,
+    val bytesPerSecond: Long = 0L
 )
 
 data class MainConflictPromptUi(
@@ -93,6 +98,9 @@ class MainViewModel(
     private val repository: PhoneCompanionRepository,
     private val bluetoothSyncManager: PhoneBluetoothSyncManager
 ) : ViewModel() {
+    private val _toastEvent = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val toastEvent: SharedFlow<String> = _toastEvent.asSharedFlow()
+
     private val sessionState = MutableStateFlow(MainUiState())
     private var conflictResolutionDeferred: CompletableDeferred<PhoneSyncConflictResolution>? = null
 
@@ -257,15 +265,17 @@ class MainViewModel(
             .filterNot { ImportedContentIds.isImportedContentUrl(it.url) }
         if (sources.isEmpty()) {
             sessionState.value = sessionState.value.copy(
-                message = "暂无可刷新的 RSS 源",
+                message = null,
                 error = null
             )
+            _toastEvent.tryEmit("暂无可刷新的 RSS 源")
             return
         }
         val urls = sources.map { it.url }.toSet()
         if (urls.any { it in sessionState.value.refreshingRssSourceUrls }) return
         viewModelScope.launch {
-            markRssSourcesRefreshing(urls, "正在刷新 RSS 源…")
+            markRssSourcesRefreshing(urls)
+            _toastEvent.tryEmit("正在刷新 RSS 源…")
             var refreshedCount = 0
             val failures = mutableListOf<String>()
             sources.forEach { source ->
@@ -279,49 +289,43 @@ class MainViewModel(
             }
             sessionState.update { state ->
                 state.copy(
-                    message = if (failures.isEmpty()) {
-                        "已刷新 RSS 源：$refreshedCount 个"
-                    } else {
-                        "已刷新 $refreshedCount 个 RSS 源，失败 ${failures.size} 个"
-                    },
-                    error = failures.firstOrNull(),
                     refreshingRssSourceUrls = state.refreshingRssSourceUrls - urls
                 )
+            }
+            if (failures.isEmpty()) {
+                _toastEvent.tryEmit("已刷新 RSS 源：$refreshedCount 个")
+            } else {
+                _toastEvent.tryEmit("已刷新 $refreshedCount 个 RSS 源，失败 ${failures.size} 个")
+                _toastEvent.tryEmit(failures.first())
             }
         }
     }
 
     fun refreshRssSource(source: PhoneRssSourceEntity) {
         if (ImportedContentIds.isImportedContentUrl(source.url)) {
-            sessionState.value = sessionState.value.copy(
-                message = "本地导入频道无需从 RSS 源刷新",
-                error = null
-            )
+            _toastEvent.tryEmit("本地导入频道无需从 RSS 源刷新")
             return
         }
         if (source.url in sessionState.value.refreshingRssSourceUrls) return
         viewModelScope.launch {
-            markRssSourcesRefreshing(
-                urls = setOf(source.url),
-                message = "正在刷新频道：${source.title.ifBlank { source.url }}"
-            )
+            markRssSourcesRefreshing(urls = setOf(source.url))
+            _toastEvent.tryEmit("正在刷新频道：${source.title.ifBlank { source.url }}")
             runCatching {
                 repository.refreshRssSource(source.url)
             }.onSuccess { result ->
                 sessionState.update { state ->
                     state.copy(
-                        message = "已刷新频道：${result.source.title.ifBlank { result.source.url }}，拉取 ${result.articleCount} 篇",
-                        error = null,
                         refreshingRssSourceUrls = state.refreshingRssSourceUrls - source.url
                     )
                 }
+                _toastEvent.tryEmit("已刷新频道：${result.source.title.ifBlank { result.source.url }}，拉取 ${result.articleCount} 篇")
             }.onFailure { throwable ->
                 sessionState.update { state ->
                     state.copy(
-                        error = throwable.message ?: "刷新失败",
                         refreshingRssSourceUrls = state.refreshingRssSourceUrls - source.url
                     )
                 }
+                _toastEvent.tryEmit(throwable.message ?: "刷新失败")
             }
         }
     }
@@ -413,11 +417,13 @@ class MainViewModel(
             }.getOrElse { throwable ->
                 sessionState.value = sessionState.value.copy(
                     isBusy = false,
-                    error = throwable.message ?: "操作失败",
+                    message = null,
+                    error = null,
                     syncProgress = null,
                     bluetoothDevicePrompt = null,
                     conflictPrompt = null
                 )
+                _toastEvent.tryEmit(throwable.message ?: "操作失败")
                 return@launch
             }
             when (reachableDevices.size) {
@@ -425,10 +431,11 @@ class MainViewModel(
                     sessionState.value = sessionState.value.copy(
                         isBusy = false,
                         message = null,
-                        error = "未找到已打开 WatchRSS 的已配对手表，请在手表端打开应用并保持亮屏后重试",
+                        error = null,
                         syncProgress = null,
                         bluetoothDevicePrompt = null
                     )
+                    _toastEvent.tryEmit("未找到已打开 WatchRSS 的已配对手表，请在手表端打开应用并保持亮屏后重试")
                 }
                 1 -> {
                     delay(400L)
@@ -480,20 +487,23 @@ class MainViewModel(
             )
             val stats = result.libraryStats
             sessionState.value = sessionState.value.copy(
-                message = if (stats != null) {
-                    "已与 ${result.deviceName.ifBlank { "手表" }} 同步：文章发送 ${stats.sent}，收到 ${stats.received}，合并 ${stats.merged}；RSS源发送 ${stats.sourcesSent}，收到 ${stats.sourcesReceived}，合并 ${stats.sourcesMerged}"
-                } else {
-                    "已与 ${result.deviceName.ifBlank { "手表" }} 同步"
-                },
                 error = null,
                 syncProgress = null
             )
+            _toastEvent.tryEmit(
+                if (stats != null) {
+                    "已与 ${result.deviceName.ifBlank { "手表" }} 同步：文章发送 ${stats.sent}，收到 ${stats.received}，合并 ${stats.merged}；RSS源发送 ${stats.sourcesSent}，收到 ${stats.sourcesReceived}，合并 ${stats.sourcesMerged}"
+                } else {
+                    "已与 ${result.deviceName.ifBlank { "手表" }} 同步"
+                }
+            )
         }.onFailure { throwable ->
             sessionState.value = sessionState.value.copy(
-                error = throwable.message ?: "操作失败",
+                error = null,
                 syncProgress = null,
                 conflictPrompt = null
             )
+            _toastEvent.tryEmit(throwable.message ?: "操作失败")
         }
         conflictResolutionDeferred?.complete(PhoneSyncConflictResolution.KEEP_LATEST)
         conflictResolutionDeferred = null
@@ -566,24 +576,19 @@ class MainViewModel(
 
     private fun toggleSaved(article: PhoneArticleEntity, type: PhoneSavedItemType) {
         viewModelScope.launch {
-            runBusy("正在更新${type.displayName}…") {
-                val updated = repository.toggleSaved(article, type)
-                val saved = when (type) {
-                    PhoneSavedItemType.FAVORITE -> updated.favoriteSaved
-                    PhoneSavedItemType.WATCH_LATER -> updated.watchLaterSaved
-                }
-                sessionState.value = sessionState.value.copy(
-                    message = if (saved) "已加入${type.displayName}" else "已从${type.displayName}移除",
-                    error = null
-                )
+            val updated = repository.toggleSaved(article, type)
+            val saved = when (type) {
+                PhoneSavedItemType.FAVORITE -> updated.favoriteSaved
+                PhoneSavedItemType.WATCH_LATER -> updated.watchLaterSaved
             }
+            val msg = if (saved) "已加入${type.displayName}" else "已从${type.displayName}移除"
+            _toastEvent.tryEmit(msg)
         }
     }
 
-    private fun markRssSourcesRefreshing(urls: Set<String>, message: String) {
+    private fun markRssSourcesRefreshing(urls: Set<String>) {
         sessionState.update { state ->
             state.copy(
-                message = message,
                 error = null,
                 syncProgress = null,
                 refreshingRssSourceUrls = state.refreshingRssSourceUrls + urls
@@ -642,7 +647,9 @@ class MainViewModel(
             error = null,
             syncProgress = MainSyncProgressUi(
                 phase = progress.stage.displayName,
-                percent = percent
+                percent = percent,
+                bytesTransferred = progress.bytesTransferred,
+                bytesPerSecond = progress.bytesPerSecond
             )
         )
     }

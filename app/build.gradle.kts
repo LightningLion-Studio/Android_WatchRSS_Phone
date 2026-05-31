@@ -89,9 +89,10 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:${libs.versions.lifecycleRuntimeKtx.get()}")
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.ui)
     implementation("androidx.compose.ui:ui-graphics")
     implementation(libs.androidx.compose.ui.tooling.preview)
@@ -108,6 +109,7 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.jsoup)
     ksp(libs.androidx.room.compiler)
+    // Backdrop source copied locally — see app/src/main/java/com/kyant/backdrop
 
     testImplementation(libs.junit)
     testImplementation(libs.json)

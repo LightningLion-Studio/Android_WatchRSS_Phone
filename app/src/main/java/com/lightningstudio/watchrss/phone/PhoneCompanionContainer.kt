@@ -25,7 +25,8 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_3_4,
             PhoneCompanionDatabase.MIGRATION_4_5,
             PhoneCompanionDatabase.MIGRATION_5_6,
-            PhoneCompanionDatabase.MIGRATION_6_7
+            PhoneCompanionDatabase.MIGRATION_6_7,
+            PhoneCompanionDatabase.MIGRATION_7_8
         )
             .build()
     }

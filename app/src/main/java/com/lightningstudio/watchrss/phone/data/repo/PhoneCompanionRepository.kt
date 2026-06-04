@@ -147,6 +147,10 @@ class PhoneCompanionRepository(
         }
     }
 
+    suspend fun updateArticleReadingProgress(articleId: String, progress: Float) = withContext(Dispatchers.IO) {
+        articleDao.updateReadingProgress(articleId, progress.coerceIn(0f, 1f))
+    }
+
     suspend fun importWebArticle(input: String): PhoneArticleEntity =
         withContext(Dispatchers.IO) {
             val imported = webArticleImporter(input)
@@ -853,7 +857,8 @@ class PhoneCompanionRepository(
             favoriteSortOrder = existing.favoriteSortOrder,
             watchLaterSaved = existing.watchLaterSaved,
             watchLaterChangedAt = existing.watchLaterChangedAt,
-            watchLaterSortOrder = existing.watchLaterSortOrder
+            watchLaterSortOrder = existing.watchLaterSortOrder,
+            readingProgress = existing.readingProgress
         )
     }
 
@@ -1028,6 +1033,7 @@ class PhoneCompanionRepository(
         val independentSaved = if (independentFromRemote) remote.independentSaved else local.independentSaved
         val independentChangedAt = if (independentFromRemote) remote.independentChangedAt else local.independentChangedAt
         val independentSortOrder = if (independentFromRemote) remote.independentSortOrder else local.independentSortOrder
+        val readingProgress = maxOf(local.readingProgress, remote.readingProgress)
         val rssSourceUrl = remote.rssSourceUrl?.takeIf { it.isNotBlank() }
             ?: local.rssSourceUrl?.takeIf { it.isNotBlank() }
         val rssSourceTitle = remote.rssSourceTitle?.takeIf { it.isNotBlank() }
@@ -1057,7 +1063,8 @@ class PhoneCompanionRepository(
             watchLaterChangedAt = watchLaterChangedAt,
             watchLaterSortOrder = watchLaterSortOrder,
             deleted = deleted,
-            deletedAt = deletedAt
+            deletedAt = deletedAt,
+            readingProgress = readingProgress
         )
     }
 
@@ -1087,7 +1094,8 @@ class PhoneCompanionRepository(
             watchLaterChangedAt = maxOf(local.watchLaterChangedAt, remote.watchLaterChangedAt),
             watchLaterSortOrder = maxOf(local.watchLaterSortOrder, remote.watchLaterSortOrder),
             deleted = false,
-            deletedAt = 0L
+            deletedAt = 0L,
+            readingProgress = maxOf(local.readingProgress, remote.readingProgress)
         )
     }
 
@@ -1361,7 +1369,8 @@ class PhoneCompanionRepository(
                 ArticleSyncBody.metadataHashFor(this)
             },
             bodyAvailable = bodyAvailable,
-            bodySyncMode = bodySyncModeForSync()
+            bodySyncMode = bodySyncModeForSync(),
+            readingProgress = readingProgress
         )
     }
 

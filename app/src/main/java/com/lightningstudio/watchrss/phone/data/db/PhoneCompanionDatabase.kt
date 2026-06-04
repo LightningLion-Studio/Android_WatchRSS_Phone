@@ -14,7 +14,7 @@ import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
         SyncChangeLogEntity::class,
         SyncPeerStateEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
@@ -162,6 +162,14 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
                         updatedAt INTEGER NOT NULL DEFAULT 0
                     )
                     """.trimIndent()
+                )
+            }
+        }
+
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "ALTER TABLE phone_articles ADD COLUMN readingProgress REAL NOT NULL DEFAULT 0"
                 )
             }
         }

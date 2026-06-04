@@ -1049,6 +1049,16 @@ class PhoneCompanionRepositoryTest {
             }
         }
 
+        override suspend fun updateReadingProgress(articleId: String, progress: Float) {
+            items = items.map { article ->
+                if (article.articleId == articleId) {
+                    article.copy(readingProgress = progress)
+                } else {
+                    article
+                }
+            }
+        }
+
         override suspend fun upsert(article: PhoneArticleEntity) {
             items = items.filterNot { it.articleId == article.articleId } + article
         }

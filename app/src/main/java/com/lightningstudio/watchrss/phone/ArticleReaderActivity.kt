@@ -5,9 +5,9 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.graphics.RenderEffect
-import android.graphics.RuntimeShader
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.BorderStroke
@@ -25,7 +25,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListItemInfo
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -41,10 +45,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,13 +61,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextIndent
@@ -77,7 +87,17 @@ import com.lightningstudio.watchrss.phone.ui.theme.PrimaryRed
 import com.kyant.backdrop.*
 import com.kyant.backdrop.backdrops.*
 import com.kyant.backdrop.effects.*
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.sample
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
@@ -100,6 +120,9 @@ class ArticleReaderActivity : ComponentActivity() {
                 ArticleReaderScreen(
                     article = article,
                     invalidArticleId = articleId.isBlank(),
+                    onSaveReadingProgress = { progress ->
+                        repository.updateArticleReadingProgress(articleId, progress)
+                    },
                     onBack = { finish() },
                     onOpenImportedArticle = { url ->
                         val targetId = runCatching {
@@ -128,10 +151,12 @@ class ArticleReaderActivity : ComponentActivity() {
     }
 }
 
+@OptIn(FlowPreview::class)
 @Composable
 private fun ArticleReaderScreen(
     article: PhoneArticleEntity?,
     invalidArticleId: Boolean,
+    onSaveReadingProgress: suspend (Float) -> Unit,
     onBack: () -> Unit,
     onOpenImportedArticle: (String) -> Unit,
     onOpenOriginal: (String) -> Unit
@@ -167,6 +192,171 @@ private fun ArticleReaderScreen(
             return@Surface
         }
 
+        val contentNodes = remember(
+            safeArticle.articleId,
+            safeArticle.contentHash,
+            safeArticle.contentHtml,
+            safeArticle.contentText,
+            safeArticle.excerpt,
+            safeArticle.url
+        ) {
+            if (!safeArticle.contentHtml.isNullOrBlank()) {
+                parseArticleContent(safeArticle.contentHtml ?: "")
+            } else {
+                buildPlainArticleNodes(
+                    safeArticle.contentText
+                        .ifBlank { safeArticle.excerpt }
+                        .ifBlank { safeArticle.url }
+                )
+            }
+        }
+        val listState = rememberLazyListState()
+        val textLayouts = remember(safeArticle.articleId, contentNodes) {
+            mutableStateMapOf<Int, TextLayoutResult>()
+        }
+        var topBarHeight by remember { mutableStateOf(0.dp) }
+        val density = LocalDensity.current
+        val topBarHeightPx = with(density) { topBarHeight.roundToPx() }
+        var hasRestoredPosition by remember(safeArticle.articleId) { mutableStateOf(false) }
+        var pendingRestoreProgress by remember(safeArticle.articleId) {
+            mutableStateOf<Float?>(safeArticle.readingProgress.coerceIn(0f, 1f))
+        }
+        var pendingTextRestore by remember(safeArticle.articleId) {
+            mutableStateOf<ArticleTextRestoreTarget?>(null)
+        }
+        var lastSavedProgress by remember(safeArticle.articleId) { mutableStateOf(-1f) }
+        var lastProgressSavedAt by remember(safeArticle.articleId) { mutableStateOf(0L) }
+        val lifecycleOwner = LocalLifecycleOwner.current
+        val onSaveReadingProgressState = rememberUpdatedState(onSaveReadingProgress)
+        val onBackState = rememberUpdatedState(onBack)
+
+        fun freshReadingProgress(): Float? {
+            return calculateArticleTextReadingProgressFromLayout(
+                listState = listState,
+                nodes = contentNodes,
+                textLayouts = textLayouts,
+                anchorOffsetPx = topBarHeightPx
+            )
+        }
+
+        suspend fun awaitReadingProgress(): Float? {
+            freshReadingProgress()?.let { return it }
+            return withTimeoutOrNull(ARTICLE_READING_PROGRESS_LAYOUT_TIMEOUT_MS) {
+                snapshotFlow { freshReadingProgress() }
+                    .filterNotNull()
+                    .first()
+            }
+        }
+
+        suspend fun saveCurrentReadingProgress(force: Boolean): Boolean {
+            if (!hasRestoredPosition && !force) return false
+            val progress = awaitReadingProgress() ?: return false
+            val clamped = progress.coerceIn(0f, 1f)
+            val now = SystemClock.elapsedRealtime()
+            if (!force && lastSavedProgress >= 0f) {
+                val diff = kotlin.math.abs(clamped - lastSavedProgress)
+                if (diff < 0.02f && now - lastProgressSavedAt < 1500L) return false
+            }
+            lastSavedProgress = clamped
+            lastProgressSavedAt = now
+            onSaveReadingProgressState.value(clamped)
+            return true
+        }
+
+        LaunchedEffect(pendingRestoreProgress, contentNodes, topBarHeight) {
+            val progress = pendingRestoreProgress ?: return@LaunchedEffect
+            if (topBarHeight == 0.dp) return@LaunchedEffect
+            if (contentNodes.isEmpty()) {
+                pendingRestoreProgress = null
+                hasRestoredPosition = true
+                return@LaunchedEffect
+            }
+            val restoreTarget = articleTextRestoreTarget(
+                progress = progress,
+                nodes = contentNodes
+            )
+            if (restoreTarget == null) {
+                listState.scrollToItem(
+                    ((contentNodes.size - 1) * progress)
+                        .roundToInt()
+                        .coerceIn(0, contentNodes.lastIndex)
+                )
+                pendingRestoreProgress = null
+                hasRestoredPosition = true
+                return@LaunchedEffect
+            }
+            listState.scrollToItem(restoreTarget.itemIndex.coerceIn(0, contentNodes.lastIndex))
+            pendingTextRestore = restoreTarget.copy(
+                itemIndex = restoreTarget.itemIndex.coerceIn(0, contentNodes.lastIndex)
+            )
+            pendingRestoreProgress = null
+        }
+
+        LaunchedEffect(pendingTextRestore) {
+            val restoreTarget = pendingTextRestore ?: return@LaunchedEffect
+            val offsetPx = withTimeoutOrNull(ARTICLE_RESTORE_OFFSET_TIMEOUT_MS) {
+                snapshotFlow {
+                    val text = articleNodeText(contentNodes.getOrNull(restoreTarget.nodeIndex))
+                    val layout = textLayouts[restoreTarget.nodeIndex]
+                    val itemInfo = listState.layoutInfo.visibleItemsInfo
+                        .firstOrNull { it.index == restoreTarget.itemIndex }
+                    if (text == null || layout == null || itemInfo == null) {
+                        null
+                    } else {
+                        articleTextRestoreVisualOffsetPx(
+                            restoreTarget = restoreTarget,
+                            text = text,
+                            layout = layout,
+                            itemInfo = itemInfo,
+                            anchorOffsetPx = topBarHeightPx
+                        )
+                    }
+                }
+                    .filterNotNull()
+                    .first()
+            }
+            if (offsetPx != null) {
+                listState.scrollToItem(restoreTarget.itemIndex, offsetPx)
+            }
+            pendingTextRestore = null
+            hasRestoredPosition = true
+        }
+
+        LaunchedEffect(listState, contentNodes) {
+            snapshotFlow { freshReadingProgress() }
+                .filterNotNull()
+                .distinctUntilChanged()
+                .sample(ARTICLE_READING_PROGRESS_SAMPLE_MS)
+                .collect { progress ->
+                    if (hasRestoredPosition) {
+                        saveCurrentReadingProgress(force = false)
+                    }
+                }
+        }
+
+        DisposableEffect(lifecycleOwner, safeArticle.articleId) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_PAUSE) {
+                    runBlocking {
+                        saveCurrentReadingProgress(force = true)
+                    }
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose {
+                lifecycleOwner.lifecycle.removeObserver(observer)
+            }
+        }
+
+        fun handleBack() {
+            runBlocking {
+                saveCurrentReadingProgress(force = true)
+            }
+            onBackState.value()
+        }
+
+        BackHandler(onBack = ::handleBack)
+
         Box(modifier = Modifier.fillMaxSize()) {
             val backgroundColor = MaterialTheme.colorScheme.background
             val surfaceColorArgb = MaterialTheme.colorScheme.surface.toArgb()
@@ -175,9 +365,6 @@ private fun ArticleReaderScreen(
                 drawContent()
             }
 
-            // 顶部玻璃条高度
-            var topBarHeight by remember { mutableStateOf(0.dp) }
-
             // 内容区域 - 使用原生 Compose 渲染
             Box(
                 modifier = Modifier
@@ -185,35 +372,29 @@ private fun ArticleReaderScreen(
                     .fillMaxSize()
                     .clipToBounds()
             ) {
-                if (!safeArticle.contentHtml.isNullOrBlank()) {
-                    NativeArticleView(
-                        article = safeArticle,
-                        onOpenImportedArticle = onOpenImportedArticle,
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(top = topBarHeight + 20.dp, start = 20.dp, end = 20.dp, bottom = 20.dp)
+                ArticleReaderContentView(
+                    nodes = contentNodes,
+                    listState = listState,
+                    textLayouts = textLayouts,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        top = topBarHeight + 20.dp,
+                        start = 20.dp,
+                        end = 20.dp,
+                        bottom = 20.dp
                     )
-                } else {
-                    PlainArticleView(
-                        text = safeArticle.contentText
-                            .ifBlank { safeArticle.excerpt }
-                            .ifBlank { safeArticle.url },
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(top = topBarHeight + 20.dp, start = 20.dp, end = 20.dp, bottom = 20.dp)
-                    )
-                }
+                )
             }
 
-            // 顶部液态玻璃（常可见）
-            val density = LocalDensity.current
+            // 顶部无圆角高斯模糊（常可见）
             Box(
                 modifier = Modifier
                     .onGloballyPositioned { coordinates ->
                         topBarHeight = with(density) { coordinates.size.height.toDp() }
                     }
                     .fillMaxWidth()
-                    .liquidGlassBackdrop(
+                    .gaussianBlurBackdrop(
                         backdrop = backdrop,
-                        shape = { RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp) },
                         isDark = isSystemInDarkTheme()
                     )
                     .padding(bottom = 12.dp)
@@ -224,14 +405,13 @@ private fun ArticleReaderScreen(
                 )
             }
 
-            // 底部液态玻璃按钮
+            // 底部无圆角高斯模糊按钮栏
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .liquidGlassBackdrop(
+                    .gaussianBlurBackdrop(
                         backdrop = backdrop,
-                        shape = { RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp) },
                         isDark = isSystemInDarkTheme()
                     )
                     .padding(horizontal = 16.dp, vertical = 12.dp)
@@ -241,7 +421,7 @@ private fun ArticleReaderScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    GlassButton(onClick = onBack) {
+                    GlassButton(onClick = ::handleBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
                         Text("返回")
                     }
@@ -303,21 +483,18 @@ private fun GlassButton(
     }
 }
 
-// 统一的液态玻璃效果
-private fun Modifier.liquidGlassBackdrop(
+// 阅读页统一的无圆角高斯模糊效果
+private fun Modifier.gaussianBlurBackdrop(
     backdrop: LayerBackdrop,
-    shape: () -> Shape,
     isDark: Boolean
 ) = drawBackdrop(
     backdrop = backdrop,
-    shape = shape,
+    shape = { RectangleShape },
     effects = {
-        vibrancy()
-        blur(8f.dp.toPx())
-        lens(16f.dp.toPx(), 32f.dp.toPx())
+        blur(18f.dp.toPx())
     },
     onDrawSurface = {
-        val surfaceAlpha = if (isDark) 0.12f else 0.5f
+        val surfaceAlpha = if (isDark) 0.18f else 0.42f
         drawRect(Color.White.copy(alpha = surfaceAlpha))
     }
 )
@@ -325,6 +502,102 @@ private fun Modifier.liquidGlassBackdrop(
 /**
  * 原生文章渲染器 - 将 HTML 解析为 Compose 组件
  */
+@Composable
+private fun ArticleReaderContentView(
+    nodes: List<ArticleNode>,
+    listState: LazyListState,
+    textLayouts: MutableMap<Int, TextLayoutResult>,
+    modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(0.dp)
+) {
+    LazyColumn(
+        modifier = modifier,
+        state = listState,
+        contentPadding = contentPadding
+    ) {
+        itemsIndexed(nodes) { index, node ->
+            when (node) {
+                is ArticleNode.Heading -> {
+                    Text(
+                        text = node.text,
+                        style = when (node.level) {
+                            1 -> MaterialTheme.typography.headlineLarge
+                            2 -> MaterialTheme.typography.headlineMedium
+                            3 -> MaterialTheme.typography.headlineSmall
+                            else -> MaterialTheme.typography.titleLarge
+                        },
+                        fontWeight = FontWeight.Bold,
+                        onTextLayout = { textLayouts[index] = it },
+                        modifier = Modifier.padding(vertical = 12.dp)
+                    )
+                }
+                is ArticleNode.Paragraph -> {
+                    Text(
+                        text = node.text,
+                        style = MaterialTheme.typography.bodyLarge,
+                        onTextLayout = { textLayouts[index] = it },
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        lineHeight = MaterialTheme.typography.bodyLarge.lineHeight * 1.4f
+                    )
+                }
+                is ArticleNode.Image -> {
+                    ArticleImage(
+                        url = node.url,
+                        alt = node.alt,
+                        modifier = Modifier.padding(vertical = 12.dp)
+                    )
+                }
+                is ArticleNode.BlockQuote -> {
+                    ArticleBlockQuote(
+                        text = node.text,
+                        onTextLayout = { textLayouts[index] = it }
+                    )
+                }
+                is ArticleNode.CodeBlock -> {
+                    ArticleCodeBlock(
+                        text = node.text,
+                        onTextLayout = { textLayouts[index] = it }
+                    )
+                }
+                is ArticleNode.ListItem -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp, horizontal = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "•",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = PrimaryRed
+                        )
+                        Text(
+                            text = node.text,
+                            style = MaterialTheme.typography.bodyLarge,
+                            onTextLayout = { textLayouts[index] = it },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+                is ArticleNode.HorizontalRule -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 16.dp)
+                            .height(1.dp)
+                            .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                    )
+                }
+                is ArticleNode.Spacer -> {
+                    Spacer(modifier = Modifier.height(node.height))
+                }
+            }
+        }
+
+        item { Spacer(modifier = Modifier.height(80.dp)) }
+    }
+}
+
 @Composable
 private fun NativeArticleView(
     article: PhoneArticleEntity,
@@ -417,12 +690,14 @@ private fun NativeArticleView(
 @Composable
 private fun ArticleBlockQuote(
     text: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onTextLayout: (TextLayoutResult) -> Unit = {}
 ) {
     val lineColor = MaterialTheme.colorScheme.primary
     val lineWidth = 4.dp
     Text(
         text = text,
+        onTextLayout = onTextLayout,
         modifier = modifier
             .fillMaxWidth()
             .padding(vertical = 12.dp)
@@ -445,7 +720,8 @@ private fun ArticleBlockQuote(
 @Composable
 private fun ArticleCodeBlock(
     text: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onTextLayout: (TextLayoutResult) -> Unit = {}
 ) {
     val horizontalScrollState = rememberScrollState()
     Surface(
@@ -464,6 +740,7 @@ private fun ArticleCodeBlock(
         SelectionContainer {
             Text(
                 text = text,
+                onTextLayout = onTextLayout,
                 modifier = Modifier
                     .horizontalScroll(horizontalScrollState)
                     .padding(horizontal = 16.dp, vertical = 14.dp),
@@ -535,6 +812,194 @@ private sealed class ArticleNode {
     data class Spacer(val height: Dp) : ArticleNode()
 }
 
+private data class VisibleArticleTextNodeWithLayout(
+    val itemInfo: LazyListItemInfo,
+    val nodeIndex: Int,
+    val text: String,
+    val layout: TextLayoutResult
+)
+
+private data class ArticleTextRestoreTarget(
+    val itemIndex: Int,
+    val nodeIndex: Int,
+    val byteOffsetInNode: Int
+)
+
+private fun buildPlainArticleNodes(text: String): List<ArticleNode> {
+    return text.split("\n")
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .map(ArticleNode::Paragraph)
+        .ifEmpty { listOf(ArticleNode.Paragraph(text.ifBlank { "暂无正文" })) }
+}
+
+private fun articleNodeText(node: ArticleNode?): String? {
+    return when (node) {
+        is ArticleNode.Heading -> node.text
+        is ArticleNode.Paragraph -> node.text
+        is ArticleNode.BlockQuote -> node.text
+        is ArticleNode.CodeBlock -> node.text
+        is ArticleNode.ListItem -> node.text
+        else -> null
+    }?.takeIf { it.isNotBlank() }
+}
+
+private fun calculateArticleTextReadingProgressFromLayout(
+    listState: LazyListState,
+    nodes: List<ArticleNode>,
+    textLayouts: Map<Int, TextLayoutResult>,
+    anchorOffsetPx: Int
+): Float? {
+    val totalTextBytes = nodes.sumOf { node -> articleNodeText(node)?.let(::utf8ByteCount) ?: 0 }
+    if (totalTextBytes <= 0) return null
+    val layoutInfo = listState.layoutInfo
+    if (layoutInfo.visibleItemsInfo.isNotEmpty() && !listState.canScrollForward) return 1f
+    val normalizedAnchorOffsetPx = anchorOffsetPx.coerceAtLeast(0)
+    val visibleNode = layoutInfo.visibleItemsInfo.firstNotNullOfOrNull { itemInfo ->
+        if (itemInfo.offset + itemInfo.size <= normalizedAnchorOffsetPx) {
+            return@firstNotNullOfOrNull null
+        }
+        val text = articleNodeText(nodes.getOrNull(itemInfo.index))
+            ?: return@firstNotNullOfOrNull null
+        val layout = textLayouts[itemInfo.index] ?: return@firstNotNullOfOrNull null
+        if (layout.lineCount <= 0) return@firstNotNullOfOrNull null
+        VisibleArticleTextNodeWithLayout(
+            itemInfo = itemInfo,
+            nodeIndex = itemInfo.index,
+            text = text,
+            layout = layout
+        )
+    } ?: return null
+    val bytesBeforeNode = nodes.asSequence()
+        .take(visibleNode.nodeIndex)
+        .sumOf { node -> articleNodeText(node)?.let(::utf8ByteCount) ?: 0 }
+    val scrolledInItemPx = (normalizedAnchorOffsetPx - visibleNode.itemInfo.offset)
+        .coerceIn(0, visibleNode.itemInfo.size.coerceAtLeast(0))
+    val textTopPaddingPx = articleTextTopInsetPx(
+        itemInfo = visibleNode.itemInfo,
+        layout = visibleNode.layout
+    )
+    val textY = (scrolledInItemPx - textTopPaddingPx)
+        .coerceAtLeast(0)
+        .toFloat()
+    val lineIndex = visibleNode.layout
+        .getLineForVerticalPosition(textY)
+        .coerceIn(0, visibleNode.layout.lineCount - 1)
+    val charOffset = visibleNode.layout
+        .getLineStart(lineIndex)
+        .coerceIn(0, visibleNode.text.length)
+    val byteOffsetInNode = utf8ByteCountBeforeCharOffset(visibleNode.text, charOffset)
+    val absoluteByte = (bytesBeforeNode + byteOffsetInNode)
+        .coerceIn(0, totalTextBytes)
+    return (absoluteByte.toDouble() / totalTextBytes.toDouble())
+        .toFloat()
+        .coerceIn(0f, 1f)
+}
+
+private fun articleTextRestoreTarget(
+    progress: Float,
+    nodes: List<ArticleNode>
+): ArticleTextRestoreTarget? {
+    val textByteCounts = nodes.map { node -> articleNodeText(node)?.let(::utf8ByteCount) ?: 0 }
+    val totalTextBytes = textByteCounts.sum()
+    if (totalTextBytes <= 0) return null
+    val targetByte = (totalTextBytes.toDouble() * progress.coerceIn(0f, 1f).toDouble())
+        .roundToInt()
+        .coerceIn(0, (totalTextBytes - 1).coerceAtLeast(0))
+    var consumed = 0
+    textByteCounts.forEachIndexed { index, byteCount ->
+        if (byteCount <= 0) return@forEachIndexed
+        val next = consumed + byteCount
+        if (targetByte < next) {
+            return ArticleTextRestoreTarget(
+                itemIndex = index,
+                nodeIndex = index,
+                byteOffsetInNode = (targetByte - consumed).coerceAtLeast(0)
+            )
+        }
+        consumed = next
+    }
+    val lastTextIndex = textByteCounts.indexOfLast { it > 0 }
+    if (lastTextIndex < 0) return null
+    return ArticleTextRestoreTarget(
+        itemIndex = lastTextIndex,
+        nodeIndex = lastTextIndex,
+        byteOffsetInNode = (textByteCounts[lastTextIndex] - 1).coerceAtLeast(0)
+    )
+}
+
+private fun articleTextRestoreVisualOffsetPx(
+    restoreTarget: ArticleTextRestoreTarget,
+    text: String,
+    layout: TextLayoutResult,
+    itemInfo: LazyListItemInfo,
+    anchorOffsetPx: Int
+): Int {
+    if (layout.lineCount <= 0) return 0
+    val charOffset = utf8CharOffsetForByteOffset(
+        text = text,
+        byteOffset = restoreTarget.byteOffsetInNode
+    ).coerceIn(0, text.length)
+    val lineIndex = layout
+        .getLineForOffset(charOffset)
+        .coerceIn(0, layout.lineCount - 1)
+    val textTopPaddingPx = articleTextTopInsetPx(
+        itemInfo = itemInfo,
+        layout = layout
+    )
+    return (textTopPaddingPx + layout.getLineTop(lineIndex))
+        .roundToInt()
+        .coerceAtLeast(0) - anchorOffsetPx.coerceAtLeast(0)
+}
+
+private fun articleTextTopInsetPx(
+    itemInfo: LazyListItemInfo,
+    layout: TextLayoutResult
+): Int {
+    val nonTextVerticalSpacePx = (itemInfo.size - layout.size.height)
+        .coerceAtLeast(0)
+    return (nonTextVerticalSpacePx / 2f).roundToInt()
+}
+
+private fun utf8ByteCount(text: String): Int {
+    return utf8ByteCountBeforeCharOffset(text, text.length)
+}
+
+private fun utf8ByteCountBeforeCharOffset(text: String, charOffset: Int): Int {
+    val targetCharOffset = charOffset.coerceIn(0, text.length)
+    var byteCount = 0
+    var index = 0
+    while (index < targetCharOffset) {
+        val codePoint = Character.codePointAt(text, index)
+        byteCount += utf8ByteCountForCodePoint(codePoint)
+        index += Character.charCount(codePoint)
+    }
+    return byteCount
+}
+
+private fun utf8CharOffsetForByteOffset(text: String, byteOffset: Int): Int {
+    if (byteOffset <= 0) return 0
+    var byteCount = 0
+    var index = 0
+    while (index < text.length) {
+        val codePoint = Character.codePointAt(text, index)
+        val codePointByteCount = utf8ByteCountForCodePoint(codePoint)
+        if (byteCount + codePointByteCount > byteOffset) return index
+        byteCount += codePointByteCount
+        index += Character.charCount(codePoint)
+    }
+    return text.length
+}
+
+private fun utf8ByteCountForCodePoint(codePoint: Int): Int {
+    return when {
+        codePoint <= 0x7F -> 1
+        codePoint <= 0x7FF -> 2
+        codePoint <= 0xFFFF -> 3
+        else -> 4
+    }
+}
+
 private fun parseArticleContent(html: String): List<ArticleNode> {
     val result = mutableListOf<ArticleNode>()
     if (html.isBlank()) return result
@@ -543,7 +1008,6 @@ private fun parseArticleContent(html: String): List<ArticleNode> {
     doc.outputSettings().prettyPrint(false)
     
     val body = doc.body()
-    if (body == null) return result
     
     val children = body.children()
     if (children.isEmpty()) {
@@ -747,3 +1211,7 @@ private fun extractTextWithInlineFormatting(element: Element): String {
     }
     return builder.toString().trim()
 }
+
+private const val ARTICLE_READING_PROGRESS_LAYOUT_TIMEOUT_MS = 800L
+private const val ARTICLE_RESTORE_OFFSET_TIMEOUT_MS = 3_000L
+private const val ARTICLE_READING_PROGRESS_SAMPLE_MS = 500L

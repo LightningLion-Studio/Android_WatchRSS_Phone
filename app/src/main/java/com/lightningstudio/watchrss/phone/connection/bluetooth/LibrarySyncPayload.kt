@@ -39,7 +39,8 @@ data class ArticleSyncManifestEntry(
     val chunkHashes: List<String> = emptyList(),
     val metadataHash: String = "",
     val bodyAvailable: Boolean = true,
-    val bodySyncMode: String = ARTICLE_BODY_SYNC_MODE_FULL
+    val bodySyncMode: String = ARTICLE_BODY_SYNC_MODE_FULL,
+    val readingProgress: Float = 0f
 )
 
 data class LibraryChangeSequence(
@@ -342,7 +343,10 @@ object LibrarySyncPayload {
                         bodyAvailable = item.optBoolean("bodyAvailable", true),
                         bodySyncMode = item.optString("bodySyncMode")
                             .trim()
-                            .ifBlank { ARTICLE_BODY_SYNC_MODE_FULL }
+                            .ifBlank { ARTICLE_BODY_SYNC_MODE_FULL },
+                        readingProgress = item.optDouble("readingProgress", 0.0)
+                            .toFloat()
+                            .coerceIn(0f, 1f)
                     )
                 )
             }
@@ -375,7 +379,8 @@ object LibrarySyncPayload {
                     remote.favoriteChangedAt > local.favoriteChangedAt ||
                     remote.watchLaterChangedAt > local.watchLaterChangedAt ||
                     remote.deletedAt > local.deletedAt ||
-                    remote.deleted != local.deleted
+                    remote.deleted != local.deleted ||
+                    remote.readingProgress.isMeaningfullyAheadOf(local.readingProgress)
             }
             val hasReusableLocalBody = local != null &&
                 local.bodyAvailable &&
@@ -452,7 +457,8 @@ object LibrarySyncPayload {
                 article.favoriteChangedAt > remote.favoriteChangedAt ||
                 article.watchLaterChangedAt > remote.watchLaterChangedAt ||
                 article.deletedAt > remote.deletedAt ||
-                article.deleted != remote.deleted
+                article.deleted != remote.deleted ||
+                article.readingProgress.isMeaningfullyAheadOf(remote.readingProgress)
         }
     }
 
@@ -607,7 +613,10 @@ object LibrarySyncPayload {
                         watchLaterChangedAt = item.optLong("watchLaterChangedAt"),
                         watchLaterSortOrder = item.optLong("watchLaterSortOrder"),
                         deleted = item.optBoolean("deleted"),
-                        deletedAt = item.optLong("deletedAt")
+                        deletedAt = item.optLong("deletedAt"),
+                        readingProgress = item.optDouble("readingProgress", 0.0)
+                            .toFloat()
+                            .coerceIn(0f, 1f)
                     )
                 )
             }
@@ -740,6 +749,7 @@ object LibrarySyncPayload {
             put("metadataHash", syncMetadataHash.ifBlank { ArticleSyncBody.metadataHashFor(this@toManifestJson) })
             put("bodyAvailable", true)
             put("bodySyncMode", bodySyncModeForSync())
+            put("readingProgress", readingProgress.coerceIn(0f, 1f))
         }
     }
 
@@ -769,6 +779,7 @@ object LibrarySyncPayload {
             put("metadataHash", metadataHash)
             put("bodyAvailable", bodyAvailable)
             put("bodySyncMode", bodySyncMode)
+            put("readingProgress", readingProgress.coerceIn(0f, 1f))
         }
     }
 
@@ -801,6 +812,7 @@ object LibrarySyncPayload {
             put("watchLaterSortOrder", watchLaterSortOrder)
             put("deleted", deleted)
             put("deletedAt", deletedAt)
+            put("readingProgress", readingProgress.coerceIn(0f, 1f))
         }
     }
 
@@ -939,6 +951,10 @@ object LibrarySyncPayload {
         }
     }
 
+    private fun Float.isMeaningfullyAheadOf(other: Float): Boolean {
+        return coerceIn(0f, 1f) > other.coerceIn(0f, 1f) + READING_PROGRESS_SYNC_EPSILON
+    }
+
     private fun JSONObject.optStringArray(name: String): List<String> {
         val array = optJSONArray(name) ?: return emptyList()
         return buildList {
@@ -1015,4 +1031,5 @@ object LibrarySyncPayload {
     private const val PHASE_COMPLETE = "complete"
     private const val ARTICLE_BATCH_TARGET_BYTES = 512 * 1024
     private const val METADATA_ONLY_ARTICLES_PROTOCOL_VERSION = 8
+    private const val READING_PROGRESS_SYNC_EPSILON = 0.001f
 }

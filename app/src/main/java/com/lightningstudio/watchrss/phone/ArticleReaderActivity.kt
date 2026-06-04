@@ -1333,7 +1333,7 @@ private fun importedTextRestoreVisualOffsetPx(
         itemInfo = itemInfo,
         layout = layout
     )
-    return (textTopPaddingPx + layout.getLineTop(lineIndex))
+    return (itemInfo.offset + textTopPaddingPx + layout.getLineTop(lineIndex))
         .roundToInt()
         .coerceAtLeast(0) - anchorOffsetPx.coerceAtLeast(0)
 }
@@ -1357,7 +1357,7 @@ private fun articleTextRestoreVisualOffsetPx(
         itemInfo = itemInfo,
         layout = layout
     )
-    return (textTopPaddingPx + layout.getLineTop(lineIndex))
+    return (itemInfo.offset + textTopPaddingPx + layout.getLineTop(lineIndex))
         .roundToInt()
         .coerceAtLeast(0) - anchorOffsetPx.coerceAtLeast(0)
 }

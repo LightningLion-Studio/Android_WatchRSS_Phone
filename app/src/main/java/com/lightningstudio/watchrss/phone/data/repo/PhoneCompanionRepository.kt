@@ -28,6 +28,7 @@ import com.lightningstudio.watchrss.phone.data.importer.LocalContentImporter
 import com.lightningstudio.watchrss.phone.data.importer.ImportedWebArticle
 import com.lightningstudio.watchrss.phone.data.importer.RssSourceImporter
 import com.lightningstudio.watchrss.phone.data.importer.WebArticleImporter
+import com.lightningstudio.watchrss.phone.data.local.ARTICLE_TEXT_CHUNK_BYTES
 import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
@@ -60,6 +61,12 @@ data class PhoneLibrarySyncWindow(
     val toSeqInclusive: Long,
     val peerAckedSeq: Long,
     val fallbackReason: String
+)
+
+data class PhoneImportedTextReader(
+    val marker: String,
+    val byteLength: Long,
+    val chunkCount: Int
 )
 
 private data class SyncHydratedArticle(
@@ -142,10 +149,35 @@ class PhoneCompanionRepository(
     fun observeArticle(articleId: String): Flow<PhoneArticleEntity?> {
         return articleDao.observeById(articleId).map { article ->
             withContext(Dispatchers.IO) {
-                article?.hydrateExternalText()
+                article?.let { entity ->
+                    if (entity.isFileBackedImportedText()) {
+                        entity
+                    } else {
+                        entity.hydrateExternalText()
+                    }
+                }
             }
         }
     }
+
+    suspend fun getImportedTextReader(articleId: String): PhoneImportedTextReader? =
+        withContext(Dispatchers.IO) {
+            val store = articleContentStore ?: return@withContext null
+            val article = articleDao.getById(articleId) ?: return@withContext null
+            if (!article.isFileBackedImportedText(store)) return@withContext null
+            val marker = article.contentText.takeIf(store::isMarker) ?: return@withContext null
+            val handle = store.textChunkHandle(marker, ARTICLE_TEXT_CHUNK_BYTES) ?: return@withContext null
+            PhoneImportedTextReader(
+                marker = handle.marker,
+                byteLength = handle.byteLength,
+                chunkCount = handle.chunkCount
+            )
+        }
+
+    suspend fun loadImportedTextChunk(marker: String, chunkIndex: Int): String? =
+        withContext(Dispatchers.IO) {
+            articleContentStore?.loadTextChunk(marker, chunkIndex, ARTICLE_TEXT_CHUNK_BYTES)
+        }
 
     suspend fun updateArticleReadingProgress(articleId: String, progress: Float) = withContext(Dispatchers.IO) {
         articleDao.updateReadingProgress(articleId, progress.coerceIn(0f, 1f))
@@ -200,7 +232,6 @@ class PhoneCompanionRepository(
                     favoriteSaved = !current.favoriteSaved,
                     favoriteChangedAt = now,
                     favoriteSortOrder = if (!current.favoriteSaved) now else current.favoriteSortOrder,
-                    updatedAt = now,
                     sourceDeviceId = deviceId,
                     deleted = false
                 )
@@ -208,7 +239,6 @@ class PhoneCompanionRepository(
                     watchLaterSaved = !current.watchLaterSaved,
                     watchLaterChangedAt = now,
                     watchLaterSortOrder = if (!current.watchLaterSaved) now else current.watchLaterSortOrder,
-                    updatedAt = now,
                     sourceDeviceId = deviceId,
                     deleted = false
                 )
@@ -1440,6 +1470,15 @@ class PhoneCompanionRepository(
             contentText
         }
         return copy(contentHtml = html, contentText = text)
+    }
+
+    private fun PhoneArticleEntity.isFileBackedImportedText(): Boolean {
+        val store = articleContentStore ?: return false
+        return isFileBackedImportedText(store)
+    }
+
+    private fun PhoneArticleEntity.isFileBackedImportedText(store: ArticleContentStore): Boolean {
+        return ImportedContentIds.isImportedTextArticleUrl(url) && store.isMarker(contentText)
     }
 
     private fun PhoneArticleEntity.hydrateExternalTextForSync(): SyncHydratedArticle {

@@ -14,6 +14,7 @@ import com.lightningstudio.watchrss.phone.data.importer.ImportedRssSource
 import com.lightningstudio.watchrss.phone.data.importer.ImportedWebArticle
 import com.lightningstudio.watchrss.phone.data.importer.LocalContentImportKind
 import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
+import com.lightningstudio.watchrss.phone.data.local.StoredTextChunkHandle
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import kotlinx.coroutines.flow.Flow
@@ -238,6 +239,29 @@ class PhoneCompanionRepositoryTest {
     }
 
     @Test
+    fun toggleSaved_preservesRssArticleUpdatedAt() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val article = article(
+            id = "rss-article",
+            rssSourceUrl = "https://example.com/feed.xml"
+        ).copy(updatedAt = 42L)
+        articleDao.items = listOf(article)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        val updated = repository.toggleSaved(article, PhoneSavedItemType.FAVORITE)
+
+        assertTrue(updated.favoriteSaved)
+        assertTrue(updated.favoriteChangedAt > 0L)
+        assertEquals(42L, updated.updatedAt)
+        assertEquals(42L, articleDao.items.single().updatedAt)
+    }
+
+    @Test
     fun refreshRssSource_rejectsImportedContentChannels() = runBlocking {
         val sourceUrl = ImportedContentIds.epubSourceUrl("book")
         val sourceDao = FakePhoneRssSourceDao().apply {
@@ -360,6 +384,13 @@ class PhoneCompanionRepositoryTest {
         assertTrue(contentStore.isMarker(storedArticle.contentText))
         assertEquals(longText, contentStore.loadText(storedArticle.contentText))
         assertEquals(longText, repository.getArticlesForSync().single().contentText)
+
+        val reader = repository.getImportedTextReader(storedArticle.articleId)
+        assertEquals(storedArticle.contentText, reader?.marker)
+        assertTrue((reader?.chunkCount ?: 0) > 1)
+        val firstChunk = repository.loadImportedTextChunk(storedArticle.contentText, 0).orEmpty()
+        assertTrue(firstChunk.isNotBlank())
+        assertTrue(firstChunk.length < longText.length)
     }
 
     @Test
@@ -1108,5 +1139,45 @@ class PhoneCompanionRepositoryTest {
         }
 
         override fun loadText(marker: String): String? = texts[marker]
+
+        override fun textChunkHandle(marker: String, chunkBytes: Int): StoredTextChunkHandle? {
+            val text = texts[marker] ?: return null
+            val byteLength = text.toByteArray(Charsets.UTF_8).size.toLong()
+            val chunkCount = ((byteLength + chunkBytes - 1L) / chunkBytes)
+                .toInt()
+                .coerceAtLeast(1)
+            return StoredTextChunkHandle(
+                marker = marker,
+                byteLength = byteLength,
+                chunkBytes = chunkBytes,
+                chunkCount = chunkCount
+            )
+        }
+
+        override fun loadTextChunk(marker: String, chunkIndex: Int, chunkBytes: Int): String? {
+            if (chunkIndex < 0 || chunkBytes <= 0) return null
+            val bytes = texts[marker]?.toByteArray(Charsets.UTF_8) ?: return null
+            val nominalStart = chunkIndex * chunkBytes
+            if (nominalStart >= bytes.size) return null
+            val nominalEnd = (nominalStart + chunkBytes).coerceAtMost(bytes.size)
+            val start = bytes.adjustUtf8Boundary(nominalStart)
+            val end = bytes.adjustUtf8Boundary(nominalEnd)
+            if (end <= start) return ""
+            return String(bytes.copyOfRange(start, end), Charsets.UTF_8)
+        }
+
+        private fun ByteArray.adjustUtf8Boundary(requested: Int): Int {
+            var position = requested.coerceIn(0, size)
+            if (position <= 0 || position >= size) return position
+            while (position > 0 && (this[position].toInt() and UTF8_CONTINUATION_MASK) == UTF8_CONTINUATION_PREFIX) {
+                position -= 1
+            }
+            return position
+        }
+
+        companion object {
+            private const val UTF8_CONTINUATION_MASK = 0xC0
+            private const val UTF8_CONTINUATION_PREFIX = 0x80
+        }
     }
 }

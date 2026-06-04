@@ -29,6 +29,11 @@ object ImportedContentIds {
         return normalized == ROOT_SOURCE_URL
     }
 
+    fun isImportedTextArticleUrl(url: String?): Boolean {
+        val normalized = url?.trim()?.lowercase() ?: return false
+        return normalized.startsWith("$ROOT_SOURCE_URL/txt/")
+    }
+
     fun isImportedEpubSourceUrl(url: String?): Boolean {
         val normalized = url?.trim()?.lowercase() ?: return false
         return normalized.startsWith(EPUB_SOURCE_ROOT_URL) ||

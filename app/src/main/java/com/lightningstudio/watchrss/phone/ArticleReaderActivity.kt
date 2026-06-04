@@ -9,6 +9,8 @@ import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -50,6 +53,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
@@ -73,12 +77,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import coil.compose.AsyncImage
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.importer.WebArticleImporter
+import com.lightningstudio.watchrss.phone.data.local.ARTICLE_TEXT_CHUNK_BYTES
+import com.lightningstudio.watchrss.phone.data.local.isArticleContentMarker
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
+import com.lightningstudio.watchrss.phone.data.repo.PhoneImportedTextReader
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import com.lightningstudio.watchrss.phone.ui.theme.AppCard
 import com.lightningstudio.watchrss.phone.ui.theme.AppPrimaryCard
@@ -98,6 +109,7 @@ import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.Node
@@ -116,9 +128,17 @@ class ArticleReaderActivity : ComponentActivity() {
                 val article by remember(articleId) {
                     repository.observeArticle(articleId)
                 }.collectAsState(initial = null)
+                val importedTextReader by produceState<PhoneImportedTextReader?>(
+                    initialValue = null,
+                    articleId
+                ) {
+                    value = repository.getImportedTextReader(articleId)
+                }
                 ArticleReaderScreen(
                     article = article,
+                    importedTextReader = importedTextReader,
                     invalidArticleId = articleId.isBlank(),
+                    onLoadImportedTextChunk = repository::loadImportedTextChunk,
                     onSaveReadingProgress = { progress ->
                         repository.updateArticleReadingProgress(articleId, progress)
                     },
@@ -154,7 +174,9 @@ class ArticleReaderActivity : ComponentActivity() {
 @Composable
 private fun ArticleReaderScreen(
     article: PhoneArticleEntity?,
+    importedTextReader: PhoneImportedTextReader?,
     invalidArticleId: Boolean,
+    onLoadImportedTextChunk: suspend (String, Int) -> String?,
     onSaveReadingProgress: suspend (Float) -> Unit,
     onBack: () -> Unit,
     onOpenImportedArticle: (String) -> Unit,
@@ -191,31 +213,56 @@ private fun ArticleReaderScreen(
             return@Surface
         }
 
+        val hasFileBackedImportedText = ImportedContentIds.isImportedTextArticleUrl(safeArticle.url) &&
+            isArticleContentMarker(safeArticle.contentText)
+        val waitingForImportedTextReader = hasFileBackedImportedText && importedTextReader == null
+        val useImportedTextChunks = importedTextReader != null
         val contentNodes = remember(
             safeArticle.articleId,
             safeArticle.contentHash,
             safeArticle.contentHtml,
             safeArticle.contentText,
             safeArticle.excerpt,
-            safeArticle.url
+            safeArticle.url,
+            waitingForImportedTextReader,
+            useImportedTextChunks
         ) {
-            if (!safeArticle.contentHtml.isNullOrBlank()) {
-                parseArticleContent(safeArticle.contentHtml ?: "")
+            if (useImportedTextChunks || waitingForImportedTextReader) {
+                emptyList()
             } else {
-                buildPlainArticleNodes(
-                    safeArticle.contentText
-                        .ifBlank { safeArticle.excerpt }
-                        .ifBlank { safeArticle.url }
-                )
+                if (!safeArticle.contentHtml.isNullOrBlank()) {
+                    parseArticleContent(safeArticle.contentHtml ?: "")
+                } else {
+                    buildPlainArticleNodes(
+                        safeArticle.contentText
+                            .ifBlank { safeArticle.excerpt }
+                            .ifBlank { safeArticle.url }
+                    )
+                }
             }
         }
         val listState = rememberLazyListState()
         val textLayouts = remember(safeArticle.articleId, contentNodes) {
             mutableStateMapOf<Int, TextLayoutResult>()
         }
+        val importedTextChunkLayouts = remember(safeArticle.articleId, importedTextReader?.marker) {
+            mutableStateMapOf<Int, TextLayoutResult>()
+        }
+        val importedTextChunkTexts = remember(safeArticle.articleId, importedTextReader?.marker) {
+            mutableStateMapOf<Int, String>()
+        }
         var topBarHeight by remember { mutableStateOf(0.dp) }
+        var bottomBarHeight by remember { mutableStateOf(0.dp) }
         val density = LocalDensity.current
         val topBarHeightPx = with(density) { topBarHeight.roundToPx() }
+        val bottomBarHeightPx = with(density) { bottomBarHeight.roundToPx() }
+        val chromeHideRangePx = maxOf(topBarHeightPx, bottomBarHeightPx)
+        var readerChromeOffsetPx by remember { mutableStateOf(0f) }
+        var lastReaderChromeDirection by remember { mutableStateOf(0) }
+        val visibleTopBarHeightPx = (topBarHeightPx - readerChromeOffsetPx
+            .coerceAtMost(topBarHeightPx.toFloat()))
+            .roundToInt()
+            .coerceAtLeast(0)
         var hasRestoredPosition by remember(safeArticle.articleId) { mutableStateOf(false) }
         var pendingRestoreProgress by remember(safeArticle.articleId) {
             mutableStateOf<Float?>(safeArticle.readingProgress.coerceIn(0f, 1f))
@@ -223,18 +270,86 @@ private fun ArticleReaderScreen(
         var pendingTextRestore by remember(safeArticle.articleId) {
             mutableStateOf<ArticleTextRestoreTarget?>(null)
         }
+        var pendingImportedTextRestore by remember(safeArticle.articleId, importedTextReader?.marker) {
+            mutableStateOf<ImportedTextByteRestoreTarget?>(null)
+        }
         var lastSavedProgress by remember(safeArticle.articleId) { mutableStateOf(-1f) }
         var lastProgressSavedAt by remember(safeArticle.articleId) { mutableStateOf(0L) }
         val lifecycleOwner = LocalLifecycleOwner.current
         val onSaveReadingProgressState = rememberUpdatedState(onSaveReadingProgress)
         val onBackState = rememberUpdatedState(onBack)
 
+        fun updateReaderChromeOffset(deltaPx: Float) {
+            if (chromeHideRangePx <= 0 || deltaPx == 0f) return
+            readerChromeOffsetPx = (readerChromeOffsetPx + deltaPx)
+                .coerceIn(0f, chromeHideRangePx.toFloat())
+            if (kotlin.math.abs(deltaPx) > 0.5f) {
+                lastReaderChromeDirection = if (deltaPx > 0f) 1 else -1
+            }
+        }
+
+        val readerChromeNestedScrollConnection = remember(chromeHideRangePx) {
+            object : NestedScrollConnection {
+                override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                    if (available.y > 0f) {
+                        updateReaderChromeOffset(deltaPx = -available.y)
+                    }
+                    return Offset.Zero
+                }
+
+                override fun onPostScroll(
+                    consumed: Offset,
+                    available: Offset,
+                    source: NestedScrollSource
+                ): Offset {
+                    if (consumed.y < 0f) {
+                        updateReaderChromeOffset(deltaPx = -consumed.y)
+                    }
+                    return Offset.Zero
+                }
+            }
+        }
+        val isReaderScrollInProgress = listState.isScrollInProgress
+        LaunchedEffect(isReaderScrollInProgress, chromeHideRangePx) {
+            if (chromeHideRangePx <= 0) return@LaunchedEffect
+            readerChromeOffsetPx = readerChromeOffsetPx.coerceIn(0f, chromeHideRangePx.toFloat())
+            if (!isReaderScrollInProgress) {
+                val targetOffsetPx = when {
+                    lastReaderChromeDirection > 0 -> chromeHideRangePx.toFloat()
+                    lastReaderChromeDirection < 0 -> 0f
+                    readerChromeOffsetPx > chromeHideRangePx * 0.5f -> chromeHideRangePx.toFloat()
+                    else -> 0f
+                }
+                if (kotlin.math.abs(readerChromeOffsetPx - targetOffsetPx) > 0.5f) {
+                    animate(
+                        initialValue = readerChromeOffsetPx,
+                        targetValue = targetOffsetPx,
+                        animationSpec = tween(durationMillis = READER_CHROME_SNAP_ANIMATION_MS)
+                    ) { value, _ ->
+                        readerChromeOffsetPx = value.coerceIn(0f, chromeHideRangePx.toFloat())
+                    }
+                } else {
+                    readerChromeOffsetPx = targetOffsetPx
+                }
+            }
+        }
+
         fun freshReadingProgress(): Float? {
-            return calculateArticleTextReadingProgressFromLayout(
+            return importedTextReader?.let { reader ->
+                calculateImportedTextByteReadingProgressFromLayout(
+                    listState = listState,
+                    marker = reader.marker,
+                    byteLength = reader.byteLength,
+                    chunkCount = reader.chunkCount,
+                    chunkTexts = importedTextChunkTexts,
+                    chunkLayouts = importedTextChunkLayouts,
+                    anchorOffsetPx = visibleTopBarHeightPx
+                )
+            } ?: calculateArticleTextReadingProgressFromLayout(
                 listState = listState,
                 nodes = contentNodes,
                 textLayouts = textLayouts,
-                anchorOffsetPx = topBarHeightPx
+                anchorOffsetPx = visibleTopBarHeightPx
             )
         }
 
@@ -262,9 +377,28 @@ private fun ArticleReaderScreen(
             return true
         }
 
-        LaunchedEffect(pendingRestoreProgress, contentNodes, topBarHeight) {
+        LaunchedEffect(pendingRestoreProgress, contentNodes, topBarHeight, importedTextReader) {
             val progress = pendingRestoreProgress ?: return@LaunchedEffect
             if (topBarHeight == 0.dp) return@LaunchedEffect
+            if (waitingForImportedTextReader) return@LaunchedEffect
+            importedTextReader?.let { reader ->
+                if (reader.chunkCount <= 0 || reader.byteLength <= 0L) {
+                    pendingRestoreProgress = null
+                    hasRestoredPosition = true
+                    return@LaunchedEffect
+                }
+                val restoreTarget = importedTextByteRestoreTarget(
+                    progress = progress,
+                    byteLength = reader.byteLength,
+                    chunkCount = reader.chunkCount,
+                    chunkBytes = ARTICLE_TEXT_CHUNK_BYTES
+                )
+                val targetIndex = restoreTarget.chunkIndex.coerceIn(0, reader.chunkCount - 1)
+                listState.scrollToItem(targetIndex)
+                pendingImportedTextRestore = restoreTarget.copy(itemIndex = targetIndex)
+                pendingRestoreProgress = null
+                return@LaunchedEffect
+            }
             if (contentNodes.isEmpty()) {
                 pendingRestoreProgress = null
                 hasRestoredPosition = true
@@ -291,6 +425,36 @@ private fun ArticleReaderScreen(
             pendingRestoreProgress = null
         }
 
+        LaunchedEffect(pendingImportedTextRestore) {
+            val restoreTarget = pendingImportedTextRestore ?: return@LaunchedEffect
+            val offsetPx = withTimeoutOrNull(ARTICLE_RESTORE_OFFSET_TIMEOUT_MS) {
+                snapshotFlow {
+                    val text = importedTextChunkTexts[restoreTarget.chunkIndex]
+                    val layout = importedTextChunkLayouts[restoreTarget.chunkIndex]
+                    val itemInfo = listState.layoutInfo.visibleItemsInfo
+                        .firstOrNull { it.index == restoreTarget.itemIndex }
+                    if (text == null || layout == null || itemInfo == null) {
+                        null
+                    } else {
+                        importedTextRestoreVisualOffsetPx(
+                            restoreTarget = restoreTarget,
+                            text = text,
+                            layout = layout,
+                            itemInfo = itemInfo,
+                            anchorOffsetPx = visibleTopBarHeightPx
+                        )
+                    }
+                }
+                    .filterNotNull()
+                    .first()
+            }
+            if (offsetPx != null) {
+                listState.scrollToItem(restoreTarget.itemIndex, offsetPx)
+            }
+            pendingImportedTextRestore = null
+            hasRestoredPosition = true
+        }
+
         LaunchedEffect(pendingTextRestore) {
             val restoreTarget = pendingTextRestore ?: return@LaunchedEffect
             val offsetPx = withTimeoutOrNull(ARTICLE_RESTORE_OFFSET_TIMEOUT_MS) {
@@ -307,7 +471,7 @@ private fun ArticleReaderScreen(
                             text = text,
                             layout = layout,
                             itemInfo = itemInfo,
-                            anchorOffsetPx = topBarHeightPx
+                            anchorOffsetPx = visibleTopBarHeightPx
                         )
                     }
                 }
@@ -369,29 +533,68 @@ private fun ArticleReaderScreen(
                 modifier = Modifier
                     .layerBackdrop(backdrop)
                     .fillMaxSize()
+                    .nestedScroll(readerChromeNestedScrollConnection)
                     .clipToBounds()
             ) {
-                ArticleReaderContentView(
-                    nodes = contentNodes,
-                    listState = listState,
-                    textLayouts = textLayouts,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(
-                        top = topBarHeight + 20.dp,
-                        start = 20.dp,
-                        end = 20.dp,
-                        bottom = 20.dp
-                    )
+                val readerContentPadding = PaddingValues(
+                    top = topBarHeight + 20.dp,
+                    start = 20.dp,
+                    end = 20.dp,
+                    bottom = 20.dp
                 )
+                val reader = importedTextReader
+                when {
+                    reader != null -> {
+                        ImportedTextChunkContentView(
+                            reader = reader,
+                            listState = listState,
+                            chunkTexts = importedTextChunkTexts,
+                            chunkLayouts = importedTextChunkLayouts,
+                            onLoadImportedTextChunk = onLoadImportedTextChunk,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = readerContentPadding
+                        )
+                    }
+                    waitingForImportedTextReader -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(readerContentPadding),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                text = "正在加载正文…",
+                                style = MaterialTheme.typography.titleLarge
+                            )
+                        }
+                    }
+                    else -> {
+                        ArticleReaderContentView(
+                            nodes = contentNodes,
+                            listState = listState,
+                            textLayouts = textLayouts,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = readerContentPadding
+                        )
+                    }
+                }
             }
 
-            // 顶部无圆角高斯模糊（常可见）
+            val topBarOffsetPx = readerChromeOffsetPx
+                .coerceAtMost(topBarHeightPx.toFloat())
+                .roundToInt()
+            val bottomBarOffsetPx = readerChromeOffsetPx
+                .coerceAtMost(bottomBarHeightPx.toFloat())
+                .roundToInt()
+
+            // 顶部无圆角高斯模糊
             Box(
                 modifier = Modifier
                     .onGloballyPositioned { coordinates ->
                         topBarHeight = with(density) { coordinates.size.height.toDp() }
                     }
                     .fillMaxWidth()
+                    .offset { IntOffset(0, -topBarOffsetPx) }
                     .gaussianBlurBackdrop(
                         backdrop = backdrop
                     )
@@ -407,7 +610,11 @@ private fun ArticleReaderScreen(
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
+                    .onGloballyPositioned { coordinates ->
+                        bottomBarHeight = with(density) { coordinates.size.height.toDp() }
+                    }
                     .fillMaxWidth()
+                    .offset { IntOffset(0, bottomBarOffsetPx) }
                     .gaussianBlurBackdrop(
                         backdrop = backdrop
                     )
@@ -496,6 +703,56 @@ private fun Modifier.gaussianBlurBackdrop(
 /**
  * 原生文章渲染器 - 将 HTML 解析为 Compose 组件
  */
+@Composable
+private fun ImportedTextChunkContentView(
+    reader: PhoneImportedTextReader,
+    listState: LazyListState,
+    chunkTexts: MutableMap<Int, String>,
+    chunkLayouts: MutableMap<Int, TextLayoutResult>,
+    onLoadImportedTextChunk: suspend (String, Int) -> String?,
+    modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(0.dp)
+) {
+    LazyColumn(
+        modifier = modifier,
+        state = listState,
+        contentPadding = contentPadding
+    ) {
+        items(
+            count = reader.chunkCount,
+            key = { index -> importedTextChunkKey(reader.marker, index) },
+            contentType = { "imported_text_chunk" }
+        ) { index ->
+            val marker = reader.marker
+            val chunk by produceState<String?>(initialValue = null, marker, index) {
+                value = onLoadImportedTextChunk(marker, index)
+            }
+            LaunchedEffect(marker, index, chunk) {
+                if (chunk == null) {
+                    chunkTexts.remove(index)
+                    chunkLayouts.remove(index)
+                } else {
+                    chunkTexts[index] = chunk.orEmpty()
+                }
+            }
+            val text = chunk
+            if (text == null) {
+                Spacer(modifier = Modifier.height(1.dp))
+            } else if (text.isNotBlank()) {
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.bodyLarge,
+                    onTextLayout = { chunkLayouts[index] = it },
+                    modifier = Modifier.padding(vertical = 8.dp),
+                    lineHeight = MaterialTheme.typography.bodyLarge.lineHeight * 1.4f
+                )
+            }
+        }
+
+        item { Spacer(modifier = Modifier.height(80.dp)) }
+    }
+}
+
 @Composable
 private fun ArticleReaderContentView(
     nodes: List<ArticleNode>,
@@ -813,18 +1070,56 @@ private data class VisibleArticleTextNodeWithLayout(
     val layout: TextLayoutResult
 )
 
+private data class VisibleImportedTextChunkWithLayout(
+    val itemInfo: LazyListItemInfo,
+    val chunkIndex: Int,
+    val text: String,
+    val layout: TextLayoutResult
+)
+
 private data class ArticleTextRestoreTarget(
     val itemIndex: Int,
     val nodeIndex: Int,
     val byteOffsetInNode: Int
 )
 
+private data class ImportedTextByteRestoreTarget(
+    val itemIndex: Int,
+    val chunkIndex: Int,
+    val byteOffsetInChunk: Int
+)
+
 private fun buildPlainArticleNodes(text: String): List<ArticleNode> {
-    return text.split("\n")
-        .map(String::trim)
-        .filter(String::isNotBlank)
-        .map(ArticleNode::Paragraph)
-        .ifEmpty { listOf(ArticleNode.Paragraph(text.ifBlank { "暂无正文" })) }
+    val nodes = mutableListOf<ArticleNode>()
+    text.lineSequence().forEach { line ->
+        appendSplitTextNodes(
+            target = nodes,
+            text = line.trim(),
+            factory = ArticleNode::Paragraph
+        )
+    }
+    return nodes.ifEmpty { listOf(ArticleNode.Paragraph(text.ifBlank { "暂无正文" })) }
+}
+
+private fun appendSplitTextNodes(
+    target: MutableList<ArticleNode>,
+    text: String,
+    factory: (String) -> ArticleNode
+) {
+    if (text.isBlank()) return
+    if (text.length <= MAX_ARTICLE_TEXT_NODE_CHARS) {
+        target += factory(text)
+        return
+    }
+    var start = 0
+    while (start < text.length) {
+        val end = (start + MAX_ARTICLE_TEXT_NODE_CHARS).coerceAtMost(text.length)
+        val slice = text.substring(start, end).trim()
+        if (slice.isNotEmpty()) {
+            target += factory(slice)
+        }
+        start = end
+    }
 }
 
 private fun articleNodeText(node: ArticleNode?): String? {
@@ -836,6 +1131,73 @@ private fun articleNodeText(node: ArticleNode?): String? {
         is ArticleNode.ListItem -> node.text
         else -> null
     }?.takeIf { it.isNotBlank() }
+}
+
+private fun importedTextChunkKey(marker: String, chunkIndex: Int): String {
+    return "$IMPORTED_TEXT_CHUNK_KEY_PREFIX$marker:$chunkIndex"
+}
+
+private fun importedTextChunkIndexFromKey(key: Any?, marker: String): Int? {
+    val keyText = key as? String ?: return null
+    val prefix = "$IMPORTED_TEXT_CHUNK_KEY_PREFIX$marker:"
+    if (!keyText.startsWith(prefix)) return null
+    return keyText.substring(prefix.length).toIntOrNull()
+}
+
+private fun calculateImportedTextByteReadingProgressFromLayout(
+    listState: LazyListState,
+    marker: String,
+    byteLength: Long,
+    chunkCount: Int,
+    chunkTexts: Map<Int, String>,
+    chunkLayouts: Map<Int, TextLayoutResult>,
+    anchorOffsetPx: Int
+): Float? {
+    if (chunkCount <= 0 || byteLength <= 0L) return null
+    val layoutInfo = listState.layoutInfo
+    if (layoutInfo.visibleItemsInfo.isNotEmpty() && !listState.canScrollForward) return 1f
+    val normalizedAnchorOffsetPx = anchorOffsetPx.coerceAtLeast(0)
+    val visibleChunk = layoutInfo.visibleItemsInfo.firstNotNullOfOrNull { itemInfo ->
+        if (itemInfo.offset + itemInfo.size <= normalizedAnchorOffsetPx) {
+            return@firstNotNullOfOrNull null
+        }
+        val chunkIndex = importedTextChunkIndexFromKey(itemInfo.key, marker)
+            ?: return@firstNotNullOfOrNull null
+        if (chunkIndex !in 0 until chunkCount) return@firstNotNullOfOrNull null
+        val text = chunkTexts[chunkIndex] ?: return@firstNotNullOfOrNull null
+        val layout = chunkLayouts[chunkIndex] ?: return@firstNotNullOfOrNull null
+        if (layout.lineCount <= 0) return@firstNotNullOfOrNull null
+        VisibleImportedTextChunkWithLayout(
+            itemInfo = itemInfo,
+            chunkIndex = chunkIndex,
+            text = text,
+            layout = layout
+        )
+    } ?: return null
+    val scrolledInItemPx = (normalizedAnchorOffsetPx - visibleChunk.itemInfo.offset)
+        .coerceIn(0, visibleChunk.itemInfo.size.coerceAtLeast(0))
+    val textTopPaddingPx = articleTextTopInsetPx(
+        itemInfo = visibleChunk.itemInfo,
+        layout = visibleChunk.layout
+    )
+    val textY = (scrolledInItemPx - textTopPaddingPx)
+        .coerceAtLeast(0)
+        .toFloat()
+    val lineIndex = visibleChunk.layout
+        .getLineForVerticalPosition(textY)
+        .coerceIn(0, visibleChunk.layout.lineCount - 1)
+    val charOffset = visibleChunk.layout
+        .getLineStart(lineIndex)
+        .coerceIn(0, visibleChunk.text.length)
+    val byteOffsetInChunk = utf8ByteCountBeforeCharOffset(
+        text = visibleChunk.text,
+        charOffset = charOffset
+    )
+    val absoluteByte = (visibleChunk.chunkIndex.toLong() * ARTICLE_TEXT_CHUNK_BYTES.toLong() + byteOffsetInChunk)
+        .coerceIn(0L, byteLength)
+    return (absoluteByte.toDouble() / byteLength.toDouble())
+        .toFloat()
+        .coerceIn(0f, 1f)
 }
 
 private fun calculateArticleTextReadingProgressFromLayout(
@@ -920,6 +1282,60 @@ private fun articleTextRestoreTarget(
         nodeIndex = lastTextIndex,
         byteOffsetInNode = (textByteCounts[lastTextIndex] - 1).coerceAtLeast(0)
     )
+}
+
+private fun importedTextByteRestoreTarget(
+    progress: Float,
+    byteLength: Long,
+    chunkCount: Int,
+    chunkBytes: Int
+): ImportedTextByteRestoreTarget {
+    if (byteLength <= 0L || chunkCount <= 0 || chunkBytes <= 0) {
+        return ImportedTextByteRestoreTarget(
+            itemIndex = 0,
+            chunkIndex = 0,
+            byteOffsetInChunk = 0
+        )
+    }
+    val maxByte = (byteLength - 1L).coerceAtLeast(0L)
+    val absoluteByte = (byteLength.toDouble() * progress.coerceIn(0f, 1f).toDouble())
+        .roundToLong()
+        .coerceIn(0L, maxByte)
+    val chunkIndex = (absoluteByte / chunkBytes.toLong())
+        .toInt()
+        .coerceIn(0, chunkCount - 1)
+    val byteOffsetInChunk = (absoluteByte - chunkIndex.toLong() * chunkBytes.toLong())
+        .toInt()
+        .coerceAtLeast(0)
+    return ImportedTextByteRestoreTarget(
+        itemIndex = chunkIndex,
+        chunkIndex = chunkIndex,
+        byteOffsetInChunk = byteOffsetInChunk
+    )
+}
+
+private fun importedTextRestoreVisualOffsetPx(
+    restoreTarget: ImportedTextByteRestoreTarget,
+    text: String,
+    layout: TextLayoutResult,
+    itemInfo: LazyListItemInfo,
+    anchorOffsetPx: Int
+): Int {
+    if (layout.lineCount <= 0) return 0
+    val charOffset = utf8CharOffsetForByteOffset(
+        text = text,
+        byteOffset = restoreTarget.byteOffsetInChunk
+    ).coerceIn(0, text.length)
+    val lineIndex = layout
+        .getLineForOffset(charOffset)
+        .coerceIn(0, layout.lineCount - 1)
+    val textTopPaddingPx = articleTextTopInsetPx(
+        itemInfo = itemInfo,
+        layout = layout
+    )
+    return (textTopPaddingPx + layout.getLineTop(lineIndex))
+        .roundToInt()
+        .coerceAtLeast(0) - anchorOffsetPx.coerceAtLeast(0)
 }
 
 private fun articleTextRestoreVisualOffsetPx(
@@ -1209,3 +1625,6 @@ private fun extractTextWithInlineFormatting(element: Element): String {
 private const val ARTICLE_READING_PROGRESS_LAYOUT_TIMEOUT_MS = 800L
 private const val ARTICLE_RESTORE_OFFSET_TIMEOUT_MS = 3_000L
 private const val ARTICLE_READING_PROGRESS_SAMPLE_MS = 500L
+private const val MAX_ARTICLE_TEXT_NODE_CHARS = 2_000
+private const val IMPORTED_TEXT_CHUNK_KEY_PREFIX = "importedText:"
+private const val READER_CHROME_SNAP_ANIMATION_MS = 140

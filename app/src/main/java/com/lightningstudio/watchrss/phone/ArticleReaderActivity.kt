@@ -35,7 +35,6 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
@@ -394,8 +393,7 @@ private fun ArticleReaderScreen(
                     }
                     .fillMaxWidth()
                     .gaussianBlurBackdrop(
-                        backdrop = backdrop,
-                        isDark = isSystemInDarkTheme()
+                        backdrop = backdrop
                     )
                     .padding(bottom = 12.dp)
             ) {
@@ -411,8 +409,7 @@ private fun ArticleReaderScreen(
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .gaussianBlurBackdrop(
-                        backdrop = backdrop,
-                        isDark = isSystemInDarkTheme()
+                        backdrop = backdrop
                     )
                     .padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
@@ -485,17 +482,14 @@ private fun GlassButton(
 
 // 阅读页统一的无圆角高斯模糊效果
 private fun Modifier.gaussianBlurBackdrop(
-    backdrop: LayerBackdrop,
-    isDark: Boolean
+    backdrop: LayerBackdrop
 ) = drawBackdrop(
     backdrop = backdrop,
     shape = { RectangleShape },
+    highlight = null,
+    shadow = null,
     effects = {
         blur(18f.dp.toPx())
-    },
-    onDrawSurface = {
-        val surfaceAlpha = if (isDark) 0.18f else 0.42f
-        drawRect(Color.White.copy(alpha = surfaceAlpha))
     }
 )
 

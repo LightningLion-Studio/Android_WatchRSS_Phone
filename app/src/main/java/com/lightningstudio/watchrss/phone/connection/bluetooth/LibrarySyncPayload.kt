@@ -150,7 +150,7 @@ object LibrarySyncPayload {
             return listOf(buildArticlesRequest(deviceId, articles))
         }
         return buildArticleFrames(
-            articleItems = articles.map { it.toJson() },
+            articleItems = articles.asSequence().map { it.toJson() },
             totalArticles = articles.size
         ) { array, batchIndex, batchCount, totalArticles ->
             JSONObject().apply {
@@ -173,15 +173,15 @@ object LibrarySyncPayload {
         useBatches: Boolean
     ): List<JSONObject> {
         val requestById = articleRequests.associateBy { it.articleId }
-        val articleItems = articles.flatMap { article ->
-            article.toChunkedJsonItems(requestById[article.articleId])
+        val articleItems = articles.asSequence().flatMap { article ->
+            article.toChunkedJsonItemSequence(requestById[article.articleId])
         }
         if (!useBatches) {
-            return listOf(buildChunkedArticlesRequest(deviceId, articleItems, bodyRequests))
+            return listOf(buildChunkedArticlesRequest(deviceId, articleItems.toList(), bodyRequests))
         }
         return buildArticleFrames(
             articleItems = articleItems,
-            totalArticles = articleItems.size
+            totalArticles = null
         ) { array, batchIndex, batchCount, totalArticles ->
             JSONObject().apply {
                 put("version", PROTOCOL_VERSION)
@@ -213,15 +213,15 @@ object LibrarySyncPayload {
         useBatches: Boolean
     ): List<JSONObject> {
         val requestById = articleRequests.associateBy { it.articleId }
-        val articleItems = articles.flatMap { article ->
-            article.toChunkedJsonItems(requestById[article.articleId])
+        val articleItems = articles.asSequence().flatMap { article ->
+            article.toChunkedJsonItemSequence(requestById[article.articleId])
         }
         if (!useBatches) {
-            return listOf(buildChunkedResponse(deviceId, articleItems, stats))
+            return listOf(buildChunkedResponse(deviceId, articleItems.toList(), stats))
         }
         return buildArticleFrames(
             articleItems = articleItems,
-            totalArticles = articleItems.size
+            totalArticles = null
         ) { array, batchIndex, batchCount, totalArticles ->
             JSONObject().apply {
                 put("success", true)
@@ -611,20 +611,17 @@ object LibrarySyncPayload {
     }
 
     private fun buildArticleFrames(
-        articleItems: List<JSONObject>,
-        totalArticles: Int,
+        articleItems: Sequence<JSONObject>,
+        totalArticles: Int?,
         buildPayload: (JSONArray, Int, Int, Int) -> JSONObject
     ): List<JSONObject> {
-        if (articleItems.isEmpty()) {
-            return listOf(buildPayload(JSONArray(), 0, 1, totalArticles))
-        }
-
         val chunks = mutableListOf<List<JSONObject>>()
         var current = mutableListOf<JSONObject>()
         var currentBytes = 0
-        val articleSizes = articleItems.map(BluetoothSyncProtocol::encodedSize)
-        articleItems.forEachIndexed { index, article ->
-            val articleSize = articleSizes[index]
+        var articleItemCount = 0
+        articleItems.forEach { article ->
+            articleItemCount += 1
+            val articleSize = BluetoothSyncProtocol.encodedSize(article)
             if (current.isNotEmpty() && currentBytes + articleSize > ARTICLE_BATCH_TARGET_BYTES) {
                 chunks += current
                 current = mutableListOf(article)
@@ -637,11 +634,15 @@ object LibrarySyncPayload {
         if (current.isNotEmpty()) {
             chunks += current
         }
+        val resolvedTotalArticles = totalArticles ?: articleItemCount
+        if (chunks.isEmpty()) {
+            return listOf(buildPayload(JSONArray(), 0, 1, resolvedTotalArticles))
+        }
 
         while (true) {
             val batchCount = chunks.size.coerceAtLeast(1)
             val payloads = chunks.mapIndexed { index, chunk ->
-                buildPayload(chunk.toRawJsonArray(), index, batchCount, totalArticles)
+                buildPayload(chunk.toRawJsonArray(), index, batchCount, resolvedTotalArticles)
             }
             val oversizedIndex = payloads.indexOfFirst { payload ->
                 BluetoothSyncProtocol.encodedSize(payload) > BluetoothSyncProtocol.MAX_FRAME_BYTES
@@ -767,18 +768,22 @@ object LibrarySyncPayload {
         }
     }
 
-    private fun PhoneArticleEntity.toChunkedJsonItems(request: ArticleBodyRequest?): List<JSONObject> {
-        val metadata = ArticleSyncBody.metadataFor(this)
+    private fun PhoneArticleEntity.toChunkedJsonItemSequence(request: ArticleBodyRequest?): Sequence<JSONObject> = sequence {
+        val article = this@toChunkedJsonItemSequence
+        val metadata = ArticleSyncBody.metadataFor(article)
         val bodyRequest = request ?: ArticleBodyRequest(
-            articleId = articleId,
+            articleId = article.articleId,
             bodyHash = metadata.bodyHash,
             chunkIndexes = metadata.chunkHashes.indices.toList()
         )
-        val chunks = ArticleSyncBody.chunksForRequest(this, bodyRequest)
+        val chunks = ArticleSyncBody.chunksForRequest(article, bodyRequest)
         if (chunks.isEmpty()) {
-            return listOf(toChunkedJson(metadata, emptyList()))
+            yield(article.toChunkedJson(metadata, emptyList()))
+        } else {
+            chunks.forEach { chunk ->
+                yield(article.toChunkedJson(metadata, listOf(chunk)))
+            }
         }
-        return chunks.map { chunk -> toChunkedJson(metadata, listOf(chunk)) }
     }
 
     private fun PhoneArticleEntity.toChunkedJson(
@@ -958,6 +963,5 @@ object LibrarySyncPayload {
     private const val PHASE_MANIFEST = "manifest"
     private const val PHASE_ARTICLES = "articles"
     private const val PHASE_COMPLETE = "complete"
-    private const val ARTICLE_BATCH_TARGET_BYTES = BluetoothSyncProtocol.MAX_FRAME_BYTES - 128 * 1024
-    private const val MAX_BATCH_COUNT_FOR_SIZING = 9999
+    private const val ARTICLE_BATCH_TARGET_BYTES = 512 * 1024
 }

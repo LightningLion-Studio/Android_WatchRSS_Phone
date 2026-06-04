@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
@@ -18,6 +19,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withTimeout
+import org.json.JSONArray
 import org.json.JSONObject
 
 data class BluetoothSyncExchange(
@@ -32,9 +34,21 @@ data class BluetoothLibrarySyncExchange(
     val deviceAddress: String,
     val request: JSONObject,
     val manifestResponse: JSONObject,
-    val articleRequestFrames: List<JSONObject>,
-    val responseFrames: List<JSONObject>,
+    val articleRequestFrameCount: Int,
+    val responseFrameCount: Int,
     val response: JSONObject
+)
+
+private data class LibraryFrameStats(
+    val frameCount: Int,
+    val totalBytes: Long,
+    val maxFrameBytes: Int,
+    val articleCount: Int
+)
+
+private data class LibraryResponseRead(
+    val response: JSONObject,
+    val stats: LibraryFrameStats
 )
 
 data class PhoneBluetoothWatchDevice(
@@ -74,7 +88,18 @@ class PhoneBluetoothSyncClient(
 
         val bondedDevices = adapter.bondedDevices.orEmpty()
         logAdapterSnapshot(sessionId, adapter, bondedDevices)
-        val candidates = sortedWatchDevices(bondedDevices)
+        val allCandidates = probeCandidateWatchDevices(bondedDevices)
+        val candidates = allCandidates.take(MAX_DEVICE_PROBE_CANDIDATES)
+        debugLog.appendEvent(
+            event = "bt.library.probe.candidates",
+            sessionId = sessionId,
+            fields = mapOf(
+                "candidates" to allCandidates.size,
+                "probedCandidates" to candidates.size,
+                "skippedCandidates" to (allCandidates.size - candidates.size).coerceAtLeast(0),
+                "cachedAddress" to cachedDeviceAddress().orEmpty()
+            )
+        )
         if (candidates.isEmpty()) {
             debugLog.appendEvent(
                 event = "bt.library.probe.complete",
@@ -88,14 +113,38 @@ class PhoneBluetoothSyncClient(
             return emptyList()
         }
 
-        val results = candidates.mapIndexed { index, device ->
-            probeLibrarySyncDevice(
+        val results = mutableListOf<PhoneBluetoothWatchProbeResult>()
+        val cachedAddress = cachedDeviceAddress()
+        candidates.forEachIndexed { index, device ->
+            val result = probeLibrarySyncDevice(
                 device = device,
                 deviceId = deviceId,
                 sessionId = "$sessionId-${index + 1}",
                 timeoutMs = perDeviceTimeoutMs
-            ).also { result ->
-                onProbe(index + 1, candidates.size, result)
+            )
+            results += result
+            onProbe(index + 1, candidates.size, result)
+            if (
+                result.reachable &&
+                cachedAddress != null &&
+                device.address.equals(cachedAddress, ignoreCase = true)
+            ) {
+                debugLog.appendEvent(
+                    event = "bt.library.probe.cached.hit",
+                    sessionId = sessionId,
+                    fields = deviceFields(device) + mapOf("elapsedMs" to elapsedSince(startedAt))
+                )
+                debugLog.appendEvent(
+                    event = "bt.library.probe.complete",
+                    sessionId = sessionId,
+                    fields = mapOf(
+                        "candidates" to candidates.size,
+                        "reachable" to results.count { it.reachable },
+                        "elapsedMs" to elapsedSince(startedAt),
+                        "shortCircuited" to true
+                    )
+                )
+                return results
             }
         }
         debugLog.appendEvent(
@@ -213,15 +262,22 @@ class PhoneBluetoothSyncClient(
         val totalStartedAt = SystemClock.elapsedRealtime()
         var socket: BluetoothSocket? = null
         var selectedDevice: BluetoothDevice? = null
+        val tracker = ByteTransferTracker().apply { start() }
+        fun report(stage: PhoneBluetoothSyncStage, percent: Int) {
+            onProgress(
+                PhoneBluetoothSyncProgress(
+                    stage = stage,
+                    percent = percent,
+                    bytesTransferred = tracker.bytesTransferred(),
+                    bytesPerSecond = tracker.bytesPerSecond()
+                )
+            )
+        }
         val cancellationHandle = installSocketCancellationLogger(
             sessionId = sessionId,
             owner = "library",
             socketProvider = { socket }
         )
-        val tracker = ByteTransferTracker().apply { start() }
-        fun report(stage: PhoneBluetoothSyncStage, percent: Int) {
-            onProgress(PhoneBluetoothSyncProgress(stage, percent, tracker.bytesTransferred(), tracker.bytesPerSecond()))
-        }
         report(PhoneBluetoothSyncStage.CONNECTING, 5)
         debugLog.appendEvent(
             event = "bt.library.start",
@@ -280,45 +336,51 @@ class PhoneBluetoothSyncClient(
                     deviceAddress = device.address,
                     request = request,
                     manifestResponse = manifestResponse,
-                    articleRequestFrames = emptyList(),
-                    responseFrames = listOf(manifestResponse),
+                    articleRequestFrameCount = 0,
+                    responseFrameCount = 1,
                     response = manifestResponse
                 )
             }
             val supportsArticleBatches = manifestResponse.optBoolean("supportsArticleBatches", false)
-            val articleRequests = buildArticleRequests(manifestResponse, supportsArticleBatches)
-            debugLog.appendEvent(
-                event = "bt.library.articles.request.built",
-                sessionId = sessionId,
-                fields = batchFields("articlesRequest", articleRequests)
-            )
-            articleRequests.forEachIndexed { index, articleRequest ->
-                report(
-                    PhoneBluetoothSyncStage.TRANSFERRING,
-                    percentBetween(30, 58, index, articleRequests.size)
-                )
-                writeFrameLogged(
-                    socket = socket,
+            var articleRequestStats = EMPTY_FRAME_STATS
+            var articleRequestFrameCount = 0
+            run {
+                val articleRequests = buildArticleRequests(manifestResponse, supportsArticleBatches)
+                articleRequestStats = frameStats(articleRequests)
+                articleRequestFrameCount = articleRequests.size
+                debugLog.appendEvent(
+                    event = "bt.library.articles.request.built",
                     sessionId = sessionId,
-                    label = batchLabel("articlesRequest", index, articleRequests.size),
-                    payload = articleRequest,
-                    byteTracker = tracker
+                    fields = frameStatsFields("articlesRequest", articleRequestStats)
                 )
-                report(
-                    PhoneBluetoothSyncStage.TRANSFERRING,
-                    percentBetween(30, 58, index + 1, articleRequests.size)
-                )
+                articleRequests.forEachIndexed { index, articleRequest ->
+                    report(
+                        PhoneBluetoothSyncStage.TRANSFERRING,
+                        percentBetween(30, 58, index, articleRequestFrameCount)
+                    )
+                    writeFrameLogged(
+                        socket = socket,
+                        sessionId = sessionId,
+                        label = batchLabel("articlesRequest", index, articleRequestFrameCount),
+                        payload = articleRequest,
+                        byteTracker = tracker
+                    )
+                    report(
+                        PhoneBluetoothSyncStage.TRANSFERRING,
+                        percentBetween(30, 58, index + 1, articleRequestFrameCount)
+                    )
+                }
             }
-            val responseFrames = readLibraryResponseFrames(socket, sessionId, onProgress, tracker)
-            val response = LibrarySyncPayload.combineArticlePayloads(responseFrames)
+            val responseRead = readLibraryResponse(socket, sessionId, onProgress, tracker)
+            val response = responseRead.response
             report(PhoneBluetoothSyncStage.VERIFYING, 88)
             val exchange = BluetoothLibrarySyncExchange(
                 deviceName = device.name.orEmpty(),
                 deviceAddress = device.address,
                 request = request,
                 manifestResponse = manifestResponse,
-                articleRequestFrames = articleRequests,
-                responseFrames = responseFrames,
+                articleRequestFrameCount = articleRequestFrameCount,
+                responseFrameCount = responseRead.stats.frameCount,
                 response = response
             )
             try {
@@ -342,7 +404,8 @@ class PhoneBluetoothSyncClient(
                 event = "bt.library.complete",
                 sessionId = sessionId,
                 fields = deviceFields(device) + payloadFields("manifestResponse", manifestResponse) +
-                    batchFields("articlesRequest", articleRequests) + batchFields("libraryResponse", responseFrames) +
+                    frameStatsFields("articlesRequest", articleRequestStats) +
+                    frameStatsFields("libraryResponse", responseRead.stats) +
                     payloadFields("combinedLibraryResponse", response) +
                     mapOf("elapsedMs" to elapsedSince(totalStartedAt))
             )
@@ -420,15 +483,27 @@ class PhoneBluetoothSyncClient(
         return probe
     }
 
-    private fun readLibraryResponseFrames(
+    private fun readLibraryResponse(
         socket: BluetoothSocket,
         sessionId: String,
         onProgress: (PhoneBluetoothSyncProgress) -> Unit,
         byteTracker: ByteTransferTracker
-    ): List<JSONObject> {
-        onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.TRANSFERRING, 60, byteTracker.bytesTransferred(), byteTracker.bytesPerSecond()))
+    ): LibraryResponseRead {
+        onProgress(
+            PhoneBluetoothSyncProgress(
+                PhoneBluetoothSyncStage.TRANSFERRING,
+                60,
+                byteTracker.bytesTransferred(),
+                byteTracker.bytesPerSecond()
+            )
+        )
         val first = readFrameLogged(socket, sessionId, "libraryResponse", byteTracker)
-        if (!first.optBoolean("success", true)) return listOf(first)
+        if (!first.optBoolean("success", true)) {
+            return LibraryResponseRead(
+                response = first,
+                stats = frameStats(first)
+            )
+        }
         val batchCount = validateBatchFrame(
             frame = first,
             label = "libraryResponse",
@@ -436,17 +511,19 @@ class PhoneBluetoothSyncClient(
             expectedIndex = 0,
             expectedBatchCount = null
         )
-        val frames = mutableListOf(first)
+        val accumulator = CombinedLibraryResponse(first)
+        var stats = frameStats(first)
+        var completed = 1
         onProgress(
             PhoneBluetoothSyncProgress(
                 PhoneBluetoothSyncStage.TRANSFERRING,
-                percentBetween(60, 84, frames.size, batchCount),
+                percentBetween(60, 84, completed, batchCount),
                 byteTracker.bytesTransferred(),
                 byteTracker.bytesPerSecond()
             )
         )
-        while (frames.size < batchCount) {
-            val index = frames.size
+        while (completed < batchCount) {
+            val index = completed
             val frame = readFrameLogged(socket, sessionId, batchLabel("libraryResponse", index, batchCount), byteTracker)
             validateBatchFrame(
                 frame = frame,
@@ -455,17 +532,68 @@ class PhoneBluetoothSyncClient(
                 expectedIndex = index,
                 expectedBatchCount = batchCount
             )
-            frames += frame
+            accumulator.append(frame)
+            stats = stats + frameStats(frame)
+            completed += 1
             onProgress(
                 PhoneBluetoothSyncProgress(
                     PhoneBluetoothSyncStage.TRANSFERRING,
-                    percentBetween(60, 84, frames.size, batchCount),
+                    percentBetween(60, 84, completed, batchCount),
                     byteTracker.bytesTransferred(),
                     byteTracker.bytesPerSecond()
                 )
             )
         }
-        return frames
+        return LibraryResponseRead(
+            response = accumulator.toPayload(),
+            stats = stats
+        )
+    }
+
+    private class CombinedLibraryResponse(first: JSONObject) {
+        private val firstFrame = first
+        private val articles = JSONArray()
+        private val sources = JSONArray()
+        private val bodyRequests = JSONArray()
+        private var success = true
+
+        init {
+            append(first)
+        }
+
+        fun append(frame: JSONObject) {
+            success = success && frame.optBoolean("success", true)
+            copyArray(frame.optJSONArray("articles"), articles)
+            copyArray(frame.optJSONArray("rssSources"), sources)
+            copyArray(frame.optJSONArray("bodyRequests"), bodyRequests)
+        }
+
+        fun toPayload(): JSONObject {
+            return JSONObject().apply {
+                put("success", success)
+                put("version", firstFrame.optInt("version", LibrarySyncPayload.PROTOCOL_VERSION))
+                put("action", BluetoothSyncProtocol.ACTION_SYNC_LIBRARY)
+                put("phase", firstFrame.optString("phase").ifBlank { PHASE_COMPLETE })
+                put("deviceId", firstFrame.optString("deviceId"))
+                put("sentAt", firstFrame.optLong("sentAt"))
+                put("articles", articles)
+                if (sources.length() > 0) {
+                    put("rssSources", sources)
+                }
+                if (bodyRequests.length() > 0) {
+                    put("bodyRequests", bodyRequests)
+                }
+                firstFrame.optJSONObject("stats")?.let { put("stats", it) }
+                firstFrame.optString("message").takeIf { it.isNotBlank() }?.let { put("message", it) }
+            }
+        }
+
+        private fun copyArray(source: JSONArray?, target: JSONArray) {
+            if (source == null) return
+            for (index in 0 until source.length()) {
+                source.optJSONObject(index)?.let(target::put)
+            }
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -503,10 +631,31 @@ class PhoneBluetoothSyncClient(
             .filter(::looksLikeWatchDevice)
 
     @SuppressLint("MissingPermission")
+    private fun probeCandidateWatchDevices(devices: Set<BluetoothDevice>): List<BluetoothDevice> {
+        val cachedAddress = cachedDeviceAddress()
+        val watchDevices = sortedWatchDevices(devices).toMutableList()
+        if (!cachedAddress.isNullOrBlank()) {
+            val cachedDevice = devices.firstOrNull { it.address.equals(cachedAddress, ignoreCase = true) }
+            if (cachedDevice != null && watchDevices.none { it.address.equals(cachedDevice.address, ignoreCase = true) }) {
+                watchDevices.add(0, cachedDevice)
+            }
+        }
+        return watchDevices
+            .distinctBy { it.address.uppercase() }
+            .sortedBy { device ->
+                if (cachedAddress != null && device.address.equals(cachedAddress, ignoreCase = true)) 0 else 1
+            }
+    }
+
+    @SuppressLint("MissingPermission")
     private fun looksLikeWatchDevice(device: BluetoothDevice): Boolean {
-        val name = device.name.orEmpty()
-        return name.contains("watch", ignoreCase = true) ||
-            name.contains("OPPO", ignoreCase = true)
+        val name = device.name.orEmpty().lowercase()
+        val classMajor = device.bluetoothClass?.majorDeviceClass
+        return classMajor == BluetoothClass.Device.Major.WEARABLE ||
+            name.contains("watch") ||
+            name.contains("wear") ||
+            name.contains("手表") ||
+            name.contains("腕")
     }
 
     private fun requireBluetoothConnectPermission() {
@@ -622,7 +771,7 @@ class PhoneBluetoothSyncClient(
         debugLog.appendEvent("bt.frame.write.start", sessionId, mapOf("label" to label) + fields)
         try {
             BluetoothSyncProtocol.writeFrame(socket.outputStream, payload)
-            byteTracker?.add(BluetoothSyncProtocol.encodedSize(payload).toLong() + 4L)
+            byteTracker?.add(BluetoothSyncProtocol.encodedSize(payload).toLong() + FRAME_LENGTH_PREFIX_BYTES)
             debugLog.appendEvent(
                 event = "bt.frame.write.success",
                 sessionId = sessionId,
@@ -654,7 +803,7 @@ class PhoneBluetoothSyncClient(
         debugLog.appendEvent("bt.frame.read.start", sessionId, mapOf("label" to label))
         return try {
             BluetoothSyncProtocol.readFrame(socket.inputStream).also { payload ->
-                byteTracker?.add(BluetoothSyncProtocol.encodedSize(payload).toLong() + 4L)
+                byteTracker?.add(BluetoothSyncProtocol.encodedSize(payload).toLong() + FRAME_LENGTH_PREFIX_BYTES)
                 debugLog.appendEvent(
                     event = "bt.frame.read.success",
                     sessionId = sessionId,
@@ -835,29 +984,29 @@ class PhoneBluetoothSyncClient(
         debugLog.appendEvent("bt.device.cache.updated", sessionId, deviceFields(device))
     }
 
+    private class ByteTransferTracker {
+        private var totalBytes = 0L
+        private var startTime = 0L
+
+        fun start() {
+            totalBytes = 0L
+            startTime = SystemClock.elapsedRealtime()
+        }
+
+        fun add(bytes: Long) {
+            totalBytes += bytes
+        }
+
+        fun bytesTransferred(): Long = totalBytes
+
+        fun bytesPerSecond(): Long {
+            val elapsed = SystemClock.elapsedRealtime() - startTime
+            if (elapsed <= 0) return 0L
+            return (totalBytes * 1000L) / elapsed
+        }
+    }
+
     @SuppressLint("MissingPermission")
-private class ByteTransferTracker {
-    private var totalBytes = 0L
-    private var startTime = 0L
-
-    fun start() {
-        totalBytes = 0L
-        startTime = SystemClock.elapsedRealtime()
-    }
-
-    fun add(bytes: Long) {
-        totalBytes += bytes
-    }
-
-    fun bytesTransferred(): Long = totalBytes
-
-    fun bytesPerSecond(): Long {
-        val elapsed = SystemClock.elapsedRealtime() - startTime
-        if (elapsed <= 0) return 0L
-        return (totalBytes * 1000L) / elapsed
-    }
-}
-
     private fun deviceFields(device: BluetoothDevice): Map<String, Any?> {
         return mapOf(
             "deviceName" to device.name.orEmpty(),
@@ -896,19 +1045,37 @@ private class ByteTransferTracker {
         }
     }
 
-    private fun batchFields(prefix: String, payloads: List<JSONObject>): Map<String, Any?> {
-        val articleCount = payloads.sumOf { it.optJSONArray("articles")?.length() ?: 0 }
-        val bytes = payloads.sumOf { payload ->
-            runCatching { BluetoothSyncProtocol.encodedSize(payload) }.getOrDefault(0)
+    private fun frameStats(payloads: List<JSONObject>): LibraryFrameStats {
+        return payloads.fold(EMPTY_FRAME_STATS) { stats, payload ->
+            stats + frameStats(payload)
         }
-        val maxBytes = payloads.maxOfOrNull { payload ->
-            runCatching { BluetoothSyncProtocol.encodedSize(payload) }.getOrDefault(0)
-        } ?: 0
+    }
+
+    private fun frameStats(payload: JSONObject): LibraryFrameStats {
+        val bytes = runCatching { BluetoothSyncProtocol.encodedSize(payload) }.getOrDefault(0)
+        return LibraryFrameStats(
+            frameCount = 1,
+            totalBytes = bytes.toLong(),
+            maxFrameBytes = bytes,
+            articleCount = payload.optJSONArray("articles")?.length() ?: 0
+        )
+    }
+
+    private operator fun LibraryFrameStats.plus(other: LibraryFrameStats): LibraryFrameStats {
+        return LibraryFrameStats(
+            frameCount = frameCount + other.frameCount,
+            totalBytes = totalBytes + other.totalBytes,
+            maxFrameBytes = maxOf(maxFrameBytes, other.maxFrameBytes),
+            articleCount = articleCount + other.articleCount
+        )
+    }
+
+    private fun frameStatsFields(prefix: String, stats: LibraryFrameStats): Map<String, Any?> {
         return mapOf(
-            "${prefix}FrameCount" to payloads.size,
-            "${prefix}TotalBytes" to bytes,
-            "${prefix}MaxFrameBytes" to maxBytes,
-            "${prefix}ArticleCount" to articleCount
+            "${prefix}FrameCount" to stats.frameCount,
+            "${prefix}TotalBytes" to stats.totalBytes,
+            "${prefix}MaxFrameBytes" to stats.maxFrameBytes,
+            "${prefix}ArticleCount" to stats.articleCount
         )
     }
 
@@ -930,8 +1097,16 @@ private class ByteTransferTracker {
         private const val TAG = "WatchRSS_BtSyncClient"
         private const val PHASE_COMPLETE = "complete"
         private const val MAX_SYNC_BATCH_FRAMES = 256
-        private const val DEFAULT_DEVICE_PROBE_TIMEOUT_MS = 4_000L
+        private const val MAX_DEVICE_PROBE_CANDIDATES = 3
+        private const val DEFAULT_DEVICE_PROBE_TIMEOUT_MS = 2_000L
+        private const val FRAME_LENGTH_PREFIX_BYTES = 4L
         private const val PREFS_NAME = "watchrss_bluetooth_sync"
         private const val KEY_LAST_DEVICE_ADDRESS = "last_successful_device_address"
+        private val EMPTY_FRAME_STATS = LibraryFrameStats(
+            frameCount = 0,
+            totalBytes = 0L,
+            maxFrameBytes = 0,
+            articleCount = 0
+        )
     }
 }

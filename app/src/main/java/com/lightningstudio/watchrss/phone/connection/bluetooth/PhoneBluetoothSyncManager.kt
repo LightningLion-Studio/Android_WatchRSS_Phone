@@ -50,14 +50,16 @@ class PhoneBluetoothSyncManager(
             fields = mapOf("protocol" to LibrarySyncPayload.PROTOCOL_VERSION)
         )
         return runCatching {
-            withContext(Dispatchers.IO) {
-                client.probeLibrarySyncDevices(
-                    deviceId = deviceId,
-                    sessionId = sessionId,
-                    onProbe = { completed, total, _ ->
-                        onProbe(completed, total)
-                    }
-                )
+            withTimeout(LIBRARY_PROBE_TIMEOUT_MS) {
+                withContext(Dispatchers.IO) {
+                    client.probeLibrarySyncDevices(
+                        deviceId = deviceId,
+                        sessionId = sessionId,
+                        onProbe = { completed, total, _ ->
+                            onProbe(completed, total)
+                        }
+                    )
+                }
             }.filter { it.reachable }
                 .map { it.device }
                 .also { devices ->
@@ -74,7 +76,15 @@ class PhoneBluetoothSyncManager(
                 fields = failureFields(throwable),
                 throwable = throwable
             )
-        }.getOrThrow()
+        }.getOrElse { throwable ->
+            if (throwable is TimeoutCancellationException) {
+                throw IllegalStateException(
+                    "探测手表超时，请确认手表端应用已打开并保持亮屏后重试",
+                    throwable
+                )
+            }
+            throw throwable
+        }
     }
 
     suspend fun sendRemoteInput(url: String): PhoneBluetoothSyncResult {
@@ -483,6 +493,7 @@ class PhoneBluetoothSyncManager(
     }
 
     companion object {
+        private const val LIBRARY_PROBE_TIMEOUT_MS = 10_000L
         private const val QUICK_EXCHANGE_TIMEOUT_MS = 30_000L
         private const val LIBRARY_SYNC_TIMEOUT_MS = 900_000L
     }

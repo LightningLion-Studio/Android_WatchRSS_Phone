@@ -8,6 +8,7 @@ import java.security.MessageDigest
 import java.util.Base64
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
+import kotlin.math.min
 
 data class ArticleBodyMetadata(
     val bodyHash: String,
@@ -60,7 +61,7 @@ object ArticleSyncBody {
 
     fun metadataFor(article: PhoneArticleEntity): ArticleBodyMetadata {
         val bodyBytes = encodeBody(article.contentHtml, article.contentText)
-        val chunkHashes = chunkBytes(bodyBytes).map(::sha256)
+        val chunkHashes = chunkHashesFor(bodyBytes)
         return ArticleBodyMetadata(
             bodyHash = sha256(bodyBytes),
             bodyByteCount = bodyBytes.size.toLong(),
@@ -101,14 +102,17 @@ object ArticleSyncBody {
 
     fun chunksForRequest(article: PhoneArticleEntity, request: ArticleBodyRequest): List<ArticleBodyChunk> {
         val bodyBytes = encodeBody(article.contentHtml, article.contentText)
-        val chunks = chunkBytes(bodyBytes)
+        val chunkCount = chunkCountFor(bodyBytes)
         val indexes = request.chunkIndexes
-            .filter { it in chunks.indices }
+            .distinct()
+            .filter { it in 0 until chunkCount }
         return indexes.map { index ->
-            val bytes = chunks[index]
+            val start = index * CHUNK_SIZE_BYTES
+            val end = min(start + CHUNK_SIZE_BYTES, bodyBytes.size)
+            val bytes = bodyBytes.copyOfRange(start, end)
             ArticleBodyChunk(
                 index = index,
-                hash = sha256(bytes),
+                hash = sha256(bodyBytes, start, end - start),
                 bytes = bytes
             )
         }
@@ -121,25 +125,36 @@ object ArticleSyncBody {
         if (localArticle != null && localArticle.syncBodyHash == payload.bodyHash) {
             return localArticle.contentHtml to localArticle.contentText
         }
-        val localChunks = localArticle
+        val localBodyBytes = localArticle
             ?.let { encodeBody(it.contentHtml, it.contentText) }
-            ?.let(::chunkBytes)
-            .orEmpty()
         val sentByIndex = payload.chunks.associateBy { it.index }
-        val rebuilt = payload.chunkHashes.mapIndexed { index, expectedHash ->
+        val chunkSize = payload.chunkSize.takeIf { it > 0 } ?: CHUNK_SIZE_BYTES
+        val expectedSize = payload.bodyByteCount
+            .coerceIn(0L, Int.MAX_VALUE.toLong())
+            .toInt()
+        val rebuilt = ByteArrayOutputStream(expectedSize)
+        payload.chunkHashes.forEachIndexed { index, expectedHash ->
             val sent = sentByIndex[index]
             when {
                 sent != null -> {
                     require(sent.hash == expectedHash && sha256(sent.bytes) == expectedHash) {
                         "同步正文分块校验失败：${payload.article.articleId}#$index"
                     }
-                    sent.bytes
+                    rebuilt.write(sent.bytes)
                 }
-                index in localChunks.indices && sha256(localChunks[index]) == expectedHash -> localChunks[index]
+                localBodyBytes != null && index < chunkCountFor(localBodyBytes, chunkSize) -> {
+                    val start = index * chunkSize
+                    val end = min(start + chunkSize, localBodyBytes.size)
+                    val length = end - start
+                    require(sha256(localBodyBytes, start, length) == expectedHash) {
+                        "同步正文缺少分块：${payload.article.articleId}#$index"
+                    }
+                    rebuilt.write(localBodyBytes, start, length)
+                }
                 else -> error("同步正文缺少分块：${payload.article.articleId}#$index")
             }
         }
-        val bodyBytes = rebuilt.fold(ByteArray(0)) { acc, bytes -> acc + bytes }
+        val bodyBytes = rebuilt.toByteArray()
         require(sha256(bodyBytes) == payload.bodyHash) {
             "同步正文整体校验失败：${payload.article.articleId}"
         }
@@ -177,15 +192,30 @@ object ArticleSyncBody {
     private fun gunzip(bytes: ByteArray): ByteArray =
         GZIPInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
 
-    private fun chunkBytes(bytes: ByteArray): List<ByteArray> {
-        if (bytes.isEmpty()) return listOf(ByteArray(0))
-        return bytes.asList()
-            .chunked(CHUNK_SIZE_BYTES)
-            .map { it.toByteArray() }
+    private fun chunkHashesFor(bytes: ByteArray): List<String> {
+        val chunkCount = chunkCountFor(bytes)
+        return buildList(chunkCount) {
+            repeat(chunkCount) { index ->
+                val start = index * CHUNK_SIZE_BYTES
+                val end = min(start + CHUNK_SIZE_BYTES, bytes.size)
+                add(sha256(bytes, start, end - start))
+            }
+        }
+    }
+
+    private fun chunkCountFor(bytes: ByteArray, chunkSize: Int = CHUNK_SIZE_BYTES): Int {
+        if (bytes.isEmpty()) return 1
+        return ((bytes.size - 1) / chunkSize) + 1
     }
 
     private fun sha256(bytes: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        return sha256(bytes, 0, bytes.size)
+    }
+
+    private fun sha256(bytes: ByteArray, offset: Int, length: Int): String {
+        val digest = MessageDigest.getInstance("SHA-256").apply {
+            update(bytes, offset, length)
+        }.digest()
         return digest.joinToString("") { "%02x".format(it) }
     }
 }

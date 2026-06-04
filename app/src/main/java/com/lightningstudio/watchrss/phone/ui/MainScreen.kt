@@ -48,7 +48,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -93,7 +92,6 @@ import kotlinx.coroutines.launch
 private enum class MainPage {
     DASHBOARD,
     RSS,
-    SAVED,
     IMPORTS,
     CHANNEL
 }
@@ -101,25 +99,41 @@ private enum class MainPage {
 private val TopLevelMainPages = listOf(
     MainPage.DASHBOARD,
     MainPage.RSS,
-    MainPage.SAVED,
     MainPage.IMPORTS
 )
 
 private fun MainPage.topLevelIndex(): Int = TopLevelMainPages.indexOf(this).coerceAtLeast(0)
 
-private enum class SavedSection {
-    FAVORITES,
-    WATCH_LATER
-}
-
-private enum class ImportSection {
-    INDEPENDENT,
-    LOCAL_CONTENT
-}
-
 private enum class UrlDialogMode {
     ARTICLE,
     RSS
+}
+
+private const val CONTENT_SOURCE_PREFIX = "source:"
+private const val CONTENT_CHANNEL_FAVORITES = "virtual:favorites"
+private const val CONTENT_CHANNEL_WATCH_LATER = "virtual:watch_later"
+private const val CONTENT_CHANNEL_INDEPENDENT = "virtual:independent"
+private const val CONTENT_CHANNEL_IMPORTED_TEXT = "virtual:imported_text"
+
+private data class MainContentChannel(
+    val key: String,
+    val title: String,
+    val supportingText: String,
+    val articleCount: Int,
+    val source: PhoneRssSourceEntity? = null,
+    val articles: List<PhoneArticleEntity> = emptyList(),
+    val icon: MainContentChannelIcon,
+    val emptyTitle: String,
+    val emptyText: String,
+    val canRefresh: Boolean = false
+)
+
+private enum class MainContentChannelIcon {
+    RSS,
+    FAVORITE,
+    WATCH_LATER,
+    ARTICLE,
+    IMPORTED
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -152,9 +166,7 @@ fun MainScreen(
     onShowManualConflictOptions: () -> Unit,
     onDismissMessage: () -> Unit
 ) {
-    var savedSection by rememberSaveable { mutableStateOf(SavedSection.FAVORITES) }
-    var importSection by rememberSaveable { mutableStateOf(ImportSection.INDEPENDENT) }
-    var selectedSourceUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedContentChannelKey by rememberSaveable { mutableStateOf<String?>(null) }
     var urlDialogMode by remember { mutableStateOf<UrlDialogMode?>(null) }
     val pagerState = rememberPagerState(initialPage = MainPage.DASHBOARD.topLevelIndex()) {
         TopLevelMainPages.size
@@ -165,19 +177,30 @@ fun MainScreen(
     val articlesBySource = remember(uiState.rssArticles) {
         uiState.rssArticles.groupBy { it.rssSourceUrl.orEmpty() }
     }
-    val selectedSource = selectedSourceUrl?.let { url ->
-        uiState.rssSources.firstOrNull { it.url == url }
+    val contentChannels = remember(uiState, articlesBySource) {
+        buildContentChannels(uiState, articlesBySource)
     }
+    val selectedContentChannel = selectedContentChannelKey?.let { key ->
+        contentChannels.firstOrNull { it.key == key }
+    }
+    val selectedSource = selectedContentChannel?.source
     val currentTopLevelPage = TopLevelMainPages.getOrElse(pagerState.currentPage) {
         MainPage.DASHBOARD
     }
-    val page = if (selectedSourceUrl != null) MainPage.CHANNEL else currentTopLevelPage
+    val page = if (selectedContentChannel != null) MainPage.CHANNEL else currentTopLevelPage
     val selectedBottomPage = if (page == MainPage.CHANNEL) MainPage.RSS else currentTopLevelPage
 
     fun navigateToTopLevelPage(destination: MainPage) {
-        selectedSourceUrl = null
+        selectedContentChannelKey = null
         coroutineScope.launch {
             pagerState.animateScrollToPage(destination.topLevelIndex())
+        }
+    }
+
+    fun navigateToContentChannel(channelKey: String) {
+        selectedContentChannelKey = channelKey
+        coroutineScope.launch {
+            pagerState.animateScrollToPage(MainPage.RSS.topLevelIndex())
         }
     }
 
@@ -193,14 +216,19 @@ fun MainScreen(
         topBar = {
             MainTopBar(
                 page = page,
-                selectedSource = selectedSource,
-                canRefreshRss = uiState.rssSources.isNotEmpty() && !uiState.isBusy,
-                canRefreshSource = selectedSource != null &&
+                selectedChannel = selectedContentChannel,
+                canRefreshRss = uiState.rssSources.any { !ImportedContentIds.isImportedContentUrl(it.url) } && !uiState.isBusy,
+                canRefreshSource = selectedContentChannel?.canRefresh == true &&
+                    selectedSource != null &&
                     selectedSource.url !in uiState.refreshingRssSourceUrls &&
                     !uiState.isBusy,
                 onBack = { navigateToTopLevelPage(MainPage.RSS) },
                 onRefreshAllRssSources = onRefreshAllRssSources,
-                onRefreshSelectedSource = { selectedSource?.let(onRefreshRssSource) },
+                onRefreshSelectedSource = {
+                    if (selectedContentChannel?.canRefresh == true) {
+                        selectedSource?.let(onRefreshRssSource)
+                    }
+                },
                 onExportBluetoothLog = onExportBluetoothLog
             )
         },
@@ -213,25 +241,30 @@ fun MainScreen(
         floatingActionButton = {
             MainFloatingActionButton(
                 page = page,
-                importSection = importSection,
                 isBusy = uiState.isBusy,
                 selectedSource = selectedSource,
-                selectedSourceRefreshing = selectedSourceUrl?.let { it in uiState.refreshingRssSourceUrls } == true,
+                selectedSourceRefreshing = selectedSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
+                canRefreshSelectedSource = selectedContentChannel?.canRefresh == true,
                 onSyncLibrary = onSyncLibrary,
                 onAddRssSource = { urlDialogMode = UrlDialogMode.RSS },
-                onRefreshSelectedSource = { selectedSource?.let(onRefreshRssSource) },
-                onImportArticle = { urlDialogMode = UrlDialogMode.ARTICLE },
-                onImportFile = onImportFile
+                onRefreshSelectedSource = {
+                    if (selectedContentChannel?.canRefresh == true) {
+                        selectedSource?.let(onRefreshRssSource)
+                    }
+                }
             )
         }
     ) { contentPadding ->
         if (page == MainPage.CHANNEL) {
             ChannelPage(
-                source = selectedSource,
-                articles = selectedSourceUrl?.let { articlesBySource[it] }.orEmpty(),
-                isRefreshing = selectedSourceUrl?.let { it in uiState.refreshingRssSourceUrls } == true,
+                channel = selectedContentChannel,
+                isRefreshing = selectedSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
                 contentPadding = contentPadding,
-                onRefreshSource = { selectedSource?.let(onRefreshRssSource) },
+                onRefreshSource = {
+                    if (selectedContentChannel?.canRefresh == true) {
+                        selectedSource?.let(onRefreshRssSource)
+                    }
+                },
                 onOpenArticle = onOpenArticle,
                 onOpenOriginalLink = { uriHandler.openUri(it) },
                 onToggleFavorite = onToggleFavorite,
@@ -251,53 +284,27 @@ fun MainScreen(
                         onSyncLibrary = onSyncLibrary,
                         onExportBluetoothLog = onExportBluetoothLog,
                         onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
-                        onOpenFavorites = {
-                            savedSection = SavedSection.FAVORITES
-                            navigateToTopLevelPage(MainPage.SAVED)
-                        },
-                        onOpenWatchLater = {
-                            savedSection = SavedSection.WATCH_LATER
-                            navigateToTopLevelPage(MainPage.SAVED)
-                        },
-                        onOpenIndependent = {
-                            importSection = ImportSection.INDEPENDENT
-                            navigateToTopLevelPage(MainPage.IMPORTS)
-                        },
-                        onOpenImportedContent = {
-                            importSection = ImportSection.LOCAL_CONTENT
-                            navigateToTopLevelPage(MainPage.IMPORTS)
-                        },
+                        onOpenFavorites = { navigateToContentChannel(CONTENT_CHANNEL_FAVORITES) },
+                        onOpenWatchLater = { navigateToContentChannel(CONTENT_CHANNEL_WATCH_LATER) },
+                        onOpenIndependent = { navigateToContentChannel(CONTENT_CHANNEL_INDEPENDENT) },
+                        onOpenImportedContent = { navigateToContentChannel(CONTENT_CHANNEL_IMPORTED_TEXT) },
                         onDismissMessage = onDismissMessage
                     )
 
-                    MainPage.RSS -> RssPage(
+                    MainPage.RSS -> ContentPage(
                         uiState = uiState,
-                        articlesBySource = articlesBySource,
+                        channels = contentChannels,
                         contentPadding = contentPadding,
-                        onOpenSource = { source -> selectedSourceUrl = source.url },
+                        onOpenChannel = { channel -> selectedContentChannelKey = channel.key },
                         onMoveToTop = onMoveRssSourceToTop,
                         onTogglePinned = onToggleRssSourcePinned,
                         onDelete = onDeleteRssSource,
                         onRefreshAllRssSources = onRefreshAllRssSources
                     )
 
-                    MainPage.SAVED -> SavedPage(
-                        section = savedSection,
-                        uiState = uiState,
-                        contentPadding = contentPadding,
-                        onSectionChange = { savedSection = it },
-                        onOpenArticle = onOpenArticle,
-                        onOpenOriginalLink = { uriHandler.openUri(it) },
-                        onToggleFavorite = onToggleFavorite,
-                        onToggleWatchLater = onToggleWatchLater,
-                        onDeleteArticle = onDeleteArticle
-                    )
-
                     MainPage.IMPORTS -> ImportsPage(
-                        section = importSection,
                         uiState = uiState,
                         contentPadding = contentPadding,
-                        onSectionChange = { importSection = it },
                         onUrlChange = onUrlChange,
                         onImportArticle = onImportArticle,
                         onImportFile = onImportFile,
@@ -361,7 +368,7 @@ fun MainScreen(
 @Composable
 private fun MainTopBar(
     page: MainPage,
-    selectedSource: PhoneRssSourceEntity?,
+    selectedChannel: MainContentChannel?,
     canRefreshRss: Boolean,
     canRefreshSource: Boolean,
     onBack: () -> Unit,
@@ -371,10 +378,9 @@ private fun MainTopBar(
 ) {
     val title = when (page) {
         MainPage.DASHBOARD -> "腕上RSS"
-        MainPage.RSS -> "RSS 频道"
-        MainPage.SAVED -> "保存列表"
-        MainPage.IMPORTS -> "导入内容"
-        MainPage.CHANNEL -> selectedSource?.title?.takeIf { it.isNotBlank() } ?: "频道"
+        MainPage.RSS -> "内容"
+        MainPage.IMPORTS -> "导入"
+        MainPage.CHANNEL -> selectedChannel?.title?.takeIf { it.isNotBlank() } ?: "频道"
     }
     CenterAlignedTopAppBar(
         title = {
@@ -400,7 +406,7 @@ private fun MainTopBar(
                     onClick = onRefreshAllRssSources,
                     enabled = canRefreshRss
                 ) {
-                    Icon(Icons.Default.Sync, contentDescription = "刷新 RSS")
+                    Icon(Icons.Default.Sync, contentDescription = "刷新内容")
                 }
                 MainPage.CHANNEL -> IconButton(
                     onClick = onRefreshSelectedSource,
@@ -433,7 +439,6 @@ private fun MainNavigationBar(
                         imageVector = when (destination) {
                             MainPage.DASHBOARD -> Icons.Default.Home
                             MainPage.RSS -> Icons.Default.RssFeed
-                            MainPage.SAVED -> Icons.Default.Favorite
                             MainPage.IMPORTS -> Icons.Default.FileOpen
                             MainPage.CHANNEL -> Icons.Default.RssFeed
                         },
@@ -444,8 +449,7 @@ private fun MainNavigationBar(
                     Text(
                         text = when (destination) {
                             MainPage.DASHBOARD -> "总览"
-                            MainPage.RSS -> "RSS"
-                            MainPage.SAVED -> "保存"
+                            MainPage.RSS -> "内容"
                             MainPage.IMPORTS -> "导入"
                             MainPage.CHANNEL -> "频道"
                         }
@@ -459,15 +463,13 @@ private fun MainNavigationBar(
 @Composable
 private fun MainFloatingActionButton(
     page: MainPage,
-    importSection: ImportSection,
     isBusy: Boolean,
     selectedSource: PhoneRssSourceEntity?,
     selectedSourceRefreshing: Boolean,
+    canRefreshSelectedSource: Boolean,
     onSyncLibrary: () -> Unit,
     onAddRssSource: () -> Unit,
-    onRefreshSelectedSource: () -> Unit,
-    onImportArticle: () -> Unit,
-    onImportFile: () -> Unit
+    onRefreshSelectedSource: () -> Unit
 ) {
     when (page) {
         MainPage.DASHBOARD -> {
@@ -485,7 +487,7 @@ private fun MainFloatingActionButton(
             text = { Text("添加 RSS") }
         )
         MainPage.CHANNEL -> {
-            if (selectedSource != null && !selectedSourceRefreshing && !isBusy) {
+            if (selectedSource != null && canRefreshSelectedSource && !selectedSourceRefreshing && !isBusy) {
                 ExtendedFloatingActionButton(
                     onClick = onRefreshSelectedSource,
                     icon = { Icon(Icons.Default.Sync, contentDescription = null) },
@@ -493,19 +495,7 @@ private fun MainFloatingActionButton(
                 )
             }
         }
-        MainPage.IMPORTS -> ExtendedFloatingActionButton(
-            onClick = if (importSection == ImportSection.INDEPENDENT) onImportArticle else onImportFile,
-            icon = {
-                Icon(
-                    if (importSection == ImportSection.INDEPENDENT) Icons.Default.Add else Icons.Default.FileOpen,
-                    contentDescription = null
-                )
-            },
-            text = {
-                Text(if (importSection == ImportSection.INDEPENDENT) "添加文章" else "导入文件")
-            }
-        )
-        MainPage.SAVED -> {}
+        MainPage.IMPORTS -> {}
     }
 }
 
@@ -687,8 +677,8 @@ private fun LibrarySummaryCard(
             )
             SummaryRow {
                 SummaryTile(
-                    title = "RSS",
-                    value = "$rssSourceCount 源",
+                    title = "内容",
+                    value = "$rssSourceCount 频道",
                     supporting = "$rssArticleCount 篇",
                     icon = { Icon(Icons.Default.RssFeed, contentDescription = null) },
                     onClick = onOpenRss,
@@ -723,9 +713,9 @@ private fun LibrarySummaryCard(
             }
             SummaryRow {
                 SummaryTile(
-                    title = "本地导入",
+                    title = "导入内容",
                     value = "$importedContentCount 篇",
-                    supporting = "TXT / EPUB",
+                    supporting = "TXT",
                     icon = { Icon(Icons.Default.Description, contentDescription = null) },
                     onClick = onOpenImportedContent,
                     modifier = Modifier.weight(1f)
@@ -780,13 +770,82 @@ private fun SummaryTile(
     }
 }
 
+private fun buildContentChannels(
+    uiState: MainUiState,
+    articlesBySource: Map<String, List<PhoneArticleEntity>>
+): List<MainContentChannel> {
+    val virtualChannels = listOf(
+        MainContentChannel(
+            key = CONTENT_CHANNEL_FAVORITES,
+            title = "收藏",
+            supportingText = "已保存的文章",
+            articleCount = uiState.favorites.size,
+            articles = uiState.favorites,
+            icon = MainContentChannelIcon.FAVORITE,
+            emptyTitle = "暂无收藏",
+            emptyText = "在文章列表中标记后会显示在这里"
+        ),
+        MainContentChannel(
+            key = CONTENT_CHANNEL_WATCH_LATER,
+            title = "稍后再看",
+            supportingText = "待阅读的文章",
+            articleCount = uiState.watchLater.size,
+            articles = uiState.watchLater,
+            icon = MainContentChannelIcon.WATCH_LATER,
+            emptyTitle = "暂无稍后再看",
+            emptyText = "在文章列表中标记后会显示在这里"
+        ),
+        MainContentChannel(
+            key = CONTENT_CHANNEL_INDEPENDENT,
+            title = "独立文章",
+            supportingText = "网页导入",
+            articleCount = uiState.independentArticles.size,
+            articles = uiState.independentArticles,
+            icon = MainContentChannelIcon.ARTICLE,
+            emptyTitle = "暂无独立文章",
+            emptyText = "可在导入页添加网页文章"
+        ),
+        MainContentChannel(
+            key = CONTENT_CHANNEL_IMPORTED_TEXT,
+            title = ImportedContentIds.ROOT_SOURCE_TITLE,
+            supportingText = "TXT 导入",
+            articleCount = uiState.importedContentArticles.size,
+            articles = uiState.importedContentArticles,
+            icon = MainContentChannelIcon.IMPORTED,
+            emptyTitle = "暂无导入内容",
+            emptyText = "TXT 文件导入后会显示在这里"
+        )
+    )
+    val sourceChannels = uiState.rssSources.map { source ->
+        val articles = articlesBySource[source.url].orEmpty()
+        val isImportedSource = ImportedContentIds.isImportedContentUrl(source.url)
+        MainContentChannel(
+            key = sourceContentChannelKey(source.url),
+            title = source.title.ifBlank { source.url },
+            supportingText = source.description.ifBlank {
+                if (isImportedSource) "EPUB 导入" else source.url
+            },
+            articleCount = articles.size,
+            source = source,
+            articles = articles,
+            icon = MainContentChannelIcon.RSS,
+            emptyTitle = "暂无文章",
+            emptyText = if (isImportedSource) "此频道暂无内容" else "下拉或点击刷新",
+            canRefresh = !isImportedSource
+        )
+    }
+    return virtualChannels + sourceChannels
+}
+
+private fun sourceContentChannelKey(sourceUrl: String): String = "$CONTENT_SOURCE_PREFIX$sourceUrl"
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun RssPage(
+private fun ContentPage(
     uiState: MainUiState,
-    articlesBySource: Map<String, List<PhoneArticleEntity>>,
+    channels: List<MainContentChannel>,
     contentPadding: PaddingValues,
-    onOpenSource: (PhoneRssSourceEntity) -> Unit,
+    onOpenChannel: (MainContentChannel) -> Unit,
     onMoveToTop: (PhoneRssSourceEntity) -> Unit,
     onTogglePinned: (PhoneRssSourceEntity) -> Unit,
     onDelete: (PhoneRssSourceEntity) -> Unit,
@@ -802,24 +861,32 @@ private fun RssPage(
             contentPadding = mainContentPadding(contentPadding),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            if (uiState.rssSources.isEmpty()) {
+            if (channels.isEmpty()) {
                 item {
                     EmptyStateCard(
                         icon = { Icon(Icons.Default.RssFeed, contentDescription = null) },
-                        title = "暂无 RSS 源",
-                        text = "点击右下角添加 RSS"
+                        title = "暂无内容",
+                        text = "可在导入页添加 RSS、网页文章或本地文件"
                     )
                 }
             } else {
-                items(uiState.rssSources, key = { it.url }) { source ->
-                    MainScreenSourceRow(
-                        source = source,
-                        articleCount = articlesBySource[source.url].orEmpty().size,
-                        onClick = { onOpenSource(source) },
-                        onMoveToTop = { onMoveToTop(source) },
-                        onTogglePinned = { onTogglePinned(source) },
-                        onDelete = { onDelete(source) }
-                    )
+                items(channels, key = { it.key }) { channel ->
+                    val source = channel.source
+                    if (source == null) {
+                        MainContentChannelRow(
+                            channel = channel,
+                            onClick = { onOpenChannel(channel) }
+                        )
+                    } else {
+                        MainScreenSourceRow(
+                            source = source,
+                            articleCount = channel.articleCount,
+                            onClick = { onOpenChannel(channel) },
+                            onMoveToTop = { onMoveToTop(source) },
+                            onTogglePinned = { onTogglePinned(source) },
+                            onDelete = { onDelete(source) }
+                        )
+                    }
                 }
             }
         }
@@ -829,8 +896,7 @@ private fun RssPage(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChannelPage(
-    source: PhoneRssSourceEntity?,
-    articles: List<PhoneArticleEntity>,
+    channel: MainContentChannel?,
     isRefreshing: Boolean,
     contentPadding: PaddingValues,
     onRefreshSource: () -> Unit,
@@ -850,16 +916,16 @@ private fun ChannelPage(
             contentPadding = mainContentPadding(contentPadding),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            if (source == null || articles.isEmpty()) {
+            if (channel == null || channel.articles.isEmpty()) {
                 item {
                     EmptyStateCard(
-                        icon = { Icon(Icons.AutoMirrored.Filled.Article, contentDescription = null) },
-                        title = "暂无文章",
-                        text = if (source == null) "频道不存在" else "下拉或点击刷新"
+                        icon = { MainContentChannelLeadingIcon(channel?.icon ?: MainContentChannelIcon.ARTICLE) },
+                        title = channel?.emptyTitle ?: "暂无文章",
+                        text = channel?.emptyText ?: "频道不存在"
                     )
                 }
             } else {
-                items(articles, key = { it.articleId }) { article ->
+                items(channel.articles, key = { it.articleId }) { article ->
                     MainScreenArticleRow(
                         article = article,
                         onOpenArticle = onOpenArticle,
@@ -875,82 +941,24 @@ private fun ChannelPage(
     }
 }
 
-@Composable
-private fun SavedPage(
-    section: SavedSection,
-    uiState: MainUiState,
-    contentPadding: PaddingValues,
-    onSectionChange: (SavedSection) -> Unit,
-    onOpenArticle: (PhoneArticleEntity) -> Unit,
-    onOpenOriginalLink: (String) -> Unit,
-    onToggleFavorite: (PhoneArticleEntity) -> Unit,
-    onToggleWatchLater: (PhoneArticleEntity) -> Unit,
-    onDeleteArticle: (PhoneArticleEntity) -> Unit
-) {
-    val articles = when (section) {
-        SavedSection.FAVORITES -> uiState.favorites
-        SavedSection.WATCH_LATER -> uiState.watchLater
+private fun recentImportedArticles(uiState: MainUiState): List<PhoneArticleEntity> {
+    val importedEpubArticles = uiState.rssArticles.filter { article ->
+        ImportedContentIds.isImportedContentUrl(article.rssSourceUrl)
     }
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = mainContentPadding(contentPadding),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(
-                    selected = section == SavedSection.FAVORITES,
-                    onClick = { onSectionChange(SavedSection.FAVORITES) },
-                    label = { Text("收藏 ${uiState.favorites.size}") },
-                    leadingIcon = {
-                        Icon(Icons.Default.Favorite, contentDescription = null)
-                    }
-                )
-                FilterChip(
-                    selected = section == SavedSection.WATCH_LATER,
-                    onClick = { onSectionChange(SavedSection.WATCH_LATER) },
-                    label = { Text("稍后 ${uiState.watchLater.size}") },
-                    leadingIcon = {
-                        Icon(Icons.Default.Bookmark, contentDescription = null)
-                    }
-                )
-            }
-        }
-        if (articles.isEmpty()) {
-            item {
-                EmptyStateCard(
-                    icon = {
-                        Icon(
-                            if (section == SavedSection.FAVORITES) Icons.Default.FavoriteBorder else Icons.Default.BookmarkBorder,
-                            contentDescription = null
-                        )
-                    },
-                    title = if (section == SavedSection.FAVORITES) "暂无收藏" else "暂无稍后再看",
-                    text = "在文章列表中标记后会显示在这里"
-                )
-            }
-        } else {
-            items(articles, key = { it.articleId }) { article ->
-                MainScreenArticleRow(
-                    article = article,
-                    onOpenArticle = onOpenArticle,
-                    onOpenOriginalLink = onOpenOriginalLink,
-                    onToggleFavorite = onToggleFavorite,
-                    onToggleWatchLater = onToggleWatchLater,
-                    onDeleteArticle = onDeleteArticle,
-                    mainScreenCanDeleteArticle = mainScreenCanDeleteArticle(article)
-                )
-            }
-        }
-    }
+    return (uiState.independentArticles + uiState.importedContentArticles + importedEpubArticles)
+        .distinctBy { it.articleId }
+        .sortedWith(
+            compareByDescending<PhoneArticleEntity> { it.importedAt }
+                .thenByDescending { it.updatedAt }
+                .thenBy { it.title }
+        )
+        .take(20)
 }
 
 @Composable
 private fun ImportsPage(
-    section: ImportSection,
     uiState: MainUiState,
     contentPadding: PaddingValues,
-    onSectionChange: (ImportSection) -> Unit,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
     onImportFile: () -> Unit,
@@ -962,10 +970,7 @@ private fun ImportsPage(
     onToggleWatchLater: (PhoneArticleEntity) -> Unit,
     onDeleteArticle: (PhoneArticleEntity) -> Unit
 ) {
-    val articles = when (section) {
-        ImportSection.INDEPENDENT -> uiState.independentArticles
-        ImportSection.LOCAL_CONTENT -> uiState.importedContentArticles
-    }
+    val articles = remember(uiState) { recentImportedArticles(uiState) }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = mainContentPadding(contentPadding),
@@ -984,32 +989,18 @@ private fun ImportsPage(
             )
         }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(
-                    selected = section == ImportSection.INDEPENDENT,
-                    onClick = { onSectionChange(ImportSection.INDEPENDENT) },
-                    label = { Text("独立 ${uiState.independentArticles.size}") },
-                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.Article, contentDescription = null) }
-                )
-                FilterChip(
-                    selected = section == ImportSection.LOCAL_CONTENT,
-                    onClick = { onSectionChange(ImportSection.LOCAL_CONTENT) },
-                    label = { Text("本地 ${uiState.importedContentArticles.size}") },
-                    leadingIcon = { Icon(Icons.Default.Description, contentDescription = null) }
-                )
-            }
+            Text(
+                text = "最近导入",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
         }
         if (articles.isEmpty()) {
             item {
                 EmptyStateCard(
-                    icon = {
-                        Icon(
-                            if (section == ImportSection.INDEPENDENT) Icons.AutoMirrored.Filled.Article else Icons.Default.Description,
-                            contentDescription = null
-                        )
-                    },
-                    title = if (section == ImportSection.INDEPENDENT) "暂无独立文章" else "暂无本地导入",
-                    text = if (section == ImportSection.INDEPENDENT) "输入网页地址后添加" else "导入 TXT 或 EPUB 文件"
+                    icon = { Icon(Icons.Default.FileOpen, contentDescription = null) },
+                    title = "暂无导入",
+                    text = "添加网页文章或导入 TXT / EPUB 文件后会显示在这里"
                 )
             }
         } else {
@@ -1099,6 +1090,51 @@ private fun ImportActionsCard(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun MainContentChannelRow(
+    channel: MainContentChannel,
+    onClick: () -> Unit
+) {
+    ElevatedCard(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        ListItem(
+            headlineContent = {
+                Text(
+                    text = channel.title,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            },
+            supportingContent = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        text = channel.supportingText,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text("${channel.articleCount} 篇文章")
+                }
+            },
+            leadingContent = {
+                MainContentChannelLeadingIcon(channel.icon)
+            }
+        )
+    }
+}
+
+@Composable
+private fun MainContentChannelLeadingIcon(icon: MainContentChannelIcon) {
+    when (icon) {
+        MainContentChannelIcon.RSS -> Icon(Icons.Default.RssFeed, contentDescription = null)
+        MainContentChannelIcon.FAVORITE -> Icon(Icons.Default.Favorite, contentDescription = null)
+        MainContentChannelIcon.WATCH_LATER -> Icon(Icons.Default.Bookmark, contentDescription = null)
+        MainContentChannelIcon.ARTICLE -> Icon(Icons.AutoMirrored.Filled.Article, contentDescription = null)
+        MainContentChannelIcon.IMPORTED -> Icon(Icons.Default.Description, contentDescription = null)
     }
 }
 

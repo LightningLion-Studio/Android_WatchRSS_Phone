@@ -2,41 +2,73 @@ package com.lightningstudio.watchrss.phone.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// 主色 RGB(226, 39, 52)
-val PrimaryRed = Color(0xFFE22734)
-val PrimaryRedLight = Color(0xFFFF6B6B)
-val PrimaryRedDark = Color(0xFFB71C1C)
+val BrandPrimary = Color(0xFF006C5B)
+val BrandOnPrimary = Color(0xFFFFFFFF)
+val BrandPrimaryContainer = Color(0xFF82F8D6)
+val BrandOnPrimaryContainer = Color(0xFF002019)
 
-// 渐变系列（基于主色衍生）
-val GradientStart = Color(0xFFE22734)      // 主色
-val GradientMid = Color(0xFFEF5350)       // 稍淡
-val GradientEnd = Color(0xFFFFCDD2)        // 很淡的粉色
+val BrandSecondary = Color(0xFF4A635D)
+val BrandOnSecondary = Color(0xFFFFFFFF)
+val BrandSecondaryContainer = Color(0xFFCDE8DF)
+val BrandOnSecondaryContainer = Color(0xFF06201A)
 
-// 深色模式 - 改进版（避免纯黑，使用 Material 3 推荐的深灰层级）
-val DarkBackground = Color(0xFF121212)        // 推荐深色背景（非纯黑）
-val DarkSurface = Color(0xFF1E1E1E)         // 卡片/表面背景
-val DarkSurfaceElevated = Color(0xFF2C2C2C)  // 提升层级（如展开菜单）
-val DarkCardStart = Color(0xFF2C2C2C)        // 中性灰色渐变起始
-val DarkCardEnd = Color(0xFF1E1E1E)          // 中性灰色渐变结束
+val BrandTertiary = Color(0xFF456179)
+val BrandOnTertiary = Color(0xFFFFFFFF)
+val BrandTertiaryContainer = Color(0xFFCBE6FF)
+val BrandOnTertiaryContainer = Color(0xFF001E31)
 
-// 深色模式主色调整（降低饱和度，更柔和）
-val DarkPrimary = Color(0xFFFF5252)          // 更亮更柔和的红
-val DarkPrimaryContainer = Color(0xFFCF222E) // 容器色
-val DarkOnPrimaryContainer = Color(0xFFFFDAD6) // 暖白，协调
+val LightBackground = Color(0xFFFAFDF9)
+val LightSurface = Color(0xFFFAFDF9)
+val LightSurfaceContainer = Color(0xFFEFF4EF)
+val LightSurfaceVariant = Color(0xFFDCE5DE)
+val LightOutline = Color(0xFF707973)
+val OnBackgroundLight = Color(0xFF191C1A)
+val OnSurfaceVariantLight = Color(0xFF404943)
 
-// 浅色模式
-val LightBackground = Color(0xFFFAFAFA)
-val LightSurface = Color(0xFFFFFFFF)
-val LightCardStart = Color(0xFFFFEBEE)     // 很淡的粉红
-val LightCardEnd = Color(0xFFFFF5F5)       // 几乎白色带粉调
+val DarkPrimary = Color(0xFF64DBBA)
+val DarkOnPrimary = Color(0xFF00382D)
+val DarkPrimaryContainer = Color(0xFF005143)
+val DarkOnPrimaryContainer = Color(0xFF82F8D6)
 
-// 通用
-val OnPrimary = Color(0xFFFFFFFF)
-val OnBackgroundLight = Color(0xFF1A1A1A)
-val OnBackgroundDark = Color(0xFFE0E0E0)
-val OnSurfaceVariantLight = Color(0xFF666666)
-val OnSurfaceVariantDark = Color(0xFFA0A0A0)
+val DarkSecondary = Color(0xFFB1CCC3)
+val DarkOnSecondary = Color(0xFF1C3530)
+val DarkSecondaryContainer = Color(0xFF334B46)
+val DarkOnSecondaryContainer = Color(0xFFCDE8DF)
 
-// 卡片高光边缘（半透明）
-val CardHighlightLight = Color(0x40FFFFFF)   // 白色半透明
-val CardHighlightDark = Color(0x40FF6B6B)    // 亮红半透明（深色下更明显）
+val DarkTertiary = Color(0xFFADCAE6)
+val DarkOnTertiary = Color(0xFF133348)
+val DarkTertiaryContainer = Color(0xFF2C4961)
+val DarkOnTertiaryContainer = Color(0xFFCBE6FF)
+
+val DarkBackground = Color(0xFF101412)
+val DarkSurface = Color(0xFF101412)
+val DarkSurfaceElevated = Color(0xFF1C211E)
+val DarkSurfaceVariant = Color(0xFF404943)
+val DarkOutline = Color(0xFF89938C)
+val OnBackgroundDark = Color(0xFFE0E4DF)
+val OnSurfaceVariantDark = Color(0xFFC0C9C2)
+
+val Error = Color(0xFFBA1A1A)
+val OnError = Color(0xFFFFFFFF)
+val ErrorContainer = Color(0xFFFFDAD6)
+val OnErrorContainer = Color(0xFF410002)
+val DarkError = Color(0xFFFFB4AB)
+val DarkOnError = Color(0xFF690005)
+val DarkErrorContainer = Color(0xFF93000A)
+val DarkOnErrorContainer = Color(0xFFFFDAD6)
+
+val LightCardStart = LightSurfaceContainer
+val LightCardEnd = LightSurface
+val DarkCardStart = DarkSurfaceElevated
+val DarkCardEnd = DarkSurface
+val CardHighlightLight = Color(0x99FFFFFF)
+val CardHighlightDark = Color(0x334DD6B8)
+
+// Legacy aliases kept for older screens/components that still import these names.
+val PrimaryRed = BrandPrimary
+val PrimaryRedLight = BrandSecondary
+val PrimaryRedDark = BrandTertiary
+val GradientStart = BrandPrimary
+val GradientMid = BrandPrimaryContainer
+val GradientEnd = BrandSecondaryContainer
+val OnPrimary = BrandOnPrimary

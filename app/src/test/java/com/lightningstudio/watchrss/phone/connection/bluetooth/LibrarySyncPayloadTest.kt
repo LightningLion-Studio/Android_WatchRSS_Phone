@@ -114,11 +114,36 @@ class LibrarySyncPayloadTest {
         assertEquals(source.title, parsedSource.title)
         assertEquals(source.isPinned, parsedSource.isPinned)
         assertTrue(LibrarySyncPayload.supportsChangeSequences(request))
+        assertTrue(LibrarySyncPayload.supportsMetadataOnlyArticles(request))
         assertEquals(7L, changeSequence.fromSeqExclusive)
         assertEquals(9L, changeSequence.toSeqInclusive)
         assertEquals(false, changeSequence.fullSnapshot)
         assertEquals("syncLibrary", request.getString("action"))
         assertEquals("manifest", request.getString("phase"))
+    }
+
+    @Test
+    fun buildManifestRequest_marksSavedListArticleAsMetadataOnlyCandidate() {
+        val article = testArticle(
+            articleId = "saved-list",
+            contentText = "正文"
+        ).copy(
+            independentSaved = false,
+            independentChangedAt = 0L,
+            independentSortOrder = 0L,
+            favoriteSaved = true,
+            favoriteChangedAt = 30L,
+            favoriteSortOrder = 30L
+        )
+
+        val request = LibrarySyncPayload.buildManifestRequest(
+            deviceId = "phone",
+            articles = listOf(article)
+        )
+        val manifest = LibrarySyncPayload.parseArticleManifest(request).single()
+
+        assertEquals(ARTICLE_BODY_SYNC_MODE_SAVED, manifest.bodySyncMode)
+        assertTrue(LibrarySyncPayload.supportsMetadataOnlyArticles(request))
     }
 
     @Test
@@ -409,6 +434,57 @@ class LibrarySyncPayloadTest {
     }
 
     @Test
+    fun chunkedBodyRequest_requestsMetadataOnlyForSavedBodyWhenPeerSupportsIt() {
+        val remoteManifest = testArticle(
+            articleId = "article-saved",
+            contentText = "正文"
+        ).toManifestEntry().copy(bodySyncMode = ARTICLE_BODY_SYNC_MODE_SAVED)
+
+        val requests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+            localManifest = emptyList(),
+            remoteManifest = listOf(remoteManifest),
+            supportsMetadataOnlyArticles = true
+        )
+
+        assertEquals(emptyList<Int>(), requests.single().chunkIndexes)
+        assertTrue(requests.single().metadataOnly)
+    }
+
+    @Test
+    fun chunkedBodyRequest_requestsMetadataOnlyForFullBodyWhenPeerSupportsIt() {
+        val remoteManifest = testArticle(
+            articleId = "article-full",
+            contentText = "正文"
+        ).toManifestEntry().copy(bodySyncMode = ARTICLE_BODY_SYNC_MODE_FULL)
+
+        val requests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+            localManifest = emptyList(),
+            remoteManifest = listOf(remoteManifest),
+            supportsMetadataOnlyArticles = true
+        )
+
+        assertEquals(emptyList<Int>(), requests.single().chunkIndexes)
+        assertTrue(requests.single().metadataOnly)
+    }
+
+    @Test
+    fun chunkedBodyRequest_requestsChunksForSavedBodyWhenPeerDoesNotSupportMetadataOnly() {
+        val remoteManifest = testArticle(
+            articleId = "article-saved",
+            contentText = "正文"
+        ).toManifestEntry().copy(bodySyncMode = ARTICLE_BODY_SYNC_MODE_SAVED)
+
+        val requests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+            localManifest = emptyList(),
+            remoteManifest = listOf(remoteManifest),
+            supportsMetadataOnlyArticles = false
+        )
+
+        assertEquals(remoteManifest.chunkHashes.indices.toList(), requests.single().chunkIndexes)
+        assertEquals(false, requests.single().metadataOnly)
+    }
+
+    @Test
     fun chunkedBodyRequest_withMetadataOnlyRequestSendsNoChunks() {
         val article = testArticle(
             articleId = "article-1",
@@ -422,7 +498,8 @@ class LibrarySyncPayloadTest {
                 ArticleBodyRequest(
                     articleId = article.articleId,
                     bodyHash = metadata.bodyHash,
-                    chunkIndexes = emptyList()
+                    chunkIndexes = emptyList(),
+                    metadataOnly = true
                 )
             ),
             bodyRequests = emptyList(),
@@ -434,6 +511,7 @@ class LibrarySyncPayloadTest {
         ).single()
 
         assertEquals(emptyList<Int>(), parsed.chunks.map { it.index })
+        assertTrue(parsed.metadataOnly)
     }
 
     @Test

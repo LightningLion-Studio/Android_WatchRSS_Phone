@@ -232,6 +232,7 @@ class PhoneBluetoothSyncManager(
                     val remoteManifest = LibrarySyncPayload.parseArticleManifest(manifestResponse)
                     val supportsChunkedBodies = manifestResponse.optBoolean("supportsChunkedBodies", false) &&
                         manifestResponse.optInt("version") > LibrarySyncPayload.LEGACY_PROTOCOL_VERSION
+                    val supportsMetadataOnlyArticles = LibrarySyncPayload.supportsMetadataOnlyArticles(manifestResponse)
                     reportProgress(onProgress, PhoneBluetoothSyncStage.TRANSFERRING, 28)
                     val deleteConflicts = repository.findDeleteConflicts(remoteManifest)
                     val conflictResolutions = if (deleteConflicts.isNotEmpty()) {
@@ -250,7 +251,8 @@ class PhoneBluetoothSyncManager(
                             defaultRequests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
                                 localManifest = window.fullArticleManifest,
                                 remoteManifest = remoteManifest,
-                                maxBodyRequestChunks = LibrarySyncPayload.MAX_BODY_REQUEST_CHUNKS_PER_SYNC
+                                maxBodyRequestChunks = LibrarySyncPayload.MAX_BODY_REQUEST_CHUNKS_PER_SYNC,
+                                supportsMetadataOnlyArticles = supportsMetadataOnlyArticles
                             ).filterNot { it.articleId in conflictPlan.suppressedRemoteArticleIds },
                             forcedRequests = conflictPlan.forcedRemoteRequests
                         )
@@ -264,6 +266,8 @@ class PhoneBluetoothSyncManager(
                                 "remoteManifest" to remoteManifest.size,
                                 "watchBodyRequests" to watchRequests.size,
                                 "phoneBodyRequests" to phoneRequests.size,
+                                "phoneMetadataOnlyRequests" to phoneRequests.count { it.metadataOnly },
+                                "phoneBodyRequestChunks" to phoneRequests.sumOf { it.chunkIndexes.size },
                                 "diffArticles" to sentArticles.size,
                                 "deleteConflicts" to deleteConflicts.size,
                                 "conflictOutgoing" to conflictPlan.outgoingArticleIds.size,

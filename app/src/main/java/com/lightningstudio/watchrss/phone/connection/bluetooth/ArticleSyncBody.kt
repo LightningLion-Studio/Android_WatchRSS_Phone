@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -21,7 +22,8 @@ data class ArticleBodyMetadata(
 data class ArticleBodyRequest(
     val articleId: String,
     val bodyHash: String,
-    val chunkIndexes: List<Int>
+    val chunkIndexes: List<Int>,
+    val metadataOnly: Boolean = false
 )
 
 data class ArticleBodyChunk(
@@ -52,7 +54,8 @@ data class ChunkedArticlePayload(
     val bodyByteCount: Long,
     val chunkSize: Int,
     val chunkHashes: List<String>,
-    val chunks: List<ArticleBodyChunk>
+    val chunks: List<ArticleBodyChunk>,
+    val metadataOnly: Boolean = false
 )
 
 object ArticleSyncBody {
@@ -61,6 +64,61 @@ object ArticleSyncBody {
 
     fun metadataFor(article: PhoneArticleEntity): ArticleBodyMetadata {
         val bodyBytes = encodeBody(article.contentHtml, article.contentText)
+        return metadataFor(article, bodyBytes)
+    }
+
+    fun cachedMetadataFor(article: PhoneArticleEntity): ArticleBodyMetadata? {
+        val expectedMetadataHash = metadataHashFor(article)
+        if (article.syncMetadataHash != expectedMetadataHash) return null
+        val chunkHashes = article.syncChunkHashesJson.toStringList()
+        val metadata = ArticleBodyMetadata(
+            bodyHash = article.syncBodyHash,
+            bodyByteCount = article.syncBodyByteCount,
+            chunkSize = article.syncChunkSize,
+            chunkHashes = chunkHashes,
+            metadataHash = article.syncMetadataHash
+        )
+        return metadata.takeIf { it.isCurrentFor(article) }
+    }
+
+    fun currentMetadataFor(article: PhoneArticleEntity): ArticleBodyMetadata =
+        cachedMetadataFor(article) ?: metadataFor(article)
+
+    fun payloadForRequest(
+        article: PhoneArticleEntity,
+        request: ArticleBodyRequest,
+        cachedMetadata: ArticleBodyMetadata? = cachedMetadataFor(article)
+    ): ChunkedArticlePayload {
+        cachedMetadata
+            ?.takeIf { request.bodyHash.isBlank() || request.bodyHash == it.bodyHash }
+            ?.let { metadata ->
+                if (request.metadataOnly) {
+                    return metadata.toPayload(article, emptyList(), metadataOnly = true)
+                }
+                runCatching {
+                    metadata.toPayload(
+                        article = article,
+                        chunks = chunksForRequestWithMetadata(article, request, metadata),
+                        metadataOnly = false
+                    )
+                }.getOrNull()
+            }
+            ?.let { return it }
+
+        val bodyBytes = encodeBody(article.contentHtml, article.contentText)
+        val metadata = metadataFor(article, bodyBytes)
+        val chunks = if (request.metadataOnly) {
+            emptyList()
+        } else {
+            chunksForRequestWithMetadata(bodyBytes, request, metadata)
+        }
+        return metadata.toPayload(article, chunks, metadataOnly = request.metadataOnly)
+    }
+
+    private fun metadataFor(
+        article: PhoneArticleEntity,
+        bodyBytes: ByteArray
+    ): ArticleBodyMetadata {
         val chunkHashes = chunkHashesFor(bodyBytes)
         return ArticleBodyMetadata(
             bodyHash = sha256(bodyBytes),
@@ -100,19 +158,45 @@ object ArticleSyncBody {
         return sha256(json.toString().toByteArray(Charsets.UTF_8))
     }
 
-    fun chunksForRequest(article: PhoneArticleEntity, request: ArticleBodyRequest): List<ArticleBodyChunk> {
+    fun chunksForRequest(
+        article: PhoneArticleEntity,
+        request: ArticleBodyRequest,
+        cachedMetadata: ArticleBodyMetadata? = cachedMetadataFor(article)
+    ): List<ArticleBodyChunk> =
+        payloadForRequest(article, request, cachedMetadata).chunks
+
+    private fun chunksForRequestWithMetadata(
+        article: PhoneArticleEntity,
+        request: ArticleBodyRequest,
+        metadata: ArticleBodyMetadata
+    ): List<ArticleBodyChunk> {
         val bodyBytes = encodeBody(article.contentHtml, article.contentText)
-        val chunkCount = chunkCountFor(bodyBytes)
+        return chunksForRequestWithMetadata(bodyBytes, request, metadata)
+    }
+
+    private fun chunksForRequestWithMetadata(
+        bodyBytes: ByteArray,
+        request: ArticleBodyRequest,
+        metadata: ArticleBodyMetadata
+    ): List<ArticleBodyChunk> {
+        val chunkSize = metadata.chunkSize.takeIf { it > 0 } ?: CHUNK_SIZE_BYTES
+        require(bodyBytes.size.toLong() == metadata.bodyByteCount) {
+            "同步正文缓存大小不匹配：expected=${metadata.bodyByteCount} actual=${bodyBytes.size}"
+        }
+        val chunkCount = chunkCountFor(bodyBytes, chunkSize)
+        require(chunkCount == metadata.chunkHashes.size) {
+            "同步正文缓存分块数不匹配：expected=${metadata.chunkHashes.size} actual=$chunkCount"
+        }
         val indexes = request.chunkIndexes
             .distinct()
             .filter { it in 0 until chunkCount }
         return indexes.map { index ->
-            val start = index * CHUNK_SIZE_BYTES
-            val end = min(start + CHUNK_SIZE_BYTES, bodyBytes.size)
+            val start = index * chunkSize
+            val end = min(start + chunkSize, bodyBytes.size)
             val bytes = bodyBytes.copyOfRange(start, end)
             ArticleBodyChunk(
                 index = index,
-                hash = sha256(bodyBytes, start, end - start),
+                hash = metadata.chunkHashes[index],
                 bytes = bytes
             )
         }
@@ -206,6 +290,39 @@ object ArticleSyncBody {
     private fun chunkCountFor(bytes: ByteArray, chunkSize: Int = CHUNK_SIZE_BYTES): Int {
         if (bytes.isEmpty()) return 1
         return ((bytes.size - 1) / chunkSize) + 1
+    }
+
+    private fun ArticleBodyMetadata.toPayload(
+        article: PhoneArticleEntity,
+        chunks: List<ArticleBodyChunk>,
+        metadataOnly: Boolean
+    ): ChunkedArticlePayload =
+        ChunkedArticlePayload(
+            article = article,
+            bodyHash = bodyHash,
+            bodyByteCount = bodyByteCount,
+            chunkSize = chunkSize,
+            chunkHashes = chunkHashes,
+            chunks = chunks,
+            metadataOnly = metadataOnly
+        )
+
+    private fun ArticleBodyMetadata.isCurrentFor(article: PhoneArticleEntity): Boolean {
+        return metadataHash == metadataHashFor(article) &&
+            bodyHash.isNotBlank() &&
+            bodyByteCount > 0L &&
+            chunkSize > 0 &&
+            chunkHashes.isNotEmpty()
+    }
+
+    private fun String.toStringList(): List<String> {
+        if (isBlank()) return emptyList()
+        val array = runCatching { JSONArray(this) }.getOrNull() ?: return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                array.optString(index).trim().takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }
     }
 
     private fun sha256(bytes: ByteArray): String {

@@ -1,8 +1,11 @@
 package com.lightningstudio.watchrss.phone.data.repo
 
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncBody
+import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyMetadata
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyRequest
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncManifestEntry
+import com.lightningstudio.watchrss.phone.connection.bluetooth.ARTICLE_BODY_SYNC_MODE_FULL
+import com.lightningstudio.watchrss.phone.connection.bluetooth.ARTICLE_BODY_SYNC_MODE_SAVED
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ChunkedArticlePayload
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictPlan
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
@@ -581,6 +584,8 @@ class PhoneCompanionRepository(
                 val local = articleDao.getById(payload.article.articleId)
                 val localHydrated = local?.hydrateExternalText()
                 val (contentHtml, contentText) = if (payload.article.deleted) {
+                    localHydrated?.contentHtml to localHydrated?.contentText.orEmpty()
+                } else if (payload.metadataOnly) {
                     localHydrated?.contentHtml to localHydrated?.contentText.orEmpty()
                 } else {
                     ArticleSyncBody.rebuildBody(localHydrated, payload)
@@ -1282,14 +1287,14 @@ class PhoneCompanionRepository(
     private suspend fun PhoneArticleEntity.ensureSyncMetadata(
         hydrated: PhoneArticleEntity = hydrateExternalText()
     ): PhoneArticleEntity {
+        ArticleSyncBody.cachedMetadataFor(hydrated)?.let { cached ->
+            if (hasSyncMetadata(cached)) return this
+            val updated = withSyncMetadata(cached)
+            articleDao.upsert(updated)
+            return updated
+        }
         val metadata = ArticleSyncBody.metadataFor(hydrated)
-        if (
-            syncBodyHash == metadata.bodyHash &&
-            syncBodyByteCount == metadata.bodyByteCount &&
-            syncChunkSize == metadata.chunkSize &&
-            syncChunkHashesJson.toStringList() == metadata.chunkHashes &&
-            syncMetadataHash == metadata.metadataHash
-        ) {
+        if (hasSyncMetadata(metadata)) {
             return this
         }
         val updated = withSyncMetadata(metadata)
@@ -1316,10 +1321,10 @@ class PhoneCompanionRepository(
     }
 
     private fun PhoneArticleEntity.withCurrentSyncMetadata(): PhoneArticleEntity {
-        return withSyncMetadata(ArticleSyncBody.metadataFor(this))
+        return withSyncMetadata(ArticleSyncBody.currentMetadataFor(this))
     }
 
-    private fun PhoneArticleEntity.withSyncMetadata(metadata: com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyMetadata): PhoneArticleEntity {
+    private fun PhoneArticleEntity.withSyncMetadata(metadata: ArticleBodyMetadata): PhoneArticleEntity {
         return copy(
             syncBodyHash = metadata.bodyHash,
             syncBodyByteCount = metadata.bodyByteCount,
@@ -1329,7 +1334,16 @@ class PhoneCompanionRepository(
         )
     }
 
+    private fun PhoneArticleEntity.hasSyncMetadata(metadata: ArticleBodyMetadata): Boolean {
+        return syncBodyHash == metadata.bodyHash &&
+            syncBodyByteCount == metadata.bodyByteCount &&
+            syncChunkSize == metadata.chunkSize &&
+            syncChunkHashesJson.toStringList() == metadata.chunkHashes &&
+            syncMetadataHash == metadata.metadataHash
+    }
+
     private fun PhoneArticleEntity.toSyncManifestEntry(bodyAvailable: Boolean = true): ArticleSyncManifestEntry {
+        val metadata = ArticleSyncBody.cachedMetadataFor(this)
         return ArticleSyncManifestEntry(
             articleId = articleId,
             sourceDeviceId = sourceDeviceId,
@@ -1339,12 +1353,15 @@ class PhoneCompanionRepository(
             favoriteChangedAt = favoriteChangedAt,
             watchLaterChangedAt = watchLaterChangedAt,
             deletedAt = deletedAt,
-            bodyHash = syncBodyHash.ifBlank { contentHash },
-            bodyByteCount = syncBodyByteCount,
-            chunkSize = syncChunkSize,
-            chunkHashes = syncChunkHashesJson.toStringList(),
-            metadataHash = syncMetadataHash.ifBlank { ArticleSyncBody.metadataHashFor(this) },
-            bodyAvailable = bodyAvailable
+            bodyHash = metadata?.bodyHash ?: syncBodyHash.ifBlank { contentHash },
+            bodyByteCount = metadata?.bodyByteCount ?: syncBodyByteCount,
+            chunkSize = metadata?.chunkSize ?: syncChunkSize,
+            chunkHashes = metadata?.chunkHashes ?: syncChunkHashesJson.toStringList(),
+            metadataHash = metadata?.metadataHash ?: syncMetadataHash.ifBlank {
+                ArticleSyncBody.metadataHashFor(this)
+            },
+            bodyAvailable = bodyAvailable,
+            bodySyncMode = bodySyncModeForSync()
         )
     }
 
@@ -1356,6 +1373,18 @@ class PhoneCompanionRepository(
             syncChunkHashesJson.toStringList().isEmpty() ||
             syncMetadataHash.isBlank() ||
             syncMetadataHash != ArticleSyncBody.metadataHashFor(this)
+    }
+
+    private fun PhoneArticleEntity.bodySyncModeForSync(): String {
+        return if (
+            independentSaved ||
+            ImportedContentIds.isImportedContentUrl(url) ||
+            ImportedContentIds.isImportedContentUrl(rssSourceUrl)
+        ) {
+            ARTICLE_BODY_SYNC_MODE_FULL
+        } else {
+            ARTICLE_BODY_SYNC_MODE_SAVED
+        }
     }
 
     private fun PhoneArticleEntity.shouldSyncThroughLibrary(): Boolean {

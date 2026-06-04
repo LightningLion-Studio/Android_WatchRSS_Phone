@@ -10,6 +10,8 @@ import android.graphics.RuntimeShader
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,6 +27,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.background
@@ -47,17 +50,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.importer.WebArticleImporter
@@ -363,47 +371,10 @@ private fun NativeArticleView(
                     )
                 }
                 is ArticleNode.BlockQuote -> {
-                    AppCard(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 12.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalAlignment = Alignment.Top
-                        ) {
-                            // 左侧红色强调线
-                            Box(
-                                modifier = Modifier
-                                    .width(3.dp)
-                                    .height(24.dp)
-                                    .background(PrimaryRed)
-                            )
-                            Text(
-                                text = node.text,
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
+                    ArticleBlockQuote(text = node.text)
                 }
                 is ArticleNode.CodeBlock -> {
-                    AppCard(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp)
-                    ) {
-                        Text(
-                            text = node.text,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.padding(16.dp)
-                        )
-                    }
+                    ArticleCodeBlock(text = node.text)
                 }
                 is ArticleNode.ListItem -> {
                     Row(
@@ -440,6 +411,70 @@ private fun NativeArticleView(
         }
         
         item { Spacer(modifier = Modifier.height(80.dp)) }
+    }
+}
+
+@Composable
+private fun ArticleBlockQuote(
+    text: String,
+    modifier: Modifier = Modifier
+) {
+    val lineColor = MaterialTheme.colorScheme.primary
+    val lineWidth = 4.dp
+    Text(
+        text = text,
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp)
+            .drawBehind {
+                val strokeWidth = lineWidth.toPx()
+                drawLine(
+                    color = lineColor,
+                    start = Offset(strokeWidth / 2f, 0f),
+                    end = Offset(strokeWidth / 2f, size.height),
+                    strokeWidth = strokeWidth,
+                    cap = StrokeCap.Round
+                )
+            }
+            .padding(start = 18.dp, end = 4.dp),
+        style = MaterialTheme.typography.bodyLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+}
+
+@Composable
+private fun ArticleCodeBlock(
+    text: String,
+    modifier: Modifier = Modifier
+) {
+    val horizontalScrollState = rememberScrollState()
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        tonalElevation = 1.dp,
+        border = BorderStroke(
+            width = 1.dp,
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)
+        )
+    ) {
+        SelectionContainer {
+            Text(
+                text = text,
+                modifier = Modifier
+                    .horizontalScroll(horizontalScrollState)
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 0.sp
+                ),
+                lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.28f,
+                softWrap = false
+            )
+        }
     }
 }
 

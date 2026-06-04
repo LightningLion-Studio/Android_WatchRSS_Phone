@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Article
@@ -66,6 +68,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -85,6 +88,7 @@ import com.lightningstudio.watchrss.phone.viewmodel.MainSyncProgressUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainUiState
 import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptKind
 import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptUi
+import kotlinx.coroutines.launch
 
 private enum class MainPage {
     DASHBOARD,
@@ -93,6 +97,15 @@ private enum class MainPage {
     IMPORTS,
     CHANNEL
 }
+
+private val TopLevelMainPages = listOf(
+    MainPage.DASHBOARD,
+    MainPage.RSS,
+    MainPage.SAVED,
+    MainPage.IMPORTS
+)
+
+private fun MainPage.topLevelIndex(): Int = TopLevelMainPages.indexOf(this).coerceAtLeast(0)
 
 private enum class SavedSection {
     FAVORITES,
@@ -109,7 +122,7 @@ private enum class UrlDialogMode {
     RSS
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun MainScreen(
     uiState: MainUiState,
@@ -139,11 +152,14 @@ fun MainScreen(
     onShowManualConflictOptions: () -> Unit,
     onDismissMessage: () -> Unit
 ) {
-    var page by rememberSaveable { mutableStateOf(MainPage.DASHBOARD) }
     var savedSection by rememberSaveable { mutableStateOf(SavedSection.FAVORITES) }
     var importSection by rememberSaveable { mutableStateOf(ImportSection.INDEPENDENT) }
     var selectedSourceUrl by rememberSaveable { mutableStateOf<String?>(null) }
     var urlDialogMode by remember { mutableStateOf<UrlDialogMode?>(null) }
+    val pagerState = rememberPagerState(initialPage = MainPage.DASHBOARD.topLevelIndex()) {
+        TopLevelMainPages.size
+    }
+    val coroutineScope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
 
     val articlesBySource = remember(uiState.rssArticles) {
@@ -152,15 +168,24 @@ fun MainScreen(
     val selectedSource = selectedSourceUrl?.let { url ->
         uiState.rssSources.firstOrNull { it.url == url }
     }
-    val selectedBottomPage = if (page == MainPage.CHANNEL) MainPage.RSS else page
+    val currentTopLevelPage = TopLevelMainPages.getOrElse(pagerState.currentPage) {
+        MainPage.DASHBOARD
+    }
+    val page = if (selectedSourceUrl != null) MainPage.CHANNEL else currentTopLevelPage
+    val selectedBottomPage = if (page == MainPage.CHANNEL) MainPage.RSS else currentTopLevelPage
+
+    fun navigateToTopLevelPage(destination: MainPage) {
+        selectedSourceUrl = null
+        coroutineScope.launch {
+            pagerState.animateScrollToPage(destination.topLevelIndex())
+        }
+    }
 
     BackHandler(enabled = page != MainPage.DASHBOARD) {
         if (page == MainPage.CHANNEL) {
-            selectedSourceUrl = null
-            page = MainPage.RSS
+            navigateToTopLevelPage(MainPage.RSS)
         } else {
-            selectedSourceUrl = null
-            page = MainPage.DASHBOARD
+            navigateToTopLevelPage(MainPage.DASHBOARD)
         }
     }
 
@@ -173,10 +198,7 @@ fun MainScreen(
                 canRefreshSource = selectedSource != null &&
                     selectedSource.url !in uiState.refreshingRssSourceUrls &&
                     !uiState.isBusy,
-                onBack = {
-                    selectedSourceUrl = null
-                    page = MainPage.RSS
-                },
+                onBack = { navigateToTopLevelPage(MainPage.RSS) },
                 onRefreshAllRssSources = onRefreshAllRssSources,
                 onRefreshSelectedSource = { selectedSource?.let(onRefreshRssSource) },
                 onExportBluetoothLog = onExportBluetoothLog
@@ -185,10 +207,7 @@ fun MainScreen(
         bottomBar = {
             MainNavigationBar(
                 selectedPage = selectedBottomPage,
-                onSelectPage = { destination ->
-                    selectedSourceUrl = null
-                    page = destination
-                }
+                onSelectPage = ::navigateToTopLevelPage
             )
         },
         floatingActionButton = {
@@ -206,48 +225,8 @@ fun MainScreen(
             )
         }
     ) { contentPadding ->
-        when (page) {
-            MainPage.DASHBOARD -> DashboardPage(
-                uiState = uiState,
-                articlesBySource = articlesBySource,
-                contentPadding = contentPadding,
-                onSyncLibrary = onSyncLibrary,
-                onExportBluetoothLog = onExportBluetoothLog,
-                onOpenRss = { page = MainPage.RSS },
-                onOpenFavorites = {
-                    savedSection = SavedSection.FAVORITES
-                    page = MainPage.SAVED
-                },
-                onOpenWatchLater = {
-                    savedSection = SavedSection.WATCH_LATER
-                    page = MainPage.SAVED
-                },
-                onOpenIndependent = {
-                    importSection = ImportSection.INDEPENDENT
-                    page = MainPage.IMPORTS
-                },
-                onOpenImportedContent = {
-                    importSection = ImportSection.LOCAL_CONTENT
-                    page = MainPage.IMPORTS
-                },
-                onDismissMessage = onDismissMessage
-            )
-
-            MainPage.RSS -> RssPage(
-                uiState = uiState,
-                articlesBySource = articlesBySource,
-                contentPadding = contentPadding,
-                onOpenSource = { source ->
-                    selectedSourceUrl = source.url
-                    page = MainPage.CHANNEL
-                },
-                onMoveToTop = onMoveRssSourceToTop,
-                onTogglePinned = onToggleRssSourcePinned,
-                onDelete = onDeleteRssSource,
-                onRefreshAllRssSources = onRefreshAllRssSources
-            )
-
-            MainPage.CHANNEL -> ChannelPage(
+        if (page == MainPage.CHANNEL) {
+            ChannelPage(
                 source = selectedSource,
                 articles = selectedSourceUrl?.let { articlesBySource[it] }.orEmpty(),
                 isRefreshing = selectedSourceUrl?.let { it in uiState.refreshingRssSourceUrls } == true,
@@ -259,35 +238,81 @@ fun MainScreen(
                 onToggleWatchLater = onToggleWatchLater,
                 onDeleteArticle = onDeleteArticle
             )
+        } else {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize()
+            ) { pageIndex ->
+                when (TopLevelMainPages[pageIndex]) {
+                    MainPage.DASHBOARD -> DashboardPage(
+                        uiState = uiState,
+                        articlesBySource = articlesBySource,
+                        contentPadding = contentPadding,
+                        onSyncLibrary = onSyncLibrary,
+                        onExportBluetoothLog = onExportBluetoothLog,
+                        onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
+                        onOpenFavorites = {
+                            savedSection = SavedSection.FAVORITES
+                            navigateToTopLevelPage(MainPage.SAVED)
+                        },
+                        onOpenWatchLater = {
+                            savedSection = SavedSection.WATCH_LATER
+                            navigateToTopLevelPage(MainPage.SAVED)
+                        },
+                        onOpenIndependent = {
+                            importSection = ImportSection.INDEPENDENT
+                            navigateToTopLevelPage(MainPage.IMPORTS)
+                        },
+                        onOpenImportedContent = {
+                            importSection = ImportSection.LOCAL_CONTENT
+                            navigateToTopLevelPage(MainPage.IMPORTS)
+                        },
+                        onDismissMessage = onDismissMessage
+                    )
 
-            MainPage.SAVED -> SavedPage(
-                section = savedSection,
-                uiState = uiState,
-                contentPadding = contentPadding,
-                onSectionChange = { savedSection = it },
-                onOpenArticle = onOpenArticle,
-                onOpenOriginalLink = { uriHandler.openUri(it) },
-                onToggleFavorite = onToggleFavorite,
-                onToggleWatchLater = onToggleWatchLater,
-                onDeleteArticle = onDeleteArticle
-            )
+                    MainPage.RSS -> RssPage(
+                        uiState = uiState,
+                        articlesBySource = articlesBySource,
+                        contentPadding = contentPadding,
+                        onOpenSource = { source -> selectedSourceUrl = source.url },
+                        onMoveToTop = onMoveRssSourceToTop,
+                        onTogglePinned = onToggleRssSourcePinned,
+                        onDelete = onDeleteRssSource,
+                        onRefreshAllRssSources = onRefreshAllRssSources
+                    )
 
-            MainPage.IMPORTS -> ImportsPage(
-                section = importSection,
-                uiState = uiState,
-                contentPadding = contentPadding,
-                onSectionChange = { importSection = it },
-                onUrlChange = onUrlChange,
-                onImportArticle = onImportArticle,
-                onImportFile = onImportFile,
-                onAddRssSource = onAddRssSource,
-                onClearImportedContent = onClearImportedContent,
-                onOpenArticle = onOpenArticle,
-                onOpenOriginalLink = { uriHandler.openUri(it) },
-                onToggleFavorite = onToggleFavorite,
-                onToggleWatchLater = onToggleWatchLater,
-                onDeleteArticle = onDeleteArticle
-            )
+                    MainPage.SAVED -> SavedPage(
+                        section = savedSection,
+                        uiState = uiState,
+                        contentPadding = contentPadding,
+                        onSectionChange = { savedSection = it },
+                        onOpenArticle = onOpenArticle,
+                        onOpenOriginalLink = { uriHandler.openUri(it) },
+                        onToggleFavorite = onToggleFavorite,
+                        onToggleWatchLater = onToggleWatchLater,
+                        onDeleteArticle = onDeleteArticle
+                    )
+
+                    MainPage.IMPORTS -> ImportsPage(
+                        section = importSection,
+                        uiState = uiState,
+                        contentPadding = contentPadding,
+                        onSectionChange = { importSection = it },
+                        onUrlChange = onUrlChange,
+                        onImportArticle = onImportArticle,
+                        onImportFile = onImportFile,
+                        onAddRssSource = onAddRssSource,
+                        onClearImportedContent = onClearImportedContent,
+                        onOpenArticle = onOpenArticle,
+                        onOpenOriginalLink = { uriHandler.openUri(it) },
+                        onToggleFavorite = onToggleFavorite,
+                        onToggleWatchLater = onToggleWatchLater,
+                        onDeleteArticle = onDeleteArticle
+                    )
+
+                    MainPage.CHANNEL -> Unit
+                }
+            }
         }
     }
 
@@ -399,12 +424,7 @@ private fun MainNavigationBar(
     onSelectPage: (MainPage) -> Unit
 ) {
     NavigationBar {
-        listOf(
-            MainPage.DASHBOARD,
-            MainPage.RSS,
-            MainPage.SAVED,
-            MainPage.IMPORTS
-        ).forEach { destination ->
+        TopLevelMainPages.forEach { destination ->
             NavigationBarItem(
                 selected = selectedPage == destination,
                 onClick = { onSelectPage(destination) },

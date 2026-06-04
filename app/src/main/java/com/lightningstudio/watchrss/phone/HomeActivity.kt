@@ -161,33 +161,17 @@ class HomeActivity : ComponentActivity() {
                     },
                     onToggleFavorite = viewModel::toggleFavorite,
                     onToggleWatchLater = viewModel::toggleWatchLater,
+                    onMoveRssSourceToTop = viewModel::moveRssSourceToTop,
+                    onToggleRssSourcePinned = viewModel::toggleRssSourcePinned,
+                    onDeleteRssSource = viewModel::deleteRssSource,
+                    onRefreshAllRssSources = viewModel::refreshAllRssSources,
+                    onRefreshRssSource = viewModel::refreshRssSource,
                     onDeleteArticle = viewModel::deleteArticle,
                     onClearImportedContent = viewModel::clearImportedContent,
                     onChooseConflictResolution = viewModel::chooseConflictResolution,
                     onShowManualConflictOptions = viewModel::showManualConflictOptions,
                     onDismissMessage = viewModel::clearMessage,
-                    onNavigateToPage = { tab ->
-                        when (tab) {
-                            com.lightningstudio.watchrss.phone.ui.MainTab.RSS -> {
-                                startActivity(RssActivity.createIntent(this@HomeActivity))
-                                overridePendingTransition(0, 0)
-                            }
-                            com.lightningstudio.watchrss.phone.ui.MainTab.NOVEL -> {
-                                startActivity(ListPageActivity.createIntent(this@HomeActivity, PageType.IMPORTED))
-                                overridePendingTransition(0, 0)
-                            }
-                            else -> {}
-                        }
-                    },
-                    onNavigateToGuide = {
-                        startActivity(
-                            GuideWebViewActivity.createIntent(
-                                context = this@HomeActivity,
-                                title = "使用指南",
-                                url = "file:///android_asset/guide.html"
-                            )
-                        )
-                    }
+                    onImportFile = ::selectLocalFile
                 )
             }
         }
@@ -417,4 +401,3 @@ private data class InboundLocalFile(
     val mimeType: String?,
     val uriString: String
 )
-

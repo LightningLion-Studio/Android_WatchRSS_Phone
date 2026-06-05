@@ -592,6 +592,54 @@ class LibrarySyncPayloadTest {
         assertEquals(article.contentText, rebuilt.second)
     }
 
+    @Test
+    fun chunkedResponse_sendsProgressHeaderBeforeLargeBodyFrames() {
+        val article = testArticle(
+            articleId = "response-huge",
+            contentText = pseudoRandomText(
+                seed = 7,
+                length = BluetoothSyncProtocol.MAX_FRAME_BYTES + ArticleSyncBody.CHUNK_SIZE_BYTES
+            )
+        )
+        val metadata = ArticleSyncBody.metadataFor(article)
+
+        val frames = LibrarySyncPayload.buildChunkedResponseFrames(
+            deviceId = "phone",
+            articles = listOf(article),
+            articleRequests = listOf(
+                ArticleBodyRequest(
+                    articleId = article.articleId,
+                    bodyHash = metadata.bodyHash,
+                    chunkIndexes = metadata.chunkHashes.indices.toList()
+                )
+            ),
+            useBatches = true
+        )
+        val combined = LibrarySyncPayload.combineArticlePayloads(frames)
+        val parsed = LibrarySyncPayload.parseChunkedArticles(combined).single()
+        val rebuilt = ArticleSyncBody.rebuildBody(null, parsed)
+
+        assertTrue(frames.size > 2)
+        assertResponseProgressHeader(frames, totalArticles = 1)
+        assertTrue(frames.all { BluetoothSyncProtocol.encodedSize(it) <= BluetoothSyncProtocol.MAX_FRAME_BYTES })
+        assertBatchWireByteHints(frames)
+        assertEquals(article.contentText, rebuilt.second)
+    }
+
+    private fun assertResponseProgressHeader(frames: List<JSONObject>, totalArticles: Int) {
+        val header = frames.first()
+        assertEquals(0, header.getInt("batchIndex"))
+        assertEquals(frames.size, header.getInt("batchCount"))
+        assertEquals(totalArticles, header.getInt("totalArticles"))
+        assertEquals(0, header.getJSONArray("articles").length())
+        assertTrue(header.has(LibrarySyncPayload.FIELD_BATCH_WIRE_BYTES))
+        assertTrue(header.has(LibrarySyncPayload.FIELD_BATCH_TOTAL_WIRE_BYTES))
+        frames.drop(1).forEachIndexed { index, frame ->
+            assertEquals(index + 1, frame.getInt("batchIndex"))
+            assertEquals(frames.size, frame.getInt("batchCount"))
+        }
+    }
+
     private fun assertBatchWireByteHints(frames: List<JSONObject>) {
         val totalWireBytes = frames.sumOf { BluetoothSyncProtocol.wireSize(it) }
         frames.forEach { frame ->

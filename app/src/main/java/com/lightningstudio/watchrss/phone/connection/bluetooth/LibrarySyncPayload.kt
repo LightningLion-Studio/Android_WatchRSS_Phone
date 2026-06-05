@@ -277,7 +277,11 @@ object LibrarySyncPayload {
                     put("stats", stats)
                 }
             }
-        }
+        }.withResponseProgressHeader(
+            deviceId = deviceId,
+            totalArticles = articles.size,
+            stats = stats
+        )
     }
 
     fun combineArticlePayloads(frames: List<JSONObject>): JSONObject {
@@ -771,6 +775,38 @@ object LibrarySyncPayload {
         return this
     }
 
+    private fun List<JSONObject>.withResponseProgressHeader(
+        deviceId: String,
+        totalArticles: Int?,
+        stats: JSONObject?
+    ): List<JSONObject> {
+        if (!needsResponseProgressHeader()) return this
+        val batchCount = size + 1
+        val header = JSONObject().apply {
+            put("success", true)
+            put("version", PROTOCOL_VERSION)
+            put("action", BluetoothSyncProtocol.ACTION_SYNC_LIBRARY)
+            put("phase", PHASE_COMPLETE)
+            put("deviceId", deviceId)
+            put("sentAt", System.currentTimeMillis())
+            put("articles", JSONArray())
+            putBatchFields(batchIndex = 0, batchCount = batchCount, totalArticles = totalArticles)
+            stats?.let { put("stats", it) }
+        }
+        val frames = ArrayList<JSONObject>(batchCount)
+        frames += header
+        forEachIndexed { index, payload ->
+            payload.putBatchFields(batchIndex = index + 1, batchCount = batchCount, totalArticles = totalArticles)
+            frames += payload
+        }
+        return frames.withBatchWireByteHints()
+    }
+
+    private fun List<JSONObject>.needsResponseProgressHeader(): Boolean =
+        size > 1 || any { payload ->
+            BluetoothSyncProtocol.encodedSize(payload) > RESPONSE_PROGRESS_HEADER_MIN_BODY_BYTES
+        }
+
     private fun JSONObject.putBatchFields(
         batchIndex: Int?,
         batchCount: Int?,
@@ -1096,6 +1132,7 @@ object LibrarySyncPayload {
 
     private const val ARTICLE_BATCH_TARGET_BYTES = 512 * 1024
     private const val BATCH_WIRE_HINT_STABILIZE_ATTEMPTS = 6
+    private const val RESPONSE_PROGRESS_HEADER_MIN_BODY_BYTES = 16 * 1024
     private const val CHANGE_SEQUENCE_PROTOCOL_VERSION = 8
     private const val METADATA_ONLY_ARTICLES_PROTOCOL_VERSION = 8
     private const val READING_PROGRESS_SYNC_EPSILON = 0.001f

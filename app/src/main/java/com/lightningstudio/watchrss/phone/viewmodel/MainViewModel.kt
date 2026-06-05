@@ -14,6 +14,7 @@ import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,6 +31,8 @@ data class MainUiState(
     val urlInput: String = "",
     val isBusy: Boolean = false,
     val message: String? = null,
+    val syncStatusMessage: String? = null,
+    val syncStatusError: String? = null,
     val error: String? = null,
     val syncProgress: MainSyncProgressUi? = null,
     val rssSources: List<PhoneRssSourceEntity> = emptyList(),
@@ -103,6 +106,8 @@ class MainViewModel(
 
     private val sessionState = MutableStateFlow(MainUiState())
     private var conflictResolutionDeferred: CompletableDeferred<PhoneSyncConflictResolution>? = null
+    private var smoothedSyncProgressJob: Job? = null
+    private var smoothedSyncProgressTarget: MainSyncProgressUi? = null
 
     val uiState: StateFlow<MainUiState> = combine(
         combine(
@@ -159,15 +164,46 @@ class MainViewModel(
     }
 
     fun clearMessage() {
-        sessionState.value = sessionState.value.copy(message = null, error = null)
+        sessionState.value = sessionState.value.copy(
+            message = null,
+            syncStatusMessage = null,
+            syncStatusError = null,
+            error = null
+        )
     }
 
     fun showMessage(message: String) {
-        sessionState.value = sessionState.value.copy(message = message, error = null)
+        sessionState.value = sessionState.value.copy(
+            message = message,
+            syncStatusMessage = null,
+            syncStatusError = null,
+            error = null
+        )
+    }
+
+    fun showSyncStatusMessage(message: String) {
+        sessionState.value = sessionState.value.copy(
+            message = message,
+            syncStatusMessage = message,
+            syncStatusError = null,
+            error = null
+        )
+    }
+
+    fun showSyncStatusError(error: String) {
+        sessionState.value = sessionState.value.copy(
+            syncStatusMessage = null,
+            syncStatusError = error,
+            error = error
+        )
     }
 
     fun showError(error: String) {
-        sessionState.value = sessionState.value.copy(error = error)
+        sessionState.value = sessionState.value.copy(
+            syncStatusMessage = null,
+            syncStatusError = null,
+            error = error
+        )
     }
 
     fun importIndependentArticle() {
@@ -180,6 +216,8 @@ class MainViewModel(
         sessionState.value = sessionState.value.copy(
             urlInput = normalized,
             message = null,
+            syncStatusMessage = null,
+            syncStatusError = null,
             error = null,
             sharedImportPrompt = SharedImportPromptUi(
                 kind = SharedImportPromptKind.LINK,
@@ -192,6 +230,8 @@ class MainViewModel(
         if (uriString.isBlank()) return
         sessionState.value = sessionState.value.copy(
             message = null,
+            syncStatusMessage = null,
+            syncStatusError = null,
             error = null,
             sharedImportPrompt = SharedImportPromptUi(
                 kind = SharedImportPromptKind.FILE,
@@ -417,22 +457,26 @@ class MainViewModel(
 
     fun syncLibraryByBluetooth() {
         viewModelScope.launch {
+            beginSmoothedSyncProgress(MainSyncProgressUi(phase = "探测手表中", percent = 0))
             sessionState.value = sessionState.value.copy(
                 isBusy = true,
                 message = "探测手表中",
+                syncStatusMessage = "探测手表中",
+                syncStatusError = null,
                 error = null,
-                syncProgress = MainSyncProgressUi(phase = "探测手表中", percent = 0),
                 bluetoothDevicePrompt = null,
                 conflictPrompt = null
             )
             val reachableDevices = runCatching {
                 bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress)
             }.getOrElse { throwable ->
+                clearSmoothedSyncProgress()
                 sessionState.value = sessionState.value.copy(
                     isBusy = false,
                     message = null,
+                    syncStatusMessage = null,
+                    syncStatusError = null,
                     error = null,
-                    syncProgress = null,
                     bluetoothDevicePrompt = null,
                     conflictPrompt = null
                 )
@@ -441,11 +485,13 @@ class MainViewModel(
             }
             when (reachableDevices.size) {
                 0 -> {
+                    clearSmoothedSyncProgress()
                     sessionState.value = sessionState.value.copy(
                         isBusy = false,
                         message = null,
+                        syncStatusMessage = null,
+                        syncStatusError = null,
                         error = null,
-                        syncProgress = null,
                         bluetoothDevicePrompt = null
                     )
                     _toastEvent.tryEmit("未找到已打开 WatchRSS 的已配对手表，请在手表端打开应用并保持亮屏后重试")
@@ -455,11 +501,14 @@ class MainViewModel(
                     runLibrarySync(reachableDevices.single().address)
                 }
                 else -> {
+                    clearSmoothedSyncProgress()
+                    val message = "发现 ${reachableDevices.size} 块可同步手表"
                     sessionState.value = sessionState.value.copy(
                         isBusy = false,
-                        message = "发现 ${reachableDevices.size} 块可同步手表",
+                        message = message,
+                        syncStatusMessage = message,
+                        syncStatusError = null,
                         error = null,
-                        syncProgress = null,
                         bluetoothDevicePrompt = MainBluetoothDevicePromptUi(
                             devices = reachableDevices.map { it.toUi() }
                         )
@@ -477,19 +526,23 @@ class MainViewModel(
     }
 
     fun dismissBluetoothDevicePrompt() {
+        clearSmoothedSyncProgress()
         sessionState.value = sessionState.value.copy(
             bluetoothDevicePrompt = null,
             message = null,
-            syncProgress = null
+            syncStatusMessage = null,
+            syncStatusError = null
         )
     }
 
     private suspend fun runLibrarySync(deviceAddress: String?) {
+        beginSmoothedSyncProgress(MainSyncProgressUi(phase = "建立连接中", percent = 0))
         sessionState.value = sessionState.value.copy(
             isBusy = true,
             message = "建立连接中",
+            syncStatusMessage = "建立连接中",
+            syncStatusError = null,
             error = null,
-            syncProgress = MainSyncProgressUi(phase = "建立连接中", percent = 0),
             bluetoothDevicePrompt = null
         )
         runCatching {
@@ -499,21 +552,29 @@ class MainViewModel(
                 resolveDeleteConflicts = ::resolveDeleteConflicts
             )
             val stats = result.libraryStats
+            val deviceName = result.deviceName.ifBlank { "手表" }
+            completeSmoothedSyncProgress()
+            val message = "已与 $deviceName 同步完成"
             sessionState.value = sessionState.value.copy(
+                message = message,
+                syncStatusMessage = message,
+                syncStatusError = null,
                 error = null,
                 syncProgress = null
             )
             _toastEvent.tryEmit(
                 if (stats != null) {
-                    "已与 ${result.deviceName.ifBlank { "手表" }} 同步：文章发送 ${stats.sent}，收到 ${stats.received}，合并 ${stats.merged}；RSS源发送 ${stats.sourcesSent}，收到 ${stats.sourcesReceived}，合并 ${stats.sourcesMerged}"
+                    "已与 $deviceName 同步：文章发送 ${stats.sent}，收到 ${stats.received}，合并 ${stats.merged}；RSS源发送 ${stats.sourcesSent}，收到 ${stats.sourcesReceived}，合并 ${stats.sourcesMerged}"
                 } else {
-                    "已与 ${result.deviceName.ifBlank { "手表" }} 同步"
+                    "已与 $deviceName 同步"
                 }
             )
         }.onFailure { throwable ->
+            clearSmoothedSyncProgress()
             sessionState.value = sessionState.value.copy(
+                syncStatusMessage = null,
+                syncStatusError = null,
                 error = null,
-                syncProgress = null,
                 conflictPrompt = null
             )
             _toastEvent.tryEmit(throwable.message ?: "操作失败")
@@ -539,10 +600,13 @@ class MainViewModel(
             return
         }
         viewModelScope.launch {
-            runBusy("正在通过蓝牙发送 RSS 地址…") {
+            runBusy("正在通过蓝牙发送 RSS 地址…", showInSyncStatus = true) {
                 val result = bluetoothSyncManager.sendRemoteInput(url)
+                val message = "已通过蓝牙发送到 ${result.deviceName.ifBlank { "手表" }}"
                 sessionState.value = sessionState.value.copy(
-                    message = "已通过蓝牙发送到 ${result.deviceName.ifBlank { "手表" }}",
+                    message = message,
+                    syncStatusMessage = message,
+                    syncStatusError = null,
                     error = null,
                     urlInput = ""
                 )
@@ -560,10 +624,13 @@ class MainViewModel(
 
     private fun syncSavedItemsByBluetooth(type: PhoneSavedItemType) {
         viewModelScope.launch {
-            runBusy("正在通过蓝牙同步${type.displayName}…") {
+            runBusy("正在通过蓝牙同步${type.displayName}…", showInSyncStatus = true) {
                 val result = bluetoothSyncManager.syncSavedItems(type)
+                val message = "已从 ${result.deviceName.ifBlank { "手表" }} 同步 ${result.importedCount ?: 0} 条${type.displayName}"
                 sessionState.value = sessionState.value.copy(
-                    message = "已从 ${result.deviceName.ifBlank { "手表" }} 同步 ${result.importedCount ?: 0} 条${type.displayName}",
+                    message = message,
+                    syncStatusMessage = message,
+                    syncStatusError = null,
                     error = null
                 )
             }
@@ -604,6 +671,8 @@ class MainViewModel(
             state.copy(
                 error = null,
                 syncProgress = null,
+                syncStatusMessage = null,
+                syncStatusError = null,
                 refreshingRssSourceUrls = state.refreshingRssSourceUrls + urls
             )
         }
@@ -615,11 +684,13 @@ class MainViewModel(
         conflictResolutionDeferred?.complete(PhoneSyncConflictResolution.KEEP_LATEST)
         val deferred = CompletableDeferred<PhoneSyncConflictResolution>()
         conflictResolutionDeferred = deferred
+        clearSmoothedSyncProgress()
         sessionState.value = sessionState.value.copy(
             isBusy = true,
             message = "双端内容有冲突，请选择处理方式",
+            syncStatusMessage = "双端内容有冲突，请选择处理方式",
+            syncStatusError = null,
             error = null,
-            syncProgress = null,
             conflictPrompt = MainConflictPromptUi(conflicts = conflicts)
         )
         return try {
@@ -629,18 +700,26 @@ class MainViewModel(
             if (conflictResolutionDeferred === deferred) {
                 conflictResolutionDeferred = null
             }
+            beginSmoothedSyncProgress(MainSyncProgressUi(phase = "信息传输中", percent = 30))
             sessionState.value = sessionState.value.copy(
                 message = "信息传输中",
-                conflictPrompt = null,
-                syncProgress = MainSyncProgressUi(phase = "信息传输中", percent = 30)
+                syncStatusMessage = "信息传输中",
+                syncStatusError = null,
+                conflictPrompt = null
             )
         }
     }
 
-    private suspend fun runBusy(busyMessage: String, block: suspend () -> Unit) {
+    private suspend fun runBusy(
+        busyMessage: String,
+        showInSyncStatus: Boolean = false,
+        block: suspend () -> Unit
+    ) {
         sessionState.value = sessionState.value.copy(
             isBusy = true,
             message = busyMessage,
+            syncStatusMessage = if (showInSyncStatus) busyMessage else null,
+            syncStatusError = null,
             error = null,
             syncProgress = null,
             conflictPrompt = null,
@@ -648,17 +727,19 @@ class MainViewModel(
         )
         runCatching { block() }
             .onFailure { throwable ->
-                sessionState.value = sessionState.value.copy(error = throwable.message ?: "操作失败")
+                val error = throwable.message ?: "操作失败"
+                sessionState.value = sessionState.value.copy(
+                    error = error,
+                    syncStatusError = if (showInSyncStatus) error else null
+                )
         }
         sessionState.value = sessionState.value.copy(isBusy = false, syncProgress = null)
     }
 
     private fun updateLibrarySyncProgress(progress: PhoneBluetoothSyncProgress) {
         val percent = progress.percent.coerceIn(0, 100)
-        sessionState.value = sessionState.value.copy(
-            message = progress.stage.displayName,
-            error = null,
-            syncProgress = MainSyncProgressUi(
+        updateSmoothedSyncProgress(
+            MainSyncProgressUi(
                 phase = progress.stage.displayName,
                 percent = percent,
                 bytesTransferred = progress.bytesTransferred,
@@ -670,10 +751,8 @@ class MainViewModel(
     private fun updateBluetoothProbeProgress(completed: Int, total: Int) {
         val safeTotal = total.coerceAtLeast(1)
         val percent = ((completed.coerceIn(0, safeTotal).toFloat() / safeTotal.toFloat()) * 100).toInt()
-        sessionState.value = sessionState.value.copy(
-            message = "探测手表中（$completed/$total）",
-            error = null,
-            syncProgress = MainSyncProgressUi(
+        updateSmoothedSyncProgress(
+            MainSyncProgressUi(
                 phase = "探测手表中",
                 percent = percent.coerceIn(0, 100)
             )
@@ -686,7 +765,97 @@ class MainViewModel(
             address = address
         )
 
+    private fun beginSmoothedSyncProgress(progress: MainSyncProgressUi) {
+        smoothedSyncProgressJob?.cancel()
+        smoothedSyncProgressJob = null
+        smoothedSyncProgressTarget = progress
+        sessionState.value = sessionState.value.copy(
+            message = progress.phase,
+            syncStatusMessage = progress.phase,
+            syncStatusError = null,
+            error = null,
+            syncProgress = progress
+        )
+    }
+
+    private fun updateSmoothedSyncProgress(progress: MainSyncProgressUi) {
+        val visible = sessionState.value.syncProgress
+        val visiblePercent = visible?.percent ?: progress.percent
+        val targetPercent = maxOf(progress.percent, visiblePercent).coerceIn(0, 100)
+        smoothedSyncProgressTarget = progress.copy(percent = targetPercent)
+        sessionState.value = sessionState.value.copy(
+            message = progress.phase,
+            syncStatusMessage = progress.phase,
+            syncStatusError = null,
+            error = null
+        )
+        if (visible == null) {
+            sessionState.value = sessionState.value.copy(
+                syncProgress = progress.copy(percent = targetPercent)
+            )
+            return
+        }
+        if (targetPercent <= visiblePercent) {
+            sessionState.value = sessionState.value.copy(
+                syncProgress = progress.copy(percent = visiblePercent.coerceIn(0, 100))
+            )
+            return
+        }
+        if (smoothedSyncProgressJob?.isActive == true) return
+        smoothedSyncProgressJob = viewModelScope.launch {
+            while (true) {
+                val target = smoothedSyncProgressTarget ?: break
+                val currentPercent = sessionState.value.syncProgress?.percent ?: target.percent
+                if (currentPercent >= target.percent) break
+                val gap = target.percent - currentPercent
+                val step = when {
+                    gap >= 24 -> 3
+                    gap >= 8 -> 2
+                    else -> 1
+                }
+                val nextPercent = (currentPercent + step).coerceAtMost(target.percent)
+                sessionState.value = sessionState.value.copy(
+                    message = target.phase,
+                    syncStatusMessage = target.phase,
+                    syncStatusError = null,
+                    error = null,
+                    syncProgress = target.copy(percent = nextPercent)
+                )
+                delay(SMOOTH_PROGRESS_TICK_MS)
+            }
+        }
+    }
+
+    private suspend fun completeSmoothedSyncProgress() {
+        val current = sessionState.value.syncProgress ?: MainSyncProgressUi(phase = "同步完成", percent = 100)
+        updateSmoothedSyncProgress(current.copy(phase = "同步完成", percent = 100))
+        var ticks = 0
+        while ((sessionState.value.syncProgress?.percent ?: 100) < 100 && ticks < SMOOTH_PROGRESS_FINISH_MAX_TICKS) {
+            delay(SMOOTH_PROGRESS_TICK_MS)
+            ticks += 1
+        }
+        sessionState.value.syncProgress?.takeIf { it.percent < 100 }?.let { progress ->
+            sessionState.value = sessionState.value.copy(syncProgress = progress.copy(percent = 100))
+        }
+        delay(SMOOTH_PROGRESS_COMPLETE_HOLD_MS)
+        clearSmoothedSyncProgress()
+    }
+
+    private fun clearSmoothedSyncProgress() {
+        smoothedSyncProgressJob?.cancel()
+        smoothedSyncProgressJob = null
+        smoothedSyncProgressTarget = null
+        sessionState.value = sessionState.value.copy(syncProgress = null)
+    }
+
     override fun onCleared() {
         super.onCleared()
+        smoothedSyncProgressJob?.cancel()
+    }
+
+    private companion object {
+        private const val SMOOTH_PROGRESS_TICK_MS = 80L
+        private const val SMOOTH_PROGRESS_COMPLETE_HOLD_MS = 180L
+        private const val SMOOTH_PROGRESS_FINISH_MAX_TICKS = 18
     }
 }

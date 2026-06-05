@@ -418,10 +418,7 @@ object LibrarySyncPayload {
                     remote.deleted != local.deleted ||
                     remote.readingProgress.isMeaningfullyAheadOf(local.readingProgress)
             }
-            val hasReusableLocalBody = local != null &&
-                local.bodyAvailable &&
-                remote.bodyHash == local.bodyHash &&
-                local.chunkHashes.isNotEmpty()
+            val hasReusableLocalBody = local?.canReuseLocalBodyFor(remote) == true
             val shouldRequestMetadataOnlyBody = remote.shouldRequestMetadataOnlyBody(
                 supportsMetadataOnlyArticles = supportsMetadataOnlyArticles
             )
@@ -434,7 +431,7 @@ object LibrarySyncPayload {
                 !hasReusableLocalBody &&
                 !shouldRequestMetadataOnlyBody
             if (!needsMetadata && !needsBody) return@mapNotNull null
-            val localHashes = if (local?.bodyAvailable == true) {
+            val localHashes = if (local?.canReuseLocalChunksFor(remote) == true) {
                 local.chunkHashes.toSet()
             } else {
                 emptySet()
@@ -458,7 +455,36 @@ object LibrarySyncPayload {
     private fun ArticleSyncManifestEntry.shouldRequestMetadataOnlyBody(
         supportsMetadataOnlyArticles: Boolean
     ): Boolean {
-        return supportsMetadataOnlyArticles && !deleted && bodyAvailable
+        return supportsMetadataOnlyArticles &&
+            !deleted &&
+            bodyAvailable &&
+            bodySyncMode == ARTICLE_BODY_SYNC_MODE_SAVED
+    }
+
+    private fun ArticleSyncManifestEntry.canReuseLocalBodyFor(
+        remote: ArticleSyncManifestEntry
+    ): Boolean {
+        return !deleted &&
+            bodyAvailable &&
+            remote.bodyAvailable &&
+            bodyHash.isNotBlank() &&
+            bodyHash == remote.bodyHash &&
+            bodyByteCount == remote.bodyByteCount &&
+            chunkSize > 0 &&
+            chunkSize == remote.chunkSize &&
+            chunkHashes.isNotEmpty() &&
+            chunkHashes == remote.chunkHashes
+    }
+
+    private fun ArticleSyncManifestEntry.canReuseLocalChunksFor(
+        remote: ArticleSyncManifestEntry
+    ): Boolean {
+        return !deleted &&
+            bodyAvailable &&
+            remote.bodyAvailable &&
+            chunkSize > 0 &&
+            chunkSize == remote.chunkSize &&
+            chunkHashes.isNotEmpty()
     }
 
     fun parseBodyRequests(payload: JSONObject): List<ArticleBodyRequest> {
@@ -923,11 +949,7 @@ object LibrarySyncPayload {
     private fun PhoneArticleEntity.toChunkedJsonItemSequence(request: ArticleBodyRequest?): Sequence<JSONObject> = sequence {
         val article = this@toChunkedJsonItemSequence
         val metadata = ArticleSyncBody.currentMetadataFor(article)
-        val bodyRequest = request ?: ArticleBodyRequest(
-            articleId = article.articleId,
-            bodyHash = metadata.bodyHash,
-            chunkIndexes = metadata.chunkHashes.indices.toList()
-        )
+        val bodyRequest = request.resolvedBodyRequestFor(article, metadata)
         val payload = ArticleSyncBody.payloadForRequest(article, bodyRequest, metadata)
         if (payload.chunks.isEmpty()) {
             yield(article.toChunkedJson(payload, emptyList()))
@@ -936,6 +958,30 @@ object LibrarySyncPayload {
                 yield(article.toChunkedJson(payload, listOf(chunk)))
             }
         }
+    }
+
+    private fun ArticleBodyRequest?.resolvedBodyRequestFor(
+        article: PhoneArticleEntity,
+        metadata: ArticleBodyMetadata
+    ): ArticleBodyRequest {
+        if (this == null) {
+            return ArticleBodyRequest(
+                articleId = article.articleId,
+                bodyHash = metadata.bodyHash,
+                chunkIndexes = metadata.chunkHashes.indices.toList()
+            )
+        }
+        if (
+            !metadataOnly &&
+            chunkIndexes.isEmpty() &&
+            article.bodySyncModeForSync() == ARTICLE_BODY_SYNC_MODE_FULL
+        ) {
+            return copy(
+                bodyHash = bodyHash.ifBlank { metadata.bodyHash },
+                chunkIndexes = metadata.chunkHashes.indices.toList()
+            )
+        }
+        return this
     }
 
     private fun PhoneArticleEntity.toChunkedJson(

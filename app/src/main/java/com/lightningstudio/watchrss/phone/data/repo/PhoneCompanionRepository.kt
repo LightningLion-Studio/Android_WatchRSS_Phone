@@ -1165,7 +1165,11 @@ class PhoneCompanionRepository(
             remoteDeletedNewer -> remote.deleted
             else -> local.deleted
         }
-        val deletedAt = max(local.deletedAt, remote.deletedAt)
+        val deletedAt = if (deleted) {
+            max(local.deletedAt, remote.deletedAt)
+        } else {
+            0L
+        }
         return metadata.copy(
             independentSaved = independentSaved,
             independentChangedAt = independentChangedAt,
@@ -1351,7 +1355,7 @@ class PhoneCompanionRepository(
 
     private fun PhoneArticleEntity.markDeletedIfEmpty(timestamp: Long): PhoneArticleEntity {
         if (favoriteSaved || watchLaterSaved || independentSaved || !rssSourceUrl.isNullOrBlank()) {
-            return copy(deleted = false)
+            return copy(deleted = false, deletedAt = 0L)
         }
         return copy(deleted = true, deletedAt = timestamp)
     }

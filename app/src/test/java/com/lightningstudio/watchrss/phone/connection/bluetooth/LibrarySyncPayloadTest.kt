@@ -338,6 +338,35 @@ class LibrarySyncPayloadTest {
     }
 
     @Test
+    fun chunkedBodyRequest_requestsFullBodyWhenLocalManifestIsDeletedTombstone() {
+        val remoteManifest = testArticle(
+            articleId = "article-restored",
+            contentText = "正文"
+        ).toManifestEntry().copy(
+            bodySyncMode = ARTICLE_BODY_SYNC_MODE_FULL,
+            updatedAt = 100L,
+            independentChangedAt = 100L,
+            deleted = false,
+            deletedAt = 50L
+        )
+        val localManifest = remoteManifest.copy(
+            updatedAt = 50L,
+            independentChangedAt = 50L,
+            deleted = true,
+            deletedAt = 50L
+        )
+
+        val requests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+            localManifest = listOf(localManifest),
+            remoteManifest = listOf(remoteManifest),
+            supportsMetadataOnlyArticles = true
+        )
+
+        assertEquals(remoteManifest.chunkHashes.indices.toList(), requests.single().chunkIndexes)
+        assertEquals(false, requests.single().metadataOnly)
+    }
+
+    @Test
     fun chunkedBodyRequest_doesNotRequestUnavailableRemoteBody() {
         val article = testArticle(
             articleId = "article-1",
@@ -495,7 +524,7 @@ class LibrarySyncPayloadTest {
     }
 
     @Test
-    fun chunkedBodyRequest_requestsMetadataOnlyForFullBodyWhenPeerSupportsIt() {
+    fun chunkedBodyRequest_requestsChunksForFullBodyWhenPeerSupportsMetadataOnly() {
         val remoteManifest = testArticle(
             articleId = "article-full",
             contentText = "正文"
@@ -507,8 +536,8 @@ class LibrarySyncPayloadTest {
             supportsMetadataOnlyArticles = true
         )
 
-        assertEquals(emptyList<Int>(), requests.single().chunkIndexes)
-        assertTrue(requests.single().metadataOnly)
+        assertEquals(remoteManifest.chunkHashes.indices.toList(), requests.single().chunkIndexes)
+        assertEquals(false, requests.single().metadataOnly)
     }
 
     @Test
@@ -556,6 +585,38 @@ class LibrarySyncPayloadTest {
 
         assertEquals(emptyList<Int>(), parsed.chunks.map { it.index })
         assertTrue(parsed.metadataOnly)
+    }
+
+    @Test
+    fun chunkedBodyRequest_sendsFullBodyForFullArticleWhenPeerRequestsReusableBody() {
+        val article = testArticle(
+            articleId = "full-body-reuse",
+            contentText = "正文".repeat(4096)
+        ).copy(independentSaved = true)
+        val metadata = ArticleSyncBody.metadataFor(article)
+        val frames = LibrarySyncPayload.buildChunkedArticleRequestFrames(
+            deviceId = "phone",
+            articles = listOf(article),
+            articleRequests = listOf(
+                ArticleBodyRequest(
+                    articleId = article.articleId,
+                    bodyHash = metadata.bodyHash,
+                    chunkIndexes = emptyList(),
+                    metadataOnly = false
+                )
+            ),
+            bodyRequests = emptyList(),
+            useBatches = true
+        )
+
+        val parsed = LibrarySyncPayload.parseChunkedArticles(
+            LibrarySyncPayload.combineArticlePayloads(frames)
+        ).single()
+        val rebuilt = ArticleSyncBody.rebuildBody(null, parsed)
+
+        assertEquals(false, parsed.metadataOnly)
+        assertEquals(metadata.chunkHashes.indices.toList(), parsed.chunks.map { it.index })
+        assertEquals(article.contentText, rebuilt.second)
     }
 
     @Test

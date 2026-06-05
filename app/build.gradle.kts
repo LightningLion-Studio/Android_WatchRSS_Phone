@@ -22,9 +22,9 @@ android {
     defaultConfig {
         applicationId = "com.lightningstudio.watchrss.phone"
         minSdk = 30
-        targetSdk = 34
-        versionCode = 7
-        versionName = "0.0.1-2"
+        targetSdk = 36
+        versionCode = 9
+        versionName = "0.1.0-1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

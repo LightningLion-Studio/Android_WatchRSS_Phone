@@ -109,12 +109,6 @@ class RssActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        onBackPressedDispatcher.addCallback(object : androidx.activity.OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                moveTaskToBack(true)
-            }
-        })
-
         setContent {
             WatchRssPhoneTheme {
                 val uiState by viewModel.uiState.collectAsState()

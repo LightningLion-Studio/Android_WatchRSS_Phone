@@ -700,6 +700,40 @@ class PhoneCompanionRepositoryTest {
         assertEquals(false, updated.deleted)
         assertEquals("手表保留", updated.title)
         assertTrue(updated.favoriteSaved)
+        assertEquals(0L, updated.deletedAt)
+    }
+
+    @Test
+    fun mergeArticlesFromSync_clearsDeletedAtWhenLatestStateRestoresArticle() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val localDeleted = article(
+            id = "article-1",
+            title = "本地已删",
+            deleted = true,
+            deletedAt = 100L
+        )
+        val remoteRestored = article(
+            id = "article-1",
+            title = "手机恢复",
+            independentSaved = true,
+            independentChangedAt = 120L,
+            deleted = false,
+            deletedAt = 100L
+        ).copy(sourceDeviceId = "watch")
+        articleDao.items = listOf(localDeleted)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        repository.mergeArticlesFromSync(incoming = listOf(remoteRestored))
+
+        val updated = articleDao.items.single()
+        assertEquals(false, updated.deleted)
+        assertTrue(updated.independentSaved)
+        assertEquals(0L, updated.deletedAt)
     }
 
     @Test

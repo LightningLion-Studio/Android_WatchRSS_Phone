@@ -5,6 +5,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.InputStreamReader
+import java.io.Reader
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.zip.GZIPInputStream
@@ -260,9 +263,40 @@ object ArticleSyncBody {
     }
 
     private fun decodeBody(bytes: ByteArray): Pair<String?, String> {
-        val rawBody = runCatching { gunzip(bytes) }.getOrElse { bytes }
-        val json = JSONObject(rawBody.toString(Charsets.UTF_8))
-        return json.optString("contentHtml").ifBlank { null } to json.optString("contentText")
+        val input = runCatching<InputStream> {
+            GZIPInputStream(ByteArrayInputStream(bytes))
+        }.getOrElse {
+            ByteArrayInputStream(bytes)
+        }
+        return input.use { stream ->
+            decodeBodyJson(InputStreamReader(stream, Charsets.UTF_8))
+        }
+    }
+
+    private fun decodeBodyJson(reader: Reader): Pair<String?, String> {
+        val cursor = BodyJsonCursor(reader)
+        var contentHtml: String? = null
+        var contentText = ""
+        cursor.expectObjectStart()
+        var firstField = true
+        while (true) {
+            val marker = cursor.nextNonWhitespace()
+            if (marker == -1 || marker.toChar() == '}') break
+            if (!firstField) {
+                require(marker.toChar() == ',') { "同步正文JSON格式错误" }
+            } else {
+                cursor.unread(marker)
+            }
+            val name = cursor.readName()
+            cursor.expect(':')
+            val value = cursor.readNullableString()
+            when (name) {
+                "contentHtml" -> contentHtml = value?.ifBlank { null }
+                "contentText" -> contentText = value.orEmpty()
+            }
+            firstField = false
+        }
+        return contentHtml to contentText
     }
 
     private fun gzip(bytes: ByteArray): ByteArray {
@@ -273,8 +307,107 @@ object ArticleSyncBody {
         return out.toByteArray()
     }
 
-    private fun gunzip(bytes: ByteArray): ByteArray =
-        GZIPInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
+    private class BodyJsonCursor(
+        private val reader: Reader
+    ) {
+        private var buffered: Int = NO_BUFFER
+
+        fun expectObjectStart() {
+            expect('{')
+        }
+
+        fun expect(expected: Char) {
+            val actual = nextNonWhitespace()
+            require(actual == expected.code) { "同步正文JSON格式错误" }
+        }
+
+        fun readName(): String {
+            val marker = nextNonWhitespace()
+            require(marker == '"'.code) { "同步正文JSON字段格式错误" }
+            return readStringBody()
+        }
+
+        fun readNullableString(): String? {
+            return when (val marker = nextNonWhitespace()) {
+                '"'.code -> readStringBody()
+                'n'.code -> {
+                    expectLiteral("ull")
+                    null
+                }
+                else -> error("同步正文JSON值格式错误：$marker")
+            }
+        }
+
+        fun nextNonWhitespace(): Int {
+            while (true) {
+                val char = read()
+                if (char == -1 || !char.toChar().isWhitespace()) return char
+            }
+        }
+
+        fun unread(char: Int) {
+            buffered = char
+        }
+
+        private fun readStringBody(): String {
+            val builder = StringBuilder()
+            while (true) {
+                val char = read()
+                require(char != -1) { "同步正文JSON字符串未结束" }
+                when (char.toChar()) {
+                    '"' -> return builder.toString()
+                    '\\' -> builder.append(readEscapedChar())
+                    else -> builder.append(char.toChar())
+                }
+            }
+        }
+
+        private fun readEscapedChar(): Char {
+            val escaped = read()
+            require(escaped != -1) { "同步正文JSON转义未结束" }
+            return when (escaped.toChar()) {
+                '"' -> '"'
+                '\\' -> '\\'
+                '/' -> '/'
+                'b' -> '\b'
+                'f' -> '\u000C'
+                'n' -> '\n'
+                'r' -> '\r'
+                't' -> '\t'
+                'u' -> readUnicodeEscape()
+                else -> error("同步正文JSON转义格式错误：${escaped.toChar()}")
+            }
+        }
+
+        private fun readUnicodeEscape(): Char {
+            var value = 0
+            repeat(4) {
+                val char = read()
+                require(char != -1) { "同步正文JSON Unicode转义未结束" }
+                value = (value shl 4) + char.toChar().digitToInt(16)
+            }
+            return value.toChar()
+        }
+
+        private fun expectLiteral(value: String) {
+            value.forEach { expected ->
+                require(read() == expected.code) { "同步正文JSON字面量格式错误" }
+            }
+        }
+
+        private fun read(): Int {
+            if (buffered != NO_BUFFER) {
+                val char = buffered
+                buffered = NO_BUFFER
+                return char
+            }
+            return reader.read()
+        }
+
+        private companion object {
+            const val NO_BUFFER = -2
+        }
+    }
 
     private fun chunkHashesFor(bytes: ByteArray): List<String> {
         val chunkCount = chunkCountFor(bytes)

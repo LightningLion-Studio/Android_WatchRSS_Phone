@@ -59,7 +59,7 @@ class HomeActivity : ComponentActivity() {
     private val exportBluetoothLogLauncher =
         registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
             if (uri == null) {
-                viewModel.showMessage("已取消导出蓝牙日志")
+                viewModel.showSyncStatusMessage("已取消导出蓝牙日志")
                 return@registerForActivityResult
             }
             lifecycleScope.launch {
@@ -69,10 +69,10 @@ class HomeActivity : ComponentActivity() {
                         .bluetoothDebugLog
                         .exportTo(contentResolver, uri)
                 }.onSuccess { bytes ->
-                    viewModel.showMessage("蓝牙日志已导出：$bytes 字节")
+                    viewModel.showSyncStatusMessage("蓝牙日志已导出：$bytes 字节")
                 }.onFailure { throwable ->
                     Log.e(TAG, "Failed to export bluetooth log", throwable)
-                    viewModel.showError("蓝牙日志导出失败：${throwable.message ?: "未知错误"}")
+                    viewModel.showSyncStatusError("蓝牙日志导出失败：${throwable.message ?: "未知错误"}")
                 }
             }
         }
@@ -115,12 +115,6 @@ class HomeActivity : ComponentActivity() {
                 Log.w(TAG, "Failed to resolve version info: ${throwable.message}")
             }
         Log.i(TAG, "===================================")
-
-        onBackPressedDispatcher.addCallback(object : androidx.activity.OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                moveTaskToBack(true)
-            }
-        })
 
         setContent {
             WatchRssPhoneTheme {

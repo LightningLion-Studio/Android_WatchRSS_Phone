@@ -130,12 +130,6 @@ class ListPageActivity : ComponentActivity() {
         val pageType = intent.getStringExtra(EXTRA_PAGE_TYPE)?.let { PageType.valueOf(it) } ?: return finish()
         val sourceUrl = intent.getStringExtra(EXTRA_SOURCE_URL)
 
-        onBackPressedDispatcher.addCallback(object : androidx.activity.OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                moveTaskToBack(true)
-            }
-        })
-
         setContent {
             WatchRssPhoneTheme {
                 val uiState by viewModel.uiState.collectAsState()

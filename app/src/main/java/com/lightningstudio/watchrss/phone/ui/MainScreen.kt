@@ -1,7 +1,16 @@
 package com.lightningstudio.watchrss.phone.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
@@ -43,7 +52,6 @@ import androidx.compose.material.icons.filled.RssFeed
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.VerticalAlignTop
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -56,6 +64,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -70,7 +79,9 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -96,6 +107,9 @@ import com.lightningstudio.watchrss.phone.viewmodel.MainSyncProgressUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainUiState
 import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptKind
 import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptUi
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 private enum class MainPage {
@@ -123,6 +137,14 @@ private const val CONTENT_CHANNEL_FAVORITES = "virtual:favorites"
 private const val CONTENT_CHANNEL_WATCH_LATER = "virtual:watch_later"
 private const val CONTENT_CHANNEL_INDEPENDENT = "virtual:independent"
 private const val CONTENT_CHANNEL_IMPORTED_TEXT = "virtual:imported_text"
+private const val CHANNEL_TRANSITION_MS = 260
+private const val CHANNEL_PREDICTIVE_EXIT_MS = 180
+private const val CHANNEL_PREDICTIVE_EXIT_PROGRESS = 2f
+private const val TAB_PREDICTIVE_EXIT_MS = 180
+private const val TAB_PREDICTIVE_EXIT_PROGRESS = 1f
+
+@Composable
+private fun defaultMainElevatedCardColors() = CardDefaults.elevatedCardColors()
 
 private data class MainContentChannel(
     val key: String,
@@ -204,6 +226,15 @@ fun MainScreen(
     onDismissMessage: () -> Unit
 ) {
     var selectedContentChannelKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var lastContentChannelKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var channelReturnPageName by rememberSaveable { mutableStateOf(MainPage.RSS.name) }
+    var channelBackProgress by remember { mutableFloatStateOf(0f) }
+    var tabBackProgress by remember { mutableFloatStateOf(0f) }
+    var tabBackActive by remember { mutableStateOf(false) }
+    var channelTabSwitchDestinationName by remember { mutableStateOf<String?>(null) }
+    var channelTabSwitchProgress by remember { mutableFloatStateOf(0f) }
+    var channelTabSwitchDirection by remember { mutableFloatStateOf(1f) }
+    var suppressNextChannelExit by remember { mutableStateOf(false) }
     var urlDialogMode by remember { mutableStateOf<UrlDialogMode?>(null) }
     val pagerState = rememberPagerState(initialPage = MainPage.DASHBOARD.topLevelIndex()) {
         TopLevelMainPages.size
@@ -217,15 +248,34 @@ fun MainScreen(
     val contentChannels = remember(uiState, articlesBySource) {
         buildContentChannels(uiState, articlesBySource)
     }
+    val importedContentChannelKey = contentChannels.firstOrNull { channel ->
+        channel.source?.url?.let(ImportedContentIds::isImportedTextSourceUrl) == true
+    }?.key ?: CONTENT_CHANNEL_IMPORTED_TEXT
     val selectedContentChannel = selectedContentChannelKey?.let { key ->
+        contentChannels.firstOrNull { it.key == key }
+    }
+    LaunchedEffect(selectedContentChannelKey) {
+        selectedContentChannelKey?.let { key ->
+            lastContentChannelKey = key
+            channelBackProgress = 0f
+        }
+    }
+    val animatedContentChannel = (selectedContentChannelKey ?: lastContentChannelKey)?.let { key ->
         contentChannels.firstOrNull { it.key == key }
     }
     val selectedSource = selectedContentChannel?.source
     val currentTopLevelPage = TopLevelMainPages.getOrElse(pagerState.currentPage) {
         MainPage.DASHBOARD
     }
+    val channelReturnPage = runCatching { MainPage.valueOf(channelReturnPageName) }
+        .getOrDefault(MainPage.RSS)
+        .takeIf { it in TopLevelMainPages }
+        ?: MainPage.RSS
+    val channelTabSwitchDestination = channelTabSwitchDestinationName
+        ?.let { runCatching { MainPage.valueOf(it) }.getOrNull() }
+        ?.takeIf { it in TopLevelMainPages }
     val page = if (selectedContentChannel != null) MainPage.CHANNEL else currentTopLevelPage
-    val selectedBottomPage = if (page == MainPage.CHANNEL) MainPage.RSS else currentTopLevelPage
+    val selectedBottomPage = if (page == MainPage.CHANNEL) channelReturnPage else currentTopLevelPage
 
     fun navigateToTopLevelPage(destination: MainPage) {
         selectedContentChannelKey = null
@@ -234,18 +284,101 @@ fun MainScreen(
         }
     }
 
-    fun navigateToContentChannel(channelKey: String) {
-        selectedContentChannelKey = channelKey
+    fun navigateToContentChannel(channelKey: String, returnPage: MainPage = currentTopLevelPage) {
+        val resolvedChannelKey = when (channelKey) {
+            CONTENT_CHANNEL_IMPORTED_TEXT -> importedContentChannelKey
+            else -> channelKey
+        }
+        channelReturnPageName = returnPage.name
+        selectedContentChannelKey = resolvedChannelKey
+    }
+
+    fun switchChannelToTopLevelPage(destination: MainPage) {
+        if (channelTabSwitchDestinationName != null || destination !in TopLevelMainPages) return
+        val sourceIndex = channelReturnPage.topLevelIndex()
+        val destinationIndex = destination.topLevelIndex()
+        if (destinationIndex == sourceIndex) {
+            navigateToTopLevelPage(destination)
+            return
+        }
+        channelTabSwitchDestinationName = destination.name
+        channelTabSwitchDirection = if (destinationIndex > sourceIndex) 1f else -1f
+        channelTabSwitchProgress = 0f
         coroutineScope.launch {
-            pagerState.animateScrollToPage(MainPage.RSS.topLevelIndex())
+            animate(
+                initialValue = 0f,
+                targetValue = 1f,
+                animationSpec = tween(CHANNEL_TRANSITION_MS)
+            ) { value, _ ->
+                channelTabSwitchProgress = value
+            }
+            suppressNextChannelExit = true
+            selectedContentChannelKey = null
+            pagerState.scrollToPage(destinationIndex)
+            delay(32L)
+            channelTabSwitchDestinationName = null
+            channelTabSwitchProgress = 0f
+            suppressNextChannelExit = false
         }
     }
 
-    BackHandler(enabled = page != MainPage.DASHBOARD) {
-        if (page == MainPage.CHANNEL) {
-            navigateToTopLevelPage(MainPage.RSS)
-        } else {
-            navigateToTopLevelPage(MainPage.DASHBOARD)
+    PredictiveBackHandler(enabled = page == MainPage.CHANNEL) { backEvents ->
+        try {
+            backEvents.collect { backEvent ->
+                channelBackProgress = backEvent.progress.coerceIn(0f, 1f)
+            }
+            animate(
+                initialValue = channelBackProgress,
+                targetValue = CHANNEL_PREDICTIVE_EXIT_PROGRESS,
+                animationSpec = tween(CHANNEL_PREDICTIVE_EXIT_MS)
+            ) { value, _ ->
+                channelBackProgress = value
+            }
+            selectedContentChannelKey = null
+            coroutineScope.launch {
+                pagerState.animateScrollToPage(channelReturnPage.topLevelIndex())
+            }
+            delay(CHANNEL_TRANSITION_MS.toLong() + 32L)
+            if (selectedContentChannelKey == null) {
+                channelBackProgress = 0f
+            }
+        } catch (exception: CancellationException) {
+            animate(
+                initialValue = channelBackProgress,
+                targetValue = 0f,
+                animationSpec = tween(CHANNEL_TRANSITION_MS)
+            ) { value, _ ->
+                channelBackProgress = value
+            }
+        }
+    }
+
+    PredictiveBackHandler(enabled = page != MainPage.DASHBOARD && page != MainPage.CHANNEL) { backEvents ->
+        try {
+            tabBackActive = true
+            tabBackProgress = 0f
+            backEvents.collect { backEvent ->
+                tabBackProgress = backEvent.progress.coerceIn(0f, 1f)
+            }
+            animate(
+                initialValue = tabBackProgress,
+                targetValue = TAB_PREDICTIVE_EXIT_PROGRESS,
+                animationSpec = tween(TAB_PREDICTIVE_EXIT_MS)
+            ) { value, _ ->
+                tabBackProgress = value
+            }
+            pagerState.scrollToPage(MainPage.DASHBOARD.topLevelIndex())
+            tabBackActive = false
+            tabBackProgress = 0f
+        } catch (exception: CancellationException) {
+            animate(
+                initialValue = tabBackProgress,
+                targetValue = 0f,
+                animationSpec = tween(CHANNEL_TRANSITION_MS)
+            ) { value, _ ->
+                tabBackProgress = value
+            }
+            tabBackActive = false
         }
     }
 
@@ -259,7 +392,7 @@ fun MainScreen(
                     selectedSource != null &&
                     selectedSource.url !in uiState.refreshingRssSourceUrls &&
                     !uiState.isBusy,
-                onBack = { navigateToTopLevelPage(MainPage.RSS) },
+                onBack = { navigateToTopLevelPage(channelReturnPage) },
                 onRefreshAllRssSources = onRefreshAllRssSources,
                 onRefreshSelectedSource = {
                     if (selectedContentChannel?.canRefresh == true) {
@@ -272,7 +405,13 @@ fun MainScreen(
         bottomBar = {
             MainNavigationBar(
                 selectedPage = selectedBottomPage,
-                onSelectPage = ::navigateToTopLevelPage
+                onSelectPage = { destination ->
+                    if (page == MainPage.CHANNEL && destination != channelReturnPage) {
+                        switchChannelToTopLevelPage(destination)
+                    } else {
+                        navigateToTopLevelPage(destination)
+                    }
+                }
             )
         },
         floatingActionButton = {
@@ -292,29 +431,74 @@ fun MainScreen(
             )
         }
     ) { contentPadding ->
-        if (page == MainPage.CHANNEL) {
-            ChannelPage(
-                channel = selectedContentChannel,
-                isRefreshing = selectedSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
-                contentPadding = contentPadding,
-                onRefreshSource = {
-                    if (selectedContentChannel?.canRefresh == true) {
-                        selectedSource?.let(onRefreshRssSource)
+        Box(modifier = Modifier.fillMaxSize()) {
+            channelTabSwitchDestination?.let { destination ->
+                OpaquePageLayer(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .channelTabSwitchTargetPreview(
+                            progress = channelTabSwitchProgress,
+                            direction = channelTabSwitchDirection
+                        )
+                        .zIndex(0.5f)
+                ) {
+                    when (destination) {
+                        MainPage.DASHBOARD -> DashboardPage(
+                            uiState = uiState,
+                            articlesBySource = articlesBySource,
+                            contentPadding = contentPadding,
+                            onSyncLibrary = onSyncLibrary,
+                            onExportBluetoothLog = onExportBluetoothLog,
+                            onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
+                            onOpenFavorites = { navigateToContentChannel(CONTENT_CHANNEL_FAVORITES) },
+                            onOpenWatchLater = { navigateToContentChannel(CONTENT_CHANNEL_WATCH_LATER) },
+                            onOpenIndependent = { navigateToContentChannel(CONTENT_CHANNEL_INDEPENDENT) },
+                            onOpenImportedContent = { navigateToContentChannel(CONTENT_CHANNEL_IMPORTED_TEXT) },
+                            onDismissMessage = onDismissMessage
+                        )
+
+                        MainPage.RSS -> ContentPage(
+                            uiState = uiState,
+                            channels = contentChannels,
+                            contentPadding = contentPadding,
+                            onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.RSS) },
+                            onMoveToTop = onMoveRssSourceToTop,
+                            onReorderContentChannels = onReorderContentChannels,
+                            onTogglePinned = onToggleRssSourcePinned,
+                            onDelete = onDeleteRssSource,
+                            onRefreshAllRssSources = onRefreshAllRssSources
+                        )
+
+                        MainPage.IMPORTS -> ImportsPage(
+                            uiState = uiState,
+                            contentPadding = contentPadding,
+                            onUrlChange = onUrlChange,
+                            onImportArticle = onImportArticle,
+                            onImportFile = onImportFile,
+                            onAddRssSource = onAddRssSource,
+                            onClearImportedContent = onClearImportedContent,
+                            onDismissMessage = onDismissMessage,
+                            recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
+                            onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.IMPORTS) },
+                            onOpenArticle = onOpenArticle,
+                            onOpenOriginalLink = { uriHandler.openUri(it) },
+                            onToggleFavorite = onToggleFavorite,
+                            onToggleWatchLater = onToggleWatchLater,
+                            onDeleteArticle = onDeleteArticle
+                        )
+
+                        MainPage.CHANNEL -> Unit
                     }
-                },
-                onOpenArticle = onOpenArticle,
-                onOpenOriginalLink = { uriHandler.openUri(it) },
-                onToggleFavorite = onToggleFavorite,
-                onToggleWatchLater = onToggleWatchLater,
-                onDeleteArticle = onDeleteArticle
-            )
-        } else {
-            HorizontalPager(
-                state = pagerState,
-                modifier = Modifier.fillMaxSize()
-            ) { pageIndex ->
-                when (TopLevelMainPages[pageIndex]) {
-                    MainPage.DASHBOARD -> DashboardPage(
+                }
+            }
+
+            if (tabBackActive) {
+                OpaquePageLayer(
+                    modifier = Modifier
+                        .tabPredictiveBackTargetPreview(tabBackProgress)
+                        .zIndex(0.5f)
+                ) {
+                    DashboardPage(
                         uiState = uiState,
                         articlesBySource = articlesBySource,
                         contentPadding = contentPadding,
@@ -327,12 +511,41 @@ fun MainScreen(
                         onOpenImportedContent = { navigateToContentChannel(CONTENT_CHANNEL_IMPORTED_TEXT) },
                         onDismissMessage = onDismissMessage
                     )
+                }
+            }
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(
+                        if (tabBackActive) {
+                            Modifier.tabPredictiveBackPreview(tabBackProgress)
+                        } else {
+                            Modifier
+                        }
+                    )
+                    .zIndex(if (tabBackActive) 1f else 0f)
+            ) { pageIndex ->
+                when (TopLevelMainPages[pageIndex]) {
+                    MainPage.DASHBOARD -> DashboardPage(
+                        uiState = uiState,
+                        articlesBySource = articlesBySource,
+                        contentPadding = contentPadding,
+                        onSyncLibrary = onSyncLibrary,
+                        onExportBluetoothLog = onExportBluetoothLog,
+                        onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
+                        onOpenFavorites = { navigateToContentChannel(CONTENT_CHANNEL_FAVORITES, MainPage.DASHBOARD) },
+                        onOpenWatchLater = { navigateToContentChannel(CONTENT_CHANNEL_WATCH_LATER, MainPage.DASHBOARD) },
+                        onOpenIndependent = { navigateToContentChannel(CONTENT_CHANNEL_INDEPENDENT, MainPage.DASHBOARD) },
+                        onOpenImportedContent = { navigateToContentChannel(CONTENT_CHANNEL_IMPORTED_TEXT, MainPage.DASHBOARD) },
+                        onDismissMessage = onDismissMessage
+                    )
 
                     MainPage.RSS -> ContentPage(
                         uiState = uiState,
                         channels = contentChannels,
                         contentPadding = contentPadding,
-                        onOpenChannel = { channel -> selectedContentChannelKey = channel.key },
+                        onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.RSS) },
                         onMoveToTop = onMoveRssSourceToTop,
                         onReorderContentChannels = onReorderContentChannels,
                         onTogglePinned = onToggleRssSourcePinned,
@@ -348,8 +561,9 @@ fun MainScreen(
                         onImportFile = onImportFile,
                         onAddRssSource = onAddRssSource,
                         onClearImportedContent = onClearImportedContent,
+                        onDismissMessage = onDismissMessage,
                         recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
-                        onOpenChannel = { channel -> selectedContentChannelKey = channel.key },
+                        onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.IMPORTS) },
                         onOpenArticle = onOpenArticle,
                         onOpenOriginalLink = { uriHandler.openUri(it) },
                         onToggleFavorite = onToggleFavorite,
@@ -359,6 +573,54 @@ fun MainScreen(
 
                     MainPage.CHANNEL -> Unit
                 }
+            }
+
+            AnimatedVisibility(
+                visible = page == MainPage.CHANNEL,
+                enter = slideInHorizontally(
+                    animationSpec = tween(CHANNEL_TRANSITION_MS)
+                ) { fullWidth -> fullWidth / 4 } + fadeIn(
+                    animationSpec = tween(CHANNEL_TRANSITION_MS)
+                ),
+                exit = if (suppressNextChannelExit) {
+                    fadeOut(animationSpec = tween(0))
+                } else {
+                    slideOutHorizontally(
+                        animationSpec = tween(CHANNEL_TRANSITION_MS)
+                    ) { fullWidth -> fullWidth / 4 } + fadeOut(
+                        animationSpec = tween(CHANNEL_TRANSITION_MS)
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(1f)
+            ) {
+                val animatedSource = animatedContentChannel?.source
+                ChannelPage(
+                    channel = animatedContentChannel,
+                    isRefreshing = animatedSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
+                    contentPadding = contentPadding,
+                    onRefreshSource = {
+                        if (animatedContentChannel?.canRefresh == true) {
+                            animatedSource?.let(onRefreshRssSource)
+                        }
+                    },
+                    onOpenArticle = onOpenArticle,
+                    onOpenOriginalLink = { uriHandler.openUri(it) },
+                    onToggleFavorite = onToggleFavorite,
+                    onToggleWatchLater = onToggleWatchLater,
+                    onDeleteArticle = onDeleteArticle,
+                    modifier = if (channelTabSwitchDestination != null) {
+                        Modifier.channelTabSwitchCurrentPreview(
+                            progress = channelTabSwitchProgress,
+                            direction = channelTabSwitchDirection
+                        )
+                    } else {
+                        Modifier.channelPredictiveBackPreview(
+                            progress = channelBackProgress
+                        )
+                    }
+                )
             }
         }
     }
@@ -389,9 +651,18 @@ fun MainScreen(
     uiState.sharedImportPrompt?.let { prompt ->
         MainScreenSharedImportDialog(
             prompt = prompt,
-            onImportLinkAsArticle = onImportSharedLinkAsArticle,
-            onImportLinkAsRss = onImportSharedLinkAsRss,
-            onConfirmFileImport = onConfirmSharedFileImport,
+            onImportLinkAsArticle = { url ->
+                navigateToTopLevelPage(MainPage.IMPORTS)
+                onImportSharedLinkAsArticle(url)
+            },
+            onImportLinkAsRss = { url ->
+                navigateToTopLevelPage(MainPage.IMPORTS)
+                onImportSharedLinkAsRss(url)
+            },
+            onConfirmFileImport = { filePrompt ->
+                navigateToTopLevelPage(MainPage.IMPORTS)
+                onConfirmSharedFileImport(filePrompt)
+            },
             onDismiss = onDismissSharedImport
         )
     }
@@ -401,6 +672,19 @@ fun MainScreen(
             onChooseDevice = onChooseBluetoothDevice,
             onDismiss = onDismissBluetoothDevicePrompt
         )
+    }
+}
+
+@Composable
+private fun OpaquePageLayer(
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    Surface(
+        modifier = modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        content()
     }
 }
 
@@ -551,17 +835,18 @@ private fun DashboardPage(
     onOpenWatchLater: () -> Unit,
     onOpenIndependent: () -> Unit,
     onOpenImportedContent: () -> Unit,
-    onDismissMessage: () -> Unit
+    onDismissMessage: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        modifier = modifier.fillMaxSize(),
         contentPadding = mainContentPadding(contentPadding),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item {
             SyncStatusCard(
-                message = uiState.message,
-                error = uiState.error,
+                message = uiState.syncStatusMessage,
+                error = uiState.syncStatusError,
                 syncProgress = uiState.syncProgress,
                 isBusy = uiState.isBusy,
                 onSyncLibrary = onSyncLibrary,
@@ -643,28 +928,26 @@ private fun SyncStatusCard(
                 }
             }
             message?.takeIf { it.isNotBlank() }?.let {
-                AssistChip(
-                    onClick = onDismissMessage,
-                    label = {
-                        Text(
-                            text = it,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
+                Text(
+                    text = it,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onDismissMessage)
                 )
             }
             error?.takeIf { it.isNotBlank() }?.let {
-                AssistChip(
-                    onClick = onDismissMessage,
-                    label = {
-                        Text(
-                            text = it,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
+                Text(
+                    text = it,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onDismissMessage)
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -705,7 +988,11 @@ private fun LibrarySummaryCard(
     onOpenIndependent: () -> Unit,
     onOpenImportedContent: () -> Unit
 ) {
-    ElevatedCard {
+    val cardColors = defaultMainElevatedCardColors()
+
+    ElevatedCard(
+        colors = cardColors
+    ) {
         Column(
             modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -888,7 +1175,7 @@ private fun buildContentChannels(
     val hasImportedTextSource = sourceChannels.any { channel ->
         channel.source?.url?.let(ImportedContentIds::isImportedTextSourceUrl) == true
     }
-    val importedTextFallback = if (!hasImportedTextSource && uiState.importedContentArticles.isNotEmpty()) {
+    val importedTextFallback = if (!hasImportedTextSource) {
         listOf(
             MainContentChannel(
                 key = CONTENT_CHANNEL_IMPORTED_TEXT,
@@ -942,6 +1229,61 @@ private fun Modifier.contentChannelDrag(
             )
         }
 }
+
+private fun Modifier.channelPredictiveBackPreview(
+    progress: Float
+): Modifier {
+    val previewProgress = progress.coerceIn(0f, 1f)
+    val exitProgress = (progress - 1f).coerceIn(0f, 1f)
+    if (previewProgress <= 0f && exitProgress <= 0f) return this
+    return this.graphicsLayer {
+        translationX = 96.dp.toPx() * previewProgress + 1280.dp.toPx() * exitProgress
+        scaleX = 1f - 0.04f * previewProgress
+        scaleY = 1f - 0.04f * previewProgress
+        alpha = (1f - 0.16f * previewProgress) * (1f - exitProgress)
+    }
+}
+
+private fun Modifier.tabPredictiveBackPreview(
+    progress: Float
+): Modifier {
+    val pageProgress = progress.coerceIn(0f, 1f)
+    if (pageProgress <= 0f) return this
+    return this.graphicsLayer {
+        translationX = size.width * pageProgress
+    }
+}
+
+private fun Modifier.tabPredictiveBackTargetPreview(
+    progress: Float
+): Modifier {
+    val pageProgress = progress.coerceIn(0f, 1f)
+    return this.graphicsLayer {
+        translationX = size.width * (pageProgress - 1f)
+    }
+}
+
+private fun Modifier.channelTabSwitchCurrentPreview(
+    progress: Float,
+    direction: Float
+): Modifier {
+    val pageProgress = progress.coerceIn(0f, 1f)
+    return this.graphicsLayer {
+        translationX = -direction.signForPageTransition() * size.width * pageProgress
+    }
+}
+
+private fun Modifier.channelTabSwitchTargetPreview(
+    progress: Float,
+    direction: Float
+): Modifier {
+    val pageProgress = progress.coerceIn(0f, 1f)
+    return this.graphicsLayer {
+        translationX = direction.signForPageTransition() * size.width * (1f - pageProgress)
+    }
+}
+
+private fun Float.signForPageTransition(): Float = if (this < 0f) -1f else 1f
 
 private fun findContentDragTargetKey(
     listState: LazyListState,
@@ -1110,37 +1452,42 @@ private fun ChannelPage(
     onOpenOriginalLink: (String) -> Unit,
     onToggleFavorite: (PhoneArticleEntity) -> Unit,
     onToggleWatchLater: (PhoneArticleEntity) -> Unit,
-    onDeleteArticle: (PhoneArticleEntity) -> Unit
+    onDeleteArticle: (PhoneArticleEntity) -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    PullToRefreshBox(
-        isRefreshing = isRefreshing,
-        onRefresh = onRefreshSource,
-        modifier = Modifier.fillMaxSize()
+    Surface(
+        modifier = modifier.fillMaxSize()
     ) {
-        LazyColumn(
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = onRefreshSource,
             modifier = Modifier.fillMaxSize(),
-            contentPadding = mainContentPadding(contentPadding),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            if (channel == null || channel.articles.isEmpty()) {
-                item {
-                    EmptyStateCard(
-                        icon = { MainContentChannelLeadingIcon(channel?.icon ?: MainContentChannelIcon.ARTICLE) },
-                        title = channel?.emptyTitle ?: "暂无文章",
-                        text = channel?.emptyText ?: "频道不存在"
-                    )
-                }
-            } else {
-                items(channel.articles, key = { it.articleId }) { article ->
-                    MainScreenArticleRow(
-                        article = article,
-                        onOpenArticle = onOpenArticle,
-                        onOpenOriginalLink = onOpenOriginalLink,
-                        onToggleFavorite = onToggleFavorite,
-                        onToggleWatchLater = onToggleWatchLater,
-                        onDeleteArticle = onDeleteArticle,
-                        mainScreenCanDeleteArticle = mainScreenCanDeleteArticle(article)
-                    )
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = mainContentPadding(contentPadding),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (channel == null || channel.articles.isEmpty()) {
+                    item {
+                        EmptyStateCard(
+                            icon = { MainContentChannelLeadingIcon(channel?.icon ?: MainContentChannelIcon.ARTICLE) },
+                            title = channel?.emptyTitle ?: "暂无文章",
+                            text = channel?.emptyText ?: "频道不存在"
+                        )
+                    }
+                } else {
+                    items(channel.articles, key = { it.articleId }) { article ->
+                        MainScreenArticleRow(
+                            article = article,
+                            onOpenArticle = onOpenArticle,
+                            onOpenOriginalLink = onOpenOriginalLink,
+                            onToggleFavorite = onToggleFavorite,
+                            onToggleWatchLater = onToggleWatchLater,
+                            onDeleteArticle = onDeleteArticle,
+                            mainScreenCanDeleteArticle = mainScreenCanDeleteArticle(article)
+                        )
+                    }
                 }
             }
         }
@@ -1186,6 +1533,7 @@ private fun ImportsPage(
     onImportFile: () -> Unit,
     onAddRssSource: () -> Unit,
     onClearImportedContent: () -> Unit,
+    onDismissMessage: () -> Unit,
     recentEntries: List<RecentImportEntry>,
     onOpenChannel: (MainContentChannel) -> Unit,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
@@ -1194,6 +1542,8 @@ private fun ImportsPage(
     onToggleWatchLater: (PhoneArticleEntity) -> Unit,
     onDeleteArticle: (PhoneArticleEntity) -> Unit
 ) {
+    val importMessage = uiState.message?.takeUnless { it == uiState.syncStatusMessage }
+    val importError = uiState.error?.takeUnless { it == uiState.syncStatusError }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = mainContentPadding(contentPadding),
@@ -1208,7 +1558,10 @@ private fun ImportsPage(
                 onImportArticle = onImportArticle,
                 onImportFile = onImportFile,
                 onAddRssSource = onAddRssSource,
-                onClearImportedContent = onClearImportedContent
+                onClearImportedContent = onClearImportedContent,
+                message = importMessage,
+                error = importError,
+                onDismissMessage = onDismissMessage
             )
         }
         item {
@@ -1257,9 +1610,16 @@ private fun ImportActionsCard(
     onImportArticle: () -> Unit,
     onImportFile: () -> Unit,
     onAddRssSource: () -> Unit,
-    onClearImportedContent: () -> Unit
+    onClearImportedContent: () -> Unit,
+    message: String?,
+    error: String?,
+    onDismissMessage: () -> Unit
 ) {
-    ElevatedCard {
+    ElevatedCard(
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+        )
+    ) {
         Column(
             modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -1318,6 +1678,46 @@ private fun ImportActionsCard(
                     Text("清空")
                 }
             }
+            if (message?.isNotBlank() == true || error?.isNotBlank() == true) {
+                ImportStatusContent(
+                    message = message,
+                    error = error,
+                    onDismissMessage = onDismissMessage
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ImportStatusContent(
+    message: String?,
+    error: String?,
+    onDismissMessage: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        message?.takeIf { it.isNotBlank() }?.let {
+            Text(
+                text = it,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onDismissMessage)
+            )
+        }
+        error?.takeIf { it.isNotBlank() }?.let {
+            Text(
+                text = it,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onDismissMessage)
+            )
         }
     }
 }
@@ -1328,11 +1728,17 @@ private fun MainContentChannelRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val cardColors = defaultMainElevatedCardColors()
+
     ElevatedCard(
         onClick = onClick,
-        modifier = modifier.fillMaxWidth()
+        modifier = modifier.fillMaxWidth(),
+        colors = cardColors
     ) {
         ListItem(
+            colors = ListItemDefaults.colors(
+                containerColor = cardColors.containerColor
+            ),
             headlineContent = {
                 Text(
                     text = channel.title,
@@ -1382,16 +1788,22 @@ private fun MainScreenSourceRow(
     modifier: Modifier = Modifier
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val cardColors = defaultMainElevatedCardColors()
+
     ElevatedCard(
         modifier = modifier
             .fillMaxWidth()
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = { menuExpanded = true }
-            )
+            ),
+        colors = cardColors
     ) {
         Box {
             ListItem(
+                colors = ListItemDefaults.colors(
+                    containerColor = cardColors.containerColor
+                ),
                 headlineContent = {
                     Text(
                         text = source.title.ifBlank { source.url },

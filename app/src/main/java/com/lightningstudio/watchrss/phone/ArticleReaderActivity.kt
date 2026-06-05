@@ -8,24 +8,40 @@ import android.os.Bundle
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.exponentialDecay
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListItemInfo
@@ -36,11 +52,10 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.background
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -55,20 +70,30 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
@@ -78,12 +103,16 @@ import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import coil.compose.AsyncImage
+import coil.compose.AsyncImagePainter
+import coil.compose.rememberAsyncImagePainter
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.importer.WebArticleImporter
 import com.lightningstudio.watchrss.phone.data.local.ARTICLE_TEXT_CHUNK_BYTES
@@ -91,7 +120,6 @@ import com.lightningstudio.watchrss.phone.data.local.isArticleContentMarker
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.repo.PhoneImportedTextReader
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
-import com.lightningstudio.watchrss.phone.ui.theme.AppCard
 import com.lightningstudio.watchrss.phone.ui.theme.AppPrimaryCard
 import com.lightningstudio.watchrss.phone.ui.theme.PrimaryRed
 import com.kyant.backdrop.*
@@ -100,14 +128,19 @@ import com.kyant.backdrop.effects.*
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.sample
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 import org.jsoup.Jsoup
@@ -267,11 +300,17 @@ private fun ArticleReaderScreen(
         var pendingRestoreProgress by remember(safeArticle.articleId) {
             mutableStateOf<Float?>(safeArticle.readingProgress.coerceIn(0f, 1f))
         }
-        var pendingTextRestore by remember(safeArticle.articleId) {
-            mutableStateOf<ArticleTextRestoreTarget?>(null)
+        var pendingArticleRestore by remember(safeArticle.articleId) {
+            mutableStateOf<ArticleRestoreTarget?>(null)
         }
         var pendingImportedTextRestore by remember(safeArticle.articleId, importedTextReader?.marker) {
             mutableStateOf<ImportedTextByteRestoreTarget?>(null)
+        }
+        var previewImage by remember(safeArticle.articleId) {
+            mutableStateOf<ArticlePreviewImage?>(null)
+        }
+        var previewDismissRequests by remember(safeArticle.articleId) {
+            mutableStateOf(0)
         }
         var lastSavedProgress by remember(safeArticle.articleId) { mutableStateOf(-1f) }
         var lastProgressSavedAt by remember(safeArticle.articleId) { mutableStateOf(0L) }
@@ -345,7 +384,7 @@ private fun ArticleReaderScreen(
                     chunkLayouts = importedTextChunkLayouts,
                     anchorOffsetPx = visibleTopBarHeightPx
                 )
-            } ?: calculateArticleTextReadingProgressFromLayout(
+            } ?: calculateArticleReadingProgressFromLayout(
                 listState = listState,
                 nodes = contentNodes,
                 textLayouts = textLayouts,
@@ -404,7 +443,7 @@ private fun ArticleReaderScreen(
                 hasRestoredPosition = true
                 return@LaunchedEffect
             }
-            val restoreTarget = articleTextRestoreTarget(
+            val restoreTarget = articleRestoreTarget(
                 progress = progress,
                 nodes = contentNodes
             )
@@ -418,10 +457,12 @@ private fun ArticleReaderScreen(
                 hasRestoredPosition = true
                 return@LaunchedEffect
             }
-            listState.scrollToItem(restoreTarget.itemIndex.coerceIn(0, contentNodes.lastIndex))
-            pendingTextRestore = restoreTarget.copy(
-                itemIndex = restoreTarget.itemIndex.coerceIn(0, contentNodes.lastIndex)
-            )
+            val targetIndex = restoreTarget.itemIndex.coerceIn(0, contentNodes.lastIndex)
+            listState.scrollToItem(targetIndex)
+            pendingArticleRestore = when (restoreTarget) {
+                is ArticleRestoreTarget.Text -> restoreTarget.copy(itemIndex = targetIndex)
+                is ArticleRestoreTarget.Image -> restoreTarget.copy(itemIndex = targetIndex)
+            }
             pendingRestoreProgress = null
         }
 
@@ -455,24 +496,39 @@ private fun ArticleReaderScreen(
             hasRestoredPosition = true
         }
 
-        LaunchedEffect(pendingTextRestore) {
-            val restoreTarget = pendingTextRestore ?: return@LaunchedEffect
+        LaunchedEffect(pendingArticleRestore) {
+            val restoreTarget = pendingArticleRestore ?: return@LaunchedEffect
             val offsetPx = withTimeoutOrNull(ARTICLE_RESTORE_OFFSET_TIMEOUT_MS) {
                 snapshotFlow {
-                    val text = articleNodeText(contentNodes.getOrNull(restoreTarget.nodeIndex))
-                    val layout = textLayouts[restoreTarget.nodeIndex]
                     val itemInfo = listState.layoutInfo.visibleItemsInfo
                         .firstOrNull { it.index == restoreTarget.itemIndex }
-                    if (text == null || layout == null || itemInfo == null) {
-                        null
-                    } else {
-                        articleTextRestoreVisualOffsetPx(
-                            restoreTarget = restoreTarget,
-                            text = text,
-                            layout = layout,
-                            itemInfo = itemInfo,
-                            anchorOffsetPx = visibleTopBarHeightPx
-                        )
+                    when (restoreTarget) {
+                        is ArticleRestoreTarget.Text -> {
+                            val text = articleNodeText(contentNodes.getOrNull(restoreTarget.nodeIndex))
+                            val layout = textLayouts[restoreTarget.nodeIndex]
+                            if (text == null || layout == null || itemInfo == null) {
+                                null
+                            } else {
+                                articleTextRestoreVisualOffsetPx(
+                                    restoreTarget = restoreTarget,
+                                    text = text,
+                                    layout = layout,
+                                    itemInfo = itemInfo,
+                                    anchorOffsetPx = visibleTopBarHeightPx
+                                )
+                            }
+                        }
+                        is ArticleRestoreTarget.Image -> {
+                            if (itemInfo == null) {
+                                null
+                            } else {
+                                articleImageRestoreVisualOffsetPx(
+                                    restoreTarget = restoreTarget,
+                                    itemInfo = itemInfo,
+                                    anchorOffsetPx = visibleTopBarHeightPx
+                                )
+                            }
+                        }
                     }
                 }
                     .filterNotNull()
@@ -481,7 +537,7 @@ private fun ArticleReaderScreen(
             if (offsetPx != null) {
                 listState.scrollToItem(restoreTarget.itemIndex, offsetPx)
             }
-            pendingTextRestore = null
+            pendingArticleRestore = null
             hasRestoredPosition = true
         }
 
@@ -512,13 +568,15 @@ private fun ArticleReaderScreen(
         }
 
         fun handleBack() {
+            if (previewImage != null) {
+                previewDismissRequests += 1
+                return
+            }
             runBlocking {
                 saveCurrentReadingProgress(force = true)
             }
             onBackState.value()
         }
-
-        BackHandler(onBack = ::handleBack)
 
         Box(modifier = Modifier.fillMaxSize()) {
             val backgroundColor = MaterialTheme.colorScheme.background
@@ -573,6 +631,8 @@ private fun ArticleReaderScreen(
                             nodes = contentNodes,
                             listState = listState,
                             textLayouts = textLayouts,
+                            onPreviewImage = { previewImage = it },
+                            previewSourceNodeIndex = previewImage?.sourceNodeIndex,
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = readerContentPadding
                         )
@@ -636,6 +696,20 @@ private fun ArticleReaderScreen(
                         }
                     }
                 }
+            }
+
+            previewImage?.let { image ->
+                ArticleImagePreviewOverlay(
+                    preview = image,
+                    dismissRequests = previewDismissRequests,
+                    onExit = {
+                        previewImage = null
+                        previewDismissRequests = 0
+                    },
+                    modifier = Modifier
+                        .matchParentSize()
+                        .zIndex(PREVIEW_OVERLAY_Z_INDEX)
+                )
             }
         }
     }
@@ -758,6 +832,8 @@ private fun ArticleReaderContentView(
     nodes: List<ArticleNode>,
     listState: LazyListState,
     textLayouts: MutableMap<Int, TextLayoutResult>,
+    onPreviewImage: (ArticlePreviewImage) -> Unit,
+    previewSourceNodeIndex: Int?,
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(0.dp)
 ) {
@@ -795,6 +871,19 @@ private fun ArticleReaderContentView(
                     ArticleImage(
                         url = node.url,
                         alt = node.alt,
+                        aspectRatio = node.aspectRatio,
+                        onClick = { sourceBounds ->
+                            onPreviewImage(
+                                ArticlePreviewImage(
+                                    url = node.url,
+                                    alt = node.alt.takeIf { it.isNotBlank() },
+                                    aspectRatio = node.aspectRatio,
+                                    sourceNodeIndex = index,
+                                    sourceBounds = sourceBounds
+                                )
+                            )
+                        },
+                        hidden = previewSourceNodeIndex == index,
                         modifier = Modifier.padding(vertical = 12.dp)
                     )
                 }
@@ -891,6 +980,7 @@ private fun NativeArticleView(
                     ArticleImage(
                         url = node.url,
                         alt = node.alt,
+                        aspectRatio = node.aspectRatio,
                         modifier = Modifier.padding(vertical = 12.dp)
                     )
                 }
@@ -1010,21 +1100,854 @@ private fun ArticleCodeBlock(
 private fun ArticleImage(
     url: String,
     alt: String,
+    aspectRatio: Float?,
+    onClick: ((Rect?) -> Unit)? = null,
+    hidden: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    AppCard(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        AsyncImage(
-            model = url,
-            contentDescription = alt.takeIf { it.isNotBlank() },
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp)),
-            contentScale = ContentScale.FillWidth
+    var loadedAspectRatio by remember(url) {
+        mutableStateOf<Float?>(null)
+    }
+    var imageBounds by remember(url) {
+        mutableStateOf<Rect?>(null)
+    }
+    val intrinsicAspectRatio = aspectRatio ?: loadedAspectRatio
+    val sizeModifier = if (intrinsicAspectRatio != null) {
+        Modifier
+            .fillMaxWidth()
+            .aspectRatio(intrinsicAspectRatio)
+    } else {
+        Modifier.fillMaxWidth()
+    }
+
+    val imageModifier = modifier
+        .then(sizeModifier)
+        .onGloballyPositioned { coordinates ->
+            imageBounds = coordinates.boundsInRoot()
+        }
+        .let { baseModifier ->
+            if (onClick != null) {
+                baseModifier.clickable { onClick(imageBounds) }
+            } else {
+                baseModifier
+            }
+        }
+
+    if (hidden) {
+        Box(modifier = imageModifier)
+        return
+    }
+
+    AsyncImage(
+        model = url,
+        contentDescription = alt.takeIf { it.isNotBlank() },
+        modifier = imageModifier,
+        contentScale = ContentScale.Fit,
+        onSuccess = { state ->
+            val drawable = state.result.drawable
+            val intrinsicWidth = drawable.intrinsicWidth
+            val intrinsicHeight = drawable.intrinsicHeight
+            if (intrinsicWidth > 0 && intrinsicHeight > 0) {
+                loadedAspectRatio = intrinsicWidth.toFloat() / intrinsicHeight.toFloat()
+            }
+        }
+    )
+}
+
+@Composable
+private fun ArticleImagePreviewOverlay(
+    preview: ArticlePreviewImage,
+    dismissRequests: Int,
+    onExit: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val density = LocalDensity.current
+    val scope = rememberCoroutineScope()
+    var scale by remember(preview.url) { mutableStateOf(1f) }
+    var offset by remember(preview.url) { mutableStateOf(Offset.Zero) }
+    var lastScaleAt by remember(preview.url) { mutableStateOf(0L) }
+    val scaleAnimator = remember(preview.url) { Animatable(1f) }
+    val offsetXAnimator = remember(preview.url) { Animatable(0f) }
+    val offsetYAnimator = remember(preview.url) { Animatable(0f) }
+    val openProgress = remember(preview.url) { Animatable(0f) }
+    var scaleAnimJob by remember(preview.url) { mutableStateOf<Job?>(null) }
+    var offsetAnimJob by remember(preview.url) { mutableStateOf<Job?>(null) }
+    var dismissJob by remember(preview.url) { mutableStateOf<Job?>(null) }
+    var lastDismissRequest by remember(preview.url) { mutableStateOf(dismissRequests) }
+    var dragDismissOffsetY by remember(preview.url) { mutableStateOf(0f) }
+    var predictiveBackProgress by remember(preview.url) { mutableStateOf(0f) }
+    var isClosingPreview by remember(preview.url) { mutableStateOf(false) }
+    var overlayBoundsInRoot by remember(preview.url) { mutableStateOf<Rect?>(null) }
+    val springSpec = remember {
+        spring<Float>(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessLow
         )
     }
+    val springOffsetSpec = remember {
+        spring<Float>(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessLow
+        )
+    }
+    val swipeReturnSpringSpec = remember {
+        spring<Float>(
+            dampingRatio = 0.74f,
+            stiffness = Spring.StiffnessMediumLow
+        )
+    }
+    val swipeExitSpringSpec = remember {
+        spring<Float>(
+            dampingRatio = 0.86f,
+            stiffness = Spring.StiffnessMediumLow
+        )
+    }
+    val panDecay = remember { exponentialDecay<Float>(frictionMultiplier = 0.9f) }
+    val scaleDecay = remember { exponentialDecay<Float>(frictionMultiplier = 13.6f) }
+    val painter = rememberAsyncImagePainter(
+        model = preview.url,
+        contentScale = ContentScale.Fit
+    )
+    val painterState = painter.state
+
+    fun stopPreviewTransformAnimations() {
+        scaleAnimJob?.cancel()
+        offsetAnimJob?.cancel()
+    }
+
+    suspend fun springDragDismissOffsetToRest(initialVelocity: Float = 0f) {
+        if (dragDismissOffsetY == 0f && initialVelocity == 0f) return
+        Animatable(dragDismissOffsetY).animateTo(
+            targetValue = 0f,
+            animationSpec = swipeReturnSpringSpec,
+            initialVelocity = initialVelocity
+        ) {
+            dragDismissOffsetY = value
+        }
+    }
+
+    fun closePreviewToSource() {
+        if (isClosingPreview) return
+        dismissJob?.cancel()
+        dismissJob = scope.launch {
+            isClosingPreview = true
+            stopPreviewTransformAnimations()
+            if (dragDismissOffsetY != 0f) {
+                animate(
+                    initialValue = dragDismissOffsetY,
+                    targetValue = 0f,
+                    animationSpec = tween(PREVIEW_SWIPE_SETTLE_ANIMATION_MS)
+                ) { value, _ ->
+                    dragDismissOffsetY = value
+                }
+            }
+            if (predictiveBackProgress != 0f) {
+                animate(
+                    initialValue = predictiveBackProgress,
+                    targetValue = 0f,
+                    animationSpec = tween(PREVIEW_SWIPE_SETTLE_ANIMATION_MS)
+                ) { value, _ ->
+                    predictiveBackProgress = value
+                }
+            }
+            openProgress.animateTo(
+                targetValue = 0f,
+                animationSpec = tween(PREVIEW_SOURCE_EXIT_ANIMATION_MS)
+            )
+            onExit()
+        }
+    }
+
+    fun closePreviewBySwipe(initialVelocityY: Float) {
+        if (isClosingPreview) return
+        dismissJob?.cancel()
+        dismissJob = scope.launch {
+            isClosingPreview = true
+            stopPreviewTransformAnimations()
+            val dragJob = launch {
+                springDragDismissOffsetToRest(initialVelocityY)
+            }
+            val frameJob = launch {
+                openProgress.animateTo(
+                    targetValue = 0f,
+                    animationSpec = swipeExitSpringSpec
+                )
+            }
+            dragJob.join()
+            frameJob.join()
+            onExit()
+        }
+    }
+
+    LaunchedEffect(preview.url) {
+        openProgress.snapTo(0f)
+        openProgress.animateTo(
+            targetValue = 1f,
+            animationSpec = spring(
+                dampingRatio = 0.86f,
+                stiffness = Spring.StiffnessMediumLow
+            )
+        )
+    }
+
+    LaunchedEffect(dismissRequests) {
+        if (dismissRequests != lastDismissRequest) {
+            lastDismissRequest = dismissRequests
+            if (dismissRequests > 0) {
+                closePreviewToSource()
+            }
+        }
+    }
+
+    BackHandler(enabled = true) {
+        closePreviewToSource()
+    }
+
+    PredictiveBackHandler(enabled = true) { backEvents ->
+        try {
+            stopPreviewTransformAnimations()
+            backEvents.collect { backEvent ->
+                predictiveBackProgress = backEvent.progress.coerceIn(0f, 1f)
+            }
+            if (!isClosingPreview) {
+                isClosingPreview = true
+                animate(
+                    initialValue = predictiveBackProgress,
+                    targetValue = 1f,
+                    animationSpec = tween(PREVIEW_SOURCE_EXIT_ANIMATION_MS)
+                ) { value, _ ->
+                    predictiveBackProgress = value
+                }
+                onExit()
+            }
+        } catch (exception: CancellationException) {
+            animate(
+                initialValue = predictiveBackProgress,
+                targetValue = 0f,
+                animationSpec = tween(PREVIEW_SWIPE_SETTLE_ANIMATION_MS)
+            ) { value, _ ->
+                predictiveBackProgress = value
+            }
+        }
+    }
+
+    BoxWithConstraints(
+        modifier = modifier
+            .fillMaxSize()
+            .onGloballyPositioned { coordinates ->
+                overlayBoundsInRoot = coordinates.boundsInRoot()
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        val containerWidthPx = with(density) { maxWidth.toPx() }
+        val containerHeightPx = with(density) { maxHeight.toPx() }
+        val containerSize = IntSize(
+            containerWidthPx.roundToInt().coerceAtLeast(1),
+            containerHeightPx.roundToInt().coerceAtLeast(1)
+        )
+        val imageSize = remember(painterState, preview.aspectRatio, containerSize) {
+            val drawableSize = (painterState as? AsyncImagePainter.State.Success)
+                ?.result
+                ?.drawable
+                ?.let { drawable ->
+                    IntSize(
+                        drawable.intrinsicWidth.coerceAtLeast(0),
+                        drawable.intrinsicHeight.coerceAtLeast(0)
+                    )
+                }
+                ?: IntSize.Zero
+            if (drawableSize.width > 0 && drawableSize.height > 0) {
+                drawableSize
+            } else {
+                fallbackPreviewImageSize(preview.aspectRatio, containerSize)
+            }
+        }
+        val baseSize = remember(containerSize, imageSize) {
+            calculatePreviewBaseSize(containerSize, imageSize)
+        }
+        val maxScale = remember(containerSize, imageSize, baseSize) {
+            calculatePreviewMaxScale(containerSize, imageSize, baseSize)
+        }
+        val minScale = 0.5f
+
+        LaunchedEffect(containerSize, imageSize, minScale) {
+            scale = max(1f, minScale)
+            offset = Offset.Zero
+            scaleAnimator.snapTo(scale)
+            offsetXAnimator.snapTo(offset.x)
+            offsetYAnimator.snapTo(offset.y)
+        }
+        LaunchedEffect(maxScale) {
+            if (scale > maxScale) {
+                scale = maxScale
+                scaleAnimator.snapTo(scale)
+            }
+            offset = clampPreviewOffset(offset, scale, containerSize, baseSize)
+            offsetXAnimator.snapTo(offset.x)
+            offsetYAnimator.snapTo(offset.y)
+        }
+
+        val isLoading = painterState is AsyncImagePainter.State.Loading ||
+            painterState is AsyncImagePainter.State.Empty
+        val isError = painterState is AsyncImagePainter.State.Error
+        val targetFrame = calculatePreviewTargetFrame(containerSize, baseSize)
+        val measuredSourceFrame = preview.sourceBounds
+            ?.let { bounds ->
+                rootBoundsToPreviewBounds(bounds, overlayBoundsInRoot) ?: bounds
+            }
+            ?.takeIf { it.width > 1f && it.height > 1f }
+        val sourceFrame = measuredSourceFrame ?: calculatePreviewFallbackSourceFrame(targetFrame)
+        val predictiveAdjustedProgress = (openProgress.value * (1f - predictiveBackProgress))
+            .coerceIn(0f, 1f)
+        val frameProgress = previewEaseOutCubic(predictiveAdjustedProgress)
+        val swipeDismissProgress = calculatePreviewSwipeDismissProgress(
+            offsetY = dragDismissOffsetY,
+            containerHeightPx = containerSize.height.toFloat()
+        )
+        val backgroundAlpha = PREVIEW_BACKGROUND_ALPHA *
+            frameProgress *
+            (1f - PREVIEW_BACKGROUND_DISMISS_ALPHA_LOSS * swipeDismissProgress)
+        val imageAlpha = (if (measuredSourceFrame != null) 1f else frameProgress) *
+            (1f - PREVIEW_IMAGE_DISMISS_ALPHA_LOSS * swipeDismissProgress)
+        val zoomProgress = frameProgress * (1f - swipeDismissProgress)
+        val sourceToTargetScaleX = if (targetFrame.width > 0f) {
+            sourceFrame.width / targetFrame.width
+        } else {
+            1f
+        }
+        val sourceToTargetScaleY = if (targetFrame.height > 0f) {
+            sourceFrame.height / targetFrame.height
+        } else {
+            1f
+        }
+        val sourceToTargetTranslation = sourceFrame.center - targetFrame.center
+        val swipeScale = 1f - PREVIEW_SWIPE_MIN_SCALE_LOSS * swipeDismissProgress
+        val frameScaleX = lerpPreviewFloat(sourceToTargetScaleX, 1f, frameProgress)
+        val frameScaleY = lerpPreviewFloat(sourceToTargetScaleY, 1f, frameProgress)
+        val frameTranslationX = lerpPreviewFloat(sourceToTargetTranslation.x, 0f, frameProgress)
+        val frameTranslationY = lerpPreviewFloat(sourceToTargetTranslation.y, 0f, frameProgress) +
+            dragDismissOffsetY
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    previewBackgroundBrush(
+                        alpha = backgroundAlpha,
+                        offsetY = dragDismissOffsetY,
+                        dismissProgress = swipeDismissProgress
+                    )
+                )
+        )
+
+        val renderScale = sanitizePreviewScale(scale, minScale, maxScale)
+        if (renderScale != scale) {
+            scale = renderScale
+        }
+        val renderOffset = sanitizePreviewOffset(offset)
+        if (renderOffset != offset) {
+            offset = renderOffset
+        }
+
+        val imageModifier = Modifier
+            .size(
+                with(density) { targetFrame.width.toDp() },
+                with(density) { targetFrame.height.toDp() }
+            )
+            .graphicsLayer(
+                translationX = frameTranslationX + renderOffset.x * zoomProgress,
+                translationY = frameTranslationY + renderOffset.y * zoomProgress,
+                scaleX = frameScaleX * swipeScale * (1f + (renderScale - 1f) * zoomProgress),
+                scaleY = frameScaleY * swipeScale * (1f + (renderScale - 1f) * zoomProgress),
+                transformOrigin = TransformOrigin.Center,
+                alpha = imageAlpha
+            )
+        val gestureModifier = Modifier
+            .fillMaxSize()
+            .pointerInput(preview.url, containerSize, imageSize, maxScale) {
+                detectTapGestures(
+                    onTap = { closePreviewToSource() },
+                    onDoubleTap = { tap ->
+                        val nextScale = nextPreviewDoubleTapScale(scale, maxScale)
+                        scope.launch {
+                            scaleAnimJob?.cancel()
+                            offsetAnimJob?.cancel()
+                            val center = Offset(
+                                containerSize.width / 2f,
+                                containerSize.height / 2f
+                            )
+                            val tapFromCenter = tap - center
+                            val content = (tapFromCenter - offset) / scale
+                            val targetOffset = tapFromCenter - content * nextScale
+                            val clampedOffset = clampPreviewOffset(
+                                targetOffset,
+                                nextScale,
+                                containerSize,
+                                baseSize
+                            )
+                            scaleAnimJob = launch {
+                                scaleAnimator.snapTo(scale)
+                                scaleAnimator.animateTo(nextScale, springSpec) {
+                                    scale = value
+                                    offset = clampPreviewOffset(offset, scale, containerSize, baseSize)
+                                }
+                            }
+                            offsetAnimJob = launch {
+                                offsetXAnimator.snapTo(offset.x)
+                                offsetYAnimator.snapTo(offset.y)
+                                launch {
+                                    offsetXAnimator.animateTo(clampedOffset.x, springOffsetSpec) {
+                                        offset = clampPreviewOffset(
+                                            Offset(value, offsetYAnimator.value),
+                                            scale,
+                                            containerSize,
+                                            baseSize
+                                        )
+                                    }
+                                }
+                                launch {
+                                    offsetYAnimator.animateTo(clampedOffset.y, springOffsetSpec) {
+                                        offset = clampPreviewOffset(
+                                            Offset(offsetXAnimator.value, value),
+                                            scale,
+                                            containerSize,
+                                            baseSize
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
+            }
+            .pointerInput(preview.url, containerSize, imageSize, maxScale) {
+                if (containerSize.width <= 0 || containerSize.height <= 0 || imageSize.width <= 0) {
+                    return@pointerInput
+                }
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    scaleAnimJob?.cancel()
+                    offsetAnimJob?.cancel()
+                    val panVelocityTracker = VelocityTracker().apply {
+                        addPosition(down.uptimeMillis, down.position)
+                    }
+                    var lastScale = scale
+                    var lastTime = down.uptimeMillis
+                    var scaleVelocity = 0f
+                    var lastScaleDelta = 0f
+                    var panVelocity = Offset.Zero
+                    var lastPanDelta = Offset.Zero
+                    var totalPanDistance = 0f
+                    var accumulatedPan = Offset.Zero
+                    var isVerticalDismiss = false
+                    while (true) {
+                        val event = awaitPointerEvent(pass = PointerEventPass.Main)
+                        if (event.changes.none { it.pressed }) {
+                            break
+                        }
+                        val zoomChange = event.calculateZoom()
+                        val panChange = event.calculatePan()
+                        val centroid = event.calculateCentroid()
+                        val rawTime = event.changes.firstOrNull()?.uptimeMillis ?: 0L
+                        val time = if (rawTime != 0L) rawTime else SystemClock.uptimeMillis()
+
+                        if (!centroid.isFinite() || !panChange.isFinite() || !zoomChange.isFinite()) {
+                            continue
+                        }
+                        accumulatedPan += panChange
+                        val activePointerCount = event.changes.count { it.pressed }
+                        if (!isVerticalDismiss &&
+                            activePointerCount == 1 &&
+                            abs(accumulatedPan.y) > PREVIEW_SWIPE_START_THRESHOLD_PX &&
+                            abs(accumulatedPan.y) > abs(accumulatedPan.x) * PREVIEW_SWIPE_AXIS_DOMINANCE
+                        ) {
+                            isVerticalDismiss = true
+                            stopPreviewTransformAnimations()
+                            dragDismissOffsetY += panChange.y
+                            panVelocityTracker.addPosition(time, centroid)
+                            event.changes.forEach { change ->
+                                if (change.positionChanged()) {
+                                    change.consume()
+                                }
+                            }
+                            continue
+                        }
+                        if (isVerticalDismiss) {
+                            dragDismissOffsetY += panChange.y
+                            panVelocityTracker.addPosition(time, centroid)
+                            event.changes.forEach { change ->
+                                if (change.positionChanged()) {
+                                    change.consume()
+                                }
+                            }
+                            continue
+                        }
+                        val currentScale = sanitizePreviewScale(scale, minScale, maxScale)
+                        val newScale = (currentScale * zoomChange).coerceIn(minScale, maxScale)
+                        val scaleChange = if (currentScale == 0f) 1f else newScale / currentScale
+                        val center = Offset(
+                            containerSize.width / 2f,
+                            containerSize.height / 2f
+                        )
+                        val currentOffset = sanitizePreviewOffset(offset)
+                        val scaleDelta = newScale - lastScale
+                        val isScaling = abs(scaleDelta) > 0.000018f
+                        if (isScaling) {
+                            lastScaleAt = time
+                        }
+                        val ignorePan = !isScaling && lastScaleAt != 0L && time - lastScaleAt < 100L
+                        val appliedPan = if (ignorePan) Offset.Zero else panChange
+                        if (!ignorePan) {
+                            panVelocityTracker.addPosition(time, centroid)
+                        }
+                        val newOffset = currentOffset + appliedPan +
+                            (centroid - center - currentOffset) * (1 - scaleChange)
+
+                        scale = newScale
+                        offset = clampPreviewOffset(newOffset, newScale, containerSize, baseSize)
+                        if (!ignorePan && (appliedPan.x != 0f || appliedPan.y != 0f)) {
+                            totalPanDistance += appliedPan.getDistance()
+                            lastPanDelta = appliedPan
+                        }
+                        if (lastTime != 0L) {
+                            val dt = (time - lastTime).coerceAtLeast(1)
+                            if (abs(scaleDelta) > 0.000018f) {
+                                val scaleVelocityCandidate = (scaleDelta / dt) * 1000f
+                                scaleVelocity = scaleVelocity * 0.2f + scaleVelocityCandidate * 0.8f
+                                lastScaleDelta = scaleDelta
+                            }
+                            if (!ignorePan && (appliedPan.x != 0f || appliedPan.y != 0f)) {
+                                val panVelocityCandidate = appliedPan * (1000f / dt)
+                                panVelocity = panVelocity * 0.2f + panVelocityCandidate * 0.8f
+                            }
+                        }
+                        lastScale = newScale
+                        lastTime = time
+
+                        event.changes.forEach { change ->
+                            if (change.positionChanged()) {
+                                change.consume()
+                            }
+                        }
+                        if (event.changes.all { !it.pressed }) break
+                    }
+
+                    if (isVerticalDismiss) {
+                        val velocityY = panVelocityTracker.calculateVelocity().y
+                        val shouldDismiss = abs(dragDismissOffsetY) >
+                            containerSize.height * PREVIEW_SWIPE_DISMISS_DISTANCE_FRACTION ||
+                            abs(velocityY) > PREVIEW_SWIPE_DISMISS_VELOCITY_PX
+                        if (shouldDismiss) {
+                            closePreviewBySwipe(
+                                initialVelocityY = velocityY.takeIf { it.isFinite() } ?: 0f
+                            )
+                        } else {
+                            scope.launch {
+                                springDragDismissOffsetToRest(
+                                    initialVelocity = velocityY.takeIf { it.isFinite() } ?: 0f
+                                )
+                            }
+                        }
+                        return@awaitEachGesture
+                    }
+
+                    val scaleFlingVelocity = when {
+                        abs(scaleVelocity) > 0.0009f -> scaleVelocity
+                        abs(lastScaleDelta) > 0.000018f -> lastScaleDelta * 120f
+                        else -> 0f
+                    }
+                    if (abs(scaleFlingVelocity) > 0.0009f) {
+                        scaleAnimJob = scope.launch {
+                            scaleAnimator.snapTo(sanitizePreviewScale(scale, minScale, maxScale))
+                            scaleAnimator.animateDecay(scaleFlingVelocity, scaleDecay) {
+                                val clamped = value.coerceIn(minScale, maxScale)
+                                if (clamped != scale) {
+                                    scale = clamped
+                                    offset = clampPreviewOffset(offset, scale, containerSize, baseSize)
+                                }
+                            }
+                        }
+                    }
+
+                    val trackerVelocity = panVelocityTracker.calculateVelocity()
+                    val trackerOffset = Offset(trackerVelocity.x, trackerVelocity.y)
+                    val panVelocityDistance = panVelocity.getDistance()
+                    val panFlingVelocity = when {
+                        totalPanDistance <= 1f -> Offset.Zero
+                        trackerOffset.getDistance() > 5f -> trackerOffset
+                        panVelocityDistance > 5f -> panVelocity
+                        lastPanDelta.getDistance() > 0.5f -> lastPanDelta * 80f
+                        else -> Offset.Zero
+                    }
+                    val panFlingDistance = panFlingVelocity.getDistance()
+                    if (panFlingDistance > 0.1f) {
+                        offsetAnimJob = scope.launch {
+                            offsetXAnimator.snapTo(offset.x)
+                            offsetYAnimator.snapTo(offset.y)
+                            launch {
+                                offsetXAnimator.animateDecay(panFlingVelocity.x, panDecay) {
+                                    val clamped = clampPreviewOffset(
+                                        Offset(value, offsetYAnimator.value),
+                                        scale,
+                                        containerSize,
+                                        baseSize
+                                    )
+                                    if (clamped != offset) {
+                                        offset = clamped
+                                    }
+                                }
+                            }
+                            launch {
+                                offsetYAnimator.animateDecay(panFlingVelocity.y, panDecay) {
+                                    val clamped = clampPreviewOffset(
+                                        Offset(offsetXAnimator.value, value),
+                                        scale,
+                                        containerSize,
+                                        baseSize
+                                    )
+                                    if (clamped != offset) {
+                                        offset = clamped
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        offset = clampPreviewOffset(offset, scale, containerSize, baseSize)
+                    }
+                }
+            }
+
+        Box(
+            modifier = gestureModifier,
+            contentAlignment = Alignment.Center
+        ) {
+            Image(
+                painter = painter,
+                contentDescription = preview.alt,
+                contentScale = ContentScale.Fit,
+                modifier = imageModifier
+            )
+        }
+
+        if (isLoading) {
+            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+        }
+        if (isError) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(onClick = ::closePreviewToSource),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "图片加载失败",
+                    color = Color.White.copy(alpha = 0.72f),
+                    style = MaterialTheme.typography.bodyLarge
+                )
+            }
+        }
+    }
+}
+
+private fun calculatePreviewTargetFrame(container: IntSize, baseSize: Size): Rect {
+    if (container.width <= 0 || container.height <= 0 || baseSize.width <= 0f || baseSize.height <= 0f) {
+        return Rect.Zero
+    }
+    val left = (container.width.toFloat() - baseSize.width) / 2f
+    val top = (container.height.toFloat() - baseSize.height) / 2f
+    return Rect(
+        left = left,
+        top = top,
+        right = left + baseSize.width,
+        bottom = top + baseSize.height
+    )
+}
+
+private fun rootBoundsToPreviewBounds(
+    rootBounds: Rect,
+    previewRootBounds: Rect?
+): Rect? {
+    val root = previewRootBounds ?: return null
+    if (root.width <= 0f || root.height <= 0f) return null
+    return Rect(
+        left = rootBounds.left - root.left,
+        top = rootBounds.top - root.top,
+        right = rootBounds.right - root.left,
+        bottom = rootBounds.bottom - root.top
+    )
+}
+
+private fun calculatePreviewFallbackSourceFrame(targetFrame: Rect): Rect {
+    if (targetFrame.width <= 0f || targetFrame.height <= 0f) return targetFrame
+    val scale = 0.32f
+    return scalePreviewFrame(targetFrame, scale)
+}
+
+private fun lerpPreviewFrame(start: Rect, stop: Rect, fraction: Float): Rect {
+    val progress = fraction.coerceIn(0f, 1f)
+    return Rect(
+        left = lerpPreviewFloat(start.left, stop.left, progress),
+        top = lerpPreviewFloat(start.top, stop.top, progress),
+        right = lerpPreviewFloat(start.right, stop.right, progress),
+        bottom = lerpPreviewFloat(start.bottom, stop.bottom, progress)
+    )
+}
+
+private fun translatePreviewFrame(frame: Rect, y: Float): Rect {
+    if (y == 0f) return frame
+    return Rect(
+        left = frame.left,
+        top = frame.top + y,
+        right = frame.right,
+        bottom = frame.bottom + y
+    )
+}
+
+private fun scalePreviewFrame(frame: Rect, scale: Float): Rect {
+    val safeScale = scale.coerceAtLeast(0.01f)
+    val center = frame.center
+    val width = frame.width * safeScale
+    val height = frame.height * safeScale
+    return Rect(
+        left = center.x - width / 2f,
+        top = center.y - height / 2f,
+        right = center.x + width / 2f,
+        bottom = center.y + height / 2f
+    )
+}
+
+private fun calculatePreviewSwipeDismissProgress(offsetY: Float, containerHeightPx: Float): Float {
+    val range = (containerHeightPx * PREVIEW_SWIPE_BACKGROUND_FADE_DISTANCE_FRACTION)
+        .coerceAtLeast(1f)
+    return (abs(offsetY) / range).coerceIn(0f, 1f)
+}
+
+private fun previewBackgroundBrush(
+    alpha: Float,
+    offsetY: Float,
+    dismissProgress: Float
+): Brush {
+    val baseAlpha = alpha.coerceIn(0f, PREVIEW_BACKGROUND_ALPHA)
+    if (baseAlpha <= 0f) {
+        return Brush.verticalGradient(
+            listOf(Color.Transparent, Color.Transparent)
+        )
+    }
+    val edgeAlpha = baseAlpha * (1f - dismissProgress.coerceIn(0f, 1f))
+    val topAlpha = if (offsetY < 0f) edgeAlpha else baseAlpha
+    val bottomAlpha = if (offsetY > 0f) edgeAlpha else baseAlpha
+    return Brush.verticalGradient(
+        colors = listOf(
+            Color.Black.copy(alpha = topAlpha),
+            Color.Black.copy(alpha = baseAlpha),
+            Color.Black.copy(alpha = bottomAlpha)
+        )
+    )
+}
+
+private fun previewEaseOutCubic(value: Float): Float {
+    val clamped = value.coerceIn(0f, 1f)
+    val inverse = 1f - clamped
+    return 1f - inverse * inverse * inverse
+}
+
+private fun lerpPreviewFloat(start: Float, stop: Float, fraction: Float): Float {
+    return start + (stop - start) * fraction
+}
+
+private fun fallbackPreviewImageSize(
+    aspectRatio: Float?,
+    containerSize: IntSize
+): IntSize {
+    val ratio = aspectRatio
+        ?.takeIf { it.isFinite() && it > 0f }
+        ?.coerceIn(0.05f, 20f)
+    return if (ratio != null) {
+        IntSize(
+            width = (1_000f * ratio).roundToInt().coerceAtLeast(1),
+            height = 1_000
+        )
+    } else {
+        containerSize
+    }
+}
+
+private fun calculatePreviewBaseSize(container: IntSize, image: IntSize): Size {
+    if (container.width <= 0 || container.height <= 0 || image.width <= 0 || image.height <= 0) {
+        return Size.Zero
+    }
+    val containerRatio = container.width.toFloat() / container.height.toFloat()
+    val imageRatio = image.width.toFloat() / image.height.toFloat()
+    return if (imageRatio >= containerRatio) {
+        val width = container.width.toFloat()
+        Size(width, width / imageRatio)
+    } else {
+        val height = container.height.toFloat()
+        Size(height * imageRatio, height)
+    }
+}
+
+private fun calculatePreviewMaxScale(container: IntSize, image: IntSize, baseSize: Size): Float {
+    if (baseSize.width <= 0f || baseSize.height <= 0f) return 1f
+    val screenScale = max(
+        container.width * 4f / baseSize.width,
+        container.height * 4f / baseSize.height
+    )
+    val imageScale = max(
+        image.width * 4f / baseSize.width,
+        image.height * 4f / baseSize.height
+    )
+    return max(screenScale, imageScale).coerceAtLeast(1f)
+}
+
+private fun clampPreviewOffset(
+    rawOffset: Offset,
+    scale: Float,
+    container: IntSize,
+    baseSize: Size
+): Offset {
+    if (baseSize.width <= 0f || baseSize.height <= 0f) return Offset.Zero
+    if (!rawOffset.isFinite()) return Offset.Zero
+    val scaledWidth = baseSize.width * scale
+    val scaledHeight = baseSize.height * scale
+    val maxX = ((scaledWidth - container.width) / 2f).coerceAtLeast(0f)
+    val maxY = ((scaledHeight - container.height) / 2f).coerceAtLeast(0f)
+    return Offset(
+        rawOffset.x.coerceIn(-maxX, maxX),
+        rawOffset.y.coerceIn(-maxY, maxY)
+    )
+}
+
+private fun nextPreviewDoubleTapScale(current: Float, maxScale: Float): Float {
+    val first = minOf(2f, maxScale)
+    val second = minOf(4f, maxScale)
+    return when {
+        current < first - 0.05f -> first
+        current < second - 0.05f -> second
+        else -> 1f
+    }
+}
+
+private operator fun Offset.times(factor: Float): Offset {
+    return Offset(x * factor, y * factor)
+}
+
+private operator fun Offset.div(factor: Float): Offset {
+    return Offset(x / factor, y / factor)
+}
+
+private fun Offset.isFinite(): Boolean {
+    return x.isFinite() && y.isFinite()
+}
+
+private fun sanitizePreviewScale(value: Float, minScale: Float, maxScale: Float): Float {
+    if (!value.isFinite()) return minScale
+    if (value <= 0f) return minScale
+    return value.coerceIn(minScale, maxScale)
+}
+
+private fun sanitizePreviewOffset(value: Offset): Offset {
+    return if (value.isFinite()) value else Offset.Zero
 }
 
 @Composable
@@ -1052,10 +1975,18 @@ private fun PlainArticleView(
 
 // ==================== HTML 解析 ====================
 
+private data class ArticlePreviewImage(
+    val url: String,
+    val alt: String?,
+    val aspectRatio: Float?,
+    val sourceNodeIndex: Int,
+    val sourceBounds: Rect?
+)
+
 private sealed class ArticleNode {
     data class Heading(val text: String, val level: Int) : ArticleNode()
     data class Paragraph(val text: String) : ArticleNode()
-    data class Image(val url: String, val alt: String) : ArticleNode()
+    data class Image(val url: String, val alt: String, val aspectRatio: Float?) : ArticleNode()
     data class BlockQuote(val text: String) : ArticleNode()
     data class CodeBlock(val text: String) : ArticleNode()
     data class ListItem(val text: String) : ArticleNode()
@@ -1063,12 +1994,22 @@ private sealed class ArticleNode {
     data class Spacer(val height: Dp) : ArticleNode()
 }
 
-private data class VisibleArticleTextNodeWithLayout(
-    val itemInfo: LazyListItemInfo,
-    val nodeIndex: Int,
-    val text: String,
-    val layout: TextLayoutResult
-)
+private sealed class VisibleArticleNodeWithLayout {
+    abstract val itemInfo: LazyListItemInfo
+    abstract val nodeIndex: Int
+
+    data class Text(
+        override val itemInfo: LazyListItemInfo,
+        override val nodeIndex: Int,
+        val text: String,
+        val layout: TextLayoutResult
+    ) : VisibleArticleNodeWithLayout()
+
+    data class Image(
+        override val itemInfo: LazyListItemInfo,
+        override val nodeIndex: Int
+    ) : VisibleArticleNodeWithLayout()
+}
 
 private data class VisibleImportedTextChunkWithLayout(
     val itemInfo: LazyListItemInfo,
@@ -1077,11 +2018,21 @@ private data class VisibleImportedTextChunkWithLayout(
     val layout: TextLayoutResult
 )
 
-private data class ArticleTextRestoreTarget(
-    val itemIndex: Int,
-    val nodeIndex: Int,
-    val byteOffsetInNode: Int
-)
+private sealed class ArticleRestoreTarget {
+    abstract val itemIndex: Int
+
+    data class Text(
+        override val itemIndex: Int,
+        val nodeIndex: Int,
+        val byteOffsetInNode: Int
+    ) : ArticleRestoreTarget()
+
+    data class Image(
+        override val itemIndex: Int,
+        val nodeIndex: Int,
+        val offsetFraction: Float
+    ) : ArticleRestoreTarget()
+}
 
 private data class ImportedTextByteRestoreTarget(
     val itemIndex: Int,
@@ -1131,6 +2082,11 @@ private fun articleNodeText(node: ArticleNode?): String? {
         is ArticleNode.ListItem -> node.text
         else -> null
     }?.takeIf { it.isNotBlank() }
+}
+
+private fun articleNodeReadingUnits(node: ArticleNode?): Int {
+    return articleNodeText(node)?.let(::utf8ByteCount)
+        ?: if (node is ArticleNode.Image) ARTICLE_IMAGE_READING_UNITS else 0
 }
 
 private fun importedTextChunkKey(marker: String, chunkIndex: Int): String {
@@ -1200,14 +2156,14 @@ private fun calculateImportedTextByteReadingProgressFromLayout(
         .coerceIn(0f, 1f)
 }
 
-private fun calculateArticleTextReadingProgressFromLayout(
+private fun calculateArticleReadingProgressFromLayout(
     listState: LazyListState,
     nodes: List<ArticleNode>,
     textLayouts: Map<Int, TextLayoutResult>,
     anchorOffsetPx: Int
 ): Float? {
-    val totalTextBytes = nodes.sumOf { node -> articleNodeText(node)?.let(::utf8ByteCount) ?: 0 }
-    if (totalTextBytes <= 0) return null
+    val totalReadingUnits = nodes.sumOf(::articleNodeReadingUnits)
+    if (totalReadingUnits <= 0) return null
     val layoutInfo = listState.layoutInfo
     if (layoutInfo.visibleItemsInfo.isNotEmpty() && !listState.canScrollForward) return 1f
     val normalizedAnchorOffsetPx = anchorOffsetPx.coerceAtLeast(0)
@@ -1215,73 +2171,112 @@ private fun calculateArticleTextReadingProgressFromLayout(
         if (itemInfo.offset + itemInfo.size <= normalizedAnchorOffsetPx) {
             return@firstNotNullOfOrNull null
         }
-        val text = articleNodeText(nodes.getOrNull(itemInfo.index))
-            ?: return@firstNotNullOfOrNull null
-        val layout = textLayouts[itemInfo.index] ?: return@firstNotNullOfOrNull null
-        if (layout.lineCount <= 0) return@firstNotNullOfOrNull null
-        VisibleArticleTextNodeWithLayout(
-            itemInfo = itemInfo,
-            nodeIndex = itemInfo.index,
-            text = text,
-            layout = layout
-        )
+        when (nodes.getOrNull(itemInfo.index)) {
+            is ArticleNode.Image -> VisibleArticleNodeWithLayout.Image(
+                itemInfo = itemInfo,
+                nodeIndex = itemInfo.index
+            )
+            else -> {
+                val text = articleNodeText(nodes.getOrNull(itemInfo.index))
+                    ?: return@firstNotNullOfOrNull null
+                val layout = textLayouts[itemInfo.index] ?: return@firstNotNullOfOrNull null
+                if (layout.lineCount <= 0) return@firstNotNullOfOrNull null
+                VisibleArticleNodeWithLayout.Text(
+                    itemInfo = itemInfo,
+                    nodeIndex = itemInfo.index,
+                    text = text,
+                    layout = layout
+                )
+            }
+        }
     } ?: return null
-    val bytesBeforeNode = nodes.asSequence()
+
+    val unitsBeforeNode = nodes.asSequence()
         .take(visibleNode.nodeIndex)
-        .sumOf { node -> articleNodeText(node)?.let(::utf8ByteCount) ?: 0 }
+        .sumOf(::articleNodeReadingUnits)
     val scrolledInItemPx = (normalizedAnchorOffsetPx - visibleNode.itemInfo.offset)
         .coerceIn(0, visibleNode.itemInfo.size.coerceAtLeast(0))
-    val textTopPaddingPx = articleTextTopInsetPx(
-        itemInfo = visibleNode.itemInfo,
-        layout = visibleNode.layout
-    )
-    val textY = (scrolledInItemPx - textTopPaddingPx)
-        .coerceAtLeast(0)
-        .toFloat()
-    val lineIndex = visibleNode.layout
-        .getLineForVerticalPosition(textY)
-        .coerceIn(0, visibleNode.layout.lineCount - 1)
-    val charOffset = visibleNode.layout
-        .getLineStart(lineIndex)
-        .coerceIn(0, visibleNode.text.length)
-    val byteOffsetInNode = utf8ByteCountBeforeCharOffset(visibleNode.text, charOffset)
-    val absoluteByte = (bytesBeforeNode + byteOffsetInNode)
-        .coerceIn(0, totalTextBytes)
-    return (absoluteByte.toDouble() / totalTextBytes.toDouble())
+
+    val absoluteUnit = when (visibleNode) {
+        is VisibleArticleNodeWithLayout.Text -> {
+            val textTopPaddingPx = articleTextTopInsetPx(
+                itemInfo = visibleNode.itemInfo,
+                layout = visibleNode.layout
+            )
+            val textY = (scrolledInItemPx - textTopPaddingPx)
+                .coerceAtLeast(0)
+                .toFloat()
+            val lineIndex = visibleNode.layout
+                .getLineForVerticalPosition(textY)
+                .coerceIn(0, visibleNode.layout.lineCount - 1)
+            val charOffset = visibleNode.layout
+                .getLineStart(lineIndex)
+                .coerceIn(0, visibleNode.text.length)
+            unitsBeforeNode + utf8ByteCountBeforeCharOffset(visibleNode.text, charOffset)
+        }
+        is VisibleArticleNodeWithLayout.Image -> {
+            val imageUnits = articleNodeReadingUnits(nodes.getOrNull(visibleNode.nodeIndex))
+            val itemSizePx = visibleNode.itemInfo.size.coerceAtLeast(1)
+            val imageUnitOffset = (imageUnits.toDouble() * scrolledInItemPx.toDouble() / itemSizePx.toDouble())
+                .roundToInt()
+                .coerceIn(0, imageUnits)
+            unitsBeforeNode + imageUnitOffset
+        }
+    }.coerceIn(0, totalReadingUnits)
+
+    return (absoluteUnit.toDouble() / totalReadingUnits.toDouble())
         .toFloat()
         .coerceIn(0f, 1f)
 }
 
-private fun articleTextRestoreTarget(
+private fun articleRestoreTarget(
     progress: Float,
     nodes: List<ArticleNode>
-): ArticleTextRestoreTarget? {
-    val textByteCounts = nodes.map { node -> articleNodeText(node)?.let(::utf8ByteCount) ?: 0 }
-    val totalTextBytes = textByteCounts.sum()
-    if (totalTextBytes <= 0) return null
-    val targetByte = (totalTextBytes.toDouble() * progress.coerceIn(0f, 1f).toDouble())
+): ArticleRestoreTarget? {
+    val readingUnitCounts = nodes.map(::articleNodeReadingUnits)
+    val totalReadingUnits = readingUnitCounts.sum()
+    if (totalReadingUnits <= 0) return null
+    val targetUnit = (totalReadingUnits.toDouble() * progress.coerceIn(0f, 1f).toDouble())
         .roundToInt()
-        .coerceIn(0, (totalTextBytes - 1).coerceAtLeast(0))
+        .coerceIn(0, (totalReadingUnits - 1).coerceAtLeast(0))
     var consumed = 0
-    textByteCounts.forEachIndexed { index, byteCount ->
-        if (byteCount <= 0) return@forEachIndexed
-        val next = consumed + byteCount
-        if (targetByte < next) {
-            return ArticleTextRestoreTarget(
+    readingUnitCounts.forEachIndexed { index, unitCount ->
+        if (unitCount <= 0) return@forEachIndexed
+        val next = consumed + unitCount
+        if (targetUnit < next) {
+            val node = nodes.getOrNull(index)
+            if (node is ArticleNode.Image) {
+                return ArticleRestoreTarget.Image(
+                    itemIndex = index,
+                    nodeIndex = index,
+                    offsetFraction = ((targetUnit - consumed).toFloat() / unitCount.toFloat())
+                        .coerceIn(0f, 1f)
+                )
+            }
+            return ArticleRestoreTarget.Text(
                 itemIndex = index,
                 nodeIndex = index,
-                byteOffsetInNode = (targetByte - consumed).coerceAtLeast(0)
+                byteOffsetInNode = (targetUnit - consumed).coerceAtLeast(0)
             )
         }
         consumed = next
     }
-    val lastTextIndex = textByteCounts.indexOfLast { it > 0 }
-    if (lastTextIndex < 0) return null
-    return ArticleTextRestoreTarget(
-        itemIndex = lastTextIndex,
-        nodeIndex = lastTextIndex,
-        byteOffsetInNode = (textByteCounts[lastTextIndex] - 1).coerceAtLeast(0)
-    )
+    val lastReadableIndex = readingUnitCounts.indexOfLast { it > 0 }
+    if (lastReadableIndex < 0) return null
+    val lastNode = nodes.getOrNull(lastReadableIndex)
+    return if (lastNode is ArticleNode.Image) {
+        ArticleRestoreTarget.Image(
+            itemIndex = lastReadableIndex,
+            nodeIndex = lastReadableIndex,
+            offsetFraction = 1f
+        )
+    } else {
+        ArticleRestoreTarget.Text(
+            itemIndex = lastReadableIndex,
+            nodeIndex = lastReadableIndex,
+            byteOffsetInNode = (readingUnitCounts[lastReadableIndex] - 1).coerceAtLeast(0)
+        )
+    }
 }
 
 private fun importedTextByteRestoreTarget(
@@ -1339,7 +2334,7 @@ private fun importedTextRestoreVisualOffsetPx(
 }
 
 private fun articleTextRestoreVisualOffsetPx(
-    restoreTarget: ArticleTextRestoreTarget,
+    restoreTarget: ArticleRestoreTarget.Text,
     text: String,
     layout: TextLayoutResult,
     itemInfo: LazyListItemInfo,
@@ -1359,6 +2354,18 @@ private fun articleTextRestoreVisualOffsetPx(
     )
     return (itemInfo.offset + textTopPaddingPx + layout.getLineTop(lineIndex))
         .roundToInt()
+        .coerceAtLeast(0) - anchorOffsetPx.coerceAtLeast(0)
+}
+
+private fun articleImageRestoreVisualOffsetPx(
+    restoreTarget: ArticleRestoreTarget.Image,
+    itemInfo: LazyListItemInfo,
+    anchorOffsetPx: Int
+): Int {
+    val imageOffsetPx = (itemInfo.size.coerceAtLeast(0).toFloat() * restoreTarget.offsetFraction)
+        .roundToInt()
+        .coerceAtLeast(0)
+    return (itemInfo.offset + imageOffsetPx)
         .coerceAtLeast(0) - anchorOffsetPx.coerceAtLeast(0)
 }
 
@@ -1462,18 +2469,12 @@ private fun parseArticleContent(html: String): List<ArticleNode> {
                 }
             }
             "img" -> {
-                val src = element.attr("src").trim()
-                if (src.isNotBlank()) {
-                    result.add(ArticleNode.Image(src, element.attr("alt")))
-                }
+                parseImageNode(element)?.let(result::add)
             }
             "figure" -> {
                 val img = element.selectFirst("img")
                 if (img != null) {
-                    val src = img.attr("src").trim()
-                    if (src.isNotBlank()) {
-                        result.add(ArticleNode.Image(src, img.attr("alt")))
-                    }
+                    parseImageNode(img)?.let(result::add)
                 }
                 val caption = element.selectFirst("figcaption")
                 if (caption != null) {
@@ -1552,18 +2553,12 @@ private fun parseElement(element: Element, result: MutableList<ArticleNode>) {
             }
         }
         "img" -> {
-            val src = element.attr("src").trim()
-            if (src.isNotBlank()) {
-                result.add(ArticleNode.Image(src, element.attr("alt")))
-            }
+            parseImageNode(element)?.let(result::add)
         }
         "figure" -> {
             val img = element.selectFirst("img")
             if (img != null) {
-                val src = img.attr("src").trim()
-                if (src.isNotBlank()) {
-                    result.add(ArticleNode.Image(src, img.attr("alt")))
-                }
+                parseImageNode(img)?.let(result::add)
             }
             val caption = element.selectFirst("figcaption")
             if (caption != null) {
@@ -1598,6 +2593,65 @@ private fun parseElement(element: Element, result: MutableList<ArticleNode>) {
     }
 }
 
+private fun parseImageNode(element: Element): ArticleNode.Image? {
+    val src = element.attr("src").trim()
+    if (src.isBlank()) return null
+    return ArticleNode.Image(
+        url = src,
+        alt = element.attr("alt"),
+        aspectRatio = parseImageAspectRatio(element)
+    )
+}
+
+private fun parseImageAspectRatio(element: Element): Float? {
+    val width = firstImageDimension(
+        element,
+        attrs = listOf("width", "data-width", "data-w", "data-original-width", "data-actual-width"),
+        styleProperty = "width"
+    )
+    val height = firstImageDimension(
+        element,
+        attrs = listOf("height", "data-height", "data-h", "data-original-height", "data-actual-height"),
+        styleProperty = "height"
+    )
+    if (width == null || height == null || height <= 0f) return null
+    return (width / height)
+        .takeIf { it.isFinite() }
+}
+
+private fun firstImageDimension(
+    element: Element,
+    attrs: List<String>,
+    styleProperty: String
+): Float? {
+    attrs.firstNotNullOfOrNull { attr ->
+        parseImageDimension(element.attr(attr))
+    }?.let { return it }
+    return parseStyleDimension(
+        style = element.attr("style"),
+        property = styleProperty
+    )
+}
+
+private fun parseStyleDimension(style: String, property: String): Float? {
+    if (style.isBlank()) return null
+    val match = Regex(
+        pattern = "(?i)(?:^|;)\\s*${Regex.escape(property)}\\s*:\\s*([^;]+)"
+    ).find(style) ?: return null
+    return parseImageDimension(match.groupValues[1])
+}
+
+private fun parseImageDimension(value: String): Float? {
+    val normalized = value.trim().lowercase()
+    if (normalized.isBlank() || normalized.contains("%") || normalized == "auto") return null
+    val number = Regex("""\d+(?:\.\d+)?""")
+        .find(normalized)
+        ?.value
+        ?.toFloatOrNull()
+        ?: return null
+    return number.takeIf { it > 0f && it.isFinite() }
+}
+
 /**
  * 提取包含内联格式（如 <strong>, <em>, <a>）的文本
  */
@@ -1626,5 +2680,18 @@ private const val ARTICLE_READING_PROGRESS_LAYOUT_TIMEOUT_MS = 800L
 private const val ARTICLE_RESTORE_OFFSET_TIMEOUT_MS = 3_000L
 private const val ARTICLE_READING_PROGRESS_SAMPLE_MS = 500L
 private const val MAX_ARTICLE_TEXT_NODE_CHARS = 2_000
+private const val ARTICLE_IMAGE_READING_UNITS = 520
 private const val IMPORTED_TEXT_CHUNK_KEY_PREFIX = "importedText:"
 private const val READER_CHROME_SNAP_ANIMATION_MS = 140
+private const val PREVIEW_OVERLAY_Z_INDEX = 10f
+private const val PREVIEW_BACKGROUND_ALPHA = 0.96f
+private const val PREVIEW_BACKGROUND_DISMISS_ALPHA_LOSS = 0.94f
+private const val PREVIEW_IMAGE_DISMISS_ALPHA_LOSS = 0.42f
+private const val PREVIEW_SWIPE_MIN_SCALE_LOSS = 0.12f
+private const val PREVIEW_SWIPE_START_THRESHOLD_PX = 18f
+private const val PREVIEW_SWIPE_AXIS_DOMINANCE = 1.2f
+private const val PREVIEW_SWIPE_DISMISS_DISTANCE_FRACTION = 0.16f
+private const val PREVIEW_SWIPE_BACKGROUND_FADE_DISTANCE_FRACTION = 0.36f
+private const val PREVIEW_SWIPE_DISMISS_VELOCITY_PX = 1_050f
+private const val PREVIEW_SOURCE_EXIT_ANIMATION_MS = 220
+private const val PREVIEW_SWIPE_SETTLE_ANIMATION_MS = 180

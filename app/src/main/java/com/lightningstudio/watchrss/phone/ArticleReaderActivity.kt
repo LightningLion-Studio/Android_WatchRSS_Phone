@@ -1540,6 +1540,8 @@ private fun ArticleImagePreviewOverlay(
                     var totalPanDistance = 0f
                     var accumulatedPan = Offset.Zero
                     var isVerticalDismiss = false
+                    var hadMultiPointer = false
+                    var hadScaleGesture = false
                     while (true) {
                         val event = awaitPointerEvent(pass = PointerEventPass.Main)
                         if (event.changes.none { it.pressed }) {
@@ -1548,16 +1550,29 @@ private fun ArticleImagePreviewOverlay(
                         val zoomChange = event.calculateZoom()
                         val panChange = event.calculatePan()
                         val centroid = event.calculateCentroid()
+                        val activePointerCount = event.changes.count { it.pressed }
                         val rawTime = event.changes.firstOrNull()?.uptimeMillis ?: 0L
                         val time = if (rawTime != 0L) rawTime else SystemClock.uptimeMillis()
 
                         if (!centroid.isFinite() || !panChange.isFinite() || !zoomChange.isFinite()) {
                             continue
                         }
+                        if (activePointerCount > 1) {
+                            hadMultiPointer = true
+                        }
+                        if (activePointerCount > 1 &&
+                            abs(zoomChange - 1f) > PREVIEW_SCALE_GESTURE_ZOOM_EPSILON
+                        ) {
+                            hadScaleGesture = true
+                        }
                         accumulatedPan += panChange
-                        val activePointerCount = event.changes.count { it.pressed }
+                        val recentlyScaled = lastScaleAt != 0L &&
+                            time - lastScaleAt < PREVIEW_SWIPE_AFTER_SCALE_BLOCK_MS
                         if (!isVerticalDismiss &&
                             activePointerCount == 1 &&
+                            !hadMultiPointer &&
+                            !hadScaleGesture &&
+                            !recentlyScaled &&
                             abs(accumulatedPan.y) > PREVIEW_SWIPE_START_THRESHOLD_PX &&
                             abs(accumulatedPan.y) > abs(accumulatedPan.x) * PREVIEW_SWIPE_AXIS_DOMINANCE
                         ) {
@@ -2690,6 +2705,8 @@ private const val PREVIEW_IMAGE_DISMISS_ALPHA_LOSS = 0.42f
 private const val PREVIEW_SWIPE_MIN_SCALE_LOSS = 0.12f
 private const val PREVIEW_SWIPE_START_THRESHOLD_PX = 18f
 private const val PREVIEW_SWIPE_AXIS_DOMINANCE = 1.2f
+private const val PREVIEW_SCALE_GESTURE_ZOOM_EPSILON = 0.012f
+private const val PREVIEW_SWIPE_AFTER_SCALE_BLOCK_MS = 180L
 private const val PREVIEW_SWIPE_DISMISS_DISTANCE_FRACTION = 0.16f
 private const val PREVIEW_SWIPE_BACKGROUND_FADE_DISTANCE_FRACTION = 0.36f
 private const val PREVIEW_SWIPE_DISMISS_VELOCITY_PX = 1_050f

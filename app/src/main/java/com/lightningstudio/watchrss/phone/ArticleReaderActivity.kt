@@ -29,6 +29,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -42,6 +43,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListItemInfo
@@ -215,8 +217,11 @@ private fun ArticleReaderScreen(
     onOpenImportedArticle: (String) -> Unit,
     onOpenOriginal: (String) -> Unit
 ) {
-    Surface(modifier = Modifier.fillMaxSize()) {
-        if (invalidArticleId) {
+    if (invalidArticleId) {
+        ReaderBackSurface(
+            onBeforeBack = {},
+            onBack = onBack
+        ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -228,10 +233,16 @@ private fun ArticleReaderScreen(
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                 }
             }
-            return@Surface
         }
-        val safeArticle = article
-        if (safeArticle == null) {
+        return
+    }
+
+    val safeArticle = article
+    if (safeArticle == null) {
+        ReaderBackSurface(
+            onBeforeBack = {},
+            onBack = onBack
+        ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -243,37 +254,38 @@ private fun ArticleReaderScreen(
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                 }
             }
-            return@Surface
         }
+        return
+    }
 
-        val hasFileBackedImportedText = ImportedContentIds.isImportedTextArticleUrl(safeArticle.url) &&
-            isArticleContentMarker(safeArticle.contentText)
-        val waitingForImportedTextReader = hasFileBackedImportedText && importedTextReader == null
-        val useImportedTextChunks = importedTextReader != null
-        val contentNodes = remember(
-            safeArticle.articleId,
-            safeArticle.contentHash,
-            safeArticle.contentHtml,
-            safeArticle.contentText,
-            safeArticle.excerpt,
-            safeArticle.url,
-            waitingForImportedTextReader,
-            useImportedTextChunks
-        ) {
-            if (useImportedTextChunks || waitingForImportedTextReader) {
-                emptyList()
+    val hasFileBackedImportedText = ImportedContentIds.isImportedTextArticleUrl(safeArticle.url) &&
+        isArticleContentMarker(safeArticle.contentText)
+    val waitingForImportedTextReader = hasFileBackedImportedText && importedTextReader == null
+    val useImportedTextChunks = importedTextReader != null
+    val contentNodes = remember(
+        safeArticle.articleId,
+        safeArticle.contentHash,
+        safeArticle.contentHtml,
+        safeArticle.contentText,
+        safeArticle.excerpt,
+        safeArticle.url,
+        waitingForImportedTextReader,
+        useImportedTextChunks
+    ) {
+        if (useImportedTextChunks || waitingForImportedTextReader) {
+            emptyList()
+        } else {
+            if (!safeArticle.contentHtml.isNullOrBlank()) {
+                parseArticleContent(safeArticle.contentHtml ?: "")
             } else {
-                if (!safeArticle.contentHtml.isNullOrBlank()) {
-                    parseArticleContent(safeArticle.contentHtml ?: "")
-                } else {
-                    buildPlainArticleNodes(
-                        safeArticle.contentText
-                            .ifBlank { safeArticle.excerpt }
-                            .ifBlank { safeArticle.url }
-                    )
-                }
+                buildPlainArticleNodes(
+                    safeArticle.contentText
+                        .ifBlank { safeArticle.excerpt }
+                        .ifBlank { safeArticle.url }
+                )
             }
         }
+    }
         val listState = rememberLazyListState()
         val textLayouts = remember(safeArticle.articleId, contentNodes) {
             mutableStateMapOf<Int, TextLayoutResult>()
@@ -402,7 +414,7 @@ private fun ArticleReaderScreen(
         }
 
         suspend fun saveCurrentReadingProgress(force: Boolean): Boolean {
-            if (!hasRestoredPosition && !force) return false
+            if (!hasRestoredPosition) return false
             val progress = awaitReadingProgress() ?: return false
             val clamped = progress.coerceIn(0f, 1f)
             val now = SystemClock.elapsedRealtime()
@@ -578,7 +590,13 @@ private fun ArticleReaderScreen(
             onBackState.value()
         }
 
-        Box(modifier = Modifier.fillMaxSize()) {
+        ReaderBackSurface(
+            enabled = previewImage == null,
+            onBeforeBack = {
+                saveCurrentReadingProgress(force = true)
+            },
+            onBack = onBackState.value
+        ) {
             val backgroundColor = MaterialTheme.colorScheme.background
             val surfaceColorArgb = MaterialTheme.colorScheme.surface.toArgb()
             val backdrop = rememberLayerBackdrop {
@@ -662,7 +680,10 @@ private fun ArticleReaderScreen(
             ) {
                 ReaderTopContent(
                     article = safeArticle,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                    modifier = Modifier
+                        .statusBarsPadding()
+                        .padding(horizontal = 16.dp)
+                        .padding(top = 12.dp, bottom = 12.dp)
                 )
             }
 
@@ -712,6 +733,64 @@ private fun ArticleReaderScreen(
                 )
             }
         }
+}
+
+@Composable
+private fun ReaderBackSurface(
+    enabled: Boolean = true,
+    onBeforeBack: suspend () -> Unit,
+    onBack: () -> Unit,
+    content: @Composable BoxScope.() -> Unit
+) {
+    var backProgress by remember { mutableStateOf(0f) }
+    val onBeforeBackState = rememberUpdatedState(onBeforeBack)
+    val onBackState = rememberUpdatedState(onBack)
+
+    PredictiveBackHandler(enabled = enabled) { backEvents ->
+        try {
+            backEvents.collect { backEvent ->
+                backProgress = backEvent.progress.coerceIn(0f, 1f)
+            }
+            animate(
+                initialValue = backProgress,
+                targetValue = READER_BACK_EXIT_PROGRESS,
+                animationSpec = tween(READER_BACK_EXIT_ANIMATION_MS)
+            ) { value, _ ->
+                backProgress = value
+            }
+            onBeforeBackState.value()
+            onBackState.value()
+        } catch (exception: CancellationException) {
+            animate(
+                initialValue = backProgress,
+                targetValue = 0f,
+                animationSpec = tween(READER_BACK_CANCEL_ANIMATION_MS)
+            ) { value, _ ->
+                backProgress = value
+            }
+        }
+    }
+
+    Surface(
+        modifier = Modifier
+            .fillMaxSize()
+            .readerPredictiveBackPreview(backProgress)
+    ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            content()
+        }
+    }
+}
+
+private fun Modifier.readerPredictiveBackPreview(progress: Float): Modifier {
+    val previewProgress = progress.coerceIn(0f, 1f)
+    val exitProgress = (progress - 1f).coerceIn(0f, 1f)
+    if (previewProgress <= 0f && exitProgress <= 0f) return this
+    return graphicsLayer {
+        translationX = 96.dp.toPx() * previewProgress + size.width * exitProgress
+        scaleX = 1f - 0.04f * previewProgress
+        scaleY = 1f - 0.04f * previewProgress
+        alpha = (1f - 0.16f * previewProgress) * (1f - exitProgress)
     }
 }
 
@@ -2698,6 +2777,9 @@ private const val MAX_ARTICLE_TEXT_NODE_CHARS = 2_000
 private const val ARTICLE_IMAGE_READING_UNITS = 520
 private const val IMPORTED_TEXT_CHUNK_KEY_PREFIX = "importedText:"
 private const val READER_CHROME_SNAP_ANIMATION_MS = 140
+private const val READER_BACK_CANCEL_ANIMATION_MS = 260
+private const val READER_BACK_EXIT_ANIMATION_MS = 180
+private const val READER_BACK_EXIT_PROGRESS = 2f
 private const val PREVIEW_OVERLAY_Z_INDEX = 10f
 private const val PREVIEW_BACKGROUND_ALPHA = 0.96f
 private const val PREVIEW_BACKGROUND_DISMISS_ALPHA_LOSS = 0.94f

@@ -122,7 +122,7 @@
         <activity
             android:name=".ArticleReaderActivity"
             android:exported="false"
-            android:theme="@style/Theme.WatchRSS" />
+            android:theme="@style/Theme.WatchRSS.Reader" />
         <activity
             android:name=".RssActivity"
             android:exported="false"

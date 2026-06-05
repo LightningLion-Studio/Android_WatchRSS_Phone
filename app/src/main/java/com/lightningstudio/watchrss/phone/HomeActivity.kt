@@ -162,6 +162,7 @@ class HomeActivity : ComponentActivity() {
                     onToggleFavorite = viewModel::toggleFavorite,
                     onToggleWatchLater = viewModel::toggleWatchLater,
                     onMoveRssSourceToTop = viewModel::moveRssSourceToTop,
+                    onReorderContentChannels = viewModel::reorderContentChannels,
                     onToggleRssSourcePinned = viewModel::toggleRssSourcePinned,
                     onDeleteRssSource = viewModel::deleteRssSource,
                     onRefreshAllRssSources = viewModel::refreshAllRssSources,

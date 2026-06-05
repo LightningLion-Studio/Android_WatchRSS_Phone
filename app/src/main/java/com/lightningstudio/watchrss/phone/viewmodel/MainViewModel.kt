@@ -350,6 +350,19 @@ class MainViewModel(
         }
     }
 
+    fun reorderContentChannels(sourceUrlsInDisplayOrder: List<String>, independentIndex: Int?) {
+        if (sourceUrlsInDisplayOrder.size < 2 && independentIndex == null) return
+        viewModelScope.launch {
+            runBusy("正在调整频道顺序…") {
+                repository.reorderContentChannels(sourceUrlsInDisplayOrder, independentIndex)
+                sessionState.value = sessionState.value.copy(
+                    message = "已更新频道顺序",
+                    error = null
+                )
+            }
+        }
+    }
+
     fun toggleRssSourcePinned(source: PhoneRssSourceEntity) {
         viewModelScope.launch {
             runBusy("正在更新频道置顶…") {

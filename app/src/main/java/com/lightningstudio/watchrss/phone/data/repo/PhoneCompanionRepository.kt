@@ -89,6 +89,8 @@ private object NoopSyncPeerStateDao : SyncPeerStateDao {
     override suspend fun upsert(state: SyncPeerStateEntity) = Unit
 }
 
+private const val CONTENT_CHANNEL_SORT_STEP = 10_000L
+
 class PhoneCompanionRepository(
     private val savedItemDao: PhoneSavedItemDao,
     private val articleDao: PhoneArticleDao,
@@ -134,9 +136,7 @@ class PhoneCompanionRepository(
     }
 
     fun observeRssSources(): Flow<List<PhoneRssSourceEntity>> {
-        return rssSourceDao.observeActive(
-            importedTextSourceUrl()
-        )
+        return rssSourceDao.observeActive()
     }
 
     fun observeRssArticles(): Flow<List<PhoneArticleEntity>> {
@@ -251,10 +251,11 @@ class PhoneCompanionRepository(
     suspend fun moveRssSourceToTop(sourceUrl: String) = withContext(Dispatchers.IO) {
         val source = rssSourceDao.getByUrl(sourceUrl) ?: return@withContext
         val now = System.currentTimeMillis()
+        val nextSortOrder = nextTopRssSourceSortOrder(now)
         val updated = source.copy(
                 sourceDeviceId = deviceId,
                 updatedAt = now,
-                sortOrder = now,
+                sortOrder = nextSortOrder,
                 deleted = false,
                 deletedAt = 0L
             )
@@ -262,19 +263,107 @@ class PhoneCompanionRepository(
         recordRssSourceChange(updated.url, "sourceState", now)
     }
 
+    suspend fun reorderRssSources(sourceUrlsInDisplayOrder: List<String>) = withContext(Dispatchers.IO) {
+        reorderContentChannelsInternal(sourceUrlsInDisplayOrder, independentIndex = null)
+    }
+
+    suspend fun reorderContentChannels(
+        sourceUrlsInDisplayOrder: List<String>,
+        independentIndex: Int?
+    ) = withContext(Dispatchers.IO) {
+        reorderContentChannelsInternal(sourceUrlsInDisplayOrder, independentIndex)
+    }
+
+    private suspend fun reorderContentChannelsInternal(
+        sourceUrlsInDisplayOrder: List<String>,
+        independentIndex: Int?
+    ) {
+        val orderedUrls = sourceUrlsInDisplayOrder
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+        if (orderedUrls.size < 2 && independentIndex == null) return
+        val sourcesByUrl = rssSourceDao.getAllForSync().associateBy { it.url }
+        val now = System.currentTimeMillis()
+        val hasIndependentArticles = independentIndex != null &&
+            articleDao.getAllForSync().any { it.independentSaved && !it.deleted }
+        val itemCount = orderedUrls.size + if (hasIndependentArticles) 1 else 0
+        if (itemCount < 2) return
+        val normalizedIndependentIndex = if (hasIndependentArticles) {
+            independentIndex?.coerceIn(0, itemCount - 1)
+        } else {
+            null
+        }
+        val baseSortOrder = now + itemCount * CONTENT_CHANNEL_SORT_STEP
+        var sourceIndex = 0
+        for (displayIndex in 0 until itemCount) {
+            val sortOrder = baseSortOrder - displayIndex * CONTENT_CHANNEL_SORT_STEP
+            if (displayIndex == normalizedIndependentIndex) {
+                reorderIndependentArticles(sortOrder, now + displayIndex)
+            } else {
+                val url = orderedUrls.getOrNull(sourceIndex++) ?: continue
+                val source = sourcesByUrl[url]?.takeUnless { it.deleted } ?: continue
+                val updatedAt = now + displayIndex
+                val updated = source.copy(
+                    sourceDeviceId = deviceId,
+                    updatedAt = updatedAt,
+                    sortOrder = sortOrder,
+                    deleted = false,
+                    deletedAt = 0L
+                )
+                if (updated != source) {
+                    rssSourceDao.upsert(updated)
+                    recordRssSourceChange(updated.url, "sourceState", updatedAt)
+                }
+            }
+        }
+    }
+
+    private suspend fun reorderIndependentArticles(rowSortOrder: Long, changedAt: Long) {
+        val articles = articleDao.getAllForSync()
+            .filter { it.independentSaved && !it.deleted }
+            .sortedWith(
+                compareByDescending<PhoneArticleEntity> { it.independentSortOrder }
+                    .thenByDescending { it.independentChangedAt }
+                    .thenByDescending { it.importedAt }
+                    .thenBy { it.title }
+            )
+        articles.forEachIndexed { index, article ->
+            val articleChangedAt = changedAt + index
+            val updated = article.copy(
+                sourceDeviceId = deviceId,
+                independentChangedAt = articleChangedAt,
+                independentSortOrder = rowSortOrder - index,
+                deleted = false
+            )
+            if (updated != article) {
+                articleDao.upsert(updated)
+                recordArticleChange(updated.articleId, "sourceState", articleChangedAt)
+            }
+        }
+    }
+
     suspend fun setRssSourcePinned(sourceUrl: String, pinned: Boolean) = withContext(Dispatchers.IO) {
         val source = rssSourceDao.getByUrl(sourceUrl) ?: return@withContext
         val now = System.currentTimeMillis()
+        val nextSortOrder = if (pinned) nextTopRssSourceSortOrder(now) else source.sortOrder
         val updated = source.copy(
                 sourceDeviceId = deviceId,
                 updatedAt = now,
-                sortOrder = if (pinned) now else source.sortOrder,
+                sortOrder = nextSortOrder,
                 isPinned = pinned,
                 deleted = false,
                 deletedAt = 0L
             )
         rssSourceDao.upsert(updated)
         recordRssSourceChange(updated.url, "sourceState", now)
+    }
+
+    private suspend fun nextTopRssSourceSortOrder(now: Long): Long {
+        val currentMax = rssSourceDao.getAllForSync()
+            .filterNot { it.deleted }
+            .maxOfOrNull { it.sortOrder } ?: 0L
+        return maxOf(now, currentMax + CONTENT_CHANNEL_SORT_STEP)
     }
 
     suspend fun deleteRssSource(sourceUrl: String) = withContext(Dispatchers.IO) {
@@ -351,7 +440,6 @@ class PhoneCompanionRepository(
 
     suspend fun getRssSourcesForSync(): List<PhoneRssSourceEntity> = withContext(Dispatchers.IO) {
         rssSourceDao.getAllForSync()
-            .filterNot { ImportedContentIds.isImportedTextSourceUrl(it.url) }
     }
 
     private suspend fun getRssSourcesForSync(sourceUrls: Collection<String>): List<PhoneRssSourceEntity> {
@@ -359,7 +447,6 @@ class PhoneCompanionRepository(
         if (urlSet.isEmpty()) return emptyList()
         return rssSourceDao.getAllForSync()
             .filter { it.url in urlSet }
-            .filterNot { ImportedContentIds.isImportedTextSourceUrl(it.url) }
     }
 
     suspend fun prepareLibrarySyncWindow(peerDeviceId: String): PhoneLibrarySyncWindow =
@@ -660,7 +747,6 @@ class PhoneCompanionRepository(
         withContext(Dispatchers.IO) {
             var merged = 0
             incoming.forEach { remote ->
-                if (ImportedContentIds.isImportedTextSourceUrl(remote.url)) return@forEach
                 val local = rssSourceDao.getByUrl(remote.url)
                 val next = if (local == null || remote.isNewerThan(local)) {
                     remote

@@ -737,7 +737,7 @@ class PhoneCompanionRepositoryTest {
     }
 
     @Test
-    fun importedTextRootSource_isNotSyncedAsRssSource() = runBlocking {
+    fun importedTextRootSource_isSyncedAsRssSourceForChannelOrdering() = runBlocking {
         val importedText = source(
             url = ImportedContentIds.ROOT_SOURCE_URL,
             title = ImportedContentIds.ROOT_SOURCE_TITLE,
@@ -757,12 +757,12 @@ class PhoneCompanionRepositoryTest {
 
         val exported = repository.getRssSourcesForSync()
         val merged = repository.mergeRssSourcesFromSync(
-            listOf(importedText.copy(sourceDeviceId = "watch", updatedAt = 200L))
+            listOf(importedText.copy(sourceDeviceId = "watch", deleted = false, updatedAt = 200L))
         )
 
-        assertEquals(listOf(regular.url), exported.map { it.url })
-        assertEquals(0, merged)
-        assertEquals(true, sourceDao.sources.first { it.url == importedText.url }.deleted)
+        assertEquals(listOf(importedText.url, regular.url), exported.map { it.url })
+        assertEquals(1, merged)
+        assertEquals(false, sourceDao.sources.first { it.url == importedText.url }.deleted)
     }
 
     @Test
@@ -940,6 +940,62 @@ class PhoneCompanionRepositoryTest {
         assertEquals("cached-body", articleDao.items.single().syncBodyHash)
     }
 
+    @Test
+    fun reorderContentChannels_updatesSourceAndIndependentSortStateForSync() = runBlocking {
+        val rss = source(url = "https://example.com/feed.xml", updatedAt = 10L)
+        val importedText = source(
+            url = ImportedContentIds.ROOT_SOURCE_URL,
+            title = ImportedContentIds.ROOT_SOURCE_TITLE,
+            updatedAt = 20L
+        )
+        val sourceDao = FakePhoneRssSourceDao().apply {
+            sources = listOf(rss, importedText)
+        }
+        val articleDao = FakePhoneArticleDao().apply {
+            items = listOf(
+                article(
+                    id = "independent-1",
+                    independentSaved = true,
+                    independentChangedAt = 5L
+                ),
+                article(
+                    id = "independent-2",
+                    independentSaved = true,
+                    independentChangedAt = 4L
+                )
+            )
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone"
+        )
+
+        repository.reorderContentChannels(
+            sourceUrlsInDisplayOrder = listOf(importedText.url, rss.url),
+            independentIndex = 1
+        )
+
+        val importedTextUpdated = sourceDao.sources.first { it.url == importedText.url }
+        val rssUpdated = sourceDao.sources.first { it.url == rss.url }
+        val independentUpdated = articleDao.items
+            .filter { it.independentSaved }
+            .sortedByDescending { it.independentSortOrder }
+
+        assertTrue(importedTextUpdated.sortOrder > independentUpdated.first().independentSortOrder)
+        assertTrue(independentUpdated.first().independentSortOrder > rssUpdated.sortOrder)
+        assertTrue(independentUpdated[0].independentSortOrder > independentUpdated[1].independentSortOrder)
+        assertEquals(
+            setOf(importedText.url, rss.url),
+            repository.getRssSourcesForSync().map { it.url }.toSet()
+        )
+        assertEquals(
+            setOf("independent-1", "independent-2"),
+            repository.getArticleManifestsForSync().map { it.articleId }.toSet()
+        )
+    }
+
     private fun source(
         url: String,
         title: String = "示例源",
@@ -1106,9 +1162,7 @@ class PhoneCompanionRepositoryTest {
     private class FakePhoneRssSourceDao : PhoneRssSourceDao {
         var sources: List<PhoneRssSourceEntity> = emptyList()
 
-        override fun observeActive(
-            importedTextSourceUrl: String
-        ): Flow<List<PhoneRssSourceEntity>> = emptyFlow()
+        override fun observeActive(): Flow<List<PhoneRssSourceEntity>> = emptyFlow()
 
         override suspend fun getByUrl(url: String): PhoneRssSourceEntity? {
             return sources.firstOrNull { it.url == url }

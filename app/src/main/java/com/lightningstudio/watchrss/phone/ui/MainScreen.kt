@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,12 +17,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Article
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
@@ -62,7 +66,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -72,10 +78,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
@@ -125,15 +134,42 @@ private data class MainContentChannel(
     val icon: MainContentChannelIcon,
     val emptyTitle: String,
     val emptyText: String,
-    val canRefresh: Boolean = false
+    val canRefresh: Boolean = false,
+    val canDrag: Boolean = false,
+    val sortOrder: Long = 0L
+)
+
+private data class MainContentReorderRequest(
+    val sourceUrlsInDisplayOrder: List<String>,
+    val independentIndex: Int?
 )
 
 private enum class MainContentChannelIcon {
     RSS,
+    BOOK,
     FAVORITE,
     WATCH_LATER,
     ARTICLE,
     IMPORTED
+}
+
+private sealed interface RecentImportEntry {
+    val key: String
+    val sortAt: Long
+
+    data class Channel(
+        val channel: MainContentChannel,
+        override val sortAt: Long
+    ) : RecentImportEntry {
+        override val key: String = "channel:${channel.key}"
+    }
+
+    data class Article(
+        val article: PhoneArticleEntity
+    ) : RecentImportEntry {
+        override val key: String = "article:${article.articleId}"
+        override val sortAt: Long = maxOf(article.importedAt, article.updatedAt)
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -156,6 +192,7 @@ fun MainScreen(
     onToggleFavorite: (PhoneArticleEntity) -> Unit,
     onToggleWatchLater: (PhoneArticleEntity) -> Unit,
     onMoveRssSourceToTop: (PhoneRssSourceEntity) -> Unit,
+    onReorderContentChannels: (List<String>, Int?) -> Unit,
     onToggleRssSourcePinned: (PhoneRssSourceEntity) -> Unit,
     onDeleteRssSource: (PhoneRssSourceEntity) -> Unit,
     onRefreshAllRssSources: () -> Unit,
@@ -297,6 +334,7 @@ fun MainScreen(
                         contentPadding = contentPadding,
                         onOpenChannel = { channel -> selectedContentChannelKey = channel.key },
                         onMoveToTop = onMoveRssSourceToTop,
+                        onReorderContentChannels = onReorderContentChannels,
                         onTogglePinned = onToggleRssSourcePinned,
                         onDelete = onDeleteRssSource,
                         onRefreshAllRssSources = onRefreshAllRssSources
@@ -310,6 +348,8 @@ fun MainScreen(
                         onImportFile = onImportFile,
                         onAddRssSource = onAddRssSource,
                         onClearImportedContent = onClearImportedContent,
+                        recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
+                        onOpenChannel = { channel -> selectedContentChannelKey = channel.key },
                         onOpenArticle = onOpenArticle,
                         onOpenOriginalLink = { uriHandler.openUri(it) },
                         onToggleFavorite = onToggleFavorite,
@@ -774,7 +814,7 @@ private fun buildContentChannels(
     uiState: MainUiState,
     articlesBySource: Map<String, List<PhoneArticleEntity>>
 ): List<MainContentChannel> {
-    val virtualChannels = listOf(
+    val fixedChannels = listOf(
         MainContentChannel(
             key = CONTENT_CHANNEL_FAVORITES,
             title = "收藏",
@@ -794,50 +834,151 @@ private fun buildContentChannels(
             icon = MainContentChannelIcon.WATCH_LATER,
             emptyTitle = "暂无稍后再看",
             emptyText = "在文章列表中标记后会显示在这里"
-        ),
-        MainContentChannel(
-            key = CONTENT_CHANNEL_INDEPENDENT,
-            title = "独立文章",
-            supportingText = "网页导入",
-            articleCount = uiState.independentArticles.size,
-            articles = uiState.independentArticles,
-            icon = MainContentChannelIcon.ARTICLE,
-            emptyTitle = "暂无独立文章",
-            emptyText = "可在导入页添加网页文章"
-        ),
-        MainContentChannel(
-            key = CONTENT_CHANNEL_IMPORTED_TEXT,
-            title = ImportedContentIds.ROOT_SOURCE_TITLE,
-            supportingText = "TXT 导入",
-            articleCount = uiState.importedContentArticles.size,
-            articles = uiState.importedContentArticles,
-            icon = MainContentChannelIcon.IMPORTED,
-            emptyTitle = "暂无导入内容",
-            emptyText = "TXT 文件导入后会显示在这里"
         )
     )
+    val independentSortOrder = uiState.independentArticles.maxOfOrNull { article ->
+        maxOf(article.independentSortOrder, article.independentChangedAt, article.importedAt)
+    } ?: 0L
+    val independentChannel = MainContentChannel(
+        key = CONTENT_CHANNEL_INDEPENDENT,
+        title = "独立文章",
+        supportingText = "网页导入",
+        articleCount = uiState.independentArticles.size,
+        articles = uiState.independentArticles,
+        icon = MainContentChannelIcon.ARTICLE,
+        emptyTitle = "暂无独立文章",
+        emptyText = "可在导入页添加网页文章",
+        canDrag = uiState.independentArticles.isNotEmpty(),
+        sortOrder = independentSortOrder
+    )
     val sourceChannels = uiState.rssSources.map { source ->
-        val articles = articlesBySource[source.url].orEmpty()
-        val isImportedSource = ImportedContentIds.isImportedContentUrl(source.url)
+        val isImportedTextSource = ImportedContentIds.isImportedTextSourceUrl(source.url)
+        val isImportedEpubSource = ImportedContentIds.isImportedEpubSourceUrl(source.url)
+        val isImportedSource = isImportedTextSource || isImportedEpubSource
+        val articles = if (isImportedTextSource) {
+            uiState.importedContentArticles
+        } else {
+            articlesBySource[source.url].orEmpty()
+        }
         MainContentChannel(
             key = sourceContentChannelKey(source.url),
             title = source.title.ifBlank { source.url },
             supportingText = source.description.ifBlank {
-                if (isImportedSource) "EPUB 导入" else source.url
+                when {
+                    isImportedTextSource -> "TXT 导入"
+                    isImportedEpubSource -> "EPUB 导入"
+                    else -> source.url
+                }
             },
             articleCount = articles.size,
             source = source,
             articles = articles,
-            icon = MainContentChannelIcon.RSS,
+            icon = when {
+                isImportedEpubSource -> MainContentChannelIcon.BOOK
+                isImportedTextSource -> MainContentChannelIcon.IMPORTED
+                else -> MainContentChannelIcon.RSS
+            },
             emptyTitle = "暂无文章",
             emptyText = if (isImportedSource) "此频道暂无内容" else "下拉或点击刷新",
-            canRefresh = !isImportedSource
+            canRefresh = !isImportedSource,
+            canDrag = true,
+            sortOrder = source.sortOrder
         )
     }
-    return virtualChannels + sourceChannels
+    val hasImportedTextSource = sourceChannels.any { channel ->
+        channel.source?.url?.let(ImportedContentIds::isImportedTextSourceUrl) == true
+    }
+    val importedTextFallback = if (!hasImportedTextSource && uiState.importedContentArticles.isNotEmpty()) {
+        listOf(
+            MainContentChannel(
+                key = CONTENT_CHANNEL_IMPORTED_TEXT,
+                title = ImportedContentIds.ROOT_SOURCE_TITLE,
+                supportingText = "TXT 导入",
+                articleCount = uiState.importedContentArticles.size,
+                articles = uiState.importedContentArticles,
+                icon = MainContentChannelIcon.IMPORTED,
+                emptyTitle = "暂无导入内容",
+                emptyText = "TXT 文件导入后会显示在这里"
+            )
+        )
+    } else {
+        emptyList()
+    }
+    val reorderableChannels = (listOf(independentChannel) + importedTextFallback + sourceChannels)
+        .sortedWith(
+            compareByDescending<MainContentChannel> { it.sortOrder }
+                .thenBy { it.title }
+        )
+    return fixedChannels + reorderableChannels
 }
 
 private fun sourceContentChannelKey(sourceUrl: String): String = "$CONTENT_SOURCE_PREFIX$sourceUrl"
+
+private fun Modifier.contentChannelDrag(
+    channelKey: String,
+    draggedChannelKey: String?,
+    draggedOffsetY: Float,
+    onDragStart: () -> Unit,
+    onDrag: (Float) -> Unit,
+    onDragFinished: () -> Unit
+): Modifier {
+    val isDragging = draggedChannelKey == channelKey
+    return this
+        .zIndex(if (isDragging) 1f else 0f)
+        .graphicsLayer {
+            translationY = if (isDragging) draggedOffsetY else 0f
+            alpha = if (isDragging) 0.92f else 1f
+            shadowElevation = if (isDragging) 8.dp.toPx() else 0f
+        }
+        .pointerInput(channelKey) {
+            detectDragGesturesAfterLongPress(
+                onDragStart = { onDragStart() },
+                onDragEnd = onDragFinished,
+                onDragCancel = onDragFinished,
+                onDrag = { change, dragAmount ->
+                    change.consume()
+                    onDrag(dragAmount.y)
+                }
+            )
+        }
+}
+
+private fun findContentDragTargetKey(
+    listState: LazyListState,
+    draggedKey: String,
+    draggedOffsetY: Float
+): String? {
+    val visibleItems = listState.layoutInfo.visibleItemsInfo
+    val draggedItem = visibleItems.firstOrNull { it.key == draggedKey } ?: return null
+    val draggedCenter = draggedItem.offset + draggedItem.size / 2f + draggedOffsetY
+    return visibleItems
+        .filterNot { it.key == draggedKey }
+        .firstOrNull { item ->
+            draggedCenter >= item.offset && draggedCenter <= item.offset + item.size
+        }
+        ?.key as? String
+}
+
+private fun reorderSourceChannelsForDrop(
+    channels: List<MainContentChannel>,
+    draggedKey: String,
+    targetKey: String
+): MainContentReorderRequest? {
+    if (draggedKey == targetKey) return null
+    val reorderableChannels = channels.filter { it.canDrag }.toMutableList()
+    val fromIndex = reorderableChannels.indexOfFirst { it.key == draggedKey }
+    val toIndex = reorderableChannels.indexOfFirst { it.key == targetKey }
+    if (fromIndex < 0 || toIndex < 0 || fromIndex == toIndex) return null
+    val moved = reorderableChannels.removeAt(fromIndex)
+    reorderableChannels.add(toIndex, moved)
+    val sourceUrls = reorderableChannels.mapNotNull { it.source?.url }
+    val independentIndex = reorderableChannels.indexOfFirst { it.key == CONTENT_CHANNEL_INDEPENDENT }
+        .takeIf { it >= 0 && reorderableChannels[it].articleCount > 0 }
+    return MainContentReorderRequest(
+        sourceUrlsInDisplayOrder = sourceUrls,
+        independentIndex = independentIndex
+    )
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -847,17 +988,62 @@ private fun ContentPage(
     contentPadding: PaddingValues,
     onOpenChannel: (MainContentChannel) -> Unit,
     onMoveToTop: (PhoneRssSourceEntity) -> Unit,
+    onReorderContentChannels: (List<String>, Int?) -> Unit,
     onTogglePinned: (PhoneRssSourceEntity) -> Unit,
     onDelete: (PhoneRssSourceEntity) -> Unit,
     onRefreshAllRssSources: () -> Unit
 ) {
+    val listState = rememberLazyListState()
+    val pullState = rememberPullToRefreshState()
+    var draggedChannelKey by remember { mutableStateOf<String?>(null) }
+    var draggedOffsetY by remember { mutableStateOf(0f) }
+
+    fun finishDrag() {
+        val draggedKey = draggedChannelKey
+        val targetKey = draggedKey?.let {
+            findContentDragTargetKey(
+                listState = listState,
+                draggedKey = it,
+                draggedOffsetY = draggedOffsetY
+            )
+        }
+        val reorderRequest = if (draggedKey != null && targetKey != null) {
+            reorderSourceChannelsForDrop(
+                channels = channels,
+                draggedKey = draggedKey,
+                targetKey = targetKey
+            )
+        } else {
+            null
+        }
+        draggedChannelKey = null
+        draggedOffsetY = 0f
+        if (reorderRequest != null) {
+            onReorderContentChannels(
+                reorderRequest.sourceUrlsInDisplayOrder,
+                reorderRequest.independentIndex
+            )
+        }
+    }
+
     PullToRefreshBox(
         isRefreshing = uiState.refreshingRssSourceUrls.isNotEmpty(),
         onRefresh = onRefreshAllRssSources,
+        state = pullState,
+        indicator = {
+            PullToRefreshDefaults.Indicator(
+                state = pullState,
+                isRefreshing = uiState.refreshingRssSourceUrls.isNotEmpty(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = contentPadding.calculateTopPadding() + 12.dp)
+            )
+        },
         modifier = Modifier.fillMaxSize()
     ) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
+            state = listState,
             contentPadding = mainContentPadding(contentPadding),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -872,19 +1058,39 @@ private fun ContentPage(
             } else {
                 items(channels, key = { it.key }) { channel ->
                     val source = channel.source
+                    val dragModifier = if (channel.canDrag) {
+                        Modifier.contentChannelDrag(
+                            channelKey = channel.key,
+                            draggedChannelKey = draggedChannelKey,
+                            draggedOffsetY = draggedOffsetY,
+                            onDragStart = {
+                                draggedChannelKey = channel.key
+                                draggedOffsetY = 0f
+                            },
+                            onDrag = { deltaY ->
+                                draggedOffsetY += deltaY
+                            },
+                            onDragFinished = ::finishDrag
+                        )
+                    } else {
+                        Modifier
+                    }
                     if (source == null) {
                         MainContentChannelRow(
                             channel = channel,
-                            onClick = { onOpenChannel(channel) }
+                            onClick = { onOpenChannel(channel) },
+                            modifier = dragModifier
                         )
                     } else {
                         MainScreenSourceRow(
                             source = source,
+                            icon = channel.icon,
                             articleCount = channel.articleCount,
                             onClick = { onOpenChannel(channel) },
                             onMoveToTop = { onMoveToTop(source) },
                             onTogglePinned = { onTogglePinned(source) },
-                            onDelete = { onDelete(source) }
+                            onDelete = { onDelete(source) },
+                            modifier = dragModifier
                         )
                     }
                 }
@@ -941,18 +1147,34 @@ private fun ChannelPage(
     }
 }
 
-private fun recentImportedArticles(uiState: MainUiState): List<PhoneArticleEntity> {
-    val importedEpubArticles = uiState.rssArticles.filter { article ->
-        ImportedContentIds.isImportedContentUrl(article.rssSourceUrl)
-    }
-    return (uiState.independentArticles + uiState.importedContentArticles + importedEpubArticles)
-        .distinctBy { it.articleId }
+private fun buildRecentImportEntries(
+    contentChannels: List<MainContentChannel>,
+    independentArticles: List<PhoneArticleEntity>
+): List<RecentImportEntry> {
+    val sourceEntries = contentChannels
+        .asSequence()
+        .filter { channel ->
+            val sourceUrl = channel.source?.url ?: return@filter false
+            sourceUrl == ImportedContentIds.ROOT_SOURCE_URL ||
+                ImportedContentIds.isImportedEpubSourceUrl(sourceUrl) ||
+                !ImportedContentIds.isImportedContentUrl(sourceUrl)
+        }
+        .filter { channel -> channel.articleCount > 0 || channel.source?.url?.let { !ImportedContentIds.isImportedContentUrl(it) } == true }
+        .map { channel ->
+            RecentImportEntry.Channel(
+                channel = channel,
+                sortAt = maxOf(channel.source?.updatedAt ?: 0L, channel.source?.createdAt ?: 0L)
+            )
+        }
+    val articleEntries = independentArticles.asSequence()
+        .map(RecentImportEntry::Article)
+    return (sourceEntries + articleEntries)
         .sortedWith(
-            compareByDescending<PhoneArticleEntity> { it.importedAt }
-                .thenByDescending { it.updatedAt }
-                .thenBy { it.title }
+            compareByDescending<RecentImportEntry> { it.sortAt }
+                .thenBy { it.key }
         )
         .take(20)
+        .toList()
 }
 
 @Composable
@@ -964,13 +1186,14 @@ private fun ImportsPage(
     onImportFile: () -> Unit,
     onAddRssSource: () -> Unit,
     onClearImportedContent: () -> Unit,
+    recentEntries: List<RecentImportEntry>,
+    onOpenChannel: (MainContentChannel) -> Unit,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
     onOpenOriginalLink: (String) -> Unit,
     onToggleFavorite: (PhoneArticleEntity) -> Unit,
     onToggleWatchLater: (PhoneArticleEntity) -> Unit,
     onDeleteArticle: (PhoneArticleEntity) -> Unit
 ) {
-    val articles = remember(uiState) { recentImportedArticles(uiState) }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = mainContentPadding(contentPadding),
@@ -995,7 +1218,7 @@ private fun ImportsPage(
                 fontWeight = FontWeight.SemiBold
             )
         }
-        if (articles.isEmpty()) {
+        if (recentEntries.isEmpty()) {
             item {
                 EmptyStateCard(
                     icon = { Icon(Icons.Default.FileOpen, contentDescription = null) },
@@ -1004,16 +1227,22 @@ private fun ImportsPage(
                 )
             }
         } else {
-            items(articles, key = { it.articleId }) { article ->
-                MainScreenArticleRow(
-                    article = article,
-                    onOpenArticle = onOpenArticle,
-                    onOpenOriginalLink = onOpenOriginalLink,
-                    onToggleFavorite = onToggleFavorite,
-                    onToggleWatchLater = onToggleWatchLater,
-                    onDeleteArticle = onDeleteArticle,
-                    mainScreenCanDeleteArticle = mainScreenCanDeleteArticle(article)
-                )
+            items(recentEntries, key = { it.key }) { entry ->
+                when (entry) {
+                    is RecentImportEntry.Channel -> MainContentChannelRow(
+                        channel = entry.channel,
+                        onClick = { onOpenChannel(entry.channel) }
+                    )
+                    is RecentImportEntry.Article -> MainScreenArticleRow(
+                        article = entry.article,
+                        onOpenArticle = onOpenArticle,
+                        onOpenOriginalLink = onOpenOriginalLink,
+                        onToggleFavorite = onToggleFavorite,
+                        onToggleWatchLater = onToggleWatchLater,
+                        onDeleteArticle = onDeleteArticle,
+                        mainScreenCanDeleteArticle = mainScreenCanDeleteArticle(entry.article)
+                    )
+                }
             }
         }
     }
@@ -1096,11 +1325,12 @@ private fun ImportActionsCard(
 @Composable
 private fun MainContentChannelRow(
     channel: MainContentChannel,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     ElevatedCard(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth()
+        modifier = modifier.fillMaxWidth()
     ) {
         ListItem(
             headlineContent = {
@@ -1131,6 +1361,7 @@ private fun MainContentChannelRow(
 private fun MainContentChannelLeadingIcon(icon: MainContentChannelIcon) {
     when (icon) {
         MainContentChannelIcon.RSS -> Icon(Icons.Default.RssFeed, contentDescription = null)
+        MainContentChannelIcon.BOOK -> Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null)
         MainContentChannelIcon.FAVORITE -> Icon(Icons.Default.Favorite, contentDescription = null)
         MainContentChannelIcon.WATCH_LATER -> Icon(Icons.Default.Bookmark, contentDescription = null)
         MainContentChannelIcon.ARTICLE -> Icon(Icons.AutoMirrored.Filled.Article, contentDescription = null)
@@ -1142,15 +1373,17 @@ private fun MainContentChannelLeadingIcon(icon: MainContentChannelIcon) {
 @Composable
 private fun MainScreenSourceRow(
     source: PhoneRssSourceEntity,
+    icon: MainContentChannelIcon,
     articleCount: Int,
     onClick: () -> Unit,
     onMoveToTop: () -> Unit,
     onTogglePinned: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     ElevatedCard(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .combinedClickable(
                 onClick = onClick,
@@ -1184,44 +1417,45 @@ private fun MainScreenSourceRow(
                     }
                 },
                 leadingContent = {
-                    Icon(Icons.Default.RssFeed, contentDescription = null)
+                    MainContentChannelLeadingIcon(icon)
                 },
                 trailingContent = {
-                    IconButton(onClick = { menuExpanded = true }) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "频道操作")
+                    Box {
+                        IconButton(onClick = { menuExpanded = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "频道操作")
+                        }
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("移到顶部") },
+                                leadingIcon = { Icon(Icons.Default.VerticalAlignTop, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onMoveToTop()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (source.isPinned) "取消置顶" else "置顶") },
+                                leadingIcon = { Icon(Icons.Default.PushPin, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onTogglePinned()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("删除") },
+                                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onDelete()
+                                }
+                            )
+                        }
                     }
                 }
             )
-            DropdownMenu(
-                expanded = menuExpanded,
-                onDismissRequest = { menuExpanded = false },
-                modifier = Modifier.align(Alignment.TopEnd)
-            ) {
-                DropdownMenuItem(
-                    text = { Text("移到顶部") },
-                    leadingIcon = { Icon(Icons.Default.VerticalAlignTop, contentDescription = null) },
-                    onClick = {
-                        menuExpanded = false
-                        onMoveToTop()
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text(if (source.isPinned) "取消置顶" else "置顶") },
-                    leadingIcon = { Icon(Icons.Default.PushPin, contentDescription = null) },
-                    onClick = {
-                        menuExpanded = false
-                        onTogglePinned()
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("删除") },
-                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
-                    onClick = {
-                        menuExpanded = false
-                        onDelete()
-                    }
-                )
-            }
         }
     }
 }
@@ -1262,8 +1496,23 @@ private fun MainScreenArticleRow(
                         modifier = Modifier.weight(1f)
                     )
                     if (mainScreenCanDeleteArticle) {
-                        IconButton(onClick = { menuExpanded = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "文章操作")
+                        Box {
+                            IconButton(onClick = { menuExpanded = true }) {
+                                Icon(Icons.Default.MoreVert, contentDescription = "文章操作")
+                            }
+                            DropdownMenu(
+                                expanded = menuExpanded,
+                                onDismissRequest = { menuExpanded = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("删除") },
+                                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
+                                    onClick = {
+                                        menuExpanded = false
+                                        onDeleteArticle(article)
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -1306,20 +1555,6 @@ private fun MainScreenArticleRow(
                         }
                     }
                 }
-            }
-            DropdownMenu(
-                expanded = menuExpanded,
-                onDismissRequest = { menuExpanded = false },
-                modifier = Modifier.align(Alignment.TopEnd)
-            ) {
-                DropdownMenuItem(
-                    text = { Text("删除") },
-                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
-                    onClick = {
-                        menuExpanded = false
-                        onDeleteArticle(article)
-                    }
-                )
             }
         }
     }

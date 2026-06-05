@@ -2,6 +2,7 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -122,8 +123,39 @@ class LibrarySyncPayloadTest {
         assertEquals(7L, changeSequence.fromSeqExclusive)
         assertEquals(9L, changeSequence.toSeqInclusive)
         assertEquals(false, changeSequence.fullSnapshot)
+        assertEquals(9, request.getInt("version"))
         assertEquals("syncLibrary", request.getString("action"))
         assertEquals("manifest", request.getString("phase"))
+    }
+
+    @Test
+    fun protocolFeatureChecks_acceptVersion8PeersAfterV9Upgrade() {
+        val payload = JSONObject().apply {
+            put("version", 8)
+            put("supportsChangeSequences", true)
+            put("supportsMetadataOnlyArticles", true)
+        }
+
+        assertTrue(LibrarySyncPayload.supportsChangeSequences(payload))
+        assertTrue(LibrarySyncPayload.supportsMetadataOnlyArticles(payload))
+    }
+
+    @Test
+    fun buildProbeRequest_marksV9ProbeCapability() {
+        val request = LibrarySyncPayload.buildProbeRequest("phone")
+        val response = JSONObject().apply {
+            put("success", true)
+            put("version", LibrarySyncPayload.PROTOCOL_VERSION)
+            put("action", BluetoothSyncProtocol.ACTION_SYNC_LIBRARY)
+            put("phase", LibrarySyncPayload.PHASE_PROBE)
+        }
+
+        assertEquals(9, request.getInt("version"))
+        assertEquals("syncLibrary", request.getString("action"))
+        assertEquals(LibrarySyncPayload.PHASE_PROBE, request.getString("phase"))
+        assertTrue(LibrarySyncPayload.supportsChangeSequences(request))
+        assertTrue(LibrarySyncPayload.supportsMetadataOnlyArticles(request))
+        assertTrue(LibrarySyncPayload.isProbeResponse(response))
     }
 
     @Test
@@ -172,6 +204,7 @@ class LibrarySyncPayloadTest {
             assertEquals(frames.size, frame.getInt("batchCount"))
             assertEquals(articles.size, frame.getInt("totalArticles"))
         }
+        assertBatchWireByteHints(frames)
 
         val combined = LibrarySyncPayload.combineArticlePayloads(frames)
         val parsed = LibrarySyncPayload.parseArticles(combined)
@@ -555,7 +588,22 @@ class LibrarySyncPayloadTest {
 
         assertTrue(frames.size > 1)
         assertTrue(frames.all { BluetoothSyncProtocol.encodedSize(it) <= BluetoothSyncProtocol.MAX_FRAME_BYTES })
+        assertBatchWireByteHints(frames)
         assertEquals(article.contentText, rebuilt.second)
+    }
+
+    private fun assertBatchWireByteHints(frames: List<JSONObject>) {
+        val totalWireBytes = frames.sumOf { BluetoothSyncProtocol.wireSize(it) }
+        frames.forEach { frame ->
+            assertEquals(
+                BluetoothSyncProtocol.wireSize(frame),
+                frame.getLong(LibrarySyncPayload.FIELD_BATCH_WIRE_BYTES)
+            )
+            assertEquals(
+                totalWireBytes,
+                frame.getLong(LibrarySyncPayload.FIELD_BATCH_TOTAL_WIRE_BYTES)
+            )
+        }
     }
 
     private fun testArticle(

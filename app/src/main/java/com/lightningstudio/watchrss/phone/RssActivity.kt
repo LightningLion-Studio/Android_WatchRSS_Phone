@@ -11,7 +11,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import android.widget.Toast
 import androidx.activity.viewModels
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
@@ -63,6 +63,7 @@ import com.lightningstudio.watchrss.phone.ui.TAB_BAR_HEIGHT
 import com.lightningstudio.watchrss.phone.ui.canDeleteArticle
 import com.lightningstudio.watchrss.phone.ui.theme.AppCard
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import com.lightningstudio.watchrss.phone.ui.theme.roundedClickable
 import com.lightningstudio.watchrss.phone.viewmodel.MainUiState
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModel
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModelFactory
@@ -312,25 +313,31 @@ fun RssScreen(
                 ) {
                     Spacer(modifier = Modifier.height(topBarHeight))
                     uiState.message?.takeIf { it.isNotBlank() }?.let {
-                        AppCard {
+                        AppCard(
+                            interactionModifier = Modifier.roundedClickable(
+                                shape = RoundedCornerShape(16.dp),
+                                onClick = onDismissMessage
+                            )
+                        ) {
                             Text(
                                 text = it,
                                 style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier
-                                    .padding(12.dp)
-                                    .clickable(onClick = onDismissMessage)
+                                modifier = Modifier.padding(12.dp)
                             )
                         }
                     }
                     uiState.error?.takeIf { it.isNotBlank() }?.let {
-                        AppCard {
+                        AppCard(
+                            interactionModifier = Modifier.roundedClickable(
+                                shape = RoundedCornerShape(16.dp),
+                                onClick = onDismissMessage
+                            )
+                        ) {
                             Text(
                                 text = it,
                                 color = MaterialTheme.colorScheme.error,
                                 style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier
-                                    .padding(12.dp)
-                                    .clickable(onClick = onDismissMessage)
+                                modifier = Modifier.padding(12.dp)
                             )
                         }
                     }

@@ -16,7 +16,6 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -73,7 +72,9 @@ import com.lightningstudio.watchrss.phone.ui.GlassTopBar
 import com.lightningstudio.watchrss.phone.ui.RefreshablePageColumn
 import com.lightningstudio.watchrss.phone.ui.TAB_BAR_HEIGHT
 import com.lightningstudio.watchrss.phone.ui.canDeleteArticle
+import com.lightningstudio.watchrss.phone.ui.theme.AppCard
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import com.lightningstudio.watchrss.phone.ui.theme.roundedClickable
 import com.lightningstudio.watchrss.phone.viewmodel.MainUiState
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModel
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModelFactory
@@ -462,25 +463,31 @@ fun ListPageScreen(
                         .padding(top = contentTopPadding, start = 16.dp, end = 16.dp)
                 ) {
                     uiState.message?.takeIf { it.isNotBlank() }?.let {
-                        com.lightningstudio.watchrss.phone.ui.theme.AppCard {
+                        AppCard(
+                            interactionModifier = Modifier.roundedClickable(
+                                shape = RoundedCornerShape(16.dp),
+                                onClick = onDismissMessage
+                            )
+                        ) {
                             Text(
                                 text = it,
                                 style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier
-                                    .padding(12.dp)
-                                    .clickable(onClick = onDismissMessage)
+                                modifier = Modifier.padding(12.dp)
                             )
                         }
                     }
                     uiState.error?.takeIf { it.isNotBlank() }?.let {
-                        com.lightningstudio.watchrss.phone.ui.theme.AppCard {
+                        AppCard(
+                            interactionModifier = Modifier.roundedClickable(
+                                shape = RoundedCornerShape(16.dp),
+                                onClick = onDismissMessage
+                            )
+                        ) {
                             Text(
                                 text = it,
                                 color = MaterialTheme.colorScheme.error,
                                 style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier
-                                    .padding(12.dp)
-                                    .clickable(onClick = onDismissMessage)
+                                modifier = Modifier.padding(12.dp)
                             )
                         }
                     }

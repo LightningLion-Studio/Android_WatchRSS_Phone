@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.*
 import com.kyant.backdrop.backdrops.*
 import com.kyant.backdrop.effects.*
+import com.lightningstudio.watchrss.phone.ui.theme.roundedClickable
 
 val TAB_BAR_HEIGHT = 72.dp
 
@@ -74,7 +75,10 @@ fun GlassTabBar(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
-                        .clickable { onTabSelected(tab) }
+                        .roundedClickable(
+                            shape = RoundedCornerShape(16.dp),
+                            onClick = { onTabSelected(tab) }
+                        )
                         .padding(horizontal = 8.dp, vertical = 4.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
@@ -102,7 +106,11 @@ fun GlassButton(
 ) {
     Box(
         modifier = modifier
-            .clickable(enabled = enabled, onClick = onClick)
+            .roundedClickable(
+                shape = RoundedCornerShape(percent = 50),
+                enabled = enabled,
+                onClick = onClick
+            )
             .padding(horizontal = 8.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center
     ) {

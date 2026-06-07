@@ -24,7 +24,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -33,6 +32,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
@@ -67,6 +67,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkKind
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import com.lightningstudio.watchrss.phone.ui.theme.roundedClickable
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -334,7 +335,11 @@ private fun GlassButton(
     }
     Box(
         modifier = modifier
-            .clickable(enabled = enabled, onClick = onClick)
+            .roundedClickable(
+                shape = RoundedCornerShape(percent = 50),
+                enabled = enabled,
+                onClick = onClick
+            )
             .padding(horizontal = 8.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center
     ) {

@@ -4,7 +4,6 @@ import android.os.Build
 import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.*
 import com.kyant.backdrop.backdrops.*
 import com.kyant.backdrop.effects.*
+import com.lightningstudio.watchrss.phone.ui.theme.roundedClickable
 
 // ==================== 液态玻璃效果抽象 ====================
 
@@ -134,7 +134,11 @@ fun CapsuleFloatingButton(
                 shape = { RoundedCornerShape(percent = 50) },
                 surfaceAlpha = surfaceAlpha
             )
-            .clickable(enabled = enabled, onClick = onClick)
+            .roundedClickable(
+                shape = RoundedCornerShape(percent = 50),
+                enabled = enabled,
+                onClick = onClick
+            )
             .padding(PaddingValues(horizontal = 20.dp, vertical = 12.dp))
     ) {
         CompositionLocalProvider(LocalContentColor provides contentColor) {

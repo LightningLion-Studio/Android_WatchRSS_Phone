@@ -70,6 +70,7 @@ fun AppCard(
     modifier: Modifier = Modifier,
     shape: Shape = RoundedCornerShape(CardCornerRadius),
     elevation: Dp = CardElevation,
+    interactionModifier: Modifier = Modifier,
     content: @Composable BoxScope.() -> Unit
 ) {
     val highlightColor = appCardHighlightBorder()
@@ -89,6 +90,7 @@ fun AppCard(
                 color = highlightColor,
                 shape = shape
             )
+            .then(interactionModifier)
     ) {
         CompositionLocalProvider(
             LocalContentColor provides MaterialTheme.colorScheme.onSurface
@@ -105,6 +107,7 @@ fun AppCard(
 fun AppPrimaryCard(
     modifier: Modifier = Modifier,
     shape: Shape = RoundedCornerShape(CardCornerRadius),
+    interactionModifier: Modifier = Modifier,
     content: @Composable BoxScope.() -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
@@ -139,6 +142,7 @@ fun AppPrimaryCard(
                 color = if (isDark) DarkPrimary.copy(alpha = 0.5f) else PrimaryRed.copy(alpha = 0.2f),
                 shape = shape
             )
+            .then(interactionModifier)
     ) {
         CompositionLocalProvider(
             LocalContentColor provides MaterialTheme.colorScheme.onSurface
@@ -154,6 +158,7 @@ fun AppPrimaryCard(
 @Composable
 fun AppListCard(
     modifier: Modifier = Modifier,
+    interactionModifier: Modifier = Modifier,
     content: @Composable BoxScope.() -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
@@ -213,6 +218,7 @@ fun AppListCard(
                     )
                 }
             }
+            .then(interactionModifier)
     ) {
         CompositionLocalProvider(
             LocalContentColor provides MaterialTheme.colorScheme.onSurface

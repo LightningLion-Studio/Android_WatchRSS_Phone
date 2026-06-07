@@ -12,9 +12,9 @@ import androidx.activity.compose.setContent
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -26,6 +26,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lightningstudio.watchrss.phone.ui.theme.roundedCombinedClickable
 
 class AboutActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -348,7 +349,8 @@ private fun BeianNumberText(onClick: () -> Unit) {
         text = beianText,
         fontSize = 12.sp,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.combinedClickable(
+        modifier = Modifier.roundedCombinedClickable(
+            shape = RoundedCornerShape(8.dp),
             onClick = onClick,
             onLongClick = {
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

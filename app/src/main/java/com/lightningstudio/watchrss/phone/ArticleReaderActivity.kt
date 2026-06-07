@@ -19,7 +19,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
@@ -52,6 +51,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -124,6 +124,7 @@ import com.lightningstudio.watchrss.phone.data.repo.PhoneImportedTextReader
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import com.lightningstudio.watchrss.phone.ui.theme.AppPrimaryCard
 import com.lightningstudio.watchrss.phone.ui.theme.PrimaryRed
+import com.lightningstudio.watchrss.phone.ui.theme.roundedClickable
 import com.kyant.backdrop.*
 import com.kyant.backdrop.backdrops.*
 import com.kyant.backdrop.effects.*
@@ -827,7 +828,11 @@ private fun GlassButton(
 ) {
     Box(
         modifier = modifier
-            .clickable(enabled = enabled, onClick = onClick)
+            .roundedClickable(
+                shape = RoundedCornerShape(percent = 50),
+                enabled = enabled,
+                onClick = onClick
+            )
             .padding(horizontal = 8.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -1206,7 +1211,10 @@ private fun ArticleImage(
         }
         .let { baseModifier ->
             if (onClick != null) {
-                baseModifier.clickable { onClick(imageBounds) }
+                baseModifier.roundedClickable(
+                    shape = RectangleShape,
+                    onClick = { onClick(imageBounds) }
+                )
             } else {
                 baseModifier
             }
@@ -1830,7 +1838,10 @@ private fun ArticleImagePreviewOverlay(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .clickable(onClick = ::closePreviewToSource),
+                    .roundedClickable(
+                        shape = RectangleShape,
+                        onClick = ::closePreviewToSource
+                    ),
                 contentAlignment = Alignment.Center
             ) {
                 Text(

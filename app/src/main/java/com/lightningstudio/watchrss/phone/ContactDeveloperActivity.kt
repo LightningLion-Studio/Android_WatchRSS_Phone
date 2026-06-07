@@ -14,8 +14,8 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.QrCode
@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.rememberAsyncImagePainter
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
+import com.lightningstudio.watchrss.phone.ui.theme.roundedCombinedClickable
 
 class ContactDeveloperActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -197,7 +198,8 @@ private fun BeianNumberText(onClick: () -> Unit) {
         text = beianText,
         fontSize = 12.sp,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.combinedClickable(
+        modifier = Modifier.roundedCombinedClickable(
+            shape = RoundedCornerShape(8.dp),
             onClick = onClick,
             onLongClick = {
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

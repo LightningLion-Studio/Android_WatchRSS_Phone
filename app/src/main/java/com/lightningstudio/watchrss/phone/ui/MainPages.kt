@@ -1,8 +1,6 @@
 package com.lightningstudio.watchrss.phone.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -64,6 +62,8 @@ import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.ui.theme.AppCard
 import com.lightningstudio.watchrss.phone.ui.theme.AppPrimaryCard
 import com.lightningstudio.watchrss.phone.ui.theme.AppListCard
+import com.lightningstudio.watchrss.phone.ui.theme.roundedClickable
+import com.lightningstudio.watchrss.phone.ui.theme.roundedCombinedClickable
 import com.lightningstudio.watchrss.phone.viewmodel.MainSyncProgressUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainUiState
 import androidx.compose.foundation.border
@@ -160,7 +160,8 @@ fun HomePage(
                         .padding(vertical = 8.dp)
                         .clip(RoundedCornerShape(12.dp))
                         .background(Color(0xFFF3F2F6))
-                        .combinedClickable(
+                        .roundedCombinedClickable(
+                            shape = RoundedCornerShape(12.dp),
                             onClick = { qrMenuExpanded = true },
                             onLongClick = { qrMenuExpanded = true }
                         ),
@@ -295,7 +296,10 @@ fun StatusCard(
                     Text(
                         text = it,
                         style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.clickable(onClick = onDismissMessage)
+                        modifier = Modifier.roundedClickable(
+                            shape = RoundedCornerShape(8.dp),
+                            onClick = onDismissMessage
+                        )
                     )
                 }
             }
@@ -304,7 +308,10 @@ fun StatusCard(
                     text = it,
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.clickable(onClick = onDismissMessage)
+                    modifier = Modifier.roundedClickable(
+                        shape = RoundedCornerShape(8.dp),
+                        onClick = onDismissMessage
+                    )
                 )
             }
         }
@@ -356,12 +363,12 @@ fun SourceRow(
     var menuExpanded by remember { mutableStateOf(false) }
     Box(modifier = Modifier.fillMaxWidth()) {
         AppListCard(
-            modifier = Modifier
-                .fillMaxWidth()
-                .combinedClickable(
-                    onClick = onClick,
-                    onLongClick = { menuExpanded = true }
-                )
+            modifier = Modifier.fillMaxWidth(),
+            interactionModifier = Modifier.roundedCombinedClickable(
+                shape = RoundedCornerShape(12.dp),
+                onClick = onClick,
+                onLongClick = { menuExpanded = true }
+            )
         ) {
             Column(
                 modifier = Modifier.padding(16.dp),
@@ -440,16 +447,16 @@ fun ArticleRow(
     var menuExpanded by remember { mutableStateOf(false) }
     Box(modifier = Modifier.fillMaxWidth()) {
         AppListCard(
-            modifier = Modifier
-                .fillMaxWidth()
-                .combinedClickable(
-                    onClick = { onOpenArticle(article) },
-                    onLongClick = {
-                        if (canDeleteArticle) {
-                            menuExpanded = true
-                        }
+            modifier = Modifier.fillMaxWidth(),
+            interactionModifier = Modifier.roundedCombinedClickable(
+                shape = RoundedCornerShape(12.dp),
+                onClick = { onOpenArticle(article) },
+                onLongClick = {
+                    if (canDeleteArticle) {
+                        menuExpanded = true
                     }
-                )
+                }
+            )
         ) {
             Column(
                 modifier = Modifier.padding(16.dp),

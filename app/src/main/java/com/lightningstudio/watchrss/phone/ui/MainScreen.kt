@@ -10,8 +10,6 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +27,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Article
@@ -104,6 +103,8 @@ import com.lightningstudio.watchrss.phone.viewmodel.MainSyncProgressUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainUiState
 import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptKind
 import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptUi
+import com.lightningstudio.watchrss.phone.ui.theme.roundedClickable
+import com.lightningstudio.watchrss.phone.ui.theme.roundedCombinedClickable
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
@@ -942,7 +943,10 @@ private fun SyncStatusCard(
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable(onClick = onDismissMessage)
+                        .roundedClickable(
+                            shape = RoundedCornerShape(8.dp),
+                            onClick = onDismissMessage
+                        )
                 )
             }
             error?.takeIf { it.isNotBlank() }?.let {
@@ -954,7 +958,10 @@ private fun SyncStatusCard(
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable(onClick = onDismissMessage)
+                        .roundedClickable(
+                            shape = RoundedCornerShape(8.dp),
+                            onClick = onDismissMessage
+                        )
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1722,7 +1729,10 @@ private fun ImportStatusContent(
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(onClick = onDismissMessage)
+                    .roundedClickable(
+                        shape = RoundedCornerShape(8.dp),
+                        onClick = onDismissMessage
+                    )
             )
         }
         error?.takeIf { it.isNotBlank() }?.let {
@@ -1734,7 +1744,10 @@ private fun ImportStatusContent(
                 color = MaterialTheme.colorScheme.error,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(onClick = onDismissMessage)
+                    .roundedClickable(
+                        shape = RoundedCornerShape(8.dp),
+                        onClick = onDismissMessage
+                    )
             )
         }
     }
@@ -1807,16 +1820,21 @@ private fun MainScreenSourceRow(
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     val cardColors = defaultMainElevatedCardColors()
+    val cardShape = MaterialTheme.shapes.medium
 
     ElevatedCard(
-        modifier = modifier
-            .fillMaxWidth()
-            .combinedClickable(
-                onClick = onClick
-            ),
+        modifier = modifier.fillMaxWidth(),
+        shape = cardShape,
         colors = cardColors
     ) {
-        Box {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .roundedClickable(
+                    shape = cardShape,
+                    onClick = onClick
+                )
+        ) {
             ListItem(
                 colors = ListItemDefaults.colors(
                     containerColor = cardColors.containerColor
@@ -1901,17 +1919,22 @@ private fun MainScreenArticleRow(
     mainScreenCanDeleteArticle: Boolean
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val cardShape = MaterialTheme.shapes.medium
     ElevatedCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .combinedClickable(
-                onClick = { onOpenArticle(article) },
-                onLongClick = {
-                    if (mainScreenCanDeleteArticle) menuExpanded = true
-                }
-            )
+        modifier = Modifier.fillMaxWidth(),
+        shape = cardShape
     ) {
-        Box {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .roundedCombinedClickable(
+                    shape = cardShape,
+                    onClick = { onOpenArticle(article) },
+                    onLongClick = {
+                        if (mainScreenCanDeleteArticle) menuExpanded = true
+                    }
+                )
+        ) {
             Column(
                 modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)

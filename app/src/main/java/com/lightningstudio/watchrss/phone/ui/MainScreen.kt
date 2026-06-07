@@ -1,12 +1,13 @@
 package com.lightningstudio.watchrss.phone.ui
 
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -17,12 +18,16 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
@@ -65,6 +70,8 @@ import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -72,6 +79,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -80,22 +88,30 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import com.lightningstudio.watchrss.phone.ArticleReaderScreen
+import com.lightningstudio.watchrss.phone.PlatformWebViewScreen
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
+import com.lightningstudio.watchrss.phone.data.repo.PhoneImportedTextReader
+import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
 import com.lightningstudio.watchrss.phone.viewmodel.MainBluetoothDevicePromptUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainBluetoothDeviceUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainConflictPromptUi
@@ -109,6 +125,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 
@@ -138,13 +155,24 @@ private const val CONTENT_CHANNEL_WATCH_LATER = "virtual:watch_later"
 private const val CONTENT_CHANNEL_INDEPENDENT = "virtual:independent"
 private const val CONTENT_CHANNEL_IMPORTED_TEXT = "virtual:imported_text"
 private const val CHANNEL_TRANSITION_MS = 260
-private const val CHANNEL_PREDICTIVE_EXIT_MS = 180
+private const val CHANNEL_PREDICTIVE_EXIT_MS = 480
 private const val CHANNEL_PREDICTIVE_EXIT_PROGRESS = 2f
-private const val TAB_PREDICTIVE_EXIT_MS = 180
+private const val TAB_PREDICTIVE_EXIT_MS = 480
 private const val TAB_PREDICTIVE_EXIT_PROGRESS = 1f
+private const val READER_LEFT_PANE_RETURN_TRANSITION_MS = 480
+private const val READER_FULLSCREEN_BACK_SETTLE_MS = 480
+private const val ARTICLE_CARD_TITLE_MAX_LINES = 3
+private val MainNavigationRailWidth = 80.dp
 
 @Composable
 private fun defaultMainElevatedCardColors() = CardDefaults.elevatedCardColors()
+
+private data class ReaderLeftPaneReturnState(
+    val channelKey: String,
+    val articleId: String,
+    val returnPage: MainPage,
+    val initialProgress: Float = 0f
+)
 
 private data class MainContentChannel(
     val key: String,
@@ -219,8 +247,13 @@ fun MainScreen(
     onDismissBluetoothDevicePrompt: () -> Unit,
     onExportBluetoothLog: () -> Unit,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
+    canOpenArticleInline: (PhoneArticleEntity) -> Boolean,
+    onLoadArticleForInlineReader: suspend (String) -> PhoneArticleEntity?,
+    onLoadImportedTextReaderForInlineReader: suspend (String) -> PhoneImportedTextReader?,
+    onLoadImportedTextChunkForInlineReader: suspend (String, Int) -> String?,
     onToggleFavorite: (PhoneArticleEntity) -> Unit,
     onToggleWatchLater: (PhoneArticleEntity) -> Unit,
+    onSaveArticleReadingProgress: suspend (String, Float) -> Unit,
     onMoveRssSourceToTop: (PhoneRssSourceEntity) -> Unit,
     onReorderContentChannels: (List<String>, Int?) -> Unit,
     onToggleRssSourcePinned: (PhoneRssSourceEntity) -> Unit,
@@ -234,12 +267,21 @@ fun MainScreen(
     onDismissMessage: () -> Unit
 ) {
     var selectedContentChannelKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedReaderArticleId by rememberSaveable { mutableStateOf<String?>(null) }
+    var readerFullscreenActive by rememberSaveable { mutableStateOf(false) }
+    var readerBackProgress by remember { mutableFloatStateOf(0f) }
+    var readerFullscreenBackProgress by remember { mutableFloatStateOf(0f) }
+    var readerBackAnimating by remember { mutableStateOf(false) }
+    var readerOpenProgress by remember { mutableFloatStateOf(1f) }
+    var readerOpenAnimating by remember { mutableStateOf(false) }
+    var readerLeftPaneReturnState by remember { mutableStateOf<ReaderLeftPaneReturnState?>(null) }
     var lastContentChannelKey by rememberSaveable { mutableStateOf<String?>(null) }
     var channelReturnPageName by rememberSaveable { mutableStateOf(MainPage.RSS.name) }
     var channelBackProgress by remember { mutableFloatStateOf(0f) }
     var tabBackProgress by remember { mutableFloatStateOf(0f) }
     var tabBackActive by remember { mutableStateOf(false) }
     var channelTabSwitchDestinationName by remember { mutableStateOf<String?>(null) }
+    var topLevelNavigationTargetName by remember { mutableStateOf<String?>(null) }
     var channelTabSwitchProgress by remember { mutableFloatStateOf(0f) }
     var channelTabSwitchDirection by remember { mutableFloatStateOf(1f) }
     var suppressNextChannelExit by remember { mutableStateOf(false) }
@@ -247,6 +289,8 @@ fun MainScreen(
     val pagerState = rememberPagerState(initialPage = MainPage.DASHBOARD.topLevelIndex()) {
         TopLevelMainPages.size
     }
+    val contentPageListState = rememberLazyListState()
+    val importsPageListState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
 
@@ -262,10 +306,60 @@ fun MainScreen(
     val selectedContentChannel = selectedContentChannelKey?.let { key ->
         contentChannels.firstOrNull { it.key == key }
     }
+    val selectedReaderArticleListItem = selectedReaderArticleId?.let { articleId ->
+        selectedContentChannel?.articles?.firstOrNull { it.articleId == articleId }
+            ?: uiState.independentArticles.firstOrNull { it.articleId == articleId }
+            ?: uiState.importedContentArticles.firstOrNull { it.articleId == articleId }
+            ?: uiState.favorites.firstOrNull { it.articleId == articleId }
+            ?: uiState.watchLater.firstOrNull { it.articleId == articleId }
+            ?: uiState.rssArticles.firstOrNull { it.articleId == articleId }
+    }
+    val hydratedSelectedReaderArticle by produceState<PhoneArticleEntity?>(
+        initialValue = null,
+        selectedReaderArticleId
+    ) {
+        val articleId = selectedReaderArticleId
+        value = null
+        if (articleId != null) {
+            value = runCatching { onLoadArticleForInlineReader(articleId) }.getOrNull()
+        }
+    }
+    val selectedReaderArticle = hydratedSelectedReaderArticle
+        ?.takeIf { it.articleId == selectedReaderArticleId }
+        ?: selectedReaderArticleListItem
+    val selectedImportedTextReader by produceState<PhoneImportedTextReader?>(
+        initialValue = null,
+        selectedReaderArticle?.articleId,
+        selectedReaderArticle?.contentText
+    ) {
+        val articleId = selectedReaderArticle?.articleId
+        value = null
+        if (articleId != null) {
+            value = runCatching { onLoadImportedTextReaderForInlineReader(articleId) }.getOrNull()
+        }
+    }
     LaunchedEffect(selectedContentChannelKey) {
         selectedContentChannelKey?.let { key ->
             lastContentChannelKey = key
             channelBackProgress = 0f
+        }
+    }
+    LaunchedEffect(selectedReaderArticleId, selectedReaderArticle) {
+        if (selectedReaderArticleId != null && selectedReaderArticle == null) {
+            selectedReaderArticleId = null
+            readerFullscreenActive = false
+            readerFullscreenBackProgress = 0f
+            readerOpenProgress = 1f
+            readerOpenAnimating = false
+        }
+    }
+    LaunchedEffect(selectedReaderArticleId) {
+        if (selectedReaderArticleId == null) {
+            readerFullscreenActive = false
+            readerBackProgress = 0f
+            readerFullscreenBackProgress = 0f
+            readerOpenProgress = 1f
+            readerOpenAnimating = false
         }
     }
     val animatedContentChannel = (selectedContentChannelKey ?: lastContentChannelKey)?.let { key ->
@@ -282,13 +376,38 @@ fun MainScreen(
     val channelTabSwitchDestination = channelTabSwitchDestinationName
         ?.let { runCatching { MainPage.valueOf(it) }.getOrNull() }
         ?.takeIf { it in TopLevelMainPages }
+    val topLevelNavigationTarget = topLevelNavigationTargetName
+        ?.let { runCatching { MainPage.valueOf(it) }.getOrNull() }
+        ?.takeIf { it in TopLevelMainPages }
     val page = if (selectedContentChannel != null) MainPage.CHANNEL else currentTopLevelPage
     val selectedBottomPage = if (page == MainPage.CHANNEL) channelReturnPage else currentTopLevelPage
 
     fun navigateToTopLevelPage(destination: MainPage) {
+        topLevelNavigationTargetName = destination.name
         selectedContentChannelKey = null
+        selectedReaderArticleId = null
+        readerFullscreenActive = false
+        readerFullscreenBackProgress = 0f
+        readerOpenProgress = 1f
+        readerOpenAnimating = false
+        readerLeftPaneReturnState = null
         coroutineScope.launch {
-            pagerState.animateScrollToPage(destination.topLevelIndex())
+            try {
+                pagerState.animateScrollToPage(destination.topLevelIndex())
+                if (destination != MainPage.RSS) {
+                    selectedContentChannelKey = null
+                    selectedReaderArticleId = null
+                    readerFullscreenActive = false
+                    readerFullscreenBackProgress = 0f
+                    readerOpenProgress = 1f
+                    readerOpenAnimating = false
+                    readerLeftPaneReturnState = null
+                }
+            } finally {
+                if (topLevelNavigationTargetName == destination.name) {
+                    topLevelNavigationTargetName = null
+                }
+            }
         }
     }
 
@@ -299,6 +418,12 @@ fun MainScreen(
         }
         channelReturnPageName = returnPage.name
         selectedContentChannelKey = resolvedChannelKey
+        selectedReaderArticleId = null
+        readerFullscreenActive = false
+        readerFullscreenBackProgress = 0f
+        readerOpenProgress = 1f
+        readerOpenAnimating = false
+        readerLeftPaneReturnState = null
     }
 
     fun switchChannelToTopLevelPage(destination: MainPage) {
@@ -330,7 +455,7 @@ fun MainScreen(
         }
     }
 
-    PredictiveBackHandler(enabled = page == MainPage.CHANNEL) { backEvents ->
+    PredictiveBackHandler(enabled = page == MainPage.CHANNEL && selectedReaderArticle == null) { backEvents ->
         try {
             backEvents.collect { backEvent ->
                 channelBackProgress = backEvent.progress.coerceIn(0f, 1f)
@@ -361,7 +486,7 @@ fun MainScreen(
         }
     }
 
-    PredictiveBackHandler(enabled = page != MainPage.DASHBOARD && page != MainPage.CHANNEL) { backEvents ->
+    PredictiveBackHandler(enabled = selectedReaderArticle == null && page != MainPage.DASHBOARD && page != MainPage.CHANNEL) { backEvents ->
         try {
             tabBackActive = true
             tabBackProgress = 0f
@@ -390,13 +515,303 @@ fun MainScreen(
         }
     }
 
-    Scaffold(
-        topBar = {
+    AdaptiveWindowScope(modifier = Modifier.fillMaxSize()) { windowInfo ->
+        fun openAdaptiveContentChannel(channelKey: String, returnPage: MainPage) {
+            navigateToContentChannel(channelKey, returnPage)
+            if (windowInfo.isMediumOrExpanded && returnPage in TopLevelMainPages) {
+                coroutineScope.launch {
+                    pagerState.animateScrollToPage(returnPage.topLevelIndex())
+                }
+            }
+        }
+
+        fun openInlineReaderWithMotion(articleId: String) {
+            readerLeftPaneReturnState = null
+            readerBackProgress = 0f
+            readerFullscreenActive = false
+            readerFullscreenBackProgress = 0f
+            if (selectedReaderArticleId != null) {
+                selectedReaderArticleId = articleId
+                if (!readerOpenAnimating) {
+                    readerOpenProgress = 1f
+                }
+                return
+            }
+            readerOpenProgress = 0f
+            readerOpenAnimating = true
+            selectedReaderArticleId = articleId
+            coroutineScope.launch {
+                try {
+                    animate(
+                        initialValue = 0f,
+                        targetValue = 1f,
+                        animationSpec = tween(
+                            durationMillis = READER_LEFT_PANE_RETURN_TRANSITION_MS,
+                            easing = FastOutSlowInEasing
+                        )
+                    ) { value, _ ->
+                        readerOpenProgress = value
+                    }
+                } finally {
+                    readerOpenProgress = 1f
+                    readerOpenAnimating = false
+                }
+            }
+        }
+
+        fun openAdaptiveArticle(article: PhoneArticleEntity) {
+            if (windowInfo.isMediumOrExpanded && canOpenArticleInline(article)) {
+                openInlineReaderWithMotion(article.articleId)
+            } else {
+                onOpenArticle(article)
+            }
+        }
+
+        fun openIndependentArticleFromImports(article: PhoneArticleEntity) {
+            if (windowInfo.isMediumOrExpanded && canOpenArticleInline(article)) {
+                selectedContentChannelKey = CONTENT_CHANNEL_INDEPENDENT
+                openInlineReaderWithMotion(article.articleId)
+            } else {
+                onOpenArticle(article)
+            }
+        }
+
+        fun startReaderLeftPaneReturnTransition(initialProgress: Float = 0f) {
+            val channelKey = selectedContentChannelKey
+            val articleId = selectedReaderArticleId
+            if (
+                windowInfo.isMediumOrExpanded &&
+                channelKey != null &&
+                articleId != null &&
+                currentTopLevelPage in TopLevelMainPages
+            ) {
+                readerLeftPaneReturnState = ReaderLeftPaneReturnState(
+                    channelKey = channelKey,
+                    articleId = articleId,
+                    returnPage = currentTopLevelPage,
+                    initialProgress = initialProgress.coerceIn(0f, 1f)
+                )
+            }
+        }
+
+        fun handleInlineReaderBack(returnMotionProgress: Float = 0f) {
+            if (readerFullscreenActive && windowInfo.isMediumOrExpanded) {
+                readerFullscreenActive = false
+                readerBackProgress = 0f
+                readerFullscreenBackProgress = 0f
+            } else if (
+                returnMotionProgress <= 0f &&
+                windowInfo.isMediumOrExpanded &&
+                selectedReaderArticleId != null &&
+                selectedContentChannelKey != null
+            ) {
+                if (readerBackAnimating) return
+                readerBackAnimating = true
+                coroutineScope.launch {
+                    try {
+                        animate(
+                            initialValue = readerBackProgress.coerceIn(0f, 1f),
+                            targetValue = 1f,
+                            animationSpec = tween(
+                                durationMillis = READER_LEFT_PANE_RETURN_TRANSITION_MS,
+                                easing = FastOutSlowInEasing
+                            )
+                        ) { value, _ ->
+                            readerBackProgress = value
+                        }
+                        startReaderLeftPaneReturnTransition(1f)
+                        selectedReaderArticleId = null
+                        readerFullscreenActive = false
+                        readerFullscreenBackProgress = 0f
+                        readerOpenProgress = 1f
+                        readerOpenAnimating = false
+                    } finally {
+                        readerBackProgress = 0f
+                        readerBackAnimating = false
+                    }
+                }
+            } else {
+                startReaderLeftPaneReturnTransition(returnMotionProgress)
+                selectedReaderArticleId = null
+                readerFullscreenActive = false
+                readerBackProgress = 0f
+                readerFullscreenBackProgress = 0f
+                readerOpenProgress = 1f
+                readerOpenAnimating = false
+            }
+        }
+
+        PredictiveBackHandler(enabled = selectedReaderArticle != null) { backEvents ->
+            val fullscreenReaderBack = windowInfo.isMediumOrExpanded && readerFullscreenActive
+            try {
+                if (fullscreenReaderBack) {
+                    readerBackProgress = 0f
+                    readerFullscreenBackProgress = 0f
+                    backEvents.collect { backEvent ->
+                        readerFullscreenBackProgress = backEvent.progress.coerceIn(0f, 1f)
+                    }
+                    val remainingDuration = (READER_FULLSCREEN_BACK_SETTLE_MS *
+                        (1f - readerFullscreenBackProgress.coerceIn(0f, 1f)))
+                        .toInt()
+                        .coerceAtLeast(1)
+                    animate(
+                        initialValue = readerFullscreenBackProgress,
+                        targetValue = 1f,
+                        animationSpec = tween(
+                            durationMillis = remainingDuration,
+                            easing = FastOutSlowInEasing
+                        )
+                    ) { value, _ ->
+                        readerFullscreenBackProgress = value
+                    }
+                    readerFullscreenActive = false
+                    delay(READER_FULLSCREEN_BACK_SETTLE_MS.toLong() + 32L)
+                    if (!readerFullscreenActive) {
+                        readerFullscreenBackProgress = 0f
+                    }
+                } else {
+                    readerBackProgress = 0f
+                    backEvents.collect { backEvent ->
+                        readerBackProgress = backEvent.progress.coerceIn(0f, 1f)
+                    }
+                    val splitReaderBack = windowInfo.isMediumOrExpanded
+                    val targetProgress = if (windowInfo.isMediumOrExpanded) 1f else PREDICTIVE_BACK_EXIT_PROGRESS
+                    val exitDurationMs = if (splitReaderBack) {
+                        READER_LEFT_PANE_RETURN_TRANSITION_MS
+                    } else {
+                        PREDICTIVE_BACK_EXIT_ANIMATION_MS
+                    }
+                    animate(
+                        initialValue = readerBackProgress,
+                        targetValue = targetProgress,
+                        animationSpec = tween(
+                            durationMillis = exitDurationMs,
+                            easing = FastOutSlowInEasing
+                        )
+                    ) { value, _ ->
+                        readerBackProgress = value
+                    }
+                    val returnMotionProgress = if (splitReaderBack) {
+                        readerBackProgress.coerceIn(0f, 1f)
+                    } else {
+                        0f
+                    }
+                    handleInlineReaderBack(returnMotionProgress)
+                }
+            } catch (exception: CancellationException) {
+                if (fullscreenReaderBack) {
+                    animate(
+                        initialValue = readerFullscreenBackProgress,
+                        targetValue = 0f,
+                        animationSpec = tween(PREDICTIVE_BACK_CANCEL_ANIMATION_MS)
+                    ) { value, _ ->
+                        readerFullscreenBackProgress = value
+                    }
+                } else {
+                    animate(
+                        initialValue = readerBackProgress,
+                        targetValue = 0f,
+                        animationSpec = tween(PREDICTIVE_BACK_CANCEL_ANIMATION_MS)
+                    ) { value, _ ->
+                        readerBackProgress = value
+                    }
+                }
+            }
+        }
+
+        LaunchedEffect(
+            windowInfo.isMediumOrExpanded,
+            currentTopLevelPage,
+            channelReturnPage,
+            selectedContentChannelKey,
+            contentChannels
+        ) {
+            val fallbackChannel = if (
+                windowInfo.isMediumOrExpanded &&
+                currentTopLevelPage == MainPage.RSS &&
+                selectedContentChannel == null
+            ) {
+                contentChannels.firstOrNull { it.articleCount > 0 }
+                    ?: contentChannels.firstOrNull()
+            } else {
+                null
+            }
+            fallbackChannel?.let { channel ->
+                channelReturnPageName = MainPage.RSS.name
+                selectedContentChannelKey = channel.key
+            }
+        }
+
+        LaunchedEffect(
+            windowInfo.isMediumOrExpanded,
+            currentTopLevelPage,
+            channelReturnPage,
+            selectedContentChannelKey
+        ) {
+            if (
+                windowInfo.isMediumOrExpanded &&
+                selectedContentChannelKey != null &&
+                currentTopLevelPage != channelReturnPage
+            ) {
+                delay(CHANNEL_TRANSITION_MS.toLong() + 80L)
+                selectedContentChannelKey = null
+                selectedReaderArticleId = null
+                readerFullscreenActive = false
+                readerOpenProgress = 1f
+                readerOpenAnimating = false
+            }
+        }
+
+        val fabPage = when {
+            windowInfo.isMediumOrExpanded && selectedReaderArticle != null -> MainPage.IMPORTS
+            windowInfo.isMediumOrExpanded && page == MainPage.CHANNEL -> channelReturnPage
+            else -> page
+        }
+        val topBarPage = if (selectedContentChannel == null) {
+            topLevelNavigationTarget ?: page
+        } else {
+            page
+        }
+        val navigationSelectedPage = topLevelNavigationTarget ?: selectedBottomPage
+        val readerTakesCurrentPage = selectedReaderArticle != null &&
+            (readerFullscreenActive || !windowInfo.isMediumOrExpanded)
+        val readingSplitActive = windowInfo.isMediumOrExpanded && selectedReaderArticle != null
+        val usesPaneTopBars = windowInfo.isMediumOrExpanded &&
+            (topBarPage == MainPage.RSS || topBarPage == MainPage.IMPORTS || topBarPage == MainPage.CHANNEL)
+        val showGlobalTopBar = !readingSplitActive && !readerTakesCurrentPage && !usesPaneTopBars
+        val showScaffoldTopBar = showGlobalTopBar && windowInfo.navigationType != AdaptiveNavigationType.Rail
+        val activeInlineReaderPane: @Composable (Boolean) -> Unit = { fullscreen ->
+            val article = selectedReaderArticle
+            if (article != null) {
+                InlineArticleReaderPane(
+                    article = article,
+                    readerArticle = hydratedSelectedReaderArticle
+                        ?.takeIf { it.articleId == article.articleId },
+                    importedTextReader = selectedImportedTextReader,
+                    onLoadImportedTextChunk = onLoadImportedTextChunkForInlineReader,
+                    onSaveReadingProgress = { progress ->
+                        onSaveArticleReadingProgress(article.articleId, progress)
+                    },
+                    onBack = { handleInlineReaderBack() },
+                    onOpenImportedArticle = { url -> uriHandler.openUri(url) },
+                    onOpenOriginal = { url -> uriHandler.openUri(url) },
+                    fullscreen = fullscreen,
+                    showFullscreenControl = windowInfo.isMediumOrExpanded,
+                    onToggleFullscreen = {
+                        readerFullscreenBackProgress = 0f
+                        readerFullscreenActive = !readerFullscreenActive
+                    }
+                )
+            }
+        }
+        @Composable
+        fun RenderGlobalTopBar(modifier: Modifier = Modifier) {
             MainTopBar(
-                page = page,
-                selectedChannel = selectedContentChannel,
+                page = if (windowInfo.isMediumOrExpanded && topBarPage == MainPage.CHANNEL) channelReturnPage else topBarPage,
+                selectedChannel = if (windowInfo.isMediumOrExpanded) null else selectedContentChannel,
                 canRefreshRss = uiState.rssSources.any { !ImportedContentIds.isImportedContentUrl(it.url) } && !uiState.isBusy,
-                canRefreshSource = selectedContentChannel?.canRefresh == true &&
+                canRefreshSource = !windowInfo.isMediumOrExpanded &&
+                    selectedContentChannel?.canRefresh == true &&
                     selectedSource != null &&
                     selectedSource.url !in uiState.refreshingRssSourceUrls &&
                     !uiState.isBusy,
@@ -407,230 +822,708 @@ fun MainScreen(
                         selectedSource?.let(onRefreshRssSource)
                     }
                 },
-                onExportBluetoothLog = onExportBluetoothLog
-            )
-        },
-        bottomBar = {
-            MainNavigationBar(
-                selectedPage = selectedBottomPage,
-                onSelectPage = { destination ->
-                    if (page == MainPage.CHANNEL && destination != channelReturnPage) {
-                        switchChannelToTopLevelPage(destination)
-                    } else {
-                        navigateToTopLevelPage(destination)
-                    }
-                }
-            )
-        },
-        floatingActionButton = {
-            MainFloatingActionButton(
-                page = page,
-                isBusy = uiState.isBusy,
-                selectedSource = selectedSource,
-                selectedSourceRefreshing = selectedSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
-                canRefreshSelectedSource = selectedContentChannel?.canRefresh == true,
-                onSyncLibrary = onSyncLibrary,
-                onAddRssSource = { urlDialogMode = UrlDialogMode.RSS },
-                onRefreshSelectedSource = {
-                    if (selectedContentChannel?.canRefresh == true) {
-                        selectedSource?.let(onRefreshRssSource)
-                    }
-                }
+                onExportBluetoothLog = onExportBluetoothLog,
+                modifier = modifier
             )
         }
-    ) { contentPadding ->
-        Box(modifier = Modifier.fillMaxSize()) {
-            channelTabSwitchDestination?.let { destination ->
-                OpaquePageLayer(
+        Scaffold(
+            topBar = {
+                if (showScaffoldTopBar) {
+                    RenderGlobalTopBar()
+                }
+            },
+            bottomBar = {
+                if (windowInfo.navigationType == AdaptiveNavigationType.BottomBar && selectedReaderArticle == null) {
+                    MainNavigationBar(
+                        selectedPage = navigationSelectedPage,
+                        onSelectPage = { destination ->
+                            if (page == MainPage.CHANNEL && destination != channelReturnPage) {
+                                switchChannelToTopLevelPage(destination)
+                            } else {
+                                navigateToTopLevelPage(destination)
+                            }
+                        }
+                    )
+                }
+            },
+            floatingActionButton = {
+                if (selectedReaderArticle == null) {
+                    MainFloatingActionButton(
+                        page = fabPage,
+                        isBusy = uiState.isBusy,
+                        selectedSource = if (windowInfo.isMediumOrExpanded) null else selectedSource,
+                        selectedSourceRefreshing = selectedSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
+                        canRefreshSelectedSource = !windowInfo.isMediumOrExpanded && selectedContentChannel?.canRefresh == true,
+                        onSyncLibrary = onSyncLibrary,
+                        onAddRssSource = { urlDialogMode = UrlDialogMode.RSS },
+                        onRefreshSelectedSource = {
+                            if (selectedContentChannel?.canRefresh == true) {
+                                selectedSource?.let(onRefreshRssSource)
+                            }
+                        }
+                    )
+                }
+            }
+        ) { contentPadding ->
+            Row(modifier = Modifier.fillMaxSize()) {
+                if (windowInfo.navigationType == AdaptiveNavigationType.Rail) {
+                    MainNavigationRail(
+                        selectedPage = navigationSelectedPage,
+                        contentPadding = contentPadding,
+                        onSelectPage = { destination ->
+                            if (!windowInfo.isMediumOrExpanded && page == MainPage.CHANNEL && destination != channelReturnPage) {
+                                switchChannelToTopLevelPage(destination)
+                            } else {
+                                navigateToTopLevelPage(destination)
+                            }
+                        }
+                    )
+                    VerticalDivider(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .padding(
+                                top = contentPadding.calculateTopPadding(),
+                                bottom = contentPadding.calculateBottomPadding()
+                            )
+                    )
+                }
+                Column(
                     modifier = Modifier
+                        .weight(1f)
                         .fillMaxSize()
-                        .channelTabSwitchTargetPreview(
-                            progress = channelTabSwitchProgress,
-                            direction = channelTabSwitchDirection
-                        )
-                        .zIndex(0.5f)
                 ) {
-                    when (destination) {
-                        MainPage.DASHBOARD -> DashboardPage(
-                            uiState = uiState,
-                            articlesBySource = articlesBySource,
-                            contentPadding = contentPadding,
-                            onSyncLibrary = onSyncLibrary,
-                            onExportBluetoothLog = onExportBluetoothLog,
-                            onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
-                            onOpenFavorites = { navigateToContentChannel(CONTENT_CHANNEL_FAVORITES) },
-                            onOpenWatchLater = { navigateToContentChannel(CONTENT_CHANNEL_WATCH_LATER) },
-                            onOpenIndependent = { navigateToContentChannel(CONTENT_CHANNEL_INDEPENDENT) },
-                            onOpenImportedContent = { navigateToContentChannel(CONTENT_CHANNEL_IMPORTED_TEXT) },
-                            onDismissMessage = onDismissMessage
-                        )
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                    ) {
+                    channelTabSwitchDestination?.takeUnless { windowInfo.isMediumOrExpanded }?.let { destination ->
+                        OpaquePageLayer(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .channelTabSwitchTargetPreview(
+                                    progress = channelTabSwitchProgress,
+                                    direction = channelTabSwitchDirection
+                                )
+                                .zIndex(0.5f)
+                        ) {
+                            when (destination) {
+                                MainPage.DASHBOARD -> DashboardPage(
+                                    uiState = uiState,
+                                    articlesBySource = articlesBySource,
+                                    contentPadding = contentPadding,
+                                    windowInfo = windowInfo,
+                                    onSyncLibrary = onSyncLibrary,
+                                    onExportBluetoothLog = onExportBluetoothLog,
+                                    onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
+                                    onOpenFavorites = { navigateToContentChannel(CONTENT_CHANNEL_FAVORITES) },
+                                    onOpenWatchLater = { navigateToContentChannel(CONTENT_CHANNEL_WATCH_LATER) },
+                                    onOpenIndependent = { navigateToContentChannel(CONTENT_CHANNEL_INDEPENDENT) },
+                                    onOpenImportedContent = { navigateToContentChannel(CONTENT_CHANNEL_IMPORTED_TEXT) },
+                                    onDismissMessage = onDismissMessage
+                                )
 
-                        MainPage.RSS -> ContentPage(
-                            uiState = uiState,
-                            channels = contentChannels,
-                            contentPadding = contentPadding,
-                            onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.RSS) },
-                            onMoveToTop = onMoveRssSourceToTop,
-                            onReorderContentChannels = onReorderContentChannels,
-                            onTogglePinned = onToggleRssSourcePinned,
-                            onDelete = onDeleteRssSource,
-                            onRefreshAllRssSources = onRefreshAllRssSources
-                        )
+                                MainPage.RSS -> ContentPage(
+                                    uiState = uiState,
+                                    channels = contentChannels,
+                                    contentPadding = contentPadding,
+                                    windowInfo = windowInfo,
+                                    listState = contentPageListState,
+                                    onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.RSS) },
+                                    onMoveToTop = onMoveRssSourceToTop,
+                                    onReorderContentChannels = onReorderContentChannels,
+                                    onTogglePinned = onToggleRssSourcePinned,
+                                    onDelete = onDeleteRssSource,
+                                    onRefreshAllRssSources = onRefreshAllRssSources
+                                )
 
-                        MainPage.IMPORTS -> ImportsPage(
-                            uiState = uiState,
+                                MainPage.IMPORTS -> ImportsPage(
+                                    uiState = uiState,
+                                    contentPadding = contentPadding,
+                                    windowInfo = windowInfo,
+                                    listState = importsPageListState,
+                                    onUrlChange = onUrlChange,
+                                    onImportArticle = onImportArticle,
+                                    onImportFile = onImportFile,
+                                    onAddRssSource = onAddRssSource,
+                                    onClearImportedContent = onClearImportedContent,
+                                    onDismissMessage = onDismissMessage,
+                                    recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
+                                    onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.IMPORTS) },
+                                    onOpenArticle = onOpenArticle,
+                                    onOpenOriginalLink = { uriHandler.openUri(it) },
+                                    onToggleFavorite = onToggleFavorite,
+                                    onToggleWatchLater = onToggleWatchLater,
+                                    onDeleteArticle = onDeleteArticle
+                                )
+
+                                MainPage.CHANNEL -> Unit
+                            }
+                        }
+                    }
+
+                    if (tabBackActive) {
+                        OpaquePageLayer(
+                            modifier = Modifier
+                                .tabPredictiveBackTargetPreview(tabBackProgress)
+                                .zIndex(0.5f)
+                        ) {
+                            DashboardPage(
+                                uiState = uiState,
+                                articlesBySource = articlesBySource,
+                                contentPadding = contentPadding,
+                                windowInfo = windowInfo,
+                                onSyncLibrary = onSyncLibrary,
+                                onExportBluetoothLog = onExportBluetoothLog,
+                                onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
+                                onOpenFavorites = { navigateToContentChannel(CONTENT_CHANNEL_FAVORITES) },
+                                onOpenWatchLater = { navigateToContentChannel(CONTENT_CHANNEL_WATCH_LATER) },
+                                onOpenIndependent = { navigateToContentChannel(CONTENT_CHANNEL_INDEPENDENT) },
+                                onOpenImportedContent = { navigateToContentChannel(CONTENT_CHANNEL_IMPORTED_TEXT) },
+                                onDismissMessage = onDismissMessage
+                            )
+                        }
+                    }
+                    HorizontalPager(
+                        state = pagerState,
+                        userScrollEnabled = !windowInfo.isMediumOrExpanded,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .then(
+                                if (tabBackActive) {
+                                    Modifier.tabPredictiveBackPreview(tabBackProgress)
+                                } else {
+                                    Modifier
+                                }
+                            )
+                            .zIndex(if (tabBackActive) 1f else 0f)
+                    ) { pageIndex ->
+                        when (TopLevelMainPages[pageIndex]) {
+                            MainPage.DASHBOARD -> DashboardPage(
+                                uiState = uiState,
+                                articlesBySource = articlesBySource,
+                                contentPadding = contentPadding,
+                                windowInfo = windowInfo,
+                                onSyncLibrary = onSyncLibrary,
+                                onExportBluetoothLog = onExportBluetoothLog,
+                                onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
+                                onOpenFavorites = { openAdaptiveContentChannel(CONTENT_CHANNEL_FAVORITES, MainPage.RSS) },
+                                onOpenWatchLater = { openAdaptiveContentChannel(CONTENT_CHANNEL_WATCH_LATER, MainPage.RSS) },
+                                onOpenIndependent = { openAdaptiveContentChannel(CONTENT_CHANNEL_INDEPENDENT, MainPage.RSS) },
+                                onOpenImportedContent = { openAdaptiveContentChannel(CONTENT_CHANNEL_IMPORTED_TEXT, MainPage.RSS) },
+                                onDismissMessage = onDismissMessage
+                            )
+
+                            MainPage.RSS -> {
+                                if (selectedReaderArticle != null) {
+                                    val selectedChannel = selectedContentChannel
+                                    if (windowInfo.isMediumOrExpanded && selectedChannel != null) {
+                                        val startPane: @Composable () -> Unit = {
+                                            ContentPage(
+                                                uiState = uiState,
+                                                channels = contentChannels,
+                                                contentPadding = contentPadding,
+                                                windowInfo = windowInfo,
+                                                listState = contentPageListState,
+                                                selectedChannelKey = selectedContentChannelKey,
+                                                onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.RSS) },
+                                                onMoveToTop = onMoveRssSourceToTop,
+                                                onReorderContentChannels = onReorderContentChannels,
+                                                onTogglePinned = onToggleRssSourcePinned,
+                                                onDelete = onDeleteRssSource,
+                                                onRefreshAllRssSources = onRefreshAllRssSources
+                                            )
+                                        }
+                                        val movingPane: @Composable (Float) -> Unit = { progress ->
+                                            val movingPaneSource = selectedChannel.source
+                                            ReaderReturnMovingArticlePane(
+                                                progress = progress,
+                                                channel = selectedChannel,
+                                                selectedArticleId = selectedReaderArticle.articleId,
+                                                isRefreshing = movingPaneSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
+                                                contentPadding = contentPadding,
+                                                windowInfo = windowInfo,
+                                                onRefreshSource = {
+                                                    if (selectedChannel.canRefresh) {
+                                                        movingPaneSource?.let(onRefreshRssSource)
+                                                    }
+                                                },
+                                                onBackToChannels = { handleInlineReaderBack() },
+                                                onOpenArticle = { article ->
+                                                    openAdaptiveArticle(article)
+                                                },
+                                                onOpenOriginalLink = { uriHandler.openUri(it) },
+                                                onToggleFavorite = onToggleFavorite,
+                                                onToggleWatchLater = onToggleWatchLater,
+                                                onDeleteArticle = onDeleteArticle
+                                            )
+                                        }
+                                        val readerReturnAnimating = !readerFullscreenActive &&
+                                            (readerBackAnimating || readerBackProgress > 0f)
+                                        if (readerOpenAnimating || readerOpenProgress < 1f) {
+                                            ActiveReaderOpenThreePane(
+                                                progress = readerOpenProgress,
+                                                windowInfo = windowInfo,
+                                                startPane = startPane,
+                                                movingPane = movingPane,
+                                                readerPane = activeInlineReaderPane
+                                            )
+                                        } else if (readerReturnAnimating) {
+                                            ActiveReaderReturnTwoPane(
+                                                progress = readerBackProgress,
+                                                windowInfo = windowInfo,
+                                                startPane = startPane,
+                                                movingPane = movingPane,
+                                                readerPane = activeInlineReaderPane
+                                            )
+                                        } else {
+                                            AdaptiveReadingPane(
+                                                windowInfo = windowInfo,
+                                                fullscreen = readerFullscreenActive,
+                                                predictiveBackProgress = readerBackProgress,
+                                                fullscreenBackProgress = readerFullscreenBackProgress,
+                                                startPane = {
+                                                    ChannelArticleListPane(
+                                                        channel = selectedChannel,
+                                                        selectedArticleId = selectedReaderArticle.articleId,
+                                                        contentPadding = contentPadding,
+                                                        windowInfo = windowInfo,
+                                                        onBackToChannels = { handleInlineReaderBack() },
+                                                        onOpenArticle = { article ->
+                                                            openAdaptiveArticle(article)
+                                                        }
+                                                    )
+                                                },
+                                                readerPane = activeInlineReaderPane
+                                            )
+                                        }
+                                    } else {
+                                        AdaptiveReadingPane(
+                                            windowInfo = windowInfo,
+                                            fullscreen = readerFullscreenActive || !windowInfo.isMediumOrExpanded,
+                                            predictiveBackProgress = readerBackProgress,
+                                            fullscreenBackProgress = readerFullscreenBackProgress,
+                                            startPane = {
+                                                if (selectedChannel != null) {
+                                                    ChannelArticleListPane(
+                                                        channel = selectedChannel,
+                                                        selectedArticleId = selectedReaderArticle.articleId,
+                                                        contentPadding = contentPadding,
+                                                        windowInfo = windowInfo,
+                                                        onBackToChannels = { handleInlineReaderBack() },
+                                                        onOpenArticle = { article ->
+                                                            openAdaptiveArticle(article)
+                                                        }
+                                                    )
+                                                } else {
+                                                    ContentPage(
+                                                        uiState = uiState,
+                                                        channels = contentChannels,
+                                                        contentPadding = contentPadding,
+                                                        windowInfo = windowInfo,
+                                                        listState = contentPageListState,
+                                                        selectedChannelKey = selectedContentChannelKey,
+                                                        onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.RSS) },
+                                                        onMoveToTop = onMoveRssSourceToTop,
+                                                        onReorderContentChannels = onReorderContentChannels,
+                                                        onTogglePinned = onToggleRssSourcePinned,
+                                                        onDelete = onDeleteRssSource,
+                                                        onRefreshAllRssSources = onRefreshAllRssSources
+                                                    )
+                                                }
+                                            },
+                                            readerPane = activeInlineReaderPane
+                                        )
+                                    }
+                                } else if (windowInfo.isMediumOrExpanded) {
+                                    val returnTransition = readerLeftPaneReturnState
+                                        ?.takeIf { it.returnPage == MainPage.RSS }
+                                    ReaderReturnTwoPane(
+                                        transitionState = returnTransition,
+                                        windowInfo = windowInfo,
+                                        onTransitionFinished = { finishedState ->
+                                            if (readerLeftPaneReturnState == finishedState) {
+                                                readerLeftPaneReturnState = null
+                                            }
+                                        },
+                                        startPane = {
+                                            ContentPage(
+                                                uiState = uiState,
+                                                channels = contentChannels,
+                                                contentPadding = contentPadding,
+                                                windowInfo = windowInfo,
+                                                listState = contentPageListState,
+                                                selectedChannelKey = selectedContentChannelKey,
+                                                onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.RSS) },
+                                                onMoveToTop = onMoveRssSourceToTop,
+                                                onReorderContentChannels = onReorderContentChannels,
+                                                onTogglePinned = onToggleRssSourcePinned,
+                                                onDelete = onDeleteRssSource,
+                                                onRefreshAllRssSources = onRefreshAllRssSources
+                                            )
+                                        },
+                                        endPane = {
+                                            val paneSource = selectedContentChannel?.source
+                                            ChannelArticlePane(
+                                                channel = selectedContentChannel,
+                                                isRefreshing = paneSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
+                                                contentPadding = contentPadding,
+                                                windowInfo = windowInfo,
+                                                onRefreshSource = {
+                                                    if (selectedContentChannel?.canRefresh == true) {
+                                                        paneSource?.let(onRefreshRssSource)
+                                                    }
+                                                },
+                                                onOpenArticle = { article ->
+                                                    openAdaptiveArticle(article)
+                                                },
+                                                onOpenOriginalLink = { uriHandler.openUri(it) },
+                                                onToggleFavorite = onToggleFavorite,
+                                                onToggleWatchLater = onToggleWatchLater,
+                                                onDeleteArticle = onDeleteArticle
+                                            )
+                                        },
+                                        movingPane = { progress ->
+                                            val movingChannel = returnTransition?.let { state ->
+                                                contentChannels.firstOrNull { it.key == state.channelKey }
+                                            } ?: selectedContentChannel
+                                            val movingPaneSource = movingChannel?.source
+                                            ReaderReturnMovingArticlePane(
+                                                progress = progress,
+                                                channel = movingChannel,
+                                                selectedArticleId = returnTransition?.articleId,
+                                                isRefreshing = movingPaneSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
+                                                contentPadding = contentPadding,
+                                                windowInfo = windowInfo,
+                                                onRefreshSource = {
+                                                    if (movingChannel?.canRefresh == true) {
+                                                        movingPaneSource?.let(onRefreshRssSource)
+                                                    }
+                                                },
+                                                onBackToChannels = { readerLeftPaneReturnState = null },
+                                                onOpenArticle = { article ->
+                                                    openAdaptiveArticle(article)
+                                                },
+                                                onOpenOriginalLink = { uriHandler.openUri(it) },
+                                                onToggleFavorite = onToggleFavorite,
+                                                onToggleWatchLater = onToggleWatchLater,
+                                                onDeleteArticle = onDeleteArticle
+                                            )
+                                        }
+                                    )
+                                } else {
+                                    ContentPage(
+                                        uiState = uiState,
+                                        channels = contentChannels,
+                                        contentPadding = contentPadding,
+                                        windowInfo = windowInfo,
+                                        listState = contentPageListState,
+                                        onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.RSS) },
+                                        onMoveToTop = onMoveRssSourceToTop,
+                                        onReorderContentChannels = onReorderContentChannels,
+                                        onTogglePinned = onToggleRssSourcePinned,
+                                        onDelete = onDeleteRssSource,
+                                        onRefreshAllRssSources = onRefreshAllRssSources
+                                    )
+                                }
+                            }
+
+                            MainPage.IMPORTS -> {
+                                if (selectedReaderArticle != null) {
+                                    val selectedChannel = selectedContentChannel
+                                    if (windowInfo.isMediumOrExpanded && selectedChannel != null) {
+                                        val startPane: @Composable () -> Unit = {
+                                            ImportsPage(
+                                                uiState = uiState,
+                                                contentPadding = contentPadding,
+                                                windowInfo = windowInfo,
+                                                listState = importsPageListState,
+                                                selectedChannelKey = selectedContentChannelKey,
+                                                onUrlChange = onUrlChange,
+                                                onImportArticle = onImportArticle,
+                                                onImportFile = onImportFile,
+                                                onAddRssSource = onAddRssSource,
+                                                onClearImportedContent = onClearImportedContent,
+                                                onDismissMessage = onDismissMessage,
+                                                recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
+                                                onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.IMPORTS) },
+                                                onOpenArticle = { article -> openIndependentArticleFromImports(article) },
+                                                onOpenOriginalLink = { uriHandler.openUri(it) },
+                                                onToggleFavorite = onToggleFavorite,
+                                                onToggleWatchLater = onToggleWatchLater,
+                                                onDeleteArticle = onDeleteArticle
+                                            )
+                                        }
+                                        val movingPane: @Composable (Float) -> Unit = { progress ->
+                                            val movingPaneSource = selectedChannel.source
+                                            ReaderReturnMovingArticlePane(
+                                                progress = progress,
+                                                channel = selectedChannel,
+                                                selectedArticleId = selectedReaderArticle.articleId,
+                                                isRefreshing = movingPaneSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
+                                                contentPadding = contentPadding,
+                                                windowInfo = windowInfo,
+                                                onRefreshSource = {
+                                                    if (selectedChannel.canRefresh) {
+                                                        movingPaneSource?.let(onRefreshRssSource)
+                                                    }
+                                                },
+                                                onBackToChannels = { handleInlineReaderBack() },
+                                                onOpenArticle = { article ->
+                                                    openAdaptiveArticle(article)
+                                                },
+                                                onOpenOriginalLink = { uriHandler.openUri(it) },
+                                                onToggleFavorite = onToggleFavorite,
+                                                onToggleWatchLater = onToggleWatchLater,
+                                                onDeleteArticle = onDeleteArticle
+                                            )
+                                        }
+                                        val readerReturnAnimating = !readerFullscreenActive &&
+                                            (readerBackAnimating || readerBackProgress > 0f)
+                                        if (readerOpenAnimating || readerOpenProgress < 1f) {
+                                            ActiveReaderOpenThreePane(
+                                                progress = readerOpenProgress,
+                                                windowInfo = windowInfo,
+                                                startPane = startPane,
+                                                movingPane = movingPane,
+                                                readerPane = activeInlineReaderPane
+                                            )
+                                        } else if (readerReturnAnimating) {
+                                            ActiveReaderReturnTwoPane(
+                                                progress = readerBackProgress,
+                                                windowInfo = windowInfo,
+                                                startPane = startPane,
+                                                movingPane = movingPane,
+                                                readerPane = activeInlineReaderPane
+                                            )
+                                        } else {
+                                            AdaptiveReadingPane(
+                                                windowInfo = windowInfo,
+                                                fullscreen = readerFullscreenActive,
+                                                predictiveBackProgress = readerBackProgress,
+                                                fullscreenBackProgress = readerFullscreenBackProgress,
+                                                startPane = {
+                                                    ChannelArticleListPane(
+                                                        channel = selectedChannel,
+                                                        selectedArticleId = selectedReaderArticle.articleId,
+                                                        contentPadding = contentPadding,
+                                                        windowInfo = windowInfo,
+                                                        onBackToChannels = { handleInlineReaderBack() },
+                                                        onOpenArticle = { article ->
+                                                            openAdaptiveArticle(article)
+                                                        }
+                                                    )
+                                                },
+                                                readerPane = activeInlineReaderPane
+                                            )
+                                        }
+                                    } else {
+                                        AdaptiveReadingPane(
+                                            windowInfo = windowInfo,
+                                            fullscreen = readerFullscreenActive || !windowInfo.isMediumOrExpanded,
+                                            predictiveBackProgress = readerBackProgress,
+                                            fullscreenBackProgress = readerFullscreenBackProgress,
+                                            startPane = {
+                                                if (selectedChannel != null) {
+                                                    ChannelArticleListPane(
+                                                        channel = selectedChannel,
+                                                        selectedArticleId = selectedReaderArticle.articleId,
+                                                        contentPadding = contentPadding,
+                                                        windowInfo = windowInfo,
+                                                        onBackToChannels = { handleInlineReaderBack() },
+                                                        onOpenArticle = { article ->
+                                                            openAdaptiveArticle(article)
+                                                        }
+                                                    )
+                                                } else {
+                                                    ImportsPage(
+                                                        uiState = uiState,
+                                                        contentPadding = contentPadding,
+                                                        windowInfo = windowInfo,
+                                                        listState = importsPageListState,
+                                                        selectedChannelKey = selectedContentChannelKey,
+                                                        onUrlChange = onUrlChange,
+                                                        onImportArticle = onImportArticle,
+                                                        onImportFile = onImportFile,
+                                                        onAddRssSource = onAddRssSource,
+                                                        onClearImportedContent = onClearImportedContent,
+                                                        onDismissMessage = onDismissMessage,
+                                                        recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
+                                                        onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.IMPORTS) },
+                                                        onOpenArticle = { article -> openIndependentArticleFromImports(article) },
+                                                        onOpenOriginalLink = { uriHandler.openUri(it) },
+                                                        onToggleFavorite = onToggleFavorite,
+                                                        onToggleWatchLater = onToggleWatchLater,
+                                                        onDeleteArticle = onDeleteArticle
+                                                    )
+                                                }
+                                            },
+                                            readerPane = activeInlineReaderPane
+                                        )
+                                    }
+                                } else if (windowInfo.isMediumOrExpanded) {
+                                    val returnTransition = readerLeftPaneReturnState
+                                        ?.takeIf { it.returnPage == MainPage.IMPORTS }
+                                    ReaderReturnTwoPane(
+                                        transitionState = returnTransition,
+                                        windowInfo = windowInfo,
+                                        onTransitionFinished = { finishedState ->
+                                            if (readerLeftPaneReturnState == finishedState) {
+                                                readerLeftPaneReturnState = null
+                                            }
+                                        },
+                                        startPane = {
+                                            ImportsPage(
+                                                uiState = uiState,
+                                                contentPadding = contentPadding,
+                                                windowInfo = windowInfo,
+                                                listState = importsPageListState,
+                                                selectedChannelKey = selectedContentChannelKey,
+                                                onUrlChange = onUrlChange,
+                                                onImportArticle = onImportArticle,
+                                                onImportFile = onImportFile,
+                                                onAddRssSource = onAddRssSource,
+                                                onClearImportedContent = onClearImportedContent,
+                                                onDismissMessage = onDismissMessage,
+                                                recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
+                                                onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.IMPORTS) },
+                                                onOpenArticle = { article -> openIndependentArticleFromImports(article) },
+                                                onOpenOriginalLink = { uriHandler.openUri(it) },
+                                                onToggleFavorite = onToggleFavorite,
+                                                onToggleWatchLater = onToggleWatchLater,
+                                                onDeleteArticle = onDeleteArticle
+                                            )
+                                        },
+                                        endPane = {
+                                            val paneSource = selectedContentChannel?.source
+                                            ChannelArticlePane(
+                                                channel = selectedContentChannel,
+                                                isRefreshing = paneSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
+                                                contentPadding = contentPadding,
+                                                windowInfo = windowInfo,
+                                                onRefreshSource = {
+                                                    if (selectedContentChannel?.canRefresh == true) {
+                                                        paneSource?.let(onRefreshRssSource)
+                                                    }
+                                                },
+                                                onOpenArticle = { article ->
+                                                    openAdaptiveArticle(article)
+                                                },
+                                                onOpenOriginalLink = { uriHandler.openUri(it) },
+                                                onToggleFavorite = onToggleFavorite,
+                                                onToggleWatchLater = onToggleWatchLater,
+                                                onDeleteArticle = onDeleteArticle
+                                            )
+                                        },
+                                        movingPane = { progress ->
+                                            val movingChannel = returnTransition?.let { state ->
+                                                contentChannels.firstOrNull { it.key == state.channelKey }
+                                            } ?: selectedContentChannel
+                                            val movingPaneSource = movingChannel?.source
+                                            ReaderReturnMovingArticlePane(
+                                                progress = progress,
+                                                channel = movingChannel,
+                                                selectedArticleId = returnTransition?.articleId,
+                                                isRefreshing = movingPaneSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
+                                                contentPadding = contentPadding,
+                                                windowInfo = windowInfo,
+                                                onRefreshSource = {
+                                                    if (movingChannel?.canRefresh == true) {
+                                                        movingPaneSource?.let(onRefreshRssSource)
+                                                    }
+                                                },
+                                                onBackToChannels = { readerLeftPaneReturnState = null },
+                                                onOpenArticle = { article ->
+                                                    openAdaptiveArticle(article)
+                                                },
+                                                onOpenOriginalLink = { uriHandler.openUri(it) },
+                                                onToggleFavorite = onToggleFavorite,
+                                                onToggleWatchLater = onToggleWatchLater,
+                                                onDeleteArticle = onDeleteArticle
+                                            )
+                                        }
+                                    )
+                                } else {
+                                    ImportsPage(
+                                        uiState = uiState,
+                                        contentPadding = contentPadding,
+                                        windowInfo = windowInfo,
+                                        listState = importsPageListState,
+                                        onUrlChange = onUrlChange,
+                                        onImportArticle = onImportArticle,
+                                        onImportFile = onImportFile,
+                                        onAddRssSource = onAddRssSource,
+                                        onClearImportedContent = onClearImportedContent,
+                                        onDismissMessage = onDismissMessage,
+                                        recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
+                                        onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.IMPORTS) },
+                                        onOpenArticle = onOpenArticle,
+                                        onOpenOriginalLink = { uriHandler.openUri(it) },
+                                        onToggleFavorite = onToggleFavorite,
+                                        onToggleWatchLater = onToggleWatchLater,
+                                        onDeleteArticle = onDeleteArticle
+                                    )
+                                }
+                            }
+
+                            MainPage.CHANNEL -> Unit
+                        }
+                    }
+
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = page == MainPage.CHANNEL &&
+                            !windowInfo.isMediumOrExpanded &&
+                            selectedReaderArticle == null,
+                        enter = slideInHorizontally(
+                            animationSpec = tween(CHANNEL_TRANSITION_MS)
+                        ) { fullWidth -> fullWidth / 4 } + fadeIn(
+                            animationSpec = tween(CHANNEL_TRANSITION_MS)
+                        ),
+                        exit = if (suppressNextChannelExit) {
+                            fadeOut(animationSpec = tween(0))
+                        } else {
+                            slideOutHorizontally(
+                                animationSpec = tween(CHANNEL_TRANSITION_MS)
+                            ) { fullWidth -> fullWidth / 4 } + fadeOut(
+                                animationSpec = tween(CHANNEL_TRANSITION_MS)
+                            )
+                        },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .zIndex(1f)
+                    ) {
+                        val animatedSource = animatedContentChannel?.source
+                        ChannelPage(
+                            channel = animatedContentChannel,
+                            isRefreshing = animatedSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
                             contentPadding = contentPadding,
-                            onUrlChange = onUrlChange,
-                            onImportArticle = onImportArticle,
-                            onImportFile = onImportFile,
-                            onAddRssSource = onAddRssSource,
-                            onClearImportedContent = onClearImportedContent,
-                            onDismissMessage = onDismissMessage,
-                            recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
-                            onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.IMPORTS) },
+                            windowInfo = windowInfo,
+                            onRefreshSource = {
+                                if (animatedContentChannel?.canRefresh == true) {
+                                    animatedSource?.let(onRefreshRssSource)
+                                }
+                            },
                             onOpenArticle = onOpenArticle,
                             onOpenOriginalLink = { uriHandler.openUri(it) },
                             onToggleFavorite = onToggleFavorite,
                             onToggleWatchLater = onToggleWatchLater,
-                            onDeleteArticle = onDeleteArticle
-                        )
-
-                        MainPage.CHANNEL -> Unit
-                    }
-                }
-            }
-
-            if (tabBackActive) {
-                OpaquePageLayer(
-                    modifier = Modifier
-                        .tabPredictiveBackTargetPreview(tabBackProgress)
-                        .zIndex(0.5f)
-                ) {
-                    DashboardPage(
-                        uiState = uiState,
-                        articlesBySource = articlesBySource,
-                        contentPadding = contentPadding,
-                        onSyncLibrary = onSyncLibrary,
-                        onExportBluetoothLog = onExportBluetoothLog,
-                        onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
-                        onOpenFavorites = { navigateToContentChannel(CONTENT_CHANNEL_FAVORITES) },
-                        onOpenWatchLater = { navigateToContentChannel(CONTENT_CHANNEL_WATCH_LATER) },
-                        onOpenIndependent = { navigateToContentChannel(CONTENT_CHANNEL_INDEPENDENT) },
-                        onOpenImportedContent = { navigateToContentChannel(CONTENT_CHANNEL_IMPORTED_TEXT) },
-                        onDismissMessage = onDismissMessage
-                    )
-                }
-            }
-            HorizontalPager(
-                state = pagerState,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .then(
-                        if (tabBackActive) {
-                            Modifier.tabPredictiveBackPreview(tabBackProgress)
-                        } else {
-                            Modifier
-                        }
-                    )
-                    .zIndex(if (tabBackActive) 1f else 0f)
-            ) { pageIndex ->
-                when (TopLevelMainPages[pageIndex]) {
-                    MainPage.DASHBOARD -> DashboardPage(
-                        uiState = uiState,
-                        articlesBySource = articlesBySource,
-                        contentPadding = contentPadding,
-                        onSyncLibrary = onSyncLibrary,
-                        onExportBluetoothLog = onExportBluetoothLog,
-                        onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
-                        onOpenFavorites = { navigateToContentChannel(CONTENT_CHANNEL_FAVORITES, MainPage.DASHBOARD) },
-                        onOpenWatchLater = { navigateToContentChannel(CONTENT_CHANNEL_WATCH_LATER, MainPage.DASHBOARD) },
-                        onOpenIndependent = { navigateToContentChannel(CONTENT_CHANNEL_INDEPENDENT, MainPage.DASHBOARD) },
-                        onOpenImportedContent = { navigateToContentChannel(CONTENT_CHANNEL_IMPORTED_TEXT, MainPage.DASHBOARD) },
-                        onDismissMessage = onDismissMessage
-                    )
-
-                    MainPage.RSS -> ContentPage(
-                        uiState = uiState,
-                        channels = contentChannels,
-                        contentPadding = contentPadding,
-                        onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.RSS) },
-                        onMoveToTop = onMoveRssSourceToTop,
-                        onReorderContentChannels = onReorderContentChannels,
-                        onTogglePinned = onToggleRssSourcePinned,
-                        onDelete = onDeleteRssSource,
-                        onRefreshAllRssSources = onRefreshAllRssSources
-                    )
-
-                    MainPage.IMPORTS -> ImportsPage(
-                        uiState = uiState,
-                        contentPadding = contentPadding,
-                        onUrlChange = onUrlChange,
-                        onImportArticle = onImportArticle,
-                        onImportFile = onImportFile,
-                        onAddRssSource = onAddRssSource,
-                        onClearImportedContent = onClearImportedContent,
-                        onDismissMessage = onDismissMessage,
-                        recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
-                        onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.IMPORTS) },
-                        onOpenArticle = onOpenArticle,
-                        onOpenOriginalLink = { uriHandler.openUri(it) },
-                        onToggleFavorite = onToggleFavorite,
-                        onToggleWatchLater = onToggleWatchLater,
-                        onDeleteArticle = onDeleteArticle
-                    )
-
-                    MainPage.CHANNEL -> Unit
-                }
-            }
-
-            AnimatedVisibility(
-                visible = page == MainPage.CHANNEL,
-                enter = slideInHorizontally(
-                    animationSpec = tween(CHANNEL_TRANSITION_MS)
-                ) { fullWidth -> fullWidth / 4 } + fadeIn(
-                    animationSpec = tween(CHANNEL_TRANSITION_MS)
-                ),
-                exit = if (suppressNextChannelExit) {
-                    fadeOut(animationSpec = tween(0))
-                } else {
-                    slideOutHorizontally(
-                        animationSpec = tween(CHANNEL_TRANSITION_MS)
-                    ) { fullWidth -> fullWidth / 4 } + fadeOut(
-                        animationSpec = tween(CHANNEL_TRANSITION_MS)
-                    )
-                },
-                modifier = Modifier
-                    .fillMaxSize()
-                    .zIndex(1f)
-            ) {
-                val animatedSource = animatedContentChannel?.source
-                ChannelPage(
-                    channel = animatedContentChannel,
-                    isRefreshing = animatedSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
-                    contentPadding = contentPadding,
-                    onRefreshSource = {
-                        if (animatedContentChannel?.canRefresh == true) {
-                            animatedSource?.let(onRefreshRssSource)
-                        }
-                    },
-                    onOpenArticle = onOpenArticle,
-                    onOpenOriginalLink = { uriHandler.openUri(it) },
-                    onToggleFavorite = onToggleFavorite,
-                    onToggleWatchLater = onToggleWatchLater,
-                    onDeleteArticle = onDeleteArticle,
-                    modifier = if (channelTabSwitchDestination != null) {
-                        Modifier.channelTabSwitchCurrentPreview(
-                            progress = channelTabSwitchProgress,
-                            direction = channelTabSwitchDirection
-                        )
-                    } else {
-                        Modifier.channelPredictiveBackPreview(
-                            progress = channelBackProgress
+                            onDeleteArticle = onDeleteArticle,
+                            modifier = if (channelTabSwitchDestination != null) {
+                                Modifier.channelTabSwitchCurrentPreview(
+                                    progress = channelTabSwitchProgress,
+                                    direction = channelTabSwitchDirection
+                                )
+                            } else {
+                                Modifier.channelPredictiveBackPreview(
+                                    progress = channelBackProgress
+                                )
+                            }
                         )
                     }
-                )
+                }
             }
         }
+    }
     }
 
     urlDialogMode?.let { mode ->
@@ -696,6 +1589,52 @@ private fun OpaquePageLayer(
     }
 }
 
+@Composable
+private fun InlineArticleReaderPane(
+    article: PhoneArticleEntity,
+    readerArticle: PhoneArticleEntity?,
+    importedTextReader: PhoneImportedTextReader?,
+    onLoadImportedTextChunk: suspend (String, Int) -> String?,
+    onSaveReadingProgress: suspend (Float) -> Unit,
+    onBack: () -> Unit,
+    onOpenImportedArticle: (String) -> Unit,
+    onOpenOriginal: (String) -> Unit,
+    fullscreen: Boolean,
+    showFullscreenControl: Boolean,
+    onToggleFullscreen: () -> Unit
+) {
+    val fullscreenControl = if (showFullscreenControl) onToggleFullscreen else null
+    val platform = PlatformLinkRouter.detect(article.url)
+    if (platform != null) {
+        PlatformWebViewScreen(
+            url = article.url,
+            title = article.title.ifBlank { article.url },
+            platform = platform,
+            onBack = onBack,
+            onOpenExternal = { onOpenOriginal(article.url) },
+            embedded = true,
+            initialScrollProgress = article.readingProgress,
+            onSaveScrollProgress = onSaveReadingProgress,
+            embeddedFullscreen = fullscreen,
+            onOpenFullscreen = fullscreenControl
+        )
+        return
+    }
+    ArticleReaderScreen(
+        article = readerArticle,
+        importedTextReader = importedTextReader,
+        invalidArticleId = article.articleId.isBlank(),
+        onLoadImportedTextChunk = onLoadImportedTextChunk,
+        onSaveReadingProgress = onSaveReadingProgress,
+        onBack = onBack,
+        onOpenImportedArticle = onOpenImportedArticle,
+        onOpenOriginal = onOpenOriginal,
+        embedded = true,
+        embeddedFullscreen = fullscreen,
+        onOpenFullscreen = fullscreenControl
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MainTopBar(
@@ -706,7 +1645,8 @@ private fun MainTopBar(
     onBack: () -> Unit,
     onRefreshAllRssSources: () -> Unit,
     onRefreshSelectedSource: () -> Unit,
-    onExportBluetoothLog: () -> Unit
+    onExportBluetoothLog: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val title = when (page) {
         MainPage.DASHBOARD -> "腕上RSS"
@@ -715,6 +1655,7 @@ private fun MainTopBar(
         MainPage.CHANNEL -> selectedChannel?.title?.takeIf { it.isNotBlank() } ?: "频道"
     }
     CenterAlignedTopAppBar(
+        modifier = modifier,
         title = {
             Text(
                 text = title,
@@ -757,6 +1698,60 @@ private fun MainTopBar(
 }
 
 @Composable
+private fun SplitPaneTopBar(
+    title: String,
+    modifier: Modifier = Modifier,
+    action: @Composable RowScope.() -> Unit = {}
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .height(64.dp)
+                .padding(horizontal = 8.dp)
+        ) {
+            Text(
+                text = title,
+                modifier = Modifier.align(Alignment.Center),
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Row(
+                modifier = Modifier.align(Alignment.CenterEnd),
+                verticalAlignment = Alignment.CenterVertically,
+                content = action
+            )
+        }
+    }
+}
+
+private fun MainPage.label(): String = when (this) {
+    MainPage.DASHBOARD -> "总览"
+    MainPage.RSS -> "内容"
+    MainPage.IMPORTS -> "导入"
+    MainPage.CHANNEL -> "频道"
+}
+
+@Composable
+private fun MainPage.IconContent() {
+    Icon(
+        imageVector = when (this) {
+            MainPage.DASHBOARD -> Icons.Default.Home
+            MainPage.RSS -> Icons.Default.RssFeed
+            MainPage.IMPORTS -> Icons.Default.FileOpen
+            MainPage.CHANNEL -> Icons.Default.RssFeed
+        },
+        contentDescription = null
+    )
+}
+
+@Composable
 private fun MainNavigationBar(
     selectedPage: MainPage,
     onSelectPage: (MainPage) -> Unit
@@ -766,27 +1761,40 @@ private fun MainNavigationBar(
             NavigationBarItem(
                 selected = selectedPage == destination,
                 onClick = { onSelectPage(destination) },
-                icon = {
-                    Icon(
-                        imageVector = when (destination) {
-                            MainPage.DASHBOARD -> Icons.Default.Home
-                            MainPage.RSS -> Icons.Default.RssFeed
-                            MainPage.IMPORTS -> Icons.Default.FileOpen
-                            MainPage.CHANNEL -> Icons.Default.RssFeed
-                        },
-                        contentDescription = null
-                    )
-                },
+                icon = { destination.IconContent() },
                 label = {
-                    Text(
-                        text = when (destination) {
-                            MainPage.DASHBOARD -> "总览"
-                            MainPage.RSS -> "内容"
-                            MainPage.IMPORTS -> "导入"
-                            MainPage.CHANNEL -> "频道"
-                        }
-                    )
+                    Text(text = destination.label())
                 }
+            )
+        }
+    }
+}
+
+@Composable
+private fun MainNavigationRail(
+    selectedPage: MainPage,
+    contentPadding: PaddingValues,
+    onSelectPage: (MainPage) -> Unit
+) {
+    val topPadding = contentPadding.calculateTopPadding()
+    NavigationRail(
+        modifier = Modifier
+            .width(MainNavigationRailWidth)
+            .fillMaxHeight()
+            .then(if (topPadding == 0.dp) Modifier.statusBarsPadding() else Modifier)
+            .padding(
+                top = topPadding,
+                bottom = contentPadding.calculateBottomPadding()
+            ),
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Spacer(modifier = Modifier.height(8.dp))
+        TopLevelMainPages.forEach { destination ->
+            NavigationRailItem(
+                selected = selectedPage == destination,
+                onClick = { onSelectPage(destination) },
+                icon = { destination.IconContent() },
+                label = { Text(destination.label()) }
             )
         }
     }
@@ -836,6 +1844,7 @@ private fun DashboardPage(
     uiState: MainUiState,
     articlesBySource: Map<String, List<PhoneArticleEntity>>,
     contentPadding: PaddingValues,
+    windowInfo: AdaptiveWindowInfo,
     onSyncLibrary: () -> Unit,
     onExportBluetoothLog: () -> Unit,
     onOpenRss: () -> Unit,
@@ -846,36 +1855,99 @@ private fun DashboardPage(
     onDismissMessage: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = mainContentPadding(contentPadding),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        item {
-            SyncStatusCard(
-                message = uiState.syncStatusMessage,
-                error = uiState.syncStatusError,
-                syncProgress = uiState.syncProgress,
-                isBusy = uiState.isBusy,
-                onSyncLibrary = onSyncLibrary,
+    val useDashboardTopBar = windowInfo.navigationType == AdaptiveNavigationType.Rail
+    Column(modifier = modifier.fillMaxSize()) {
+        if (useDashboardTopBar) {
+            MainTopBar(
+                page = MainPage.DASHBOARD,
+                selectedChannel = null,
+                canRefreshRss = false,
+                canRefreshSource = false,
+                onBack = {},
+                onRefreshAllRssSources = {},
+                onRefreshSelectedSource = {},
                 onExportBluetoothLog = onExportBluetoothLog,
-                onDismissMessage = onDismissMessage
+                modifier = Modifier.fillMaxWidth()
             )
         }
-        item {
-            LibrarySummaryCard(
-                rssSourceCount = uiState.rssSources.size,
-                rssArticleCount = articlesBySource.values.sumOf { it.size },
-                favoriteCount = uiState.favorites.size,
-                watchLaterCount = uiState.watchLater.size,
-                independentCount = uiState.independentArticles.size,
-                importedContentCount = uiState.importedContentArticles.size,
-                onOpenRss = onOpenRss,
-                onOpenFavorites = onOpenFavorites,
-                onOpenWatchLater = onOpenWatchLater,
-                onOpenIndependent = onOpenIndependent,
-                onOpenImportedContent = onOpenImportedContent
-            )
+        AdaptiveContentFrame(
+            windowInfo = windowInfo,
+            modifier = Modifier.weight(1f),
+            mediumMaxWidth = 720.dp,
+            expandedMaxWidth = 1120.dp
+        ) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = mainContentPadding(
+                    scaffoldPadding = contentPadding,
+                    windowInfo = windowInfo,
+                    includeScaffoldTop = !useDashboardTopBar
+                ),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                if (windowInfo.isExpanded) {
+                    item {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            Box(modifier = Modifier.weight(1f)) {
+                                SyncStatusCard(
+                                    message = uiState.syncStatusMessage,
+                                    error = uiState.syncStatusError,
+                                    syncProgress = uiState.syncProgress,
+                                    isBusy = uiState.isBusy,
+                                    onSyncLibrary = onSyncLibrary,
+                                    onExportBluetoothLog = onExportBluetoothLog,
+                                    onDismissMessage = onDismissMessage
+                                )
+                            }
+                            Box(modifier = Modifier.weight(1f)) {
+                                LibrarySummaryCard(
+                                    rssSourceCount = uiState.rssSources.size,
+                                    rssArticleCount = articlesBySource.values.sumOf { it.size },
+                                    favoriteCount = uiState.favorites.size,
+                                    watchLaterCount = uiState.watchLater.size,
+                                    independentCount = uiState.independentArticles.size,
+                                    importedContentCount = uiState.importedContentArticles.size,
+                                    onOpenRss = onOpenRss,
+                                    onOpenFavorites = onOpenFavorites,
+                                    onOpenWatchLater = onOpenWatchLater,
+                                    onOpenIndependent = onOpenIndependent,
+                                    onOpenImportedContent = onOpenImportedContent
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    item {
+                        SyncStatusCard(
+                            message = uiState.syncStatusMessage,
+                            error = uiState.syncStatusError,
+                            syncProgress = uiState.syncProgress,
+                            isBusy = uiState.isBusy,
+                            onSyncLibrary = onSyncLibrary,
+                            onExportBluetoothLog = onExportBluetoothLog,
+                            onDismissMessage = onDismissMessage
+                        )
+                    }
+                    item {
+                        LibrarySummaryCard(
+                            rssSourceCount = uiState.rssSources.size,
+                            rssArticleCount = articlesBySource.values.sumOf { it.size },
+                            favoriteCount = uiState.favorites.size,
+                            watchLaterCount = uiState.watchLater.size,
+                            independentCount = uiState.independentArticles.size,
+                            importedContentCount = uiState.importedContentArticles.size,
+                            onOpenRss = onOpenRss,
+                            onOpenFavorites = onOpenFavorites,
+                            onOpenWatchLater = onOpenWatchLater,
+                            onOpenIndependent = onOpenIndependent,
+                            onOpenImportedContent = onOpenImportedContent
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -1331,6 +2403,9 @@ private fun ContentPage(
     uiState: MainUiState,
     channels: List<MainContentChannel>,
     contentPadding: PaddingValues,
+    windowInfo: AdaptiveWindowInfo,
+    listState: LazyListState,
+    selectedChannelKey: String? = null,
     onOpenChannel: (MainContentChannel) -> Unit,
     onMoveToTop: (PhoneRssSourceEntity) -> Unit,
     onReorderContentChannels: (List<String>, Int?) -> Unit,
@@ -1338,7 +2413,6 @@ private fun ContentPage(
     onDelete: (PhoneRssSourceEntity) -> Unit,
     onRefreshAllRssSources: () -> Unit
 ) {
-    val listState = rememberLazyListState()
     val pullState = rememberPullToRefreshState()
     var displayChannels by remember { mutableStateOf(channels) }
     var movedDragGroup by remember { mutableStateOf<MainContentDragGroup?>(null) }
@@ -1382,84 +2456,1023 @@ private fun ContentPage(
         }
     }
 
-    PullToRefreshBox(
-        isRefreshing = uiState.refreshingRssSourceUrls.isNotEmpty(),
-        onRefresh = onRefreshAllRssSources,
-        state = pullState,
-        indicator = {
-            PullToRefreshDefaults.Indicator(
-                state = pullState,
-                isRefreshing = uiState.refreshingRssSourceUrls.isNotEmpty(),
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = contentPadding.calculateTopPadding() + 12.dp)
-            )
-        },
-        modifier = Modifier.fillMaxSize()
+    AdaptiveContentFrame(
+        windowInfo = windowInfo,
+        expandedMaxWidth = 760.dp
     ) {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            state = listState,
-            contentPadding = mainContentPadding(contentPadding),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            if (displayChannels.isEmpty()) {
-                item {
-                    EmptyStateCard(
-                        icon = { Icon(Icons.Default.RssFeed, contentDescription = null) },
-                        title = "暂无内容",
-                        text = "可在导入页添加 RSS、网页文章或本地文件"
-                    )
-                }
-            } else {
-                items(displayChannels, key = { it.key }) { channel ->
-                    val source = channel.source
-                    val isReorderTargetEnabled = channel.canDrag &&
-                        (movedDragGroup == null || channel.dragGroup == movedDragGroup)
-                    ReorderableItem(
-                        reorderableLazyListState,
-                        key = channel.key,
-                        enabled = isReorderTargetEnabled
-                    ) { isDragging ->
-                        val onDragStarted = {
-                            movedDragGroup = channel.dragGroup
-                            dragMoved = false
-                        }
-                        val itemModifier = Modifier
-                            .animateItem()
-                            .zIndex(if (isDragging) 1f else 0f)
-                            .graphicsLayer {
-                                shadowElevation = if (isDragging) 8.dp.toPx() else 0f
-                            }
-                            .then(
-                                if (channel.canDrag) {
-                                    Modifier.longPressDraggableHandle(
-                                        onDragStarted = { _ -> onDragStarted() },
-                                        onDragStopped = ::finishDrag
-                                    )
-                                } else {
-                                    Modifier
-                                }
-                            )
-                        if (source == null) {
-                            MainContentChannelRow(
-                                channel = channel,
-                                onClick = { onOpenChannel(channel) },
-                                modifier = itemModifier
-                            )
-                        } else {
-                            MainScreenSourceRow(
-                                source = source,
-                                icon = channel.icon,
-                                articleCount = channel.articleCount,
-                                onClick = { onOpenChannel(channel) },
-                                onMoveToTop = { onMoveToTop(source) },
-                                onTogglePinned = { onTogglePinned(source) },
-                                onDelete = { onDelete(source) },
-                                modifier = itemModifier
-                            )
+        val usePaneTopBar = windowInfo.isMediumOrExpanded
+        Column(modifier = Modifier.fillMaxSize()) {
+            if (usePaneTopBar) {
+                SplitPaneTopBar(
+                    title = "内容",
+                    action = {
+                        IconButton(
+                            onClick = onRefreshAllRssSources,
+                            enabled = uiState.rssSources.any { !ImportedContentIds.isImportedContentUrl(it.url) } &&
+                                !uiState.isBusy
+                        ) {
+                            Icon(Icons.Default.Sync, contentDescription = "刷新内容")
                         }
                     }
+                )
+            }
+            PullToRefreshBox(
+                isRefreshing = uiState.refreshingRssSourceUrls.isNotEmpty(),
+                onRefresh = onRefreshAllRssSources,
+                state = pullState,
+                indicator = {
+                    PullToRefreshDefaults.Indicator(
+                        state = pullState,
+                        isRefreshing = uiState.refreshingRssSourceUrls.isNotEmpty(),
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(
+                                top = if (usePaneTopBar) {
+                                    12.dp
+                                } else {
+                                    contentPadding.calculateTopPadding() + 12.dp
+                                }
+                            )
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    state = listState,
+                    contentPadding = mainContentPadding(
+                        scaffoldPadding = contentPadding,
+                        windowInfo = windowInfo,
+                        includeScaffoldTop = !usePaneTopBar
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                if (displayChannels.isEmpty()) {
+                    item {
+                        EmptyStateCard(
+                            icon = { Icon(Icons.Default.RssFeed, contentDescription = null) },
+                            title = "暂无内容",
+                            text = "可在导入页添加 RSS、网页文章或本地文件"
+                        )
+                    }
+                } else {
+                    items(displayChannels, key = { it.key }) { channel ->
+                        val source = channel.source
+                        val isReorderTargetEnabled = channel.canDrag &&
+                            (movedDragGroup == null || channel.dragGroup == movedDragGroup)
+                        ReorderableItem(
+                            reorderableLazyListState,
+                            key = channel.key,
+                            enabled = isReorderTargetEnabled
+                        ) { isDragging ->
+                            val onDragStarted = {
+                                movedDragGroup = channel.dragGroup
+                                dragMoved = false
+                            }
+                            val itemModifier = Modifier
+                                .animateItem()
+                                .zIndex(if (isDragging) 1f else 0f)
+                                .graphicsLayer {
+                                    shadowElevation = if (isDragging) 8.dp.toPx() else 0f
+                                }
+                                .then(
+                                    if (channel.canDrag) {
+                                        Modifier.longPressDraggableHandle(
+                                            onDragStarted = { _ -> onDragStarted() },
+                                            onDragStopped = ::finishDrag
+                                        )
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                            if (source == null) {
+                                MainContentChannelRow(
+                                    channel = channel,
+                                    onClick = { onOpenChannel(channel) },
+                                    selected = channel.key == selectedChannelKey,
+                                    modifier = itemModifier
+                                )
+                            } else {
+                                MainScreenSourceRow(
+                                    source = source,
+                                    icon = channel.icon,
+                                    articleCount = channel.articleCount,
+                                    onClick = { onOpenChannel(channel) },
+                                    selected = channel.key == selectedChannelKey,
+                                    onMoveToTop = { onMoveToTop(source) },
+                                    onTogglePinned = { onTogglePinned(source) },
+                                    onDelete = { onDelete(source) },
+                                    modifier = itemModifier
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+}
+
+@Composable
+private fun ActiveReaderReturnTwoPane(
+    progress: Float,
+    windowInfo: AdaptiveWindowInfo,
+    startPane: @Composable () -> Unit,
+    movingPane: @Composable (Float) -> Unit,
+    readerPane: @Composable (Boolean) -> Unit
+) {
+    val returnProgress = progress.coerceIn(0f, 1f)
+    AdaptiveReaderReturnThreePane(
+        windowInfo = windowInfo,
+        progress = returnProgress,
+        startPane = startPane,
+        movingPane = {
+            movingPane(returnProgress)
+        },
+        readerPane = {
+            readerPane(false)
+        }
+    )
+}
+
+@Composable
+private fun ActiveReaderOpenThreePane(
+    progress: Float,
+    windowInfo: AdaptiveWindowInfo,
+    startPane: @Composable () -> Unit,
+    movingPane: @Composable (Float) -> Unit,
+    readerPane: @Composable (Boolean) -> Unit
+) {
+    val openProgress = progress.coerceIn(0f, 1f)
+    AdaptiveReaderOpenThreePane(
+        windowInfo = windowInfo,
+        progress = openProgress,
+        startPane = startPane,
+        movingPane = {
+            movingPane(1f - openProgress)
+        },
+        readerPane = {
+            readerPane(false)
+        }
+    )
+}
+
+@Composable
+private fun ReaderReturnTwoPane(
+    transitionState: ReaderLeftPaneReturnState?,
+    windowInfo: AdaptiveWindowInfo,
+    onTransitionFinished: (ReaderLeftPaneReturnState) -> Unit,
+    startPane: @Composable () -> Unit,
+    endPane: @Composable () -> Unit,
+    movingPane: @Composable (Float) -> Unit
+) {
+    val initialMotionProgress = transitionState
+        ?.initialProgress
+        ?.coerceIn(0f, 1f)
+        ?: 1f
+    val motionProgress = remember(transitionState) {
+        Animatable(initialMotionProgress)
+    }
+
+    LaunchedEffect(transitionState) {
+        if (transitionState == null) {
+            motionProgress.snapTo(1f)
+        } else {
+            val initialProgress = transitionState.initialProgress.coerceIn(0f, 1f)
+            val remainingDuration = (READER_LEFT_PANE_RETURN_TRANSITION_MS * (1f - initialProgress))
+                .toInt()
+                .coerceAtLeast(1)
+            motionProgress.snapTo(initialProgress)
+            motionProgress.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(
+                    durationMillis = remainingDuration,
+                    easing = FastOutSlowInEasing
+                )
+            )
+            onTransitionFinished(transitionState)
+        }
+    }
+
+    AdaptiveMovingTwoPane(
+        windowInfo = windowInfo,
+        transitionProgress = transitionState?.let { motionProgress.value },
+        startPane = startPane,
+        endPane = endPane,
+        movingPane = {
+            movingPane(motionProgress.value)
+        }
+    )
+}
+
+@Composable
+private fun ReaderReturnMovingArticlePane(
+    progress: Float,
+    channel: MainContentChannel?,
+    selectedArticleId: String?,
+    isRefreshing: Boolean,
+    contentPadding: PaddingValues,
+    windowInfo: AdaptiveWindowInfo,
+    onRefreshSource: () -> Unit,
+    onBackToChannels: () -> Unit,
+    onOpenArticle: (PhoneArticleEntity) -> Unit,
+    onOpenOriginalLink: (String) -> Unit,
+    onToggleFavorite: (PhoneArticleEntity) -> Unit,
+    onToggleWatchLater: (PhoneArticleEntity) -> Unit,
+    onDeleteArticle: (PhoneArticleEntity) -> Unit
+) {
+    if (channel == null) {
+        ChannelArticlePane(
+            channel = null,
+            isRefreshing = isRefreshing,
+            contentPadding = contentPadding,
+            windowInfo = windowInfo,
+            onRefreshSource = onRefreshSource,
+            onOpenArticle = onOpenArticle,
+            onOpenOriginalLink = onOpenOriginalLink,
+            onToggleFavorite = onToggleFavorite,
+            onToggleWatchLater = onToggleWatchLater,
+            onDeleteArticle = onDeleteArticle
+        )
+        return
+    }
+    MorphingChannelArticlePane(
+        progress = progress,
+        channel = channel,
+        selectedArticleId = selectedArticleId,
+        isRefreshing = isRefreshing,
+        contentPadding = contentPadding,
+        windowInfo = windowInfo,
+        onRefreshSource = onRefreshSource,
+        onBackToChannels = onBackToChannels,
+        onOpenArticle = onOpenArticle,
+        onOpenOriginalLink = onOpenOriginalLink,
+        onToggleFavorite = onToggleFavorite,
+        onToggleWatchLater = onToggleWatchLater,
+        onDeleteArticle = onDeleteArticle
+    )
+}
+
+@Composable
+private fun MorphingChannelArticlePane(
+    progress: Float,
+    channel: MainContentChannel,
+    selectedArticleId: String?,
+    isRefreshing: Boolean,
+    contentPadding: PaddingValues,
+    windowInfo: AdaptiveWindowInfo,
+    onRefreshSource: () -> Unit,
+    onBackToChannels: () -> Unit,
+    onOpenArticle: (PhoneArticleEntity) -> Unit,
+    onOpenOriginalLink: (String) -> Unit,
+    onToggleFavorite: (PhoneArticleEntity) -> Unit,
+    onToggleWatchLater: (PhoneArticleEntity) -> Unit,
+    onDeleteArticle: (PhoneArticleEntity) -> Unit
+) {
+    val paneProgress = progress.coerceIn(0f, 1f)
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(lerpMainDp(64.dp, 0.dp, paneProgress))
+                    .clipToBounds(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "内容",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.graphicsLayer {
+                        translationY = -28.dp.toPx() * paneProgress
+                        scaleX = 1f - 0.08f * paneProgress
+                        scaleY = 1f - 0.08f * paneProgress
+                    }
+                )
+            }
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentPadding = PaddingValues(
+                    start = readerSplitListHorizontalPadding(windowInfo),
+                    top = 12.dp,
+                    end = readerSplitListHorizontalPadding(windowInfo),
+                    bottom = contentPadding.calculateBottomPadding() + 96.dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(lerpMainDp(10.dp, 12.dp, paneProgress))
+            ) {
+                item {
+                    MorphingChannelArticleHeader(
+                        progress = paneProgress,
+                        channel = channel,
+                        isRefreshing = isRefreshing,
+                        onBackToChannels = onBackToChannels,
+                        onRefreshSource = onRefreshSource
+                    )
+                }
+                if (channel.articles.isEmpty()) {
+                    item {
+                        EmptyStateCard(
+                            icon = { MainContentChannelLeadingIcon(channel.icon) },
+                            title = channel.emptyTitle,
+                            text = channel.emptyText
+                        )
+                    }
+                } else {
+                    items(channel.articles, key = { it.articleId }) { article ->
+                        MorphingMainScreenArticleRow(
+                            progress = paneProgress,
+                            article = article,
+                            selected = article.articleId == selectedArticleId,
+                            onOpenArticle = onOpenArticle,
+                            onOpenOriginalLink = onOpenOriginalLink,
+                            onToggleFavorite = onToggleFavorite,
+                            onToggleWatchLater = onToggleWatchLater,
+                            onDeleteArticle = onDeleteArticle,
+                            mainScreenCanDeleteArticle = mainScreenCanDeleteArticle(article)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MorphingChannelArticleHeader(
+    progress: Float,
+    channel: MainContentChannel,
+    isRefreshing: Boolean,
+    onBackToChannels: () -> Unit,
+    onRefreshSource: () -> Unit
+) {
+    val paneProgress = progress.coerceIn(0f, 1f)
+    val refreshActionWidth = if (channel.canRefresh) {
+        lerpMainDp(0.dp, 48.dp, paneProgress)
+    } else {
+        0.dp
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        tonalElevation = 1.dp
+    ) {
+        Row(
+            modifier = Modifier.padding(lerpMainDp(12.dp, 16.dp, paneProgress)),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(lerpMainDp(8.dp, 12.dp, paneProgress))
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(lerpMainDp(48.dp, 44.dp, paneProgress))
+                    .clipToBounds()
+                    .roundedClickable(
+                        shape = RoundedCornerShape(12.dp),
+                        onClick = {
+                            if (paneProgress < 0.5f) {
+                                onBackToChannels()
+                            }
+                        }
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier.size(lerpMainDp(48.dp, 0.dp, paneProgress)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回频道列表")
+                }
+                Surface(
+                    modifier = Modifier.size(lerpMainDp(0.dp, 44.dp, paneProgress)),
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        MainContentChannelLeadingIcon(channel.icon)
+                    }
+                }
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.Top
+            ) {
+                Text(
+                    text = channel.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(lerpMainDp(2.dp, 0.dp, paneProgress)))
+                MorphingVerticalSlot(
+                    progress = 1f - paneProgress,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                ) {
+                    Text(
+                        text = "${channel.articleCount} 篇文章",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(modifier = Modifier.height(lerpMainDp(0.dp, 3.dp, paneProgress)))
+                MorphingVerticalSlot(
+                    progress = paneProgress,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                ) {
+                    Text(
+                        text = channel.supportingText.takeIf { it.isNotBlank() } ?: "${channel.articleCount} 篇文章",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(modifier = Modifier.height(lerpMainDp(0.dp, 3.dp, paneProgress)))
+                MorphingVerticalSlot(
+                    progress = paneProgress,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                ) {
+                    Text(
+                        text = buildString {
+                            append("${channel.articleCount} 篇文章")
+                            append(" · ")
+                            append(
+                                when {
+                                    channel.source == null -> "本地集合"
+                                    channel.canRefresh -> "RSS 源"
+                                    else -> "导入内容"
+                                }
+                            )
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .width(refreshActionWidth)
+                    .height(48.dp)
+                    .clipToBounds(),
+                contentAlignment = Alignment.CenterEnd
+            ) {
+                if (channel.canRefresh && refreshActionWidth > 0.dp) {
+                    IconButton(
+                        onClick = onRefreshSource,
+                        enabled = !isRefreshing
+                    ) {
+                        Icon(Icons.Default.Sync, contentDescription = "刷新频道")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MorphingMainScreenArticleRow(
+    progress: Float,
+    article: PhoneArticleEntity,
+    selected: Boolean,
+    onOpenArticle: (PhoneArticleEntity) -> Unit,
+    onOpenOriginalLink: (String) -> Unit,
+    onToggleFavorite: (PhoneArticleEntity) -> Unit,
+    onToggleWatchLater: (PhoneArticleEntity) -> Unit,
+    onDeleteArticle: (PhoneArticleEntity) -> Unit,
+    mainScreenCanDeleteArticle: Boolean
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    val paneProgress = progress.coerceIn(0f, 1f)
+    val cardShape = MaterialTheme.shapes.medium
+    val defaultCardColors = defaultMainElevatedCardColors()
+    val cardColors = if (selected) {
+        CardDefaults.elevatedCardColors(
+            containerColor = lerpMainColor(
+                MaterialTheme.colorScheme.secondaryContainer,
+                defaultCardColors.containerColor,
+                paneProgress
+            )
+        )
+    } else {
+        defaultCardColors
+    }
+    val titleStyle = MaterialTheme.typography.titleSmall.copy(
+        fontSize = lerpMainSp(14f, 16f, paneProgress),
+        lineHeight = lerpMainSp(20f, 24f, paneProgress)
+    )
+    val summaryStyle = MaterialTheme.typography.bodySmall.copy(
+        fontSize = lerpMainSp(12f, 14f, paneProgress),
+        lineHeight = lerpMainSp(16f, 20f, paneProgress)
+    )
+    val menuActionWidth = if (mainScreenCanDeleteArticle) {
+        lerpMainDp(0.dp, 48.dp, paneProgress)
+    } else {
+        0.dp
+    }
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = cardShape,
+        colors = cardColors
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .roundedCombinedClickable(
+                    shape = cardShape,
+                    onClick = { onOpenArticle(article) },
+                    onLongClick = {
+                        if (mainScreenCanDeleteArticle) menuExpanded = true
+                    }
+                )
+        ) {
+            Column(
+                modifier = Modifier.padding(lerpMainDp(14.dp, 16.dp, paneProgress)),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(verticalAlignment = Alignment.Top) {
+                    Text(
+                        text = article.title.ifBlank { article.url },
+                        style = titleStyle,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = ARTICLE_CARD_TITLE_MAX_LINES,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .width(menuActionWidth)
+                            .height(48.dp)
+                            .clipToBounds(),
+                        contentAlignment = Alignment.TopEnd
+                    ) {
+                        if (mainScreenCanDeleteArticle && menuActionWidth > 0.dp) {
+                            Box {
+                                IconButton(onClick = { menuExpanded = true }) {
+                                    Icon(Icons.Default.MoreVert, contentDescription = "文章操作")
+                                }
+                                DropdownMenu(
+                                    expanded = menuExpanded,
+                                    onDismissRequest = { menuExpanded = false }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("删除") },
+                                        leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
+                                        onClick = {
+                                            menuExpanded = false
+                                            onDeleteArticle(article)
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                val sourceLabel = article.rssSourceTitle?.takeIf { it.isNotBlank() } ?: article.siteName
+                if (sourceLabel.isNotBlank()) {
+                    Text(
+                        text = sourceLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                val summary = article.excerpt.ifBlank { article.contentText }
+                if (summary.isNotBlank()) {
+                    Text(
+                        text = summary,
+                        style = summaryStyle,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(lerpMainDp(8.dp, 4.dp, paneProgress)),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    MorphingArticleActionIcon(
+                        progress = paneProgress,
+                        startVisible = article.favoriteSaved,
+                        endVisible = true,
+                        onClick = { onToggleFavorite(article) }
+                    ) {
+                        Icon(
+                            imageVector = if (article.favoriteSaved) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            contentDescription = if (article.favoriteSaved) "取消收藏" else "收藏",
+                            modifier = Modifier.size(lerpMainDp(18.dp, 24.dp, paneProgress))
+                        )
+                    }
+                    MorphingArticleActionIcon(
+                        progress = paneProgress,
+                        startVisible = article.watchLaterSaved,
+                        endVisible = true,
+                        onClick = { onToggleWatchLater(article) }
+                    ) {
+                        Icon(
+                            imageVector = if (article.watchLaterSaved) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                            contentDescription = if (article.watchLaterSaved) "移出稍后再看" else "稍后再看",
+                            modifier = Modifier.size(lerpMainDp(18.dp, 24.dp, paneProgress))
+                        )
+                    }
+                    MorphingArticleActionIcon(
+                        progress = paneProgress,
+                        startVisible = false,
+                        endVisible = article.url.isNotBlank() && !ImportedContentIds.isImportedContentUrl(article.url),
+                        onClick = { onOpenOriginalLink(article.url) }
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.OpenInNew,
+                            contentDescription = "打开原网页",
+                            modifier = Modifier.size(lerpMainDp(18.dp, 24.dp, paneProgress))
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MorphingArticleActionIcon(
+    progress: Float,
+    startVisible: Boolean,
+    endVisible: Boolean,
+    onClick: () -> Unit,
+    icon: @Composable () -> Unit
+) {
+    val paneProgress = progress.coerceIn(0f, 1f)
+    val startSize = if (startVisible) 18.dp else 0.dp
+    val endSize = if (endVisible) 48.dp else 0.dp
+    val boxSize = lerpMainDp(startSize, endSize, paneProgress)
+    if (boxSize <= 0.dp) return
+    Box(
+        modifier = Modifier
+            .size(boxSize)
+            .clipToBounds()
+            .roundedClickable(
+                shape = RoundedCornerShape(12.dp),
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        icon()
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChannelArticleListPane(
+    channel: MainContentChannel,
+    selectedArticleId: String,
+    contentPadding: PaddingValues,
+    windowInfo: AdaptiveWindowInfo,
+    onBackToChannels: () -> Unit,
+    onOpenArticle: (PhoneArticleEntity) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surface
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .height(64.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "内容",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    start = readerSplitListHorizontalPadding(windowInfo),
+                    top = 12.dp,
+                    end = readerSplitListHorizontalPadding(windowInfo),
+                    bottom = contentPadding.calculateBottomPadding() + 96.dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                item {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        tonalElevation = 1.dp
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            IconButton(onClick = onBackToChannels) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回频道列表")
+                            }
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = channel.title,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "${channel.articleCount} 篇文章",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+                if (channel.articles.isEmpty()) {
+                    item {
+                        EmptyStateCard(
+                            icon = { MainContentChannelLeadingIcon(channel.icon) },
+                            title = channel.emptyTitle,
+                            text = channel.emptyText
+                        )
+                    }
+                } else {
+                    items(channel.articles, key = { it.articleId }) { article ->
+                        MainScreenArticleListRow(
+                            article = article,
+                            selected = article.articleId == selectedArticleId,
+                            onClick = { onOpenArticle(article) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MainScreenArticleListRow(
+    article: PhoneArticleEntity,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val cardColors = if (selected) {
+        CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        )
+    } else {
+        defaultMainElevatedCardColors()
+    }
+    ElevatedCard(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        colors = cardColors,
+        shape = MaterialTheme.shapes.medium
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = article.title.ifBlank { article.url },
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                maxLines = ARTICLE_CARD_TITLE_MAX_LINES,
+                overflow = TextOverflow.Ellipsis
+            )
+            val sourceLabel = article.rssSourceTitle?.takeIf { it.isNotBlank() } ?: article.siteName
+            if (sourceLabel.isNotBlank()) {
+                Text(
+                    text = sourceLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            val summary = article.excerpt.ifBlank { article.contentText }
+            if (summary.isNotBlank()) {
+                Text(
+                    text = summary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (article.favoriteSaved || article.watchLaterSaved) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (article.favoriteSaved) {
+                        Icon(
+                            imageVector = Icons.Default.Favorite,
+                            contentDescription = "已收藏",
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    if (article.watchLaterSaved) {
+                        Icon(
+                            imageVector = Icons.Default.Bookmark,
+                            contentDescription = "稍后再看",
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChannelArticlePane(
+    channel: MainContentChannel?,
+    isRefreshing: Boolean,
+    contentPadding: PaddingValues,
+    windowInfo: AdaptiveWindowInfo,
+    onRefreshSource: () -> Unit,
+    onOpenArticle: (PhoneArticleEntity) -> Unit,
+    onOpenOriginalLink: (String) -> Unit,
+    onToggleFavorite: (PhoneArticleEntity) -> Unit,
+    onToggleWatchLater: (PhoneArticleEntity) -> Unit,
+    onDeleteArticle: (PhoneArticleEntity) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = {
+                if (channel?.canRefresh == true) {
+                    onRefreshSource()
+                }
+            },
+            modifier = Modifier
+                .fillMaxSize()
+                .then(if (windowInfo.isMediumOrExpanded) Modifier.statusBarsPadding() else Modifier)
+        ) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = articlePaneContentPadding(
+                    scaffoldPadding = contentPadding,
+                    windowInfo = windowInfo,
+                    includeScaffoldTop = !windowInfo.isMediumOrExpanded
+                ),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                item {
+                    ChannelArticlePaneHeader(
+                        channel = channel,
+                        isRefreshing = isRefreshing,
+                        onRefreshSource = onRefreshSource
+                    )
+                }
+                when {
+                    channel == null -> item {
+                        EmptyStateCard(
+                            icon = { Icon(Icons.AutoMirrored.Filled.Article, contentDescription = null) },
+                            title = "选择左侧内容",
+                            text = "频道、收藏、稍后再看或导入内容会在这里显示文章"
+                        )
+                    }
+                    channel.articles.isEmpty() -> item {
+                        EmptyStateCard(
+                            icon = { MainContentChannelLeadingIcon(channel.icon) },
+                            title = channel.emptyTitle,
+                            text = channel.emptyText
+                        )
+                    }
+                    else -> items(channel.articles, key = { it.articleId }) { article ->
+                        MainScreenArticleRow(
+                            article = article,
+                            onOpenArticle = onOpenArticle,
+                            onOpenOriginalLink = onOpenOriginalLink,
+                            onToggleFavorite = onToggleFavorite,
+                            onToggleWatchLater = onToggleWatchLater,
+                            onDeleteArticle = onDeleteArticle,
+                            mainScreenCanDeleteArticle = mainScreenCanDeleteArticle(article)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChannelArticlePaneHeader(
+    channel: MainContentChannel?,
+    isRefreshing: Boolean,
+    onRefreshSource: () -> Unit
+) {
+    val title = channel?.title?.takeIf { it.isNotBlank() } ?: "文章区"
+    val supportingText = channel?.supportingText?.takeIf { it.isNotBlank() } ?: "从左侧选择频道或内容集合"
+    val detailText = channel?.let { selectedChannel ->
+        buildString {
+            append("${selectedChannel.articleCount} 篇文章")
+            append(" · ")
+            append(
+                when {
+                    selectedChannel.source == null -> "本地集合"
+                    selectedChannel.canRefresh -> "RSS 源"
+                    else -> "导入内容"
+                }
+            )
+        }
+    } ?: "等待选择"
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        tonalElevation = 1.dp
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.primaryContainer
+            ) {
+                Box(
+                    modifier = Modifier.size(44.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    MainContentChannelLeadingIcon(channel?.icon ?: MainContentChannelIcon.ARTICLE)
+                }
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = supportingText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = detailText,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (channel?.canRefresh == true) {
+                IconButton(
+                    onClick = onRefreshSource,
+                    enabled = !isRefreshing
+                ) {
+                    Icon(Icons.Default.Sync, contentDescription = "刷新频道")
                 }
             }
         }
@@ -1472,6 +3485,7 @@ private fun ChannelPage(
     channel: MainContentChannel?,
     isRefreshing: Boolean,
     contentPadding: PaddingValues,
+    windowInfo: AdaptiveWindowInfo,
     onRefreshSource: () -> Unit,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
     onOpenOriginalLink: (String) -> Unit,
@@ -1483,35 +3497,40 @@ private fun ChannelPage(
     Surface(
         modifier = modifier.fillMaxSize()
     ) {
-        PullToRefreshBox(
-            isRefreshing = isRefreshing,
-            onRefresh = onRefreshSource,
-            modifier = Modifier.fillMaxSize(),
+        AdaptiveContentFrame(
+            windowInfo = windowInfo,
+            expandedMaxWidth = 760.dp
         ) {
-            LazyColumn(
+            PullToRefreshBox(
+                isRefreshing = isRefreshing,
+                onRefresh = onRefreshSource,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = mainContentPadding(contentPadding),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                if (channel == null || channel.articles.isEmpty()) {
-                    item {
-                        EmptyStateCard(
-                            icon = { MainContentChannelLeadingIcon(channel?.icon ?: MainContentChannelIcon.ARTICLE) },
-                            title = channel?.emptyTitle ?: "暂无文章",
-                            text = channel?.emptyText ?: "频道不存在"
-                        )
-                    }
-                } else {
-                    items(channel.articles, key = { it.articleId }) { article ->
-                        MainScreenArticleRow(
-                            article = article,
-                            onOpenArticle = onOpenArticle,
-                            onOpenOriginalLink = onOpenOriginalLink,
-                            onToggleFavorite = onToggleFavorite,
-                            onToggleWatchLater = onToggleWatchLater,
-                            onDeleteArticle = onDeleteArticle,
-                            mainScreenCanDeleteArticle = mainScreenCanDeleteArticle(article)
-                        )
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = mainContentPadding(contentPadding, windowInfo),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    if (channel == null || channel.articles.isEmpty()) {
+                        item {
+                            EmptyStateCard(
+                                icon = { MainContentChannelLeadingIcon(channel?.icon ?: MainContentChannelIcon.ARTICLE) },
+                                title = channel?.emptyTitle ?: "暂无文章",
+                                text = channel?.emptyText ?: "频道不存在"
+                            )
+                        }
+                    } else {
+                        items(channel.articles, key = { it.articleId }) { article ->
+                            MainScreenArticleRow(
+                                article = article,
+                                onOpenArticle = onOpenArticle,
+                                onOpenOriginalLink = onOpenOriginalLink,
+                                onToggleFavorite = onToggleFavorite,
+                                onToggleWatchLater = onToggleWatchLater,
+                                onDeleteArticle = onDeleteArticle,
+                                mainScreenCanDeleteArticle = mainScreenCanDeleteArticle(article)
+                            )
+                        }
                     }
                 }
             }
@@ -1553,6 +3572,9 @@ private fun buildRecentImportEntries(
 private fun ImportsPage(
     uiState: MainUiState,
     contentPadding: PaddingValues,
+    windowInfo: AdaptiveWindowInfo,
+    listState: LazyListState,
+    selectedChannelKey: String? = null,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
     onImportFile: () -> Unit,
@@ -1569,61 +3591,80 @@ private fun ImportsPage(
 ) {
     val importMessage = uiState.message?.takeUnless { it == uiState.syncStatusMessage }
     val importError = uiState.error?.takeUnless { it == uiState.syncStatusError }
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = mainContentPadding(contentPadding),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+    AdaptiveContentFrame(
+        windowInfo = windowInfo,
+        expandedMaxWidth = 760.dp
     ) {
-        item {
-            ImportActionsCard(
-                urlInput = uiState.urlInput,
-                enabled = !uiState.isBusy,
-                importedContentCount = uiState.importedContentArticles.size,
-                onUrlChange = onUrlChange,
-                onImportArticle = onImportArticle,
-                onImportFile = onImportFile,
-                onAddRssSource = onAddRssSource,
-                onClearImportedContent = onClearImportedContent,
-                message = importMessage,
-                error = importError,
-                onDismissMessage = onDismissMessage
-            )
-        }
-        item {
-            Text(
-                text = "最近导入",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
-        if (recentEntries.isEmpty()) {
+        val usePaneTopBar = windowInfo.isMediumOrExpanded
+        Column(modifier = Modifier.fillMaxSize()) {
+            if (usePaneTopBar) {
+                SplitPaneTopBar(title = "导入")
+            }
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                state = listState,
+                contentPadding = mainContentPadding(
+                    scaffoldPadding = contentPadding,
+                    windowInfo = windowInfo,
+                    includeScaffoldTop = !usePaneTopBar
+                ),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
             item {
-                EmptyStateCard(
-                    icon = { Icon(Icons.Default.FileOpen, contentDescription = null) },
-                    title = "暂无导入",
-                    text = "添加网页文章或导入 TXT / EPUB 文件后会显示在这里"
+                ImportActionsCard(
+                    urlInput = uiState.urlInput,
+                    enabled = !uiState.isBusy,
+                    importedContentCount = uiState.importedContentArticles.size,
+                    onUrlChange = onUrlChange,
+                    onImportArticle = onImportArticle,
+                    onImportFile = onImportFile,
+                    onAddRssSource = onAddRssSource,
+                    onClearImportedContent = onClearImportedContent,
+                    message = importMessage,
+                    error = importError,
+                    onDismissMessage = onDismissMessage
                 )
             }
-        } else {
-            items(recentEntries, key = { it.key }) { entry ->
-                when (entry) {
-                    is RecentImportEntry.Channel -> MainContentChannelRow(
-                        channel = entry.channel,
-                        onClick = { onOpenChannel(entry.channel) }
+            item {
+                Text(
+                    text = "最近导入",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            if (recentEntries.isEmpty()) {
+                item {
+                    EmptyStateCard(
+                        icon = { Icon(Icons.Default.FileOpen, contentDescription = null) },
+                        title = "暂无导入",
+                        text = "添加网页文章或导入 TXT / EPUB 文件后会显示在这里"
                     )
-                    is RecentImportEntry.Article -> MainScreenArticleRow(
-                        article = entry.article,
-                        onOpenArticle = onOpenArticle,
-                        onOpenOriginalLink = onOpenOriginalLink,
-                        onToggleFavorite = onToggleFavorite,
-                        onToggleWatchLater = onToggleWatchLater,
-                        onDeleteArticle = onDeleteArticle,
-                        mainScreenCanDeleteArticle = mainScreenCanDeleteArticle(entry.article)
-                    )
+                }
+            } else {
+                items(recentEntries, key = { it.key }) { entry ->
+                    when (entry) {
+                        is RecentImportEntry.Channel -> MainContentChannelRow(
+                            channel = entry.channel,
+                            onClick = { onOpenChannel(entry.channel) },
+                            selected = entry.channel.key == selectedChannelKey
+                        )
+                        is RecentImportEntry.Article -> MainScreenArticleRow(
+                            article = entry.article,
+                            onOpenArticle = onOpenArticle,
+                            onOpenOriginalLink = onOpenOriginalLink,
+                            onToggleFavorite = onToggleFavorite,
+                            onToggleWatchLater = onToggleWatchLater,
+                            onDeleteArticle = onDeleteArticle,
+                            mainScreenCanDeleteArticle = mainScreenCanDeleteArticle(entry.article)
+                        )
+                    }
                 }
             }
         }
     }
+}
 }
 
 @Composable
@@ -1757,9 +3798,16 @@ private fun ImportStatusContent(
 private fun MainContentChannelRow(
     channel: MainContentChannel,
     onClick: () -> Unit,
+    selected: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    val cardColors = defaultMainElevatedCardColors()
+    val cardColors = if (selected) {
+        CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        )
+    } else {
+        defaultMainElevatedCardColors()
+    }
 
     ElevatedCard(
         onClick = onClick,
@@ -1813,13 +3861,20 @@ private fun MainScreenSourceRow(
     icon: MainContentChannelIcon,
     articleCount: Int,
     onClick: () -> Unit,
+    selected: Boolean = false,
     onMoveToTop: () -> Unit,
     onTogglePinned: () -> Unit,
     onDelete: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
-    val cardColors = defaultMainElevatedCardColors()
+    val cardColors = if (selected) {
+        CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        )
+    } else {
+        defaultMainElevatedCardColors()
+    }
     val cardShape = MaterialTheme.shapes.medium
 
     ElevatedCard(
@@ -1943,7 +3998,8 @@ private fun MainScreenArticleRow(
                     Text(
                         text = article.title.ifBlank { article.url },
                         style = MaterialTheme.typography.titleMedium,
-                        maxLines = 2,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = ARTICLE_CARD_TITLE_MAX_LINES,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
@@ -2302,13 +4358,104 @@ private fun MainScreenSharedImportDialog(
     )
 }
 
-private fun mainContentPadding(scaffoldPadding: PaddingValues): PaddingValues =
-    PaddingValues(
-        start = 16.dp,
-        top = scaffoldPadding.calculateTopPadding() + 12.dp,
-        end = 16.dp,
-        bottom = scaffoldPadding.calculateBottomPadding() + 88.dp
+private fun mainContentPadding(
+    scaffoldPadding: PaddingValues,
+    windowInfo: AdaptiveWindowInfo,
+    includeScaffoldTop: Boolean = true
+): PaddingValues {
+    val horizontal = when (windowInfo.widthClass) {
+        AdaptiveWidthClass.Compact -> 16.dp
+        AdaptiveWidthClass.Medium -> 20.dp
+        AdaptiveWidthClass.Expanded -> 24.dp
+    }
+    val bottomExtra = if (windowInfo.navigationType == AdaptiveNavigationType.BottomBar) {
+        88.dp
+    } else {
+        96.dp
+    }
+    return PaddingValues(
+        start = horizontal,
+        top = (if (includeScaffoldTop) scaffoldPadding.calculateTopPadding() else 0.dp) + 12.dp,
+        end = horizontal,
+        bottom = scaffoldPadding.calculateBottomPadding() + bottomExtra
     )
+}
+
+private fun articlePaneContentPadding(
+    scaffoldPadding: PaddingValues,
+    windowInfo: AdaptiveWindowInfo,
+    includeScaffoldTop: Boolean = true
+): PaddingValues {
+    val horizontal = when (windowInfo.widthClass) {
+        AdaptiveWidthClass.Compact -> 16.dp
+        AdaptiveWidthClass.Medium -> 12.dp
+        AdaptiveWidthClass.Expanded -> 16.dp
+    }
+    return PaddingValues(
+        start = horizontal,
+        top = (if (includeScaffoldTop) scaffoldPadding.calculateTopPadding() else 0.dp) + 12.dp,
+        end = horizontal,
+        bottom = scaffoldPadding.calculateBottomPadding() + 96.dp
+    )
+}
+
+private fun readerSplitListHorizontalPadding(windowInfo: AdaptiveWindowInfo) = when (windowInfo.widthClass) {
+    AdaptiveWidthClass.Compact -> 16.dp
+    AdaptiveWidthClass.Medium -> 12.dp
+    AdaptiveWidthClass.Expanded -> 16.dp
+}
+
+private fun lerpMainDp(start: androidx.compose.ui.unit.Dp, stop: androidx.compose.ui.unit.Dp, progress: Float) =
+    (start.value + (stop.value - start.value) * progress.coerceIn(0f, 1f)).dp
+
+private fun lerpMainSp(start: Float, stop: Float, progress: Float) =
+    (start + (stop - start) * progress.coerceIn(0f, 1f)).sp
+
+private fun lerpMainColor(
+    start: androidx.compose.ui.graphics.Color,
+    stop: androidx.compose.ui.graphics.Color,
+    progress: Float
+): androidx.compose.ui.graphics.Color {
+    val fraction = progress.coerceIn(0f, 1f)
+    return androidx.compose.ui.graphics.Color(
+        red = start.red + (stop.red - start.red) * fraction,
+        green = start.green + (stop.green - start.green) * fraction,
+        blue = start.blue + (stop.blue - start.blue) * fraction,
+        alpha = start.alpha + (stop.alpha - start.alpha) * fraction
+    )
+}
+
+@Composable
+private fun MorphingVerticalSlot(
+    progress: Float,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    val slotProgress = progress.coerceIn(0f, 1f)
+    when {
+        slotProgress <= 0f -> Spacer(modifier = modifier.height(0.dp))
+        slotProgress >= 1f -> Box(modifier = modifier) {
+            content()
+        }
+        else -> Layout(
+            modifier = modifier.clipToBounds(),
+            content = content
+        ) { measurables, constraints ->
+            val looseConstraints = constraints.copy(minHeight = 0)
+            val placeables = measurables.map { it.measure(looseConstraints) }
+            val width = placeables.maxOfOrNull { it.width } ?: constraints.minWidth
+            val fullHeight = placeables.maxOfOrNull { it.height } ?: 0
+            val animatedHeight = (fullHeight * slotProgress)
+                .roundToInt()
+                .coerceAtLeast(0)
+            layout(width, animatedHeight) {
+                placeables.forEach { placeable ->
+                    placeable.placeRelative(0, 0)
+                }
+            }
+        }
+    }
+}
 
 private fun mainScreenCanDeleteArticle(article: PhoneArticleEntity): Boolean {
     return article.independentSaved ||

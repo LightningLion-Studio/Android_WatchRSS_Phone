@@ -32,6 +32,10 @@ import androidx.compose.ui.unit.sp
 import coil.compose.rememberAsyncImagePainter
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
+import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
+import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
+import com.lightningstudio.watchrss.phone.ui.PredictiveBackSurface
+import com.lightningstudio.watchrss.phone.ui.adaptiveContentWidth
 import com.lightningstudio.watchrss.phone.ui.theme.roundedCombinedClickable
 
 class ContactDeveloperActivity : ComponentActivity() {
@@ -39,12 +43,10 @@ class ContactDeveloperActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             WatchRSSTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
+                val onBack = { finish() }
+                PredictiveBackSurface(onBack = onBack) {
                     ContactDeveloperScreen(
-                        onBack = { finish() },
+                        onBack = onBack,
                         onJoinQQ = {
                             try {
                                 val intent = Intent(Intent.ACTION_VIEW)
@@ -82,107 +84,120 @@ fun ContactDeveloperScreen(
         visible = true
     }
 
-    Scaffold(
-        topBar = {
-            SmallTopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Icon(Icons.Default.QrCode, contentDescription = null)
-                        Text("联系开发者")
+    AdaptiveWindowScope(modifier = Modifier.fillMaxSize()) { windowInfo ->
+        Scaffold(
+            topBar = {
+                SmallTopAppBar(
+                    title = {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Icon(Icons.Default.QrCode, contentDescription = null)
+                            Text("联系开发者")
+                        }
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        }
                     }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                }
-            )
-        }
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
-            Column(
+                )
+            }
+        ) { padding ->
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
+                    .padding(padding)
             ) {
-                AnimatedVisibility(
-                    visible = visible,
-                    enter = fadeIn(animationSpec = tween(800)) +
-                            scaleIn(
-                                initialScale = 0.8f,
-                                animationSpec = tween(800, easing = FastOutSlowInEasing)
-                            )
+                AdaptiveContentFrame(
+                    windowInfo = windowInfo,
+                    mediumMaxWidth = 520.dp,
+                    expandedMaxWidth = 560.dp
                 ) {
                     Column(
-                        horizontalAlignment = Alignment.CenterHorizontally
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
                     ) {
-                        Text(
-                            text = "加入QQ群",
-                            fontSize = 24.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-
-                        Spacer(modifier = Modifier.height(16.dp))
-
-                        Text(
-                            text = "群号：1083518433",
-                            fontSize = 18.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
-                        Spacer(modifier = Modifier.height(32.dp))
-
-                        // QR Code
-                        val qrBitmap = remember {
-                            generateQRCode("https://qm.qq.com/q/cJNTQuxfoW", 512)
-                        }
-
-                        Card(
-                            modifier = Modifier.size(200.dp),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant
-                            )
+                        AnimatedVisibility(
+                            visible = visible,
+                            enter = fadeIn(animationSpec = tween(800)) +
+                                    scaleIn(
+                                        initialScale = 0.8f,
+                                        animationSpec = tween(800, easing = FastOutSlowInEasing)
+                                    )
                         ) {
-                            Box(
-                                modifier = Modifier.fillMaxSize().padding(8.dp),
-                                contentAlignment = Alignment.Center
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                Image(
-                                    bitmap = qrBitmap.asImageBitmap(),
-                                    contentDescription = "QQ群二维码",
-                                    modifier = Modifier.fillMaxSize()
+                                Text(
+                                    text = "加入QQ群",
+                                    fontSize = 24.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
                                 )
+
+                                Spacer(modifier = Modifier.height(16.dp))
+
+                                Text(
+                                    text = "群号：1083518433",
+                                    fontSize = 18.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+
+                                Spacer(modifier = Modifier.height(32.dp))
+
+                                // QR Code
+                                val qrBitmap = remember {
+                                    generateQRCode("https://qm.qq.com/q/cJNTQuxfoW", 512)
+                                }
+
+                                Card(
+                                    modifier = Modifier.size(200.dp),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                ) {
+                                    Box(
+                                        modifier = Modifier.fillMaxSize().padding(8.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Image(
+                                            bitmap = qrBitmap.asImageBitmap(),
+                                            contentDescription = "QQ群二维码",
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(32.dp))
+
+                                Button(
+                                    onClick = onJoinQQ,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("一键加群", fontSize = 16.sp)
+                                }
                             }
-                        }
-
-                        Spacer(modifier = Modifier.height(32.dp))
-
-                        Button(
-                            onClick = onJoinQQ,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("一键加群", fontSize = 16.sp)
                         }
                     }
                 }
-            }
 
-            // 备案号在底部
-            AnimatedVisibility(
-                visible = visible,
-                enter = fadeIn(animationSpec = tween(800, delayMillis = 600)),
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 16.dp)
-            ) {
-                BeianNumberText(onClick = onBeianClick)
+                // 备案号在底部
+                AnimatedVisibility(
+                    visible = visible,
+                    enter = fadeIn(animationSpec = tween(800, delayMillis = 600)),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .adaptiveContentWidth(
+                            windowInfo = windowInfo,
+                            mediumMaxWidth = 520.dp,
+                            expandedMaxWidth = 560.dp
+                        )
+                        .padding(bottom = 16.dp)
+                ) {
+                    BeianNumberText(onClick = onBeianClick)
+                }
             }
         }
     }

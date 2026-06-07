@@ -146,15 +146,24 @@ class HomeActivity : ComponentActivity() {
                                 PlatformWebViewActivity.createIntent(
                                     context = this@HomeActivity,
                                     title = article.title.ifBlank { article.url },
-                                    url = article.url
+                                    url = article.url,
+                                    articleId = article.articleId,
+                                    initialReadingProgress = article.readingProgress
                                 )
                             )
                         } else {
                             startActivity(ArticleReaderActivity.createIntent(this@HomeActivity, article.articleId))
                         }
                     },
+                    canOpenArticleInline = { article -> article.articleId.isNotBlank() },
+                    onLoadArticleForInlineReader = container.repository::getArticle,
+                    onLoadImportedTextReaderForInlineReader = container.repository::getImportedTextReader,
+                    onLoadImportedTextChunkForInlineReader = container.repository::loadImportedTextChunk,
                     onToggleFavorite = viewModel::toggleFavorite,
                     onToggleWatchLater = viewModel::toggleWatchLater,
+                    onSaveArticleReadingProgress = { articleId, progress ->
+                        container.repository.updateArticleReadingProgress(articleId, progress)
+                    },
                     onMoveRssSourceToTop = viewModel::moveRssSourceToTop,
                     onReorderContentChannels = viewModel::reorderContentChannels,
                     onToggleRssSourcePinned = viewModel::toggleRssSourcePinned,

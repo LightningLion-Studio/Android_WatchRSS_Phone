@@ -37,11 +37,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.backdrops.layerBackdrop
+import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
+import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
+import com.lightningstudio.watchrss.phone.ui.adaptiveContentWidth
 import com.lightningstudio.watchrss.phone.ui.CapsuleFloatingButton
 import com.lightningstudio.watchrss.phone.ui.PageColumn
 import com.lightningstudio.watchrss.phone.ui.GlassTopBar
 import com.lightningstudio.watchrss.phone.ui.theme.AppCard
 import com.lightningstudio.watchrss.phone.ui.theme.AppPrimaryCard
+import com.lightningstudio.watchrss.phone.ui.PredictiveBackSurface
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 
 class GuideActivity : ComponentActivity() {
@@ -55,9 +59,12 @@ class GuideActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             WatchRssPhoneTheme {
-                GuideScreen(
-                    onBack = { finish() }
-                )
+                val onBack = { finish() }
+                PredictiveBackSurface(onBack = onBack) {
+                    GuideScreen(
+                        onBack = onBack
+                    )
+                }
             }
         }
     }
@@ -72,6 +79,7 @@ fun GuideScreen(onBack: () -> Unit) {
     }
     val uriHandler = LocalUriHandler.current
 
+    AdaptiveWindowScope(modifier = Modifier.fillMaxSize()) { windowInfo ->
     Box(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
@@ -79,13 +87,18 @@ fun GuideScreen(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(top = 56.dp)
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+            AdaptiveContentFrame(
+                windowInfo = windowInfo,
+                mediumMaxWidth = 720.dp,
+                expandedMaxWidth = 840.dp
             ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
                 Text(
                     text = "开始使用腕上RSS",
                     style = MaterialTheme.typography.headlineMedium,
@@ -188,6 +201,7 @@ fun GuideScreen(onBack: () -> Unit) {
                 }
 
                 Spacer(modifier = Modifier.height(80.dp))
+                }
             }
         }
 
@@ -195,7 +209,14 @@ fun GuideScreen(onBack: () -> Unit) {
             backdrop = backdrop,
             title = "使用指南",
             onBack = onBack,
-            modifier = Modifier.align(Alignment.TopCenter)
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .adaptiveContentWidth(
+                    windowInfo = windowInfo,
+                    mediumMaxWidth = 720.dp,
+                    expandedMaxWidth = 840.dp
+                )
         )
+    }
     }
 }

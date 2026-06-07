@@ -26,6 +26,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
+import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
+import com.lightningstudio.watchrss.phone.ui.PredictiveBackSurface
+import com.lightningstudio.watchrss.phone.ui.adaptiveContentWidth
 import com.lightningstudio.watchrss.phone.ui.theme.roundedCombinedClickable
 
 class AboutActivity : ComponentActivity() {
@@ -33,12 +37,10 @@ class AboutActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             WatchRSSTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
+                val onBack = { finish() }
+                PredictiveBackSurface(onBack = onBack) {
                     AboutScreen(
-                        onBackClick = { finish() },
+                        onBackClick = onBack,
                         onBeianClick = {
                             val intent = Intent(Intent.ACTION_VIEW)
                             intent.data = Uri.parse("https://beian.miit.gov.cn/")
@@ -60,89 +62,102 @@ fun AboutScreen(onBackClick: () -> Unit, onBeianClick: () -> Unit) {
         visible = true
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
-                        Text("关于")
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBackClick) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回"
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+    AdaptiveWindowScope(modifier = Modifier.fillMaxSize()) { windowInfo ->
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+                            Text("关于")
+                        }
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBackClick) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "返回"
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
                 )
-            )
-        }
-    ) { paddingValues ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-        ) {
-            Column(
+            }
+        ) { paddingValues ->
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(24.dp)
+                    .padding(paddingValues)
             ) {
-                AnimatedVisibility(
-                    visible = visible,
-                    enter = fadeIn(animationSpec = tween(600)) +
-                            slideInVertically(
-                                initialOffsetY = { -50 },
-                                animationSpec = tween(600, easing = FastOutSlowInEasing)
-                            )
+                AdaptiveContentFrame(
+                    windowInfo = windowInfo,
+                    mediumMaxWidth = 720.dp,
+                    expandedMaxWidth = 840.dp
                 ) {
-                    AboutSection()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(24.dp)
+                    ) {
+                        AnimatedVisibility(
+                            visible = visible,
+                            enter = fadeIn(animationSpec = tween(600)) +
+                                    slideInVertically(
+                                        initialOffsetY = { -50 },
+                                        animationSpec = tween(600, easing = FastOutSlowInEasing)
+                                    )
+                        ) {
+                            AboutSection()
+                        }
+
+                        Spacer(modifier = Modifier.height(24.dp))
+
+                        AnimatedVisibility(
+                            visible = visible,
+                            enter = fadeIn(animationSpec = tween(600, delayMillis = 200)) +
+                                    slideInVertically(
+                                        initialOffsetY = { -50 },
+                                        animationSpec = tween(600, delayMillis = 200, easing = FastOutSlowInEasing)
+                                    )
+                        ) {
+                            ServiceAgreementSection()
+                        }
+
+                        Spacer(modifier = Modifier.height(24.dp))
+
+                        AnimatedVisibility(
+                            visible = visible,
+                            enter = fadeIn(animationSpec = tween(600, delayMillis = 400)) +
+                                    slideInVertically(
+                                        initialOffsetY = { -50 },
+                                        animationSpec = tween(600, delayMillis = 400, easing = FastOutSlowInEasing)
+                                    )
+                        ) {
+                            PrivacyPolicySection()
+                        }
+
+                        Spacer(modifier = Modifier.height(80.dp))
+                    }
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
-
                 AnimatedVisibility(
                     visible = visible,
-                    enter = fadeIn(animationSpec = tween(600, delayMillis = 200)) +
-                            slideInVertically(
-                                initialOffsetY = { -50 },
-                                animationSpec = tween(600, delayMillis = 200, easing = FastOutSlowInEasing)
-                            )
+                    enter = fadeIn(animationSpec = tween(800, delayMillis = 600)),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .adaptiveContentWidth(
+                            windowInfo = windowInfo,
+                            mediumMaxWidth = 720.dp,
+                            expandedMaxWidth = 840.dp
+                        )
+                        .padding(bottom = 16.dp)
                 ) {
-                    ServiceAgreementSection()
+                    BeianNumberText(onClick = onBeianClick)
                 }
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                AnimatedVisibility(
-                    visible = visible,
-                    enter = fadeIn(animationSpec = tween(600, delayMillis = 400)) +
-                            slideInVertically(
-                                initialOffsetY = { -50 },
-                                animationSpec = tween(600, delayMillis = 400, easing = FastOutSlowInEasing)
-                            )
-                ) {
-                    PrivacyPolicySection()
-                }
-
-                Spacer(modifier = Modifier.height(80.dp))
-            }
-
-            AnimatedVisibility(
-                visible = visible,
-                enter = fadeIn(animationSpec = tween(800, delayMillis = 600)),
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 16.dp)
-            ) {
-                BeianNumberText(onClick = onBeianClick)
             }
         }
     }
@@ -173,7 +188,7 @@ fun AboutSection() {
             )
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "腕上RSS是一款专为OPPO Watch设计的RSS阅读器配套应用。通过声波引导 WiFi 会话连接手表，您可以轻松管理RSS订阅源、查看收藏内容和稍后阅读列表。",
+                text = "腕上RSS是一款专为OPPO Watch设计的RSS阅读器配套应用。通过已配对蓝牙 RFCOMM 连接手表，您可以同步RSS订阅源、收藏内容、稍后阅读列表和本地导入文章。",
                 fontSize = 14.sp,
                 lineHeight = 20.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -187,7 +202,7 @@ fun AboutSection() {
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "• 声波引导 WiFi 连接手表\n• 添加RSS订阅源\n• 查看收藏文章\n• 管理稍后阅读列表",
+                text = "• 已配对蓝牙 RFCOMM 同步\n• 添加RSS订阅源\n• 查看收藏文章\n• 管理稍后阅读列表\n• 导入 TXT / EPUB 本地内容",
                 fontSize = 14.sp,
                 lineHeight = 20.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -299,10 +314,10 @@ fun PrivacyPolicySection() {
             )
             Spacer(modifier = Modifier.height(6.dp))
             Text(
-                text = "• 本地通信：应用仅在您的手机和手表之间建立本地网络连接，数据不经过第三方服务器\n" +
-                        "• 声波引导：热点与临时会话信息仅用于本次连接\n" +
+                text = "• 本地通信：应用仅在您的手机和手表之间建立蓝牙 RFCOMM 连接，数据不经过第三方服务器\n" +
+                        "• 已配对设备：同步仅面向系统中已配对的手表设备\n" +
                         "• 无云存储：您的订阅数据仅存储在本地设备，不上传至云端\n" +
-                        "• 权限最小化：应用仅请求必要的网络和 WiFi 权限（用于本地通信与引导连接）",
+                        "• 权限最小化：应用仅请求必要的网络和蓝牙权限",
                 fontSize = 13.sp,
                 lineHeight = 18.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant

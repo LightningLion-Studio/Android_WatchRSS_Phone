@@ -91,24 +91,30 @@ fun GlassTopBar(
             )
     ) {
     CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (onBack != null) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+        AdaptiveWindowScope(modifier = Modifier.fillMaxWidth()) { windowInfo ->
+            Row(
+                modifier = Modifier.adaptiveContentWidth(
+                    windowInfo = windowInfo,
+                    mediumMaxWidth = 720.dp,
+                    expandedMaxWidth = 840.dp
+                ),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (onBack != null) {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
                 }
+                Text(
+                    text = title,
+                    style = if (isTopLevel) MaterialTheme.typography.headlineMedium
+                           else MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+                actions()
             }
-            Text(
-                text = title,
-                style = if (isTopLevel) MaterialTheme.typography.headlineMedium
-                       else MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.weight(1f)
-            )
-            actions()
         }
     }
     }
@@ -161,19 +167,27 @@ fun PageColumn(
     bottomSpacing: Dp = 0.dp,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        if (topSpacing > 0.dp) {
-            Spacer(modifier = Modifier.height(topSpacing))
-        }
-        content()
-        if (bottomSpacing > 0.dp) {
-            Spacer(modifier = Modifier.height(bottomSpacing))
+    AdaptiveWindowScope(modifier = modifier.fillMaxSize()) { windowInfo ->
+        AdaptiveContentFrame(
+            windowInfo = windowInfo,
+            mediumMaxWidth = 720.dp,
+            expandedMaxWidth = 840.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                if (topSpacing > 0.dp) {
+                    Spacer(modifier = Modifier.height(topSpacing))
+                }
+                content()
+                if (bottomSpacing > 0.dp) {
+                    Spacer(modifier = Modifier.height(bottomSpacing))
+                }
+            }
         }
     }
 }

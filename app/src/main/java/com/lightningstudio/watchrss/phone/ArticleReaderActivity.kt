@@ -57,6 +57,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -76,6 +78,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -121,6 +124,11 @@ import com.lightningstudio.watchrss.phone.data.local.ARTICLE_TEXT_CHUNK_BYTES
 import com.lightningstudio.watchrss.phone.data.local.isArticleContentMarker
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.repo.PhoneImportedTextReader
+import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
+import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
+import com.lightningstudio.watchrss.phone.ui.AdaptiveWidthClass
+import com.lightningstudio.watchrss.phone.ui.PredictiveBackSurface
+import com.lightningstudio.watchrss.phone.ui.adaptiveContentWidth
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import com.lightningstudio.watchrss.phone.ui.theme.AppPrimaryCard
 import com.lightningstudio.watchrss.phone.ui.theme.PrimaryRed
@@ -208,7 +216,7 @@ class ArticleReaderActivity : ComponentActivity() {
 
 @OptIn(FlowPreview::class)
 @Composable
-private fun ArticleReaderScreen(
+internal fun ArticleReaderScreen(
     article: PhoneArticleEntity?,
     importedTextReader: PhoneImportedTextReader?,
     invalidArticleId: Boolean,
@@ -216,10 +224,14 @@ private fun ArticleReaderScreen(
     onSaveReadingProgress: suspend (Float) -> Unit,
     onBack: () -> Unit,
     onOpenImportedArticle: (String) -> Unit,
-    onOpenOriginal: (String) -> Unit
+    onOpenOriginal: (String) -> Unit,
+    embedded: Boolean = false,
+    embeddedFullscreen: Boolean = false,
+    onOpenFullscreen: (() -> Unit)? = null
 ) {
     if (invalidArticleId) {
         ReaderBackSurface(
+            enabled = !embedded,
             onBeforeBack = {},
             onBack = onBack
         ) {
@@ -241,6 +253,7 @@ private fun ArticleReaderScreen(
     val safeArticle = article
     if (safeArticle == null) {
         ReaderBackSurface(
+            enabled = !embedded,
             onBeforeBack = {},
             onBack = onBack
         ) {
@@ -250,7 +263,7 @@ private fun ArticleReaderScreen(
                     .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text(text = "正在加载文章…", style = MaterialTheme.typography.titleLarge)
+                DelayedReaderLoadingText(text = "正在加载文章…")
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                 }
@@ -305,10 +318,7 @@ private fun ArticleReaderScreen(
         val chromeHideRangePx = maxOf(topBarHeightPx, bottomBarHeightPx)
         var readerChromeOffsetPx by remember { mutableStateOf(0f) }
         var lastReaderChromeDirection by remember { mutableStateOf(0) }
-        val visibleTopBarHeightPx = (topBarHeightPx - readerChromeOffsetPx
-            .coerceAtMost(topBarHeightPx.toFloat()))
-            .roundToInt()
-            .coerceAtLeast(0)
+        val readerProgressAnchorOffsetPx = topBarHeightPx.coerceAtLeast(0)
         var hasRestoredPosition by remember(safeArticle.articleId) { mutableStateOf(false) }
         var pendingRestoreProgress by remember(safeArticle.articleId) {
             mutableStateOf<Float?>(safeArticle.readingProgress.coerceIn(0f, 1f))
@@ -395,13 +405,13 @@ private fun ArticleReaderScreen(
                     chunkCount = reader.chunkCount,
                     chunkTexts = importedTextChunkTexts,
                     chunkLayouts = importedTextChunkLayouts,
-                    anchorOffsetPx = visibleTopBarHeightPx
+                    anchorOffsetPx = readerProgressAnchorOffsetPx
                 )
             } ?: calculateArticleReadingProgressFromLayout(
                 listState = listState,
                 nodes = contentNodes,
                 textLayouts = textLayouts,
-                anchorOffsetPx = visibleTopBarHeightPx
+                anchorOffsetPx = readerProgressAnchorOffsetPx
             )
         }
 
@@ -495,7 +505,7 @@ private fun ArticleReaderScreen(
                             text = text,
                             layout = layout,
                             itemInfo = itemInfo,
-                            anchorOffsetPx = visibleTopBarHeightPx
+                            anchorOffsetPx = readerProgressAnchorOffsetPx
                         )
                     }
                 }
@@ -527,7 +537,7 @@ private fun ArticleReaderScreen(
                                     text = text,
                                     layout = layout,
                                     itemInfo = itemInfo,
-                                    anchorOffsetPx = visibleTopBarHeightPx
+                                    anchorOffsetPx = readerProgressAnchorOffsetPx
                                 )
                             }
                         }
@@ -538,7 +548,7 @@ private fun ArticleReaderScreen(
                                 articleImageRestoreVisualOffsetPx(
                                     restoreTarget = restoreTarget,
                                     itemInfo = itemInfo,
-                                    anchorOffsetPx = visibleTopBarHeightPx
+                                    anchorOffsetPx = readerProgressAnchorOffsetPx
                                 )
                             }
                         }
@@ -576,6 +586,9 @@ private fun ArticleReaderScreen(
             }
             lifecycleOwner.lifecycle.addObserver(observer)
             onDispose {
+                runBlocking {
+                    saveCurrentReadingProgress(force = true)
+                }
                 lifecycleOwner.lifecycle.removeObserver(observer)
             }
         }
@@ -592,7 +605,7 @@ private fun ArticleReaderScreen(
         }
 
         ReaderBackSurface(
-            enabled = previewImage == null,
+            enabled = previewImage == null && !embedded,
             onBeforeBack = {
                 saveCurrentReadingProgress(force = true)
             },
@@ -605,6 +618,7 @@ private fun ArticleReaderScreen(
                 drawContent()
             }
 
+            AdaptiveWindowScope(modifier = Modifier.fillMaxSize()) { windowInfo ->
             // 内容区域 - 使用原生 Compose 渲染
             Box(
                 modifier = Modifier
@@ -613,48 +627,68 @@ private fun ArticleReaderScreen(
                     .nestedScroll(readerChromeNestedScrollConnection)
                     .clipToBounds()
             ) {
+                val readerHorizontalPadding = when (windowInfo.widthClass) {
+                    AdaptiveWidthClass.Compact -> 20.dp
+                    AdaptiveWidthClass.Medium -> 24.dp
+                    AdaptiveWidthClass.Expanded -> 28.dp
+                }
                 val readerContentPadding = PaddingValues(
                     top = topBarHeight + 20.dp,
-                    start = 20.dp,
-                    end = 20.dp,
+                    start = readerHorizontalPadding,
+                    end = readerHorizontalPadding,
                     bottom = 20.dp
                 )
                 val reader = importedTextReader
                 when {
                     reader != null -> {
-                        ImportedTextChunkContentView(
-                            reader = reader,
-                            listState = listState,
-                            chunkTexts = importedTextChunkTexts,
-                            chunkLayouts = importedTextChunkLayouts,
-                            onLoadImportedTextChunk = onLoadImportedTextChunk,
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = readerContentPadding
-                        )
-                    }
-                    waitingForImportedTextReader -> {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(readerContentPadding),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        AdaptiveContentFrame(
+                            windowInfo = windowInfo,
+                            mediumMaxWidth = 720.dp,
+                            expandedMaxWidth = 760.dp
                         ) {
-                            Text(
-                                text = "正在加载正文…",
-                                style = MaterialTheme.typography.titleLarge
+                            ImportedTextChunkContentView(
+                                reader = reader,
+                                listState = listState,
+                                chunkTexts = importedTextChunkTexts,
+                                chunkLayouts = importedTextChunkLayouts,
+                                onLoadImportedTextChunk = onLoadImportedTextChunk,
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = readerContentPadding
                             )
                         }
                     }
+                    waitingForImportedTextReader -> {
+                        AdaptiveContentFrame(
+                            windowInfo = windowInfo,
+                            mediumMaxWidth = 720.dp,
+                            expandedMaxWidth = 760.dp
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(readerContentPadding),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                DelayedReaderLoadingText(text = "正在加载正文…")
+                            }
+                        }
+                    }
                     else -> {
-                        ArticleReaderContentView(
-                            nodes = contentNodes,
-                            listState = listState,
-                            textLayouts = textLayouts,
-                            onPreviewImage = { previewImage = it },
-                            previewSourceNodeIndex = previewImage?.sourceNodeIndex,
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = readerContentPadding
-                        )
+                        AdaptiveContentFrame(
+                            windowInfo = windowInfo,
+                            mediumMaxWidth = 720.dp,
+                            expandedMaxWidth = 760.dp
+                        ) {
+                            ArticleReaderContentView(
+                                nodes = contentNodes,
+                                listState = listState,
+                                textLayouts = textLayouts,
+                                onPreviewImage = { previewImage = it },
+                                previewSourceNodeIndex = previewImage?.sourceNodeIndex,
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = readerContentPadding
+                            )
+                        }
                     }
                 }
             }
@@ -679,13 +713,23 @@ private fun ArticleReaderScreen(
                     )
                     .padding(bottom = 12.dp)
             ) {
-                ReaderTopContent(
-                    article = safeArticle,
-                    modifier = Modifier
-                        .statusBarsPadding()
-                        .padding(horizontal = 16.dp)
-                        .padding(top = 12.dp, bottom = 12.dp)
-                )
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.TopCenter
+                ) {
+                    ReaderTopContent(
+                        article = safeArticle,
+                        modifier = Modifier
+                            .statusBarsPadding()
+                            .adaptiveContentWidth(
+                                windowInfo = windowInfo,
+                                mediumMaxWidth = 720.dp,
+                                expandedMaxWidth = 760.dp
+                            )
+                            .padding(horizontal = 16.dp)
+                            .padding(top = 12.dp, bottom = 12.dp)
+                    )
+                }
             }
 
             // 底部无圆角高斯模糊按钮栏
@@ -700,21 +744,40 @@ private fun ArticleReaderScreen(
                     .gaussianBlurBackdrop(
                         backdrop = backdrop
                     )
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
-                Row(
+                Box(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    contentAlignment = Alignment.Center
                 ) {
-                    GlassButton(onClick = ::handleBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
-                        Text("返回")
-                    }
-                    if (safeArticle.url.isNotBlank() && !ImportedContentIds.isImportedContentUrl(safeArticle.url)) {
-                        GlassButton(onClick = { onOpenOriginal(safeArticle.url) }) {
-                            Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
-                            Text("原网页")
+                    Row(
+                        modifier = Modifier
+                            .adaptiveContentWidth(
+                                windowInfo = windowInfo,
+                                mediumMaxWidth = 720.dp,
+                                expandedMaxWidth = 760.dp
+                            )
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        GlassButton(onClick = ::handleBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+                            Text("返回")
+                        }
+                        if (safeArticle.url.isNotBlank() && !ImportedContentIds.isImportedContentUrl(safeArticle.url)) {
+                            GlassButton(onClick = { onOpenOriginal(safeArticle.url) }) {
+                                Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
+                                Text("原网页")
+                            }
+                        }
+                        if (embedded && onOpenFullscreen != null) {
+                            GlassButton(onClick = onOpenFullscreen) {
+                                Icon(
+                                    if (embeddedFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                                    contentDescription = null
+                                )
+                                Text(if (embeddedFullscreen) "缩小" else "全屏")
+                            }
                         }
                     }
                 }
@@ -733,6 +796,7 @@ private fun ArticleReaderScreen(
                         .zIndex(PREVIEW_OVERLAY_Z_INDEX)
                 )
             }
+            }
         }
 }
 
@@ -743,55 +807,12 @@ private fun ReaderBackSurface(
     onBack: () -> Unit,
     content: @Composable BoxScope.() -> Unit
 ) {
-    var backProgress by remember { mutableStateOf(0f) }
-    val onBeforeBackState = rememberUpdatedState(onBeforeBack)
-    val onBackState = rememberUpdatedState(onBack)
-
-    PredictiveBackHandler(enabled = enabled) { backEvents ->
-        try {
-            backEvents.collect { backEvent ->
-                backProgress = backEvent.progress.coerceIn(0f, 1f)
-            }
-            animate(
-                initialValue = backProgress,
-                targetValue = READER_BACK_EXIT_PROGRESS,
-                animationSpec = tween(READER_BACK_EXIT_ANIMATION_MS)
-            ) { value, _ ->
-                backProgress = value
-            }
-            onBeforeBackState.value()
-            onBackState.value()
-        } catch (exception: CancellationException) {
-            animate(
-                initialValue = backProgress,
-                targetValue = 0f,
-                animationSpec = tween(READER_BACK_CANCEL_ANIMATION_MS)
-            ) { value, _ ->
-                backProgress = value
-            }
-        }
-    }
-
-    Surface(
-        modifier = Modifier
-            .fillMaxSize()
-            .readerPredictiveBackPreview(backProgress)
+    PredictiveBackSurface(
+        enabled = enabled,
+        onBeforeBack = onBeforeBack,
+        onBack = onBack
     ) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            content()
-        }
-    }
-}
-
-private fun Modifier.readerPredictiveBackPreview(progress: Float): Modifier {
-    val previewProgress = progress.coerceIn(0f, 1f)
-    val exitProgress = (progress - 1f).coerceIn(0f, 1f)
-    if (previewProgress <= 0f && exitProgress <= 0f) return this
-    return graphicsLayer {
-        translationX = 96.dp.toPx() * previewProgress + size.width * exitProgress
-        scaleX = 1f - 0.04f * previewProgress
-        scaleY = 1f - 0.04f * previewProgress
-        alpha = (1f - 0.16f * previewProgress) * (1f - exitProgress)
+        content()
     }
 }
 
@@ -817,6 +838,29 @@ private fun ReaderTopContent(
             )
         }
     }
+}
+
+@Composable
+private fun DelayedReaderLoadingText(
+    text: String,
+    modifier: Modifier = Modifier
+) {
+    var showText by remember(text) { mutableStateOf(false) }
+
+    LaunchedEffect(text) {
+        showText = false
+        repeat(READER_LOADING_TEXT_FRAME_DELAY) {
+            withFrameNanos { }
+        }
+        showText = true
+    }
+
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleLarge,
+        color = if (showText) Color.Unspecified else Color.Transparent,
+        modifier = modifier
+    )
 }
 
 @Composable
@@ -2787,10 +2831,8 @@ private const val ARTICLE_READING_PROGRESS_SAMPLE_MS = 500L
 private const val MAX_ARTICLE_TEXT_NODE_CHARS = 2_000
 private const val ARTICLE_IMAGE_READING_UNITS = 520
 private const val IMPORTED_TEXT_CHUNK_KEY_PREFIX = "importedText:"
+private const val READER_LOADING_TEXT_FRAME_DELAY = 2
 private const val READER_CHROME_SNAP_ANIMATION_MS = 140
-private const val READER_BACK_CANCEL_ANIMATION_MS = 260
-private const val READER_BACK_EXIT_ANIMATION_MS = 180
-private const val READER_BACK_EXIT_PROGRESS = 2f
 private const val PREVIEW_OVERLAY_Z_INDEX = 10f
 private const val PREVIEW_BACKGROUND_ALPHA = 0.96f
 private const val PREVIEW_BACKGROUND_DISMISS_ALPHA_LOSS = 0.94f

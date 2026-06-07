@@ -160,6 +160,16 @@ class PhoneCompanionRepository(
         }
     }
 
+    suspend fun getArticle(articleId: String): PhoneArticleEntity? =
+        withContext(Dispatchers.IO) {
+            val article = articleDao.getById(articleId) ?: return@withContext null
+            if (article.isFileBackedImportedText()) {
+                article
+            } else {
+                article.hydrateExternalText()
+            }
+        }
+
     suspend fun getImportedTextReader(articleId: String): PhoneImportedTextReader? =
         withContext(Dispatchers.IO) {
             val store = articleContentStore ?: return@withContext null

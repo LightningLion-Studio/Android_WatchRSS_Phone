@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
@@ -63,34 +64,42 @@ fun GlassTabBar(
             )
             .padding(horizontal = 8.dp, vertical = 4.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().fillMaxHeight(),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            MainTab.entries.forEach { tab ->
-                val isSelected = tab == selectedTab
-                val iconTint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .roundedClickable(
-                            shape = RoundedCornerShape(16.dp),
-                            onClick = { onTabSelected(tab) }
-                        )
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    CompositionLocalProvider(LocalContentColor provides iconTint) {
-                        tab.icon()
-                    }
-                    Text(
-                        text = tab.label,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+        AdaptiveWindowScope(modifier = Modifier.fillMaxSize()) { windowInfo ->
+            Row(
+                modifier = Modifier
+                    .adaptiveContentWidth(
+                        windowInfo = windowInfo,
+                        mediumMaxWidth = 560.dp,
+                        expandedMaxWidth = 640.dp
                     )
+                    .fillMaxHeight(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                MainTab.entries.forEach { tab ->
+                    val isSelected = tab == selectedTab
+                    val iconTint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .roundedClickable(
+                                shape = RoundedCornerShape(16.dp),
+                                onClick = { onTabSelected(tab) }
+                            )
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        CompositionLocalProvider(LocalContentColor provides iconTint) {
+                            tab.icon()
+                        }
+                        Text(
+                            text = tab.label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }

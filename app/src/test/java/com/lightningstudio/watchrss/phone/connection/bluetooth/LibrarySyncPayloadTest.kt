@@ -702,14 +702,18 @@ class LibrarySyncPayloadTest {
     }
 
     private fun assertBatchWireByteHints(frames: List<JSONObject>) {
-        val totalWireBytes = frames.sumOf { BluetoothSyncProtocol.wireSize(it) }
+        val hintedTotalWireBytes = frames.sumOf { it.getLong(LibrarySyncPayload.FIELD_BATCH_WIRE_BYTES) }
         frames.forEach { frame ->
+            val actualWireBytes = BluetoothSyncProtocol.wireSize(frame)
+            val hintedWireBytes = frame.getLong(LibrarySyncPayload.FIELD_BATCH_WIRE_BYTES)
+            val delta = if (hintedWireBytes > actualWireBytes) {
+                hintedWireBytes - actualWireBytes
+            } else {
+                actualWireBytes - hintedWireBytes
+            }
+            assertTrue("batchWireBytes should stay close to actual wire bytes", delta <= maxOf(16 * 1024L, actualWireBytes / 5L))
             assertEquals(
-                BluetoothSyncProtocol.wireSize(frame),
-                frame.getLong(LibrarySyncPayload.FIELD_BATCH_WIRE_BYTES)
-            )
-            assertEquals(
-                totalWireBytes,
+                hintedTotalWireBytes,
                 frame.getLong(LibrarySyncPayload.FIELD_BATCH_TOTAL_WIRE_BYTES)
             )
         }

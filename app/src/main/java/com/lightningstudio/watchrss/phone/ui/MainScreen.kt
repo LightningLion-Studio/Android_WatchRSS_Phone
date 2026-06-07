@@ -12,7 +12,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,7 +25,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
@@ -90,7 +88,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -111,6 +108,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import sh.calvin.reorderable.ReorderableItem
+import sh.calvin.reorderable.rememberReorderableLazyListState
 
 private enum class MainPage {
     DASHBOARD,
@@ -152,12 +151,14 @@ private data class MainContentChannel(
     val supportingText: String,
     val articleCount: Int,
     val source: PhoneRssSourceEntity? = null,
+    val reorderSourceUrl: String? = source?.url,
     val articles: List<PhoneArticleEntity> = emptyList(),
     val icon: MainContentChannelIcon,
     val emptyTitle: String,
     val emptyText: String,
     val canRefresh: Boolean = false,
     val canDrag: Boolean = false,
+    val dragGroup: MainContentDragGroup = MainContentDragGroup.FIXED,
     val sortOrder: Long = 0L
 )
 
@@ -173,6 +174,12 @@ private enum class MainContentChannelIcon {
     WATCH_LATER,
     ARTICLE,
     IMPORTED
+}
+
+private enum class MainContentDragGroup {
+    FIXED,
+    PINNED,
+    NORMAL
 }
 
 private sealed interface RecentImportEntry {
@@ -1136,6 +1143,7 @@ private fun buildContentChannels(
         emptyTitle = "暂无独立文章",
         emptyText = "可在导入页添加网页文章",
         canDrag = uiState.independentArticles.isNotEmpty(),
+        dragGroup = MainContentDragGroup.NORMAL,
         sortOrder = independentSortOrder
     )
     val sourceChannels = uiState.rssSources.map { source ->
@@ -1169,6 +1177,7 @@ private fun buildContentChannels(
             emptyText = if (isImportedSource) "此频道暂无内容" else "下拉或点击刷新",
             canRefresh = !isImportedSource,
             canDrag = true,
+            dragGroup = if (source.isPinned) MainContentDragGroup.PINNED else MainContentDragGroup.NORMAL,
             sortOrder = source.sortOrder
         )
     }
@@ -1176,59 +1185,45 @@ private fun buildContentChannels(
         channel.source?.url?.let(ImportedContentIds::isImportedTextSourceUrl) == true
     }
     val importedTextFallback = if (!hasImportedTextSource) {
+        val importedTextSortOrder = uiState.importedContentArticles.maxOfOrNull { article ->
+            maxOf(article.updatedAt, article.importedAt)
+        } ?: 0L
         listOf(
             MainContentChannel(
                 key = CONTENT_CHANNEL_IMPORTED_TEXT,
                 title = ImportedContentIds.ROOT_SOURCE_TITLE,
                 supportingText = "TXT 导入",
                 articleCount = uiState.importedContentArticles.size,
+                reorderSourceUrl = ImportedContentIds.ROOT_SOURCE_URL,
                 articles = uiState.importedContentArticles,
                 icon = MainContentChannelIcon.IMPORTED,
                 emptyTitle = "暂无导入内容",
-                emptyText = "TXT 文件导入后会显示在这里"
+                emptyText = "TXT 文件导入后会显示在这里",
+                canDrag = uiState.importedContentArticles.isNotEmpty(),
+                dragGroup = MainContentDragGroup.NORMAL,
+                sortOrder = importedTextSortOrder
             )
         )
     } else {
         emptyList()
     }
-    val reorderableChannels = (listOf(independentChannel) + importedTextFallback + sourceChannels)
+    val reorderableChannels = listOf(independentChannel) + importedTextFallback + sourceChannels
+    val sortedPinnedChannels = reorderableChannels
+        .filter { it.dragGroup == MainContentDragGroup.PINNED }
         .sortedWith(
             compareByDescending<MainContentChannel> { it.sortOrder }
                 .thenBy { it.title }
         )
-    return fixedChannels + reorderableChannels
+    val sortedNormalChannels = reorderableChannels
+        .filter { it.dragGroup == MainContentDragGroup.NORMAL }
+        .sortedWith(
+            compareByDescending<MainContentChannel> { it.sortOrder }
+                .thenBy { it.title }
+        )
+    return fixedChannels + sortedPinnedChannels + sortedNormalChannels
 }
 
 private fun sourceContentChannelKey(sourceUrl: String): String = "$CONTENT_SOURCE_PREFIX$sourceUrl"
-
-private fun Modifier.contentChannelDrag(
-    channelKey: String,
-    draggedChannelKey: String?,
-    draggedOffsetY: Float,
-    onDragStart: () -> Unit,
-    onDrag: (Float) -> Unit,
-    onDragFinished: () -> Unit
-): Modifier {
-    val isDragging = draggedChannelKey == channelKey
-    return this
-        .zIndex(if (isDragging) 1f else 0f)
-        .graphicsLayer {
-            translationY = if (isDragging) draggedOffsetY else 0f
-            alpha = if (isDragging) 0.92f else 1f
-            shadowElevation = if (isDragging) 8.dp.toPx() else 0f
-        }
-        .pointerInput(channelKey) {
-            detectDragGesturesAfterLongPress(
-                onDragStart = { onDragStart() },
-                onDragEnd = onDragFinished,
-                onDragCancel = onDragFinished,
-                onDrag = { change, dragAmount ->
-                    change.consume()
-                    onDrag(dragAmount.y)
-                }
-            )
-        }
-}
 
 private fun Modifier.channelPredictiveBackPreview(
     progress: Float
@@ -1285,44 +1280,45 @@ private fun Modifier.channelTabSwitchTargetPreview(
 
 private fun Float.signForPageTransition(): Float = if (this < 0f) -1f else 1f
 
-private fun findContentDragTargetKey(
-    listState: LazyListState,
-    draggedKey: String,
-    draggedOffsetY: Float
-): String? {
-    val visibleItems = listState.layoutInfo.visibleItemsInfo
-    val draggedItem = visibleItems.firstOrNull { it.key == draggedKey } ?: return null
-    val draggedCenter = draggedItem.offset + draggedItem.size / 2f + draggedOffsetY
-    return visibleItems
-        .filterNot { it.key == draggedKey }
-        .firstOrNull { item ->
-            draggedCenter >= item.offset && draggedCenter <= item.offset + item.size
-        }
-        ?.key as? String
-}
-
-private fun reorderSourceChannelsForDrop(
+private fun reorderSourceChannelsForDisplay(
     channels: List<MainContentChannel>,
-    draggedKey: String,
-    targetKey: String
+    dragGroup: MainContentDragGroup
 ): MainContentReorderRequest? {
-    if (draggedKey == targetKey) return null
-    val reorderableChannels = channels.filter { it.canDrag }.toMutableList()
-    val fromIndex = reorderableChannels.indexOfFirst { it.key == draggedKey }
-    val toIndex = reorderableChannels.indexOfFirst { it.key == targetKey }
-    if (fromIndex < 0 || toIndex < 0 || fromIndex == toIndex) return null
-    val moved = reorderableChannels.removeAt(fromIndex)
-    reorderableChannels.add(toIndex, moved)
-    val sourceUrls = reorderableChannels.mapNotNull { it.source?.url }
-    val independentIndex = reorderableChannels.indexOfFirst { it.key == CONTENT_CHANNEL_INDEPENDENT }
-        .takeIf { it >= 0 && reorderableChannels[it].articleCount > 0 }
+    val reorderableChannels = channels.filter { it.canDrag && it.dragGroup == dragGroup }
+    if (reorderableChannels.size < 2) return null
+    val sourceUrls = reorderableChannels.mapNotNull { it.reorderSourceUrl }
+    val independentIndex = if (dragGroup == MainContentDragGroup.NORMAL) {
+        reorderableChannels.indexOfFirst { it.key == CONTENT_CHANNEL_INDEPENDENT }
+            .takeIf { it >= 0 && reorderableChannels[it].articleCount > 0 }
+    } else {
+        null
+    }
+    if (sourceUrls.size < 2 && independentIndex == null) return null
     return MainContentReorderRequest(
         sourceUrlsInDisplayOrder = sourceUrls,
         independentIndex = independentIndex
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+private fun moveContentChannelForReorder(
+    channels: List<MainContentChannel>,
+    fromIndex: Int,
+    toIndex: Int
+): Pair<List<MainContentChannel>, MainContentDragGroup>? {
+    if (fromIndex == toIndex) return null
+    val draggedChannel = channels.getOrNull(fromIndex) ?: return null
+    val targetChannel = channels.getOrNull(toIndex) ?: return null
+    if (!draggedChannel.canDrag || !targetChannel.canDrag) return null
+    if (draggedChannel.dragGroup != targetChannel.dragGroup) return null
+    val reorderedChannels = channels.toMutableList()
+    val moved = reorderedChannels.removeAt(fromIndex)
+    reorderedChannels.add(toIndex, moved)
+    return reorderedChannels to draggedChannel.dragGroup
+}
+
+private fun List<MainContentChannel>.contentChannelKeys(): List<String> = map { it.key }
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun ContentPage(
     uiState: MainUiState,
@@ -1337,30 +1333,41 @@ private fun ContentPage(
 ) {
     val listState = rememberLazyListState()
     val pullState = rememberPullToRefreshState()
-    var draggedChannelKey by remember { mutableStateOf<String?>(null) }
-    var draggedOffsetY by remember { mutableStateOf(0f) }
+    var displayChannels by remember { mutableStateOf(channels) }
+    var movedDragGroup by remember { mutableStateOf<MainContentDragGroup?>(null) }
+    var dragMoved by remember { mutableStateOf(false) }
+    var pendingReorderKeys by remember { mutableStateOf<List<String>?>(null) }
+    val reorderableLazyListState = rememberReorderableLazyListState(listState) { from, to ->
+        moveContentChannelForReorder(
+            channels = displayChannels,
+            fromIndex = from.index,
+            toIndex = to.index
+        )?.let { (reorderedChannels, dragGroup) ->
+            displayChannels = reorderedChannels
+            movedDragGroup = dragGroup
+            dragMoved = true
+        }
+    }
+
+    LaunchedEffect(channels) {
+        val incomingKeys = channels.contentChannelKeys()
+        val pendingKeys = pendingReorderKeys
+        if (!dragMoved && (pendingKeys == null || pendingKeys == incomingKeys)) {
+            displayChannels = channels
+            pendingReorderKeys = null
+        }
+    }
 
     fun finishDrag() {
-        val draggedKey = draggedChannelKey
-        val targetKey = draggedKey?.let {
-            findContentDragTargetKey(
-                listState = listState,
-                draggedKey = it,
-                draggedOffsetY = draggedOffsetY
-            )
-        }
-        val reorderRequest = if (draggedKey != null && targetKey != null) {
-            reorderSourceChannelsForDrop(
-                channels = channels,
-                draggedKey = draggedKey,
-                targetKey = targetKey
-            )
-        } else {
-            null
-        }
-        draggedChannelKey = null
-        draggedOffsetY = 0f
+        val reorderRequest = if (dragMoved) {
+            movedDragGroup?.let { group ->
+                reorderSourceChannelsForDisplay(displayChannels, group)
+            }
+        } else null
+        dragMoved = false
+        movedDragGroup = null
         if (reorderRequest != null) {
+            pendingReorderKeys = displayChannels.contentChannelKeys()
             onReorderContentChannels(
                 reorderRequest.sourceUrlsInDisplayOrder,
                 reorderRequest.independentIndex
@@ -1389,7 +1396,7 @@ private fun ContentPage(
             contentPadding = mainContentPadding(contentPadding),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            if (channels.isEmpty()) {
+            if (displayChannels.isEmpty()) {
                 item {
                     EmptyStateCard(
                         icon = { Icon(Icons.Default.RssFeed, contentDescription = null) },
@@ -1398,42 +1405,53 @@ private fun ContentPage(
                     )
                 }
             } else {
-                items(channels, key = { it.key }) { channel ->
+                items(displayChannels, key = { it.key }) { channel ->
                     val source = channel.source
-                    val dragModifier = if (channel.canDrag) {
-                        Modifier.contentChannelDrag(
-                            channelKey = channel.key,
-                            draggedChannelKey = draggedChannelKey,
-                            draggedOffsetY = draggedOffsetY,
-                            onDragStart = {
-                                draggedChannelKey = channel.key
-                                draggedOffsetY = 0f
-                            },
-                            onDrag = { deltaY ->
-                                draggedOffsetY += deltaY
-                            },
-                            onDragFinished = ::finishDrag
-                        )
-                    } else {
-                        Modifier
-                    }
-                    if (source == null) {
-                        MainContentChannelRow(
-                            channel = channel,
-                            onClick = { onOpenChannel(channel) },
-                            modifier = dragModifier
-                        )
-                    } else {
-                        MainScreenSourceRow(
-                            source = source,
-                            icon = channel.icon,
-                            articleCount = channel.articleCount,
-                            onClick = { onOpenChannel(channel) },
-                            onMoveToTop = { onMoveToTop(source) },
-                            onTogglePinned = { onTogglePinned(source) },
-                            onDelete = { onDelete(source) },
-                            modifier = dragModifier
-                        )
+                    val isReorderTargetEnabled = channel.canDrag &&
+                        (movedDragGroup == null || channel.dragGroup == movedDragGroup)
+                    ReorderableItem(
+                        reorderableLazyListState,
+                        key = channel.key,
+                        enabled = isReorderTargetEnabled
+                    ) { isDragging ->
+                        val onDragStarted = {
+                            movedDragGroup = channel.dragGroup
+                            dragMoved = false
+                        }
+                        val itemModifier = Modifier
+                            .animateItem()
+                            .zIndex(if (isDragging) 1f else 0f)
+                            .graphicsLayer {
+                                shadowElevation = if (isDragging) 8.dp.toPx() else 0f
+                            }
+                            .then(
+                                if (channel.canDrag) {
+                                    Modifier.longPressDraggableHandle(
+                                        onDragStarted = { _ -> onDragStarted() },
+                                        onDragStopped = ::finishDrag
+                                    )
+                                } else {
+                                    Modifier
+                                }
+                            )
+                        if (source == null) {
+                            MainContentChannelRow(
+                                channel = channel,
+                                onClick = { onOpenChannel(channel) },
+                                modifier = itemModifier
+                            )
+                        } else {
+                            MainScreenSourceRow(
+                                source = source,
+                                icon = channel.icon,
+                                articleCount = channel.articleCount,
+                                onClick = { onOpenChannel(channel) },
+                                onMoveToTop = { onMoveToTop(source) },
+                                onTogglePinned = { onTogglePinned(source) },
+                                onDelete = { onDelete(source) },
+                                modifier = itemModifier
+                            )
+                        }
                     }
                 }
             }
@@ -1794,8 +1812,7 @@ private fun MainScreenSourceRow(
         modifier = modifier
             .fillMaxWidth()
             .combinedClickable(
-                onClick = onClick,
-                onLongClick = { menuExpanded = true }
+                onClick = onClick
             ),
         colors = cardColors
     ) {
@@ -1832,7 +1849,7 @@ private fun MainScreenSourceRow(
                     MainContentChannelLeadingIcon(icon)
                 },
                 trailingContent = {
-                    Box {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { menuExpanded = true }) {
                             Icon(Icons.Default.MoreVert, contentDescription = "频道操作")
                         }

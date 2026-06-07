@@ -715,24 +715,33 @@ object LibrarySyncPayload {
         }
     }
 
+    private data class SizedArticleItem(
+        val payload: JSONObject,
+        val estimatedBytes: Long
+    )
+
     private fun buildArticleFrames(
         articleItems: Sequence<JSONObject>,
         totalArticles: Int?,
         buildPayload: (JSONArray, Int, Int, Int) -> JSONObject
     ): List<JSONObject> {
-        val chunks = mutableListOf<List<JSONObject>>()
-        var current = mutableListOf<JSONObject>()
-        var currentBytes = 0
+        val chunks = mutableListOf<List<SizedArticleItem>>()
+        var current = mutableListOf<SizedArticleItem>()
+        var currentBytes = 0L
         var articleItemCount = 0
         articleItems.forEach { article ->
             articleItemCount += 1
-            val articleSize = BluetoothSyncProtocol.encodedSize(article)
+            val item = SizedArticleItem(
+                payload = article,
+                estimatedBytes = article.estimatedArticleItemBytes()
+            )
+            val articleSize = item.estimatedBytes
             if (current.isNotEmpty() && currentBytes + articleSize > ARTICLE_BATCH_TARGET_BYTES) {
                 chunks += current
-                current = mutableListOf(article)
+                current = mutableListOf(item)
                 currentBytes = articleSize
             } else {
-                current.add(article)
+                current.add(item)
                 currentBytes += articleSize
             }
         }
@@ -748,26 +757,23 @@ object LibrarySyncPayload {
         while (true) {
             val batchCount = chunks.size.coerceAtLeast(1)
             val payloads = chunks.mapIndexed { index, chunk ->
-                buildPayload(chunk.toRawJsonArray(), index, batchCount, resolvedTotalArticles)
+                buildPayload(chunk.toPayloadJsonArray(), index, batchCount, resolvedTotalArticles)
             }
-            val preHintOversizedIndex = payloads.indexOfFirst { payload ->
-                BluetoothSyncProtocol.encodedSize(payload) > BluetoothSyncProtocol.MAX_FRAME_BYTES
+            val estimatedPayloadBytes = chunks.map { chunk ->
+                estimateArticleFramePayloadBytes(
+                    articleBytes = chunk.sumOf { it.estimatedBytes },
+                    itemCount = chunk.size
+                )
             }
-            val annotatedPayloads = payloads.withBatchWireByteHints()
-            val postHintOversizedIndex = annotatedPayloads.indexOfFirst { payload ->
-                BluetoothSyncProtocol.encodedSize(payload) > BluetoothSyncProtocol.MAX_FRAME_BYTES
+            val oversizedIndex = estimatedPayloadBytes.indexOfFirst { payloadBytes ->
+                payloadBytes > BluetoothSyncProtocol.MAX_FRAME_BYTES
             }
-            val oversizedIndex = if (preHintOversizedIndex >= 0) {
-                preHintOversizedIndex
-            } else {
-                postHintOversizedIndex
-            }
-            if (oversizedIndex < 0) return annotatedPayloads
+            if (oversizedIndex < 0) return payloads.withEstimatedBatchWireByteHints(estimatedPayloadBytes)
             val oversized = chunks[oversizedIndex]
             require(oversized.size > 1) {
                 val item = oversized.first()
-                val payloadSize = BluetoothSyncProtocol.encodedSize(annotatedPayloads[oversizedIndex])
-                "单篇文章蓝牙消息过大：${item.optString("title").ifBlank { item.optString("url") }.take(40)}（$payloadSize 字节）"
+                val payloadSize = estimatedPayloadBytes[oversizedIndex]
+                "单篇文章蓝牙消息过大：${item.payload.optString("title").ifBlank { item.payload.optString("url") }.take(40)}（约 $payloadSize 字节）"
             }
             val midpoint = oversized.size / 2
             chunks[oversizedIndex] = oversized.take(midpoint)
@@ -777,22 +783,17 @@ object LibrarySyncPayload {
 
     private fun List<JSONObject>.withBatchWireByteHints(): List<JSONObject> {
         if (isEmpty()) return this
-        var previousWireBytes = emptyList<Long>()
-        var previousTotalWireBytes = -1L
-        repeat(BATCH_WIRE_HINT_STABILIZE_ATTEMPTS) {
-            val wireBytes = map { BluetoothSyncProtocol.wireSize(it) }
-            val totalWireBytes = wireBytes.sum()
-            if (wireBytes == previousWireBytes && totalWireBytes == previousTotalWireBytes) {
-                return this
-            }
-            previousWireBytes = wireBytes
-            previousTotalWireBytes = totalWireBytes
-            forEachIndexed { index, payload ->
-                payload.put(FIELD_BATCH_WIRE_BYTES, wireBytes[index])
-                payload.put(FIELD_BATCH_TOTAL_WIRE_BYTES, totalWireBytes)
-            }
+        return withEstimatedBatchWireByteHints(map { BluetoothSyncProtocol.encodedSize(it).toLong() })
+    }
+
+    private fun List<JSONObject>.withEstimatedBatchWireByteHints(estimatedPayloadBytes: List<Long>): List<JSONObject> {
+        if (isEmpty()) return this
+        require(size == estimatedPayloadBytes.size) {
+            "蓝牙批次大小估算数量不匹配：payloads=$size estimates=${estimatedPayloadBytes.size}"
         }
-        val wireBytes = map { BluetoothSyncProtocol.wireSize(it) }
+        val wireBytes = estimatedPayloadBytes.map { payloadBytes ->
+            payloadBytes + ESTIMATED_BATCH_WIRE_HINT_BYTES + BluetoothSyncProtocol.LENGTH_PREFIX_BYTES
+        }
         val totalWireBytes = wireBytes.sum()
         forEachIndexed { index, payload ->
             payload.put(FIELD_BATCH_WIRE_BYTES, wireBytes[index])
@@ -821,17 +822,57 @@ object LibrarySyncPayload {
         }
         val frames = ArrayList<JSONObject>(batchCount)
         frames += header
+        val estimatedPayloadBytes = ArrayList<Long>(batchCount)
+        estimatedPayloadBytes += BluetoothSyncProtocol.encodedSize(header).toLong()
         forEachIndexed { index, payload ->
             payload.putBatchFields(batchIndex = index + 1, batchCount = batchCount, totalArticles = totalArticles)
             frames += payload
+            estimatedPayloadBytes += payload.estimatedPayloadBytesFromHint()
         }
-        return frames.withBatchWireByteHints()
+        return frames.withEstimatedBatchWireByteHints(estimatedPayloadBytes)
     }
 
     private fun List<JSONObject>.needsResponseProgressHeader(): Boolean =
         size > 1 || any { payload ->
-            BluetoothSyncProtocol.encodedSize(payload) > RESPONSE_PROGRESS_HEADER_MIN_BODY_BYTES
+            payload.optLong(FIELD_BATCH_WIRE_BYTES, -1L)
+                .takeIf { it > 0L }
+                ?.let { it > RESPONSE_PROGRESS_HEADER_MIN_BODY_BYTES }
+                ?: (BluetoothSyncProtocol.encodedSize(payload) > RESPONSE_PROGRESS_HEADER_MIN_BODY_BYTES)
         }
+
+    private fun JSONObject.estimatedPayloadBytesFromHint(): Long {
+        val hintedWireBytes = optLong(FIELD_BATCH_WIRE_BYTES, -1L)
+        if (hintedWireBytes > 0L) {
+            return (hintedWireBytes - BluetoothSyncProtocol.LENGTH_PREFIX_BYTES - ESTIMATED_BATCH_WIRE_HINT_BYTES)
+                .coerceAtLeast(0L)
+        }
+        return BluetoothSyncProtocol.encodedSize(this).toLong()
+    }
+
+    private fun List<SizedArticleItem>.toPayloadJsonArray(): JSONArray {
+        return JSONArray().also { array ->
+            forEach { item -> array.put(item.payload) }
+        }
+    }
+
+    private fun JSONObject.estimatedArticleItemBytes(): Long {
+        val body = optJSONObject("body") ?: return BluetoothSyncProtocol.encodedSize(this).toLong()
+        val chunks = body.optJSONArray("chunks") ?: return BluetoothSyncProtocol.encodedSize(this).toLong()
+        var dataBytes = 0L
+        for (index in 0 until chunks.length()) {
+            dataBytes += chunks.optJSONObject(index)?.optString("data")?.length ?: 0
+        }
+        if (dataBytes <= 0L) return BluetoothSyncProtocol.encodedSize(this).toLong()
+        if (dataBytes <= EXACT_CHUNKED_ARTICLE_SIZE_MAX_BYTES) {
+            return BluetoothSyncProtocol.encodedSize(this).toLong()
+        }
+        return dataBytes + ESTIMATED_CHUNKED_ARTICLE_JSON_OVERHEAD_BYTES
+    }
+
+    private fun estimateArticleFramePayloadBytes(articleBytes: Long, itemCount: Int): Long {
+        val arrayCommaBytes = (itemCount - 1).coerceAtLeast(0).toLong()
+        return articleBytes + arrayCommaBytes + ESTIMATED_FRAME_JSON_OVERHEAD_BYTES
+    }
 
     private fun JSONObject.putBatchFields(
         batchIndex: Int?,
@@ -1177,8 +1218,11 @@ object LibrarySyncPayload {
     }
 
     private const val ARTICLE_BATCH_TARGET_BYTES = 512 * 1024
-    private const val BATCH_WIRE_HINT_STABILIZE_ATTEMPTS = 6
     private const val RESPONSE_PROGRESS_HEADER_MIN_BODY_BYTES = 16 * 1024
+    private const val EXACT_CHUNKED_ARTICLE_SIZE_MAX_BYTES = 64 * 1024L
+    private const val ESTIMATED_CHUNKED_ARTICLE_JSON_OVERHEAD_BYTES = 8 * 1024L
+    private const val ESTIMATED_FRAME_JSON_OVERHEAD_BYTES = 2 * 1024L
+    private const val ESTIMATED_BATCH_WIRE_HINT_BYTES = 160L
     private const val CHANGE_SEQUENCE_PROTOCOL_VERSION = 8
     private const val METADATA_ONLY_ARTICLES_PROTOCOL_VERSION = 8
     private const val READING_PROGRESS_SYNC_EPSILON = 0.001f

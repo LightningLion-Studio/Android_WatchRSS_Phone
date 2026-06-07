@@ -108,6 +108,7 @@ dependencies {
     implementation(libs.nanohttpd)
     implementation(libs.okhttp)
     implementation(libs.jsoup)
+    implementation(libs.reorderable)
     ksp(libs.androidx.room.compiler)
     // Backdrop source copied locally — see app/src/main/java/com/kyant/backdrop
 

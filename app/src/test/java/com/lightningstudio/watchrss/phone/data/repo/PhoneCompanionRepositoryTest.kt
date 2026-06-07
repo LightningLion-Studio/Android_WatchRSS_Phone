@@ -1030,12 +1030,147 @@ class PhoneCompanionRepositoryTest {
         )
     }
 
+    @Test
+    fun reorderContentChannels_reordersPinnedSourcesWithinPinnedGroup() = runBlocking {
+        val pinnedFirst = source(
+            url = "https://example.com/first.xml",
+            updatedAt = 100L,
+            isPinned = true
+        )
+        val pinnedSecond = source(
+            url = "https://example.com/second.xml",
+            updatedAt = 90L,
+            isPinned = true
+        )
+        val sourceDao = FakePhoneRssSourceDao().apply {
+            sources = listOf(pinnedFirst, pinnedSecond)
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = FakePhoneArticleDao(),
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone"
+        )
+
+        repository.reorderContentChannels(
+            sourceUrlsInDisplayOrder = listOf(pinnedSecond.url, pinnedFirst.url),
+            independentIndex = null
+        )
+
+        val updatedFirst = sourceDao.sources.first { it.url == pinnedFirst.url }
+        val updatedSecond = sourceDao.sources.first { it.url == pinnedSecond.url }
+        assertTrue(updatedSecond.sortOrder > updatedFirst.sortOrder)
+        assertEquals(true, updatedFirst.isPinned)
+        assertEquals(true, updatedSecond.isPinned)
+    }
+
+    @Test
+    fun reorderContentChannels_ignoresMixedPinnedAndNormalSources() = runBlocking {
+        val pinned = source(
+            url = "https://example.com/pinned.xml",
+            updatedAt = 100L,
+            isPinned = true
+        )
+        val normal = source(
+            url = "https://example.com/normal.xml",
+            updatedAt = 10L
+        )
+        val sourceDao = FakePhoneRssSourceDao().apply {
+            sources = listOf(pinned, normal)
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = FakePhoneArticleDao(),
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone"
+        )
+
+        repository.reorderContentChannels(
+            sourceUrlsInDisplayOrder = listOf(normal.url, pinned.url),
+            independentIndex = null
+        )
+
+        assertEquals(pinned.sortOrder, sourceDao.sources.first { it.url == pinned.url }.sortOrder)
+        assertEquals(normal.sortOrder, sourceDao.sources.first { it.url == normal.url }.sortOrder)
+    }
+
+    @Test
+    fun reorderContentChannels_ignoresIndependentArticleInPinnedGroup() = runBlocking {
+        val pinnedFirst = source(
+            url = "https://example.com/first.xml",
+            updatedAt = 100L,
+            isPinned = true
+        )
+        val pinnedSecond = source(
+            url = "https://example.com/second.xml",
+            updatedAt = 90L,
+            isPinned = true
+        )
+        val sourceDao = FakePhoneRssSourceDao().apply {
+            sources = listOf(pinnedFirst, pinnedSecond)
+        }
+        val articleDao = FakePhoneArticleDao().apply {
+            items = listOf(
+                article(
+                    id = "independent",
+                    independentSaved = true,
+                    independentChangedAt = 50L
+                )
+            )
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone"
+        )
+
+        repository.reorderContentChannels(
+            sourceUrlsInDisplayOrder = listOf(pinnedFirst.url, pinnedSecond.url),
+            independentIndex = 1
+        )
+
+        assertEquals(pinnedFirst.sortOrder, sourceDao.sources.first { it.url == pinnedFirst.url }.sortOrder)
+        assertEquals(pinnedSecond.sortOrder, sourceDao.sources.first { it.url == pinnedSecond.url }.sortOrder)
+        assertEquals(50L, articleDao.items.single().independentSortOrder)
+    }
+
+    @Test
+    fun repairImportedContentSourceStates_createsMissingImportedTextSource() = runBlocking {
+        val sourceDao = FakePhoneRssSourceDao()
+        val articleDao = FakePhoneArticleDao().apply {
+            items = listOf(
+                article(
+                    id = "txt",
+                    url = ImportedContentIds.txtArticleUrl("txt"),
+                    importedAt = 42L
+                )
+            )
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone"
+        )
+
+        val repaired = repository.repairImportedContentSourceStates()
+
+        val source = sourceDao.sources.single()
+        assertEquals(1, repaired)
+        assertEquals(ImportedContentIds.ROOT_SOURCE_URL, source.url)
+        assertEquals(ImportedContentIds.ROOT_SOURCE_TITLE, source.title)
+        assertEquals(false, source.deleted)
+        assertTrue(source.sortOrder >= 42L)
+    }
+
     private fun source(
         url: String,
         title: String = "示例源",
         deleted: Boolean = false,
         deletedAt: Long = 0L,
-        updatedAt: Long = 1L
+        updatedAt: Long = 1L,
+        isPinned: Boolean = false
     ): PhoneRssSourceEntity {
         return PhoneRssSourceEntity(
             url = url,
@@ -1047,7 +1182,7 @@ class PhoneCompanionRepositoryTest {
             createdAt = 1L,
             updatedAt = updatedAt,
             sortOrder = updatedAt,
-            isPinned = false,
+            isPinned = isPinned,
             deleted = deleted,
             deletedAt = deletedAt
         )

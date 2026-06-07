@@ -283,7 +283,15 @@ class PhoneCompanionRepository(
             .filter { it.isNotBlank() }
             .distinct()
         if (orderedUrls.size < 2 && independentIndex == null) return
+        if (ImportedContentIds.ROOT_SOURCE_URL in orderedUrls) {
+            repairMissingImportedTextSourceIfNeeded(rssSourceDao.getAllForSync())
+        }
         val sourcesByUrl = rssSourceDao.getAllForSync().associateBy { it.url }
+        val requestedSources = orderedUrls.mapNotNull { url ->
+            sourcesByUrl[url]?.takeUnless { it.deleted }
+        }
+        if (requestedSources.map { it.isPinned }.distinct().size > 1) return
+        if (independentIndex != null && requestedSources.any { it.isPinned }) return
         val now = System.currentTimeMillis()
         val hasIndependentArticles = independentIndex != null &&
             articleDao.getAllForSync().any { it.independentSaved && !it.deleted }
@@ -582,12 +590,16 @@ class PhoneCompanionRepository(
     }
 
     suspend fun repairImportedContentSourceStates(): Int = withContext(Dispatchers.IO) {
+        var repaired = 0
+        repaired += if (repairMissingImportedTextSourceIfNeeded(rssSourceDao.getAllForSync())) 1 else 0
         val sources = rssSourceDao.getAllForSync()
             .filter { ImportedContentIds.isImportedContentUrl(it.url) }
-        var repaired = 0
         sources.forEach { source ->
-            val liveArticles = articleDao.getByRssSourceUrl(source.url)
-                .filterNot { it.deleted }
+            val liveArticles = if (ImportedContentIds.isImportedTextSourceUrl(source.url)) {
+                liveImportedTextArticles()
+            } else {
+                articleDao.getByRssSourceUrl(source.url).filterNot { it.deleted }
+            }
             if (liveArticles.isEmpty() || !source.deleted) return@forEach
             val latestArticleUpdate = liveArticles.maxOf { article ->
                 maxOf(article.updatedAt, article.importedAt)
@@ -603,6 +615,49 @@ class PhoneCompanionRepository(
             repaired += 1
         }
         repaired
+    }
+
+    private suspend fun repairMissingImportedTextSourceIfNeeded(
+        sources: List<PhoneRssSourceEntity>
+    ): Boolean {
+        if (sources.any { it.url == ImportedContentIds.ROOT_SOURCE_URL }) return false
+        val liveArticles = liveImportedTextArticles()
+        if (liveArticles.isEmpty()) return false
+        val latestArticleUpdate = liveArticles.maxOf { article ->
+            maxOf(article.updatedAt, article.importedAt)
+        }
+        val createdAt = liveArticles.minOf { article ->
+            listOf(article.importedAt, article.updatedAt)
+                .filter { it > 0L }
+                .minOrNull() ?: latestArticleUpdate
+        }
+        val source = PhoneRssSourceEntity(
+            url = ImportedContentIds.ROOT_SOURCE_URL,
+            sourceDeviceId = deviceId,
+            title = ImportedContentIds.ROOT_SOURCE_TITLE,
+            description = "",
+            siteUrl = null,
+            imageUrl = null,
+            createdAt = createdAt,
+            updatedAt = latestArticleUpdate,
+            sortOrder = latestArticleUpdate,
+            isPinned = false,
+            deleted = false,
+            deletedAt = 0L
+        )
+        rssSourceDao.upsert(source)
+        recordRssSourceChange(source.url, "repairState", latestArticleUpdate)
+        return true
+    }
+
+    private suspend fun liveImportedTextArticles(): List<PhoneArticleEntity> {
+        return articleDao.getAllForSync().filter { article ->
+            !article.deleted &&
+                (
+                    article.rssSourceUrl == ImportedContentIds.ROOT_SOURCE_URL ||
+                        ImportedContentIds.isImportedTextArticleUrl(article.url)
+                )
+        }
     }
 
     suspend fun findDeleteConflicts(remoteManifest: List<ArticleSyncManifestEntry>): List<PhoneSyncDeleteConflict> =

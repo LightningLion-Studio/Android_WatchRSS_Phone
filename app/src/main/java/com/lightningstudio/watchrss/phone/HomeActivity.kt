@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -40,13 +41,16 @@ class HomeActivity : ComponentActivity() {
     }
 
     private val viewModel: MainViewModel by viewModels {
+        val container = (application as PhoneCompanionApplication).container
         MainViewModelFactory(
-            (application as PhoneCompanionApplication).container.repository,
-            (application as PhoneCompanionApplication).container.bluetoothSyncManager
+            container.repository,
+            container.bluetoothSyncManager,
+            container.usageTelemetry
         )
     }
 
     private var pendingBluetoothAction: (() -> Unit)? = null
+    private var homeScreenStartedAt: Long = 0L
 
     private val bluetoothPermissionsLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -128,6 +132,7 @@ class HomeActivity : ComponentActivity() {
 
                 MainScreen(
                     uiState = state,
+                    showAccountFeatures = BuildConfig.DEBUG,
                     onUrlChange = viewModel::updateUrlInput,
                     onImportArticle = viewModel::importIndependentArticle,
                     onAddRssSource = viewModel::addRssSource,
@@ -136,6 +141,10 @@ class HomeActivity : ComponentActivity() {
                     onConfirmSharedFileImport = ::importSharedFile,
                     onDismissSharedImport = viewModel::dismissSharedImportPrompt,
                     onSyncLibrary = { ensureBluetoothPermissions(viewModel::syncLibraryByBluetooth) },
+                    onSyncAccount = { ensureBluetoothPermissions(viewModel::syncAccountByBluetooth) },
+                    onOpenAccount = {
+                        startActivity(AccountActivity.createIntent(this@HomeActivity))
+                    },
                     onChooseBluetoothDevice = viewModel::chooseBluetoothDeviceForSync,
                     onDismissBluetoothDevicePrompt = viewModel::dismissBluetoothDevicePrompt,
                     onExportBluetoothLog = ::exportBluetoothLog,
@@ -180,6 +189,24 @@ class HomeActivity : ComponentActivity() {
             }
         }
         handleInboundIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        homeScreenStartedAt = SystemClock.elapsedRealtime()
+        (application as PhoneCompanionApplication).container.usageTelemetry.recordScreenOpen("phone_home")
+    }
+
+    override fun onPause() {
+        super.onPause()
+        val startedAt = homeScreenStartedAt
+        if (startedAt > 0L) {
+            (application as PhoneCompanionApplication).container.usageTelemetry.recordScreenDuration(
+                "phone_home",
+                SystemClock.elapsedRealtime() - startedAt
+            )
+            homeScreenStartedAt = 0L
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

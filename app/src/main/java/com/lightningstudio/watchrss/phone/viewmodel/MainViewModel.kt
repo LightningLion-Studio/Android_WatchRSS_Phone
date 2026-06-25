@@ -13,6 +13,7 @@ import com.lightningstudio.watchrss.phone.data.importer.LocalContentImportKind
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
+import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -60,13 +61,20 @@ data class MainConflictPromptUi(
 )
 
 data class MainBluetoothDevicePromptUi(
-    val devices: List<MainBluetoothDeviceUi>
+    val devices: List<MainBluetoothDeviceUi>,
+    val purpose: MainBluetoothDevicePromptPurpose = MainBluetoothDevicePromptPurpose.LIBRARY
 )
 
 data class MainBluetoothDeviceUi(
     val name: String,
-    val address: String
+    val address: String,
+    val remoteDeviceId: String = ""
 )
+
+enum class MainBluetoothDevicePromptPurpose {
+    LIBRARY,
+    ACCOUNT
+}
 
 enum class SharedImportPromptKind {
     LINK,
@@ -99,7 +107,8 @@ private data class LibraryContentLists(
 
 class MainViewModel(
     private val repository: PhoneCompanionRepository,
-    private val bluetoothSyncManager: PhoneBluetoothSyncManager
+    private val bluetoothSyncManager: PhoneBluetoothSyncManager,
+    private val usageTelemetry: PhoneUsageTelemetry
 ) : ViewModel() {
     private val _toastEvent = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val toastEvent: SharedFlow<String> = _toastEvent.asSharedFlow()
@@ -510,7 +519,74 @@ class MainViewModel(
                         syncStatusError = null,
                         error = null,
                         bluetoothDevicePrompt = MainBluetoothDevicePromptUi(
-                            devices = reachableDevices.map { it.toUi() }
+                            devices = reachableDevices.map { it.toUi() },
+                            purpose = MainBluetoothDevicePromptPurpose.LIBRARY
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun syncAccountByBluetooth() {
+        viewModelScope.launch {
+            beginSmoothedSyncProgress(MainSyncProgressUi(phase = "探测手表中", percent = 0))
+            sessionState.value = sessionState.value.copy(
+                isBusy = true,
+                message = "探测手表中",
+                syncStatusMessage = "探测手表中",
+                syncStatusError = null,
+                error = null,
+                bluetoothDevicePrompt = null,
+                conflictPrompt = null
+            )
+            val reachableDevices = runCatching {
+                bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress)
+            }.getOrElse { throwable ->
+                clearSmoothedSyncProgress()
+                sessionState.value = sessionState.value.copy(
+                    isBusy = false,
+                    message = null,
+                    syncStatusMessage = null,
+                    syncStatusError = null,
+                    error = null,
+                    bluetoothDevicePrompt = null,
+                    conflictPrompt = null
+                )
+                usageTelemetry.recordSyncResult(false, "account", throwable.message)
+                _toastEvent.tryEmit(throwable.message ?: "操作失败")
+                return@launch
+            }
+            when (reachableDevices.size) {
+                0 -> {
+                    clearSmoothedSyncProgress()
+                    sessionState.value = sessionState.value.copy(
+                        isBusy = false,
+                        message = null,
+                        syncStatusMessage = null,
+                        syncStatusError = null,
+                        error = null,
+                        bluetoothDevicePrompt = null
+                    )
+                    usageTelemetry.recordSyncResult(false, "account", "no_watch")
+                    _toastEvent.tryEmit("未找到已打开 WatchRSS 的已配对手表，请在手表端打开应用并保持亮屏后重试")
+                }
+                1 -> {
+                    delay(400L)
+                    runAccountSync(reachableDevices.single().toUi())
+                }
+                else -> {
+                    clearSmoothedSyncProgress()
+                    val message = "发现 ${reachableDevices.size} 块可同步手表"
+                    sessionState.value = sessionState.value.copy(
+                        isBusy = false,
+                        message = message,
+                        syncStatusMessage = message,
+                        syncStatusError = null,
+                        error = null,
+                        bluetoothDevicePrompt = MainBluetoothDevicePromptUi(
+                            devices = reachableDevices.map { it.toUi() },
+                            purpose = MainBluetoothDevicePromptPurpose.ACCOUNT
                         )
                     )
                 }
@@ -520,8 +596,13 @@ class MainViewModel(
 
     fun chooseBluetoothDeviceForSync(device: MainBluetoothDeviceUi) {
         viewModelScope.launch {
+            val purpose = sessionState.value.bluetoothDevicePrompt?.purpose
             sessionState.value = sessionState.value.copy(bluetoothDevicePrompt = null)
-            runLibrarySync(device.address)
+            if (purpose == MainBluetoothDevicePromptPurpose.ACCOUNT) {
+                runAccountSync(device)
+            } else {
+                runLibrarySync(device.address)
+            }
         }
     }
 
@@ -569,6 +650,7 @@ class MainViewModel(
                     "已与 $deviceName 同步"
                 }
             )
+            usageTelemetry.recordSyncResult(true, "library")
         }.onFailure { throwable ->
             clearSmoothedSyncProgress()
             sessionState.value = sessionState.value.copy(
@@ -577,10 +659,56 @@ class MainViewModel(
                 error = null,
                 conflictPrompt = null
             )
+            usageTelemetry.recordSyncResult(false, "library", throwable.message)
             _toastEvent.tryEmit(throwable.message ?: "操作失败")
         }
         conflictResolutionDeferred?.complete(PhoneSyncConflictResolution.KEEP_LATEST)
         conflictResolutionDeferred = null
+        sessionState.value = sessionState.value.copy(isBusy = false, conflictPrompt = null)
+    }
+
+    private suspend fun runAccountSync(device: MainBluetoothDeviceUi) {
+        beginSmoothedSyncProgress(MainSyncProgressUi(phase = "同步账号中", percent = 20))
+        sessionState.value = sessionState.value.copy(
+            isBusy = true,
+            message = "同步账号中",
+            syncStatusMessage = "同步账号中",
+            syncStatusError = null,
+            error = null,
+            bluetoothDevicePrompt = null
+        )
+        runCatching {
+            val result = bluetoothSyncManager.syncAccount(
+                PhoneBluetoothWatchDevice(
+                    name = device.name,
+                    address = device.address,
+                    uuidCount = 0,
+                    remoteDeviceId = device.remoteDeviceId
+                )
+            )
+            completeSmoothedSyncProgress()
+            val deviceName = result.deviceName.ifBlank { device.name.ifBlank { "手表" } }
+            val message = "已向 $deviceName 同步账号"
+            sessionState.value = sessionState.value.copy(
+                message = message,
+                syncStatusMessage = message,
+                syncStatusError = null,
+                error = null,
+                syncProgress = null
+            )
+            usageTelemetry.recordSyncResult(true, "account")
+            _toastEvent.tryEmit(message)
+        }.onFailure { throwable ->
+            clearSmoothedSyncProgress()
+            sessionState.value = sessionState.value.copy(
+                syncStatusMessage = null,
+                syncStatusError = null,
+                error = null,
+                conflictPrompt = null
+            )
+            usageTelemetry.recordSyncResult(false, "account", throwable.message)
+            _toastEvent.tryEmit(throwable.message ?: "操作失败")
+        }
         sessionState.value = sessionState.value.copy(isBusy = false, conflictPrompt = null)
     }
 
@@ -762,7 +890,8 @@ class MainViewModel(
     private fun PhoneBluetoothWatchDevice.toUi(): MainBluetoothDeviceUi =
         MainBluetoothDeviceUi(
             name = name.ifBlank { "未知手表" },
-            address = address
+            address = address,
+            remoteDeviceId = remoteDeviceId
         )
 
     private fun beginSmoothedSyncProgress(progress: MainSyncProgressUi) {

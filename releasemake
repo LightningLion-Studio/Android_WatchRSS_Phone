@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GRADLEW="${ROOT_DIR}/gradlew"
-VERSION_FILE="${ROOT_DIR}/app/build.gradle.kts"
+VERSION_REL_PATH="app/build.gradle.kts"
+VERSION_FILE="${ROOT_DIR}/${VERSION_REL_PATH}"
 APK_DIR="${ROOT_DIR}/app/build/outputs/apk/release"
 OUTPUT_DIR="${ROOT_DIR}"
 
@@ -24,6 +25,36 @@ Options:
 Example:
   ./releasemake --version-name 1.2.0
 EOF
+}
+
+ensure_version_commit_ready() {
+    if ! command -v git >/dev/null 2>&1; then
+        echo "git is required to commit release version changes" >&2
+        exit 1
+    fi
+
+    if ! git -C "${ROOT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "Not a git work tree: ${ROOT_DIR}" >&2
+        exit 1
+    fi
+
+    if ! git -C "${ROOT_DIR}" diff --quiet -- "${VERSION_REL_PATH}" ||
+        ! git -C "${ROOT_DIR}" diff --cached --quiet -- "${VERSION_REL_PATH}"; then
+        echo "Version file has uncommitted changes: ${VERSION_REL_PATH}" >&2
+        echo "Commit or restore it before running releasemake so the release version commit stays clean." >&2
+        exit 1
+    fi
+}
+
+commit_version_bump() {
+    git -C "${ROOT_DIR}" add -- "${VERSION_REL_PATH}"
+
+    if git -C "${ROOT_DIR}" diff --cached --quiet -- "${VERSION_REL_PATH}"; then
+        echo "No release version changes to commit." >&2
+        return
+    fi
+
+    git -C "${ROOT_DIR}" commit -m "更新 release ${version_name} 版本号" -- "${VERSION_REL_PATH}"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -89,6 +120,8 @@ if [[ ! -f "${VERSION_FILE}" ]]; then
     exit 1
 fi
 
+ensure_version_commit_ready
+
 version_code_count="$(grep -Ec '^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*[0-9]+[[:space:]]*$' "${VERSION_FILE}")"
 version_name_count="$(grep -Ec '^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"[^"]*"[[:space:]]*$' "${VERSION_FILE}")"
 
@@ -145,6 +178,7 @@ output_apk="${OUTPUT_DIR}/phone-release-${release_date}-${version_name}.apk"
 cp "${apk_path}" "${output_apk}"
 
 restore_on_failure=false
+commit_version_bump
 
 cat <<EOF
 Release APK is ready.

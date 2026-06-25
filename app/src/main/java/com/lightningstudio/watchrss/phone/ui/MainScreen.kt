@@ -39,6 +39,7 @@ import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.BugReport
@@ -234,6 +235,7 @@ private sealed interface RecentImportEntry {
 @Composable
 fun MainScreen(
     uiState: MainUiState,
+    showAccountFeatures: Boolean = true,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
     onImportFile: () -> Unit,
@@ -243,6 +245,8 @@ fun MainScreen(
     onConfirmSharedFileImport: (SharedImportPromptUi) -> Unit,
     onDismissSharedImport: () -> Unit,
     onSyncLibrary: () -> Unit,
+    onSyncAccount: () -> Unit,
+    onOpenAccount: () -> Unit,
     onChooseBluetoothDevice: (MainBluetoothDeviceUi) -> Unit,
     onDismissBluetoothDevicePrompt: () -> Unit,
     onExportBluetoothLog: () -> Unit,
@@ -823,6 +827,8 @@ fun MainScreen(
                     }
                 },
                 onExportBluetoothLog = onExportBluetoothLog,
+                onOpenAccount = onOpenAccount,
+                showAccountAction = showAccountFeatures,
                 modifier = modifier
             )
         }
@@ -914,6 +920,9 @@ fun MainScreen(
                                     contentPadding = contentPadding,
                                     windowInfo = windowInfo,
                                     onSyncLibrary = onSyncLibrary,
+                                    onSyncAccount = onSyncAccount,
+                                    onOpenAccount = onOpenAccount,
+                                    showAccountActions = showAccountFeatures,
                                     onExportBluetoothLog = onExportBluetoothLog,
                                     onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
                                     onOpenFavorites = { navigateToContentChannel(CONTENT_CHANNEL_FAVORITES) },
@@ -974,6 +983,9 @@ fun MainScreen(
                                 contentPadding = contentPadding,
                                 windowInfo = windowInfo,
                                 onSyncLibrary = onSyncLibrary,
+                                onSyncAccount = onSyncAccount,
+                                onOpenAccount = onOpenAccount,
+                                showAccountActions = showAccountFeatures,
                                 onExportBluetoothLog = onExportBluetoothLog,
                                 onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
                                 onOpenFavorites = { navigateToContentChannel(CONTENT_CHANNEL_FAVORITES) },
@@ -1005,6 +1017,9 @@ fun MainScreen(
                                 contentPadding = contentPadding,
                                 windowInfo = windowInfo,
                                 onSyncLibrary = onSyncLibrary,
+                                onSyncAccount = onSyncAccount,
+                                onOpenAccount = onOpenAccount,
+                                showAccountActions = showAccountFeatures,
                                 onExportBluetoothLog = onExportBluetoothLog,
                                 onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
                                 onOpenFavorites = { openAdaptiveContentChannel(CONTENT_CHANNEL_FAVORITES, MainPage.RSS) },
@@ -1646,6 +1661,8 @@ private fun MainTopBar(
     onRefreshAllRssSources: () -> Unit,
     onRefreshSelectedSource: () -> Unit,
     onExportBluetoothLog: () -> Unit,
+    onOpenAccount: () -> Unit,
+    showAccountAction: Boolean,
     modifier: Modifier = Modifier
 ) {
     val title = when (page) {
@@ -1672,8 +1689,15 @@ private fun MainTopBar(
         },
         actions = {
             when (page) {
-                MainPage.DASHBOARD -> IconButton(onClick = onExportBluetoothLog) {
-                    Icon(Icons.Default.BugReport, contentDescription = "导出蓝牙日志")
+                MainPage.DASHBOARD -> {
+                    if (showAccountAction) {
+                        IconButton(onClick = onOpenAccount) {
+                            Icon(Icons.Default.AccountCircle, contentDescription = "账号")
+                        }
+                    }
+                    IconButton(onClick = onExportBluetoothLog) {
+                        Icon(Icons.Default.BugReport, contentDescription = "导出蓝牙日志")
+                    }
                 }
                 MainPage.RSS -> IconButton(
                     onClick = onRefreshAllRssSources,
@@ -1846,6 +1870,9 @@ private fun DashboardPage(
     contentPadding: PaddingValues,
     windowInfo: AdaptiveWindowInfo,
     onSyncLibrary: () -> Unit,
+    onSyncAccount: () -> Unit,
+    onOpenAccount: () -> Unit,
+    showAccountActions: Boolean,
     onExportBluetoothLog: () -> Unit,
     onOpenRss: () -> Unit,
     onOpenFavorites: () -> Unit,
@@ -1867,6 +1894,8 @@ private fun DashboardPage(
                 onRefreshAllRssSources = {},
                 onRefreshSelectedSource = {},
                 onExportBluetoothLog = onExportBluetoothLog,
+                onOpenAccount = onOpenAccount,
+                showAccountAction = showAccountActions,
                 modifier = Modifier.fillMaxWidth()
             )
         }
@@ -1898,6 +1927,8 @@ private fun DashboardPage(
                                     syncProgress = uiState.syncProgress,
                                     isBusy = uiState.isBusy,
                                     onSyncLibrary = onSyncLibrary,
+                                    onSyncAccount = onSyncAccount,
+                                    showAccountAction = showAccountActions,
                                     onExportBluetoothLog = onExportBluetoothLog,
                                     onDismissMessage = onDismissMessage
                                 )
@@ -1927,6 +1958,8 @@ private fun DashboardPage(
                             syncProgress = uiState.syncProgress,
                             isBusy = uiState.isBusy,
                             onSyncLibrary = onSyncLibrary,
+                            onSyncAccount = onSyncAccount,
+                            showAccountAction = showAccountActions,
                             onExportBluetoothLog = onExportBluetoothLog,
                             onDismissMessage = onDismissMessage
                         )
@@ -1959,6 +1992,8 @@ private fun SyncStatusCard(
     syncProgress: MainSyncProgressUi?,
     isBusy: Boolean,
     onSyncLibrary: () -> Unit,
+    onSyncAccount: () -> Unit,
+    showAccountAction: Boolean,
     onExportBluetoothLog: () -> Unit,
     onDismissMessage: () -> Unit
 ) {
@@ -2036,7 +2071,7 @@ private fun SyncStatusCard(
                         )
                 )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = onSyncLibrary,
                     enabled = !isBusy,
@@ -2045,6 +2080,17 @@ private fun SyncStatusCard(
                     Icon(Icons.Default.Sync, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("同步")
+                }
+                if (showAccountAction) {
+                    OutlinedButton(
+                        onClick = onSyncAccount,
+                        enabled = !isBusy,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.AccountCircle, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("账号")
+                    }
                 }
                 OutlinedButton(
                     onClick = onExportBluetoothLog,

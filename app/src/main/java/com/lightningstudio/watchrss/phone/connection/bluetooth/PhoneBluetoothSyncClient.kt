@@ -55,7 +55,8 @@ private data class LibraryResponseRead(
 data class PhoneBluetoothWatchDevice(
     val name: String,
     val address: String,
-    val uuidCount: Int
+    val uuidCount: Int,
+    val remoteDeviceId: String = ""
 )
 
 data class PhoneBluetoothWatchProbeResult(
@@ -464,9 +465,9 @@ class PhoneBluetoothSyncClient(
             )
         }
         val probe = result.fold(
-            onSuccess = {
+            onSuccess = { remoteDeviceId ->
                 PhoneBluetoothWatchProbeResult(
-                    device = device.toWatchDevice(),
+                    device = device.toWatchDevice(remoteDeviceId),
                     reachable = true
                 )
             },
@@ -494,7 +495,7 @@ class PhoneBluetoothSyncClient(
         deviceId: String,
         sessionId: String,
         fallbackTimeoutMs: Long
-    ) {
+    ): String {
         val probeResult = runCatching {
             withTimeout(V9_PROBE_TIMEOUT_MS) {
                 exchange(
@@ -512,7 +513,7 @@ class PhoneBluetoothSyncClient(
                 sessionId = sessionId,
                 fields = payloadFields("probeResponse", exchange.response)
             )
-            return
+            return exchange.response.optString("deviceId").trim()
         }
         if (exchange != null && exchange.response.optBoolean("success", false)) {
             debugLog.appendEvent(
@@ -520,7 +521,7 @@ class PhoneBluetoothSyncClient(
                 sessionId = sessionId,
                 fields = payloadFields("probeResponse", exchange.response)
             )
-            return
+            return exchange.response.optString("deviceId").trim()
         }
         probeResult.exceptionOrNull()?.let { throwable ->
             debugLog.appendEvent(
@@ -530,7 +531,7 @@ class PhoneBluetoothSyncClient(
                 throwable = throwable
             )
         }
-        withTimeout(fallbackTimeoutMs) {
+        return withTimeout(fallbackTimeoutMs) {
             exchangeLibrary(
                 manifestRequest = buildProbeManifestRequest(deviceId),
                 buildArticleRequests = { _, _ ->
@@ -541,7 +542,7 @@ class PhoneBluetoothSyncClient(
                 onProgress = {},
                 ackApplied = false,
                 rememberDeviceOnSuccess = false
-            )
+            ).manifestResponse.optString("deviceId").trim()
         }
     }
 
@@ -1114,11 +1115,12 @@ class PhoneBluetoothSyncClient(
     }
 
     @SuppressLint("MissingPermission")
-    private fun BluetoothDevice.toWatchDevice(): PhoneBluetoothWatchDevice =
+    private fun BluetoothDevice.toWatchDevice(remoteDeviceId: String = ""): PhoneBluetoothWatchDevice =
         PhoneBluetoothWatchDevice(
             name = name.orEmpty(),
             address = address,
-            uuidCount = uuids?.size ?: 0
+            uuidCount = uuids?.size ?: 0,
+            remoteDeviceId = remoteDeviceId
         )
 
     private fun payloadFields(prefix: String, payload: JSONObject): Map<String, Any?> {

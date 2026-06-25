@@ -16,7 +16,8 @@ import org.json.JSONObject
 data class PhoneBluetoothSyncResult(
     val deviceName: String,
     val importedCount: Int? = null,
-    val libraryStats: LibrarySyncStats? = null
+    val libraryStats: LibrarySyncStats? = null,
+    val accountSync: AccountSyncResult? = null
 )
 
 enum class PhoneBluetoothSyncStage(val displayName: String) {
@@ -36,7 +37,9 @@ class PhoneBluetoothSyncManager(
     context: Context,
     private val repository: PhoneCompanionRepository,
     private val deviceId: String,
-    private val debugLog: BluetoothDebugLog
+    private val debugLog: BluetoothDebugLog,
+    private val buildAccountSyncRequest: suspend (watchDeviceId: String, watchInstallId: String?, watchDisplayName: String?) -> JSONObject =
+        { _, _, _ -> error("账号同步未配置") }
 ) {
     private val client = PhoneBluetoothSyncClient(context.applicationContext, debugLog)
 
@@ -114,6 +117,54 @@ class PhoneBluetoothSyncManager(
         }.onFailure { throwable ->
             debugLog.appendEvent(
                 event = "sync.remoteInput.failed",
+                sessionId = sessionId,
+                fields = failureFields(throwable),
+                throwable = throwable
+            )
+        }.getOrThrow()
+    }
+
+    suspend fun syncAccount(device: PhoneBluetoothWatchDevice): PhoneBluetoothSyncResult {
+        val sessionId = BluetoothDebugLog.newSessionId("syncAccount")
+        val watchDeviceId = device.remoteDeviceId.ifBlank { device.address }
+        debugLog.appendEvent(
+            event = "sync.account.start",
+            sessionId = sessionId,
+            fields = mapOf(
+                "targetAddress" to device.address,
+                "watchDeviceId" to watchDeviceId
+            )
+        )
+        return runCatching {
+            val request = buildAccountSyncRequest(
+                watchDeviceId,
+                null,
+                device.name.ifBlank { "手表" }
+            )
+            val exchange = exchange(
+                request = request,
+                deviceAddress = device.address,
+                sessionId = sessionId
+            )
+            requireSuccess(exchange.response)
+            val accountSync = AccountSyncPayload.parseResponse(exchange.response)
+            debugLog.appendEvent(
+                event = "sync.account.complete",
+                sessionId = sessionId,
+                fields = mapOf(
+                    "device" to exchange.deviceName,
+                    "boundUserId" to accountSync.boundUserId,
+                    "watchDeviceId" to accountSync.watchDeviceId,
+                    "telemetryBacklog" to accountSync.telemetryBacklog
+                )
+            )
+            PhoneBluetoothSyncResult(
+                deviceName = exchange.deviceName,
+                accountSync = accountSync
+            )
+        }.onFailure { throwable ->
+            debugLog.appendEvent(
+                event = "sync.account.failed",
                 sessionId = sessionId,
                 fields = failureFields(throwable),
                 throwable = throwable
@@ -401,12 +452,17 @@ class PhoneBluetoothSyncManager(
     private suspend fun exchange(
         request: JSONObject,
         timeoutMs: Long = QUICK_EXCHANGE_TIMEOUT_MS,
-        sessionId: String
+        sessionId: String,
+        deviceAddress: String? = null
     ): BluetoothSyncExchange {
         return try {
             withTimeout(timeoutMs) {
                 withContext(Dispatchers.IO) {
-                    client.exchange(request, sessionId = sessionId)
+                    client.exchange(
+                        request = request,
+                        deviceAddress = deviceAddress,
+                        sessionId = sessionId
+                    )
                 }
             }
         } catch (exception: TimeoutCancellationException) {

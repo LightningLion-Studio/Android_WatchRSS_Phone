@@ -2,6 +2,11 @@ package com.lightningstudio.watchrss.phone
 
 import android.content.Context
 import androidx.room.Room
+import com.lightningstudio.watchrss.phone.account.AccountEnvironment
+import com.lightningstudio.watchrss.phone.account.EncryptedAccountSessionStore
+import com.lightningstudio.watchrss.phone.account.PhoneAccountClient
+import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
+import com.lightningstudio.watchrss.phone.account.PhoneInstallationIdentity
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
 import com.lightningstudio.watchrss.phone.connection.guided.PhoneGuidedSessionManager
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
@@ -10,9 +15,17 @@ import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
+import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 
 class PhoneCompanionContainer(context: Context) {
     private val appContext = context.applicationContext
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val accountEnvironment: AccountEnvironment by lazy {
+        AccountEnvironment()
+    }
 
     private val database: PhoneCompanionDatabase by lazy {
         Room.databaseBuilder(
@@ -33,6 +46,30 @@ class PhoneCompanionContainer(context: Context) {
 
     private val deviceIdentity: PhoneDeviceIdentity by lazy {
         PhoneDeviceIdentity(appContext)
+    }
+
+    private val installationIdentity: PhoneInstallationIdentity by lazy {
+        PhoneInstallationIdentity(appContext)
+    }
+
+    val accountRepository: PhoneAccountRepository by lazy {
+        PhoneAccountRepository(
+            environment = accountEnvironment,
+            sessionStore = EncryptedAccountSessionStore(appContext),
+            installationIdentity = installationIdentity,
+            accountClient = PhoneAccountClient(accountEnvironment),
+            phoneDeviceId = deviceIdentity.deviceId
+        )
+    }
+
+    val usageTelemetry: PhoneUsageTelemetry by lazy {
+        PhoneUsageTelemetry(
+            context = appContext,
+            environment = accountEnvironment,
+            installationIdentity = installationIdentity,
+            accountRepository = accountRepository,
+            appScope = appScope
+        )
     }
 
     val bluetoothDebugLog: BluetoothDebugLog by lazy {
@@ -72,7 +109,8 @@ class PhoneCompanionContainer(context: Context) {
             context = appContext,
             repository = repository,
             deviceId = deviceIdentity.deviceId,
-            debugLog = bluetoothDebugLog
+            debugLog = bluetoothDebugLog,
+            buildAccountSyncRequest = accountRepository::buildAccountSyncRequest
         )
     }
 }

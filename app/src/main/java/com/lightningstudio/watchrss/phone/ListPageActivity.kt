@@ -100,7 +100,8 @@ class ListPageActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels {
         MainViewModelFactory(
             (application as PhoneCompanionApplication).container.repository,
-            (application as PhoneCompanionApplication).container.bluetoothSyncManager
+            (application as PhoneCompanionApplication).container.bluetoothSyncManager,
+            (application as PhoneCompanionApplication).container.usageTelemetry
         )
     }
 

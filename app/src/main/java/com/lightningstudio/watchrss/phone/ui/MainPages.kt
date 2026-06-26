@@ -62,6 +62,7 @@ import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.ui.theme.AppCard
 import com.lightningstudio.watchrss.phone.ui.theme.AppPrimaryCard
 import com.lightningstudio.watchrss.phone.ui.theme.AppListCard
+import com.lightningstudio.watchrss.phone.ui.theme.appPinnedListCardGradient
 import com.lightningstudio.watchrss.phone.ui.theme.roundedClickable
 import com.lightningstudio.watchrss.phone.ui.theme.roundedCombinedClickable
 import com.lightningstudio.watchrss.phone.viewmodel.MainSyncProgressUi
@@ -361,6 +362,7 @@ fun SourceRow(
     onDelete: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val backgroundBrush = if (source.isPinned) appPinnedListCardGradient() else null
     Box(modifier = Modifier.fillMaxWidth()) {
         AppListCard(
             modifier = Modifier.fillMaxWidth(),
@@ -368,7 +370,8 @@ fun SourceRow(
                 shape = RoundedCornerShape(12.dp),
                 onClick = onClick,
                 onLongClick = { menuExpanded = true }
-            )
+            ),
+            backgroundBrush = backgroundBrush
         ) {
             Column(
                 modifier = Modifier.padding(16.dp),

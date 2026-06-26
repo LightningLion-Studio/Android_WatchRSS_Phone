@@ -677,6 +677,23 @@ internal fun ArticleReaderScreen(
                     bottom = 20.dp
                 )
                 val reader = importedTextReader
+                val hideContentUntilRestore = safeArticle.readingProgress > ARTICLE_RESTORE_HIDE_PROGRESS_EPSILON &&
+                    !hasRestoredPosition
+                fun Modifier.restoreVisibility(): Modifier {
+                    return if (hideContentUntilRestore) {
+                        graphicsLayer { alpha = 0f }
+                    } else {
+                        this
+                    }
+                }
+                @Composable
+                fun RestoreLoadingOverlay() {
+                    ReaderContentLoadingPlaceholder(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(readerContentPadding)
+                    )
+                }
                 when {
                     !contentReady -> {
                         AdaptiveContentFrame(
@@ -697,15 +714,22 @@ internal fun ArticleReaderScreen(
                             mediumMaxWidth = 720.dp,
                             expandedMaxWidth = 760.dp
                         ) {
-                            ImportedTextChunkContentView(
-                                reader = reader,
-                                listState = listState,
-                                chunkTexts = importedTextChunkTexts,
-                                chunkLayouts = importedTextChunkLayouts,
-                                onLoadImportedTextChunk = onLoadImportedTextChunk,
-                                modifier = Modifier.fillMaxSize(),
-                                contentPadding = readerContentPadding
-                            )
+                            Box(modifier = Modifier.fillMaxSize()) {
+                                ImportedTextChunkContentView(
+                                    reader = reader,
+                                    listState = listState,
+                                    chunkTexts = importedTextChunkTexts,
+                                    chunkLayouts = importedTextChunkLayouts,
+                                    onLoadImportedTextChunk = onLoadImportedTextChunk,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .restoreVisibility(),
+                                    contentPadding = readerContentPadding
+                                )
+                                if (hideContentUntilRestore) {
+                                    RestoreLoadingOverlay()
+                                }
+                            }
                         }
                     }
                     waitingForImportedTextReader -> {
@@ -740,15 +764,22 @@ internal fun ArticleReaderScreen(
                             mediumMaxWidth = 720.dp,
                             expandedMaxWidth = 760.dp
                         ) {
-                            ArticleReaderContentView(
-                                nodes = contentNodes,
-                                listState = listState,
-                                textLayouts = textLayouts,
-                                onPreviewImage = { previewImage = it },
-                                previewSourceNodeIndex = previewImage?.sourceNodeIndex,
-                                modifier = Modifier.fillMaxSize(),
-                                contentPadding = readerContentPadding
-                            )
+                            Box(modifier = Modifier.fillMaxSize()) {
+                                ArticleReaderContentView(
+                                    nodes = contentNodes,
+                                    listState = listState,
+                                    textLayouts = textLayouts,
+                                    onPreviewImage = { previewImage = it },
+                                    previewSourceNodeIndex = previewImage?.sourceNodeIndex,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .restoreVisibility(),
+                                    contentPadding = readerContentPadding
+                                )
+                                if (hideContentUntilRestore) {
+                                    RestoreLoadingOverlay()
+                                }
+                            }
                         }
                     }
                 }
@@ -2903,6 +2934,7 @@ private fun extractTextWithInlineFormatting(element: Element): String {
 
 private const val ARTICLE_READING_PROGRESS_LAYOUT_TIMEOUT_MS = 800L
 private const val ARTICLE_RESTORE_OFFSET_TIMEOUT_MS = 3_000L
+private const val ARTICLE_RESTORE_HIDE_PROGRESS_EPSILON = 0.001f
 private const val ARTICLE_READING_PROGRESS_SAMPLE_MS = 500L
 private const val MAX_ARTICLE_TEXT_NODE_CHARS = 2_000
 private const val ARTICLE_IMAGE_READING_UNITS = 520

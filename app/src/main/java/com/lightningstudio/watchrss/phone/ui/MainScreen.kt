@@ -13,6 +13,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -100,6 +101,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalUriHandler
@@ -170,6 +172,16 @@ private val MainNavigationRailWidth = 80.dp
 
 @Composable
 private fun defaultMainElevatedCardColors() = CardDefaults.elevatedCardColors()
+
+@Composable
+private fun pinnedMainContentChannelContainerColor(): Color {
+    val isDark = isSystemInDarkTheme()
+    return lerpMainColor(
+        start = MaterialTheme.colorScheme.surface,
+        stop = if (isDark) Color.White else Color.Black,
+        progress = if (isDark) 0.06f else 0.04f
+    )
+}
 
 private data class ReaderLeftPaneReturnState(
     val channelKey: String,
@@ -4107,12 +4119,18 @@ private fun MainContentChannelRow(
     selected: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    val cardColors = if (selected) {
+    val defaultCardColors = defaultMainElevatedCardColors()
+    val containerColor = when {
+        selected -> MaterialTheme.colorScheme.secondaryContainer
+        channel.source?.isPinned == true -> pinnedMainContentChannelContainerColor()
+        else -> defaultCardColors.containerColor
+    }
+    val cardColors = if (selected || channel.source?.isPinned == true) {
         CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer
+            containerColor = containerColor
         )
     } else {
-        defaultMainElevatedCardColors()
+        defaultCardColors
     }
 
     ElevatedCard(
@@ -4122,7 +4140,7 @@ private fun MainContentChannelRow(
     ) {
         ListItem(
             colors = ListItemDefaults.colors(
-                containerColor = cardColors.containerColor
+                containerColor = containerColor
             ),
             headlineContent = {
                 Text(
@@ -4174,12 +4192,18 @@ private fun MainScreenSourceRow(
     modifier: Modifier = Modifier
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
-    val cardColors = if (selected) {
+    val defaultCardColors = defaultMainElevatedCardColors()
+    val containerColor = when {
+        selected -> MaterialTheme.colorScheme.secondaryContainer
+        source.isPinned -> pinnedMainContentChannelContainerColor()
+        else -> defaultCardColors.containerColor
+    }
+    val cardColors = if (selected || source.isPinned) {
         CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer
+            containerColor = containerColor
         )
     } else {
-        defaultMainElevatedCardColors()
+        defaultCardColors
     }
     val cardShape = MaterialTheme.shapes.medium
 
@@ -4198,7 +4222,7 @@ private fun MainScreenSourceRow(
         ) {
             ListItem(
                 colors = ListItemDefaults.colors(
-                    containerColor = cardColors.containerColor
+                    containerColor = containerColor
                 ),
                 headlineContent = {
                     Text(

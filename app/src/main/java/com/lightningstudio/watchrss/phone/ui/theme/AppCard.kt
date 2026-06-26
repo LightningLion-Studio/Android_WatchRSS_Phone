@@ -22,6 +22,7 @@ import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.PaintingStyle
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -60,6 +61,26 @@ fun appCardGradient(): Brush {
 @Composable
 fun appCardHighlightBorder(): Color {
     return if (isSystemInDarkTheme()) CardHighlightDark else CardHighlightLight
+}
+
+@Composable
+fun appPinnedListCardGradient(): Brush {
+    val isDark = isSystemInDarkTheme()
+    return if (isDark) {
+        Brush.verticalGradient(
+            colors = listOf(
+                lerp(DarkCardStart, Color.White, 0.08f),
+                lerp(DarkCardEnd, Color.White, 0.06f)
+            )
+        )
+    } else {
+        Brush.verticalGradient(
+            colors = listOf(
+                lerp(LightCardStart, Color.Black, 0.06f),
+                lerp(LightCardEnd, Color.Black, 0.04f)
+            )
+        )
+    }
 }
 
 /**
@@ -159,12 +180,14 @@ fun AppPrimaryCard(
 fun AppListCard(
     modifier: Modifier = Modifier,
     interactionModifier: Modifier = Modifier,
+    backgroundBrush: Brush? = null,
     content: @Composable BoxScope.() -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
     val highlightAlpha = if (isDark) 0.15f else 0.50f
     val glowAlpha = if (isDark) 0.10f else 0.40f
     val shape = RoundedCornerShape(12.dp)
+    val cardBackground = backgroundBrush ?: appCardGradient()
 
     Box(
         modifier = modifier
@@ -175,7 +198,7 @@ fun AppListCard(
                 ambientColor = PrimaryRed.copy(alpha = 0.05f)
             )
             .clip(shape)
-            .background(appCardGradient())
+            .background(cardBackground)
             .drawBehind {
                 val width = size.width
                 val height = size.height

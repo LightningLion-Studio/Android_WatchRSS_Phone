@@ -139,7 +139,9 @@ import com.kyant.backdrop.effects.*
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -148,7 +150,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 import kotlin.math.max
@@ -278,20 +280,29 @@ internal fun ArticleReaderScreen(
         isArticleContentMarker(safeArticle.contentText)
     val waitingForImportedTextReader = hasFileBackedImportedText && importedTextReader == null
     val useImportedTextChunks = importedTextReader != null
-    val contentNodes = remember(
-        safeArticle.articleId,
-        safeArticle.contentHash,
-        safeArticle.contentHtml,
-        safeArticle.contentText,
-        safeArticle.excerpt,
-        safeArticle.url,
-        waitingForImportedTextReader,
-        useImportedTextChunks,
-        contentReady
+    val shouldBuildContentNodes = contentReady && !useImportedTextChunks && !waitingForImportedTextReader
+    val contentNodesKey = ArticleContentNodesKey(
+        articleId = safeArticle.articleId,
+        contentHash = safeArticle.contentHash,
+        contentHtml = safeArticle.contentHtml,
+        contentText = safeArticle.contentText,
+        excerpt = safeArticle.excerpt,
+        url = safeArticle.url
+    )
+    val contentNodesSnapshot by produceState<ArticleContentNodesSnapshot?>(
+        initialValue = null,
+        contentNodesKey,
+        shouldBuildContentNodes
     ) {
-        if (!contentReady || useImportedTextChunks || waitingForImportedTextReader) {
-            emptyList()
-        } else {
+        if (!shouldBuildContentNodes) {
+            value = ArticleContentNodesSnapshot(
+                key = contentNodesKey,
+                nodes = emptyList()
+            )
+            return@produceState
+        }
+        value = null
+        val nodes = withContext(Dispatchers.Default) {
             if (!safeArticle.contentHtml.isNullOrBlank()) {
                 parseArticleContent(safeArticle.contentHtml ?: "")
             } else {
@@ -302,7 +313,20 @@ internal fun ArticleReaderScreen(
                 )
             }
         }
+        value = ArticleContentNodesSnapshot(
+            key = contentNodesKey,
+            nodes = nodes
+        )
     }
+    val currentContentNodes = if (shouldBuildContentNodes) {
+        contentNodesSnapshot
+            ?.takeIf { it.key == contentNodesKey }
+            ?.nodes
+    } else {
+        emptyList()
+    }
+    val contentNodesReady = !shouldBuildContentNodes || currentContentNodes != null
+    val contentNodes = currentContentNodes.orEmpty()
         val textLayouts = remember(safeArticle.articleId, contentNodes) {
             mutableStateMapOf<Int, TextLayoutResult>()
         }
@@ -417,8 +441,9 @@ internal fun ArticleReaderScreen(
             )
         }
 
-        suspend fun awaitReadingProgress(): Float? {
+        suspend fun awaitReadingProgress(waitForLayout: Boolean): Float? {
             freshReadingProgress()?.let { return it }
+            if (!waitForLayout) return null
             return withTimeoutOrNull(ARTICLE_READING_PROGRESS_LAYOUT_TIMEOUT_MS) {
                 snapshotFlow { freshReadingProgress() }
                     .filterNotNull()
@@ -426,9 +451,12 @@ internal fun ArticleReaderScreen(
             }
         }
 
-        suspend fun saveCurrentReadingProgress(force: Boolean): Boolean {
+        suspend fun saveCurrentReadingProgress(
+            force: Boolean,
+            waitForLayout: Boolean = true
+        ): Boolean {
             if (!hasRestoredPosition) return false
-            val progress = awaitReadingProgress() ?: return false
+            val progress = awaitReadingProgress(waitForLayout) ?: return false
             val clamped = progress.coerceIn(0f, 1f)
             val now = SystemClock.elapsedRealtime()
             if (!force && lastSavedProgress >= 0f) {
@@ -441,11 +469,18 @@ internal fun ArticleReaderScreen(
             return true
         }
 
-        LaunchedEffect(pendingRestoreProgress, contentNodes, topBarHeight, importedTextReader) {
+        LaunchedEffect(
+            pendingRestoreProgress,
+            contentNodes,
+            contentNodesReady,
+            topBarHeight,
+            importedTextReader
+        ) {
             val progress = pendingRestoreProgress ?: return@LaunchedEffect
             if (topBarHeight == 0.dp) return@LaunchedEffect
             if (!contentReady) return@LaunchedEffect
             if (waitingForImportedTextReader) return@LaunchedEffect
+            if (!useImportedTextChunks && !contentNodesReady) return@LaunchedEffect
             importedTextReader?.let { reader ->
                 if (reader.chunkCount <= 0 || reader.byteLength <= 0L) {
                     pendingRestoreProgress = null
@@ -567,14 +602,14 @@ internal fun ArticleReaderScreen(
             hasRestoredPosition = true
         }
 
-        LaunchedEffect(listState, contentNodes) {
+        LaunchedEffect(listState, contentNodes, contentNodesReady) {
             snapshotFlow { freshReadingProgress() }
                 .filterNotNull()
                 .distinctUntilChanged()
                 .sample(ARTICLE_READING_PROGRESS_SAMPLE_MS)
                 .collect { progress ->
                     if (hasRestoredPosition) {
-                        saveCurrentReadingProgress(force = false)
+                        saveCurrentReadingProgress(force = false, waitForLayout = false)
                     }
                 }
         }
@@ -582,15 +617,15 @@ internal fun ArticleReaderScreen(
         DisposableEffect(lifecycleOwner, safeArticle.articleId) {
             val observer = LifecycleEventObserver { _, event ->
                 if (event == Lifecycle.Event.ON_PAUSE) {
-                    runBlocking {
-                        saveCurrentReadingProgress(force = true)
+                    lifecycleOwner.lifecycleScope.launch {
+                        saveCurrentReadingProgress(force = true, waitForLayout = false)
                     }
                 }
             }
             lifecycleOwner.lifecycle.addObserver(observer)
             onDispose {
-                runBlocking {
-                    saveCurrentReadingProgress(force = true)
+                lifecycleOwner.lifecycleScope.launch {
+                    saveCurrentReadingProgress(force = true, waitForLayout = false)
                 }
                 lifecycleOwner.lifecycle.removeObserver(observer)
             }
@@ -601,8 +636,8 @@ internal fun ArticleReaderScreen(
                 previewDismissRequests += 1
                 return
             }
-            runBlocking {
-                saveCurrentReadingProgress(force = true)
+            lifecycleOwner.lifecycleScope.launch {
+                saveCurrentReadingProgress(force = true, waitForLayout = false)
             }
             onBackState.value()
         }
@@ -610,7 +645,7 @@ internal fun ArticleReaderScreen(
         ReaderBackSurface(
             enabled = previewImage == null && !embedded,
             onBeforeBack = {
-                saveCurrentReadingProgress(force = true)
+                saveCurrentReadingProgress(force = true, waitForLayout = false)
             },
             onBack = onBackState.value
         ) {
@@ -674,6 +709,19 @@ internal fun ArticleReaderScreen(
                         }
                     }
                     waitingForImportedTextReader -> {
+                        AdaptiveContentFrame(
+                            windowInfo = windowInfo,
+                            mediumMaxWidth = 720.dp,
+                            expandedMaxWidth = 760.dp
+                        ) {
+                            ReaderContentLoadingPlaceholder(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(readerContentPadding)
+                            )
+                        }
+                    }
+                    !contentNodesReady -> {
                         AdaptiveContentFrame(
                             windowInfo = windowInfo,
                             mediumMaxWidth = 720.dp,
@@ -2144,6 +2192,20 @@ private data class ArticlePreviewImage(
     val aspectRatio: Float?,
     val sourceNodeIndex: Int,
     val sourceBounds: Rect?
+)
+
+private data class ArticleContentNodesKey(
+    val articleId: String,
+    val contentHash: String,
+    val contentHtml: String?,
+    val contentText: String,
+    val excerpt: String,
+    val url: String
+)
+
+private data class ArticleContentNodesSnapshot(
+    val key: ArticleContentNodesKey,
+    val nodes: List<ArticleNode>
 )
 
 private sealed class ArticleNode {

@@ -165,7 +165,6 @@ private const val TAB_PREDICTIVE_EXIT_MS = 480
 private const val TAB_PREDICTIVE_EXIT_PROGRESS = 1f
 private const val READER_LEFT_PANE_RETURN_TRANSITION_MS = 480
 private const val READER_FULLSCREEN_BACK_SETTLE_MS = 480
-private const val READER_INLINE_CONTENT_LOAD_DELAY_MS = 160
 private const val ARTICLE_CARD_TITLE_LINES = 2
 private val MainNavigationRailWidth = 80.dp
 
@@ -334,16 +333,8 @@ fun MainScreen(
     val inlineReaderOpenSettled = selectedReaderArticleId != null &&
         !readerOpenAnimating &&
         readerOpenProgress >= 1f
-    var inlineReaderContentReady by remember { mutableStateOf(false) }
-    LaunchedEffect(selectedReaderArticleId, inlineReaderOpenSettled) {
-        inlineReaderContentReady = false
-        if (selectedReaderArticleId != null && inlineReaderOpenSettled) {
-            delay(READER_INLINE_CONTENT_LOAD_DELAY_MS.toLong())
-            inlineReaderContentReady = true
-        }
-    }
+    val inlineReaderContentReady = inlineReaderOpenSettled
     val inlineReaderLoadArticleId = selectedReaderArticleId
-        ?.takeIf { inlineReaderContentReady }
     val hydratedSelectedReaderArticle by produceState<PhoneArticleEntity?>(
         initialValue = null,
         inlineReaderLoadArticleId

@@ -62,6 +62,7 @@ import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -78,7 +79,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -227,7 +227,9 @@ internal fun ArticleReaderScreen(
     onOpenOriginal: (String) -> Unit,
     embedded: Boolean = false,
     embeddedFullscreen: Boolean = false,
-    onOpenFullscreen: (() -> Unit)? = null
+    onOpenFullscreen: (() -> Unit)? = null,
+    listState: LazyListState = rememberLazyListState(),
+    contentReady: Boolean = true
 ) {
     if (invalidArticleId) {
         ReaderBackSurface(
@@ -263,7 +265,7 @@ internal fun ArticleReaderScreen(
                     .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                DelayedReaderLoadingText(text = "正在加载文章…")
+                ReaderContentLoadingPlaceholder(modifier = Modifier.fillMaxWidth())
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                 }
@@ -284,9 +286,10 @@ internal fun ArticleReaderScreen(
         safeArticle.excerpt,
         safeArticle.url,
         waitingForImportedTextReader,
-        useImportedTextChunks
+        useImportedTextChunks,
+        contentReady
     ) {
-        if (useImportedTextChunks || waitingForImportedTextReader) {
+        if (!contentReady || useImportedTextChunks || waitingForImportedTextReader) {
             emptyList()
         } else {
             if (!safeArticle.contentHtml.isNullOrBlank()) {
@@ -300,7 +303,6 @@ internal fun ArticleReaderScreen(
             }
         }
     }
-        val listState = rememberLazyListState()
         val textLayouts = remember(safeArticle.articleId, contentNodes) {
             mutableStateMapOf<Int, TextLayoutResult>()
         }
@@ -442,6 +444,7 @@ internal fun ArticleReaderScreen(
         LaunchedEffect(pendingRestoreProgress, contentNodes, topBarHeight, importedTextReader) {
             val progress = pendingRestoreProgress ?: return@LaunchedEffect
             if (topBarHeight == 0.dp) return@LaunchedEffect
+            if (!contentReady) return@LaunchedEffect
             if (waitingForImportedTextReader) return@LaunchedEffect
             importedTextReader?.let { reader ->
                 if (reader.chunkCount <= 0 || reader.byteLength <= 0L) {
@@ -640,6 +643,19 @@ internal fun ArticleReaderScreen(
                 )
                 val reader = importedTextReader
                 when {
+                    !contentReady -> {
+                        AdaptiveContentFrame(
+                            windowInfo = windowInfo,
+                            mediumMaxWidth = 720.dp,
+                            expandedMaxWidth = 760.dp
+                        ) {
+                            ReaderContentLoadingPlaceholder(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(readerContentPadding)
+                            )
+                        }
+                    }
                     reader != null -> {
                         AdaptiveContentFrame(
                             windowInfo = windowInfo,
@@ -663,14 +679,11 @@ internal fun ArticleReaderScreen(
                             mediumMaxWidth = 720.dp,
                             expandedMaxWidth = 760.dp
                         ) {
-                            Column(
+                            ReaderContentLoadingPlaceholder(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .padding(readerContentPadding),
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                DelayedReaderLoadingText(text = "正在加载正文…")
-                            }
+                                    .padding(readerContentPadding)
+                            )
                         }
                     }
                     else -> {
@@ -841,26 +854,21 @@ private fun ReaderTopContent(
 }
 
 @Composable
-private fun DelayedReaderLoadingText(
-    text: String,
+private fun ReaderContentLoadingPlaceholder(
     modifier: Modifier = Modifier
 ) {
-    var showText by remember(text) { mutableStateOf(false) }
-
-    LaunchedEffect(text) {
-        showText = false
-        repeat(READER_LOADING_TEXT_FRAME_DELAY) {
-            withFrameNanos { }
-        }
-        showText = true
+    Box(
+        modifier = modifier,
+        contentAlignment = Alignment.TopCenter
+    ) {
+        LinearProgressIndicator(
+            modifier = Modifier
+                .width(180.dp)
+                .height(4.dp),
+            color = MaterialTheme.colorScheme.primary,
+            trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f)
+        )
     }
-
-    Text(
-        text = text,
-        style = MaterialTheme.typography.titleLarge,
-        color = if (showText) Color.Unspecified else Color.Transparent,
-        modifier = modifier
-    )
 }
 
 @Composable
@@ -935,6 +943,12 @@ private fun ImportedTextChunkContentView(
                     chunkLayouts.remove(index)
                 } else {
                     chunkTexts[index] = chunk.orEmpty()
+                }
+            }
+            DisposableEffect(marker, index) {
+                onDispose {
+                    chunkTexts.remove(index)
+                    chunkLayouts.remove(index)
                 }
             }
             val text = chunk
@@ -2831,7 +2845,6 @@ private const val ARTICLE_READING_PROGRESS_SAMPLE_MS = 500L
 private const val MAX_ARTICLE_TEXT_NODE_CHARS = 2_000
 private const val ARTICLE_IMAGE_READING_UNITS = 520
 private const val IMPORTED_TEXT_CHUNK_KEY_PREFIX = "importedText:"
-private const val READER_LOADING_TEXT_FRAME_DELAY = 2
 private const val READER_CHROME_SNAP_ANIMATION_MS = 140
 private const val PREVIEW_OVERLAY_Z_INDEX = 10f
 private const val PREVIEW_BACKGROUND_ALPHA = 0.96f

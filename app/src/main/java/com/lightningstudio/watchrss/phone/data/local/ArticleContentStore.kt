@@ -118,4 +118,4 @@ fun isArticleContentMarker(value: String?): Boolean {
 }
 
 const val ARTICLE_CONTENT_MARKER_PREFIX = "watchrss-local-text:"
-const val ARTICLE_TEXT_CHUNK_BYTES = 16 * 1024
+const val ARTICLE_TEXT_CHUNK_BYTES = 2 * 1024

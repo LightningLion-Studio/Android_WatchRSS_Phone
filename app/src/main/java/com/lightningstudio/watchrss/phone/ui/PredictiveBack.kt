@@ -19,7 +19,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 
-const val PREDICTIVE_BACK_EXIT_PROGRESS = 1.18f
+const val PREDICTIVE_BACK_EXIT_PROGRESS = 2f
 const val PREDICTIVE_BACK_EXIT_ANIMATION_MS = 140
 const val PREDICTIVE_BACK_CANCEL_ANIMATION_MS = 480
 
@@ -49,7 +49,6 @@ fun PredictiveBackSurface(
             }
             onBeforeBackState.value()
             onBackState.value()
-            backProgress = 0f
         } catch (exception: CancellationException) {
             animate(
                 initialValue = backProgress,

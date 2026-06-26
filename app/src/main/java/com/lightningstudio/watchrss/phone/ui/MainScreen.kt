@@ -89,9 +89,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -162,7 +164,8 @@ private const val TAB_PREDICTIVE_EXIT_MS = 480
 private const val TAB_PREDICTIVE_EXIT_PROGRESS = 1f
 private const val READER_LEFT_PANE_RETURN_TRANSITION_MS = 480
 private const val READER_FULLSCREEN_BACK_SETTLE_MS = 480
-private const val ARTICLE_CARD_TITLE_MAX_LINES = 3
+private const val READER_INLINE_CONTENT_LOAD_DELAY_MS = 160
+private const val ARTICLE_CARD_TITLE_LINES = 2
 private val MainNavigationRailWidth = 80.dp
 
 @Composable
@@ -295,6 +298,12 @@ fun MainScreen(
     }
     val contentPageListState = rememberLazyListState()
     val importsPageListState = rememberLazyListState()
+    val channelArticleListState = rememberSaveable(
+        selectedContentChannelKey,
+        saver = LazyListState.Saver
+    ) {
+        LazyListState()
+    }
     val coroutineScope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
 
@@ -318,11 +327,24 @@ fun MainScreen(
             ?: uiState.watchLater.firstOrNull { it.articleId == articleId }
             ?: uiState.rssArticles.firstOrNull { it.articleId == articleId }
     }
+    val inlineReaderOpenSettled = selectedReaderArticleId != null &&
+        !readerOpenAnimating &&
+        readerOpenProgress >= 1f
+    var inlineReaderContentReady by remember { mutableStateOf(false) }
+    LaunchedEffect(selectedReaderArticleId, inlineReaderOpenSettled) {
+        inlineReaderContentReady = false
+        if (selectedReaderArticleId != null && inlineReaderOpenSettled) {
+            delay(READER_INLINE_CONTENT_LOAD_DELAY_MS.toLong())
+            inlineReaderContentReady = true
+        }
+    }
+    val inlineReaderLoadArticleId = selectedReaderArticleId
+        ?.takeIf { inlineReaderContentReady }
     val hydratedSelectedReaderArticle by produceState<PhoneArticleEntity?>(
         initialValue = null,
-        selectedReaderArticleId
+        inlineReaderLoadArticleId
     ) {
-        val articleId = selectedReaderArticleId
+        val articleId = inlineReaderLoadArticleId
         value = null
         if (articleId != null) {
             value = runCatching { onLoadArticleForInlineReader(articleId) }.getOrNull()
@@ -333,10 +355,9 @@ fun MainScreen(
         ?: selectedReaderArticleListItem
     val selectedImportedTextReader by produceState<PhoneImportedTextReader?>(
         initialValue = null,
-        selectedReaderArticle?.articleId,
-        selectedReaderArticle?.contentText
+        inlineReaderLoadArticleId
     ) {
-        val articleId = selectedReaderArticle?.articleId
+        val articleId = inlineReaderLoadArticleId
         value = null
         if (articleId != null) {
             value = runCatching { onLoadImportedTextReaderForInlineReader(articleId) }.getOrNull()
@@ -784,28 +805,48 @@ fun MainScreen(
             (topBarPage == MainPage.RSS || topBarPage == MainPage.IMPORTS || topBarPage == MainPage.CHANNEL)
         val showGlobalTopBar = !readingSplitActive && !readerTakesCurrentPage && !usesPaneTopBars
         val showScaffoldTopBar = showGlobalTopBar && windowInfo.navigationType != AdaptiveNavigationType.Rail
-        val activeInlineReaderPane: @Composable (Boolean) -> Unit = { fullscreen ->
-            val article = selectedReaderArticle
-            if (article != null) {
-                InlineArticleReaderPane(
-                    article = article,
-                    readerArticle = hydratedSelectedReaderArticle
-                        ?.takeIf { it.articleId == article.articleId },
-                    importedTextReader = selectedImportedTextReader,
-                    onLoadImportedTextChunk = onLoadImportedTextChunkForInlineReader,
-                    onSaveReadingProgress = { progress ->
-                        onSaveArticleReadingProgress(article.articleId, progress)
-                    },
-                    onBack = { handleInlineReaderBack() },
-                    onOpenImportedArticle = { url -> uriHandler.openUri(url) },
-                    onOpenOriginal = { url -> uriHandler.openUri(url) },
-                    fullscreen = fullscreen,
-                    showFullscreenControl = windowInfo.isMediumOrExpanded,
-                    onToggleFullscreen = {
-                        readerFullscreenBackProgress = 0f
-                        readerFullscreenActive = !readerFullscreenActive
-                    }
-                )
+        val inlineReaderListState = remember(selectedReaderArticle?.articleId) {
+            LazyListState()
+        }
+        val selectedReaderArticleState = rememberUpdatedState(selectedReaderArticle)
+        val hydratedSelectedReaderArticleState = rememberUpdatedState(hydratedSelectedReaderArticle)
+        val selectedImportedTextReaderState = rememberUpdatedState(selectedImportedTextReader)
+        val onLoadImportedTextChunkState = rememberUpdatedState(onLoadImportedTextChunkForInlineReader)
+        val onSaveArticleReadingProgressState = rememberUpdatedState(onSaveArticleReadingProgress)
+        val inlineReaderListStateState = rememberUpdatedState(inlineReaderListState)
+        val uriHandlerState = rememberUpdatedState(uriHandler)
+        val showFullscreenControlState = rememberUpdatedState(windowInfo.isMediumOrExpanded)
+        val onInlineReaderBackState = rememberUpdatedState { handleInlineReaderBack() }
+        val onToggleReaderFullscreenState = rememberUpdatedState {
+            readerFullscreenBackProgress = 0f
+            readerFullscreenActive = !readerFullscreenActive
+        }
+        val activeInlineReaderPane: @Composable (Boolean) -> Unit = remember(
+            selectedReaderArticle?.articleId,
+            inlineReaderContentReady
+        ) {
+            movableContentOf { fullscreen: Boolean ->
+                val article = selectedReaderArticleState.value
+                if (article != null) {
+                    InlineArticleReaderPane(
+                        article = article,
+                        readerArticle = hydratedSelectedReaderArticleState.value
+                            ?.takeIf { it.articleId == article.articleId },
+                        importedTextReader = selectedImportedTextReaderState.value,
+                        onLoadImportedTextChunk = onLoadImportedTextChunkState.value,
+                        onSaveReadingProgress = { progress ->
+                            onSaveArticleReadingProgressState.value(article.articleId, progress)
+                        },
+                        onBack = onInlineReaderBackState.value,
+                        onOpenImportedArticle = { url -> uriHandlerState.value.openUri(url) },
+                        onOpenOriginal = { url -> uriHandlerState.value.openUri(url) },
+                        listState = inlineReaderListStateState.value,
+                        contentReady = inlineReaderContentReady,
+                        fullscreen = fullscreen,
+                        showFullscreenControl = showFullscreenControlState.value,
+                        onToggleFullscreen = onToggleReaderFullscreenState.value
+                    )
+                }
             }
         }
         @Composable
@@ -1058,6 +1099,7 @@ fun MainScreen(
                                                 isRefreshing = movingPaneSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
                                                 contentPadding = contentPadding,
                                                 windowInfo = windowInfo,
+                                                listState = channelArticleListState,
                                                 onRefreshSource = {
                                                     if (selectedChannel.canRefresh) {
                                                         movingPaneSource?.let(onRefreshRssSource)
@@ -1098,15 +1140,27 @@ fun MainScreen(
                                                 predictiveBackProgress = readerBackProgress,
                                                 fullscreenBackProgress = readerFullscreenBackProgress,
                                                 startPane = {
-                                                    ChannelArticleListPane(
+                                                    ReaderReturnMovingArticlePane(
+                                                        progress = 0f,
                                                         channel = selectedChannel,
                                                         selectedArticleId = selectedReaderArticle.articleId,
+                                                        isRefreshing = selectedChannel.source?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
                                                         contentPadding = contentPadding,
                                                         windowInfo = windowInfo,
+                                                        listState = channelArticleListState,
+                                                        onRefreshSource = {
+                                                            if (selectedChannel.canRefresh) {
+                                                                selectedChannel.source?.let(onRefreshRssSource)
+                                                            }
+                                                        },
                                                         onBackToChannels = { handleInlineReaderBack() },
                                                         onOpenArticle = { article ->
                                                             openAdaptiveArticle(article)
-                                                        }
+                                                        },
+                                                        onOpenOriginalLink = { uriHandler.openUri(it) },
+                                                        onToggleFavorite = onToggleFavorite,
+                                                        onToggleWatchLater = onToggleWatchLater,
+                                                        onDeleteArticle = onDeleteArticle
                                                     )
                                                 },
                                                 readerPane = activeInlineReaderPane
@@ -1125,6 +1179,7 @@ fun MainScreen(
                                                         selectedArticleId = selectedReaderArticle.articleId,
                                                         contentPadding = contentPadding,
                                                         windowInfo = windowInfo,
+                                                        listState = channelArticleListState,
                                                         onBackToChannels = { handleInlineReaderBack() },
                                                         onOpenArticle = { article ->
                                                             openAdaptiveArticle(article)
@@ -1184,6 +1239,7 @@ fun MainScreen(
                                                 isRefreshing = paneSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
                                                 contentPadding = contentPadding,
                                                 windowInfo = windowInfo,
+                                                listState = channelArticleListState,
                                                 onRefreshSource = {
                                                     if (selectedContentChannel?.canRefresh == true) {
                                                         paneSource?.let(onRefreshRssSource)
@@ -1210,6 +1266,7 @@ fun MainScreen(
                                                 isRefreshing = movingPaneSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
                                                 contentPadding = contentPadding,
                                                 windowInfo = windowInfo,
+                                                listState = channelArticleListState,
                                                 onRefreshSource = {
                                                     if (movingChannel?.canRefresh == true) {
                                                         movingPaneSource?.let(onRefreshRssSource)
@@ -1278,6 +1335,7 @@ fun MainScreen(
                                                 isRefreshing = movingPaneSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
                                                 contentPadding = contentPadding,
                                                 windowInfo = windowInfo,
+                                                listState = channelArticleListState,
                                                 onRefreshSource = {
                                                     if (selectedChannel.canRefresh) {
                                                         movingPaneSource?.let(onRefreshRssSource)
@@ -1318,15 +1376,27 @@ fun MainScreen(
                                                 predictiveBackProgress = readerBackProgress,
                                                 fullscreenBackProgress = readerFullscreenBackProgress,
                                                 startPane = {
-                                                    ChannelArticleListPane(
+                                                    ReaderReturnMovingArticlePane(
+                                                        progress = 0f,
                                                         channel = selectedChannel,
                                                         selectedArticleId = selectedReaderArticle.articleId,
+                                                        isRefreshing = selectedChannel.source?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
                                                         contentPadding = contentPadding,
                                                         windowInfo = windowInfo,
+                                                        listState = channelArticleListState,
+                                                        onRefreshSource = {
+                                                            if (selectedChannel.canRefresh) {
+                                                                selectedChannel.source?.let(onRefreshRssSource)
+                                                            }
+                                                        },
                                                         onBackToChannels = { handleInlineReaderBack() },
                                                         onOpenArticle = { article ->
                                                             openAdaptiveArticle(article)
-                                                        }
+                                                        },
+                                                        onOpenOriginalLink = { uriHandler.openUri(it) },
+                                                        onToggleFavorite = onToggleFavorite,
+                                                        onToggleWatchLater = onToggleWatchLater,
+                                                        onDeleteArticle = onDeleteArticle
                                                     )
                                                 },
                                                 readerPane = activeInlineReaderPane
@@ -1345,6 +1415,7 @@ fun MainScreen(
                                                         selectedArticleId = selectedReaderArticle.articleId,
                                                         contentPadding = contentPadding,
                                                         windowInfo = windowInfo,
+                                                        listState = channelArticleListState,
                                                         onBackToChannels = { handleInlineReaderBack() },
                                                         onOpenArticle = { article ->
                                                             openAdaptiveArticle(article)
@@ -1416,6 +1487,7 @@ fun MainScreen(
                                                 isRefreshing = paneSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
                                                 contentPadding = contentPadding,
                                                 windowInfo = windowInfo,
+                                                listState = channelArticleListState,
                                                 onRefreshSource = {
                                                     if (selectedContentChannel?.canRefresh == true) {
                                                         paneSource?.let(onRefreshRssSource)
@@ -1442,6 +1514,7 @@ fun MainScreen(
                                                 isRefreshing = movingPaneSource?.url?.let { it in uiState.refreshingRssSourceUrls } == true,
                                                 contentPadding = contentPadding,
                                                 windowInfo = windowInfo,
+                                                listState = channelArticleListState,
                                                 onRefreshSource = {
                                                     if (movingChannel?.canRefresh == true) {
                                                         movingPaneSource?.let(onRefreshRssSource)
@@ -1614,13 +1687,15 @@ private fun InlineArticleReaderPane(
     onBack: () -> Unit,
     onOpenImportedArticle: (String) -> Unit,
     onOpenOriginal: (String) -> Unit,
+    listState: LazyListState,
+    contentReady: Boolean,
     fullscreen: Boolean,
     showFullscreenControl: Boolean,
     onToggleFullscreen: () -> Unit
 ) {
     val fullscreenControl = if (showFullscreenControl) onToggleFullscreen else null
     val platform = PlatformLinkRouter.detect(article.url)
-    if (platform != null) {
+    if (contentReady && platform != null) {
         PlatformWebViewScreen(
             url = article.url,
             title = article.title.ifBlank { article.url },
@@ -1635,8 +1710,10 @@ private fun InlineArticleReaderPane(
         )
         return
     }
+    val loadedReaderArticle = readerArticle?.takeIf { it.articleId == article.articleId }
+    val articleContentReady = contentReady && loadedReaderArticle != null
     ArticleReaderScreen(
-        article = readerArticle,
+        article = loadedReaderArticle ?: article,
         importedTextReader = importedTextReader,
         invalidArticleId = article.articleId.isBlank(),
         onLoadImportedTextChunk = onLoadImportedTextChunk,
@@ -1646,7 +1723,9 @@ private fun InlineArticleReaderPane(
         onOpenOriginal = onOpenOriginal,
         embedded = true,
         embeddedFullscreen = fullscreen,
-        onOpenFullscreen = fullscreenControl
+        onOpenFullscreen = fullscreenControl,
+        listState = listState,
+        contentReady = articleContentReady
     )
 }
 
@@ -2722,6 +2801,7 @@ private fun ReaderReturnMovingArticlePane(
     isRefreshing: Boolean,
     contentPadding: PaddingValues,
     windowInfo: AdaptiveWindowInfo,
+    listState: LazyListState,
     onRefreshSource: () -> Unit,
     onBackToChannels: () -> Unit,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
@@ -2736,6 +2816,7 @@ private fun ReaderReturnMovingArticlePane(
             isRefreshing = isRefreshing,
             contentPadding = contentPadding,
             windowInfo = windowInfo,
+            listState = listState,
             onRefreshSource = onRefreshSource,
             onOpenArticle = onOpenArticle,
             onOpenOriginalLink = onOpenOriginalLink,
@@ -2752,6 +2833,7 @@ private fun ReaderReturnMovingArticlePane(
         isRefreshing = isRefreshing,
         contentPadding = contentPadding,
         windowInfo = windowInfo,
+        listState = listState,
         onRefreshSource = onRefreshSource,
         onBackToChannels = onBackToChannels,
         onOpenArticle = onOpenArticle,
@@ -2770,6 +2852,7 @@ private fun MorphingChannelArticlePane(
     isRefreshing: Boolean,
     contentPadding: PaddingValues,
     windowInfo: AdaptiveWindowInfo,
+    listState: LazyListState,
     onRefreshSource: () -> Unit,
     onBackToChannels: () -> Unit,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
@@ -2783,35 +2866,43 @@ private fun MorphingChannelArticlePane(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .statusBarsPadding()
-        ) {
-            Box(
+        Column(modifier = Modifier.fillMaxSize()) {
+            Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(lerpMainDp(64.dp, 0.dp, paneProgress))
-                    .clipToBounds(),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "内容",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.graphicsLayer {
-                        translationY = -28.dp.toPx() * paneProgress
-                        scaleX = 1f - 0.08f * paneProgress
-                        scaleY = 1f - 0.08f * paneProgress
-                    }
+                    .statusBarsPadding(),
+                color = lerpMainColor(
+                    MaterialTheme.colorScheme.surface,
+                    MaterialTheme.colorScheme.background,
+                    paneProgress
                 )
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(lerpMainDp(64.dp, 0.dp, paneProgress))
+                        .clipToBounds(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "内容",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.graphicsLayer {
+                            translationY = -28.dp.toPx() * paneProgress
+                            scaleX = 1f - 0.08f * paneProgress
+                            scaleY = 1f - 0.08f * paneProgress
+                        }
+                    )
+                }
             }
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
+                state = listState,
                 contentPadding = PaddingValues(
                     start = readerSplitListHorizontalPadding(windowInfo),
                     top = 12.dp,
@@ -2920,6 +3011,7 @@ private fun MorphingChannelArticleHeader(
                     text = channel.title,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
+                    minLines = 2,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -3061,14 +3153,15 @@ private fun MorphingMainScreenArticleRow(
                         text = article.title.ifBlank { article.url },
                         style = titleStyle,
                         fontWeight = FontWeight.Bold,
-                        maxLines = ARTICLE_CARD_TITLE_MAX_LINES,
+                        minLines = ARTICLE_CARD_TITLE_LINES,
+                        maxLines = ARTICLE_CARD_TITLE_LINES,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
                     Box(
                         modifier = Modifier
                             .width(menuActionWidth)
-                            .height(48.dp)
+                            .height(menuActionWidth)
                             .clipToBounds(),
                         contentAlignment = Alignment.TopEnd
                     ) {
@@ -3110,7 +3203,7 @@ private fun MorphingMainScreenArticleRow(
                         text = summary,
                         style = summaryStyle,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 3,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
@@ -3194,6 +3287,7 @@ private fun ChannelArticleListPane(
     selectedArticleId: String,
     contentPadding: PaddingValues,
     windowInfo: AdaptiveWindowInfo,
+    listState: LazyListState,
     onBackToChannels: () -> Unit,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
     modifier: Modifier = Modifier
@@ -3225,6 +3319,7 @@ private fun ChannelArticleListPane(
             }
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
+                state = listState,
                 contentPadding = PaddingValues(
                     start = readerSplitListHorizontalPadding(windowInfo),
                     top = 12.dp,
@@ -3256,6 +3351,7 @@ private fun ChannelArticleListPane(
                                     text = channel.title,
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.Bold,
+                                    minLines = 2,
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
@@ -3317,7 +3413,8 @@ private fun MainScreenArticleListRow(
                 text = article.title.ifBlank { article.url },
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold,
-                maxLines = ARTICLE_CARD_TITLE_MAX_LINES,
+                minLines = ARTICLE_CARD_TITLE_LINES,
+                maxLines = ARTICLE_CARD_TITLE_LINES,
                 overflow = TextOverflow.Ellipsis
             )
             val sourceLabel = article.rssSourceTitle?.takeIf { it.isNotBlank() } ?: article.siteName
@@ -3372,6 +3469,7 @@ private fun ChannelArticlePane(
     isRefreshing: Boolean,
     contentPadding: PaddingValues,
     windowInfo: AdaptiveWindowInfo,
+    listState: LazyListState,
     onRefreshSource: () -> Unit,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
     onOpenOriginalLink: (String) -> Unit,
@@ -3397,6 +3495,7 @@ private fun ChannelArticlePane(
         ) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
+                state = listState,
                 contentPadding = articlePaneContentPadding(
                     scaffoldPadding = contentPadding,
                     windowInfo = windowInfo,
@@ -3405,11 +3504,21 @@ private fun ChannelArticlePane(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 item {
-                    ChannelArticlePaneHeader(
-                        channel = channel,
-                        isRefreshing = isRefreshing,
-                        onRefreshSource = onRefreshSource
-                    )
+                    if (channel == null) {
+                        ChannelArticlePaneHeader(
+                            channel = null,
+                            isRefreshing = isRefreshing,
+                            onRefreshSource = onRefreshSource
+                        )
+                    } else {
+                        MorphingChannelArticleHeader(
+                            progress = 1f,
+                            channel = channel,
+                            isRefreshing = isRefreshing,
+                            onBackToChannels = {},
+                            onRefreshSource = onRefreshSource
+                        )
+                    }
                 }
                 when {
                     channel == null -> item {
@@ -3427,8 +3536,10 @@ private fun ChannelArticlePane(
                         )
                     }
                     else -> items(channel.articles, key = { it.articleId }) { article ->
-                        MainScreenArticleRow(
+                        MorphingMainScreenArticleRow(
+                            progress = 1f,
                             article = article,
+                            selected = false,
                             onOpenArticle = onOpenArticle,
                             onOpenOriginalLink = onOpenOriginalLink,
                             onToggleFavorite = onToggleFavorite,
@@ -3495,6 +3606,7 @@ private fun ChannelArticlePaneHeader(
                     text = title,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
+                    minLines = 2,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -4045,7 +4157,8 @@ private fun MainScreenArticleRow(
                         text = article.title.ifBlank { article.url },
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
-                        maxLines = ARTICLE_CARD_TITLE_MAX_LINES,
+                        minLines = ARTICLE_CARD_TITLE_LINES,
+                        maxLines = ARTICLE_CARD_TITLE_LINES,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )

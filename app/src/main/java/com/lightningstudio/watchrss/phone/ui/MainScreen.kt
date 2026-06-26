@@ -91,11 +91,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.SideEffect
@@ -905,45 +903,30 @@ fun MainScreen(
         val inlineReaderListState = remember(selectedReaderArticle?.articleId) {
             LazyListState()
         }
-        val selectedReaderArticleState = rememberUpdatedState(selectedReaderArticle)
-        val hydratedSelectedReaderArticleState = rememberUpdatedState(hydratedSelectedReaderArticle)
-        val selectedImportedTextReaderState = rememberUpdatedState(selectedImportedTextReader)
-        val onLoadImportedTextChunkState = rememberUpdatedState(onLoadImportedTextChunkForInlineReader)
-        val onSaveArticleReadingProgressState = rememberUpdatedState(onSaveArticleReadingProgress)
-        val inlineReaderListStateState = rememberUpdatedState(inlineReaderListState)
-        val uriHandlerState = rememberUpdatedState(uriHandler)
-        val showFullscreenControlState = rememberUpdatedState(windowInfo.isMediumOrExpanded)
-        val onInlineReaderBackState = rememberUpdatedState { handleInlineReaderBack() }
-        val onToggleReaderFullscreenState = rememberUpdatedState {
-            readerFullscreenBackProgress = 0f
-            readerFullscreenActive = !readerFullscreenActive
-        }
-        val activeInlineReaderPane: @Composable (Boolean) -> Unit = remember(
-            selectedReaderArticle?.articleId,
-            inlineReaderContentReady
-        ) {
-            movableContentOf { fullscreen: Boolean ->
-                val article = selectedReaderArticleState.value
-                if (article != null) {
-                    InlineArticleReaderPane(
-                        article = article,
-                        readerArticle = hydratedSelectedReaderArticleState.value
-                            ?.takeIf { it.articleId == article.articleId },
-                        importedTextReader = selectedImportedTextReaderState.value,
-                        onLoadImportedTextChunk = onLoadImportedTextChunkState.value,
-                        onSaveReadingProgress = { progress ->
-                            onSaveArticleReadingProgressState.value(article.articleId, progress)
-                        },
-                        onBack = onInlineReaderBackState.value,
-                        onOpenImportedArticle = { url -> uriHandlerState.value.openUri(url) },
-                        onOpenOriginal = { url -> uriHandlerState.value.openUri(url) },
-                        listState = inlineReaderListStateState.value,
-                        contentReady = inlineReaderContentReady,
-                        fullscreen = fullscreen,
-                        showFullscreenControl = showFullscreenControlState.value,
-                        onToggleFullscreen = onToggleReaderFullscreenState.value
-                    )
-                }
+        val activeInlineReaderPane: @Composable (Boolean) -> Unit = { fullscreen ->
+            val article = selectedReaderArticle
+            if (article != null) {
+                InlineArticleReaderPane(
+                    article = article,
+                    readerArticle = hydratedSelectedReaderArticle
+                        ?.takeIf { it.articleId == article.articleId },
+                    importedTextReader = selectedImportedTextReader,
+                    onLoadImportedTextChunk = onLoadImportedTextChunkForInlineReader,
+                    onSaveReadingProgress = { progress ->
+                        onSaveArticleReadingProgress(article.articleId, progress)
+                    },
+                    onBack = { handleInlineReaderBack() },
+                    onOpenImportedArticle = { url -> uriHandler.openUri(url) },
+                    onOpenOriginal = { url -> uriHandler.openUri(url) },
+                    listState = inlineReaderListState,
+                    contentReady = inlineReaderContentReady,
+                    fullscreen = fullscreen,
+                    showFullscreenControl = windowInfo.isMediumOrExpanded,
+                    onToggleFullscreen = {
+                        readerFullscreenBackProgress = 0f
+                        readerFullscreenActive = !readerFullscreenActive
+                    }
+                )
             }
         }
         @Composable

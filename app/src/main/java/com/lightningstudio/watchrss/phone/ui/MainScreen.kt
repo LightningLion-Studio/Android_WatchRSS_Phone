@@ -1,11 +1,13 @@
 package com.lightningstudio.watchrss.phone.ui
 
 import androidx.activity.compose.PredictiveBackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
@@ -96,6 +98,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -287,7 +290,10 @@ fun MainScreen(
     var channelBackProgress by remember { mutableFloatStateOf(0f) }
     var tabBackProgress by remember { mutableFloatStateOf(0f) }
     var tabBackActive by remember { mutableStateOf(false) }
+    var suppressNextTopLevelTransition by remember { mutableStateOf(false) }
     var channelTabSwitchDestinationName by remember { mutableStateOf<String?>(null) }
+    var currentTopLevelPageName by rememberSaveable { mutableStateOf(MainPage.DASHBOARD.name) }
+    var isMediumOrExpandedLayout by remember { mutableStateOf(false) }
     var topLevelNavigationTargetName by remember { mutableStateOf<String?>(null) }
     var channelTabSwitchProgress by remember { mutableFloatStateOf(0f) }
     var channelTabSwitchDirection by remember { mutableFloatStateOf(1f) }
@@ -391,9 +397,13 @@ fun MainScreen(
         contentChannels.firstOrNull { it.key == key }
     }
     val selectedSource = selectedContentChannel?.source
-    val currentTopLevelPage = TopLevelMainPages.getOrElse(pagerState.currentPage) {
+    val pagerTopLevelPage = TopLevelMainPages.getOrElse(pagerState.currentPage) {
         MainPage.DASHBOARD
     }
+    val currentTopLevelPage = runCatching { MainPage.valueOf(currentTopLevelPageName) }
+        .getOrDefault(pagerTopLevelPage)
+        .takeIf { it in TopLevelMainPages }
+        ?: pagerTopLevelPage
     val channelReturnPage = runCatching { MainPage.valueOf(channelReturnPageName) }
         .getOrDefault(MainPage.RSS)
         .takeIf { it in TopLevelMainPages }
@@ -407,8 +417,22 @@ fun MainScreen(
     val page = if (selectedContentChannel != null) MainPage.CHANNEL else currentTopLevelPage
     val selectedBottomPage = if (page == MainPage.CHANNEL) channelReturnPage else currentTopLevelPage
 
-    fun navigateToTopLevelPage(destination: MainPage) {
-        topLevelNavigationTargetName = destination.name
+    fun returnToDashboard(
+        usePager: Boolean = !isMediumOrExpandedLayout,
+        suppressTopLevelTransition: Boolean = false,
+        keepPredictiveTransformUntilSettled: Boolean = false
+    ) {
+        if (suppressTopLevelTransition) {
+            suppressNextTopLevelTransition = true
+        }
+        if (keepPredictiveTransformUntilSettled) {
+            tabBackActive = true
+            tabBackProgress = 1f
+        } else {
+            tabBackActive = false
+            tabBackProgress = 0f
+        }
+        currentTopLevelPageName = MainPage.DASHBOARD.name
         selectedContentChannelKey = null
         selectedReaderArticleId = null
         readerFullscreenActive = false
@@ -416,22 +440,53 @@ fun MainScreen(
         readerOpenProgress = 1f
         readerOpenAnimating = false
         readerLeftPaneReturnState = null
-        coroutineScope.launch {
-            try {
+        if (usePager) {
+            coroutineScope.launch {
+                pagerState.scrollToPage(MainPage.DASHBOARD.topLevelIndex())
+            }
+        }
+        if (keepPredictiveTransformUntilSettled) {
+            coroutineScope.launch {
+                delay(64L)
+                tabBackActive = false
+                tabBackProgress = 0f
+            }
+        }
+    }
+
+    fun navigateToTopLevelPage(
+        destination: MainPage,
+        usePager: Boolean = !isMediumOrExpandedLayout
+    ) {
+        tabBackActive = false
+        tabBackProgress = 0f
+        topLevelNavigationTargetName = destination.name
+        currentTopLevelPageName = destination.name
+        selectedContentChannelKey = null
+        selectedReaderArticleId = null
+        readerFullscreenActive = false
+        readerFullscreenBackProgress = 0f
+        readerOpenProgress = 1f
+        readerOpenAnimating = false
+        readerLeftPaneReturnState = null
+        if (usePager) {
+            coroutineScope.launch {
                 pagerState.animateScrollToPage(destination.topLevelIndex())
-                if (destination != MainPage.RSS) {
-                    selectedContentChannelKey = null
-                    selectedReaderArticleId = null
-                    readerFullscreenActive = false
-                    readerFullscreenBackProgress = 0f
-                    readerOpenProgress = 1f
-                    readerOpenAnimating = false
-                    readerLeftPaneReturnState = null
-                }
-            } finally {
-                if (topLevelNavigationTargetName == destination.name) {
-                    topLevelNavigationTargetName = null
-                }
+            }
+        }
+        coroutineScope.launch {
+            delay(CHANNEL_TRANSITION_MS.toLong())
+            if (destination != MainPage.RSS) {
+                selectedContentChannelKey = null
+                selectedReaderArticleId = null
+                readerFullscreenActive = false
+                readerFullscreenBackProgress = 0f
+                readerOpenProgress = 1f
+                readerOpenAnimating = false
+                readerLeftPaneReturnState = null
+            }
+            if (topLevelNavigationTargetName == destination.name) {
+                topLevelNavigationTargetName = null
             }
         }
     }
@@ -442,6 +497,9 @@ fun MainScreen(
             else -> channelKey
         }
         channelReturnPageName = returnPage.name
+        if (returnPage in TopLevelMainPages) {
+            currentTopLevelPageName = returnPage.name
+        }
         selectedContentChannelKey = resolvedChannelKey
         selectedReaderArticleId = null
         readerFullscreenActive = false
@@ -472,7 +530,10 @@ fun MainScreen(
             }
             suppressNextChannelExit = true
             selectedContentChannelKey = null
-            pagerState.scrollToPage(destinationIndex)
+            currentTopLevelPageName = destination.name
+            if (!isMediumOrExpandedLayout) {
+                pagerState.scrollToPage(destinationIndex)
+            }
             delay(32L)
             channelTabSwitchDestinationName = null
             channelTabSwitchProgress = 0f
@@ -480,7 +541,11 @@ fun MainScreen(
         }
     }
 
-    PredictiveBackHandler(enabled = page == MainPage.CHANNEL && selectedReaderArticle == null) { backEvents ->
+    PredictiveBackHandler(
+        enabled = !isMediumOrExpandedLayout &&
+            page == MainPage.CHANNEL &&
+            selectedReaderArticle == null
+    ) { backEvents ->
         try {
             backEvents.collect { backEvent ->
                 channelBackProgress = backEvent.progress.coerceIn(0f, 1f)
@@ -493,8 +558,11 @@ fun MainScreen(
                 channelBackProgress = value
             }
             selectedContentChannelKey = null
-            coroutineScope.launch {
-                pagerState.animateScrollToPage(channelReturnPage.topLevelIndex())
+            currentTopLevelPageName = channelReturnPage.name
+            if (!isMediumOrExpandedLayout) {
+                coroutineScope.launch {
+                    pagerState.animateScrollToPage(channelReturnPage.topLevelIndex())
+                }
             }
             delay(CHANNEL_TRANSITION_MS.toLong() + 32L)
             if (selectedContentChannelKey == null) {
@@ -511,7 +579,14 @@ fun MainScreen(
         }
     }
 
-    PredictiveBackHandler(enabled = selectedReaderArticle == null && page != MainPage.DASHBOARD && page != MainPage.CHANNEL) { backEvents ->
+    val topLevelBackEnabled = selectedReaderArticle == null &&
+        if (isMediumOrExpandedLayout) {
+            currentTopLevelPage != MainPage.DASHBOARD
+        } else {
+            page != MainPage.DASHBOARD && page != MainPage.CHANNEL
+    }
+    PredictiveBackHandler(enabled = topLevelBackEnabled) { backEvents ->
+        var resetBackPreviewInFinally = true
         try {
             tabBackActive = true
             tabBackProgress = 0f
@@ -525,9 +600,12 @@ fun MainScreen(
             ) { value, _ ->
                 tabBackProgress = value
             }
-            pagerState.scrollToPage(MainPage.DASHBOARD.topLevelIndex())
-            tabBackActive = false
-            tabBackProgress = 0f
+            resetBackPreviewInFinally = !isMediumOrExpandedLayout
+            returnToDashboard(
+                usePager = !isMediumOrExpandedLayout,
+                suppressTopLevelTransition = isMediumOrExpandedLayout,
+                keepPredictiveTransformUntilSettled = isMediumOrExpandedLayout
+            )
         } catch (exception: CancellationException) {
             animate(
                 initialValue = tabBackProgress,
@@ -536,18 +614,33 @@ fun MainScreen(
             ) { value, _ ->
                 tabBackProgress = value
             }
-            tabBackActive = false
+        } finally {
+            if (resetBackPreviewInFinally) {
+                tabBackActive = false
+                tabBackProgress = 0f
+            }
         }
     }
 
     AdaptiveWindowScope(modifier = Modifier.fillMaxSize()) { windowInfo ->
+        SideEffect {
+            isMediumOrExpandedLayout = windowInfo.isMediumOrExpanded
+        }
+
+        LaunchedEffect(windowInfo.isMediumOrExpanded, pagerTopLevelPage) {
+            if (!windowInfo.isMediumOrExpanded) {
+                currentTopLevelPageName = pagerTopLevelPage.name
+            }
+        }
+        LaunchedEffect(currentTopLevelPage, suppressNextTopLevelTransition) {
+            if (suppressNextTopLevelTransition) {
+                delay(32L)
+                suppressNextTopLevelTransition = false
+            }
+        }
+
         fun openAdaptiveContentChannel(channelKey: String, returnPage: MainPage) {
             navigateToContentChannel(channelKey, returnPage)
-            if (windowInfo.isMediumOrExpanded && returnPage in TopLevelMainPages) {
-                coroutineScope.launch {
-                    pagerState.animateScrollToPage(returnPage.topLevelIndex())
-                }
-            }
         }
 
         fun openInlineReaderWithMotion(articleId: String) {
@@ -797,7 +890,11 @@ fun MainScreen(
         } else {
             page
         }
-        val navigationSelectedPage = topLevelNavigationTarget ?: selectedBottomPage
+        val navigationSelectedPage = topLevelNavigationTarget ?: if (windowInfo.isMediumOrExpanded) {
+            currentTopLevelPage
+        } else {
+            selectedBottomPage
+        }
         val readerTakesCurrentPage = selectedReaderArticle != null &&
             (readerFullscreenActive || !windowInfo.isMediumOrExpanded)
         val readingSplitActive = windowInfo.isMediumOrExpanded && selectedReaderArticle != null
@@ -860,7 +957,12 @@ fun MainScreen(
                     selectedSource != null &&
                     selectedSource.url !in uiState.refreshingRssSourceUrls &&
                     !uiState.isBusy,
-                onBack = { navigateToTopLevelPage(channelReturnPage) },
+                onBack = {
+                    navigateToTopLevelPage(
+                        channelReturnPage,
+                        usePager = !windowInfo.isMediumOrExpanded
+                    )
+                },
                 onRefreshAllRssSources = onRefreshAllRssSources,
                 onRefreshSelectedSource = {
                     if (selectedContentChannel?.canRefresh == true) {
@@ -887,7 +989,10 @@ fun MainScreen(
                             if (page == MainPage.CHANNEL && destination != channelReturnPage) {
                                 switchChannelToTopLevelPage(destination)
                             } else {
-                                navigateToTopLevelPage(destination)
+                                navigateToTopLevelPage(
+                                    destination,
+                                    usePager = !windowInfo.isMediumOrExpanded
+                                )
                             }
                         }
                     )
@@ -921,12 +1026,16 @@ fun MainScreen(
                             if (!windowInfo.isMediumOrExpanded && page == MainPage.CHANNEL && destination != channelReturnPage) {
                                 switchChannelToTopLevelPage(destination)
                             } else {
-                                navigateToTopLevelPage(destination)
+                                navigateToTopLevelPage(
+                                    destination,
+                                    usePager = !windowInfo.isMediumOrExpanded
+                                )
                             }
                         }
                     )
                     VerticalDivider(
                         modifier = Modifier
+                            .zIndex(2f)
                             .fillMaxHeight()
                             .padding(
                                 top = contentPadding.calculateTopPadding(),
@@ -965,7 +1074,12 @@ fun MainScreen(
                                     onOpenAccount = onOpenAccount,
                                     showAccountActions = showAccountFeatures,
                                     onExportBluetoothLog = onExportBluetoothLog,
-                                    onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
+                                    onOpenRss = {
+                                        navigateToTopLevelPage(
+                                            MainPage.RSS,
+                                            usePager = !windowInfo.isMediumOrExpanded
+                                        )
+                                    },
                                     onOpenFavorites = { navigateToContentChannel(CONTENT_CHANNEL_FAVORITES) },
                                     onOpenWatchLater = { navigateToContentChannel(CONTENT_CHANNEL_WATCH_LATER) },
                                     onOpenIndependent = { navigateToContentChannel(CONTENT_CHANNEL_INDEPENDENT) },
@@ -1028,7 +1142,12 @@ fun MainScreen(
                                 onOpenAccount = onOpenAccount,
                                 showAccountActions = showAccountFeatures,
                                 onExportBluetoothLog = onExportBluetoothLog,
-                                onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
+                                onOpenRss = {
+                                    navigateToTopLevelPage(
+                                        MainPage.RSS,
+                                        usePager = !windowInfo.isMediumOrExpanded
+                                    )
+                                },
                                 onOpenFavorites = { navigateToContentChannel(CONTENT_CHANNEL_FAVORITES) },
                                 onOpenWatchLater = { navigateToContentChannel(CONTENT_CHANNEL_WATCH_LATER) },
                                 onOpenIndependent = { navigateToContentChannel(CONTENT_CHANNEL_INDEPENDENT) },
@@ -1037,21 +1156,9 @@ fun MainScreen(
                             )
                         }
                     }
-                    HorizontalPager(
-                        state = pagerState,
-                        userScrollEnabled = !windowInfo.isMediumOrExpanded,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .then(
-                                if (tabBackActive) {
-                                    Modifier.tabPredictiveBackPreview(tabBackProgress)
-                                } else {
-                                    Modifier
-                                }
-                            )
-                            .zIndex(if (tabBackActive) 1f else 0f)
-                    ) { pageIndex ->
-                        when (TopLevelMainPages[pageIndex]) {
+                    @Composable
+                    fun RenderTopLevelPage(topLevelPage: MainPage) {
+                        when (topLevelPage) {
                             MainPage.DASHBOARD -> DashboardPage(
                                 uiState = uiState,
                                 articlesBySource = articlesBySource,
@@ -1062,7 +1169,12 @@ fun MainScreen(
                                 onOpenAccount = onOpenAccount,
                                 showAccountActions = showAccountFeatures,
                                 onExportBluetoothLog = onExportBluetoothLog,
-                                onOpenRss = { navigateToTopLevelPage(MainPage.RSS) },
+                                onOpenRss = {
+                                    navigateToTopLevelPage(
+                                        MainPage.RSS,
+                                        usePager = !windowInfo.isMediumOrExpanded
+                                    )
+                                },
                                 onOpenFavorites = { openAdaptiveContentChannel(CONTENT_CHANNEL_FAVORITES, MainPage.RSS) },
                                 onOpenWatchLater = { openAdaptiveContentChannel(CONTENT_CHANNEL_WATCH_LATER, MainPage.RSS) },
                                 onOpenIndependent = { openAdaptiveContentChannel(CONTENT_CHANNEL_INDEPENDENT, MainPage.RSS) },
@@ -1558,6 +1670,67 @@ fun MainScreen(
                         }
                     }
 
+                    if (windowInfo.isMediumOrExpanded) {
+                        AnimatedContent(
+                            targetState = currentTopLevelPage,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .then(
+                                    if (tabBackActive) {
+                                        Modifier.tabPredictiveBackPreview(tabBackProgress)
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                                .zIndex(if (tabBackActive) 1f else 0f),
+                            transitionSpec = {
+                                if (suppressNextTopLevelTransition) {
+                                    fadeIn(animationSpec = tween(0)) togetherWith
+                                        fadeOut(animationSpec = tween(0))
+                                } else {
+                                    val direction = if (
+                                        targetState.topLevelIndex() >= initialState.topLevelIndex()
+                                    ) {
+                                        1
+                                    } else {
+                                        -1
+                                    }
+                                    (
+                                        slideInHorizontally(
+                                            animationSpec = tween(CHANNEL_TRANSITION_MS)
+                                        ) { fullWidth -> fullWidth / 4 * direction } +
+                                            fadeIn(animationSpec = tween(CHANNEL_TRANSITION_MS))
+                                        ) togetherWith (
+                                        slideOutHorizontally(
+                                            animationSpec = tween(CHANNEL_TRANSITION_MS)
+                                        ) { fullWidth -> -fullWidth / 4 * direction } +
+                                            fadeOut(animationSpec = tween(CHANNEL_TRANSITION_MS))
+                                        )
+                                }
+                            },
+                            label = "WideTopLevelPage"
+                        ) { topLevelPage ->
+                            RenderTopLevelPage(topLevelPage)
+                        }
+                    } else {
+                        HorizontalPager(
+                            state = pagerState,
+                            userScrollEnabled = true,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .then(
+                                    if (tabBackActive) {
+                                        Modifier.tabPredictiveBackPreview(tabBackProgress)
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                                .zIndex(if (tabBackActive) 1f else 0f)
+                        ) { pageIndex ->
+                            RenderTopLevelPage(TopLevelMainPages[pageIndex])
+                        }
+                    }
+
                     androidx.compose.animation.AnimatedVisibility(
                         visible = page == MainPage.CHANNEL &&
                             !windowInfo.isMediumOrExpanded &&
@@ -1882,6 +2055,7 @@ private fun MainNavigationRail(
     val topPadding = contentPadding.calculateTopPadding()
     NavigationRail(
         modifier = Modifier
+            .zIndex(2f)
             .width(MainNavigationRailWidth)
             .fillMaxHeight()
             .then(if (topPadding == 0.dp) Modifier.statusBarsPadding() else Modifier)

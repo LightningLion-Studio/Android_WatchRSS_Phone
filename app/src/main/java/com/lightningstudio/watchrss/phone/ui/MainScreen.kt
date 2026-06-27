@@ -688,6 +688,7 @@ fun MainScreen(
 
         fun openIndependentArticleFromImports(article: PhoneArticleEntity) {
             if (windowInfo.isMediumOrExpanded && canOpenArticleInline(article)) {
+                channelReturnPageName = MainPage.IMPORTS.name
                 selectedContentChannelKey = CONTENT_CHANNEL_INDEPENDENT
                 openInlineReaderWithMotion(article.articleId)
             } else {

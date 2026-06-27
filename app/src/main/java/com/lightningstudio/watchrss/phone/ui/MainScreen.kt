@@ -92,6 +92,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -110,6 +111,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import com.lightningstudio.watchrss.phone.ArticleContentNodesKey
+import com.lightningstudio.watchrss.phone.ArticleContentNodesSnapshot
 import com.lightningstudio.watchrss.phone.ArticleReaderScreen
 import com.lightningstudio.watchrss.phone.PlatformWebViewScreen
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
@@ -212,6 +215,25 @@ private data class MainContentReorderRequest(
     val independentIndex: Int?
 )
 
+private data class InlineReaderPaneInput(
+    val article: PhoneArticleEntity,
+    val readerArticle: PhoneArticleEntity?,
+    val importedTextReader: PhoneImportedTextReader?,
+    val onLoadImportedTextChunk: suspend (String, Int) -> String?,
+    val onSaveReadingProgress: suspend (Float) -> Unit,
+    val onBack: () -> Unit,
+    val onOpenImportedArticle: (String) -> Unit,
+    val onOpenOriginal: (String) -> Unit,
+    val listState: LazyListState,
+    val contentReady: Boolean,
+    val contentNodesCache: MutableMap<ArticleContentNodesKey, ArticleContentNodesSnapshot>,
+    val positionAlreadyRestored: Boolean,
+    val onPositionRestored: (String) -> Unit,
+    val fullscreen: Boolean,
+    val showFullscreenControl: Boolean,
+    val onToggleFullscreen: () -> Unit
+)
+
 private enum class MainContentChannelIcon {
     RSS,
     BOOK,
@@ -293,6 +315,7 @@ fun MainScreen(
     var readerBackAnimating by remember { mutableStateOf(false) }
     var readerOpenProgress by remember { mutableFloatStateOf(1f) }
     var readerOpenAnimating by remember { mutableStateOf(false) }
+    var inlineReaderRestoredArticleId by remember { mutableStateOf<String?>(null) }
     var readerLeftPaneReturnState by remember { mutableStateOf<ReaderLeftPaneReturnState?>(null) }
     var lastContentChannelKey by rememberSaveable { mutableStateOf<String?>(null) }
     var channelReturnPageName by rememberSaveable { mutableStateOf(MainPage.RSS.name) }
@@ -387,11 +410,14 @@ fun MainScreen(
     }
     LaunchedEffect(selectedReaderArticleId) {
         if (selectedReaderArticleId == null) {
+            inlineReaderRestoredArticleId = null
             readerFullscreenActive = false
             readerBackProgress = 0f
             readerFullscreenBackProgress = 0f
             readerOpenProgress = 1f
             readerOpenAnimating = false
+        } else if (inlineReaderRestoredArticleId != selectedReaderArticleId) {
+            inlineReaderRestoredArticleId = null
         }
     }
     val animatedContentChannel = (selectedContentChannelKey ?: lastContentChannelKey)?.let { key ->
@@ -907,29 +933,67 @@ fun MainScreen(
         val inlineReaderListState = remember(selectedReaderArticle?.articleId) {
             LazyListState()
         }
-        val activeInlineReaderPane: @Composable (Boolean) -> Unit = { fullscreen ->
-            val article = selectedReaderArticle
-            if (article != null) {
+        val inlineReaderContentNodesCache = remember {
+            mutableMapOf<ArticleContentNodesKey, ArticleContentNodesSnapshot>()
+        }
+        val movableInlineReaderPane = remember(
+            selectedReaderArticle?.articleId,
+            inlineReaderContentReady,
+            hydratedSelectedReaderArticle?.articleId != null
+        ) {
+            movableContentOf<InlineReaderPaneInput> { input ->
                 InlineArticleReaderPane(
-                    article = article,
-                    readerArticle = hydratedSelectedReaderArticle
-                        ?.takeIf { it.articleId == article.articleId },
-                    importedTextReader = selectedImportedTextReader,
-                    onLoadImportedTextChunk = onLoadImportedTextChunkForInlineReader,
-                    onSaveReadingProgress = { progress ->
-                        onSaveArticleReadingProgress(article.articleId, progress)
-                    },
-                    onBack = { handleInlineReaderBack() },
-                    onOpenImportedArticle = { url -> uriHandler.openUri(url) },
-                    onOpenOriginal = { url -> uriHandler.openUri(url) },
-                    listState = inlineReaderListState,
-                    contentReady = inlineReaderContentReady,
-                    fullscreen = fullscreen,
-                    showFullscreenControl = windowInfo.isMediumOrExpanded,
-                    onToggleFullscreen = {
-                        readerFullscreenBackProgress = 0f
-                        readerFullscreenActive = !readerFullscreenActive
-                    }
+                    article = input.article,
+                    readerArticle = input.readerArticle,
+                    importedTextReader = input.importedTextReader,
+                    onLoadImportedTextChunk = input.onLoadImportedTextChunk,
+                    onSaveReadingProgress = input.onSaveReadingProgress,
+                    onBack = input.onBack,
+                    onOpenImportedArticle = input.onOpenImportedArticle,
+                    onOpenOriginal = input.onOpenOriginal,
+                    listState = input.listState,
+                    contentReady = input.contentReady,
+                    contentNodesCache = input.contentNodesCache,
+                    positionAlreadyRestored = input.positionAlreadyRestored,
+                    onPositionRestored = input.onPositionRestored,
+                    fullscreen = input.fullscreen,
+                    showFullscreenControl = input.showFullscreenControl,
+                    onToggleFullscreen = input.onToggleFullscreen
+                )
+            }
+        }
+        val activeInlineReaderPane: @Composable (Boolean) -> Unit = { fullscreen ->
+            val article = selectedReaderArticleListItem ?: selectedReaderArticle
+            if (article != null) {
+                movableInlineReaderPane(
+                    InlineReaderPaneInput(
+                        article = article,
+                        readerArticle = hydratedSelectedReaderArticle
+                            ?.takeIf { inlineReaderContentReady && it.articleId == article.articleId },
+                        importedTextReader = selectedImportedTextReader,
+                        onLoadImportedTextChunk = onLoadImportedTextChunkForInlineReader,
+                        onSaveReadingProgress = { progress ->
+                            onSaveArticleReadingProgress(article.articleId, progress)
+                        },
+                        onBack = { handleInlineReaderBack() },
+                        onOpenImportedArticle = { url -> uriHandler.openUri(url) },
+                        onOpenOriginal = { url -> uriHandler.openUri(url) },
+                        listState = inlineReaderListState,
+                        contentReady = inlineReaderContentReady,
+                        contentNodesCache = inlineReaderContentNodesCache,
+                        positionAlreadyRestored = inlineReaderRestoredArticleId == article.articleId,
+                        onPositionRestored = { restoredArticleId ->
+                            if (selectedReaderArticleId == restoredArticleId) {
+                                inlineReaderRestoredArticleId = restoredArticleId
+                            }
+                        },
+                        fullscreen = fullscreen,
+                        showFullscreenControl = windowInfo.isMediumOrExpanded,
+                        onToggleFullscreen = {
+                            readerFullscreenBackProgress = 0f
+                            readerFullscreenActive = !readerFullscreenActive
+                        }
+                    )
                 )
             }
         }
@@ -1849,6 +1913,9 @@ private fun InlineArticleReaderPane(
     onOpenOriginal: (String) -> Unit,
     listState: LazyListState,
     contentReady: Boolean,
+    contentNodesCache: MutableMap<ArticleContentNodesKey, ArticleContentNodesSnapshot>,
+    positionAlreadyRestored: Boolean,
+    onPositionRestored: (String) -> Unit,
     fullscreen: Boolean,
     showFullscreenControl: Boolean,
     onToggleFullscreen: () -> Unit
@@ -1885,7 +1952,10 @@ private fun InlineArticleReaderPane(
         embeddedFullscreen = fullscreen,
         onOpenFullscreen = fullscreenControl,
         listState = listState,
-        contentReady = articleContentReady
+        contentReady = articleContentReady,
+        contentNodesCache = contentNodesCache,
+        positionAlreadyRestored = positionAlreadyRestored,
+        onPositionRestored = onPositionRestored
     )
 }
 
@@ -2282,7 +2352,7 @@ private fun SyncStatusCard(
                     )
                 }
             }
-            message?.takeIf { it.isNotBlank() }?.let {
+            message?.takeIf { syncProgress == null && it.isNotBlank() }?.let {
                 Text(
                     text = it,
                     maxLines = 2,

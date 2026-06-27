@@ -231,7 +231,10 @@ internal fun ArticleReaderScreen(
     embeddedFullscreen: Boolean = false,
     onOpenFullscreen: (() -> Unit)? = null,
     listState: LazyListState = rememberLazyListState(),
-    contentReady: Boolean = true
+    contentReady: Boolean = true,
+    contentNodesCache: MutableMap<ArticleContentNodesKey, ArticleContentNodesSnapshot>? = null,
+    positionAlreadyRestored: Boolean = false,
+    onPositionRestored: (String) -> Unit = {}
 ) {
     if (invalidArticleId) {
         ReaderBackSurface(
@@ -289,16 +292,31 @@ internal fun ArticleReaderScreen(
         excerpt = safeArticle.excerpt,
         url = safeArticle.url
     )
+    val cachedContentNodesSnapshot = if (shouldBuildContentNodes) {
+        contentNodesCache?.get(contentNodesKey)?.takeIf { it.key == contentNodesKey }
+    } else {
+        null
+    }
     val contentNodesSnapshot by produceState<ArticleContentNodesSnapshot?>(
-        initialValue = null,
+        initialValue = cachedContentNodesSnapshot,
         contentNodesKey,
-        shouldBuildContentNodes
+        contentReady,
+        shouldBuildContentNodes,
+        contentNodesCache
     ) {
+        if (!contentReady) {
+            value = null
+            return@produceState
+        }
         if (!shouldBuildContentNodes) {
             value = ArticleContentNodesSnapshot(
                 key = contentNodesKey,
                 nodes = emptyList()
             )
+            return@produceState
+        }
+        contentNodesCache?.get(contentNodesKey)?.takeIf { it.key == contentNodesKey }?.let { snapshot ->
+            value = snapshot
             return@produceState
         }
         value = null
@@ -313,10 +331,12 @@ internal fun ArticleReaderScreen(
                 )
             }
         }
-        value = ArticleContentNodesSnapshot(
+        val snapshot = ArticleContentNodesSnapshot(
             key = contentNodesKey,
             nodes = nodes
         )
+        contentNodesCache?.set(contentNodesKey, snapshot)
+        value = snapshot
     }
     val currentContentNodes = if (shouldBuildContentNodes) {
         contentNodesSnapshot
@@ -345,9 +365,17 @@ internal fun ArticleReaderScreen(
         var readerChromeOffsetPx by remember { mutableStateOf(0f) }
         var lastReaderChromeDirection by remember { mutableStateOf(0) }
         val readerProgressAnchorOffsetPx = topBarHeightPx.coerceAtLeast(0)
-        var hasRestoredPosition by remember(safeArticle.articleId) { mutableStateOf(false) }
+        var hasRestoredPosition by remember(safeArticle.articleId) {
+            mutableStateOf(positionAlreadyRestored)
+        }
         var pendingRestoreProgress by remember(safeArticle.articleId) {
-            mutableStateOf<Float?>(safeArticle.readingProgress.coerceIn(0f, 1f))
+            mutableStateOf<Float?>(
+                if (positionAlreadyRestored) {
+                    null
+                } else {
+                    safeArticle.readingProgress.coerceIn(0f, 1f)
+                }
+            )
         }
         var pendingArticleRestore by remember(safeArticle.articleId) {
             mutableStateOf<ArticleRestoreTarget?>(null)
@@ -366,6 +394,13 @@ internal fun ArticleReaderScreen(
         val lifecycleOwner = LocalLifecycleOwner.current
         val onSaveReadingProgressState = rememberUpdatedState(onSaveReadingProgress)
         val onBackState = rememberUpdatedState(onBack)
+        val onPositionRestoredState = rememberUpdatedState(onPositionRestored)
+
+        LaunchedEffect(safeArticle.articleId, hasRestoredPosition) {
+            if (hasRestoredPosition) {
+                onPositionRestoredState.value(safeArticle.articleId)
+            }
+        }
 
         fun updateReaderChromeOffset(deltaPx: Float) {
             if (chromeHideRangePx <= 0 || deltaPx == 0f) return
@@ -2225,7 +2260,7 @@ private data class ArticlePreviewImage(
     val sourceBounds: Rect?
 )
 
-private data class ArticleContentNodesKey(
+internal data class ArticleContentNodesKey(
     val articleId: String,
     val contentHash: String,
     val contentHtml: String?,
@@ -2234,12 +2269,12 @@ private data class ArticleContentNodesKey(
     val url: String
 )
 
-private data class ArticleContentNodesSnapshot(
+internal data class ArticleContentNodesSnapshot(
     val key: ArticleContentNodesKey,
     val nodes: List<ArticleNode>
 )
 
-private sealed class ArticleNode {
+internal sealed class ArticleNode {
     data class Heading(val text: String, val level: Int) : ArticleNode()
     data class Paragraph(val text: String) : ArticleNode()
     data class Image(val url: String, val alt: String, val aspectRatio: Float?) : ArticleNode()

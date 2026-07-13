@@ -13,6 +13,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -103,6 +104,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalUriHandler
@@ -115,11 +117,13 @@ import com.lightningstudio.watchrss.phone.ArticleContentNodesKey
 import com.lightningstudio.watchrss.phone.ArticleContentNodesSnapshot
 import com.lightningstudio.watchrss.phone.ArticleReaderScreen
 import com.lightningstudio.watchrss.phone.PlatformWebViewScreen
+import com.lightningstudio.watchrss.phone.generateQRCode
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.repo.PhoneImportedTextReader
+import com.lightningstudio.watchrss.phone.platform.OnlineNovelLinkDetector
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
 import com.lightningstudio.watchrss.phone.viewmodel.MainBluetoothDevicePromptUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainBluetoothDeviceUi
@@ -171,6 +175,10 @@ private const val TAB_PREDICTIVE_EXIT_PROGRESS = 1f
 private const val READER_LEFT_PANE_RETURN_TRANSITION_MS = 480
 private const val READER_FULLSCREEN_BACK_SETTLE_MS = 480
 private const val ARTICLE_CARD_TITLE_LINES = 2
+private const val ONLINE_NOVEL_IMPORT_WARNING =
+    "小说导入仅支持txt/epub等开放格式本地文件，不支持来自在线小说库的阅读链接分享（七猫/番茄/晋江/起点等平台均不支持），仍然要将页面作为网页或RSS尝试导入吗？"
+private const val WATCH_RSS_QQ_GROUP_URL = "https://qm.qq.com/q/cJNTQuxfoW"
+private const val WATCH_RSS_QQ_GROUP_NUMBER = "1083518433"
 private val MainNavigationRailWidth = 80.dp
 
 @Composable
@@ -4070,6 +4078,20 @@ private fun ImportActionsCard(
     error: String?,
     onDismissMessage: () -> Unit
 ) {
+    var pendingOnlineNovelImport by remember(urlInput) {
+        mutableStateOf<UrlDialogMode?>(null)
+    }
+    val requestUrlImport: (UrlDialogMode) -> Unit = { mode ->
+        if (OnlineNovelLinkDetector.findOnlineNovelUrl(urlInput) != null) {
+            pendingOnlineNovelImport = mode
+        } else {
+            when (mode) {
+                UrlDialogMode.ARTICLE -> onImportArticle()
+                UrlDialogMode.RSS -> onAddRssSource()
+            }
+        }
+    }
+
     ElevatedCard(
         colors = CardDefaults.elevatedCardColors(
             containerColor = MaterialTheme.colorScheme.primaryContainer
@@ -4095,7 +4117,7 @@ private fun ImportActionsCard(
             )
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
-                    onClick = onAddRssSource,
+                    onClick = { requestUrlImport(UrlDialogMode.RSS) },
                     enabled = enabled && urlInput.isNotBlank(),
                     modifier = Modifier.weight(1f)
                 ) {
@@ -4104,7 +4126,7 @@ private fun ImportActionsCard(
                     Text("RSS")
                 }
                 Button(
-                    onClick = onImportArticle,
+                    onClick = { requestUrlImport(UrlDialogMode.ARTICLE) },
                     enabled = enabled && urlInput.isNotBlank(),
                     modifier = Modifier.weight(1f)
                 ) {
@@ -4141,6 +4163,21 @@ private fun ImportActionsCard(
                 )
             }
         }
+    }
+    pendingOnlineNovelImport?.let { mode ->
+        OnlineNovelImportWarningDialog(
+            onConfirm = {
+                pendingOnlineNovelImport = null
+                OnlineNovelLinkDetector.findOnlineNovelUrl(urlInput)
+                    ?.takeIf { it != urlInput.trim() }
+                    ?.let(onUrlChange)
+                when (mode) {
+                    UrlDialogMode.ARTICLE -> onImportArticle()
+                    UrlDialogMode.RSS -> onAddRssSource()
+                }
+            },
+            onDismiss = { pendingOnlineNovelImport = null }
+        )
     }
 }
 
@@ -4508,6 +4545,21 @@ private fun UrlEntryDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    var showOnlineNovelWarning by remember(mode, urlInput) { mutableStateOf(false) }
+    if (showOnlineNovelWarning) {
+        OnlineNovelImportWarningDialog(
+            onConfirm = {
+                showOnlineNovelWarning = false
+                OnlineNovelLinkDetector.findOnlineNovelUrl(urlInput)
+                    ?.takeIf { it != urlInput.trim() }
+                    ?.let(onUrlChange)
+                onConfirm()
+            },
+            onDismiss = { showOnlineNovelWarning = false }
+        )
+        return
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -4526,7 +4578,13 @@ private fun UrlEntryDialog(
         },
         confirmButton = {
             Button(
-                onClick = onConfirm,
+                onClick = {
+                    if (OnlineNovelLinkDetector.findOnlineNovelUrl(urlInput) != null) {
+                        showOnlineNovelWarning = true
+                    } else {
+                        onConfirm()
+                    }
+                },
                 enabled = enabled && urlInput.isNotBlank()
             ) {
                 Icon(
@@ -4540,6 +4598,81 @@ private fun UrlEntryDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("取消")
+            }
+        }
+    )
+}
+
+@Composable
+private fun OnlineNovelImportWarningDialog(
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var showContactQr by remember { mutableStateOf(false) }
+    if (showContactQr) {
+        QqGroupQrDialog(onDismiss = { showContactQr = false })
+        return
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("在线小说链接") },
+        text = { Text(ONLINE_NOVEL_IMPORT_WARNING) },
+        confirmButton = {
+            Button(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = onConfirm) {
+                    Text("仍然导入")
+                }
+                TextButton(onClick = { showContactQr = true }) {
+                    Text("联系我们")
+                }
+            }
+        }
+    )
+}
+
+@Composable
+private fun QqGroupQrDialog(onDismiss: () -> Unit) {
+    val qrBitmap = remember {
+        generateQRCode(WATCH_RSS_QQ_GROUP_URL, 512).asImageBitmap()
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("联系我们") },
+        text = {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("扫描二维码加入 QQ 群")
+                Surface(
+                    modifier = Modifier.size(220.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color.White
+                ) {
+                    Image(
+                        bitmap = qrBitmap,
+                        contentDescription = "QQ群二维码",
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(12.dp)
+                    )
+                }
+                Text(
+                    text = "群号：$WATCH_RSS_QQ_GROUP_NUMBER",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) {
+                Text("返回")
             }
         }
     )
@@ -4680,6 +4813,24 @@ private fun MainScreenSharedImportDialog(
     onConfirmFileImport: (SharedImportPromptUi) -> Unit,
     onDismiss: () -> Unit
 ) {
+    var pendingOnlineNovelImport by remember(prompt.kind, prompt.url) {
+        mutableStateOf<UrlDialogMode?>(null)
+    }
+    pendingOnlineNovelImport?.let { mode ->
+        OnlineNovelImportWarningDialog(
+            onConfirm = {
+                pendingOnlineNovelImport = null
+                val url = OnlineNovelLinkDetector.findOnlineNovelUrl(prompt.url) ?: prompt.url
+                when (mode) {
+                    UrlDialogMode.ARTICLE -> onImportLinkAsArticle(url)
+                    UrlDialogMode.RSS -> onImportLinkAsRss(url)
+                }
+            },
+            onDismiss = { pendingOnlineNovelImport = null }
+        )
+        return
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -4723,7 +4874,13 @@ private fun MainScreenSharedImportDialog(
                     SharedImportPromptKind.LINK -> {
                         Button(
                             modifier = Modifier.fillMaxWidth(),
-                            onClick = { onImportLinkAsRss(prompt.url) }
+                            onClick = {
+                                if (OnlineNovelLinkDetector.findOnlineNovelUrl(prompt.url) != null) {
+                                    pendingOnlineNovelImport = UrlDialogMode.RSS
+                                } else {
+                                    onImportLinkAsRss(prompt.url)
+                                }
+                            }
                         ) {
                             Icon(Icons.Default.RssFeed, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
@@ -4731,7 +4888,13 @@ private fun MainScreenSharedImportDialog(
                         }
                         Button(
                             modifier = Modifier.fillMaxWidth(),
-                            onClick = { onImportLinkAsArticle(prompt.url) }
+                            onClick = {
+                                if (OnlineNovelLinkDetector.findOnlineNovelUrl(prompt.url) != null) {
+                                    pendingOnlineNovelImport = UrlDialogMode.ARTICLE
+                                } else {
+                                    onImportLinkAsArticle(prompt.url)
+                                }
+                            }
                         ) {
                             Icon(Icons.AutoMirrored.Filled.Article, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))

@@ -28,4 +28,7 @@ interface PhoneRssSourceDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(sources: List<PhoneRssSourceEntity>)
+
+    @Query("DELETE FROM phone_rss_sources")
+    suspend fun deleteAll()
 }

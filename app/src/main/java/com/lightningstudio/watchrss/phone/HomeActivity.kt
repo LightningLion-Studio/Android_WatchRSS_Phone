@@ -18,6 +18,8 @@ import androidx.compose.runtime.getValue
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_EXTENSION
+import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_MIME_TYPE
 import com.lightningstudio.watchrss.phone.ui.MainScreen
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
@@ -27,6 +29,9 @@ import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptUi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class HomeActivity : ComponentActivity() {
     companion object {
@@ -45,7 +50,8 @@ class HomeActivity : ComponentActivity() {
         MainViewModelFactory(
             container.repository,
             container.bluetoothSyncManager,
-            container.usageTelemetry
+            container.usageTelemetry,
+            container.backupService
         )
     }
 
@@ -81,6 +87,15 @@ class HomeActivity : ComponentActivity() {
             }
         }
 
+    private val exportBackupLauncher =
+        registerForActivityResult(ActivityResultContracts.CreateDocument(WATCHRSS_BACKUP_MIME_TYPE)) { uri ->
+            if (uri == null) {
+                viewModel.showMessage("已取消导出资料库")
+                return@registerForActivityResult
+            }
+            viewModel.exportBackup(uri.toString())
+        }
+
     private val importLocalContentLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri == null) {
@@ -89,13 +104,28 @@ class HomeActivity : ComponentActivity() {
             }
             lifecycleScope.launch {
                 runCatching {
-                    readSelectedLocalContent(uri)
-                }.onSuccess { file ->
-                    viewModel.importLocalContent(
-                        fileName = file.fileName,
-                        mimeType = file.mimeType,
-                        bytes = file.bytes
-                    )
+                    val fileName = withContext(Dispatchers.IO) {
+                        queryDisplayName(uri)
+                            ?: uri.lastPathSegment?.substringAfterLast('/')
+                            ?: "未命名文件"
+                    }
+                    val mimeType = contentResolver.getType(uri)
+                    if (isWrssBackup(fileName, mimeType)) {
+                        runCatching {
+                            contentResolver.takePersistableUriPermission(
+                                uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            )
+                        }
+                        viewModel.inspectBackup(fileName, uri.toString())
+                    } else {
+                        val file = readSelectedLocalContent(uri)
+                        viewModel.importLocalContent(
+                            fileName = file.fileName,
+                            mimeType = file.mimeType,
+                            bytes = file.bytes
+                        )
+                    }
                 }.onFailure { throwable ->
                     Log.e(TAG, "Failed to read local content", throwable)
                     viewModel.showError("文件导入失败：${throwable.message ?: "未知错误"}")
@@ -180,7 +210,10 @@ class HomeActivity : ComponentActivity() {
                     onRefreshAllRssSources = viewModel::refreshAllRssSources,
                     onRefreshRssSource = viewModel::refreshRssSource,
                     onDeleteArticle = viewModel::deleteArticle,
-                    onClearImportedContent = viewModel::clearImportedContent,
+                    onExportBackup = ::exportBackup,
+                    onImportBackup = viewModel::importBackup,
+                    onRequestBackupReplace = viewModel::requestBackupReplaceConfirmation,
+                    onDismissBackupImport = viewModel::dismissBackupImportPrompt,
                     onChooseConflictResolution = viewModel::chooseConflictResolution,
                     onShowManualConflictOptions = viewModel::showManualConflictOptions,
                     onDismissMessage = viewModel::clearMessage,
@@ -237,12 +270,19 @@ class HomeActivity : ComponentActivity() {
         exportBluetoothLogLauncher.launch(fileName)
     }
 
+    private fun exportBackup() {
+        val timestamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        exportBackupLauncher.launch("WatchRSS-backup-$timestamp$WATCHRSS_BACKUP_EXTENSION")
+    }
+
     private fun selectLocalFile() {
         importLocalContentLauncher.launch(
             arrayOf(
                 "text/plain",
                 "text/*",
                 "application/epub+zip",
+                WATCHRSS_BACKUP_MIME_TYPE,
+                "application/zip",
                 "application/octet-stream",
                 "*/*"
             )
@@ -412,6 +452,11 @@ class HomeActivity : ComponentActivity() {
     private fun isReadableLocalUri(uri: Uri): Boolean {
         val scheme = uri.scheme?.lowercase() ?: return false
         return scheme == "content" || scheme == "file"
+    }
+
+    private fun isWrssBackup(fileName: String, mimeType: String?): Boolean {
+        return fileName.endsWith(WATCHRSS_BACKUP_EXTENSION, ignoreCase = true) ||
+            mimeType.equals(WATCHRSS_BACKUP_MIME_TYPE, ignoreCase = true)
     }
 
     private fun isSupportedLocalContent(fileName: String, mimeType: String?): Boolean {

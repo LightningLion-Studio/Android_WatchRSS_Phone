@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -1164,6 +1165,111 @@ class PhoneCompanionRepositoryTest {
         assertTrue(source.sortOrder >= 42L)
     }
 
+    @Test
+    fun mergeArticlesFromBackup_usesLatestPerFieldAndKeepsMaximumProgress() = runBlocking {
+        val articleDao = FakePhoneArticleDao().apply {
+            items = listOf(
+                article(
+                    id = "same",
+                    title = "当前标题",
+                    updatedAt = 100L,
+                    favoriteSaved = false,
+                    favoriteChangedAt = 300L,
+                    readingProgress = 0.8f
+                ),
+                article(
+                    id = "tie",
+                    title = "当前同时间标题",
+                    updatedAt = 500L
+                )
+            )
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "current-device"
+        )
+
+        val changed = repository.mergeArticlesFromBackup(
+            listOf(
+                article(
+                    id = "same",
+                    title = "备份较新标题",
+                    updatedAt = 200L,
+                    favoriteSaved = true,
+                    favoriteChangedAt = 250L,
+                    watchLaterSaved = true,
+                    watchLaterChangedAt = 400L,
+                    readingProgress = 0.4f
+                ),
+                article(
+                    id = "tie",
+                    title = "备份同时间标题",
+                    updatedAt = 500L
+                ),
+                article(id = "missing", title = "新增文章", updatedAt = 50L)
+            )
+        )
+
+        assertEquals(2, changed)
+        val same = articleDao.items.single { it.articleId == "same" }
+        assertEquals("备份较新标题", same.title)
+        assertEquals(false, same.favoriteSaved)
+        assertEquals(true, same.watchLaterSaved)
+        assertEquals(0.8f, same.readingProgress)
+        assertEquals("current-device", same.sourceDeviceId)
+        assertEquals("当前同时间标题", articleDao.items.single { it.articleId == "tie" }.title)
+        assertEquals("新增文章", articleDao.items.single { it.articleId == "missing" }.title)
+    }
+
+    @Test
+    fun getArticlesForBackup_hydratesExternalTextAndRejectsMissingBody() {
+        val store = FakeArticleContentStore()
+        val marker = store.storeText("external-text", "完整外置正文")
+        val articleDao = FakePhoneArticleDao().apply {
+            items = listOf(article(id = "external", contentText = marker))
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "current-device",
+            articleContentStore = store
+        )
+
+        val hydrated = runBlocking { repository.getArticlesForBackup().single() }
+        assertEquals("完整外置正文", hydrated.contentText)
+
+        articleDao.items = listOf(article(id = "missing", contentText = store.markerFor("missing")))
+        val error = assertThrows(IllegalStateException::class.java) {
+            runBlocking { repository.getArticlesForBackup() }
+        }
+        assertTrue(error.message.orEmpty().contains("正文文件缺失"))
+    }
+
+    @Test
+    fun replaceArticlesFromBackup_removesCurrentOnlyRows() = runBlocking {
+        val articleDao = FakePhoneArticleDao().apply {
+            items = listOf(article(id = "old"))
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "current-device"
+        )
+
+        val replaced = repository.replaceArticlesFromBackup(
+            listOf(article(id = "restored", readingProgress = 0.6f))
+        )
+
+        assertEquals(1, replaced)
+        assertEquals(listOf("restored"), articleDao.items.map { it.articleId })
+        assertEquals("current-device", articleDao.items.single().sourceDeviceId)
+        assertEquals(0.6f, articleDao.items.single().readingProgress)
+    }
+
     private fun source(
         url: String,
         title: String = "示例源",
@@ -1203,7 +1309,9 @@ class PhoneCompanionRepositoryTest {
         watchLaterSaved: Boolean = false,
         watchLaterChangedAt: Long = 0L,
         deleted: Boolean = false,
-        deletedAt: Long = 0L
+        deletedAt: Long = 0L,
+        updatedAt: Long = maxOf(independentChangedAt, favoriteChangedAt, watchLaterChangedAt, 1L),
+        readingProgress: Float = 0f
     ): PhoneArticleEntity {
         return PhoneArticleEntity(
             articleId = id,
@@ -1217,7 +1325,7 @@ class PhoneCompanionRepositoryTest {
             imageUrl = null,
             contentHash = "hash-$id",
             importedAt = importedAt,
-            updatedAt = maxOf(independentChangedAt, favoriteChangedAt, watchLaterChangedAt, 1L),
+            updatedAt = updatedAt,
             independentSaved = independentSaved,
             independentChangedAt = independentChangedAt,
             independentSortOrder = independentChangedAt,
@@ -1230,7 +1338,8 @@ class PhoneCompanionRepositoryTest {
             watchLaterChangedAt = watchLaterChangedAt,
             watchLaterSortOrder = watchLaterChangedAt,
             deleted = deleted,
-            deletedAt = deletedAt
+            deletedAt = deletedAt,
+            readingProgress = readingProgress
         )
     }
 
@@ -1259,6 +1368,12 @@ class PhoneCompanionRepositoryTest {
 
         override suspend fun upsertAll(items: List<PhoneSavedItemEntity>) {
             this.items = this.items + items
+        }
+
+        override suspend fun getAll(): List<PhoneSavedItemEntity> = items
+
+        override suspend fun deleteAll() {
+            items = emptyList()
         }
     }
 
@@ -1326,6 +1441,10 @@ class PhoneCompanionRepositoryTest {
         override suspend fun deleteByRssSourceUrl(rssSourceUrl: String) {
             items = items.filterNot { it.rssSourceUrl == rssSourceUrl }
         }
+
+        override suspend fun deleteAll() {
+            items = emptyList()
+        }
     }
 
     private class FakePhoneRssSourceDao : PhoneRssSourceDao {
@@ -1345,6 +1464,10 @@ class PhoneCompanionRepositoryTest {
 
         override suspend fun upsertAll(sources: List<PhoneRssSourceEntity>) {
             sources.forEach { upsert(it) }
+        }
+
+        override suspend fun deleteAll() {
+            sources = emptyList()
         }
     }
 

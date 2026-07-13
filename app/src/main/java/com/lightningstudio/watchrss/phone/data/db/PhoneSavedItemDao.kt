@@ -16,4 +16,10 @@ interface PhoneSavedItemDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(items: List<PhoneSavedItemEntity>)
+
+    @Query("SELECT * FROM phone_saved_items")
+    suspend fun getAll(): List<PhoneSavedItemEntity>
+
+    @Query("DELETE FROM phone_saved_items")
+    suspend fun deleteAll()
 }

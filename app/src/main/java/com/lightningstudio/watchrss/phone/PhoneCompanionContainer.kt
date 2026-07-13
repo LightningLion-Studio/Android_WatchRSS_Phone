@@ -9,6 +9,7 @@ import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.account.PhoneInstallationIdentity
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
 import com.lightningstudio.watchrss.phone.connection.guided.PhoneGuidedSessionManager
+import com.lightningstudio.watchrss.phone.data.backup.WatchRssBackupService
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
 import com.lightningstudio.watchrss.phone.data.importer.AndroidWebArticleImporter
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
@@ -94,6 +95,15 @@ class PhoneCompanionContainer(context: Context) {
             syncPeerStateDao = database.syncPeerStateDao(),
             webArticleImporter = webArticleImporter::importUrl,
             articleContentStore = articleContentStore
+        )
+    }
+
+    val backupService: WatchRssBackupService by lazy {
+        WatchRssBackupService(
+            context = appContext,
+            database = database,
+            repository = repository,
+            deviceId = deviceIdentity.deviceId
         )
     }
 

@@ -47,6 +47,8 @@ import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Favorite
@@ -119,6 +121,7 @@ import com.lightningstudio.watchrss.phone.ArticleReaderScreen
 import com.lightningstudio.watchrss.phone.PlatformWebViewScreen
 import com.lightningstudio.watchrss.phone.generateQRCode
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
+import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
@@ -127,6 +130,7 @@ import com.lightningstudio.watchrss.phone.platform.OnlineNovelLinkDetector
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
 import com.lightningstudio.watchrss.phone.viewmodel.MainBluetoothDevicePromptUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainBluetoothDeviceUi
+import com.lightningstudio.watchrss.phone.viewmodel.BackupImportPromptUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainConflictPromptUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainSyncProgressUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainUiState
@@ -138,6 +142,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import java.text.DateFormat
+import java.util.Date
 import kotlin.math.roundToInt
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
@@ -310,7 +316,10 @@ fun MainScreen(
     onRefreshAllRssSources: () -> Unit,
     onRefreshRssSource: (PhoneRssSourceEntity) -> Unit,
     onDeleteArticle: (PhoneArticleEntity) -> Unit,
-    onClearImportedContent: () -> Unit,
+    onExportBackup: () -> Unit,
+    onImportBackup: (BackupImportMode) -> Unit,
+    onRequestBackupReplace: () -> Unit,
+    onDismissBackupImport: () -> Unit,
     onChooseConflictResolution: (PhoneSyncConflictResolution) -> Unit,
     onShowManualConflictOptions: () -> Unit,
     onDismissMessage: () -> Unit
@@ -1169,7 +1178,7 @@ fun MainScreen(
                                     onImportArticle = onImportArticle,
                                     onImportFile = onImportFile,
                                     onAddRssSource = onAddRssSource,
-                                    onClearImportedContent = onClearImportedContent,
+                                    onExportBackup = onExportBackup,
                                     onDismissMessage = onDismissMessage,
                                     recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
                                     onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.IMPORTS) },
@@ -1486,7 +1495,7 @@ fun MainScreen(
                                                 onImportArticle = onImportArticle,
                                                 onImportFile = onImportFile,
                                                 onAddRssSource = onAddRssSource,
-                                                onClearImportedContent = onClearImportedContent,
+                                                onExportBackup = onExportBackup,
                                                 onDismissMessage = onDismissMessage,
                                                 recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
                                                 onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.IMPORTS) },
@@ -1603,7 +1612,7 @@ fun MainScreen(
                                                         onImportArticle = onImportArticle,
                                                         onImportFile = onImportFile,
                                                         onAddRssSource = onAddRssSource,
-                                                        onClearImportedContent = onClearImportedContent,
+                                                        onExportBackup = onExportBackup,
                                                         onDismissMessage = onDismissMessage,
                                                         recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
                                                         onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.IMPORTS) },
@@ -1640,7 +1649,7 @@ fun MainScreen(
                                                 onImportArticle = onImportArticle,
                                                 onImportFile = onImportFile,
                                                 onAddRssSource = onAddRssSource,
-                                                onClearImportedContent = onClearImportedContent,
+                                                onExportBackup = onExportBackup,
                                                 onDismissMessage = onDismissMessage,
                                                 recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
                                                 onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.IMPORTS) },
@@ -1712,7 +1721,7 @@ fun MainScreen(
                                         onImportArticle = onImportArticle,
                                         onImportFile = onImportFile,
                                         onAddRssSource = onAddRssSource,
-                                        onClearImportedContent = onClearImportedContent,
+                                        onExportBackup = onExportBackup,
                                         onDismissMessage = onDismissMessage,
                                         recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
                                         onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.IMPORTS) },
@@ -1887,6 +1896,15 @@ fun MainScreen(
             onDismiss = onDismissSharedImport
         )
     }
+    uiState.backupImportPrompt?.let { prompt ->
+        MainScreenBackupImportDialog(
+            prompt = prompt,
+            onMerge = { onImportBackup(BackupImportMode.MERGE) },
+            onRequestReplace = onRequestBackupReplace,
+            onConfirmReplace = { onImportBackup(BackupImportMode.REPLACE) },
+            onDismiss = onDismissBackupImport
+        )
+    }
     uiState.bluetoothDevicePrompt?.let { prompt ->
         MainScreenBluetoothDeviceChooserDialog(
             prompt = prompt,
@@ -1894,6 +1912,85 @@ fun MainScreen(
             onDismiss = onDismissBluetoothDevicePrompt
         )
     }
+}
+
+@Composable
+private fun MainScreenBackupImportDialog(
+    prompt: BackupImportPromptUi,
+    onMerge: () -> Unit,
+    onRequestReplace: () -> Unit,
+    onConfirmReplace: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(if (prompt.confirmingReplace) "确认覆盖资料库" else "导入 WRSS 备份")
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (prompt.confirmingReplace) {
+                    Text("当前资料库会被备份内容完整替换，此操作无法撤销。")
+                } else {
+                    Text(
+                        text = prompt.fileName,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "导出时间：${formatBackupTime(prompt.preview.exportedAt)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "${prompt.preview.articleCount} 篇文章 · ${prompt.preview.sourceCount} 个 RSS 源",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "合并会保留较新的内容；覆盖会删除当前备份中没有的内容。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (prompt.confirmingReplace) {
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = onConfirmReplace
+                    ) {
+                        Text("确认覆盖")
+                    }
+                } else {
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = onMerge
+                    ) {
+                        Text("合并")
+                    }
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = onRequestReplace
+                    ) {
+                        Text("覆盖")
+                    }
+                }
+                TextButton(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = onDismiss
+                ) {
+                    Text("取消")
+                }
+            }
+        }
+    )
+}
+
+private fun formatBackupTime(timestamp: Long): String {
+    return DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+        .format(Date(timestamp))
 }
 
 @Composable
@@ -3976,7 +4073,7 @@ private fun ImportsPage(
     onImportArticle: () -> Unit,
     onImportFile: () -> Unit,
     onAddRssSource: () -> Unit,
-    onClearImportedContent: () -> Unit,
+    onExportBackup: () -> Unit,
     onDismissMessage: () -> Unit,
     recentEntries: List<RecentImportEntry>,
     onOpenChannel: (MainContentChannel) -> Unit,
@@ -4013,12 +4110,11 @@ private fun ImportsPage(
                 ImportActionsCard(
                     urlInput = uiState.urlInput,
                     enabled = !uiState.isBusy,
-                    importedContentCount = uiState.importedContentArticles.size,
                     onUrlChange = onUrlChange,
                     onImportArticle = onImportArticle,
                     onImportFile = onImportFile,
                     onAddRssSource = onAddRssSource,
-                    onClearImportedContent = onClearImportedContent,
+                    onExportBackup = onExportBackup,
                     message = importMessage,
                     error = importError,
                     onDismissMessage = onDismissMessage
@@ -4036,7 +4132,7 @@ private fun ImportsPage(
                     EmptyStateCard(
                         icon = { Icon(Icons.Default.FileOpen, contentDescription = null) },
                         title = "暂无导入",
-                        text = "添加网页文章或导入 TXT / EPUB 文件后会显示在这里"
+                        text = "添加网页文章，或导入 TXT / EPUB / WRSS 文件后会显示在这里"
                     )
                 }
             } else {
@@ -4068,12 +4164,11 @@ private fun ImportsPage(
 private fun ImportActionsCard(
     urlInput: String,
     enabled: Boolean,
-    importedContentCount: Int,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
     onImportFile: () -> Unit,
     onAddRssSource: () -> Unit,
-    onClearImportedContent: () -> Unit,
+    onExportBackup: () -> Unit,
     message: String?,
     error: String?,
     onDismissMessage: () -> Unit
@@ -4113,7 +4208,17 @@ private fun ImportActionsCard(
                 placeholder = { Text("https://example.com/feed.xml") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                enabled = enabled
+                enabled = enabled,
+                trailingIcon = {
+                    if (urlInput.isNotEmpty()) {
+                        IconButton(
+                            onClick = { onUrlChange("") },
+                            enabled = enabled
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "清空输入")
+                        }
+                    }
+                }
             )
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
@@ -4146,13 +4251,13 @@ private fun ImportActionsCard(
                     Text("文件")
                 }
                 OutlinedButton(
-                    onClick = onClearImportedContent,
-                    enabled = enabled && importedContentCount > 0,
+                    onClick = onExportBackup,
+                    enabled = enabled,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Default.Delete, contentDescription = null)
+                    Icon(Icons.Default.Archive, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("清空")
+                    Text("导出")
                 }
             }
             if (message?.isNotBlank() == true || error?.isNotBlank() == true) {

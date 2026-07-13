@@ -7,6 +7,9 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyn
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothWatchDevice
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncDeleteConflict
+import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
+import com.lightningstudio.watchrss.phone.data.backup.BackupPreview
+import com.lightningstudio.watchrss.phone.data.backup.WatchRssBackupService
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.importer.LocalContentImportKind
@@ -45,7 +48,8 @@ data class MainUiState(
     val refreshingRssSourceUrls: Set<String> = emptySet(),
     val conflictPrompt: MainConflictPromptUi? = null,
     val bluetoothDevicePrompt: MainBluetoothDevicePromptUi? = null,
-    val sharedImportPrompt: SharedImportPromptUi? = null
+    val sharedImportPrompt: SharedImportPromptUi? = null,
+    val backupImportPrompt: BackupImportPromptUi? = null
 )
 
 data class MainSyncProgressUi(
@@ -89,6 +93,13 @@ data class SharedImportPromptUi(
     val uriString: String = ""
 )
 
+data class BackupImportPromptUi(
+    val fileName: String,
+    val uriString: String,
+    val preview: BackupPreview,
+    val confirmingReplace: Boolean = false
+)
+
 private data class LibraryLists(
     val rssSources: List<PhoneRssSourceEntity>,
     val rssArticles: List<PhoneArticleEntity>,
@@ -108,7 +119,8 @@ private data class LibraryContentLists(
 class MainViewModel(
     private val repository: PhoneCompanionRepository,
     private val bluetoothSyncManager: PhoneBluetoothSyncManager,
-    private val usageTelemetry: PhoneUsageTelemetry
+    private val usageTelemetry: PhoneUsageTelemetry,
+    private val backupService: WatchRssBackupService
 ) : ViewModel() {
     private val _toastEvent = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val toastEvent: SharedFlow<String> = _toastEvent.asSharedFlow()
@@ -282,6 +294,64 @@ class MainViewModel(
                         LocalContentImportKind.TXT -> "已导入 TXT 到导入内容，文章 ${result.articleCount} 篇"
                         LocalContentImportKind.EPUB -> "已导入 EPUB 频道：${result.source.title}，章节 ${result.articleCount} 篇"
                     },
+                    error = null
+                )
+            }
+        }
+    }
+
+    fun exportBackup(uriString: String) {
+        if (uriString.isBlank() || sessionState.value.isBusy) return
+        viewModelScope.launch {
+            runBusy("正在导出资料库…") {
+                val result = backupService.exportTo(uriString)
+                sessionState.value = sessionState.value.copy(
+                    message = "已导出 WRSS：${result.articleCount} 篇文章，${result.sourceCount} 个 RSS 源",
+                    error = null
+                )
+            }
+        }
+    }
+
+    fun inspectBackup(fileName: String, uriString: String) {
+        if (uriString.isBlank() || sessionState.value.isBusy) return
+        viewModelScope.launch {
+            runBusy("正在检查 WRSS 备份…") {
+                val preview = backupService.inspect(uriString)
+                sessionState.value = sessionState.value.copy(
+                    message = null,
+                    error = null,
+                    backupImportPrompt = BackupImportPromptUi(
+                        fileName = fileName.ifBlank { "未命名.wrss" },
+                        uriString = uriString,
+                        preview = preview
+                    )
+                )
+            }
+        }
+    }
+
+    fun requestBackupReplaceConfirmation() {
+        val prompt = sessionState.value.backupImportPrompt ?: return
+        sessionState.value = sessionState.value.copy(
+            backupImportPrompt = prompt.copy(confirmingReplace = true)
+        )
+    }
+
+    fun dismissBackupImportPrompt() {
+        sessionState.value = sessionState.value.copy(backupImportPrompt = null)
+    }
+
+    fun importBackup(mode: BackupImportMode) {
+        if (sessionState.value.isBusy) return
+        val prompt = sessionState.value.backupImportPrompt ?: return
+        sessionState.value = sessionState.value.copy(backupImportPrompt = null)
+        viewModelScope.launch {
+            runBusy(if (mode == BackupImportMode.REPLACE) "正在覆盖资料库…" else "正在合并资料库…") {
+                val result = backupService.importFrom(prompt.uriString, mode)
+                val action = if (mode == BackupImportMode.REPLACE) "覆盖" else "合并"
+                sessionState.value = sessionState.value.copy(
+                    message = "已${action} WRSS：${result.articleCount} 篇文章，${result.sourceCount} 个 RSS 源",
                     error = null
                 )
             }

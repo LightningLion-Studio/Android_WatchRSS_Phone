@@ -203,4 +203,7 @@ interface PhoneArticleDao {
 
     @Query("DELETE FROM phone_articles WHERE rssSourceUrl = :rssSourceUrl")
     suspend fun deleteByRssSourceUrl(rssSourceUrl: String)
+
+    @Query("DELETE FROM phone_articles")
+    suspend fun deleteAll()
 }

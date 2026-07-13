@@ -12,4 +12,7 @@ interface SyncPeerStateDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(state: SyncPeerStateEntity)
+
+    @Query("DELETE FROM sync_peer_state")
+    suspend fun deleteAll()
 }

@@ -101,7 +101,8 @@ class ListPageActivity : ComponentActivity() {
         MainViewModelFactory(
             (application as PhoneCompanionApplication).container.repository,
             (application as PhoneCompanionApplication).container.bluetoothSyncManager,
-            (application as PhoneCompanionApplication).container.usageTelemetry
+            (application as PhoneCompanionApplication).container.usageTelemetry,
+            (application as PhoneCompanionApplication).container.backupService
         )
     }
 

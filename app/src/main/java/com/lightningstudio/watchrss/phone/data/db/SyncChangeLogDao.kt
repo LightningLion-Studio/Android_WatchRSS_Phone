@@ -32,6 +32,9 @@ interface SyncChangeLogDao {
         """
     )
     suspend fun maxChangedAtByEntityIds(kind: String, entityIds: List<String>): List<SyncChangeLogEntityState>
+
+    @Query("DELETE FROM sync_change_log")
+    suspend fun deleteAll()
 }
 
 data class SyncChangeLogEntityState(

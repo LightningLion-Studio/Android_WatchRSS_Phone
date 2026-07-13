@@ -12,6 +12,7 @@ interface ArticleContentStore {
     fun loadText(marker: String): String?
     fun textChunkHandle(marker: String, chunkBytes: Int = ARTICLE_TEXT_CHUNK_BYTES): StoredTextChunkHandle?
     fun loadTextChunk(marker: String, chunkIndex: Int, chunkBytes: Int = ARTICLE_TEXT_CHUNK_BYTES): String?
+    fun prune(retainedMarkers: Set<String>) = Unit
 }
 
 data class StoredTextChunkHandle(
@@ -79,6 +80,20 @@ class FileArticleContentStore(context: Context) : ArticleContentStore {
                 String(bytes, Charsets.UTF_8)
             }
         }.getOrNull()
+    }
+
+    override fun prune(retainedMarkers: Set<String>) {
+        if (!directory.isDirectory) return
+        val retainedFileNames = retainedMarkers
+            .asSequence()
+            .filter(::isMarker)
+            .map { it.removePrefix(ARTICLE_CONTENT_MARKER_PREFIX) }
+            .toSet()
+        directory.listFiles()?.forEach { file ->
+            if (file.isFile && file.name !in retainedFileNames) {
+                runCatching { file.delete() }
+            }
+        }
     }
 
     private fun RandomAccessFile.adjustUtf8Boundary(requested: Long, byteLength: Long): Long {

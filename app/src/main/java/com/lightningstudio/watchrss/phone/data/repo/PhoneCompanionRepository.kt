@@ -82,11 +82,13 @@ private object NoopSyncChangeLogDao : SyncChangeLogDao {
         kind: String,
         entityIds: List<String>
     ): List<SyncChangeLogEntityState> = emptyList()
+    override suspend fun deleteAll() = Unit
 }
 
 private object NoopSyncPeerStateDao : SyncPeerStateDao {
     override suspend fun get(peerDeviceId: String): SyncPeerStateEntity? = null
     override suspend fun upsert(state: SyncPeerStateEntity) = Unit
+    override suspend fun deleteAll() = Unit
 }
 
 private const val CONTENT_CHANNEL_SORT_STEP = 10_000L
@@ -169,6 +171,61 @@ class PhoneCompanionRepository(
                 article.hydrateExternalText()
             }
         }
+
+    suspend fun getArticlesForBackup(): List<PhoneArticleEntity> =
+        withContext(Dispatchers.IO) {
+            articleDao.getAllForSync().map { it.hydrateExternalTextForBackup() }
+        }
+
+    suspend fun replaceArticlesFromBackup(incoming: List<PhoneArticleEntity>): Int =
+        withContext(Dispatchers.IO) {
+            val prepared = incoming.map { article ->
+                article
+                    .normalizeBackupArticle()
+                    .withCurrentSyncMetadata()
+                    .externalizeLargeLocalContent()
+            }
+            articleDao.deleteAll()
+            if (prepared.isNotEmpty()) {
+                articleDao.upsertAll(prepared)
+            }
+            prepared.size
+        }
+
+    suspend fun mergeArticlesFromBackup(incoming: List<PhoneArticleEntity>): Int =
+        withContext(Dispatchers.IO) {
+            var merged = 0
+            incoming.forEach { rawBackup ->
+                val backup = rawBackup.copy(sourceDeviceId = "")
+                val storedLocal = articleDao.getById(backup.articleId)
+                val local = storedLocal?.hydrateExternalTextForBackup()
+                val mergedArticle = if (local == null) {
+                    backup
+                } else {
+                    mergeArticleFromBackup(local, backup)
+                }
+                if (local != mergedArticle) {
+                    val prepared = mergedArticle
+                        .normalizeBackupArticle()
+                        .withCurrentSyncMetadata()
+                        .externalizeLargeLocalContent()
+                    articleDao.upsert(prepared)
+                    merged += 1
+                }
+            }
+            merged
+        }
+
+    suspend fun pruneUnreferencedArticleContent() = withContext(Dispatchers.IO) {
+        val store = articleContentStore ?: return@withContext
+        val retainedMarkers = buildSet {
+            articleDao.getAllForSync().forEach { article ->
+                article.contentHtml?.takeIf(store::isMarker)?.let(::add)
+                article.contentText.takeIf(store::isMarker)?.let(::add)
+            }
+        }
+        store.prune(retainedMarkers)
+    }
 
     suspend fun getImportedTextReader(articleId: String): PhoneImportedTextReader? =
         withContext(Dispatchers.IO) {
@@ -1253,6 +1310,32 @@ class PhoneCompanionRepository(
         )
     }
 
+    private fun mergeArticleFromBackup(
+        local: PhoneArticleEntity,
+        backup: PhoneArticleEntity
+    ): PhoneArticleEntity {
+        val merged = mergeArticleByLatest(local, backup)
+        val metadata = if (backup.updatedAt > local.updatedAt) backup else local
+        val rssSourceUrl = metadata.rssSourceUrl?.takeIf { it.isNotBlank() }
+        val rssSourceTitle = metadata.rssSourceTitle?.takeIf { it.isNotBlank() }
+        val isImportedContentArticle = ImportedContentIds.isImportedContentUrl(rssSourceUrl) ||
+            ImportedContentIds.isImportedContentUrl(backup.url) ||
+            ImportedContentIds.isImportedContentUrl(local.url)
+        val backupDeletedNewer = backup.deletedAt > local.deletedAt
+        val deleted = when {
+            merged.favoriteSaved || merged.watchLaterSaved || merged.independentSaved -> false
+            !rssSourceUrl.isNullOrBlank() && !isImportedContentArticle -> false
+            backupDeletedNewer -> backup.deleted
+            else -> local.deleted
+        }
+        return merged.copy(
+            rssSourceUrl = rssSourceUrl,
+            rssSourceTitle = rssSourceTitle,
+            deleted = deleted,
+            deletedAt = if (deleted) maxOf(local.deletedAt, backup.deletedAt) else 0L
+        )
+    }
+
     private fun mergeArticleContent(local: PhoneArticleEntity, remote: PhoneArticleEntity): PhoneArticleEntity {
         val base = when {
             !remote.deleted -> remote
@@ -1625,6 +1708,36 @@ class PhoneCompanionRepository(
             contentText
         }
         return copy(contentHtml = html, contentText = text)
+    }
+
+    private fun PhoneArticleEntity.hydrateExternalTextForBackup(): PhoneArticleEntity {
+        val store = articleContentStore ?: return this
+        val displayTitle = title.ifBlank { articleId }
+        val html = contentHtml?.let { value ->
+            if (store.isMarker(value)) {
+                store.loadText(value) ?: error("备份失败：文章“$displayTitle”的 HTML 正文文件缺失")
+            } else {
+                value
+            }
+        }
+        val text = if (store.isMarker(contentText)) {
+            store.loadText(contentText) ?: error("备份失败：文章“$displayTitle”的正文文件缺失")
+        } else {
+            contentText
+        }
+        return copy(contentHtml = html, contentText = text)
+    }
+
+    private fun PhoneArticleEntity.normalizeBackupArticle(): PhoneArticleEntity {
+        return copy(
+            sourceDeviceId = deviceId,
+            syncBodyHash = "",
+            syncBodyByteCount = 0L,
+            syncChunkSize = 0,
+            syncChunkHashesJson = "",
+            syncMetadataHash = "",
+            readingProgress = readingProgress.coerceIn(0f, 1f)
+        )
     }
 
     private fun PhoneArticleEntity.isFileBackedImportedText(): Boolean {

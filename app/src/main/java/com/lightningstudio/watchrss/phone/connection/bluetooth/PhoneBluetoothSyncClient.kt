@@ -457,7 +457,7 @@ class PhoneBluetoothSyncClient(
             fields = deviceFields(device) + mapOf("timeoutMs" to timeoutMs)
         )
         val result = runCatching {
-            probeLibrarySyncDeviceWithV9Fallback(
+            probeLibrarySyncDeviceWithManifestFallback(
                 device = device,
                 deviceId = deviceId,
                 sessionId = sessionId,
@@ -490,18 +490,18 @@ class PhoneBluetoothSyncClient(
         return probe
     }
 
-    private suspend fun probeLibrarySyncDeviceWithV9Fallback(
+    private suspend fun probeLibrarySyncDeviceWithManifestFallback(
         device: BluetoothDevice,
         deviceId: String,
         sessionId: String,
         fallbackTimeoutMs: Long
     ): String {
         val probeResult = runCatching {
-            withTimeout(V9_PROBE_TIMEOUT_MS) {
+            withTimeout(DIRECT_PROBE_TIMEOUT_MS) {
                 exchange(
                     request = LibrarySyncPayload.buildProbeRequest(deviceId),
                     deviceAddress = device.address,
-                    sessionId = "$sessionId-v9",
+                    sessionId = "$sessionId-direct",
                     rememberDeviceOnSuccess = false
                 )
             }
@@ -509,7 +509,7 @@ class PhoneBluetoothSyncClient(
         val exchange = probeResult.getOrNull()
         if (exchange != null && LibrarySyncPayload.isProbeResponse(exchange.response)) {
             debugLog.appendEvent(
-                event = "bt.library.probe.v9.success",
+                event = "bt.library.probe.direct.success",
                 sessionId = sessionId,
                 fields = payloadFields("probeResponse", exchange.response)
             )
@@ -517,7 +517,7 @@ class PhoneBluetoothSyncClient(
         }
         if (exchange != null && exchange.response.optBoolean("success", false)) {
             debugLog.appendEvent(
-                event = "bt.library.probe.v9.compat.success",
+                event = "bt.library.probe.direct.compat.success",
                 sessionId = sessionId,
                 fields = payloadFields("probeResponse", exchange.response)
             )
@@ -525,7 +525,7 @@ class PhoneBluetoothSyncClient(
         }
         probeResult.exceptionOrNull()?.let { throwable ->
             debugLog.appendEvent(
-                event = "bt.library.probe.v9.fallback",
+                event = "bt.library.probe.direct.fallback",
                 sessionId = sessionId,
                 fields = failureFields(throwable),
                 throwable = throwable
@@ -1226,7 +1226,7 @@ class PhoneBluetoothSyncClient(
         private const val PHASE_COMPLETE = "complete"
         private const val MAX_DEVICE_PROBE_CANDIDATES = 3
         private const val DEFAULT_DEVICE_PROBE_TIMEOUT_MS = 2_000L
-        private const val V9_PROBE_TIMEOUT_MS = 700L
+        private const val DIRECT_PROBE_TIMEOUT_MS = 700L
         private const val PREFS_NAME = "watchrss_bluetooth_sync"
         private const val KEY_LAST_DEVICE_ADDRESS = "last_successful_device_address"
         private val EMPTY_FRAME_STATS = LibraryFrameStats(

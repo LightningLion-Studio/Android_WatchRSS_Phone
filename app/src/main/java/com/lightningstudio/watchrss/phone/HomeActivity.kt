@@ -358,7 +358,7 @@ class HomeActivity : ComponentActivity() {
                         viewModel.showSharedLinkPrompt(url)
                     } else {
                         val errorMessage = inspectError?.message
-                        viewModel.showError(
+                        viewModel.showContentError(
                             if (errorMessage.isNullOrBlank()) {
                                 "只支持导入 TXT 或 EPUB 文件"
                             } else {

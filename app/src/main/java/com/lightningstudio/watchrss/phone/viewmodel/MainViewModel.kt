@@ -227,6 +227,27 @@ class MainViewModel(
         )
     }
 
+    /**
+     * Shows a content-level error that must be visible to the user regardless of
+     * which page is currently displayed.
+     *
+     * Uses Toast for immediate visibility (page-independent) and also persists the
+     * error in session state so the Imports page can display it persistently.
+     *
+     * This is critical for cold-start scenarios where the app is launched from an
+     * external intent (e.g. another app shares an unsupported file). The user
+     * lands on the Dashboard page — page-specific error rendering in ImportActionsCard
+     * would be invisible because HorizontalPager only composes the current page.
+     */
+    fun showContentError(error: String) {
+        _toastEvent.tryEmit(error)
+        sessionState.value = sessionState.value.copy(
+            syncStatusMessage = null,
+            syncStatusError = null,
+            error = error
+        )
+    }
+
     fun importIndependentArticle() {
         importWebArticle(sessionState.value.urlInput.trim())
     }

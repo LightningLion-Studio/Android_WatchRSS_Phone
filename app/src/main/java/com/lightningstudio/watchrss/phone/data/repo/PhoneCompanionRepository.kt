@@ -99,6 +99,7 @@ private object NoopAppMetaDao : AppMetaDao {
     override fun observeString(key: String): Flow<String?> = flowOf(null)
     override suspend fun set(entity: AppMetaEntity) = Unit
     override suspend fun setIfAbsent(entity: AppMetaEntity) = Unit
+    override suspend fun getAll(): List<AppMetaEntity> = emptyList()
     override suspend fun deleteAll() = Unit
 }
 

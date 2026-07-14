@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.data.backup
 
+import com.lightningstudio.watchrss.phone.data.db.AppMetaEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
@@ -39,6 +40,7 @@ class WatchRssBackupArchiveTest {
             restored.articles.single()
         )
         assertEquals(snapshot.savedItems, restored.savedItems)
+        assertEquals(snapshot.appMeta, restored.appMeta)
 
         val expandedText = readZipEntries(archiveBytes).values
             .joinToString("\n") { it.toString(Charsets.UTF_8) }
@@ -109,19 +111,21 @@ class WatchRssBackupArchiveTest {
         WatchRssBackupArchive.write(sampleSnapshot(), output)
         val entries = readZipEntries(output.toByteArray()).toMutableMap()
         val manifest = entries.getValue("manifest.json").toString(Charsets.UTF_8)
-            .replace("\"version\":1", "\"version\":99")
+            .replace("\"version\":${WatchRssBackupArchive.CURRENT_DATA_STRUCTURE_VERSION}", "\"version\":99")
         entries["manifest.json"] = manifest.toByteArray()
 
-        val error = assertThrows(IllegalArgumentException::class.java) {
+        val error = assertThrows(BackupVersionTooHighException::class.java) {
             WatchRssBackupArchive.read(ByteArrayInputStream(writeZipEntries(entries)))
         }
 
-        assertTrue(error.message.orEmpty().contains("不支持"))
+        assertEquals(99, error.backupVersion)
+        assertEquals(WatchRssBackupArchive.CURRENT_DATA_STRUCTURE_VERSION, error.currentVersion)
     }
 
     private fun sampleSnapshot(): WatchRssBackupSnapshot = WatchRssBackupSnapshot(
         exportedAt = 1_725_000_000_000L,
         appVersion = "1.0-test",
+        dataStructureVersion = WatchRssBackupArchive.CURRENT_DATA_STRUCTURE_VERSION,
         sources = listOf(
             PhoneRssSourceEntity(
                 url = "https://example.com/feed.xml",
@@ -184,6 +188,12 @@ class WatchRssBackupArchiveTest {
                 channelTitle = "示例源",
                 pubDate = "2026-07-13",
                 syncedAt = 300L
+            )
+        ),
+        appMeta = listOf(
+            AppMetaEntity(
+                key = "first_use_at",
+                value = "1725000000000"
             )
         )
     )

@@ -58,6 +58,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.RssFeed
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.VerticalAlignTop
 import androidx.compose.material3.AlertDialog
@@ -298,6 +299,7 @@ fun MainScreen(
     onSyncLibrary: () -> Unit,
     onSyncAccount: () -> Unit,
     onOpenAccount: () -> Unit,
+    onOpenSettings: () -> Unit,
     onChooseBluetoothDevice: (MainBluetoothDeviceUi) -> Unit,
     onDismissBluetoothDevicePrompt: () -> Unit,
     onExportBluetoothLog: () -> Unit,
@@ -1039,6 +1041,7 @@ fun MainScreen(
                 },
                 onExportBluetoothLog = onExportBluetoothLog,
                 onOpenAccount = onOpenAccount,
+                onOpenSettings = onOpenSettings,
                 showAccountAction = showAccountFeatures,
                 modifier = modifier
             )
@@ -1140,6 +1143,7 @@ fun MainScreen(
                                     onSyncLibrary = onSyncLibrary,
                                     onSyncAccount = onSyncAccount,
                                     onOpenAccount = onOpenAccount,
+                                    onOpenSettings = onOpenSettings,
                                     showAccountActions = showAccountFeatures,
                                     onExportBluetoothLog = onExportBluetoothLog,
                                     onOpenRss = {
@@ -1208,6 +1212,7 @@ fun MainScreen(
                                 onSyncLibrary = onSyncLibrary,
                                 onSyncAccount = onSyncAccount,
                                 onOpenAccount = onOpenAccount,
+                                onOpenSettings = onOpenSettings,
                                 showAccountActions = showAccountFeatures,
                                 onExportBluetoothLog = onExportBluetoothLog,
                                 onOpenRss = {
@@ -1235,6 +1240,7 @@ fun MainScreen(
                                 onSyncLibrary = onSyncLibrary,
                                 onSyncAccount = onSyncAccount,
                                 onOpenAccount = onOpenAccount,
+                                onOpenSettings = onOpenSettings,
                                 showAccountActions = showAccountFeatures,
                                 onExportBluetoothLog = onExportBluetoothLog,
                                 onOpenRss = {
@@ -2076,6 +2082,7 @@ private fun MainTopBar(
     onRefreshSelectedSource: () -> Unit,
     onExportBluetoothLog: () -> Unit,
     onOpenAccount: () -> Unit,
+    onOpenSettings: () -> Unit,
     showAccountAction: Boolean,
     modifier: Modifier = Modifier
 ) {
@@ -2111,6 +2118,9 @@ private fun MainTopBar(
                     }
                     IconButton(onClick = onExportBluetoothLog) {
                         Icon(Icons.Default.BugReport, contentDescription = "导出蓝牙日志")
+                    }
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(Icons.Default.Settings, contentDescription = "设置")
                     }
                 }
                 MainPage.RSS -> IconButton(
@@ -2287,6 +2297,7 @@ private fun DashboardPage(
     onSyncLibrary: () -> Unit,
     onSyncAccount: () -> Unit,
     onOpenAccount: () -> Unit,
+    onOpenSettings: () -> Unit,
     showAccountActions: Boolean,
     onExportBluetoothLog: () -> Unit,
     onOpenRss: () -> Unit,
@@ -2310,6 +2321,7 @@ private fun DashboardPage(
                 onRefreshSelectedSource = {},
                 onExportBluetoothLog = onExportBluetoothLog,
                 onOpenAccount = onOpenAccount,
+                onOpenSettings = onOpenSettings,
                 showAccountAction = showAccountActions,
                 modifier = Modifier.fillMaxWidth()
             )

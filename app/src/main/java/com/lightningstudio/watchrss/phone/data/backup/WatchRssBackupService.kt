@@ -9,8 +9,13 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.InputStream
 import java.io.OutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class WatchRssBackupService(
     context: Context,
@@ -21,6 +26,8 @@ class WatchRssBackupService(
     private val appContext = context.applicationContext
     private val contentResolver = appContext.contentResolver
 
+    // ── 专有格式备份（WRSS）──
+
     suspend fun exportTo(uriString: String): BackupSummary = withContext(Dispatchers.IO) {
         val uri = parseUri(uriString)
         val output = contentResolver.openOutputStream(uri, "w")
@@ -29,13 +36,7 @@ class WatchRssBackupService(
     }
 
     suspend fun exportTo(output: OutputStream): BackupSummary = withContext(Dispatchers.IO) {
-        val snapshot = WatchRssBackupSnapshot(
-            exportedAt = System.currentTimeMillis(),
-            appVersion = currentAppVersion(),
-            sources = database.phoneRssSourceDao().getAllForSync(),
-            articles = repository.getArticlesForBackup(),
-            savedItems = database.phoneSavedItemDao().getAll()
-        )
+        val snapshot = collectSnapshot()
         WatchRssBackupArchive.write(snapshot, output)
         snapshot.summary()
     }
@@ -66,12 +67,14 @@ class WatchRssBackupService(
             var changedSourceCount = 0
             var changedArticleCount = 0
             var changedSavedItemCount = 0
+            var changedAppMetaCount = 0
 
             database.withTransaction {
                 when (mode) {
                     BackupImportMode.REPLACE -> {
                         database.phoneRssSourceDao().deleteAll()
                         database.phoneSavedItemDao().deleteAll()
+                        database.appMetaDao().deleteAll()
                         if (normalizedSources.isNotEmpty()) {
                             database.phoneRssSourceDao().upsertAll(normalizedSources)
                         }
@@ -81,12 +84,21 @@ class WatchRssBackupService(
                             database.phoneSavedItemDao().upsertAll(snapshot.savedItems)
                         }
                         changedSavedItemCount = snapshot.savedItems.size
+                        if (snapshot.appMeta.isNotEmpty()) {
+                            snapshot.appMeta.forEach { database.appMetaDao().set(it) }
+                        }
+                        changedAppMetaCount = snapshot.appMeta.size
                     }
 
                     BackupImportMode.MERGE -> {
                         changedSourceCount = mergeSources(normalizedSources)
                         changedArticleCount = repository.mergeArticlesFromBackup(snapshot.articles)
                         changedSavedItemCount = mergeSavedItems(snapshot.savedItems)
+                        // 对于元数据，合并模式使用 setIfAbsent，保留本地已有的值
+                        snapshot.appMeta.forEach { meta ->
+                            database.appMetaDao().setIfAbsent(meta)
+                            changedAppMetaCount++
+                        }
                     }
                 }
                 database.syncChangeLogDao().deleteAll()
@@ -99,11 +111,166 @@ class WatchRssBackupService(
                 sourceCount = snapshot.sources.size,
                 articleCount = snapshot.articles.size,
                 savedItemCount = snapshot.savedItems.size,
+                appMetaCount = snapshot.appMeta.size,
                 changedSourceCount = changedSourceCount,
                 changedArticleCount = changedArticleCount,
-                changedSavedItemCount = changedSavedItemCount
+                changedSavedItemCount = changedSavedItemCount,
+                changedAppMetaCount = changedAppMetaCount
             )
         }
+
+    // ── 人类可读格式导出（JSON）──
+
+    suspend fun exportHumanReadable(uriString: String): BackupSummary = withContext(Dispatchers.IO) {
+        val uri = parseUri(uriString)
+        val output = contentResolver.openOutputStream(uri, "w")
+            ?: error("无法创建导出文件")
+        output.use { exportHumanReadable(it) }
+    }
+
+    suspend fun exportHumanReadable(output: OutputStream): BackupSummary = withContext(Dispatchers.IO) {
+        val snapshot = collectSnapshot()
+        val json = buildHumanReadableJson(snapshot)
+        output.write(json.toString(2).toByteArray(Charsets.UTF_8))
+        snapshot.summary()
+    }
+
+    // ── 内部方法 ──
+
+    private suspend fun collectSnapshot(): WatchRssBackupSnapshot {
+        return WatchRssBackupSnapshot(
+            exportedAt = System.currentTimeMillis(),
+            appVersion = currentAppVersion(),
+            dataStructureVersion = WatchRssBackupArchive.CURRENT_DATA_STRUCTURE_VERSION,
+            sources = database.phoneRssSourceDao().getAllForSync(),
+            articles = repository.getArticlesForBackup(),
+            savedItems = database.phoneSavedItemDao().getAll(),
+            appMeta = database.appMetaDao().getAll()
+        )
+    }
+
+    private fun buildHumanReadableJson(snapshot: WatchRssBackupSnapshot): JSONObject {
+        val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+
+        return JSONObject().apply {
+            put("format", "watchrss-human-readable-export")
+            put("exportedAt", dateFormat.format(Date(snapshot.exportedAt)))
+            put("appVersion", snapshot.appVersion)
+            put("dataStructureVersion", snapshot.dataStructureVersion)
+
+            // 元数据
+            val metaArray = JSONArray()
+            snapshot.appMeta.forEach { meta ->
+                metaArray.put(JSONObject().apply {
+                    put("key", meta.key)
+                    put("value", meta.value)
+                    if (meta.key == "first_use_at") {
+                        meta.value.toLongOrNull()?.let {
+                            put("valueReadable", dateFormat.format(Date(it)))
+                        }
+                    }
+                })
+            }
+            put("appMeta", metaArray)
+
+            // RSS 源
+            val sourcesArray = JSONArray()
+            snapshot.sources.forEach { source ->
+                sourcesArray.put(JSONObject().apply {
+                    put("title", source.title)
+                    put("url", source.url)
+                    put("description", source.description)
+                    putNullable("siteUrl", source.siteUrl)
+                    putNullable("imageUrl", source.imageUrl)
+                    put("isPinned", source.isPinned)
+                    put("createdAt", dateFormat.format(Date(source.createdAt)))
+                    put("articleCount", snapshot.articles.count { it.rssSourceUrl == source.url })
+                })
+            }
+            put("rssSources", sourcesArray)
+
+            // 收藏
+            val favoritesArray = JSONArray()
+            snapshot.articles.filter { it.favoriteSaved && !it.deleted }.forEach { article ->
+                favoritesArray.put(articleToHumanReadableJson(article, dateFormat))
+            }
+            put("favorites", favoritesArray)
+
+            // 稍后阅读
+            val watchLaterArray = JSONArray()
+            snapshot.articles.filter { it.watchLaterSaved && !it.deleted }.forEach { article ->
+                watchLaterArray.put(articleToHumanReadableJson(article, dateFormat))
+            }
+            put("watchLater", watchLaterArray)
+
+            // 独立文章（非 RSS、非收藏、非稍后阅读）
+            val independentArray = JSONArray()
+            snapshot.articles.filter {
+                it.independentSaved && !it.deleted &&
+                    !it.favoriteSaved && !it.watchLaterSaved
+            }.forEach { article ->
+                independentArray.put(articleToHumanReadableJson(article, dateFormat))
+            }
+            put("independentArticles", independentArray)
+
+            // 全部文章（不含正文，仅元数据摘要）
+            val allArticlesArray = JSONArray()
+            snapshot.articles.filter { !it.deleted }.forEach { article ->
+                allArticlesArray.put(JSONObject().apply {
+                    put("title", article.title)
+                    put("url", article.url)
+                    put("siteName", article.siteName)
+                    put("excerpt", article.excerpt)
+                    putNullable("imageUrl", article.imageUrl)
+                    put("importedAt", dateFormat.format(Date(article.importedAt)))
+                    put("isFavorite", article.favoriteSaved)
+                    put("isWatchLater", article.watchLaterSaved)
+                    put("readingProgress", (article.readingProgress * 100).toInt())
+                    put("contentLength", article.contentText.length)
+                })
+            }
+            put("allArticles", allArticlesArray)
+
+            // 保存项（从手表同步的收藏/稍后阅读）
+            val savedItemsArray = JSONArray()
+            snapshot.savedItems.forEach { item ->
+                savedItemsArray.put(JSONObject().apply {
+                    put("type", item.type)
+                    put("title", item.title)
+                    put("link", item.link)
+                    put("summary", item.summary)
+                    put("channelTitle", item.channelTitle)
+                    put("pubDate", item.pubDate)
+                    put("syncedAt", dateFormat.format(Date(item.syncedAt)))
+                })
+            }
+            put("savedItems", savedItemsArray)
+
+            // 统计信息
+            put("statistics", JSONObject().apply {
+                put("totalSources", snapshot.sources.size)
+                put("totalArticles", snapshot.articles.count { !it.deleted })
+                put("totalFavorites", snapshot.articles.count { it.favoriteSaved && !it.deleted })
+                put("totalWatchLater", snapshot.articles.count { it.watchLaterSaved && !it.deleted })
+                put("totalSavedItems", snapshot.savedItems.size)
+            })
+        }
+    }
+
+    private fun articleToHumanReadableJson(
+        article: com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity,
+        dateFormat: SimpleDateFormat
+    ): JSONObject = JSONObject().apply {
+        put("title", article.title)
+        put("url", article.url)
+        put("siteName", article.siteName)
+        put("excerpt", article.excerpt)
+        putNullable("imageUrl", article.imageUrl)
+        put("importedAt", dateFormat.format(Date(article.importedAt)))
+        put("contentText", article.contentText)
+        article.contentHtml?.let { put("contentHtml", it) }
+        put("readingProgress", (article.readingProgress * 100).toInt())
+    }
 
     private suspend fun mergeSources(incoming: List<PhoneRssSourceEntity>): Int {
         var changed = 0
@@ -141,5 +308,9 @@ class WatchRssBackupService(
         return runCatching {
             appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName.orEmpty()
         }.getOrDefault("")
+    }
+
+    private fun JSONObject.putNullable(name: String, value: String?) {
+        put(name, value ?: JSONObject.NULL)
     }
 }

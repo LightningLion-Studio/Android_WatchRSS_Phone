@@ -154,6 +154,14 @@
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />
         <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
+            android:name=".DataManagementActivity"
+            android:exported="false"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
             android:name=".AccountActivity"
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />

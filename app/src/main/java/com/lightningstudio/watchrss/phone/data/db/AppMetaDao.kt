@@ -20,6 +20,9 @@ interface AppMetaDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun setIfAbsent(entity: AppMetaEntity)
 
+    @Query("SELECT * FROM app_meta")
+    suspend fun getAll(): List<AppMetaEntity>
+
     @Query("DELETE FROM app_meta")
     suspend fun deleteAll()
 }

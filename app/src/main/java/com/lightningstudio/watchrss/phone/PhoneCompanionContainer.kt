@@ -40,7 +40,8 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_4_5,
             PhoneCompanionDatabase.MIGRATION_5_6,
             PhoneCompanionDatabase.MIGRATION_6_7,
-            PhoneCompanionDatabase.MIGRATION_7_8
+            PhoneCompanionDatabase.MIGRATION_7_8,
+            PhoneCompanionDatabase.MIGRATION_8_9
         )
             .build()
     }
@@ -52,6 +53,9 @@ class PhoneCompanionContainer(context: Context) {
     private val installationIdentity: PhoneInstallationIdentity by lazy {
         PhoneInstallationIdentity(appContext)
     }
+
+    val firstInstalledAtMillis: Long
+        get() = installationIdentity.firstInstalledAtMillis
 
     val accountRepository: PhoneAccountRepository by lazy {
         PhoneAccountRepository(
@@ -94,7 +98,8 @@ class PhoneCompanionContainer(context: Context) {
             syncChangeLogDao = database.syncChangeLogDao(),
             syncPeerStateDao = database.syncPeerStateDao(),
             webArticleImporter = webArticleImporter::importUrl,
-            articleContentStore = articleContentStore
+            articleContentStore = articleContentStore,
+            appMetaDao = database.appMetaDao()
         )
     }
 

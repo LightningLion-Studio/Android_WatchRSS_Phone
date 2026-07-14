@@ -12,9 +12,10 @@ import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
         PhoneArticleEntity::class,
         PhoneRssSourceEntity::class,
         SyncChangeLogEntity::class,
-        SyncPeerStateEntity::class
+        SyncPeerStateEntity::class,
+        AppMetaEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
@@ -23,6 +24,7 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
     abstract fun phoneRssSourceDao(): PhoneRssSourceDao
     abstract fun syncChangeLogDao(): SyncChangeLogDao
     abstract fun syncPeerStateDao(): SyncPeerStateDao
+    abstract fun appMetaDao(): AppMetaDao
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -170,6 +172,19 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
             override fun migrate(database: SupportSQLiteDatabase) {
                 database.execSQL(
                     "ALTER TABLE phone_articles ADD COLUMN readingProgress REAL NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS app_meta (
+                        key TEXT NOT NULL PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                    """.trimIndent()
                 )
             }
         }

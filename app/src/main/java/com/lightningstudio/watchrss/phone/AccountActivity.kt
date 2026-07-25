@@ -43,6 +43,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
+import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.launch
 
@@ -58,6 +59,7 @@ class AccountActivity : ComponentActivity() {
             WatchRssPhoneTheme {
                 AccountScreen(
                     accountRepository = accountRepository,
+                    usageTelemetry = container.usageTelemetry,
                     onBack = ::finish,
                     runAction = { action ->
                         lifecycleScope.launch { action() }
@@ -95,6 +97,7 @@ class AccountActivity : ComponentActivity() {
 @Composable
 private fun AccountScreen(
     accountRepository: PhoneAccountRepository,
+    usageTelemetry: PhoneUsageTelemetry,
     onBack: () -> Unit,
     runAction: (suspend () -> Unit) -> Unit
 ) {
@@ -183,7 +186,10 @@ private fun AccountScreen(
                                     busy = true
                                     error = null
                                     runCatching { accountRepository.verifyPhoneOtp(phone, otp) }
-                                        .onSuccess { message = "登录成功" }
+                                        .onSuccess { session ->
+                                            message = "登录成功"
+                                            usageTelemetry.recordAccountSignedIn(session.userId)
+                                        }
                                         .onFailure { error = it.message ?: "登录失败" }
                                     busy = false
                                 }

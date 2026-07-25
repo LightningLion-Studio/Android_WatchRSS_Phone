@@ -2,11 +2,11 @@
 
 <div align="center">
 
-**OPPO Watch RSS 阅读器的手机伴侣应用**
+**OPPO Watch 腕上RSS 阅读器的手机伴侣应用**
 
-[![下载最新版本](https://img.shields.io/badge/下载-最新版本-blue?style=for-the-badge)](https://github.com/LightningLion-Studio/Android_WatchRSS_Phone/releases)
+[![下载最新版本](https://img.shields.io/badge/下载-最新版本-blue?style=for-the-badge)](https://github.com/LightningLion-Studio/Android_腕上RSS_Phone/releases)
 
-[📥 前往 Releases 页面下载 APK](https://github.com/LightningLion-Studio/Android_WatchRSS_Phone/releases)
+[📥 前往 Releases 页面下载 APK](https://github.com/LightningLion-Studio/Android_腕上RSS_Phone/releases)
 
 </div>
 
@@ -34,7 +34,7 @@
 
 ### 用户使用
 
-1. 从 [Releases 页面](https://github.com/LightningLion-Studio/Android_WatchRSS_Phone/releases) 下载最新版本的 APK
+1. 从 [Releases 页面](https://github.com/LightningLion-Studio/Android_腕上RSS_Phone/releases) 下载最新版本的 APK
 2. 在手机上安装应用
 3. 在手表端打开“连接手机 > 蓝牙同步”
 4. 在手机端选择发送 RSS、同步收藏或同步稍后观看
@@ -44,8 +44,8 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/LightningLion-Studio/Android_WatchRSS_Phone.git
-cd Android_WatchRSS_Phone
+git clone https://github.com/LightningLion-Studio/Android_腕上RSS_Phone.git
+cd Android_腕上RSS_Phone
 
 # 构建 Debug 版本
 ./gradlew assembleDebug
@@ -55,7 +55,15 @@ cd Android_WatchRSS_Phone
 
 # 构建 Release 版本
 ./gradlew assembleRelease
+
+# 截图测试 - 录制基线（首次或 UI 变更后）
+./gradlew :app:executeScreenshotTests -Precord
+
+# 截图测试 - 验证当前 UI 与基线一致
+./gradlew :app:executeScreenshotTests
 ```
+
+> 截图测试使用真实 `HomeActivity` 与真实 Room 数据库，通过 `ComposeTestRule` 导航、点击、输入，并用 AndroidX Test `Screenshot` + Shot 生成 HTML 报告。基线文件保存在 `app/screenshots/debug/`，需要提交到版本库用于 CI 回归比对。
 
 ## 🛠️ 技术栈
 
@@ -108,7 +116,7 @@ Lightning Lion Studio
 
 ## 🐛 问题反馈
 
-如遇到问题或有功能建议，请在 [Issues](https://github.com/LightningLion-Studio/Android_WatchRSS_Phone/issues) 页面提交。
+如遇到问题或有功能建议，请在 [Issues](https://github.com/LightningLion-Studio/Android_腕上RSS_Phone/issues) 页面提交。
 
 ## 📮 联系方式
 

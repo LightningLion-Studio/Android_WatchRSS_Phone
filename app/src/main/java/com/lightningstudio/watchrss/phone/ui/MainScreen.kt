@@ -111,6 +111,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -1930,6 +1931,7 @@ private fun MainScreenBackupImportDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier.testTag("dialog_backup_import"),
         title = {
             Text(if (prompt.confirmingReplace) "确认覆盖资料库" else "导入 WRSS 备份")
         },
@@ -2103,7 +2105,10 @@ private fun MainTopBar(
         },
         navigationIcon = {
             if (page == MainPage.CHANNEL) {
-                IconButton(onClick = onBack) {
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier.testTag("topbar_back")
+                ) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                 }
             }
@@ -2112,26 +2117,37 @@ private fun MainTopBar(
             when (page) {
                 MainPage.DASHBOARD -> {
                     if (showAccountAction) {
-                        IconButton(onClick = onOpenAccount) {
+                        IconButton(
+                            onClick = onOpenAccount,
+                            modifier = Modifier.testTag("topbar_account")
+                        ) {
                             Icon(Icons.Default.AccountCircle, contentDescription = "账号")
                         }
                     }
-                    IconButton(onClick = onExportBluetoothLog) {
+                    IconButton(
+                        onClick = onExportBluetoothLog,
+                        modifier = Modifier.testTag("topbar_export_log")
+                    ) {
                         Icon(Icons.Default.BugReport, contentDescription = "导出蓝牙日志")
                     }
-                    IconButton(onClick = onOpenSettings) {
+                    IconButton(
+                        onClick = onOpenSettings,
+                        modifier = Modifier.testTag("topbar_settings")
+                    ) {
                         Icon(Icons.Default.Settings, contentDescription = "设置")
                     }
                 }
                 MainPage.RSS -> IconButton(
                     onClick = onRefreshAllRssSources,
-                    enabled = canRefreshRss
+                    enabled = canRefreshRss,
+                    modifier = Modifier.testTag("topbar_refresh_all")
                 ) {
                     Icon(Icons.Default.Sync, contentDescription = "刷新内容")
                 }
                 MainPage.CHANNEL -> IconButton(
                     onClick = onRefreshSelectedSource,
-                    enabled = canRefreshSource
+                    enabled = canRefreshSource,
+                    modifier = Modifier.testTag("topbar_refresh_channel")
                 ) {
                     Icon(Icons.Default.Sync, contentDescription = "刷新频道")
                 }
@@ -2212,7 +2228,8 @@ private fun MainNavigationBar(
                 icon = { destination.IconContent() },
                 label = {
                     Text(text = destination.label())
-                }
+                },
+                modifier = Modifier.testTag("nav_${destination.name.lowercase()}")
             )
         }
     }
@@ -2243,7 +2260,8 @@ private fun MainNavigationRail(
                 selected = selectedPage == destination,
                 onClick = { onSelectPage(destination) },
                 icon = { destination.IconContent() },
-                label = { Text(destination.label()) }
+                label = { Text(destination.label()) },
+                modifier = Modifier.testTag("nav_${destination.name.lowercase()}")
             )
         }
     }
@@ -2266,21 +2284,24 @@ private fun MainFloatingActionButton(
                 ExtendedFloatingActionButton(
                     onClick = onSyncLibrary,
                     icon = { Icon(Icons.Default.Sync, contentDescription = null) },
-                    text = { Text("同步手表") }
+                    text = { Text("同步手表") },
+                    modifier = Modifier.testTag("fab_sync_watch")
                 )
             }
         }
         MainPage.RSS -> ExtendedFloatingActionButton(
             onClick = onAddRssSource,
             icon = { Icon(Icons.Default.Add, contentDescription = null) },
-            text = { Text("添加 RSS") }
+            text = { Text("添加 RSS") },
+            modifier = Modifier.testTag("fab_add_rss")
         )
         MainPage.CHANNEL -> {
             if (selectedSource != null && canRefreshSelectedSource && !selectedSourceRefreshing && !isBusy) {
                 ExtendedFloatingActionButton(
                     onClick = onRefreshSelectedSource,
                     icon = { Icon(Icons.Default.Sync, contentDescription = null) },
-                    text = { Text("刷新") }
+                    text = { Text("刷新") },
+                    modifier = Modifier.testTag("fab_refresh_channel")
                 )
             }
         }
@@ -2425,6 +2446,7 @@ private fun SyncStatusCard(
     onDismissMessage: () -> Unit
 ) {
     ElevatedCard(
+        modifier = Modifier.testTag("dashboard_sync_card"),
         colors = CardDefaults.elevatedCardColors(
             containerColor = MaterialTheme.colorScheme.primaryContainer
         )
@@ -2502,7 +2524,9 @@ private fun SyncStatusCard(
                 Button(
                     onClick = onSyncLibrary,
                     enabled = !isBusy,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("dashboard_sync_watch")
                 ) {
                     Icon(Icons.Default.Sync, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
@@ -2512,7 +2536,9 @@ private fun SyncStatusCard(
                     OutlinedButton(
                         onClick = onSyncAccount,
                         enabled = !isBusy,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("dashboard_sync_account")
                     ) {
                         Icon(Icons.Default.AccountCircle, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
@@ -2522,7 +2548,9 @@ private fun SyncStatusCard(
                 OutlinedButton(
                     onClick = onExportBluetoothLog,
                     enabled = !isBusy,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("dashboard_export_log")
                 ) {
                     Icon(Icons.Default.BugReport, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
@@ -2568,7 +2596,9 @@ private fun LibrarySummaryCard(
                     supporting = "$rssArticleCount 篇",
                     icon = { Icon(Icons.Default.RssFeed, contentDescription = null) },
                     onClick = onOpenRss,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("tile_content")
                 )
                 SummaryTile(
                     title = "收藏",
@@ -2576,7 +2606,9 @@ private fun LibrarySummaryCard(
                     supporting = "已保存",
                     icon = { Icon(Icons.Default.Favorite, contentDescription = null) },
                     onClick = onOpenFavorites,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("tile_favorites")
                 )
             }
             SummaryRow {
@@ -2586,7 +2618,9 @@ private fun LibrarySummaryCard(
                     supporting = "待阅读",
                     icon = { Icon(Icons.Default.Bookmark, contentDescription = null) },
                     onClick = onOpenWatchLater,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("tile_watch_later")
                 )
                 SummaryTile(
                     title = "独立文章",
@@ -2594,7 +2628,9 @@ private fun LibrarySummaryCard(
                     supporting = "网页导入",
                     icon = { Icon(Icons.AutoMirrored.Filled.Article, contentDescription = null) },
                     onClick = onOpenIndependent,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("tile_independent")
                 )
             }
             SummaryRow {
@@ -2604,7 +2640,9 @@ private fun LibrarySummaryCard(
                     supporting = "TXT",
                     icon = { Icon(Icons.Default.Description, contentDescription = null) },
                     onClick = onOpenImportedContent,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("tile_imported")
                 )
                 Spacer(modifier = Modifier.weight(1f))
             }
@@ -2942,7 +2980,8 @@ private fun ContentPage(
                         IconButton(
                             onClick = onRefreshAllRssSources,
                             enabled = uiState.rssSources.any { !ImportedContentIds.isImportedContentUrl(it.url) } &&
-                                !uiState.isBusy
+                                !uiState.isBusy,
+                            modifier = Modifier.testTag("topbar_refresh_all")
                         ) {
                             Icon(Icons.Default.Sync, contentDescription = "刷新内容")
                         }
@@ -2987,7 +3026,8 @@ private fun ContentPage(
                         EmptyStateCard(
                             icon = { Icon(Icons.Default.RssFeed, contentDescription = null) },
                             title = "暂无内容",
-                            text = "可在导入页添加 RSS、网页文章或本地文件"
+                            text = "可在导入页添加 RSS、网页文章或本地文件",
+                            modifier = Modifier.testTag("content_empty")
                         )
                     }
                 } else {
@@ -3273,7 +3313,8 @@ private fun MorphingChannelArticlePane(
                         EmptyStateCard(
                             icon = { MainContentChannelLeadingIcon(channel.icon) },
                             title = channel.emptyTitle,
-                            text = channel.emptyText
+                            text = channel.emptyText,
+                            modifier = Modifier.testTag("channel_empty")
                         )
                     }
                 } else {
@@ -3477,7 +3518,9 @@ private fun MorphingMainScreenArticleRow(
         0.dp
     }
     ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("article_row"),
         shape = cardShape,
         colors = cardColors
     ) {
@@ -3515,7 +3558,10 @@ private fun MorphingMainScreenArticleRow(
                     ) {
                         if (mainScreenCanDeleteArticle && menuActionWidth > 0.dp) {
                             Box {
-                                IconButton(onClick = { menuExpanded = true }) {
+                                IconButton(
+                                    onClick = { menuExpanded = true },
+                                    modifier = Modifier.testTag("article_more")
+                                ) {
                                     Icon(Icons.Default.MoreVert, contentDescription = "文章操作")
                                 }
                                 DropdownMenu(
@@ -3563,7 +3609,8 @@ private fun MorphingMainScreenArticleRow(
                         progress = paneProgress,
                         startVisible = article.favoriteSaved,
                         endVisible = true,
-                        onClick = { onToggleFavorite(article) }
+                        onClick = { onToggleFavorite(article) },
+                        modifier = Modifier.testTag("article_favorite")
                     ) {
                         Icon(
                             imageVector = if (article.favoriteSaved) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
@@ -3575,7 +3622,8 @@ private fun MorphingMainScreenArticleRow(
                         progress = paneProgress,
                         startVisible = article.watchLaterSaved,
                         endVisible = true,
-                        onClick = { onToggleWatchLater(article) }
+                        onClick = { onToggleWatchLater(article) },
+                        modifier = Modifier.testTag("article_watch_later")
                     ) {
                         Icon(
                             imageVector = if (article.watchLaterSaved) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
@@ -3587,7 +3635,8 @@ private fun MorphingMainScreenArticleRow(
                         progress = paneProgress,
                         startVisible = false,
                         endVisible = article.url.isNotBlank() && !ImportedContentIds.isImportedContentUrl(article.url),
-                        onClick = { onOpenOriginalLink(article.url) }
+                        onClick = { onOpenOriginalLink(article.url) },
+                        modifier = Modifier.testTag("article_open_original")
                     ) {
                         Icon(
                             Icons.AutoMirrored.Filled.OpenInNew,
@@ -3607,6 +3656,7 @@ private fun MorphingArticleActionIcon(
     startVisible: Boolean,
     endVisible: Boolean,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
     icon: @Composable () -> Unit
 ) {
     val paneProgress = progress.coerceIn(0f, 1f)
@@ -3615,7 +3665,7 @@ private fun MorphingArticleActionIcon(
     val boxSize = lerpMainDp(startSize, endSize, paneProgress)
     if (boxSize <= 0.dp) return
     Box(
-        modifier = Modifier
+        modifier = modifier
             .size(boxSize)
             .clipToBounds()
             .roundedClickable(
@@ -3717,7 +3767,8 @@ private fun ChannelArticleListPane(
                         EmptyStateCard(
                             icon = { MainContentChannelLeadingIcon(channel.icon) },
                             title = channel.emptyTitle,
-                            text = channel.emptyText
+                            text = channel.emptyText,
+                            modifier = Modifier.testTag("channel_empty")
                         )
                     }
                 } else {
@@ -3749,7 +3800,9 @@ private fun MainScreenArticleListRow(
     }
     ElevatedCard(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("article_row"),
         colors = cardColors,
         shape = MaterialTheme.shapes.medium
     ) {
@@ -3873,14 +3926,16 @@ private fun ChannelArticlePane(
                         EmptyStateCard(
                             icon = { Icon(Icons.AutoMirrored.Filled.Article, contentDescription = null) },
                             title = "选择左侧内容",
-                            text = "频道、收藏、稍后再看或导入内容会在这里显示文章"
+                            text = "频道、收藏、稍后再看或导入内容会在这里显示文章",
+                            modifier = Modifier.testTag("reader_select_channel")
                         )
                     }
                     channel.articles.isEmpty() -> item {
                         EmptyStateCard(
                             icon = { MainContentChannelLeadingIcon(channel.icon) },
                             title = channel.emptyTitle,
-                            text = channel.emptyText
+                            text = channel.emptyText,
+                            modifier = Modifier.testTag("channel_empty")
                         )
                     }
                     else -> items(channel.articles, key = { it.articleId }) { article ->
@@ -4022,7 +4077,8 @@ private fun ChannelPage(
                             EmptyStateCard(
                                 icon = { MainContentChannelLeadingIcon(channel?.icon ?: MainContentChannelIcon.ARTICLE) },
                                 title = channel?.emptyTitle ?: "暂无文章",
-                                text = channel?.emptyText ?: "频道不存在"
+                                text = channel?.emptyText ?: "频道不存在",
+                                modifier = Modifier.testTag("channel_empty")
                             )
                         }
                     } else {
@@ -4144,26 +4200,29 @@ private fun ImportsPage(
                     EmptyStateCard(
                         icon = { Icon(Icons.Default.FileOpen, contentDescription = null) },
                         title = "暂无导入",
-                        text = "添加网页文章，或导入 TXT / EPUB / WRSS 文件后会显示在这里"
+                        text = "添加网页文章，或导入 TXT / EPUB / WRSS 文件后会显示在这里",
+                        modifier = Modifier.testTag("imports_empty")
                     )
                 }
             } else {
                 items(recentEntries, key = { it.key }) { entry ->
-                    when (entry) {
-                        is RecentImportEntry.Channel -> MainContentChannelRow(
-                            channel = entry.channel,
-                            onClick = { onOpenChannel(entry.channel) },
-                            selected = entry.channel.key == selectedChannelKey
-                        )
-                        is RecentImportEntry.Article -> MainScreenArticleRow(
-                            article = entry.article,
-                            onOpenArticle = onOpenArticle,
-                            onOpenOriginalLink = onOpenOriginalLink,
-                            onToggleFavorite = onToggleFavorite,
-                            onToggleWatchLater = onToggleWatchLater,
-                            onDeleteArticle = onDeleteArticle,
-                            mainScreenCanDeleteArticle = mainScreenCanDeleteArticle(entry.article)
-                        )
+                    Box(modifier = Modifier.testTag("recent_import_item")) {
+                        when (entry) {
+                            is RecentImportEntry.Channel -> MainContentChannelRow(
+                                channel = entry.channel,
+                                onClick = { onOpenChannel(entry.channel) },
+                                selected = entry.channel.key == selectedChannelKey
+                            )
+                            is RecentImportEntry.Article -> MainScreenArticleRow(
+                                article = entry.article,
+                                onOpenArticle = onOpenArticle,
+                                onOpenOriginalLink = onOpenOriginalLink,
+                                onToggleFavorite = onToggleFavorite,
+                                onToggleWatchLater = onToggleWatchLater,
+                                onDeleteArticle = onDeleteArticle,
+                                mainScreenCanDeleteArticle = mainScreenCanDeleteArticle(entry.article)
+                            )
+                        }
                     }
                 }
             }
@@ -4218,14 +4277,17 @@ private fun ImportActionsCard(
                 onValueChange = onUrlChange,
                 label = { Text("网页或 RSS 地址") },
                 placeholder = { Text("https://example.com/feed.xml") },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("imports_url_input"),
                 singleLine = true,
                 enabled = enabled,
                 trailingIcon = {
                     if (urlInput.isNotEmpty()) {
                         IconButton(
                             onClick = { onUrlChange("") },
-                            enabled = enabled
+                            enabled = enabled,
+                            modifier = Modifier.testTag("imports_clear_url")
                         ) {
                             Icon(Icons.Default.Close, contentDescription = "清空输入")
                         }
@@ -4236,7 +4298,9 @@ private fun ImportActionsCard(
                 Button(
                     onClick = { requestUrlImport(UrlDialogMode.RSS) },
                     enabled = enabled && urlInput.isNotBlank(),
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("imports_rss")
                 ) {
                     Icon(Icons.Default.RssFeed, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
@@ -4245,7 +4309,9 @@ private fun ImportActionsCard(
                 Button(
                     onClick = { requestUrlImport(UrlDialogMode.ARTICLE) },
                     enabled = enabled && urlInput.isNotBlank(),
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("imports_article")
                 ) {
                     Icon(Icons.AutoMirrored.Filled.Article, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
@@ -4256,7 +4322,9 @@ private fun ImportActionsCard(
                 OutlinedButton(
                     onClick = onImportFile,
                     enabled = enabled,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("imports_file")
                 ) {
                     Icon(Icons.Default.FileOpen, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
@@ -4265,7 +4333,9 @@ private fun ImportActionsCard(
                 OutlinedButton(
                     onClick = onExportBackup,
                     enabled = enabled,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("imports_export_backup")
                 ) {
                     Icon(Icons.Default.Archive, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
@@ -4360,7 +4430,9 @@ private fun MainContentChannelRow(
 
     ElevatedCard(
         onClick = onClick,
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("channel_row"),
         colors = cardColors
     ) {
         ListItem(
@@ -4433,7 +4505,9 @@ private fun MainScreenSourceRow(
     val cardShape = MaterialTheme.shapes.medium
 
     ElevatedCard(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("channel_row"),
         shape = cardShape,
         colors = cardColors
     ) {
@@ -4478,7 +4552,10 @@ private fun MainScreenSourceRow(
                 },
                 trailingContent = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { menuExpanded = true }) {
+                        IconButton(
+                            onClick = { menuExpanded = true },
+                            modifier = Modifier.testTag("source_menu")
+                        ) {
                             Icon(Icons.Default.MoreVert, contentDescription = "频道操作")
                         }
                         DropdownMenu(
@@ -4531,7 +4608,9 @@ private fun MainScreenArticleRow(
     var menuExpanded by remember { mutableStateOf(false) }
     val cardShape = MaterialTheme.shapes.medium
     ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("article_row"),
         shape = cardShape
     ) {
         Box(
@@ -4561,7 +4640,10 @@ private fun MainScreenArticleRow(
                     )
                     if (mainScreenCanDeleteArticle) {
                         Box {
-                            IconButton(onClick = { menuExpanded = true }) {
+                            IconButton(
+                                onClick = { menuExpanded = true },
+                                modifier = Modifier.testTag("article_more")
+                            ) {
                                 Icon(Icons.Default.MoreVert, contentDescription = "文章操作")
                             }
                             DropdownMenu(
@@ -4601,20 +4683,29 @@ private fun MainScreenArticleRow(
                     )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    IconButton(onClick = { onToggleFavorite(article) }) {
+                    IconButton(
+                        onClick = { onToggleFavorite(article) },
+                        modifier = Modifier.testTag("article_favorite")
+                    ) {
                         Icon(
                             imageVector = if (article.favoriteSaved) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                             contentDescription = if (article.favoriteSaved) "取消收藏" else "收藏"
                         )
                     }
-                    IconButton(onClick = { onToggleWatchLater(article) }) {
+                    IconButton(
+                        onClick = { onToggleWatchLater(article) },
+                        modifier = Modifier.testTag("article_watch_later")
+                    ) {
                         Icon(
                             imageVector = if (article.watchLaterSaved) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
                             contentDescription = if (article.watchLaterSaved) "移出稍后再看" else "稍后再看"
                         )
                     }
                     if (article.url.isNotBlank() && !ImportedContentIds.isImportedContentUrl(article.url)) {
-                        IconButton(onClick = { onOpenOriginalLink(article.url) }) {
+                        IconButton(
+                            onClick = { onOpenOriginalLink(article.url) },
+                            modifier = Modifier.testTag("article_open_original")
+                        ) {
                             Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "打开原网页")
                         }
                     }
@@ -4628,9 +4719,10 @@ private fun MainScreenArticleRow(
 private fun EmptyStateCard(
     icon: @Composable () -> Unit,
     title: String,
-    text: String
+    text: String,
+    modifier: Modifier = Modifier
 ) {
-    ElevatedCard {
+    ElevatedCard(modifier = modifier) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -4679,6 +4771,7 @@ private fun UrlEntryDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier.testTag("dialog_url_entry"),
         title = {
             Text(if (mode == UrlDialogMode.RSS) "添加 RSS 源" else "添加独立文章")
         },
@@ -4733,6 +4826,7 @@ private fun OnlineNovelImportWarningDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier.testTag("dialog_online_novel_warning"),
         title = { Text("在线小说链接") },
         text = { Text(ONLINE_NOVEL_IMPORT_WARNING) },
         confirmButton = {
@@ -4760,6 +4854,7 @@ private fun QqGroupQrDialog(onDismiss: () -> Unit) {
     }
     AlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier.testTag("dialog_qq_group_qr"),
         title = { Text("联系我们") },
         text = {
             Column(
@@ -4803,6 +4898,7 @@ private fun MainScreenDeleteConflictDialog(
 ) {
     AlertDialog(
         onDismissRequest = {},
+        modifier = Modifier.testTag("dialog_delete_conflict"),
         title = {
             Text(if (prompt.manual) "保留/删除" else "双端内容有冲突")
         },
@@ -4882,6 +4978,7 @@ private fun MainScreenBluetoothDeviceChooserDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier.testTag("dialog_bluetooth_device"),
         title = { Text("选择同步手表") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -4950,6 +5047,7 @@ private fun MainScreenSharedImportDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier.testTag("dialog_shared_import"),
         title = {
             Text(
                 text = when (prompt.kind) {

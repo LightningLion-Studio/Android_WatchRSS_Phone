@@ -39,6 +39,12 @@ Do not reintroduce QR scanning, manual IP/port WiFi connection, acoustic-guided 
 
 # Run lint checks
 ./gradlew lint
+
+# Screenshot tests - record baseline
+./gradlew :app:executeScreenshotTests -Precord
+
+# Screenshot tests - verify against baseline
+./gradlew :app:executeScreenshotTests
 ```
 
 ## Architecture

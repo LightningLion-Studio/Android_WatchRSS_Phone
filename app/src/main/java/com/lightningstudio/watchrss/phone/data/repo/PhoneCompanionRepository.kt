@@ -125,6 +125,13 @@ class PhoneCompanionRepository(
     private val articleContentStore: ArticleContentStore? = null,
     private val appMetaDao: AppMetaDao = NoopAppMetaDao
 ) {
+    /** 仅用于 instrumented screenshot tests 直接操作真实数据库。 */
+    val testArticleDao: PhoneArticleDao get() = articleDao
+    /** 仅用于 instrumented screenshot tests 直接操作真实数据库。 */
+    val testRssSourceDao: PhoneRssSourceDao get() = rssSourceDao
+    /** 仅用于 instrumented screenshot tests 直接操作真实数据库。 */
+    val testSavedItemDao: PhoneSavedItemDao get() = savedItemDao
+
     fun observeFirstUseAt(): Flow<Long?> {
         return appMetaDao.observeString(KEY_FIRST_USE_AT).map { it?.toLongOrNull() }
     }

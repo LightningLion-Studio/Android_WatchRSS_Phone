@@ -310,6 +310,11 @@ class MainViewModel(
         viewModelScope.launch {
             runBusy("正在导入文件…") {
                 val result = repository.importLocalContent(fileName, mimeType, bytes)
+                usageTelemetry.recordLocalContentImported(
+                    kind = result.kind.name,
+                    title = result.source?.title,
+                    articleCount = result.articleCount
+                )
                 sessionState.value = sessionState.value.copy(
                     message = when (result.kind) {
                         LocalContentImportKind.TXT -> "已导入 TXT 到导入内容，文章 ${result.articleCount} 篇"
@@ -326,6 +331,10 @@ class MainViewModel(
         viewModelScope.launch {
             runBusy("正在导出资料库…") {
                 val result = backupService.exportTo(uriString)
+                usageTelemetry.recordBackupExported(
+                    articleCount = result.articleCount,
+                    sourceCount = result.sourceCount
+                )
                 sessionState.value = sessionState.value.copy(
                     message = "已导出 WRSS：${result.articleCount} 篇文章，${result.sourceCount} 个 RSS 源",
                     error = null
@@ -371,6 +380,11 @@ class MainViewModel(
             runBusy(if (mode == BackupImportMode.REPLACE) "正在覆盖资料库…" else "正在合并资料库…") {
                 val result = backupService.importFrom(prompt.uriString, mode)
                 val action = if (mode == BackupImportMode.REPLACE) "覆盖" else "合并"
+                usageTelemetry.recordBackupImported(
+                    mode = mode.name,
+                    articleCount = result.articleCount,
+                    sourceCount = result.sourceCount
+                )
                 sessionState.value = sessionState.value.copy(
                     message = "已${action} WRSS：${result.articleCount} 篇文章，${result.sourceCount} 个 RSS 源",
                     error = null
@@ -391,6 +405,11 @@ class MainViewModel(
         viewModelScope.launch {
             runBusy("正在添加 RSS 源…") {
                 val result = repository.addRssSource(url)
+                usageTelemetry.recordRssSourceAdded(
+                    url = result.source.url,
+                    title = result.source.title,
+                    articleCount = result.articleCount
+                )
                 sessionState.value = sessionState.value.copy(
                     message = "已添加 RSS 源：${result.source.title}，导入 ${result.articleCount} 篇",
                     error = null,
@@ -821,6 +840,7 @@ class MainViewModel(
         viewModelScope.launch {
             runBusy("正在通过蓝牙发送 RSS 地址…", showInSyncStatus = true) {
                 val result = bluetoothSyncManager.sendRemoteInput(url)
+                usageTelemetry.recordRemoteInputSent(url)
                 val message = "已通过蓝牙发送到 ${result.deviceName.ifBlank { "手表" }}"
                 sessionState.value = sessionState.value.copy(
                     message = message,
@@ -864,6 +884,11 @@ class MainViewModel(
         viewModelScope.launch {
             runBusy("正在导入网页…") {
                 val article = repository.importWebArticle(url)
+                usageTelemetry.recordArticleImported(
+                    source = "web",
+                    url = article.url,
+                    title = article.title
+                )
                 sessionState.value = sessionState.value.copy(
                     message = "已导入到独立文章：${article.title}",
                     error = null,

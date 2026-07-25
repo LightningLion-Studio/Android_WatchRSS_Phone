@@ -16,6 +16,7 @@ import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
+import com.lightningstudio.watchrss.phone.data.telemetry.OpenPanelAnalytics
 import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -67,13 +68,18 @@ class PhoneCompanionContainer(context: Context) {
         )
     }
 
+    val openPanelAnalytics: OpenPanelAnalytics by lazy {
+        OpenPanelAnalytics(appContext, appScope)
+    }
+
     val usageTelemetry: PhoneUsageTelemetry by lazy {
         PhoneUsageTelemetry(
             context = appContext,
             environment = accountEnvironment,
             installationIdentity = installationIdentity,
             accountRepository = accountRepository,
-            appScope = appScope
+            appScope = appScope,
+            openPanelAnalytics = openPanelAnalytics
         )
     }
 

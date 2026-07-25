@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    id("shot") version "6.1.0"
     alias(libs.plugins.ksp)
 }
 
@@ -25,12 +26,15 @@ android {
         targetSdk = 36
         versionCode = 15
         versionName = "1.1.0-2"
+        buildConfigField("String", "WATCHRSS_OPENPANEL_CLIENT_ID", "\"3b151c92-b189-48a3-ae77-148db3235ca1\"")
+        buildConfigField("String", "WATCHRSS_OPENPANEL_CLIENT_SECRET", "\"\"")
+        buildConfigField("String", "WATCHRSS_OPENPANEL_API_URL", "\"http://10.0.2.2:3001\"")
         buildConfigField("String", "WATCHRSS_BACKEND_BASE_URL", "\"\"")
         buildConfigField("String", "WATCHRSS_SUPABASE_ANON_KEY", "\"\"")
         buildConfigField("String", "WATCHRSS_POSTHOG_HOST", "\"\"")
         buildConfigField("String", "WATCHRSS_POSTHOG_API_KEY", "\"\"")
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner = "com.karumi.shot.ShotTestRunner"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -90,6 +94,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":openpanel"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -121,6 +126,13 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.json)
     androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.junit.ktx)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(libs.shot.android)
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    androidTestImplementation(libs.kotlinx.coroutines.test)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

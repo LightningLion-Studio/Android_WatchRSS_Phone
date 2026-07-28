@@ -106,6 +106,13 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
+import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageDailyPojo
+import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageStatisticsPojo
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -2427,7 +2434,104 @@ private fun DashboardPage(
                             onOpenImportedContent = onOpenImportedContent
                         )
                     }
+                    item {
+                        TokenUsageCard(
+                            stats = uiState.llmTokenUsageStats,
+                            daily = uiState.llmTokenUsageDaily
+                        )
+                    }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TokenUsageCard(
+    stats: PhoneLlmTokenUsageStatisticsPojo?,
+    daily: List<PhoneLlmTokenUsageDailyPojo>
+) {
+    ElevatedCard {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Sync, contentDescription = null)
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "手表 Token 消耗概览",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "与手表同步后自动更新",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+                    )
+                }
+            }
+            Text(
+                text = "累计 ${stats?.totalCalls ?: 0} 次 · ${stats?.totalTokens ?: 0} tokens",
+                style = MaterialTheme.typography.bodyMedium
+            )
+            if (daily.size > 1) {
+                val primary = MaterialTheme.colorScheme.primary
+                val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(96.dp)
+                ) {
+                    val maxVal = daily.maxOf { it.totalTokens ?: 0L }.toFloat().coerceAtLeast(1f)
+                    val paddingX = 8.dp.toPx()
+                    val width = size.width - 2 * paddingX
+                    val height = size.height - 16.dp.toPx()
+                    val step = width / (daily.size - 1).coerceAtLeast(1)
+                    val points = daily.mapIndexed { index, day ->
+                        val x = paddingX + index * step
+                        val y = height - ((day.totalTokens ?: 0L).toFloat() / maxVal) * (height * 0.85f)
+                        Offset(x, y)
+                    }
+                    for (i in 0 until points.lastIndex) {
+                        drawLine(
+                            color = primary,
+                            start = points[i],
+                            end = points[i + 1],
+                            strokeWidth = 3.dp.toPx(),
+                            cap = androidx.compose.ui.graphics.StrokeCap.Round
+                        )
+                    }
+                    points.forEach { p ->
+                        drawCircle(color = primary, radius = 3.dp.toPx(), center = p)
+                    }
+                    drawIntoCanvas { canvas ->
+                        val paint = android.graphics.Paint().apply {
+                            color = onSurfaceVariant.toArgb()
+                            textSize = 10.dp.toPx()
+                        }
+                        val fmt = java.text.SimpleDateFormat("MM/dd", java.util.Locale.getDefault())
+                        canvas.nativeCanvas.drawText(
+                            fmt.format(java.util.Date(daily.first().dayTimestamp)),
+                            paddingX,
+                            size.height - 4.dp.toPx(),
+                            paint
+                        )
+                        canvas.nativeCanvas.drawText(
+                            fmt.format(java.util.Date(daily.last().dayTimestamp)),
+                            size.width - paddingX - 40.dp.toPx(),
+                            size.height - 4.dp.toPx(),
+                            paint
+                        )
+                    }
+                }
+            } else {
+                Text(
+                    text = "暂无近7天数据，请先与手表同步资料库。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }

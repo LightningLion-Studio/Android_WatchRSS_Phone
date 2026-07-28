@@ -13,9 +13,10 @@ import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
         PhoneRssSourceEntity::class,
         SyncChangeLogEntity::class,
         SyncPeerStateEntity::class,
-        AppMetaEntity::class
+        AppMetaEntity::class,
+        PhoneLlmTokenUsageEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
@@ -25,6 +26,7 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
     abstract fun syncChangeLogDao(): SyncChangeLogDao
     abstract fun syncPeerStateDao(): SyncPeerStateDao
     abstract fun appMetaDao(): AppMetaDao
+    abstract fun llmTokenUsageDao(): PhoneLlmTokenUsageDao
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -173,6 +175,35 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
                 database.execSQL(
                     "ALTER TABLE phone_articles ADD COLUMN readingProgress REAL NOT NULL DEFAULT 0"
                 )
+            }
+        }
+
+
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS llm_token_usage (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        provider TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        requestId TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        promptTokens INTEGER,
+                        completionTokens INTEGER,
+                        totalTokens INTEGER,
+                        reasoningTokens INTEGER,
+                        cachedPromptTokens INTEGER,
+                        inputTokens INTEGER,
+                        outputTokens INTEGER,
+                        promptTokenCount INTEGER,
+                        candidatesTokenCount INTEGER,
+                        totalTokenCount INTEGER
+                    )
+                    """.trimIndent()
+                )
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_llm_token_usage_createdAt ON llm_token_usage(createdAt)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_llm_token_usage_provider_model ON llm_token_usage(provider, model)")
             }
         }
 

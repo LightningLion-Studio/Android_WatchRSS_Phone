@@ -11,6 +11,7 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyn
 import com.lightningstudio.watchrss.phone.connection.guided.PhoneGuidedSessionManager
 import com.lightningstudio.watchrss.phone.data.backup.WatchRssBackupService
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
+import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageRepository
 import com.lightningstudio.watchrss.phone.data.importer.AndroidWebArticleImporter
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
@@ -42,7 +43,8 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_5_6,
             PhoneCompanionDatabase.MIGRATION_6_7,
             PhoneCompanionDatabase.MIGRATION_7_8,
-            PhoneCompanionDatabase.MIGRATION_8_9
+            PhoneCompanionDatabase.MIGRATION_8_9,
+            PhoneCompanionDatabase.MIGRATION_9_10
         )
             .build()
     }
@@ -95,6 +97,12 @@ class PhoneCompanionContainer(context: Context) {
         FileArticleContentStore(appContext)
     }
 
+    val llmTokenUsageRepository: PhoneLlmTokenUsageRepository by lazy {
+        PhoneLlmTokenUsageRepository(
+            dao = database.llmTokenUsageDao()
+        )
+    }
+
     val repository: PhoneCompanionRepository by lazy {
         PhoneCompanionRepository(
             savedItemDao = database.phoneSavedItemDao(),
@@ -129,6 +137,7 @@ class PhoneCompanionContainer(context: Context) {
         PhoneBluetoothSyncManager(
             context = appContext,
             repository = repository,
+            llmTokenUsageRepository = llmTokenUsageRepository,
             deviceId = deviceIdentity.deviceId,
             debugLog = bluetoothDebugLog,
             buildAccountSyncRequest = accountRepository::buildAccountSyncRequest

@@ -27,6 +27,10 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageDailyPojo
+import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageRepository
+import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageStatisticsPojo
+
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -49,7 +53,9 @@ data class MainUiState(
     val conflictPrompt: MainConflictPromptUi? = null,
     val bluetoothDevicePrompt: MainBluetoothDevicePromptUi? = null,
     val sharedImportPrompt: SharedImportPromptUi? = null,
-    val backupImportPrompt: BackupImportPromptUi? = null
+    val backupImportPrompt: BackupImportPromptUi? = null,
+    val llmTokenUsageStats: PhoneLlmTokenUsageStatisticsPojo? = null,
+    val llmTokenUsageDaily: List<PhoneLlmTokenUsageDailyPojo> = emptyList()
 )
 
 data class MainSyncProgressUi(
@@ -119,6 +125,7 @@ private data class LibraryContentLists(
 class MainViewModel(
     private val repository: PhoneCompanionRepository,
     private val bluetoothSyncManager: PhoneBluetoothSyncManager,
+    private val llmTokenUsageRepository: PhoneLlmTokenUsageRepository,
     private val usageTelemetry: PhoneUsageTelemetry,
     private val backupService: WatchRssBackupService
 ) : ViewModel() {
@@ -157,15 +164,19 @@ class MainViewModel(
                 watchLater = watchLater
             )
         },
+        llmTokenUsageRepository.observeStatistics(),
+        llmTokenUsageRepository.observeDaily(),
         sessionState
-    ) { lists, state ->
+    ) { lists, llmStats, llmDaily, state ->
         state.copy(
             rssSources = lists.rssSources,
             rssArticles = lists.rssArticles,
             independentArticles = lists.independentArticles,
             importedContentArticles = lists.importedContentArticles,
             favorites = lists.favorites,
-            watchLater = lists.watchLater
+            watchLater = lists.watchLater,
+            llmTokenUsageStats = llmStats,
+            llmTokenUsageDaily = llmDaily
         )
     }.stateIn(
         viewModelScope,
@@ -745,6 +756,18 @@ class MainViewModel(
             val stats = result.libraryStats
             val deviceName = result.deviceName.ifBlank { "手表" }
             completeSmoothedSyncProgress()
+            runCatching {
+                bluetoothSyncManager.syncLlmTokenUsage(
+                    PhoneBluetoothWatchDevice(
+                        name = deviceName,
+                        address = deviceAddress.orEmpty(),
+                        uuidCount = 0,
+                        remoteDeviceId = ""
+                    )
+                )
+            }.onFailure { tokenError ->
+                _toastEvent.tryEmit("Token 用量同步失败：${tokenError.message}")
+            }
             val message = "已与 $deviceName 同步完成"
             sessionState.value = sessionState.value.copy(
                 message = message,

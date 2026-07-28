@@ -50,6 +50,7 @@ class HomeActivity : ComponentActivity() {
         MainViewModelFactory(
             container.repository,
             container.bluetoothSyncManager,
+            container.llmTokenUsageRepository,
             container.usageTelemetry,
             container.backupService
         )

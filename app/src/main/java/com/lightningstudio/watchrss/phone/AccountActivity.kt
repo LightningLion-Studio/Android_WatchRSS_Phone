@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountCircle
@@ -43,6 +45,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
+import com.lightningstudio.watchrss.phone.cloud.CloudAccountPanel
+import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncService
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.launch
 
@@ -56,8 +60,12 @@ class AccountActivity : ComponentActivity() {
 
         setContent {
             WatchRssPhoneTheme {
+                val rssSources by container.repository.observeRssSources()
+                    .collectAsState(initial = emptyList())
                 AccountScreen(
                     accountRepository = accountRepository,
+                    cloudSyncService = container.cloudSyncService,
+                    rssSources = rssSources,
                     onBack = ::finish,
                     runAction = { action ->
                         lifecycleScope.launch { action() }
@@ -95,6 +103,8 @@ class AccountActivity : ComponentActivity() {
 @Composable
 private fun AccountScreen(
     accountRepository: PhoneAccountRepository,
+    cloudSyncService: PhoneCloudSyncService,
+    rssSources: List<com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity>,
     onBack: () -> Unit,
     runAction: (suspend () -> Unit) -> Unit
 ) {
@@ -121,6 +131,7 @@ private fun AccountScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
                     .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
@@ -195,6 +206,22 @@ private fun AccountScreen(
                         }
                     }
                 } else {
+                    CloudAccountPanel(
+                        service = cloudSyncService,
+                        userId = requireNotNull(session).userId,
+                        rssSources = rssSources,
+                        busy = busy,
+                        runAction = runAction,
+                        onBusyChange = { busy = it },
+                        onMessage = {
+                            message = it
+                            error = null
+                        },
+                        onError = {
+                            error = it
+                            message = null
+                        }
+                    )
                     OutlinedButton(
                         onClick = {
                             runAction {

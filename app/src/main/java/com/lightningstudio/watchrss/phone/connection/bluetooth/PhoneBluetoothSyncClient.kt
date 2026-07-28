@@ -15,6 +15,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -397,6 +398,15 @@ class PhoneBluetoothSyncClient(
                 responseFrameCount = responseRead.stats.frameCount,
                 response = response
             )
+            if (manifestResponse.optBoolean("supportsReceivedAck", false)) {
+                writeResponseAck(
+                    socket = socket,
+                    sessionId = sessionId,
+                    success = true,
+                    applied = false,
+                    phase = BluetoothSyncProtocol.ACK_PHASE_RECEIVED
+                )
+            }
             try {
                 applyResponse(exchange)
                 writeResponseAck(socket, sessionId, success = true, applied = ackApplied)
@@ -929,6 +939,7 @@ class PhoneBluetoothSyncClient(
         sessionId: String,
         success: Boolean,
         applied: Boolean,
+        phase: String = BluetoothSyncProtocol.ACK_PHASE_APPLIED,
         message: String? = null
     ) {
         runCatching {
@@ -938,7 +949,7 @@ class PhoneBluetoothSyncClient(
                 label = "ack",
                 payload = JSONObject().apply {
                     put("action", BluetoothSyncProtocol.ACTION_ACK)
-                    put("phase", BluetoothSyncProtocol.ACK_PHASE_APPLIED)
+                    put("phase", phase)
                     put("success", success)
                     put("applied", applied)
                     message?.takeIf { it.isNotBlank() }?.let { put("message", it) }
@@ -975,11 +986,15 @@ class PhoneBluetoothSyncClient(
         }
     }
 
+    @OptIn(InternalCoroutinesApi::class)
     private suspend fun installSocketCancellationLogger(
         sessionId: String,
         owner: String,
         socketProvider: () -> BluetoothSocket?
-    ) = currentCoroutineContext()[Job]?.invokeOnCompletion { cause ->
+    ) = currentCoroutineContext()[Job]?.invokeOnCompletion(
+        onCancelling = true,
+        invokeImmediately = false
+    ) { cause ->
         if (cause !is CancellationException) return@invokeOnCompletion
         val socket = socketProvider() ?: return@invokeOnCompletion
         val startedAt = SystemClock.elapsedRealtime()
@@ -1226,7 +1241,7 @@ class PhoneBluetoothSyncClient(
         private const val PHASE_COMPLETE = "complete"
         private const val MAX_DEVICE_PROBE_CANDIDATES = 3
         private const val DEFAULT_DEVICE_PROBE_TIMEOUT_MS = 2_000L
-        private const val DIRECT_PROBE_TIMEOUT_MS = 700L
+        private const val DIRECT_PROBE_TIMEOUT_MS = 4_000L
         private const val PREFS_NAME = "watchrss_bluetooth_sync"
         private const val KEY_LAST_DEVICE_ADDRESS = "last_successful_device_address"
         private val EMPTY_FRAME_STATS = LibraryFrameStats(

@@ -14,6 +14,14 @@ if (hasKeystoreProperties) {
     keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
 }
 
+fun productionSetting(name: String, defaultValue: String = ""): String =
+    providers.gradleProperty(name).orNull
+        ?: providers.environmentVariable(name).orNull
+        ?: defaultValue
+
+fun String.asBuildConfigString(): String =
+    "\"${replace("\\", "\\\\").replace("\"", "\\\"")}\""
+
 android {
     namespace = "com.lightningstudio.watchrss.phone"
     compileSdk = 36
@@ -25,8 +33,19 @@ android {
         targetSdk = 36
         versionCode = 15
         versionName = "1.1.0-2"
-        buildConfigField("String", "WATCHRSS_BACKEND_BASE_URL", "\"\"")
-        buildConfigField("String", "WATCHRSS_SUPABASE_ANON_KEY", "\"\"")
+        buildConfigField(
+            "String",
+            "WATCHRSS_BACKEND_BASE_URL",
+            productionSetting(
+                "WATCHRSS_BACKEND_BASE_URL",
+                "https://sly-data-plane.watchrss.cn"
+            ).asBuildConfigString()
+        )
+        buildConfigField(
+            "String",
+            "WATCHRSS_SUPABASE_ANON_KEY",
+            productionSetting("WATCHRSS_SUPABASE_ANON_KEY").asBuildConfigString()
+        )
         buildConfigField("String", "WATCHRSS_POSTHOG_HOST", "\"\"")
         buildConfigField("String", "WATCHRSS_POSTHOG_API_KEY", "\"\"")
 
@@ -115,6 +134,7 @@ dependencies {
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation(libs.jsoup)
     implementation(libs.reorderable)
+    implementation(libs.androidx.work.runtime.ktx)
     ksp(libs.androidx.room.compiler)
     // Backdrop source copied locally — see app/src/main/java/com/kyant/backdrop
 

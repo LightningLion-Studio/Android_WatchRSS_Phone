@@ -269,7 +269,12 @@ object ArticleSyncBody {
             ByteArrayInputStream(bytes)
         }
         return input.use { stream ->
-            decodeBodyJson(InputStreamReader(stream, Charsets.UTF_8))
+            decodeBodyJson(
+                InputStreamReader(
+                    LimitedInputStream(stream, MAX_DECOMPRESSED_TEXT_BYTES),
+                    Charsets.UTF_8
+                )
+            )
         }
     }
 
@@ -409,6 +414,32 @@ object ArticleSyncBody {
         }
     }
 
+    private class LimitedInputStream(
+        private val upstream: InputStream,
+        private val maxBytes: Int
+    ) : InputStream() {
+        private var totalBytes = 0
+
+        override fun read(): Int {
+            val value = upstream.read()
+            if (value >= 0) count(1)
+            return value
+        }
+
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            val read = upstream.read(buffer, offset, length)
+            if (read > 0) count(read)
+            return read
+        }
+
+        private fun count(bytes: Int) {
+            totalBytes += bytes
+            if (totalBytes > maxBytes) {
+                throw IllegalArgumentException("解压内容过大")
+            }
+        }
+    }
+
     private fun chunkHashesFor(bytes: ByteArray): List<String> {
         val chunkCount = chunkCountFor(bytes)
         return buildList(chunkCount) {
@@ -468,4 +499,6 @@ object ArticleSyncBody {
         }.digest()
         return digest.joinToString("") { "%02x".format(it) }
     }
+
+    private const val MAX_DECOMPRESSED_TEXT_BYTES = 32 * 1024 * 1024
 }

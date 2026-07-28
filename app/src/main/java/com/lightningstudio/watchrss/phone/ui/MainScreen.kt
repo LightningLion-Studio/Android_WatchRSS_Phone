@@ -336,6 +336,7 @@ fun MainScreen(
     var readerLeftPaneReturnState by remember { mutableStateOf<ReaderLeftPaneReturnState?>(null) }
     var lastContentChannelKey by rememberSaveable { mutableStateOf<String?>(null) }
     var channelReturnPageName by rememberSaveable { mutableStateOf(MainPage.RSS.name) }
+    var singlePaneChannelReturnPageName by rememberSaveable { mutableStateOf(MainPage.RSS.name) }
     var channelBackProgress by remember { mutableFloatStateOf(0f) }
     var tabBackProgress by remember { mutableFloatStateOf(0f) }
     var tabBackActive by remember { mutableStateOf(false) }
@@ -452,6 +453,10 @@ fun MainScreen(
         .getOrDefault(MainPage.RSS)
         .takeIf { it in TopLevelMainPages }
         ?: MainPage.RSS
+    val singlePaneChannelReturnPage = runCatching { MainPage.valueOf(singlePaneChannelReturnPageName) }
+        .getOrDefault(MainPage.RSS)
+        .takeIf { it in TopLevelMainPages }
+        ?: MainPage.RSS
     val channelTabSwitchDestination = channelTabSwitchDestinationName
         ?.let { runCatching { MainPage.valueOf(it) }.getOrNull() }
         ?.takeIf { it in TopLevelMainPages }
@@ -459,7 +464,7 @@ fun MainScreen(
         ?.let { runCatching { MainPage.valueOf(it) }.getOrNull() }
         ?.takeIf { it in TopLevelMainPages }
     val page = if (selectedContentChannel != null) MainPage.CHANNEL else currentTopLevelPage
-    val selectedBottomPage = if (page == MainPage.CHANNEL) channelReturnPage else currentTopLevelPage
+    val selectedBottomPage = if (page == MainPage.CHANNEL) singlePaneChannelReturnPage else currentTopLevelPage
 
     fun returnToDashboard(
         usePager: Boolean = !isMediumOrExpandedLayout,
@@ -535,14 +540,19 @@ fun MainScreen(
         }
     }
 
-    fun navigateToContentChannel(channelKey: String, returnPage: MainPage = currentTopLevelPage) {
+    fun navigateToContentChannel(
+        channelKey: String,
+        hostPage: MainPage,
+        singlePaneReturnPage: MainPage
+    ) {
         val resolvedChannelKey = when (channelKey) {
             CONTENT_CHANNEL_IMPORTED_TEXT -> importedContentChannelKey
             else -> channelKey
         }
-        channelReturnPageName = returnPage.name
-        if (returnPage in TopLevelMainPages) {
-            currentTopLevelPageName = returnPage.name
+        channelReturnPageName = hostPage.name
+        singlePaneChannelReturnPageName = singlePaneReturnPage.name
+        if (hostPage in TopLevelMainPages) {
+            currentTopLevelPageName = hostPage.name
         }
         selectedContentChannelKey = resolvedChannelKey
         selectedReaderArticleId = null
@@ -553,9 +563,9 @@ fun MainScreen(
         readerLeftPaneReturnState = null
     }
 
-    fun switchChannelToTopLevelPage(destination: MainPage) {
+    fun switchChannelToTopLevelPage(destination: MainPage, returnPage: MainPage) {
         if (channelTabSwitchDestinationName != null || destination !in TopLevelMainPages) return
-        val sourceIndex = channelReturnPage.topLevelIndex()
+        val sourceIndex = returnPage.topLevelIndex()
         val destinationIndex = destination.topLevelIndex()
         if (destinationIndex == sourceIndex) {
             navigateToTopLevelPage(destination)
@@ -602,10 +612,10 @@ fun MainScreen(
                 channelBackProgress = value
             }
             selectedContentChannelKey = null
-            currentTopLevelPageName = channelReturnPage.name
+            currentTopLevelPageName = singlePaneChannelReturnPage.name
             if (!isMediumOrExpandedLayout) {
                 coroutineScope.launch {
-                    pagerState.animateScrollToPage(channelReturnPage.topLevelIndex())
+                    pagerState.animateScrollToPage(singlePaneChannelReturnPage.topLevelIndex())
                 }
             }
             delay(CHANNEL_TRANSITION_MS.toLong() + 32L)
@@ -683,8 +693,12 @@ fun MainScreen(
             }
         }
 
-        fun openAdaptiveContentChannel(channelKey: String, returnPage: MainPage) {
-            navigateToContentChannel(channelKey, returnPage)
+        fun openAdaptiveContentChannel(
+            channelKey: String,
+            hostPage: MainPage,
+            singlePaneReturnPage: MainPage
+        ) {
+            navigateToContentChannel(channelKey, hostPage, singlePaneReturnPage)
         }
 
         fun openInlineReaderWithMotion(articleId: String) {
@@ -732,6 +746,7 @@ fun MainScreen(
         fun openIndependentArticleFromImports(article: PhoneArticleEntity) {
             if (windowInfo.isMediumOrExpanded && canOpenArticleInline(article)) {
                 channelReturnPageName = MainPage.IMPORTS.name
+                singlePaneChannelReturnPageName = MainPage.IMPORTS.name
                 selectedContentChannelKey = CONTENT_CHANNEL_INDEPENDENT
                 openInlineReaderWithMotion(article.articleId)
             } else {
@@ -901,6 +916,7 @@ fun MainScreen(
             }
             fallbackChannel?.let { channel ->
                 channelReturnPageName = MainPage.RSS.name
+                singlePaneChannelReturnPageName = MainPage.RSS.name
                 selectedContentChannelKey = channel.key
             }
         }
@@ -929,6 +945,11 @@ fun MainScreen(
             windowInfo.isMediumOrExpanded && selectedReaderArticle != null -> MainPage.IMPORTS
             windowInfo.isMediumOrExpanded && page == MainPage.CHANNEL -> channelReturnPage
             else -> page
+        }
+        val activeChannelReturnPage = if (windowInfo.isMediumOrExpanded) {
+            channelReturnPage
+        } else {
+            singlePaneChannelReturnPage
         }
         val topBarPage = if (selectedContentChannel == null) {
             topLevelNavigationTarget ?: page
@@ -1027,7 +1048,7 @@ fun MainScreen(
                     !uiState.isBusy,
                 onBack = {
                     navigateToTopLevelPage(
-                        channelReturnPage,
+                        activeChannelReturnPage,
                         usePager = !windowInfo.isMediumOrExpanded
                     )
                 },
@@ -1054,8 +1075,8 @@ fun MainScreen(
                     MainNavigationBar(
                         selectedPage = navigationSelectedPage,
                         onSelectPage = { destination ->
-                            if (page == MainPage.CHANNEL && destination != channelReturnPage) {
-                                switchChannelToTopLevelPage(destination)
+                            if (page == MainPage.CHANNEL && destination != activeChannelReturnPage) {
+                                switchChannelToTopLevelPage(destination, activeChannelReturnPage)
                             } else {
                                 navigateToTopLevelPage(
                                     destination,
@@ -1091,8 +1112,8 @@ fun MainScreen(
                         selectedPage = navigationSelectedPage,
                         contentPadding = contentPadding,
                         onSelectPage = { destination ->
-                            if (!windowInfo.isMediumOrExpanded && page == MainPage.CHANNEL && destination != channelReturnPage) {
-                                switchChannelToTopLevelPage(destination)
+                            if (!windowInfo.isMediumOrExpanded && page == MainPage.CHANNEL && destination != activeChannelReturnPage) {
+                                switchChannelToTopLevelPage(destination, activeChannelReturnPage)
                             } else {
                                 navigateToTopLevelPage(
                                     destination,
@@ -1148,10 +1169,34 @@ fun MainScreen(
                                             usePager = !windowInfo.isMediumOrExpanded
                                         )
                                     },
-                                    onOpenFavorites = { navigateToContentChannel(CONTENT_CHANNEL_FAVORITES) },
-                                    onOpenWatchLater = { navigateToContentChannel(CONTENT_CHANNEL_WATCH_LATER) },
-                                    onOpenIndependent = { navigateToContentChannel(CONTENT_CHANNEL_INDEPENDENT) },
-                                    onOpenImportedContent = { navigateToContentChannel(CONTENT_CHANNEL_IMPORTED_TEXT) },
+                                    onOpenFavorites = {
+                                        navigateToContentChannel(
+                                            CONTENT_CHANNEL_FAVORITES,
+                                            MainPage.RSS,
+                                            MainPage.DASHBOARD
+                                        )
+                                    },
+                                    onOpenWatchLater = {
+                                        navigateToContentChannel(
+                                            CONTENT_CHANNEL_WATCH_LATER,
+                                            MainPage.RSS,
+                                            MainPage.DASHBOARD
+                                        )
+                                    },
+                                    onOpenIndependent = {
+                                        navigateToContentChannel(
+                                            CONTENT_CHANNEL_INDEPENDENT,
+                                            MainPage.RSS,
+                                            MainPage.DASHBOARD
+                                        )
+                                    },
+                                    onOpenImportedContent = {
+                                        navigateToContentChannel(
+                                            CONTENT_CHANNEL_IMPORTED_TEXT,
+                                            MainPage.RSS,
+                                            MainPage.DASHBOARD
+                                        )
+                                    },
                                     onDismissMessage = onDismissMessage
                                 )
 
@@ -1161,7 +1206,9 @@ fun MainScreen(
                                     contentPadding = contentPadding,
                                     windowInfo = windowInfo,
                                     listState = contentPageListState,
-                                    onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.RSS) },
+                                    onOpenChannel = { channel ->
+                                        navigateToContentChannel(channel.key, MainPage.RSS, MainPage.RSS)
+                                    },
                                     onMoveToTop = onMoveRssSourceToTop,
                                     onReorderContentChannels = onReorderContentChannels,
                                     onTogglePinned = onToggleRssSourcePinned,
@@ -1181,7 +1228,9 @@ fun MainScreen(
                                     onExportBackup = onExportBackup,
                                     onDismissMessage = onDismissMessage,
                                     recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
-                                    onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.IMPORTS) },
+                                    onOpenChannel = { channel ->
+                                        navigateToContentChannel(channel.key, MainPage.IMPORTS, MainPage.IMPORTS)
+                                    },
                                     onOpenArticle = onOpenArticle,
                                     onOpenOriginalLink = { uriHandler.openUri(it) },
                                     onToggleFavorite = onToggleFavorite,
@@ -1216,10 +1265,34 @@ fun MainScreen(
                                         usePager = !windowInfo.isMediumOrExpanded
                                     )
                                 },
-                                onOpenFavorites = { navigateToContentChannel(CONTENT_CHANNEL_FAVORITES) },
-                                onOpenWatchLater = { navigateToContentChannel(CONTENT_CHANNEL_WATCH_LATER) },
-                                onOpenIndependent = { navigateToContentChannel(CONTENT_CHANNEL_INDEPENDENT) },
-                                onOpenImportedContent = { navigateToContentChannel(CONTENT_CHANNEL_IMPORTED_TEXT) },
+                                onOpenFavorites = {
+                                    navigateToContentChannel(
+                                        CONTENT_CHANNEL_FAVORITES,
+                                        MainPage.RSS,
+                                        MainPage.DASHBOARD
+                                    )
+                                },
+                                onOpenWatchLater = {
+                                    navigateToContentChannel(
+                                        CONTENT_CHANNEL_WATCH_LATER,
+                                        MainPage.RSS,
+                                        MainPage.DASHBOARD
+                                    )
+                                },
+                                onOpenIndependent = {
+                                    navigateToContentChannel(
+                                        CONTENT_CHANNEL_INDEPENDENT,
+                                        MainPage.RSS,
+                                        MainPage.DASHBOARD
+                                    )
+                                },
+                                onOpenImportedContent = {
+                                    navigateToContentChannel(
+                                        CONTENT_CHANNEL_IMPORTED_TEXT,
+                                        MainPage.RSS,
+                                        MainPage.DASHBOARD
+                                    )
+                                },
                                 onDismissMessage = onDismissMessage
                             )
                         }
@@ -1243,10 +1316,34 @@ fun MainScreen(
                                         usePager = !windowInfo.isMediumOrExpanded
                                     )
                                 },
-                                onOpenFavorites = { openAdaptiveContentChannel(CONTENT_CHANNEL_FAVORITES, MainPage.RSS) },
-                                onOpenWatchLater = { openAdaptiveContentChannel(CONTENT_CHANNEL_WATCH_LATER, MainPage.RSS) },
-                                onOpenIndependent = { openAdaptiveContentChannel(CONTENT_CHANNEL_INDEPENDENT, MainPage.RSS) },
-                                onOpenImportedContent = { openAdaptiveContentChannel(CONTENT_CHANNEL_IMPORTED_TEXT, MainPage.RSS) },
+                                onOpenFavorites = {
+                                    openAdaptiveContentChannel(
+                                        CONTENT_CHANNEL_FAVORITES,
+                                        MainPage.RSS,
+                                        MainPage.DASHBOARD
+                                    )
+                                },
+                                onOpenWatchLater = {
+                                    openAdaptiveContentChannel(
+                                        CONTENT_CHANNEL_WATCH_LATER,
+                                        MainPage.RSS,
+                                        MainPage.DASHBOARD
+                                    )
+                                },
+                                onOpenIndependent = {
+                                    openAdaptiveContentChannel(
+                                        CONTENT_CHANNEL_INDEPENDENT,
+                                        MainPage.RSS,
+                                        MainPage.DASHBOARD
+                                    )
+                                },
+                                onOpenImportedContent = {
+                                    openAdaptiveContentChannel(
+                                        CONTENT_CHANNEL_IMPORTED_TEXT,
+                                        MainPage.RSS,
+                                        MainPage.DASHBOARD
+                                    )
+                                },
                                 onDismissMessage = onDismissMessage
                             )
 
@@ -1262,7 +1359,9 @@ fun MainScreen(
                                                 windowInfo = windowInfo,
                                                 listState = contentPageListState,
                                                 selectedChannelKey = selectedContentChannelKey,
-                                                onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.RSS) },
+                                                onOpenChannel = { channel ->
+                                                    openAdaptiveContentChannel(channel.key, MainPage.RSS, MainPage.RSS)
+                                                },
                                                 onMoveToTop = onMoveRssSourceToTop,
                                                 onReorderContentChannels = onReorderContentChannels,
                                                 onTogglePinned = onToggleRssSourcePinned,
@@ -1373,7 +1472,9 @@ fun MainScreen(
                                                         windowInfo = windowInfo,
                                                         listState = contentPageListState,
                                                         selectedChannelKey = selectedContentChannelKey,
-                                                        onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.RSS) },
+                                                        onOpenChannel = { channel ->
+                                                            openAdaptiveContentChannel(channel.key, MainPage.RSS, MainPage.RSS)
+                                                        },
                                                         onMoveToTop = onMoveRssSourceToTop,
                                                         onReorderContentChannels = onReorderContentChannels,
                                                         onTogglePinned = onToggleRssSourcePinned,
@@ -1404,7 +1505,9 @@ fun MainScreen(
                                                 windowInfo = windowInfo,
                                                 listState = contentPageListState,
                                                 selectedChannelKey = selectedContentChannelKey,
-                                                onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.RSS) },
+                                                onOpenChannel = { channel ->
+                                                    openAdaptiveContentChannel(channel.key, MainPage.RSS, MainPage.RSS)
+                                                },
                                                 onMoveToTop = onMoveRssSourceToTop,
                                                 onReorderContentChannels = onReorderContentChannels,
                                                 onTogglePinned = onToggleRssSourcePinned,
@@ -1470,7 +1573,9 @@ fun MainScreen(
                                         contentPadding = contentPadding,
                                         windowInfo = windowInfo,
                                         listState = contentPageListState,
-                                        onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.RSS) },
+                                        onOpenChannel = { channel ->
+                                            navigateToContentChannel(channel.key, MainPage.RSS, MainPage.RSS)
+                                        },
                                         onMoveToTop = onMoveRssSourceToTop,
                                         onReorderContentChannels = onReorderContentChannels,
                                         onTogglePinned = onToggleRssSourcePinned,
@@ -1498,7 +1603,13 @@ fun MainScreen(
                                                 onExportBackup = onExportBackup,
                                                 onDismissMessage = onDismissMessage,
                                                 recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
-                                                onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.IMPORTS) },
+                                                onOpenChannel = { channel ->
+                                                    openAdaptiveContentChannel(
+                                                        channel.key,
+                                                        MainPage.IMPORTS,
+                                                        MainPage.IMPORTS
+                                                    )
+                                                },
                                                 onOpenArticle = { article -> openIndependentArticleFromImports(article) },
                                                 onOpenOriginalLink = { uriHandler.openUri(it) },
                                                 onToggleFavorite = onToggleFavorite,
@@ -1615,7 +1726,13 @@ fun MainScreen(
                                                         onExportBackup = onExportBackup,
                                                         onDismissMessage = onDismissMessage,
                                                         recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
-                                                        onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.IMPORTS) },
+                                                        onOpenChannel = { channel ->
+                                                            openAdaptiveContentChannel(
+                                                                channel.key,
+                                                                MainPage.IMPORTS,
+                                                                MainPage.IMPORTS
+                                                            )
+                                                        },
                                                         onOpenArticle = { article -> openIndependentArticleFromImports(article) },
                                                         onOpenOriginalLink = { uriHandler.openUri(it) },
                                                         onToggleFavorite = onToggleFavorite,
@@ -1652,7 +1769,13 @@ fun MainScreen(
                                                 onExportBackup = onExportBackup,
                                                 onDismissMessage = onDismissMessage,
                                                 recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
-                                                onOpenChannel = { channel -> openAdaptiveContentChannel(channel.key, MainPage.IMPORTS) },
+                                                onOpenChannel = { channel ->
+                                                    openAdaptiveContentChannel(
+                                                        channel.key,
+                                                        MainPage.IMPORTS,
+                                                        MainPage.IMPORTS
+                                                    )
+                                                },
                                                 onOpenArticle = { article -> openIndependentArticleFromImports(article) },
                                                 onOpenOriginalLink = { uriHandler.openUri(it) },
                                                 onToggleFavorite = onToggleFavorite,
@@ -1724,7 +1847,13 @@ fun MainScreen(
                                         onExportBackup = onExportBackup,
                                         onDismissMessage = onDismissMessage,
                                         recentEntries = buildRecentImportEntries(contentChannels, uiState.independentArticles),
-                                        onOpenChannel = { channel -> navigateToContentChannel(channel.key, MainPage.IMPORTS) },
+                                        onOpenChannel = { channel ->
+                                            navigateToContentChannel(
+                                                channel.key,
+                                                MainPage.IMPORTS,
+                                                MainPage.IMPORTS
+                                            )
+                                        },
                                         onOpenArticle = onOpenArticle,
                                         onOpenOriginalLink = { uriHandler.openUri(it) },
                                         onToggleFavorite = onToggleFavorite,

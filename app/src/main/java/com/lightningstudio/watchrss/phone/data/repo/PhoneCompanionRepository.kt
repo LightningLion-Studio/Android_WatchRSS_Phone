@@ -35,6 +35,7 @@ import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import org.json.JSONArray
@@ -77,6 +78,7 @@ private data class SyncHydratedArticle(
 private object NoopSyncChangeLogDao : SyncChangeLogDao {
     override suspend fun insert(change: SyncChangeLogEntity): Long = 0L
     override suspend fun maxSeq(): Long = 0L
+    override fun observeMaxSeq(): Flow<Long> = flowOf(0L)
     override suspend fun entityIdsChangedAfter(kind: String, afterSeq: Long): List<String> = emptyList()
     override suspend fun maxChangedAtByEntityIds(
         kind: String,
@@ -140,6 +142,18 @@ class PhoneCompanionRepository(
     fun observeRssSources(): Flow<List<PhoneRssSourceEntity>> {
         return rssSourceDao.observeActive()
     }
+
+    suspend fun getCloudEligibleRssSources(): List<PhoneRssSourceEntity> =
+        withContext(Dispatchers.IO) {
+            rssSourceDao.getAllForSync().filter {
+                !it.deleted && !ImportedContentIds.isImportedContentUrl(it.url)
+            }
+        }
+
+    suspend fun mergeCloudRssInventory(imported: ImportedRssSource): PhoneRssSourceImportResult =
+        withContext(Dispatchers.IO) {
+            saveImportedSource(imported, recordSyncChanges = false)
+        }
 
     fun observeRssArticles(): Flow<List<PhoneArticleEntity>> {
         return articleDao.observeRssArticles(
@@ -798,7 +812,29 @@ class PhoneCompanionRepository(
         var merged = 0
         incoming.forEach { remote ->
             val local = articleDao.getById(remote.articleId)
-            val preparedRemote = remote.withCurrentSyncMetadata()
+            val retainsLocalBody =
+                local != null &&
+                remote.contentHtml.isNullOrBlank() &&
+                remote.contentText.isBlank()
+            val remoteWithBody = if (retainsLocalBody) {
+                val localBody = requireNotNull(local)
+                remote.copy(
+                    contentHtml = localBody.contentHtml,
+                    contentText = localBody.contentText,
+                    syncBodyHash = localBody.syncBodyHash,
+                    syncBodyByteCount = localBody.syncBodyByteCount,
+                    syncChunkSize = localBody.syncChunkSize,
+                    syncChunkHashesJson = localBody.syncChunkHashesJson,
+                    syncMetadataHash = localBody.syncMetadataHash
+                )
+            } else {
+                remote
+            }
+            val preparedRemote = if (retainsLocalBody) {
+                remoteWithBody
+            } else {
+                remoteWithBody.withCurrentSyncMetadata()
+            }
             val next = if (local == null) {
                 preparedRemote
             } else {
@@ -842,7 +878,7 @@ class PhoneCompanionRepository(
                     syncChunkHashesJson = payload.chunkHashes.toJsonString(),
                     syncMetadataHash = ArticleSyncBody.metadataHashFor(payload.article)
                 )
-                val next = if (localHydrated == null) {
+                val mergedArticle = if (localHydrated == null) {
                     preparedRemote
                 } else {
                     mergeArticle(
@@ -850,13 +886,24 @@ class PhoneCompanionRepository(
                         remote = preparedRemote,
                         conflictResolution = conflictResolutions[payload.article.articleId]
                     )
-                }.copy(
-                    syncBodyHash = payload.bodyHash,
-                    syncBodyByteCount = payload.bodyByteCount,
-                    syncChunkSize = payload.chunkSize,
-                    syncChunkHashesJson = payload.chunkHashes.toJsonString(),
-                    syncMetadataHash = ArticleSyncBody.metadataHashFor(payload.article)
-                )
+                }
+                val usesPreparedRemoteBody = mergedArticle.contentHtml == preparedRemote.contentHtml &&
+                    mergedArticle.contentText == preparedRemote.contentText
+                val keepsLocalBodyForMetadataOnly = payload.metadataOnly &&
+                    localHydrated != null &&
+                    mergedArticle.contentHtml == localHydrated.contentHtml &&
+                    mergedArticle.contentText == localHydrated.contentText
+                val next = if (usesPreparedRemoteBody || keepsLocalBodyForMetadataOnly) {
+                    mergedArticle.copy(
+                        syncBodyHash = payload.bodyHash,
+                        syncBodyByteCount = payload.bodyByteCount,
+                        syncChunkSize = payload.chunkSize,
+                        syncChunkHashesJson = payload.chunkHashes.toJsonString(),
+                        syncMetadataHash = ArticleSyncBody.metadataHashFor(payload.article)
+                    )
+                } else {
+                    mergedArticle
+                }
                 if (local != next) {
                     articleDao.upsert(next.externalizeLargeLocalContent())
                     merged += 1
@@ -1017,7 +1064,8 @@ class PhoneCompanionRepository(
 
     private suspend fun saveImportedSource(
         imported: ImportedRssSource,
-        replaceExistingArticles: Boolean = false
+        replaceExistingArticles: Boolean = false,
+        recordSyncChanges: Boolean = true
     ): PhoneRssSourceImportResult {
         val now = System.currentTimeMillis()
         val existing = rssSourceDao.getByUrl(imported.url)
@@ -1026,7 +1074,7 @@ class PhoneCompanionRepository(
             .filter { it.contentHash.isNotBlank() }
             .associateBy { it.contentHash }
         val existingByUrl = existingArticles.associateBy { it.url }
-        val source = PhoneRssSourceEntity(
+        val candidateSource = PhoneRssSourceEntity(
             url = imported.url,
             sourceDeviceId = deviceId,
             title = imported.title.ifBlank { hostLabel(imported.url) },
@@ -1040,11 +1088,32 @@ class PhoneCompanionRepository(
             deleted = false,
             deletedAt = 0L
         )
+        val source = if (
+            existing != null &&
+            existing.title == candidateSource.title &&
+            existing.description == candidateSource.description &&
+            existing.siteUrl == candidateSource.siteUrl &&
+            existing.imageUrl == candidateSource.imageUrl &&
+            !existing.deleted
+        ) {
+            candidateSource.copy(
+                sourceDeviceId = existing.sourceDeviceId,
+                updatedAt = existing.updatedAt
+            )
+        } else {
+            candidateSource
+        }
         rssSourceDao.upsert(source)
-        recordRssSourceChange(source.url, "upsert", now)
+        if (recordSyncChanges && source != existing) {
+            recordRssSourceChange(source.url, "upsert", now)
+        }
         val articles = imported.items.mapIndexed { index, item ->
             val timestamp = now - index
-            PhoneArticleEntity(
+            val existingArticle = existingByUrl[item.url]
+                ?: existingByContentHash[
+                    WebArticleImporter.sha256(item.contentHtml ?: item.contentText.ifBlank { item.url })
+                ]
+            val candidate = PhoneArticleEntity(
                 articleId = WebArticleImporter.stableArticleId(item.url),
                 sourceDeviceId = deviceId,
                 url = item.url,
@@ -1071,17 +1140,43 @@ class PhoneCompanionRepository(
                 deleted = false,
                 deletedAt = 0L
             )
-                .withSavedStateFrom(existingByUrl[item.url] ?: existingByContentHash[WebArticleImporter.sha256(item.contentHtml ?: item.contentText.ifBlank { item.url })])
+                .withSavedStateFrom(existingArticle)
                 .withCurrentSyncMetadata()
                 .externalizeLargeLocalContent()
+            if (
+                existingArticle != null &&
+                existingArticle.copy(
+                    sourceDeviceId = candidate.sourceDeviceId,
+                    importedAt = candidate.importedAt,
+                    updatedAt = candidate.updatedAt,
+                    syncBodyHash = candidate.syncBodyHash,
+                    syncBodyByteCount = candidate.syncBodyByteCount,
+                    syncChunkSize = candidate.syncChunkSize,
+                    syncChunkHashesJson = candidate.syncChunkHashesJson,
+                    syncMetadataHash = candidate.syncMetadataHash
+                ) == candidate
+            ) {
+                candidate.copy(
+                    sourceDeviceId = existingArticle.sourceDeviceId,
+                    importedAt = existingArticle.importedAt,
+                    updatedAt = existingArticle.updatedAt
+                )
+            } else {
+                candidate
+            }
         }
         if (replaceExistingArticles) {
             articleDao.deleteByRssSourceUrl(imported.url)
         }
         if (articles.isNotEmpty()) {
             articleDao.upsertAll(articles)
-            articles.forEach { article ->
-                recordArticleChange(article.articleId, "upsert", article.updatedAt)
+            if (recordSyncChanges) {
+                articles.forEach { article ->
+                    val previous = existingByUrl[article.url]
+                    if (previous != article) {
+                        recordArticleChange(article.articleId, "upsert", article.updatedAt)
+                    }
+                }
             }
         }
         return PhoneRssSourceImportResult(source, articles.size)
@@ -1306,7 +1401,8 @@ class PhoneCompanionRepository(
             watchLaterSortOrder = watchLaterSortOrder,
             deleted = deleted,
             deletedAt = deletedAt,
-            readingProgress = readingProgress
+            readingProgress = readingProgress,
+            isRead = local.isRead || remote.isRead
         )
     }
 
@@ -1363,7 +1459,8 @@ class PhoneCompanionRepository(
             watchLaterSortOrder = maxOf(local.watchLaterSortOrder, remote.watchLaterSortOrder),
             deleted = false,
             deletedAt = 0L,
-            readingProgress = maxOf(local.readingProgress, remote.readingProgress)
+            readingProgress = maxOf(local.readingProgress, remote.readingProgress),
+            isRead = local.isRead || remote.isRead
         )
     }
 
@@ -1638,7 +1735,8 @@ class PhoneCompanionRepository(
             },
             bodyAvailable = bodyAvailable,
             bodySyncMode = bodySyncModeForSync(),
-            readingProgress = readingProgress
+            readingProgress = readingProgress,
+            isRead = isRead
         )
     }
 

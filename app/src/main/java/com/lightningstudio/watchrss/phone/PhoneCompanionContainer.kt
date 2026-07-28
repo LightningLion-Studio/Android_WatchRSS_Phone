@@ -9,6 +9,9 @@ import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.account.PhoneInstallationIdentity
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
 import com.lightningstudio.watchrss.phone.connection.guided.PhoneGuidedSessionManager
+import com.lightningstudio.watchrss.phone.cloud.PhoneCloudChangeScheduler
+import com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient
+import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncService
 import com.lightningstudio.watchrss.phone.data.backup.WatchRssBackupService
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
 import com.lightningstudio.watchrss.phone.data.importer.AndroidWebArticleImporter
@@ -40,7 +43,8 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_4_5,
             PhoneCompanionDatabase.MIGRATION_5_6,
             PhoneCompanionDatabase.MIGRATION_6_7,
-            PhoneCompanionDatabase.MIGRATION_7_8
+            PhoneCompanionDatabase.MIGRATION_7_8,
+            PhoneCompanionDatabase.MIGRATION_8_9
         )
             .build()
     }
@@ -107,6 +111,29 @@ class PhoneCompanionContainer(context: Context) {
         )
     }
 
+    val cloudSyncService: PhoneCloudSyncService by lazy {
+        PhoneCloudSyncService(
+            context = appContext,
+            accountRepository = accountRepository,
+            backupService = backupService,
+            repository = repository,
+            deviceId = deviceIdentity.deviceId,
+            client = PhoneCloudClient(accountEnvironment)
+        )
+    }
+
+    private val cloudChangeScheduler: PhoneCloudChangeScheduler by lazy {
+        PhoneCloudChangeScheduler(
+            changeLogDao = database.syncChangeLogDao(),
+            cloudSyncService = cloudSyncService,
+            scope = appScope
+        )
+    }
+
+    fun startCloudChangeScheduler() {
+        cloudChangeScheduler.start()
+    }
+
     val guidedSessionManager: PhoneGuidedSessionManager by lazy {
         PhoneGuidedSessionManager(
             context = appContext,
@@ -120,7 +147,12 @@ class PhoneCompanionContainer(context: Context) {
             repository = repository,
             deviceId = deviceIdentity.deviceId,
             debugLog = bluetoothDebugLog,
-            buildAccountSyncRequest = accountRepository::buildAccountSyncRequest
+            buildAccountSyncRequest = accountRepository::buildAccountSyncRequest,
+            onLibrarySyncCompleted = {
+                if (accountRepository.session.value != null) {
+                    runCatching { cloudSyncService.syncNow() }
+                }
+            }
         )
     }
 }

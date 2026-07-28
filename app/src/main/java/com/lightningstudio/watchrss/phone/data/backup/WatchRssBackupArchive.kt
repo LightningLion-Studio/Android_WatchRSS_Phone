@@ -217,6 +217,7 @@ internal object WatchRssBackupArchive {
             put("deleted", deleted)
             put("deletedAt", deletedAt)
             put("readingProgress", readingProgress.toDouble())
+            put("isRead", isRead)
             put("contentTextEntry", textEntry)
             putNullable("contentHtmlEntry", htmlEntry)
         }
@@ -279,7 +280,8 @@ internal object WatchRssBackupArchive {
         watchLaterSortOrder = json.getLong("watchLaterSortOrder"),
         deleted = json.getBoolean("deleted"),
         deletedAt = json.getLong("deletedAt"),
-        readingProgress = json.getDouble("readingProgress").toFloat().coerceIn(0f, 1f)
+        readingProgress = json.optDouble("readingProgress").toFloat().coerceIn(0f, 1f),
+        isRead = json.optBoolean("isRead")
     )
 
     private fun savedItemFromBackupJson(json: JSONObject): PhoneSavedItemEntity =

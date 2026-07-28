@@ -1,5 +1,7 @@
 package com.lightningstudio.watchrss.phone.data.repo
 
+import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyRequest
+import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncBody
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncManifestEntry
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleDao
@@ -702,6 +704,105 @@ class PhoneCompanionRepositoryTest {
         assertEquals("手表保留", updated.title)
         assertTrue(updated.favoriteSaved)
         assertEquals(0L, updated.deletedAt)
+    }
+
+    @Test
+    fun mergeArticlesFromSync_stateOnlyPayloadPreservesLocalBody() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val local = article(
+            id = "article-1",
+            contentText = "本地完整正文",
+            favoriteSaved = false,
+            favoriteChangedAt = 10L
+        ).copy(
+            syncBodyHash = "local-body",
+            syncBodyByteCount = 18L,
+            syncChunkSize = 4096,
+            syncChunkHashesJson = """["local-chunk"]""",
+            syncMetadataHash = "local-metadata"
+        )
+        val remoteState = local.copy(
+            sourceDeviceId = "watch",
+            contentHtml = null,
+            contentText = "",
+            favoriteSaved = true,
+            favoriteChangedAt = 20L,
+            syncBodyHash = "",
+            syncBodyByteCount = 0L,
+            syncChunkSize = 0,
+            syncChunkHashesJson = "",
+            syncMetadataHash = ""
+        )
+        articleDao.items = listOf(local)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        repository.mergeArticlesFromSync(listOf(remoteState))
+
+        val updated = articleDao.items.single()
+        assertEquals("本地完整正文", updated.contentText)
+        assertEquals("local-body", updated.syncBodyHash)
+        assertEquals("local-metadata", updated.syncMetadataHash)
+        assertTrue(updated.favoriteSaved)
+    }
+
+    @Test
+    fun mergeChunkedArticlesFromSync_keepPhonePreservesLocalSyncBodyMetadata() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val local = article(
+            id = "article-1",
+            title = "手机正文",
+            contentText = "手机保留正文",
+            favoriteSaved = true,
+            favoriteChangedAt = 10L
+        ).copy(
+            syncBodyHash = "local-body",
+            syncBodyByteCount = 123L,
+            syncChunkSize = 456,
+            syncChunkHashesJson = """["local-chunk"]""",
+            syncMetadataHash = "local-metadata"
+        )
+        val remote = article(
+            id = "article-1",
+            title = "手表正文",
+            contentText = "手表远端正文",
+            favoriteSaved = true,
+            favoriteChangedAt = 50L
+        ).copy(sourceDeviceId = "watch")
+        val remoteMetadata = ArticleSyncBody.metadataFor(remote)
+        val remotePayload = ArticleSyncBody.payloadForRequest(
+            article = remote,
+            request = ArticleBodyRequest(
+                articleId = remote.articleId,
+                bodyHash = remoteMetadata.bodyHash,
+                chunkIndexes = remoteMetadata.chunkHashes.indices.toList()
+            ),
+            cachedMetadata = remoteMetadata
+        )
+        articleDao.items = listOf(local)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        repository.mergeChunkedArticlesFromSync(
+            incoming = listOf(remotePayload),
+            conflictResolutions = mapOf(local.articleId to PhoneSyncConflictResolution.KEEP_PHONE)
+        )
+
+        val updated = articleDao.items.single()
+        assertEquals("手机保留正文", updated.contentText)
+        assertEquals("local-body", updated.syncBodyHash)
+        assertEquals(123L, updated.syncBodyByteCount)
+        assertEquals(456, updated.syncChunkSize)
+        assertEquals("""["local-chunk"]""", updated.syncChunkHashesJson)
+        assertEquals("local-metadata", updated.syncMetadataHash)
     }
 
     @Test

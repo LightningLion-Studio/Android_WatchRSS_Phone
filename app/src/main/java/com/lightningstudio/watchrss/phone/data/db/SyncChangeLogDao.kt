@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.data.db
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.Query
+import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface SyncChangeLogDao {
@@ -11,6 +12,9 @@ interface SyncChangeLogDao {
 
     @Query("SELECT COALESCE(MAX(seq), 0) FROM sync_change_log")
     suspend fun maxSeq(): Long
+
+    @Query("SELECT COALESCE(MAX(seq), 0) FROM sync_change_log")
+    fun observeMaxSeq(): Flow<Long>
 
     @Query(
         """

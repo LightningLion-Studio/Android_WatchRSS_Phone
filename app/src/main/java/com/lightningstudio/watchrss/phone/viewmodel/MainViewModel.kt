@@ -536,6 +536,7 @@ class MainViewModel(
 
     fun syncLibraryByBluetooth() {
         viewModelScope.launch {
+            if (sessionState.value.isBusy) return@launch
             beginSmoothedSyncProgress(MainSyncProgressUi(phase = "探测手表中", percent = 0))
             sessionState.value = sessionState.value.copy(
                 isBusy = true,
@@ -600,6 +601,7 @@ class MainViewModel(
 
     fun syncAccountByBluetooth() {
         viewModelScope.launch {
+            if (sessionState.value.isBusy) return@launch
             beginSmoothedSyncProgress(MainSyncProgressUi(phase = "探测手表中", percent = 0))
             sessionState.value = sessionState.value.copy(
                 isBusy = true,

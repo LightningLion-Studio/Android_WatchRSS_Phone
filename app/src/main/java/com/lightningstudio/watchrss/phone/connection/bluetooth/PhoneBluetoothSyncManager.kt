@@ -39,7 +39,8 @@ class PhoneBluetoothSyncManager(
     private val deviceId: String,
     private val debugLog: BluetoothDebugLog,
     private val buildAccountSyncRequest: suspend (watchDeviceId: String, watchInstallId: String?, watchDisplayName: String?) -> JSONObject =
-        { _, _, _ -> error("账号同步未配置") }
+        { _, _, _ -> error("账号同步未配置") },
+    private val onLibrarySyncCompleted: suspend () -> Unit = {}
 ) {
     private val client = PhoneBluetoothSyncClient(context.applicationContext, debugLog)
 
@@ -435,7 +436,7 @@ class PhoneBluetoothSyncManager(
                     sourcesReceived = receivedSourcesCount,
                     sourcesMerged = mergedSources
                 )
-            )
+            ).also { onLibrarySyncCompleted() }
         }.onFailure { throwable ->
             debugLog.appendEvent(
                 event = "sync.library.failed",

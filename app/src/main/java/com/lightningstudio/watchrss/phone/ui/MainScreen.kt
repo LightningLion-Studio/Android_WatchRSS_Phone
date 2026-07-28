@@ -297,7 +297,7 @@ fun MainScreen(
     onDismissSharedImport: () -> Unit,
     onSyncLibrary: () -> Unit,
     onSyncAccount: () -> Unit,
-    onOpenAccount: () -> Unit,
+    onOpenProfile: () -> Unit,
     onChooseBluetoothDevice: (MainBluetoothDeviceUi) -> Unit,
     onDismissBluetoothDevicePrompt: () -> Unit,
     onExportBluetoothLog: () -> Unit,
@@ -1059,8 +1059,7 @@ fun MainScreen(
                     }
                 },
                 onExportBluetoothLog = onExportBluetoothLog,
-                onOpenAccount = onOpenAccount,
-                showAccountAction = showAccountFeatures,
+                onOpenProfile = onOpenProfile,
                 modifier = modifier
             )
         }
@@ -1160,7 +1159,7 @@ fun MainScreen(
                                     windowInfo = windowInfo,
                                     onSyncLibrary = onSyncLibrary,
                                     onSyncAccount = onSyncAccount,
-                                    onOpenAccount = onOpenAccount,
+                                    onOpenProfile = onOpenProfile,
                                     showAccountActions = showAccountFeatures,
                                     onExportBluetoothLog = onExportBluetoothLog,
                                     onOpenRss = {
@@ -1256,7 +1255,7 @@ fun MainScreen(
                                 windowInfo = windowInfo,
                                 onSyncLibrary = onSyncLibrary,
                                 onSyncAccount = onSyncAccount,
-                                onOpenAccount = onOpenAccount,
+                                onOpenProfile = onOpenProfile,
                                 showAccountActions = showAccountFeatures,
                                 onExportBluetoothLog = onExportBluetoothLog,
                                 onOpenRss = {
@@ -1307,7 +1306,7 @@ fun MainScreen(
                                 windowInfo = windowInfo,
                                 onSyncLibrary = onSyncLibrary,
                                 onSyncAccount = onSyncAccount,
-                                onOpenAccount = onOpenAccount,
+                                onOpenProfile = onOpenProfile,
                                 showAccountActions = showAccountFeatures,
                                 onExportBluetoothLog = onExportBluetoothLog,
                                 onOpenRss = {
@@ -2204,8 +2203,7 @@ private fun MainTopBar(
     onRefreshAllRssSources: () -> Unit,
     onRefreshSelectedSource: () -> Unit,
     onExportBluetoothLog: () -> Unit,
-    onOpenAccount: () -> Unit,
-    showAccountAction: Boolean,
+    onOpenProfile: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val title = when (page) {
@@ -2233,13 +2231,14 @@ private fun MainTopBar(
         actions = {
             when (page) {
                 MainPage.DASHBOARD -> {
-                    if (showAccountAction) {
-                        IconButton(onClick = onOpenAccount) {
-                            Icon(Icons.Default.AccountCircle, contentDescription = "账号")
-                        }
-                    }
                     IconButton(onClick = onExportBluetoothLog) {
                         Icon(Icons.Default.BugReport, contentDescription = "导出蓝牙日志")
+                    }
+                    IconButton(onClick = onOpenProfile) {
+                        Icon(
+                            Icons.Default.AccountCircle,
+                            contentDescription = "我的"
+                        )
                     }
                 }
                 MainPage.RSS -> IconButton(
@@ -2415,7 +2414,7 @@ private fun DashboardPage(
     windowInfo: AdaptiveWindowInfo,
     onSyncLibrary: () -> Unit,
     onSyncAccount: () -> Unit,
-    onOpenAccount: () -> Unit,
+    onOpenProfile: () -> Unit,
     showAccountActions: Boolean,
     onExportBluetoothLog: () -> Unit,
     onOpenRss: () -> Unit,
@@ -2438,8 +2437,7 @@ private fun DashboardPage(
                 onRefreshAllRssSources = {},
                 onRefreshSelectedSource = {},
                 onExportBluetoothLog = onExportBluetoothLog,
-                onOpenAccount = onOpenAccount,
-                showAccountAction = showAccountActions,
+                onOpenProfile = onOpenProfile,
                 modifier = Modifier.fillMaxWidth()
             )
         }

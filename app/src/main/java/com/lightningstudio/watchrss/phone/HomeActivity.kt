@@ -172,8 +172,8 @@ class HomeActivity : ComponentActivity() {
                     onDismissSharedImport = viewModel::dismissSharedImportPrompt,
                     onSyncLibrary = { ensureBluetoothPermissions(viewModel::syncLibraryByBluetooth) },
                     onSyncAccount = { ensureBluetoothPermissions(viewModel::syncAccountByBluetooth) },
-                    onOpenAccount = {
-                        startActivity(AccountActivity.createIntent(this@HomeActivity))
+                    onOpenProfile = {
+                        startActivity(ProfileActivity.createIntent(this@HomeActivity))
                     },
                     onChooseBluetoothDevice = viewModel::chooseBluetoothDeviceForSync,
                     onDismissBluetoothDevicePrompt = viewModel::dismissBluetoothDevicePrompt,

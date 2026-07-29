@@ -324,7 +324,11 @@ class PhoneBluetoothSyncClient(
                         if (remaining > 0L) delay(remaining)
                         writePreviewFrame(socket, sessionId, request, previewStats)
                         lastWriteAt = SystemClock.elapsedRealtime()
-                        if (request.optString("phase") == ReaderPresetPreviewPayload.PHASE_STOP) {
+                        val phase = request.optString("phase")
+                        if (
+                            phase == ReaderPresetPreviewPayload.PHASE_STOP ||
+                            phase == ReaderPresetPreviewPayload.PHASE_RESOURCE_HANDOFF
+                        ) {
                             return@launch
                         }
                     }
@@ -336,7 +340,11 @@ class PhoneBluetoothSyncClient(
                             response.optString("message").ifBlank { "手表实时预览失败" }
                         }
                         onResponse(device.name.orEmpty(), response)
-                        if (response.optString("phase") == ReaderPresetPreviewPayload.PHASE_STOP) {
+                        val phase = response.optString("phase")
+                        if (
+                            phase == ReaderPresetPreviewPayload.PHASE_STOP ||
+                            phase == ReaderPresetPreviewPayload.PHASE_RESOURCE_HANDOFF
+                        ) {
                             return@launch
                         }
                     }

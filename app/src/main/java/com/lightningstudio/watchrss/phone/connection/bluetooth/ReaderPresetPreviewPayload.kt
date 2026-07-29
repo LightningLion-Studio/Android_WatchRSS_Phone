@@ -7,6 +7,7 @@ import org.json.JSONObject
 object ReaderPresetPreviewPayload {
     const val VERSION = 2
     const val PHASE_UPDATE = "update"
+    const val PHASE_RESOURCE_HANDOFF = "resourceHandoff"
     const val PHASE_HEARTBEAT = "heartbeat"
     const val PHASE_STOP = "stop"
 
@@ -53,6 +54,16 @@ object ReaderPresetPreviewPayload {
         sequence: Long,
         preset: ReaderPreset
     ): JSONObject = update(sessionId, sequence, preset).apply {
+        put("resourceTransfer", true)
+    }
+
+    fun resourceHandoff(
+        sessionId: String,
+        sequence: Long,
+        preset: ReaderPreset
+    ): JSONObject = baseFrame(sessionId, PHASE_RESOURCE_HANDOFF).apply {
+        put("sequence", sequence)
+        put("preset", preset.toPreviewJson())
         put("resourceTransfer", true)
     }
 

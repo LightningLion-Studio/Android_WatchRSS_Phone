@@ -643,20 +643,35 @@ class PhoneBluetoothSyncManager(
                         if (preset == null) {
                             ReaderPresetPreviewPayload.stop(sessionId)
                         } else {
+                            val resourceChanged =
+                                preset.previewResourceSignature() !=
+                                    lastSentPreset.previewResourceSignature()
                             latestPreset = preset
                             lastPresetChangeAt = SystemClock.elapsedRealtime()
                             sequence += 1L
-                            val delta = ReaderPresetPreviewPayload.delta(
-                                sessionId = sessionId,
-                                sequence = sequence,
-                                previous = lastSentPreset,
-                                current = latestPreset
-                            )
+                            val nextFrame = if (resourceChanged) {
+                                ReaderPresetPreviewPayload.resourceHandoff(
+                                    sessionId = sessionId,
+                                    sequence = sequence,
+                                    preset = latestPreset
+                                )
+                            } else {
+                                ReaderPresetPreviewPayload.delta(
+                                    sessionId = sessionId,
+                                    sequence = sequence,
+                                    previous = lastSentPreset,
+                                    current = latestPreset
+                                )
+                            }
                             lastSentPreset = latestPreset
-                            if (delta.getJSONObject("changes").length() == 0) {
+                            if (
+                                nextFrame.optString("phase") ==
+                                ReaderPresetPreviewPayload.PHASE_UPDATE &&
+                                nextFrame.getJSONObject("changes").length() == 0
+                            ) {
                                 ReaderPresetPreviewPayload.heartbeat(sessionId, sequence)
                             } else {
-                                delta
+                                nextFrame
                             }
                         }
                     }
@@ -677,6 +692,21 @@ class PhoneBluetoothSyncManager(
         }
     }
 
+    private fun ReaderPreset.previewResourceSignature(): String {
+        val fontIds = buildSet {
+            body.fontAssetId?.let(::add)
+            ReaderTypographyRole.entries.forEach { role ->
+                resolvedStyle(role).fontAssetId?.let(::add)
+            }
+        }.sorted().joinToString("|")
+        return listOf(
+            fontIds,
+            background.type.name,
+            background.assetId.orEmpty(),
+            background.posterAssetId.orEmpty()
+        ).joinToString(":")
+    }
+
     private suspend fun syncReaderPreviewResources(
         deviceAddress: String,
         preset: ReaderPreset,
@@ -691,6 +721,21 @@ class PhoneBluetoothSyncManager(
         val referencedBackgroundIds = buildSet {
             preset.background.assetId?.let(::add)
             preset.background.posterAssetId?.let(::add)
+        }
+        val resourceTransferStarted =
+            referencedFontIds.isNotEmpty() || referencedBackgroundIds.isNotEmpty()
+        if (resourceTransferStarted) {
+            delay(READER_RECONNECT_DELAY_MS)
+            val transferResponse = exchangeReaderFrame(
+                request = ReaderPresetPreviewPayload.resourceTransfer(
+                    sessionId = parentSessionId,
+                    sequence = 0L,
+                    preset = preset
+                ),
+                sessionId = "$parentSessionId-preview-resource-status",
+                deviceAddress = deviceAddress
+            ).response
+            requireSuccess(transferResponse)
         }
         var fullSnapshot = readerPresetRepository.exportSnapshot()
         if (preset.background.type == ReaderBackgroundType.VIDEO) {
@@ -711,7 +756,9 @@ class PhoneBluetoothSyncManager(
             },
             deletions = emptyList()
         )
-        if (previewSnapshot.fonts.isEmpty() && previewSnapshot.backgrounds.isEmpty()) return false
+        if (previewSnapshot.fonts.isEmpty() && previewSnapshot.backgrounds.isEmpty()) {
+            return resourceTransferStarted
+        }
         delay(READER_RECONNECT_DELAY_MS)
         val manifest = exchangeReaderFrame(
             request = ReaderPresetSyncPayload.buildManifest(previewSnapshot, deviceId),
@@ -749,25 +796,13 @@ class PhoneBluetoothSyncManager(
             label = "font",
             resources = fontResources
         )
-        if (backgroundResources.isEmpty()) return false
-        delay(READER_RECONNECT_DELAY_MS)
-        val transferResponse = exchangeReaderFrame(
-            request = ReaderPresetPreviewPayload.resourceTransfer(
-                sessionId = parentSessionId,
-                sequence = 0L,
-                preset = preset
-            ),
-            sessionId = "$parentSessionId-preview-resource-status",
-            deviceAddress = deviceAddress
-        ).response
-        requireSuccess(transferResponse)
         pushReaderPreviewResources(
             deviceAddress = deviceAddress,
             parentSessionId = parentSessionId,
             label = "background",
             resources = backgroundResources
         )
-        return true
+        return resourceTransferStarted
     }
 
     private suspend fun pushReaderPreviewResources(

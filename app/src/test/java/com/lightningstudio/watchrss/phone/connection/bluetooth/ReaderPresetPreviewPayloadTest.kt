@@ -99,4 +99,25 @@ class ReaderPresetPreviewPayloadTest {
         assertEquals(ReaderPresetPreviewPayload.PHASE_UPDATE, request.getString("phase"))
         assertFalse(request.toString().contains("activePresetId"))
     }
+
+    @Test
+    fun resourceHandoffKeepsPresetInMemoryWhileEndingOnlyTheStream() {
+        val request = ReaderPresetPreviewPayload.resourceHandoff(
+            sessionId = "preview-resource",
+            sequence = 11L,
+            preset = ReaderPreset.lightDefault(id = "draft", name = "新字体")
+        )
+
+        assertEquals(
+            ReaderPresetPreviewPayload.PHASE_RESOURCE_HANDOFF,
+            request.getString("phase")
+        )
+        assertEquals(11L, request.getLong("sequence"))
+        assertTrue(request.getBoolean("resourceTransfer"))
+        assertEquals(
+            "新字体",
+            ReaderPresetCodec.decode(request.getJSONObject("preset").toString()).name
+        )
+        assertFalse(request.toString().contains("activePresetId"))
+    }
 }

@@ -558,9 +558,8 @@ internal fun ReaderSettingsHost(
         if (!watchPreviewEnabled) return@LaunchedEffect
         val signature = draft?.usedResourceSignature().orEmpty()
         if (signature == watchPreviewResourceSignature) return@LaunchedEffect
-        stopWatchPreview(showStatus = false)
-        delay(50L)
-        startWatchPreview()
+        watchPreviewResourceSignature = signature
+        watchPreviewStatus = "正在传输预览资源…"
     }
     LaunchedEffect(page) {
         if (

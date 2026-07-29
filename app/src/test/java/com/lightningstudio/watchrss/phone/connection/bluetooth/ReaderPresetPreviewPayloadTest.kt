@@ -50,4 +50,17 @@ class ReaderPresetPreviewPayloadTest {
         )
         assertFalse(request.toString().contains("activePresetId"))
     }
+
+    @Test
+    fun resourceTransferMarksOnlyTheTemporaryPreviewFrame() {
+        val request = ReaderPresetPreviewPayload.resourceTransfer(
+            sessionId = "preview-resource",
+            sequence = 0L,
+            preset = ReaderPreset.darkDefault(id = "draft", name = "资源预览")
+        )
+
+        assertEquals(true, request.getBoolean("resourceTransfer"))
+        assertEquals(ReaderPresetPreviewPayload.PHASE_UPDATE, request.getString("phase"))
+        assertFalse(request.toString().contains("activePresetId"))
+    }
 }

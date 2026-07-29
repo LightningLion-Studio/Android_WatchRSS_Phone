@@ -10,6 +10,7 @@ import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPreset
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetSnapshot
+import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundType
 import com.lightningstudio.watchrss.phone.data.reader.ReaderTypographyRole
 import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundTranscoder
 import android.os.SystemClock
@@ -612,7 +613,9 @@ class PhoneBluetoothSyncManager(
         var latestPreset = initialPreset
         var connected = false
         var lastPresetChangeAt = SystemClock.elapsedRealtime()
-        syncReaderPreviewFonts(deviceAddress, initialPreset, sessionId)
+        if (syncReaderPreviewResources(deviceAddress, initialPreset, sessionId)) {
+            sequence = 1L
+        }
         delay(READER_RECONNECT_DELAY_MS)
         withContext(Dispatchers.IO) {
             client.streamReaderPresetPreview(
@@ -662,55 +665,125 @@ class PhoneBluetoothSyncManager(
         }
     }
 
-    private suspend fun syncReaderPreviewFonts(
+    private suspend fun syncReaderPreviewResources(
         deviceAddress: String,
         preset: ReaderPreset,
         parentSessionId: String
-    ) {
-        val referencedIds = buildSet {
+    ): Boolean {
+        val referencedFontIds = buildSet {
             preset.body.fontAssetId?.let(::add)
             ReaderTypographyRole.entries.forEach { role ->
                 preset.resolvedStyle(role).fontAssetId?.let(::add)
             }
         }
-        if (referencedIds.isEmpty()) return
-        val fullSnapshot = readerPresetRepository.exportSnapshot()
+        val referencedBackgroundIds = buildSet {
+            preset.background.assetId?.let(::add)
+            preset.background.posterAssetId?.let(::add)
+        }
+        var fullSnapshot = readerPresetRepository.exportSnapshot()
+        if (preset.background.type == ReaderBackgroundType.VIDEO) {
+            val background = fullSnapshot.backgrounds.firstOrNull {
+                it.id == preset.background.assetId && !it.deleted
+            }
+            val capabilities = client.capabilitiesFor(deviceAddress)
+            if (background != null && capabilities != null) {
+                watchBackgroundTranscoder.prepare(background, capabilities)
+                fullSnapshot = readerPresetRepository.exportSnapshot()
+            }
+        }
         val previewSnapshot = ReaderPresetSnapshot(
             presets = emptyList(),
-            fonts = fullSnapshot.fonts.filter { it.id in referencedIds && !it.deleted },
-            backgrounds = emptyList(),
+            fonts = fullSnapshot.fonts.filter { it.id in referencedFontIds && !it.deleted },
+            backgrounds = fullSnapshot.backgrounds.filter {
+                it.id in referencedBackgroundIds && !it.deleted
+            },
             deletions = emptyList()
         )
-        if (previewSnapshot.fonts.isEmpty()) return
+        if (previewSnapshot.fonts.isEmpty() && previewSnapshot.backgrounds.isEmpty()) return false
         delay(READER_RECONNECT_DELAY_MS)
         val manifest = exchangeReaderFrame(
             request = ReaderPresetSyncPayload.buildManifest(previewSnapshot, deviceId),
-            sessionId = "$parentSessionId-preview-font-manifest",
+            sessionId = "$parentSessionId-preview-resource-manifest",
             deviceAddress = deviceAddress
         ).response
         requireSuccess(manifest)
         val previewFontFiles = previewSnapshot.fonts.mapTo(mutableSetOf()) { it.fileName }
-        ReaderPresetSyncPayload.missingResources(manifest)
-            .filter { it.kind == "font" && it.fileName in previewFontFiles }
-            .forEachIndexed { resourceIndex, resource ->
-                ReaderPresetSyncPayload.pushFrames(readerPresetRepository, resource)
-                    .forEachIndexed { chunkIndex, frame ->
-                        delay(READER_RECONNECT_DELAY_MS)
-                        val ack = exchangeReaderFrame(
-                            request = frame,
-                            sessionId = "$parentSessionId-preview-font-$resourceIndex-$chunkIndex",
-                            deviceAddress = deviceAddress
-                        ).response
-                        requireSuccess(ack)
-                        require(ack.optBoolean("received")) { "手表未确认收到预览字体分块" }
-                        require(ack.optString("chunkSha256") == frame.optString("chunkSha256")) {
-                            "手表预览字体分块 ACK 校验失败"
-                        }
-                        if (chunkIndex == frame.optInt("chunkCount") - 1) {
-                            require(ack.optBoolean("applied")) { "手表未确认预览字体完整落盘" }
-                        }
+        val previewBackgroundFiles = buildSet {
+            previewSnapshot.backgrounds.forEach { background ->
+                val variants = runCatching { JSONObject(background.variantsJson) }.getOrNull()
+                if (background.kind == ReaderBackgroundType.VIDEO.name) {
+                    listOf("watch", "watchPoster").forEach { key ->
+                        variants?.optJSONObject(key)?.optString("fileName")
+                            ?.takeIf(String::isNotBlank)
+                            ?.let(::add)
                     }
+                } else {
+                    val watchVariant = variants?.optJSONObject("watch")?.optString("fileName")
+                        ?.takeIf(String::isNotBlank)
+                    add(watchVariant ?: background.masterFileName)
+                }
             }
+        }
+        val missing = ReaderPresetSyncPayload.missingResources(manifest).filter { resource ->
+            (resource.kind == "font" && resource.fileName in previewFontFiles) ||
+                (resource.kind in setOf("background", "variant") &&
+                    resource.fileName in previewBackgroundFiles)
+        }
+        val fontResources = missing.filter { it.kind == "font" }
+        val backgroundResources = missing.filter { it.kind != "font" }
+        pushReaderPreviewResources(
+            deviceAddress = deviceAddress,
+            parentSessionId = parentSessionId,
+            label = "font",
+            resources = fontResources
+        )
+        if (backgroundResources.isEmpty()) return false
+        delay(READER_RECONNECT_DELAY_MS)
+        val transferResponse = exchangeReaderFrame(
+            request = ReaderPresetPreviewPayload.resourceTransfer(
+                sessionId = parentSessionId,
+                sequence = 0L,
+                preset = preset
+            ),
+            sessionId = "$parentSessionId-preview-resource-status",
+            deviceAddress = deviceAddress
+        ).response
+        requireSuccess(transferResponse)
+        pushReaderPreviewResources(
+            deviceAddress = deviceAddress,
+            parentSessionId = parentSessionId,
+            label = "background",
+            resources = backgroundResources
+        )
+        return true
+    }
+
+    private suspend fun pushReaderPreviewResources(
+        deviceAddress: String,
+        parentSessionId: String,
+        label: String,
+        resources: List<ResourceDescriptor>
+    ) {
+        resources.forEachIndexed { resourceIndex, resource ->
+            ReaderPresetSyncPayload.pushFrames(readerPresetRepository, resource)
+                .forEachIndexed { chunkIndex, frame ->
+                    delay(READER_RECONNECT_DELAY_MS)
+                    val ack = exchangeReaderFrame(
+                        request = frame,
+                        sessionId =
+                            "$parentSessionId-preview-$label-$resourceIndex-$chunkIndex",
+                        deviceAddress = deviceAddress
+                    ).response
+                    requireSuccess(ack)
+                    require(ack.optBoolean("received")) { "手表未确认收到预览资源分块" }
+                    require(ack.optString("chunkSha256") == frame.optString("chunkSha256")) {
+                        "手表预览资源分块 ACK 校验失败"
+                    }
+                    if (chunkIndex == frame.optInt("chunkCount") - 1) {
+                        require(ack.optBoolean("applied")) { "手表未确认预览资源完整落盘" }
+                    }
+                }
+        }
     }
 
     suspend fun stopReaderPresetPreview(

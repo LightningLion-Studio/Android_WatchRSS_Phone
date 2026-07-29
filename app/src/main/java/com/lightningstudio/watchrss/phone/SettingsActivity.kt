@@ -250,7 +250,7 @@ internal fun ReaderSettingsHost(
     var watchPreviewStatus by remember { mutableStateOf("关闭") }
     var watchPreviewUpdates by remember { mutableStateOf<Channel<ReaderPreset>?>(null) }
     var watchPreviewJob by remember { mutableStateOf<Job?>(null) }
-    var watchPreviewFontSignature by remember { mutableStateOf("") }
+    var watchPreviewResourceSignature by remember { mutableStateOf("") }
     val watchPreviewStopRequested = remember { AtomicBoolean(false) }
     var paneTransition by remember { mutableStateOf<SettingsPaneTransition?>(null) }
     var paneTransitionProgress by remember { mutableFloatStateOf(1f) }
@@ -381,7 +381,7 @@ internal fun ReaderSettingsHost(
                 watchPreviewJob = job
                 val deviceName = withTimeout(20_000L) { firstConnection.await() }
                 watchPreviewEnabled = true
-                watchPreviewFontSignature = current.usedFontSignature()
+                watchPreviewResourceSignature = current.usedResourceSignature()
                 watchPreviewStatus = "正在“${deviceName.ifBlank { device.name }}”上预览"
             }.onFailure {
                 stopWatchPreview(showStatus = false)
@@ -554,10 +554,10 @@ internal fun ReaderSettingsHost(
         val current = draft ?: return@LaunchedEffect
         watchPreviewUpdates?.trySend(current)
     }
-    LaunchedEffect(watchPreviewEnabled, draft?.usedFontSignature()) {
+    LaunchedEffect(watchPreviewEnabled, draft?.usedResourceSignature()) {
         if (!watchPreviewEnabled) return@LaunchedEffect
-        val signature = draft?.usedFontSignature().orEmpty()
-        if (signature == watchPreviewFontSignature) return@LaunchedEffect
+        val signature = draft?.usedResourceSignature().orEmpty()
+        if (signature == watchPreviewResourceSignature) return@LaunchedEffect
         stopWatchPreview(showStatus = false)
         delay(50L)
         startWatchPreview()
@@ -2961,12 +2961,20 @@ private fun formatNumericValue(value: Float): String =
 private fun ReaderPreset.editableFingerprint(): String =
     ReaderPresetCodec.encode(copy(updatedAt = 0L, modifiedBy = "", deleted = false))
 
-private fun ReaderPreset.usedFontSignature(): String = buildSet {
-    body.fontAssetId?.let(::add)
-    ReaderTypographyRole.entries.forEach { role ->
-        resolvedStyle(role).fontAssetId?.let(::add)
-    }
-}.sorted().joinToString("|")
+private fun ReaderPreset.usedResourceSignature(): String {
+    val fonts = buildSet {
+        body.fontAssetId?.let(::add)
+        ReaderTypographyRole.entries.forEach { role ->
+            resolvedStyle(role).fontAssetId?.let(::add)
+        }
+    }.sorted().joinToString("|")
+    return listOf(
+        fonts,
+        background.type.name,
+        background.assetId.orEmpty(),
+        background.posterAssetId.orEmpty()
+    ).joinToString(":")
+}
 
 private fun ReaderPreset.safeExportName(): String =
     name.trim()

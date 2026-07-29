@@ -6,8 +6,10 @@ import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneLibrarySyncWindow
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPreset
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
@@ -450,6 +452,40 @@ class PhoneBluetoothSyncManager(
         }.getOrThrow()
     }
 
+    suspend fun updateReaderPresetPreview(
+        deviceAddress: String,
+        sessionId: String,
+        sequence: Long,
+        preset: ReaderPreset
+    ): String {
+        delay(PREVIEW_RECONNECT_DELAY_MS)
+        val exchange = exchange(
+            request = ReaderPresetPreviewPayload.update(sessionId, sequence, preset),
+            timeoutMs = PREVIEW_EXCHANGE_TIMEOUT_MS,
+            sessionId = "$sessionId-preview-$sequence",
+            deviceAddress = deviceAddress
+        )
+        requireSuccess(exchange.response)
+        require(exchange.response.optString("sessionId") == sessionId) {
+            "手表预览会话校验失败"
+        }
+        require(exchange.response.optLong("sequence") == sequence) {
+            "手表预览更新序号校验失败"
+        }
+        return exchange.deviceName
+    }
+
+    suspend fun stopReaderPresetPreview(deviceAddress: String, sessionId: String) {
+        delay(PREVIEW_RECONNECT_DELAY_MS)
+        val response = exchange(
+            request = ReaderPresetPreviewPayload.stop(sessionId),
+            timeoutMs = PREVIEW_EXCHANGE_TIMEOUT_MS,
+            sessionId = "$sessionId-preview-stop",
+            deviceAddress = deviceAddress
+        ).response
+        requireSuccess(response)
+    }
+
     private suspend fun exchange(
         request: JSONObject,
         timeoutMs: Long = QUICK_EXCHANGE_TIMEOUT_MS,
@@ -557,5 +593,7 @@ class PhoneBluetoothSyncManager(
         private const val LIBRARY_PROBE_TIMEOUT_MS = 10_000L
         private const val QUICK_EXCHANGE_TIMEOUT_MS = 30_000L
         private const val LIBRARY_SYNC_TIMEOUT_MS = 900_000L
+        private const val PREVIEW_EXCHANGE_TIMEOUT_MS = 15_000L
+        private const val PREVIEW_RECONNECT_DELAY_MS = 180L
     }
 }

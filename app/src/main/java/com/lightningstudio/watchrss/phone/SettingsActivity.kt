@@ -87,6 +87,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -140,10 +141,14 @@ import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import java.io.File
+import java.util.UUID
 import kotlin.math.roundToInt
 
 class SettingsActivity : ComponentActivity() {
@@ -235,6 +240,14 @@ internal fun ReaderSettingsHost(
     var pendingPresetExport by remember { mutableStateOf<ReaderPreset?>(null) }
     var editorApplyTarget by remember { mutableStateOf<ReaderPreset?>(null) }
     var syncAfterPermission by remember { mutableStateOf(false) }
+    var previewAfterPermission by remember { mutableStateOf(false) }
+    var watchPreviewEnabled by remember { mutableStateOf(false) }
+    var watchPreviewStarting by remember { mutableStateOf(false) }
+    var watchPreviewDeviceAddress by remember { mutableStateOf<String?>(null) }
+    var watchPreviewSessionId by remember { mutableStateOf<String?>(null) }
+    var watchPreviewSequence by remember { mutableStateOf(0L) }
+    var watchPreviewStatus by remember { mutableStateOf("关闭") }
+    val watchPreviewMutex = remember { Mutex() }
     var paneTransition by remember { mutableStateOf<SettingsPaneTransition?>(null) }
     var paneTransitionProgress by remember { mutableFloatStateOf(1f) }
     var showFontImportSourcePicker by remember { mutableStateOf(false) }
@@ -295,10 +308,63 @@ internal fun ReaderSettingsHost(
             }.getOrElse { it.message ?: "同步失败" }
         }
     }
+
+    fun stopWatchPreview(showStatus: Boolean = true) {
+        val address = watchPreviewDeviceAddress
+        val sessionId = watchPreviewSessionId
+        watchPreviewEnabled = false
+        watchPreviewStarting = false
+        watchPreviewDeviceAddress = null
+        watchPreviewSessionId = null
+        if (showStatus) watchPreviewStatus = "关闭"
+        if (address != null && sessionId != null) {
+            scope.launch {
+                runCatching {
+                    watchPreviewMutex.withLock {
+                        container.bluetoothSyncManager.stopReaderPresetPreview(address, sessionId)
+                    }
+                }
+            }
+        }
+    }
+
+    fun startWatchPreview() {
+        val current = draft ?: return
+        if (watchPreviewStarting || watchPreviewEnabled) return
+        watchPreviewStarting = true
+        watchPreviewStatus = "正在连接手表…"
+        scope.launch {
+            runCatching {
+                val devices = container.bluetoothSyncManager.probeLibrarySyncTargets()
+                require(devices.isNotEmpty()) { "未找到可预览的手表" }
+                require(devices.size == 1) { "发现多块手表，请先只保留目标手表连接" }
+                val device = devices.single()
+                val sessionId = UUID.randomUUID().toString()
+                val deviceName = watchPreviewMutex.withLock {
+                    container.bluetoothSyncManager.updateReaderPresetPreview(
+                        deviceAddress = device.address,
+                        sessionId = sessionId,
+                        sequence = 0L,
+                        preset = current
+                    )
+                }
+                watchPreviewDeviceAddress = device.address
+                watchPreviewSessionId = sessionId
+                watchPreviewSequence = 0L
+                watchPreviewEnabled = true
+                watchPreviewStatus = "正在“${deviceName.ifBlank { device.name }}”上预览"
+            }.onFailure {
+                watchPreviewStatus = it.message ?: "无法开启手表预览"
+            }
+            watchPreviewStarting = false
+        }
+    }
     val bluetoothPermissionLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
             if (syncAfterPermission && result.values.all { it }) syncNow()
+            if (previewAfterPermission && result.values.all { it }) startWatchPreview()
             syncAfterPermission = false
+            previewAfterPermission = false
         }
     fun requestSync() {
         val missing = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S &&
@@ -313,6 +379,27 @@ internal fun ReaderSettingsHost(
         }
         if (missing.isEmpty()) syncNow() else {
             syncAfterPermission = true
+            bluetoothPermissionLauncher.launch(missing)
+        }
+    }
+
+    fun requestWatchPreview(enabled: Boolean) {
+        if (!enabled) {
+            stopWatchPreview()
+            return
+        }
+        val missing = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S &&
+            ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.BLUETOOTH_CONNECT
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            arrayOf(android.Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            emptyArray()
+        }
+        if (missing.isEmpty()) startWatchPreview() else {
+            previewAfterPermission = true
             bluetoothPermissionLauncher.launch(missing)
         }
     }
@@ -425,6 +512,68 @@ internal fun ReaderSettingsHost(
         if (draft?.id == current.id && draft?.editableFingerprint() == fingerprint) {
             lastAutoSavedFingerprint = fingerprint
             draft = saved
+        }
+    }
+
+    val latestDraft by rememberUpdatedState(draft)
+    LaunchedEffect(
+        watchPreviewEnabled,
+        draft?.editableFingerprint(),
+        watchPreviewDeviceAddress,
+        watchPreviewSessionId
+    ) {
+        if (!watchPreviewEnabled) return@LaunchedEffect
+        val current = draft ?: return@LaunchedEffect
+        val address = watchPreviewDeviceAddress ?: return@LaunchedEffect
+        val sessionId = watchPreviewSessionId ?: return@LaunchedEffect
+        delay(300L)
+        runCatching {
+            watchPreviewMutex.withLock {
+                val sequence = watchPreviewSequence + 1L
+                watchPreviewSequence = sequence
+                container.bluetoothSyncManager.updateReaderPresetPreview(
+                    deviceAddress = address,
+                    sessionId = sessionId,
+                    sequence = sequence,
+                    preset = current
+                )
+            }
+        }.onSuccess {
+            watchPreviewStatus = "手表已更新"
+        }.onFailure {
+            watchPreviewStatus = "更新失败：${it.message ?: "蓝牙连接异常"}"
+        }
+    }
+    LaunchedEffect(watchPreviewEnabled, watchPreviewDeviceAddress, watchPreviewSessionId) {
+        if (!watchPreviewEnabled) return@LaunchedEffect
+        val address = watchPreviewDeviceAddress ?: return@LaunchedEffect
+        val sessionId = watchPreviewSessionId ?: return@LaunchedEffect
+        while (isActive) {
+            delay(10_000L)
+            val current = latestDraft ?: continue
+            runCatching {
+                watchPreviewMutex.withLock {
+                    val sequence = watchPreviewSequence + 1L
+                    watchPreviewSequence = sequence
+                    container.bluetoothSyncManager.updateReaderPresetPreview(
+                        deviceAddress = address,
+                        sessionId = sessionId,
+                        sequence = sequence,
+                        preset = current
+                    )
+                }
+            }.onFailure {
+                watchPreviewStatus = "连接中断，调整任意选项即可重试"
+            }
+        }
+    }
+    LaunchedEffect(page) {
+        if (
+            page != SettingsPage.EDITOR &&
+            page != SettingsPage.CATEGORY_TYPOGRAPHY &&
+            (watchPreviewEnabled || watchPreviewStarting)
+        ) {
+            stopWatchPreview()
         }
     }
 
@@ -546,6 +695,10 @@ internal fun ReaderSettingsHost(
                             backgrounds = backgrounds,
                             repository = repository,
                             modifier = Modifier.padding(padding),
+                            watchPreviewEnabled = watchPreviewEnabled,
+                            watchPreviewStarting = watchPreviewStarting,
+                            watchPreviewStatus = watchPreviewStatus,
+                            onWatchPreviewChanged = ::requestWatchPreview,
                             onDraftChange = ::updateDraft,
                             onOpenCategoryTypography = {
                                 navigateTo(SettingsPage.CATEGORY_TYPOGRAPHY)
@@ -1285,6 +1438,10 @@ private fun PresetEditor(
     backgrounds: List<ReaderBackgroundAssetEntity>,
     repository: ReaderPresetRepository,
     modifier: Modifier,
+    watchPreviewEnabled: Boolean,
+    watchPreviewStarting: Boolean,
+    watchPreviewStatus: String,
+    onWatchPreviewChanged: (Boolean) -> Unit,
     onDraftChange: (ReaderPreset) -> Unit,
     onOpenCategoryTypography: () -> Unit,
     onImportFont: () -> Unit,
@@ -1345,6 +1502,28 @@ private fun PresetEditor(
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
+        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+            ListItem(
+                headlineContent = { Text("手表实时预览") },
+                supportingContent = {
+                    Text(
+                        if (watchPreviewStarting) "正在通过蓝牙连接…" else watchPreviewStatus
+                    )
+                },
+                trailingContent = {
+                    Switch(
+                        checked = watchPreviewEnabled || watchPreviewStarting,
+                        enabled = !watchPreviewStarting,
+                        onCheckedChange = onWatchPreviewChanged
+                    )
+                },
+                modifier = Modifier.clickable(
+                    enabled = !watchPreviewStarting
+                ) {
+                    onWatchPreviewChanged(!watchPreviewEnabled)
+                }
+            )
+        }
         SectionTitle("正文")
         ResourceDropdownRow(
             label = "字体",

@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,6 +13,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
@@ -87,6 +89,10 @@ fun ProvideReaderPreset(
     repository: ReaderPresetRepository,
     content: @Composable () -> Unit
 ) {
+    val systemDark = isSystemInDarkTheme()
+    LaunchedEffect(systemDark) {
+        repository.setSystemDark(systemDark)
+    }
     val preset by repository.activePreset.collectAsStateWithLifecycle()
     CompositionLocalProvider(
         LocalReaderPresetRuntime provides ReaderPresetRuntime(

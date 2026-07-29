@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -41,6 +42,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -68,6 +71,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -112,8 +116,11 @@ import com.lightningstudio.watchrss.phone.data.reader.ReaderFontAssetEntity
 import com.lightningstudio.watchrss.phone.data.reader.ReaderHyphenation
 import com.lightningstudio.watchrss.phone.data.reader.ReaderLineBreakMode
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPreset
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetCodec
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetSelection
 import com.lightningstudio.watchrss.phone.data.reader.ReaderRenderMode
+import com.lightningstudio.watchrss.phone.data.reader.ReaderThemeMode
 import com.lightningstudio.watchrss.phone.data.reader.ReaderTextAlignment
 import com.lightningstudio.watchrss.phone.data.reader.ReaderTextStyleOverride
 import com.lightningstudio.watchrss.phone.data.reader.ReaderTypographyRole
@@ -132,11 +139,11 @@ import com.lightningstudio.watchrss.phone.ui.reader.readerTextStyle
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import java.io.File
-import java.util.UUID
 import kotlin.math.roundToInt
 
 class SettingsActivity : ComponentActivity() {
@@ -164,6 +171,11 @@ private enum class SettingsPage {
     FONTS,
     BACKGROUNDS,
     APP
+}
+
+private enum class FontSizeMode {
+    RELATIVE,
+    ABSOLUTE
 }
 
 private data class SettingsPaneTransition(
@@ -200,8 +212,13 @@ internal fun ReaderSettingsHost(
     val container = (context.applicationContext as PhoneCompanionApplication).container
     val presets by repository.presets.collectAsStateWithLifecycle()
     val active by repository.activePreset.collectAsStateWithLifecycle()
+    val selection by repository.selection.collectAsStateWithLifecycle()
     val fonts by repository.fonts.collectAsStateWithLifecycle()
     val backgrounds by repository.backgrounds.collectAsStateWithLifecycle()
+    val isSystemDark = isSystemInDarkTheme()
+    LaunchedEffect(isSystemDark) {
+        repository.setSystemDark(isSystemDark)
+    }
     val scope = rememberCoroutineScope()
     var page by rememberSaveable { mutableStateOf(SettingsPage.ROOT) }
     var draft by remember { mutableStateOf<ReaderPreset?>(null) }
@@ -211,12 +228,60 @@ internal fun ReaderSettingsHost(
     var renameFont by remember { mutableStateOf<ReaderFontAssetEntity?>(null) }
     var deleteFont by remember { mutableStateOf<ReaderFontAssetEntity?>(null) }
     var fontDetails by remember { mutableStateOf<ReaderFontAssetEntity?>(null) }
+    var lastAutoSavedFingerprint by remember { mutableStateOf<String?>(null) }
+    var undoHistory by remember { mutableStateOf<List<ReaderPreset>>(emptyList()) }
+    var redoHistory by remember { mutableStateOf<List<ReaderPreset>>(emptyList()) }
+    var lastHistoryAt by remember { mutableStateOf(0L) }
+    var pendingPresetExport by remember { mutableStateOf<ReaderPreset?>(null) }
+    var editorApplyTarget by remember { mutableStateOf<ReaderPreset?>(null) }
     var syncAfterPermission by remember { mutableStateOf(false) }
     var paneTransition by remember { mutableStateOf<SettingsPaneTransition?>(null) }
     var paneTransitionProgress by remember { mutableFloatStateOf(1f) }
+    var showFontImportSourcePicker by remember { mutableStateOf(false) }
     var showSystemFontPicker by remember { mutableStateOf(false) }
     var systemFontsLoading by remember { mutableStateOf(false) }
     var systemFonts by remember { mutableStateOf<List<SystemReaderFont>>(emptyList()) }
+
+    fun beginEditing(preset: ReaderPreset) {
+        draft = preset
+        lastAutoSavedFingerprint = preset.editableFingerprint()
+        undoHistory = emptyList()
+        redoHistory = emptyList()
+        lastHistoryAt = 0L
+    }
+
+    fun updateDraft(next: ReaderPreset) {
+        val current = draft ?: run {
+            draft = next
+            return
+        }
+        if (current.editableFingerprint() == next.editableFingerprint()) return
+        val now = System.currentTimeMillis()
+        if (undoHistory.isEmpty() || now - lastHistoryAt >= 350L) {
+            undoHistory = (undoHistory + current).takeLast(100)
+        }
+        redoHistory = emptyList()
+        lastHistoryAt = now
+        draft = next
+    }
+
+    fun undoDraft() {
+        val current = draft ?: return
+        val previous = undoHistory.lastOrNull() ?: return
+        undoHistory = undoHistory.dropLast(1)
+        redoHistory = (redoHistory + current).takeLast(100)
+        lastHistoryAt = 0L
+        draft = previous
+    }
+
+    fun redoDraft() {
+        val current = draft ?: return
+        val next = redoHistory.lastOrNull() ?: return
+        redoHistory = redoHistory.dropLast(1)
+        undoHistory = (undoHistory + current).takeLast(100)
+        lastHistoryAt = 0L
+        draft = next
+    }
 
     fun syncNow() {
         scope.launch {
@@ -261,6 +326,37 @@ internal fun ReaderSettingsHost(
                 "字体已导入并按内容去重"
             }.getOrElse { it.message ?: "字体导入失败" }
         }
+    }
+    val presetExportPicker =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("application/json")
+        ) { uri ->
+            val preset = pendingPresetExport
+            pendingPresetExport = null
+            if (uri == null || preset == null) return@rememberLauncherForActivityResult
+            scope.launch {
+                message = runCatching {
+                    withContext(Dispatchers.IO) {
+                        context.contentResolver.openOutputStream(uri, "wt")
+                            ?.bufferedWriter(Charsets.UTF_8)
+                            ?.use { it.write(ReaderPresetCodec.encode(preset)) }
+                            ?: error("无法创建导出文件")
+                    }
+                    "已导出“${preset.name}”"
+                }.getOrElse { it.message ?: "预设导出失败" }
+            }
+        }
+    fun openFontFilePicker() {
+        fontPicker.launch(
+            arrayOf(
+                "font/ttf",
+                "font/otf",
+                "font/collection",
+                "application/x-font-ttf",
+                "application/x-font-opentype",
+                "application/x-font-ttc"
+            )
+        )
     }
     val backgroundPicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -318,6 +414,20 @@ internal fun ReaderSettingsHost(
         }
     }
 
+    LaunchedEffect(draft) {
+        val current = draft ?: return@LaunchedEffect
+        val fingerprint = current.editableFingerprint()
+        if (fingerprint == lastAutoSavedFingerprint) return@LaunchedEffect
+        delay(350)
+        val saved = runCatching { repository.savePreset(current) }
+            .onFailure { message = it.message ?: "自动保存失败" }
+            .getOrNull() ?: return@LaunchedEffect
+        if (draft?.id == current.id && draft?.editableFingerprint() == fingerprint) {
+            lastAutoSavedFingerprint = fingerprint
+            draft = saved
+        }
+    }
+
     fun backFrom(source: SettingsPage) {
         if (source == SettingsPage.ROOT) {
             onFinish()
@@ -353,6 +463,24 @@ internal fun ReaderSettingsHost(
                         IconButton(onClick = { backFrom(renderedPage) }) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                         }
+                    },
+                    actions = {
+                        if (renderedPage == SettingsPage.EDITOR ||
+                            renderedPage == SettingsPage.CATEGORY_TYPOGRAPHY
+                        ) {
+                            IconButton(
+                                onClick = ::undoDraft,
+                                enabled = undoHistory.isNotEmpty()
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "撤销")
+                            }
+                            IconButton(
+                                onClick = ::redoDraft,
+                                enabled = redoHistory.isNotEmpty()
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "重做")
+                            }
+                        }
                     }
                 )
             }
@@ -368,17 +496,33 @@ internal fun ReaderSettingsHost(
                 SettingsPage.PRESETS -> PresetManager(
                     presets = presets,
                     activeId = active.id,
+                    selection = selection,
+                    repository = repository,
                     modifier = Modifier.padding(padding),
                     onNew = {
-                        draft = ReaderPreset.darkDefault(
-                            id = UUID.randomUUID().toString(),
-                            name = "新预设"
-                        )
-                        navigateTo(SettingsPage.EDITOR)
+                        scope.launch {
+                            val template = if (isSystemDark) {
+                                ReaderPreset.darkDefault(name = "新预设")
+                            } else {
+                                ReaderPreset.lightDefault(name = "新预设")
+                            }
+                            message = runCatching {
+                                repository.saveAsNew(template, "新预设")
+                            }.fold(
+                                onSuccess = {
+                                    beginEditing(it)
+                                    navigateTo(SettingsPage.EDITOR)
+                                    null
+                                },
+                                onFailure = { it.message ?: "新建预设失败" }
+                            )
+                        }
                     },
-                    onApply = repository::setActivePreset,
+                    onThemeMode = repository::setThemeMode,
+                    onLightPreset = repository::setLightPreset,
+                    onDarkPreset = repository::setDarkPreset,
                     onEdit = {
-                        draft = it
+                        beginEditing(it)
                         navigateTo(SettingsPage.EDITOR)
                     },
                     onDuplicate = {
@@ -402,20 +546,11 @@ internal fun ReaderSettingsHost(
                             backgrounds = backgrounds,
                             repository = repository,
                             modifier = Modifier.padding(padding),
-                            onDraftChange = { draft = it },
+                            onDraftChange = ::updateDraft,
                             onOpenCategoryTypography = {
                                 navigateTo(SettingsPage.CATEGORY_TYPOGRAPHY)
                             },
-                            onImportFont = {
-                                fontPicker.launch(
-                                    arrayOf(
-                                        "font/ttf",
-                                        "font/otf",
-                                        "application/x-font-ttf",
-                                        "application/x-font-opentype"
-                                    )
-                                )
-                            },
+                            onImportFont = { showFontImportSourcePicker = true },
                             onImportBackground = { type ->
                                 backgroundPicker.launch(
                                     arrayOf(
@@ -427,30 +562,27 @@ internal fun ReaderSettingsHost(
                                     )
                                 )
                             },
-                            onSave = { apply, saveAs ->
-                                scope.launch {
-                                    val result = runCatching {
-                                        if (saveAs) {
-                                            repository.saveAsNew(current, current.name).also {
-                                                draft = it
-                                            }
-                                        } else {
-                                            repository.savePreset(current, applyAfterSave = apply)
-                                        }
-                                    }
-                                    message = result.fold(
-                                        onSuccess = {
-                                            if (apply) repository.setActivePreset(it.id)
-                                            draft = it
-                                            if (saveAs) "已另存为“${it.name}”" else "已保存"
-                                        },
-                                        onFailure = { it.message ?: "保存失败" }
-                                    )
-                                }
+                            onExport = {
+                                pendingPresetExport = current
+                                presetExportPicker.launch(
+                                    "${current.safeExportName()}.reader-preset.json"
+                                )
                             },
                             onApply = {
-                                repository.setActivePreset(current.id)
-                                message = "已应用到本机阅读器"
+                                scope.launch {
+                                    message = runCatching {
+                                        val saved = repository.savePreset(current)
+                                        lastAutoSavedFingerprint = saved.editableFingerprint()
+                                        draft = saved
+                                        if (selection.darkFollowsLight) {
+                                            repository.setLightPreset(saved.id)
+                                            "已应用"
+                                        } else {
+                                            editorApplyTarget = saved
+                                            null
+                                        }
+                                    }.getOrElse { it.message ?: "应用失败" }
+                                }
                             }
                         )
                     }
@@ -462,17 +594,8 @@ internal fun ReaderSettingsHost(
                             fonts = fonts,
                             repository = repository,
                             modifier = Modifier.padding(padding),
-                            onDraftChange = { draft = it },
-                            onImportFont = {
-                                fontPicker.launch(
-                                    arrayOf(
-                                        "font/ttf",
-                                        "font/otf",
-                                        "application/x-font-ttf",
-                                        "application/x-font-opentype"
-                                    )
-                                )
-                            }
+                            onDraftChange = ::updateDraft,
+                            onImportFont = { showFontImportSourcePicker = true }
                         )
                     }
                 }
@@ -480,17 +603,7 @@ internal fun ReaderSettingsHost(
                     fonts = fonts,
                     fontFile = repository::fontFile,
                     modifier = Modifier.padding(padding),
-                    onImportFile = {
-                        fontPicker.launch(
-                            arrayOf(
-                                "font/ttf",
-                                "font/otf",
-                                "application/x-font-ttf",
-                                "application/x-font-opentype"
-                            )
-                        )
-                    },
-                    onImportSystem = ::openSystemFontPicker,
+                    onImport = { showFontImportSourcePicker = true },
                     onDetails = { fontDetails = it },
                     onRename = { renameFont = it },
                     onDelete = { deleteFont = it }
@@ -522,6 +635,47 @@ internal fun ReaderSettingsHost(
         } else {
             renderPage(page)
         }
+    }
+
+    if (showFontImportSourcePicker) {
+        FontImportSourceDialog(
+            onDismiss = { showFontImportSourcePicker = false },
+            onSystemFont = {
+                showFontImportSourcePicker = false
+                openSystemFontPicker()
+            },
+            onCustomFile = {
+                showFontImportSourcePicker = false
+                openFontFilePicker()
+            }
+        )
+    }
+
+    editorApplyTarget?.let { preset ->
+        AlertDialog(
+            onDismissRequest = { editorApplyTarget = null },
+            title = { Text("应用“${preset.name}”") },
+            text = { Text("选择要替换的阅读器预设槽位。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        repository.setLightPreset(preset.id)
+                        editorApplyTarget = null
+                    }
+                ) { Text("应用于浅色") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { editorApplyTarget = null }) { Text("取消") }
+                    TextButton(
+                        onClick = {
+                            repository.setDarkPreset(preset.id)
+                            editorApplyTarget = null
+                        }
+                    ) { Text("应用于深色") }
+                }
+            }
+        )
     }
 
     if (showSystemFontPicker) {
@@ -850,15 +1004,20 @@ private fun SettingsRoot(
 private fun PresetManager(
     presets: List<ReaderPreset>,
     activeId: String,
+    selection: ReaderPresetSelection,
+    repository: ReaderPresetRepository,
     modifier: Modifier,
     onNew: () -> Unit,
-    onApply: (String) -> Unit,
+    onThemeMode: (ReaderThemeMode) -> Unit,
+    onLightPreset: (String?) -> Unit,
+    onDarkPreset: (String?) -> Unit,
     onEdit: (ReaderPreset) -> Unit,
     onDuplicate: (ReaderPreset) -> Unit,
     onRename: (ReaderPreset) -> Unit,
     onDelete: (ReaderPreset) -> Unit,
     onSync: () -> Unit
 ) {
+    var applyTarget by remember { mutableStateOf<ReaderPreset?>(null) }
     SettingsColumn(modifier) {
         Button(onClick = onNew, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Default.Add, contentDescription = null)
@@ -873,6 +1032,14 @@ private fun PresetManager(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        PresetAssignmentSection(
+            presets = presets,
+            selection = selection,
+            repository = repository,
+            onThemeMode = onThemeMode,
+            onLightPreset = onLightPreset,
+            onDarkPreset = onDarkPreset
+        )
         presets.forEach { preset ->
             ElevatedCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -880,7 +1047,15 @@ private fun PresetManager(
                         Column(Modifier.weight(1f)) {
                             Text(preset.name, fontWeight = FontWeight.SemiBold)
                             Text(
-                                if (preset.id == activeId) "正在本机使用" else "未应用",
+                                buildList {
+                                    if (preset.id == activeId) add("当前显示")
+                                    if (preset.id == selection.lightPresetId) add("浅色预设")
+                                    if (!selection.darkFollowsLight &&
+                                        preset.id == selection.darkPresetId
+                                    ) {
+                                        add("深色预设")
+                                    }
+                                }.joinToString(" · ").ifBlank { "未应用" },
                                 color = if (preset.id == activeId) {
                                     MaterialTheme.colorScheme.primary
                                 } else {
@@ -888,7 +1063,15 @@ private fun PresetManager(
                                 }
                             )
                         }
-                        Button(onClick = { onApply(preset.id) }) { Text("应用") }
+                        Button(
+                            onClick = {
+                                if (selection.darkFollowsLight) {
+                                    onLightPreset(preset.id)
+                                } else {
+                                    applyTarget = preset
+                                }
+                            }
+                        ) { Text("应用") }
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -905,6 +1088,194 @@ private fun PresetManager(
             }
         }
     }
+    applyTarget?.let { preset ->
+        AlertDialog(
+            onDismissRequest = { applyTarget = null },
+            title = { Text("应用“${preset.name}”") },
+            text = { Text("选择要替换的阅读器预设槽位。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onLightPreset(preset.id)
+                        applyTarget = null
+                    }
+                ) { Text("应用于浅色") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { applyTarget = null }) { Text("取消") }
+                    TextButton(
+                        onClick = {
+                            onDarkPreset(preset.id)
+                            applyTarget = null
+                        }
+                    ) { Text("应用于深色") }
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun PresetAssignmentSection(
+    presets: List<ReaderPreset>,
+    selection: ReaderPresetSelection,
+    repository: ReaderPresetRepository,
+    onThemeMode: (ReaderThemeMode) -> Unit,
+    onLightPreset: (String?) -> Unit,
+    onDarkPreset: (String?) -> Unit
+) {
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text("自动应用", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "选择阅读器使用浅色、深色或跟随系统。槽位选择只保存在本机。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(
+                    ReaderThemeMode.DARK,
+                    ReaderThemeMode.LIGHT,
+                    ReaderThemeMode.SYSTEM
+                ).forEach { mode ->
+                    FilterChip(
+                        selected = selection.mode == mode,
+                        onClick = { onThemeMode(mode) },
+                        label = {
+                            Text(
+                                when (mode) {
+                                    ReaderThemeMode.DARK -> "深色"
+                                    ReaderThemeMode.LIGHT -> "浅色"
+                                    ReaderThemeMode.SYSTEM -> "跟随系统"
+                                }
+                            )
+                        }
+                    )
+                }
+            }
+            PresetPreviewDropdown(
+                label = "浅色预设",
+                presets = presets,
+                selectedId = selection.lightPresetId,
+                allowFollowLight = false,
+                repository = repository,
+                onSelected = onLightPreset
+            )
+            PresetPreviewDropdown(
+                label = "深色预设",
+                presets = presets,
+                selectedId = selection.darkPresetId,
+                allowFollowLight = true,
+                followsLight = selection.darkFollowsLight,
+                repository = repository,
+                onSelected = onDarkPreset
+            )
+        }
+    }
+}
+
+@Composable
+private fun PresetPreviewDropdown(
+    label: String,
+    presets: List<ReaderPreset>,
+    selectedId: String?,
+    allowFollowLight: Boolean,
+    repository: ReaderPresetRepository,
+    followsLight: Boolean = false,
+    onSelected: (String?) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selected = presets.firstOrNull { it.id == selectedId }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(label)
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            if (allowFollowLight && followsLight) {
+                Text("跟随浅色", Modifier.weight(1f))
+            } else if (selected != null) {
+                PresetSingleLinePreview(
+                    preset = selected,
+                    repository = repository,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp)
+                )
+            } else {
+                Text("请选择预设", Modifier.weight(1f))
+            }
+            Icon(Icons.Default.KeyboardArrowDown, contentDescription = "展开")
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            if (allowFollowLight) {
+                DropdownMenuItem(
+                    text = { Text("跟随浅色") },
+                    onClick = {
+                        expanded = false
+                        onSelected(null)
+                    }
+                )
+            }
+            presets.forEach { preset ->
+                DropdownMenuItem(
+                    text = {
+                        PresetSingleLinePreview(
+                            preset = preset,
+                            repository = repository,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelected(preset.id)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PresetSingleLinePreview(
+    preset: ReaderPreset,
+    repository: ReaderPresetRepository,
+    modifier: Modifier = Modifier
+) {
+    androidx.compose.runtime.CompositionLocalProvider(
+        LocalReaderPresetRuntime provides ReaderPresetRuntime(
+            preset = preset,
+            fontFile = repository::fontFile,
+            backgroundFile = repository::backgroundFile
+        )
+    ) {
+        ReaderBackgroundSurface(
+            modifier = modifier.clip(RoundedCornerShape(10.dp))
+        ) {
+            Text(
+                "${preset.name} · 阅读正文预览",
+                style = readerTextStyle(ReaderTextRole.BODY),
+                maxLines = 1,
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(horizontal = 12.dp)
+            )
+        }
+    }
 }
 
 @Composable
@@ -918,7 +1289,7 @@ private fun PresetEditor(
     onOpenCategoryTypography: () -> Unit,
     onImportFont: () -> Unit,
     onImportBackground: (ReaderBackgroundType) -> Unit,
-    onSave: (apply: Boolean, saveAs: Boolean) -> Unit,
+    onExport: () -> Unit,
     onApply: () -> Unit
 ) {
     val body = draft.body
@@ -926,6 +1297,9 @@ private fun PresetEditor(
     val selectedFont = fonts.firstOrNull { it.id == body.fontAssetId }
     val fontFaces = remember(selectedFont?.metadataJson) {
         selectedFont?.fontFaceOptions().orEmpty()
+    }
+    val fontWeightRange = remember(selectedFont?.metadataJson, body.fontFaceIndex) {
+        selectedFont?.variableAxisRange(body.fontFaceIndex, "wght")
     }
     LaunchedEffect(selectedFont?.id, selectedFont?.faceCount, body.fontFaceIndex) {
         if (selectedFont != null &&
@@ -1001,7 +1375,13 @@ private fun PresetEditor(
         NumericSlider("文字大小", body.fontSizeSp, 10f..64f, "sp") {
             onDraftChange(draft.copy(body = body.copy(fontSizeSp = it)))
         }
-        NumericSlider("字重", body.fontWeight.toFloat(), 100f..900f, "") {
+        NumericSlider(
+            label = "字重",
+            value = body.fontWeight.toFloat(),
+            range = fontWeightRange ?: (100f..900f),
+            unit = "",
+            supported = selectedFont == null || fontWeightRange != null
+        ) {
             onDraftChange(draft.copy(body = body.copy(fontWeight = it.roundToInt())))
         }
         TextStyleToolbar(
@@ -1182,19 +1562,21 @@ private fun PresetEditor(
             },
             onOpen = onOpenCategoryTypography
         )
+        Text(
+            "调整会实时保存。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            OutlinedButton(onClick = { onSave(false, false) }, Modifier.weight(1f)) {
-                Text("保存")
+            OutlinedButton(onClick = onExport, Modifier.weight(1f)) {
+                Text("导出")
             }
-            OutlinedButton(onClick = { onSave(false, true) }, Modifier.weight(1f)) {
-                Text("另存为")
+            Button(onClick = onApply, Modifier.weight(1f)) {
+                Text("应用")
             }
-        }
-        Button(onClick = onApply, modifier = Modifier.fillMaxWidth()) {
-            Text("单独应用当前已保存版本")
         }
     }
 }
@@ -1282,7 +1664,7 @@ private fun CategoryTypographyEditor(
         }
     ) {
         Text(
-            "各分类先按正文生成默认比例，再叠加这里的设置。返回预设编辑页后统一保存。",
+            "各分类先按正文生成默认比例，再叠加这里的设置；调整会实时保存。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -1332,7 +1714,7 @@ private fun CategoryTypographyEditor(
             onChange = { onDraftChange(draft.copy(link = it)) }
         )
         Text(
-            "此页只修改草稿，不会自动覆盖已保存预设。",
+            "此页的调整会实时保存，可使用顶部按钮撤销或重做。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -1389,7 +1771,7 @@ private fun ReaderPresetPreview(
                     )
                     Text(
                         "这段较长的正文用于观察字体、字号、字重、字距、行高、首行缩进、对齐方式和断行效果。" +
-                            "调整设置时，样张会立即更新；草稿仍不会自动覆盖已经保存的预设。",
+                            "调整设置时，样张会立即更新并自动保存。",
                         style = readerTextStyle(ReaderTextRole.BODY)
                     )
                     Text(
@@ -1519,7 +1901,7 @@ private fun PresetPreviewHeading() {
 @Composable
 private fun PresetPreviewHint() {
     Text(
-        "预览随草稿更新；只有保存后才写入预设。",
+        "预览随调整更新，改动会实时保存。",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
@@ -1611,6 +1993,24 @@ private fun RoleOverrideEditor(
     val fontFaces = remember(selectedFont?.metadataJson) {
         selectedFont?.fontFaceOptions().orEmpty()
     }
+    val effectiveFont = if (value.useOwnFont) {
+        selectedFont
+    } else {
+        fonts.firstOrNull { it.id == body.fontAssetId }
+    }
+    val effectiveFaceIndex = if (value.useOwnFont) {
+        value.fontFaceIndex ?: 0
+    } else {
+        body.fontFaceIndex
+    }
+    val fontWeightRange = remember(effectiveFont?.metadataJson, effectiveFaceIndex) {
+        effectiveFont?.variableAxisRange(effectiveFaceIndex, "wght")
+    }
+    val sizeMode = if (value.fontSizeSp != null) {
+        FontSizeMode.ABSOLUTE
+    } else {
+        FontSizeMode.RELATIVE
+    }
     ElevatedCard(Modifier.fillMaxWidth()) {
         Column(
             Modifier.padding(12.dp),
@@ -1643,15 +2043,60 @@ private fun RoleOverrideEditor(
                     }
                 )
             }
-            NumericSlider(
-                "相对字号",
-                value.fontScale ?: defaults.fontScale ?: 1f,
-                0.5f..2.5f,
-                "×"
-            ) {
-                onChange(value.copy(fontScale = it, fontSizeSp = null))
+            Text("字号模式", style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = sizeMode == FontSizeMode.RELATIVE,
+                    onClick = {
+                        onChange(
+                            value.copy(
+                                fontScale = (effective.fontSizeSp / body.fontSizeSp)
+                                    .coerceIn(0.5f, 2.5f),
+                                fontSizeSp = null
+                            )
+                        )
+                    },
+                    label = { Text("相对") }
+                )
+                FilterChip(
+                    selected = sizeMode == FontSizeMode.ABSOLUTE,
+                    onClick = {
+                        onChange(
+                            value.copy(
+                                fontSizeSp = effective.fontSizeSp.coerceIn(10f, 64f),
+                                fontScale = null
+                            )
+                        )
+                    },
+                    label = { Text("绝对") }
+                )
             }
-            NumericSlider("字重", effective.fontWeight.toFloat(), 100f..900f, "") {
+            if (sizeMode == FontSizeMode.RELATIVE) {
+                NumericSlider(
+                    "相对字号",
+                    value.fontScale ?: defaults.fontScale ?: 1f,
+                    0.5f..2.5f,
+                    "×"
+                ) {
+                    onChange(value.copy(fontScale = it, fontSizeSp = null))
+                }
+            } else {
+                NumericSlider(
+                    "绝对字号",
+                    value.fontSizeSp ?: effective.fontSizeSp,
+                    10f..64f,
+                    "sp"
+                ) {
+                    onChange(value.copy(fontSizeSp = it, fontScale = null))
+                }
+            }
+            NumericSlider(
+                label = "字重",
+                value = effective.fontWeight.toFloat(),
+                range = fontWeightRange ?: (100f..900f),
+                unit = "",
+                supported = effectiveFont == null || fontWeightRange != null
+            ) {
                 onChange(value.copy(fontWeight = it.roundToInt()))
             }
             TextStyleToolbar(
@@ -1754,7 +2199,8 @@ private fun SystemFontPickerDialog(
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(max = 480.dp),
-                        contentPadding = PaddingValues(vertical = 4.dp)
+                        contentPadding = PaddingValues(vertical = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(
                             items = filteredFonts,
@@ -1769,8 +2215,12 @@ private fun SystemFontPickerDialog(
                                             font.fileName
                                     )
                                 },
+                                colors = ListItemDefaults.colors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                                ),
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .clip(RoundedCornerShape(16.dp))
                                     .clickable { onSelect(font) }
                             )
                         }
@@ -1807,12 +2257,61 @@ private fun SystemFontName(font: SystemReaderFont) {
 }
 
 @Composable
+private fun FontImportSourceDialog(
+    onDismiss: () -> Unit,
+    onSystemFont: () -> Unit,
+    onCustomFile: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("导入字体") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ListItem(
+                    headlineContent = { Text("系统字体") },
+                    supportingContent = { Text("从当前设备已安装的字体中选择") },
+                    leadingContent = {
+                        Icon(Icons.Default.FontDownload, contentDescription = null)
+                    },
+                    colors = ListItemDefaults.colors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable(onClick = onSystemFont)
+                )
+                ListItem(
+                    headlineContent = { Text("自定义文件") },
+                    supportingContent = { Text("选择 TTF、OTF 或 TTC 字体文件") },
+                    leadingContent = {
+                        Icon(Icons.Default.Add, contentDescription = null)
+                    },
+                    colors = ListItemDefaults.colors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable(onClick = onCustomFile)
+                )
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
+}
+
+@Composable
 private fun FontLibrary(
     fonts: List<ReaderFontAssetEntity>,
     fontFile: (String?) -> File?,
     modifier: Modifier,
-    onImportFile: () -> Unit,
-    onImportSystem: () -> Unit,
+    onImport: () -> Unit,
     onDetails: (ReaderFontAssetEntity) -> Unit,
     onRename: (ReaderFontAssetEntity) -> Unit,
     onDelete: (ReaderFontAssetEntity) -> Unit
@@ -1822,13 +2321,9 @@ private fun FontLibrary(
             "字体文件独立存储；同步时传输整个字体库，而不只传预设引用。",
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Button(onClick = onImportFile, modifier = Modifier.fillMaxWidth()) {
+        Button(onClick = onImport, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Default.Add, contentDescription = null)
-            Text(" 导入 TTF / OTF / TTC")
-        }
-        OutlinedButton(onClick = onImportSystem, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Default.FontDownload, contentDescription = null)
-            Text(" 从系统字体选择")
+            Text(" 导入字体")
         }
         if (fonts.isEmpty()) {
             Text("还没有字体", modifier = Modifier.padding(vertical = 24.dp))
@@ -2201,8 +2696,26 @@ private fun NumericSlider(
     value: Float,
     range: ClosedFloatingPointRange<Float>,
     unit: String,
+    supported: Boolean = true,
     onValue: (Float) -> Unit
 ) {
+    if (!supported) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(label, Modifier.weight(1f))
+            OutlinedTextField(
+                value = "不支持",
+                onValueChange = {},
+                enabled = false,
+                singleLine = true,
+                modifier = Modifier.width(132.dp)
+            )
+        }
+        return
+    }
     var rawValue by remember(label) { mutableStateOf(formatNumericValue(value)) }
     var isEditing by remember(label) { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
@@ -2271,6 +2784,14 @@ private fun formatNumericValue(value: Float): String =
             .trimEnd('.')
     }
 
+private fun ReaderPreset.editableFingerprint(): String =
+    ReaderPresetCodec.encode(copy(updatedAt = 0L, modifiedBy = "", deleted = false))
+
+private fun ReaderPreset.safeExportName(): String =
+    name.trim()
+        .replace(Regex("""[\\/:*?"<>|]"""), "_")
+        .ifBlank { "reader-preset" }
+
 @Composable
 private fun <T> EnumChoice(
     label: String,
@@ -2320,6 +2841,32 @@ private fun ReaderFontAssetEntity.fontFaceOptions(): List<Pair<String?, String>>
             index.toString() to "$index · 字体面 ${index + 1}"
         }
     )
+
+private fun ReaderFontAssetEntity.variableAxisRange(
+    faceIndex: Int,
+    axisTag: String
+): ClosedFloatingPointRange<Float>? = runCatching {
+    val faces = JSONObject(metadataJson).optJSONArray("faces") ?: return@runCatching null
+    val face = (0 until faces.length())
+        .asSequence()
+        .mapNotNull(faces::optJSONObject)
+        .firstOrNull { it.optInt("index", 0) == faceIndex }
+        ?: faces.optJSONObject(faceIndex)
+        ?: return@runCatching null
+    val axes = face.optJSONArray("axes") ?: return@runCatching null
+    val axis = (0 until axes.length())
+        .asSequence()
+        .mapNotNull(axes::optJSONObject)
+        .firstOrNull { it.optString("tag").equals(axisTag, ignoreCase = true) }
+        ?: return@runCatching null
+    val minimum = axis.optDouble("minimum").toFloat()
+    val maximum = axis.optDouble("maximum").toFloat()
+    if (!minimum.isFinite() || !maximum.isFinite() || minimum >= maximum) {
+        null
+    } else {
+        minimum..maximum
+    }
+}.getOrNull()
 
 @Composable
 private fun ResourceDropdownRow(

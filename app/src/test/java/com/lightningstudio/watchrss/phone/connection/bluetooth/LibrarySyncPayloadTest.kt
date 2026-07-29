@@ -123,7 +123,7 @@ class LibrarySyncPayloadTest {
         assertEquals(7L, changeSequence.fromSeqExclusive)
         assertEquals(9L, changeSequence.toSeqInclusive)
         assertEquals(false, changeSequence.fullSnapshot)
-        assertEquals(10, request.getInt("version"))
+        assertEquals(LibrarySyncPayload.PROTOCOL_VERSION, request.getInt("version"))
         assertEquals("syncLibrary", request.getString("action"))
         assertEquals("manifest", request.getString("phase"))
     }
@@ -141,7 +141,7 @@ class LibrarySyncPayloadTest {
     }
 
     @Test
-    fun buildProbeRequest_marksV10ProbeCapability() {
+    fun buildProbeRequest_marksCurrentProbeCapability() {
         val request = LibrarySyncPayload.buildProbeRequest("phone")
         val response = JSONObject().apply {
             put("success", true)
@@ -150,7 +150,7 @@ class LibrarySyncPayloadTest {
             put("phase", LibrarySyncPayload.PHASE_PROBE)
         }
 
-        assertEquals(10, request.getInt("version"))
+        assertEquals(LibrarySyncPayload.PROTOCOL_VERSION, request.getInt("version"))
         assertEquals("syncLibrary", request.getString("action"))
         assertEquals(LibrarySyncPayload.PHASE_PROBE, request.getString("phase"))
         assertTrue(LibrarySyncPayload.supportsChangeSequences(request))

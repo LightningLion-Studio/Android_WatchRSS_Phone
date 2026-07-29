@@ -28,7 +28,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
-import com.lightningstudio.watchrss.phone.ui.PredictiveBackSurface
 import com.lightningstudio.watchrss.phone.ui.adaptiveContentWidth
 import com.lightningstudio.watchrss.phone.ui.theme.roundedCombinedClickable
 
@@ -36,18 +35,16 @@ class AboutActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            WatchRSSTheme {
+            com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme {
                 val onBack = { finish() }
-                PredictiveBackSurface(onBack = onBack) {
-                    AboutScreen(
-                        onBackClick = onBack,
-                        onBeianClick = {
-                            val intent = Intent(Intent.ACTION_VIEW)
-                            intent.data = Uri.parse("https://beian.miit.gov.cn/")
-                            startActivity(intent)
-                        }
-                    )
-                }
+                AboutScreen(
+                    onBackClick = onBack,
+                    onBeianClick = {
+                        val intent = Intent(Intent.ACTION_VIEW)
+                        intent.data = Uri.parse("https://beian.miit.gov.cn/")
+                        startActivity(intent)
+                    }
+                )
             }
         }
     }
@@ -66,12 +63,7 @@ fun AboutScreen(onBackClick: () -> Unit, onBeianClick: () -> Unit) {
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
-                            Text("关于")
-                        }
-                    },
+                    title = { Text("关于腕上RSS") },
                     navigationIcon = {
                         IconButton(onClick = onBackClick) {
                             Icon(
@@ -79,11 +71,7 @@ fun AboutScreen(onBackClick: () -> Unit, onBeianClick: () -> Unit) {
                                 contentDescription = "返回"
                             )
                         }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                        titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
+                    }
                 )
             }
         ) { paddingValues ->
@@ -94,53 +82,32 @@ fun AboutScreen(onBackClick: () -> Unit, onBeianClick: () -> Unit) {
             ) {
                 AdaptiveContentFrame(
                     windowInfo = windowInfo,
-                    mediumMaxWidth = 720.dp,
-                    expandedMaxWidth = 840.dp
+                    mediumMaxWidth = 680.dp,
+                    expandedMaxWidth = 760.dp
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .verticalScroll(rememberScrollState())
-                            .padding(24.dp)
+                    AnimatedVisibility(
+                        visible = visible,
+                        enter = fadeIn(animationSpec = tween(500)) +
+                            slideInVertically(
+                                initialOffsetY = { 32 },
+                                animationSpec = tween(500, easing = FastOutSlowInEasing)
+                            )
                     ) {
-                        AnimatedVisibility(
-                            visible = visible,
-                            enter = fadeIn(animationSpec = tween(600)) +
-                                    slideInVertically(
-                                        initialOffsetY = { -50 },
-                                        animationSpec = tween(600, easing = FastOutSlowInEasing)
-                                    )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                                .padding(
+                                    horizontal = if (windowInfo.isMediumOrExpanded) 32.dp else 20.dp,
+                                    vertical = 20.dp
+                                ),
+                            verticalArrangement = Arrangement.spacedBy(20.dp)
                         ) {
                             AboutSection()
-                        }
-
-                        Spacer(modifier = Modifier.height(24.dp))
-
-                        AnimatedVisibility(
-                            visible = visible,
-                            enter = fadeIn(animationSpec = tween(600, delayMillis = 200)) +
-                                    slideInVertically(
-                                        initialOffsetY = { -50 },
-                                        animationSpec = tween(600, delayMillis = 200, easing = FastOutSlowInEasing)
-                                    )
-                        ) {
                             ServiceAgreementSection()
-                        }
-
-                        Spacer(modifier = Modifier.height(24.dp))
-
-                        AnimatedVisibility(
-                            visible = visible,
-                            enter = fadeIn(animationSpec = tween(600, delayMillis = 400)) +
-                                    slideInVertically(
-                                        initialOffsetY = { -50 },
-                                        animationSpec = tween(600, delayMillis = 400, easing = FastOutSlowInEasing)
-                                    )
-                        ) {
                             PrivacyPolicySection()
+                            Spacer(modifier = Modifier.height(64.dp))
                         }
-
-                        Spacer(modifier = Modifier.height(80.dp))
                     }
                 }
 
@@ -151,8 +118,8 @@ fun AboutScreen(onBackClick: () -> Unit, onBeianClick: () -> Unit) {
                         .align(Alignment.BottomCenter)
                         .adaptiveContentWidth(
                             windowInfo = windowInfo,
-                            mediumMaxWidth = 720.dp,
-                            expandedMaxWidth = 840.dp
+                            mediumMaxWidth = 680.dp,
+                            expandedMaxWidth = 760.dp
                         )
                         .padding(bottom = 16.dp)
                 ) {

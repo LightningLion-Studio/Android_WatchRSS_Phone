@@ -33,9 +33,14 @@ import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import org.json.JSONArray
@@ -186,6 +191,11 @@ class PhoneCompanionRepository(
             }
         }
 
+    suspend fun getRssSource(sourceUrl: String): PhoneRssSourceEntity? =
+        withContext(Dispatchers.IO) {
+            rssSourceDao.getByUrl(sourceUrl)
+        }
+
     suspend fun getArticlesForBackup(): List<PhoneArticleEntity> =
         withContext(Dispatchers.IO) {
             articleDao.getAllForSync().map { it.hydrateExternalTextForBackup() }
@@ -282,8 +292,35 @@ class PhoneCompanionRepository(
             require(!ImportedContentIds.isImportedContentUrl(source.url)) {
                 "本地导入频道无需从 RSS 源刷新"
             }
-            val imported = rssSourceImporter(source.url)
+            val imported = rssSourceImporter(source.url).let { feed ->
+                if (source.useOriginalContent) feed.withOriginalArticleContent() else feed
+            }
             saveImportedSource(imported.copy(url = source.url))
+        }
+
+    private suspend fun ImportedRssSource.withOriginalArticleContent(): ImportedRssSource =
+        coroutineScope {
+            val permits = Semaphore(4)
+            copy(
+                items = items.map { item ->
+                    async {
+                        permits.withPermit {
+                            runCatching { webArticleImporter(item.url) }
+                                .fold(
+                                    onSuccess = { original ->
+                                        item.copy(
+                                            excerpt = original.excerpt.ifBlank { item.excerpt },
+                                            contentHtml = original.contentHtml,
+                                            contentText = original.contentText,
+                                            imageUrl = original.imageUrl ?: item.imageUrl
+                                        )
+                                    },
+                                    onFailure = { item }
+                                )
+                        }
+                    }
+                }.awaitAll()
+            )
         }
 
     suspend fun importLocalContent(
@@ -446,6 +483,42 @@ class PhoneCompanionRepository(
             )
         rssSourceDao.upsert(updated)
         recordRssSourceChange(updated.url, "sourceState", now)
+    }
+
+    suspend fun setRssSourceOriginalContentEnabled(sourceUrl: String, enabled: Boolean) =
+        updateRssSourceSettings(sourceUrl) { copy(useOriginalContent = enabled) }
+
+    suspend fun setRssSourceContinuePlaybackInBackground(
+        sourceUrl: String,
+        enabled: Boolean
+    ) = updateRssSourceSettings(sourceUrl) {
+        copy(continuePlaybackInBackground = enabled)
+    }
+
+    private suspend fun updateRssSourceSettings(
+        sourceUrl: String,
+        transform: PhoneRssSourceEntity.() -> PhoneRssSourceEntity
+    ) = withContext(Dispatchers.IO) {
+        val source = rssSourceDao.getByUrl(sourceUrl) ?: return@withContext
+        val now = System.currentTimeMillis()
+        val updated = source.transform().copy(
+            sourceDeviceId = deviceId,
+            updatedAt = now
+        )
+        if (updated == source) return@withContext
+        rssSourceDao.upsert(updated)
+        recordRssSourceChange(updated.url, "sourceSettings", now)
+    }
+
+    suspend fun clearRssSourceContent(sourceUrl: String): Int = withContext(Dispatchers.IO) {
+        val articles = articleDao.getByRssSourceUrl(sourceUrl).filterNot { it.deleted }
+        val now = System.currentTimeMillis()
+        articles.forEachIndexed { index, article ->
+            val deleted = article.markDeletedByUser(now + index)
+            articleDao.upsert(deleted)
+            recordArticleChange(deleted.articleId, "delete", now + index)
+        }
+        articles.size
     }
 
     private suspend fun nextTopRssSourceSortOrder(now: Long): Long {
@@ -917,8 +990,16 @@ class PhoneCompanionRepository(
             var merged = 0
             incoming.forEach { remote ->
                 val local = rssSourceDao.getByUrl(remote.url)
-                val next = if (local == null || remote.isNewerThan(local)) {
+                val compatibleRemote = if (local != null && !remote.syncedSettingsIncluded) {
+                    remote.copy(
+                        useOriginalContent = local.useOriginalContent,
+                        continuePlaybackInBackground = local.continuePlaybackInBackground
+                    )
+                } else {
                     remote
+                }
+                val next = if (local == null || compatibleRemote.isNewerThan(local)) {
+                    compatibleRemote
                 } else {
                     local
                 }
@@ -1086,7 +1167,9 @@ class PhoneCompanionRepository(
             sortOrder = existing?.sortOrder?.takeIf { it > 0L } ?: now,
             isPinned = existing?.isPinned ?: false,
             deleted = false,
-            deletedAt = 0L
+            deletedAt = 0L,
+            useOriginalContent = existing?.useOriginalContent ?: false,
+            continuePlaybackInBackground = existing?.continuePlaybackInBackground ?: false
         )
         val source = if (
             existing != null &&

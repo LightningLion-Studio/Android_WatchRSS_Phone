@@ -14,10 +14,17 @@ if (hasKeystoreProperties) {
     keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
 }
 
-fun productionSetting(name: String, defaultValue: String = ""): String =
-    providers.gradleProperty(name).orNull
+val localPropertiesFile = rootProject.file("local.properties")
+val localProperties = Properties()
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.inputStream().use { localProperties.load(it) }
+}
+
+fun productionSetting(name: String): String =
+    localProperties.getProperty(name)
+        ?: providers.gradleProperty(name).orNull
         ?: providers.environmentVariable(name).orNull
-        ?: defaultValue
+        ?: ""
 
 fun String.asBuildConfigString(): String =
     "\"${replace("\\", "\\\\").replace("\"", "\\\"")}\""
@@ -36,10 +43,7 @@ android {
         buildConfigField(
             "String",
             "WATCHRSS_BACKEND_BASE_URL",
-            productionSetting(
-                "WATCHRSS_BACKEND_BASE_URL",
-                "https://sly-data-plane.watchrss.cn"
-            ).asBuildConfigString()
+            productionSetting("WATCHRSS_BACKEND_BASE_URL").asBuildConfigString()
         )
         buildConfigField(
             "String",
@@ -135,6 +139,9 @@ dependencies {
     implementation(libs.jsoup)
     implementation(libs.reorderable)
     implementation(libs.androidx.work.runtime.ktx)
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.ui)
+    implementation(libs.androidx.media3.transformer)
     ksp(libs.androidx.room.compiler)
     // Backdrop source copied locally — see app/src/main/java/com/kyant/backdrop
 

@@ -34,7 +34,6 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
-import com.lightningstudio.watchrss.phone.ui.PredictiveBackSurface
 import com.lightningstudio.watchrss.phone.ui.adaptiveContentWidth
 import com.lightningstudio.watchrss.phone.ui.theme.roundedCombinedClickable
 
@@ -42,30 +41,28 @@ class ContactDeveloperActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            WatchRSSTheme {
+            com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme {
                 val onBack = { finish() }
-                PredictiveBackSurface(onBack = onBack) {
-                    ContactDeveloperScreen(
-                        onBack = onBack,
-                        onJoinQQ = {
-                            try {
-                                val intent = Intent(Intent.ACTION_VIEW)
-                                intent.data = Uri.parse("mqqopensdkapi://bizAgent/qm/qr?url=http%3A%2F%2Fqm.qq.com%2Fcgi-bin%2Fqm%2Fqr%3Ffrom%3Dapp%26p%3Dandroid%26jump_from%3Dwebapi%26k%3D1083518433")
-                                startActivity(intent)
-                            } catch (e: Exception) {
-                                // 如果没有安装QQ，打开浏览器
-                                val intent = Intent(Intent.ACTION_VIEW)
-                                intent.data = Uri.parse("https://qm.qq.com/q/cJNTQuxfoW")
-                                startActivity(intent)
-                            }
-                        },
-                        onBeianClick = {
+                ContactDeveloperScreen(
+                    onBack = onBack,
+                    onJoinQQ = {
+                        try {
                             val intent = Intent(Intent.ACTION_VIEW)
-                            intent.data = Uri.parse("https://beian.miit.gov.cn/")
+                            intent.data = Uri.parse("mqqopensdkapi://bizAgent/qm/qr?url=http%3A%2F%2Fqm.qq.com%2Fcgi-bin%2Fqm%2Fqr%3Ffrom%3Dapp%26p%3Dandroid%26jump_from%3Dwebapi%26k%3D1083518433")
+                            startActivity(intent)
+                        } catch (e: Exception) {
+                            // 如果没有安装QQ，打开浏览器
+                            val intent = Intent(Intent.ACTION_VIEW)
+                            intent.data = Uri.parse("https://qm.qq.com/q/cJNTQuxfoW")
                             startActivity(intent)
                         }
-                    )
-                }
+                    },
+                    onBeianClick = {
+                        val intent = Intent(Intent.ACTION_VIEW)
+                        intent.data = Uri.parse("https://beian.miit.gov.cn/")
+                        startActivity(intent)
+                    }
+                )
             }
         }
     }
@@ -112,12 +109,11 @@ fun ContactDeveloperScreen(
                     mediumMaxWidth = 520.dp,
                     expandedMaxWidth = 560.dp
                 ) {
-                    Column(
+                    Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
+                            .padding(if (windowInfo.isMediumOrExpanded) 40.dp else 24.dp),
+                        contentAlignment = Alignment.Center
                     ) {
                         AnimatedVisibility(
                             visible = visible,
@@ -127,8 +123,12 @@ fun ContactDeveloperScreen(
                                         animationSpec = tween(800, easing = FastOutSlowInEasing)
                                     )
                         ) {
+                            val qrBitmap = remember {
+                                generateQRCode("https://qm.qq.com/q/cJNTQuxfoW", 512)
+                            }
                             Column(
-                                horizontalAlignment = Alignment.CenterHorizontally
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(20.dp)
                             ) {
                                 Text(
                                     text = "加入QQ群",
@@ -145,32 +145,7 @@ fun ContactDeveloperScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
 
-                                Spacer(modifier = Modifier.height(32.dp))
-
-                                // QR Code
-                                val qrBitmap = remember {
-                                    generateQRCode("https://qm.qq.com/q/cJNTQuxfoW", 512)
-                                }
-
-                                Card(
-                                    modifier = Modifier.size(200.dp),
-                                    colors = CardDefaults.cardColors(
-                                        containerColor = MaterialTheme.colorScheme.surfaceVariant
-                                    )
-                                ) {
-                                    Box(
-                                        modifier = Modifier.fillMaxSize().padding(8.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Image(
-                                            bitmap = qrBitmap.asImageBitmap(),
-                                            contentDescription = "QQ群二维码",
-                                            modifier = Modifier.fillMaxSize()
-                                        )
-                                    }
-                                }
-
-                                Spacer(modifier = Modifier.height(32.dp))
+                                ContactQrCard(bitmap = qrBitmap)
 
                                 Button(
                                     onClick = onJoinQQ,
@@ -202,6 +177,26 @@ fun ContactDeveloperScreen(
         }
     }
 }
+
+@Composable
+private fun ContactQrCard(
+    bitmap: Bitmap,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.sizeIn(maxWidth = 280.dp, maxHeight = 280.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White)
+    ) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "QQ群二维码",
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp)
+        )
+    }
+}
+
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable

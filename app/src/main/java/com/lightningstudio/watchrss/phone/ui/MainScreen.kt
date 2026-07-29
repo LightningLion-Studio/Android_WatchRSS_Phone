@@ -15,6 +15,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,6 +38,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Article
@@ -60,6 +62,7 @@ import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.RssFeed
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.VerticalAlignTop
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
@@ -75,6 +78,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
@@ -83,6 +87,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
@@ -119,6 +124,7 @@ import com.lightningstudio.watchrss.phone.ArticleContentNodesKey
 import com.lightningstudio.watchrss.phone.ArticleContentNodesSnapshot
 import com.lightningstudio.watchrss.phone.ArticleReaderScreen
 import com.lightningstudio.watchrss.phone.PlatformWebViewScreen
+import com.lightningstudio.watchrss.phone.cloud.CloudRssInventoryMode
 import com.lightningstudio.watchrss.phone.generateQRCode
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
@@ -244,6 +250,7 @@ private data class InlineReaderPaneInput(
     val positionAlreadyRestored: Boolean,
     val onPositionRestored: (String) -> Unit,
     val fullscreen: Boolean,
+    val continuePlaybackInBackground: Boolean,
     val showFullscreenControl: Boolean,
     val onToggleFullscreen: () -> Unit
 )
@@ -312,6 +319,11 @@ fun MainScreen(
     onMoveRssSourceToTop: (PhoneRssSourceEntity) -> Unit,
     onReorderContentChannels: (List<String>, Int?) -> Unit,
     onToggleRssSourcePinned: (PhoneRssSourceEntity) -> Unit,
+    onSetRssSourceOriginalContentEnabled: (PhoneRssSourceEntity, Boolean) -> Unit,
+    onSetRssSourceContinuePlaybackInBackground: (PhoneRssSourceEntity, Boolean) -> Unit,
+    onClearRssSourceContent: (PhoneRssSourceEntity) -> Unit,
+    rssInventoryMode: (String) -> CloudRssInventoryMode,
+    onSetRssInventoryMode: (String, CloudRssInventoryMode) -> Unit,
     onDeleteRssSource: (PhoneRssSourceEntity) -> Unit,
     onRefreshAllRssSources: () -> Unit,
     onRefreshRssSource: (PhoneRssSourceEntity) -> Unit,
@@ -349,6 +361,7 @@ fun MainScreen(
     var channelTabSwitchDirection by remember { mutableFloatStateOf(1f) }
     var suppressNextChannelExit by remember { mutableStateOf(false) }
     var urlDialogMode by remember { mutableStateOf<UrlDialogMode?>(null) }
+    var channelSettingsSourceUrl by rememberSaveable { mutableStateOf<String?>(null) }
     val pagerState = rememberPagerState(initialPage = MainPage.DASHBOARD.topLevelIndex()) {
         TopLevelMainPages.size
     }
@@ -374,6 +387,9 @@ fun MainScreen(
     }?.key ?: CONTENT_CHANNEL_IMPORTED_TEXT
     val selectedContentChannel = selectedContentChannelKey?.let { key ->
         contentChannels.firstOrNull { it.key == key }
+    }
+    val channelSettingsSource = channelSettingsSourceUrl?.let { sourceUrl ->
+        uiState.rssSources.firstOrNull { it.url == sourceUrl }
     }
     val selectedReaderArticleListItem = selectedReaderArticleId?.let { articleId ->
         selectedContentChannel?.articles?.firstOrNull { it.articleId == articleId }
@@ -995,6 +1011,7 @@ fun MainScreen(
                     positionAlreadyRestored = input.positionAlreadyRestored,
                     onPositionRestored = input.onPositionRestored,
                     fullscreen = input.fullscreen,
+                    continuePlaybackInBackground = input.continuePlaybackInBackground,
                     showFullscreenControl = input.showFullscreenControl,
                     onToggleFullscreen = input.onToggleFullscreen
                 )
@@ -1026,6 +1043,11 @@ fun MainScreen(
                             }
                         },
                         fullscreen = fullscreen,
+                        continuePlaybackInBackground = article.rssSourceUrl
+                            ?.let { sourceUrl ->
+                                uiState.rssSources.firstOrNull { it.url == sourceUrl }
+                            }
+                            ?.continuePlaybackInBackground == true,
                         showFullscreenControl = windowInfo.isMediumOrExpanded,
                         onToggleFullscreen = {
                             readerFullscreenBackProgress = 0f
@@ -1057,6 +1079,9 @@ fun MainScreen(
                     if (selectedContentChannel?.canRefresh == true) {
                         selectedSource?.let(onRefreshRssSource)
                     }
+                },
+                onOpenChannelSettings = {
+                    selectedSource?.let { channelSettingsSourceUrl = it.url }
                 },
                 onExportBluetoothLog = onExportBluetoothLog,
                 onOpenProfile = onOpenProfile,
@@ -1383,6 +1408,9 @@ fun MainScreen(
                                                         movingPaneSource?.let(onRefreshRssSource)
                                                     }
                                                 },
+                                                onOpenChannelSettings = { source ->
+                                                    channelSettingsSourceUrl = source.url
+                                                },
                                                 onBackToChannels = { handleInlineReaderBack() },
                                                 onOpenArticle = { article ->
                                                     openAdaptiveArticle(article)
@@ -1430,6 +1458,9 @@ fun MainScreen(
                                                             if (selectedChannel.canRefresh) {
                                                                 selectedChannel.source?.let(onRefreshRssSource)
                                                             }
+                                                        },
+                                                        onOpenChannelSettings = { source ->
+                                                            channelSettingsSourceUrl = source.url
                                                         },
                                                         onBackToChannels = { handleInlineReaderBack() },
                                                         onOpenArticle = { article ->
@@ -1527,6 +1558,9 @@ fun MainScreen(
                                                         paneSource?.let(onRefreshRssSource)
                                                     }
                                                 },
+                                                onOpenChannelSettings = { source ->
+                                                    channelSettingsSourceUrl = source.url
+                                                },
                                                 onOpenArticle = { article ->
                                                     openAdaptiveArticle(article)
                                                 },
@@ -1553,6 +1587,9 @@ fun MainScreen(
                                                     if (movingChannel?.canRefresh == true) {
                                                         movingPaneSource?.let(onRefreshRssSource)
                                                     }
+                                                },
+                                                onOpenChannelSettings = { source ->
+                                                    channelSettingsSourceUrl = source.url
                                                 },
                                                 onBackToChannels = { readerLeftPaneReturnState = null },
                                                 onOpenArticle = { article ->
@@ -1631,6 +1668,9 @@ fun MainScreen(
                                                         movingPaneSource?.let(onRefreshRssSource)
                                                     }
                                                 },
+                                                onOpenChannelSettings = { source ->
+                                                    channelSettingsSourceUrl = source.url
+                                                },
                                                 onBackToChannels = { handleInlineReaderBack() },
                                                 onOpenArticle = { article ->
                                                     openAdaptiveArticle(article)
@@ -1678,6 +1718,9 @@ fun MainScreen(
                                                             if (selectedChannel.canRefresh) {
                                                                 selectedChannel.source?.let(onRefreshRssSource)
                                                             }
+                                                        },
+                                                        onOpenChannelSettings = { source ->
+                                                            channelSettingsSourceUrl = source.url
                                                         },
                                                         onBackToChannels = { handleInlineReaderBack() },
                                                         onOpenArticle = { article ->
@@ -1795,6 +1838,9 @@ fun MainScreen(
                                                         paneSource?.let(onRefreshRssSource)
                                                     }
                                                 },
+                                                onOpenChannelSettings = { source ->
+                                                    channelSettingsSourceUrl = source.url
+                                                },
                                                 onOpenArticle = { article ->
                                                     openAdaptiveArticle(article)
                                                 },
@@ -1821,6 +1867,9 @@ fun MainScreen(
                                                     if (movingChannel?.canRefresh == true) {
                                                         movingPaneSource?.let(onRefreshRssSource)
                                                     }
+                                                },
+                                                onOpenChannelSettings = { source ->
+                                                    channelSettingsSourceUrl = source.url
                                                 },
                                                 onBackToChannels = { readerLeftPaneReturnState = null },
                                                 onOpenArticle = { article ->
@@ -1983,6 +2032,49 @@ fun MainScreen(
     }
     }
 
+    channelSettingsSource?.let { source ->
+        val canRefresh = !ImportedContentIds.isImportedContentUrl(source.url)
+        val hasPlayableMedia = uiState.rssArticles.any { article ->
+            article.rssSourceUrl == source.url &&
+                (
+                    PlatformLinkRouter.detect(article.url) != null ||
+                        listOf("<audio", "<video", "<iframe").any {
+                            article.contentHtml.orEmpty().contains(it, ignoreCase = true)
+                        }
+                )
+        }
+        ChannelSettingsSheet(
+            source = source,
+            canRefresh = canRefresh,
+            showContinuePlaybackInBackground = hasPlayableMedia,
+            clearEnabled = ImportedContentIds.isImportedContentUrl(source.url),
+            isRefreshing = source.url in uiState.refreshingRssSourceUrls,
+            isBusy = uiState.isBusy,
+            initialRssInventoryMode = rssInventoryMode(source.url),
+            onDismiss = { channelSettingsSourceUrl = null },
+            onTogglePinned = { onToggleRssSourcePinned(source) },
+            onToggleOriginalContent = { enabled ->
+                onSetRssSourceOriginalContentEnabled(source, enabled)
+            },
+            onToggleContinuePlaybackInBackground = { enabled ->
+                onSetRssSourceContinuePlaybackInBackground(source, enabled)
+            },
+            onSetRssInventoryMode = { mode ->
+                onSetRssInventoryMode(source.url, mode)
+            },
+            onMoveToTop = { onMoveRssSourceToTop(source) },
+            onRefresh = { onRefreshRssSource(source) },
+            onClear = { onClearRssSourceContent(source) },
+            onDelete = {
+                channelSettingsSourceUrl = null
+                if (selectedContentChannel?.source?.url == source.url) {
+                    selectedContentChannelKey = null
+                }
+                onDeleteRssSource(source)
+            }
+        )
+    }
+
     urlDialogMode?.let { mode ->
         UrlEntryDialog(
             mode = mode,
@@ -2038,6 +2130,206 @@ fun MainScreen(
             prompt = prompt,
             onChooseDevice = onChooseBluetoothDevice,
             onDismiss = onDismissBluetoothDevicePrompt
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChannelSettingsSheet(
+    source: PhoneRssSourceEntity,
+    canRefresh: Boolean,
+    showContinuePlaybackInBackground: Boolean,
+    clearEnabled: Boolean,
+    isRefreshing: Boolean,
+    isBusy: Boolean,
+    initialRssInventoryMode: CloudRssInventoryMode,
+    onDismiss: () -> Unit,
+    onTogglePinned: () -> Unit,
+    onToggleOriginalContent: (Boolean) -> Unit,
+    onToggleContinuePlaybackInBackground: (Boolean) -> Unit,
+    onSetRssInventoryMode: (CloudRssInventoryMode) -> Unit,
+    onMoveToTop: () -> Unit,
+    onRefresh: () -> Unit,
+    onClear: () -> Unit,
+    onDelete: () -> Unit
+) {
+    var showDeleteConfirm by remember(source.url) { mutableStateOf(false) }
+    var showClearConfirm by remember(source.url) { mutableStateOf(false) }
+    var inventoryMode by remember(source.url) { mutableStateOf(initialRssInventoryMode) }
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(start = 24.dp, end = 24.dp, bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "频道设置",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = source.title.ifBlank { source.url },
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = source.url,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (canRefresh) {
+                ListItem(
+                    headlineContent = { Text("原文阅读模式") },
+                    supportingContent = { Text("刷新时抓取原文正文与图片") },
+                    trailingContent = {
+                        Switch(
+                            checked = source.useOriginalContent,
+                            onCheckedChange = onToggleOriginalContent,
+                            enabled = !isBusy
+                        )
+                    }
+                )
+            }
+            if (showContinuePlaybackInBackground) {
+                ListItem(
+                    headlineContent = { Text("在后台继续播放") },
+                    trailingContent = {
+                        Switch(
+                            checked = source.continuePlaybackInBackground,
+                            onCheckedChange = onToggleContinuePlaybackInBackground,
+                            enabled = !isBusy
+                        )
+                    }
+                )
+            }
+            if (canRefresh) {
+                Text(
+                    text = "云同步文章数量",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        CloudRssInventoryMode.RECENT_128 to "最近128条",
+                        CloudRssInventoryMode.ALL to "全部"
+                    ).forEach { (mode, label) ->
+                        OutlinedButton(
+                            onClick = {
+                                inventoryMode = mode
+                                onSetRssInventoryMode(mode)
+                            },
+                            enabled = !isBusy,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(if (inventoryMode == mode) "✓ $label" else label)
+                        }
+                    }
+                }
+                Text(
+                    text = "“全部”最多同步8192条文章",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            ListItem(
+                headlineContent = { Text("置顶频道") },
+                supportingContent = { Text("置顶后显示在普通频道之前") },
+                trailingContent = {
+                    Switch(
+                        checked = source.isPinned,
+                        onCheckedChange = { onTogglePinned() },
+                        enabled = !isBusy
+                    )
+                }
+            )
+            OutlinedButton(
+                onClick = onMoveToTop,
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("移到顶部")
+            }
+            if (canRefresh) {
+                OutlinedButton(
+                    onClick = onRefresh,
+                    enabled = !isBusy && !isRefreshing,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (isRefreshing) "正在刷新…" else "刷新频道")
+                }
+            }
+            if (clearEnabled) {
+                TextButton(
+                    onClick = { showClearConfirm = true },
+                    enabled = !isBusy,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "清空内容",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+            TextButton(
+                onClick = { showDeleteConfirm = true },
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "删除频道",
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+    }
+
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("删除频道") },
+            text = { Text("删除后将从内容列表移除该频道。") },
+            confirmButton = {
+                TextButton(onClick = onDelete) {
+                    Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            title = { Text("清空内容") },
+            text = { Text("清空后将移除这个频道内的本地条目。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearConfirm = false
+                        onClear()
+                    }
+                ) {
+                    Text("清空", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearConfirm = false }) {
+                    Text("取消")
+                }
+            }
         )
     }
 }
@@ -2150,6 +2442,7 @@ private fun InlineArticleReaderPane(
     positionAlreadyRestored: Boolean,
     onPositionRestored: (String) -> Unit,
     fullscreen: Boolean,
+    continuePlaybackInBackground: Boolean,
     showFullscreenControl: Boolean,
     onToggleFullscreen: () -> Unit
 ) {
@@ -2162,6 +2455,7 @@ private fun InlineArticleReaderPane(
             platform = platform,
             onBack = onBack,
             onOpenExternal = { onOpenOriginal(article.url) },
+            continuePlaybackInBackground = continuePlaybackInBackground,
             embedded = true,
             initialScrollProgress = article.readingProgress,
             onSaveScrollProgress = onSaveReadingProgress,
@@ -2202,6 +2496,7 @@ private fun MainTopBar(
     onBack: () -> Unit,
     onRefreshAllRssSources: () -> Unit,
     onRefreshSelectedSource: () -> Unit,
+    onOpenChannelSettings: () -> Unit,
     onExportBluetoothLog: () -> Unit,
     onOpenProfile: () -> Unit,
     modifier: Modifier = Modifier
@@ -2215,11 +2510,25 @@ private fun MainTopBar(
     CenterAlignedTopAppBar(
         modifier = modifier,
         title = {
-            Text(
-                text = title,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = title,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (page == MainPage.CHANNEL && selectedChannel?.source != null) {
+                    IconButton(
+                        onClick = onOpenChannelSettings,
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(
+                            Icons.Outlined.Info,
+                            contentDescription = "频道设置",
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
         },
         navigationIcon = {
             if (page == MainPage.CHANNEL) {
@@ -2436,6 +2745,7 @@ private fun DashboardPage(
                 onBack = {},
                 onRefreshAllRssSources = {},
                 onRefreshSelectedSource = {},
+                onOpenChannelSettings = {},
                 onExportBluetoothLog = onExportBluetoothLog,
                 onOpenProfile = onOpenProfile,
                 modifier = Modifier.fillMaxWidth()
@@ -3266,6 +3576,7 @@ private fun ReaderReturnMovingArticlePane(
     windowInfo: AdaptiveWindowInfo,
     listState: LazyListState,
     onRefreshSource: () -> Unit,
+    onOpenChannelSettings: (PhoneRssSourceEntity) -> Unit,
     onBackToChannels: () -> Unit,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
     onOpenOriginalLink: (String) -> Unit,
@@ -3281,6 +3592,7 @@ private fun ReaderReturnMovingArticlePane(
             windowInfo = windowInfo,
             listState = listState,
             onRefreshSource = onRefreshSource,
+            onOpenChannelSettings = onOpenChannelSettings,
             onOpenArticle = onOpenArticle,
             onOpenOriginalLink = onOpenOriginalLink,
             onToggleFavorite = onToggleFavorite,
@@ -3298,6 +3610,7 @@ private fun ReaderReturnMovingArticlePane(
         windowInfo = windowInfo,
         listState = listState,
         onRefreshSource = onRefreshSource,
+        onOpenChannelSettings = onOpenChannelSettings,
         onBackToChannels = onBackToChannels,
         onOpenArticle = onOpenArticle,
         onOpenOriginalLink = onOpenOriginalLink,
@@ -3317,6 +3630,7 @@ private fun MorphingChannelArticlePane(
     windowInfo: AdaptiveWindowInfo,
     listState: LazyListState,
     onRefreshSource: () -> Unit,
+    onOpenChannelSettings: (PhoneRssSourceEntity) -> Unit,
     onBackToChannels: () -> Unit,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
     onOpenOriginalLink: (String) -> Unit,
@@ -3380,7 +3694,8 @@ private fun MorphingChannelArticlePane(
                         channel = channel,
                         isRefreshing = isRefreshing,
                         onBackToChannels = onBackToChannels,
-                        onRefreshSource = onRefreshSource
+                        onRefreshSource = onRefreshSource,
+                        onOpenChannelSettings = onOpenChannelSettings
                     )
                 }
                 if (channel.articles.isEmpty()) {
@@ -3417,7 +3732,8 @@ private fun MorphingChannelArticleHeader(
     channel: MainContentChannel,
     isRefreshing: Boolean,
     onBackToChannels: () -> Unit,
-    onRefreshSource: () -> Unit
+    onRefreshSource: () -> Unit,
+    onOpenChannelSettings: (PhoneRssSourceEntity) -> Unit
 ) {
     val paneProgress = progress.coerceIn(0f, 1f)
     val refreshActionWidth = if (channel.canRefresh) {
@@ -3529,6 +3845,11 @@ private fun MorphingChannelArticleHeader(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                }
+            }
+            channel.source?.let { source ->
+                IconButton(onClick = { onOpenChannelSettings(source) }) {
+                    Icon(Icons.Outlined.Info, contentDescription = "频道设置")
                 }
             }
             Box(
@@ -3934,6 +4255,7 @@ private fun ChannelArticlePane(
     windowInfo: AdaptiveWindowInfo,
     listState: LazyListState,
     onRefreshSource: () -> Unit,
+    onOpenChannelSettings: (PhoneRssSourceEntity) -> Unit,
     onOpenArticle: (PhoneArticleEntity) -> Unit,
     onOpenOriginalLink: (String) -> Unit,
     onToggleFavorite: (PhoneArticleEntity) -> Unit,
@@ -3979,7 +4301,8 @@ private fun ChannelArticlePane(
                             channel = channel,
                             isRefreshing = isRefreshing,
                             onBackToChannels = {},
-                            onRefreshSource = onRefreshSource
+                            onRefreshSource = onRefreshSource,
+                            onOpenChannelSettings = onOpenChannelSettings
                         )
                     }
                 }

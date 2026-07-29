@@ -63,13 +63,44 @@ data class PhoneBluetoothWatchDevice(
 data class PhoneBluetoothWatchProbeResult(
     val device: PhoneBluetoothWatchDevice,
     val reachable: Boolean,
-    val message: String? = null
+    val message: String? = null,
+    val capabilities: PhoneWatchCapabilities? = null
+)
+
+data class PhoneWatchVideoDecoder(
+    val name: String,
+    val mime: String,
+    val hardwareAccelerated: Boolean,
+    val maxWidth: Int,
+    val maxHeight: Int,
+    val maxFrameRate: Double,
+    val profileLevels: List<Pair<Int, Int>>
+)
+
+data class PhoneWatchCapabilities(
+    val widthPx: Int,
+    val heightPx: Int,
+    val refreshRateHz: Double,
+    val availableBytes: Long,
+    val videoDecoders: List<PhoneWatchVideoDecoder>
+) {
+    val supportsReaderPresetSync: Boolean
+        get() = widthPx > 0 && heightPx > 0
+}
+
+private data class ProbeIdentity(
+    val deviceId: String,
+    val capabilities: PhoneWatchCapabilities?
 )
 
 class PhoneBluetoothSyncClient(
     private val context: Context,
     private val debugLog: BluetoothDebugLog
 ) {
+    private val capabilitiesByAddress = mutableMapOf<String, PhoneWatchCapabilities>()
+
+    fun capabilitiesFor(deviceAddress: String): PhoneWatchCapabilities? =
+        synchronized(capabilitiesByAddress) { capabilitiesByAddress[deviceAddress] }
     @SuppressLint("MissingPermission")
     suspend fun probeLibrarySyncDevices(
         deviceId: String,
@@ -475,10 +506,11 @@ class PhoneBluetoothSyncClient(
             )
         }
         val probe = result.fold(
-            onSuccess = { remoteDeviceId ->
+            onSuccess = { identity ->
                 PhoneBluetoothWatchProbeResult(
-                    device = device.toWatchDevice(remoteDeviceId),
-                    reachable = true
+                    device = device.toWatchDevice(identity.deviceId),
+                    reachable = true,
+                    capabilities = identity.capabilities
                 )
             },
             onFailure = { throwable ->
@@ -489,6 +521,11 @@ class PhoneBluetoothSyncClient(
                 )
             }
         )
+        probe.capabilities?.let {
+            synchronized(capabilitiesByAddress) {
+                capabilitiesByAddress[device.address] = it
+            }
+        }
         debugLog.appendEvent(
             event = "bt.library.probe.device.complete",
             sessionId = sessionId,
@@ -505,7 +542,7 @@ class PhoneBluetoothSyncClient(
         deviceId: String,
         sessionId: String,
         fallbackTimeoutMs: Long
-    ): String {
+    ): ProbeIdentity {
         val probeResult = runCatching {
             withTimeout(DIRECT_PROBE_TIMEOUT_MS) {
                 exchange(
@@ -523,7 +560,10 @@ class PhoneBluetoothSyncClient(
                 sessionId = sessionId,
                 fields = payloadFields("probeResponse", exchange.response)
             )
-            return exchange.response.optString("deviceId").trim()
+            return ProbeIdentity(
+                exchange.response.optString("deviceId").trim(),
+                exchange.response.optJSONObject("watchCapabilities")?.toWatchCapabilities()
+            )
         }
         if (exchange != null && exchange.response.optBoolean("success", false)) {
             debugLog.appendEvent(
@@ -531,7 +571,10 @@ class PhoneBluetoothSyncClient(
                 sessionId = sessionId,
                 fields = payloadFields("probeResponse", exchange.response)
             )
-            return exchange.response.optString("deviceId").trim()
+            return ProbeIdentity(
+                exchange.response.optString("deviceId").trim(),
+                exchange.response.optJSONObject("watchCapabilities")?.toWatchCapabilities()
+            )
         }
         probeResult.exceptionOrNull()?.let { throwable ->
             debugLog.appendEvent(
@@ -552,7 +595,12 @@ class PhoneBluetoothSyncClient(
                 onProgress = {},
                 ackApplied = false,
                 rememberDeviceOnSuccess = false
-            ).manifestResponse.optString("deviceId").trim()
+            ).manifestResponse.let {
+                ProbeIdentity(
+                    it.optString("deviceId").trim(),
+                    it.optJSONObject("watchCapabilities")?.toWatchCapabilities()
+                )
+            }
         }
     }
 
@@ -794,6 +842,7 @@ class PhoneBluetoothSyncClient(
         )
     }
 
+    @SuppressLint("MissingPermission")
     private fun cancelDiscoveryLogged(adapter: BluetoothAdapter, sessionId: String) {
         if (!canCancelDiscovery()) {
             debugLog.appendEvent(
@@ -1252,4 +1301,36 @@ class PhoneBluetoothSyncClient(
             articleCount = 0
         )
     }
+}
+
+private fun JSONObject.toWatchCapabilities(): PhoneWatchCapabilities {
+    val decoders = optJSONArray("videoDecoders")
+    return PhoneWatchCapabilities(
+        widthPx = optInt("widthPx").coerceAtLeast(0),
+        heightPx = optInt("heightPx").coerceAtLeast(0),
+        refreshRateHz = optDouble("refreshRateHz", 0.0).coerceAtLeast(0.0),
+        availableBytes = optLong("availableBytes", 0L).coerceAtLeast(0L),
+        videoDecoders = buildList {
+            for (index in 0 until (decoders?.length() ?: 0)) {
+                val decoder = decoders?.optJSONObject(index) ?: continue
+                val profiles = decoder.optJSONArray("profiles")
+                add(
+                    PhoneWatchVideoDecoder(
+                        name = decoder.optString("name"),
+                        mime = decoder.optString("mime"),
+                        hardwareAccelerated = decoder.optBoolean("hardwareAccelerated"),
+                        maxWidth = decoder.optInt("maxWidth"),
+                        maxHeight = decoder.optInt("maxHeight"),
+                        maxFrameRate = decoder.optDouble("maxFrameRate"),
+                        profileLevels = buildList {
+                            for (profileIndex in 0 until (profiles?.length() ?: 0)) {
+                                val profile = profiles?.optJSONObject(profileIndex) ?: continue
+                                add(profile.optInt("profile") to profile.optInt("level"))
+                            }
+                        }
+                    )
+                )
+            }
+        }
+    )
 }

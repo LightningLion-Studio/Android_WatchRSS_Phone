@@ -1371,13 +1371,110 @@ class PhoneCompanionRepositoryTest {
         assertEquals(0.6f, articleDao.items.single().readingProgress)
     }
 
+    @Test
+    fun channelSettings_persistAndOriginalModeRefreshesReadableBody() = runBlocking {
+        val sourceUrl = "https://example.com/feed.xml"
+        val articleUrl = "https://example.com/post"
+        val sourceDao = FakePhoneRssSourceDao().apply {
+            sources = listOf(source(sourceUrl))
+        }
+        val articleDao = FakePhoneArticleDao()
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = sourceDao,
+            deviceId = "current-device",
+            webArticleImporter = {
+                ImportedWebArticle(
+                    articleId = "post",
+                    url = articleUrl,
+                    title = "原文标题",
+                    siteName = "example.com",
+                    excerpt = "原文摘要",
+                    contentHtml = "<article>完整原文</article>",
+                    contentText = "完整原文",
+                    imageUrl = "https://example.com/cover.jpg",
+                    contentHash = "original-hash"
+                )
+            },
+            rssSourceImporter = {
+                ImportedRssSource(
+                    url = sourceUrl,
+                    title = "示例源",
+                    description = "",
+                    siteUrl = "https://example.com",
+                    imageUrl = null,
+                    items = listOf(
+                        ImportedRssItem(
+                            url = articleUrl,
+                            title = "Feed标题",
+                            excerpt = "Feed摘要",
+                            contentHtml = "<p>Feed正文</p>",
+                            contentText = "Feed正文",
+                            imageUrl = null,
+                            guid = "post"
+                        )
+                    )
+                )
+            }
+        )
+
+        repository.setRssSourceOriginalContentEnabled(sourceUrl, true)
+        repository.setRssSourceContinuePlaybackInBackground(sourceUrl, true)
+        repository.refreshRssSource(sourceUrl)
+
+        val updatedSource = sourceDao.sources.single()
+        assertEquals(true, updatedSource.useOriginalContent)
+        assertEquals(true, updatedSource.continuePlaybackInBackground)
+        val updatedArticle = articleDao.items.single()
+        assertEquals("Feed标题", updatedArticle.title)
+        assertEquals("完整原文", updatedArticle.contentText)
+        assertEquals("<article>完整原文</article>", updatedArticle.contentHtml)
+        assertEquals("https://example.com/cover.jpg", updatedArticle.imageUrl)
+    }
+
+    @Test
+    fun mergeRssSourcesFromLegacyPeer_preservesLocalChannelSettings() = runBlocking {
+        val sourceUrl = "https://example.com/feed.xml"
+        val sourceDao = FakePhoneRssSourceDao().apply {
+            sources = listOf(
+                source(
+                    url = sourceUrl,
+                    updatedAt = 10L,
+                    useOriginalContent = true,
+                    continuePlaybackInBackground = true
+                )
+            )
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = FakePhoneArticleDao(),
+            rssSourceDao = sourceDao,
+            deviceId = "current-device"
+        )
+        val legacyRemote = source(
+            url = sourceUrl,
+            title = "手表更新的标题",
+            updatedAt = 20L
+        ).copy(sourceDeviceId = "watch")
+
+        repository.mergeRssSourcesFromSync(listOf(legacyRemote))
+
+        val merged = sourceDao.sources.single()
+        assertEquals("手表更新的标题", merged.title)
+        assertEquals(true, merged.useOriginalContent)
+        assertEquals(true, merged.continuePlaybackInBackground)
+    }
+
     private fun source(
         url: String,
         title: String = "示例源",
         deleted: Boolean = false,
         deletedAt: Long = 0L,
         updatedAt: Long = 1L,
-        isPinned: Boolean = false
+        isPinned: Boolean = false,
+        useOriginalContent: Boolean = false,
+        continuePlaybackInBackground: Boolean = false
     ): PhoneRssSourceEntity {
         return PhoneRssSourceEntity(
             url = url,
@@ -1391,7 +1488,9 @@ class PhoneCompanionRepositoryTest {
             sortOrder = updatedAt,
             isPinned = isPinned,
             deleted = deleted,
-            deletedAt = deletedAt
+            deletedAt = deletedAt,
+            useOriginalContent = useOriginalContent,
+            continuePlaybackInBackground = continuePlaybackInBackground
         )
     }
 

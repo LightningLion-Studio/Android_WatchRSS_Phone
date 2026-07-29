@@ -9,6 +9,7 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibrarySyncPayload
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.InputStream
@@ -21,6 +22,7 @@ class WatchRssBackupService(
     context: Context,
     private val database: PhoneCompanionDatabase,
     private val repository: PhoneCompanionRepository,
+    private val readerPresetRepository: ReaderPresetRepository,
     private val deviceId: String
 ) {
     private val appContext = context.applicationContext
@@ -34,12 +36,15 @@ class WatchRssBackupService(
     }
 
     suspend fun exportTo(output: OutputStream): BackupSummary = withContext(Dispatchers.IO) {
+        val readerSnapshot = readerPresetRepository.exportSnapshot()
         val snapshot = WatchRssBackupSnapshot(
             exportedAt = System.currentTimeMillis(),
             appVersion = currentAppVersion(),
             sources = database.phoneRssSourceDao().getAllForSync(),
             articles = repository.getArticlesForBackup(),
-            savedItems = database.phoneSavedItemDao().getAll()
+            savedItems = database.phoneSavedItemDao().getAll(),
+            readerSnapshot = readerSnapshot,
+            readerResources = readerResources(readerSnapshot)
         )
         WatchRssBackupArchive.write(snapshot, output)
         snapshot.summary()
@@ -53,6 +58,10 @@ class WatchRssBackupService(
     }
 
     suspend fun createCloudPrivateArchive(): ByteArray = withContext(Dispatchers.IO) {
+        createCloudPrivateArchiveFile().readBytes()
+    }
+
+    suspend fun createCloudPrivateArchiveFile(): File = withContext(Dispatchers.IO) {
         val exportedAt = System.currentTimeMillis()
         val allArticles = repository.getArticlesForBackup()
         val privateArticles = allArticles.filter { article ->
@@ -65,11 +74,15 @@ class WatchRssBackupService(
             appVersion = currentAppVersion(),
             sources = database.phoneRssSourceDao().getAllForSync(),
             articles = privateArticles,
-            savedItems = emptyList()
-        )
-        val archive = ByteArrayOutputStream().use { output ->
+            savedItems = emptyList(),
+            readerSnapshot = readerPresetRepository.exportSnapshot()
+        ).let {
+            it.copy(readerResources = readerResources(requireNotNull(it.readerSnapshot)))
+        }
+        val directory = File(appContext.cacheDir, "cloud-staging").apply { mkdirs() }
+        val archive = File(directory, "private-library.wrss")
+        archive.outputStream().buffered().use { output ->
             WatchRssBackupArchive.write(privateSnapshot, output)
-            output.toByteArray()
         }
         archive
     }
@@ -202,7 +215,10 @@ class WatchRssBackupService(
         resetSyncHistory: Boolean = true
     ): BackupImportResult =
         withContext(Dispatchers.IO) {
-            val snapshot = WatchRssBackupArchive.read(input)
+            val snapshot = WatchRssBackupArchive.read(
+                input,
+                readerPresetRepository.resourceStore
+            )
             val normalizedSources = snapshot.sources.map { source ->
                 source.copy(sourceDeviceId = deviceId)
             }
@@ -237,6 +253,12 @@ class WatchRssBackupService(
                     database.syncPeerStateDao().deleteAll()
                 }
             }
+            snapshot.readerSnapshot?.let { readerPresetRepository.mergeRemote(
+                presets = it.presets,
+                fonts = it.fonts,
+                backgrounds = it.backgrounds,
+                deletions = it.deletions
+            ) }
             repository.pruneUnreferencedArticleContent()
 
             BackupImportResult(
@@ -249,6 +271,42 @@ class WatchRssBackupService(
                 changedSavedItemCount = changedSavedItemCount
             )
         }
+
+    private suspend fun readerResources(
+        snapshot: com.lightningstudio.watchrss.phone.data.reader.ReaderPresetSnapshot
+    ): List<ReaderBackupResource> = buildList {
+        snapshot.fonts.filterNot { it.deleted }.forEach { font ->
+            readerPresetRepository.resourceStore.fontFile(font.fileName)?.let { file ->
+                add(ReaderBackupResource("font", font.fileName, font.sha256, font.byteCount, file))
+            }
+        }
+        snapshot.backgrounds.filterNot { it.deleted }.forEach { background ->
+            readerPresetRepository.resourceStore.backgroundFile(background.masterFileName)?.let { file ->
+                add(
+                    ReaderBackupResource(
+                        "background",
+                        background.masterFileName,
+                        background.sha256,
+                        background.byteCount,
+                        file
+                    )
+                )
+            }
+            val variants = runCatching { org.json.JSONObject(background.variantsJson) }.getOrNull()
+            listOf("watch", "watchPoster").forEach { key ->
+                variants?.optJSONObject(key)?.let { variant ->
+                    val fileName = variant.optString("fileName")
+                    val hash = variant.optString("sha256")
+                    val byteCount = variant.optLong("byteCount")
+                    readerPresetRepository.resourceStore.variantFile(fileName)?.let { file ->
+                        if (hash.length == 64 && file.length() == byteCount) {
+                            add(ReaderBackupResource("variant", fileName, hash, byteCount, file))
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     private suspend fun mergeSources(incoming: List<PhoneRssSourceEntity>): Int {
         var changed = 0

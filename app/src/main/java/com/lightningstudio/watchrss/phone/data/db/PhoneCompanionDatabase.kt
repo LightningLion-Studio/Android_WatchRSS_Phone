@@ -5,6 +5,11 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
+import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundAssetEntity
+import com.lightningstudio.watchrss.phone.data.reader.ReaderDeletionEntity
+import com.lightningstudio.watchrss.phone.data.reader.ReaderFontAssetEntity
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetDao
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetEntity
 
 @Database(
     entities = [
@@ -12,9 +17,13 @@ import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
         PhoneArticleEntity::class,
         PhoneRssSourceEntity::class,
         SyncChangeLogEntity::class,
-        SyncPeerStateEntity::class
+        SyncPeerStateEntity::class,
+        ReaderPresetEntity::class,
+        ReaderFontAssetEntity::class,
+        ReaderBackgroundAssetEntity::class,
+        ReaderDeletionEntity::class
     ],
-    version = 9,
+    version = 11,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
@@ -23,6 +32,7 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
     abstract fun phoneRssSourceDao(): PhoneRssSourceDao
     abstract fun syncChangeLogDao(): SyncChangeLogDao
     abstract fun syncPeerStateDao(): SyncPeerStateDao
+    abstract fun readerPresetDao(): ReaderPresetDao
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -181,5 +191,94 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
                 )
             }
         }
+
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "ALTER TABLE phone_rss_sources ADD COLUMN useOriginalContent INTEGER NOT NULL DEFAULT 0"
+                )
+                database.execSQL(
+                    "ALTER TABLE phone_rss_sources ADD COLUMN continuePlaybackInBackground INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.createReaderPresetTables()
+            }
+        }
     }
+}
+
+private fun SupportSQLiteDatabase.createReaderPresetTables() {
+    execSQL(
+        """
+        CREATE TABLE IF NOT EXISTS reader_presets (
+            id TEXT NOT NULL PRIMARY KEY,
+            name TEXT NOT NULL,
+            payloadJson TEXT NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            modifiedBy TEXT NOT NULL,
+            deleted INTEGER NOT NULL
+        )
+        """.trimIndent()
+    )
+    execSQL("CREATE INDEX IF NOT EXISTS index_reader_presets_deleted_name ON reader_presets(deleted, name)")
+    execSQL("CREATE INDEX IF NOT EXISTS index_reader_presets_updatedAt ON reader_presets(updatedAt)")
+    execSQL(
+        """
+        CREATE TABLE IF NOT EXISTS reader_font_assets (
+            id TEXT NOT NULL PRIMARY KEY,
+            sha256 TEXT NOT NULL,
+            displayName TEXT NOT NULL,
+            familyName TEXT NOT NULL,
+            fileName TEXT NOT NULL,
+            mimeType TEXT NOT NULL,
+            byteCount INTEGER NOT NULL,
+            faceCount INTEGER NOT NULL,
+            metadataJson TEXT NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            modifiedBy TEXT NOT NULL,
+            deleted INTEGER NOT NULL
+        )
+        """.trimIndent()
+    )
+    execSQL("CREATE INDEX IF NOT EXISTS index_reader_font_assets_deleted_displayName ON reader_font_assets(deleted, displayName)")
+    execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_reader_font_assets_sha256 ON reader_font_assets(sha256)")
+    execSQL(
+        """
+        CREATE TABLE IF NOT EXISTS reader_background_assets (
+            id TEXT NOT NULL PRIMARY KEY,
+            sha256 TEXT NOT NULL,
+            displayName TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            mimeType TEXT NOT NULL,
+            masterFileName TEXT NOT NULL,
+            byteCount INTEGER NOT NULL,
+            durationMs INTEGER NOT NULL,
+            width INTEGER NOT NULL,
+            height INTEGER NOT NULL,
+            posterAssetId TEXT,
+            variantsJson TEXT NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            modifiedBy TEXT NOT NULL,
+            deleted INTEGER NOT NULL
+        )
+        """.trimIndent()
+    )
+    execSQL("CREATE INDEX IF NOT EXISTS index_reader_background_assets_deleted_displayName ON reader_background_assets(deleted, displayName)")
+    execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_reader_background_assets_sha256 ON reader_background_assets(sha256)")
+    execSQL(
+        """
+        CREATE TABLE IF NOT EXISTS reader_deletions (
+            kind TEXT NOT NULL,
+            entityId TEXT NOT NULL,
+            deletedAt INTEGER NOT NULL,
+            deletedBy TEXT NOT NULL,
+            PRIMARY KEY(kind, entityId)
+        )
+        """.trimIndent()
+    )
+    execSQL("CREATE INDEX IF NOT EXISTS index_reader_deletions_deletedAt ON reader_deletions(deletedAt)")
 }

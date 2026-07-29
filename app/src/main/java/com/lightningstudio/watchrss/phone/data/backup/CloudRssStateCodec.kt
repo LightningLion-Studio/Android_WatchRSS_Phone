@@ -92,6 +92,11 @@ internal object CloudRssStateCodec {
                         put("isPinned", source.isPinned)
                         put("deleted", source.deleted)
                         put("deletedAt", source.deletedAt)
+                        put("useOriginalContent", source.useOriginalContent)
+                        put(
+                            "continuePlaybackInBackground",
+                            source.continuePlaybackInBackground
+                        )
                     })
                 }
             })
@@ -163,8 +168,15 @@ internal object CloudRssStateCodec {
                         sortOrder = json.optLong("sortOrder"),
                         isPinned = json.optBoolean("isPinned"),
                         deleted = json.optBoolean("deleted"),
-                        deletedAt = json.optLong("deletedAt")
-                    )
+                        deletedAt = json.optLong("deletedAt"),
+                        useOriginalContent = json.optBoolean("useOriginalContent"),
+                        continuePlaybackInBackground =
+                            json.optBoolean("continuePlaybackInBackground")
+                    ).also {
+                        it.syncedSettingsIncluded =
+                            json.has("useOriginalContent") ||
+                                json.has("continuePlaybackInBackground")
+                    }
                 )
             }
         }

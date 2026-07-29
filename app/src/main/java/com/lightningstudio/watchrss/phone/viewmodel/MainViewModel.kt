@@ -498,6 +498,45 @@ class MainViewModel(
         }
     }
 
+    fun setRssSourceOriginalContentEnabled(source: PhoneRssSourceEntity, enabled: Boolean) {
+        viewModelScope.launch {
+            runBusy("正在更新频道设置…") {
+                repository.setRssSourceOriginalContentEnabled(source.url, enabled)
+                sessionState.value = sessionState.value.copy(
+                    message = if (enabled) "已开启原文阅读模式" else "已关闭原文阅读模式",
+                    error = null
+                )
+            }
+        }
+    }
+
+    fun setRssSourceContinuePlaybackInBackground(
+        source: PhoneRssSourceEntity,
+        enabled: Boolean
+    ) {
+        viewModelScope.launch {
+            runBusy("正在更新频道设置…") {
+                repository.setRssSourceContinuePlaybackInBackground(source.url, enabled)
+                sessionState.value = sessionState.value.copy(
+                    message = if (enabled) "已允许在后台继续播放" else "已关闭后台继续播放",
+                    error = null
+                )
+            }
+        }
+    }
+
+    fun clearRssSourceContent(source: PhoneRssSourceEntity) {
+        viewModelScope.launch {
+            runBusy("正在清空频道内容…") {
+                val deletedCount = repository.clearRssSourceContent(source.url)
+                sessionState.value = sessionState.value.copy(
+                    message = "已清空频道内容：$deletedCount 篇",
+                    error = null
+                )
+            }
+        }
+    }
+
     fun deleteRssSource(source: PhoneRssSourceEntity) {
         viewModelScope.launch {
             runBusy("正在删除频道…") {

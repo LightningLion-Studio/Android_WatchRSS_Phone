@@ -6,6 +6,8 @@ import com.lightningstudio.watchrss.phone.account.AccountEnvironment
 import com.lightningstudio.watchrss.phone.account.EncryptedAccountSessionStore
 import com.lightningstudio.watchrss.phone.account.PhoneAccountClient
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
+import com.lightningstudio.watchrss.phone.data.ai.PhoneAiSettingsStore
+import com.lightningstudio.watchrss.phone.data.ai.PhoneAiSummaryService
 import com.lightningstudio.watchrss.phone.account.PhoneInstallationIdentity
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
 import com.lightningstudio.watchrss.phone.connection.guided.PhoneGuidedSessionManager
@@ -19,10 +21,12 @@ import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class PhoneCompanionContainer(context: Context) {
     private val appContext = context.applicationContext
@@ -44,7 +48,9 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_5_6,
             PhoneCompanionDatabase.MIGRATION_6_7,
             PhoneCompanionDatabase.MIGRATION_7_8,
-            PhoneCompanionDatabase.MIGRATION_8_9
+            PhoneCompanionDatabase.MIGRATION_8_9,
+            PhoneCompanionDatabase.MIGRATION_9_10,
+            PhoneCompanionDatabase.MIGRATION_10_11
         )
             .build()
     }
@@ -81,6 +87,21 @@ class PhoneCompanionContainer(context: Context) {
         BluetoothDebugLog(appContext)
     }
 
+    val readerPresetRepository: ReaderPresetRepository by lazy {
+        ReaderPresetRepository(
+            context = appContext,
+            database = database,
+            dao = database.readerPresetDao(),
+            deviceId = deviceIdentity.deviceId,
+            scope = appScope
+        ).also { repository ->
+            appScope.launch { repository.ensureSeeded() }
+        }
+    }
+
+    val aiSettingsStore: PhoneAiSettingsStore by lazy { PhoneAiSettingsStore(appContext) }
+    val aiSummaryService: PhoneAiSummaryService by lazy { PhoneAiSummaryService(aiSettingsStore) }
+
     private val webArticleImporter: AndroidWebArticleImporter by lazy {
         AndroidWebArticleImporter(appContext)
     }
@@ -107,6 +128,7 @@ class PhoneCompanionContainer(context: Context) {
             context = appContext,
             database = database,
             repository = repository,
+            readerPresetRepository = readerPresetRepository,
             deviceId = deviceIdentity.deviceId
         )
     }
@@ -145,6 +167,7 @@ class PhoneCompanionContainer(context: Context) {
         PhoneBluetoothSyncManager(
             context = appContext,
             repository = repository,
+            readerPresetRepository = readerPresetRepository,
             deviceId = deviceIdentity.deviceId,
             debugLog = bluetoothDebugLog,
             buildAccountSyncRequest = accountRepository::buildAccountSyncRequest,

@@ -45,7 +45,6 @@ import com.lightningstudio.watchrss.phone.ui.PageColumn
 import com.lightningstudio.watchrss.phone.ui.GlassTopBar
 import com.lightningstudio.watchrss.phone.ui.theme.AppCard
 import com.lightningstudio.watchrss.phone.ui.theme.AppPrimaryCard
-import com.lightningstudio.watchrss.phone.ui.PredictiveBackSurface
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 
 class GuideActivity : ComponentActivity() {
@@ -60,11 +59,7 @@ class GuideActivity : ComponentActivity() {
         setContent {
             WatchRssPhoneTheme {
                 val onBack = { finish() }
-                PredictiveBackSurface(onBack = onBack) {
-                    GuideScreen(
-                        onBack = onBack
-                    )
-                }
+                GuideScreen(onBack = onBack)
             }
         }
     }

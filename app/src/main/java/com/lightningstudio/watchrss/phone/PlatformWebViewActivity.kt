@@ -79,6 +79,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkKind
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
@@ -124,6 +127,18 @@ class PlatformWebViewActivity : ComponentActivity() {
                             ?: fallbackReadingProgress
                     }
                 }
+                val continuePlaybackInBackground by produceState(
+                    initialValue = false,
+                    key1 = articleId
+                ) {
+                    val article = articleId
+                        .takeIf { it.isNotBlank() }
+                        ?.let { repository.getArticle(it) }
+                    value = article
+                        ?.rssSourceUrl
+                        ?.let { repository.getRssSource(it) }
+                        ?.continuePlaybackInBackground == true
+                }
                 initialReadingProgress?.let { restoredProgress ->
                     PlatformWebViewScreen(
                         url = url,
@@ -131,6 +146,7 @@ class PlatformWebViewActivity : ComponentActivity() {
                         platform = platform,
                         onBack = { finish() },
                         onOpenExternal = { openExternalUrl(this, url) },
+                        continuePlaybackInBackground = continuePlaybackInBackground,
                         initialScrollProgress = restoredProgress,
                         onSaveScrollProgress = if (articleId.isNotBlank()) {
                             { progress -> repository.updateArticleReadingProgress(articleId, progress) }
@@ -173,6 +189,7 @@ internal fun PlatformWebViewScreen(
     platform: PlatformLinkKind?,
     onBack: () -> Unit,
     onOpenExternal: () -> Unit,
+    continuePlaybackInBackground: Boolean = false,
     embedded: Boolean = false,
     initialScrollProgress: Float = 0f,
     onSaveScrollProgress: (suspend (Float) -> Unit)? = null,
@@ -193,6 +210,7 @@ internal fun PlatformWebViewScreen(
     var webHistoryBackProgress by remember(url) { mutableFloatStateOf(0f) }
     var screenBackProgress by remember { mutableFloatStateOf(0f) }
     val density = LocalDensity.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
     val onSaveScrollProgressState = rememberUpdatedState(onSaveScrollProgress)
     val onBackState = rememberUpdatedState(onBack)
@@ -282,6 +300,22 @@ internal fun PlatformWebViewScreen(
     DisposableEffect(url) {
         onDispose {
             saveWebScrollProgressBlocking()
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, webView, continuePlaybackInBackground) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> {
+                    if (!continuePlaybackInBackground) webView?.onPause()
+                }
+                Lifecycle.Event.ON_RESUME -> webView?.onResume()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 

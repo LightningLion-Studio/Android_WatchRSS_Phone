@@ -52,7 +52,7 @@ data class LibraryChangeSequence(
 )
 
 object LibrarySyncPayload {
-    const val PROTOCOL_VERSION = 10
+    const val PROTOCOL_VERSION = 11
     const val LEGACY_PROTOCOL_VERSION = 4
     const val MAX_BODY_REQUEST_CHUNKS_PER_SYNC = Int.MAX_VALUE
     const val MAX_ARTICLE_REQUEST_BATCH_COUNT = 256
@@ -73,6 +73,10 @@ object LibrarySyncPayload {
             put("supportsChunkedBodies", true)
             put("supportsChangeSequences", true)
             put("supportsMetadataOnlyArticles", true)
+            put("supportsReaderPresets", true)
+            put("supportsReaderAssets", true)
+            put("supportsResourceChunkAck", true)
+            put("supportsReaderPresetPreview", true)
             put(FIELD_SUPPORTS_TRANSFER_BYTE_PROGRESS, true)
             put("deviceId", deviceId)
             put("sentAt", System.currentTimeMillis())
@@ -571,8 +575,15 @@ object LibrarySyncPayload {
                         sortOrder = item.optLong("sortOrder"),
                         isPinned = item.optBoolean("isPinned"),
                         deleted = item.optBoolean("deleted"),
-                        deletedAt = item.optLong("deletedAt")
-                    )
+                        deletedAt = item.optLong("deletedAt"),
+                        useOriginalContent = item.optBoolean("useOriginalContent"),
+                        continuePlaybackInBackground =
+                            item.optBoolean("continuePlaybackInBackground")
+                    ).also {
+                        it.syncedSettingsIncluded =
+                            item.has("useOriginalContent") ||
+                                item.has("continuePlaybackInBackground")
+                    }
                 )
             }
         }
@@ -1192,6 +1203,8 @@ object LibrarySyncPayload {
             put("isPinned", isPinned)
             put("deleted", deleted)
             put("deletedAt", deletedAt)
+            put("useOriginalContent", useOriginalContent)
+            put("continuePlaybackInBackground", continuePlaybackInBackground)
         }
     }
 

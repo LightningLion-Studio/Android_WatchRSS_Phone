@@ -3,6 +3,8 @@ package com.lightningstudio.watchrss.phone.data.backup
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetSnapshot
+import java.io.File
 
 enum class BackupImportMode {
     MERGE,
@@ -39,7 +41,9 @@ internal data class WatchRssBackupSnapshot(
     val appVersion: String,
     val sources: List<PhoneRssSourceEntity>,
     val articles: List<PhoneArticleEntity>,
-    val savedItems: List<PhoneSavedItemEntity>
+    val savedItems: List<PhoneSavedItemEntity>,
+    val readerSnapshot: ReaderPresetSnapshot? = null,
+    val readerResources: List<ReaderBackupResource> = emptyList()
 ) {
     fun preview(): BackupPreview = BackupPreview(
         exportedAt = exportedAt,
@@ -56,6 +60,14 @@ internal data class WatchRssBackupSnapshot(
         savedItemCount = savedItems.size
     )
 }
+
+internal data class ReaderBackupResource(
+    val kind: String,
+    val fileName: String,
+    val sha256: String,
+    val byteCount: Long,
+    val file: File
+)
 
 const val WATCHRSS_BACKUP_MIME_TYPE = "application/vnd.watchrss.backup"
 const val WATCHRSS_BACKUP_EXTENSION = ".wrss"

@@ -134,6 +134,8 @@ fun AdaptiveContentFrame(
 fun AdaptiveTwoPane(
     windowInfo: AdaptiveWindowInfo,
     modifier: Modifier = Modifier,
+    horizontalPadding: Dp? = null,
+    paneSpacing: Dp? = null,
     startPane: @Composable () -> Unit,
     endPane: @Composable () -> Unit
 ) {
@@ -143,8 +145,8 @@ fun AdaptiveTwoPane(
         Row(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = metrics.horizontalPadding),
-            horizontalArrangement = Arrangement.spacedBy(metrics.spacing)
+                .padding(horizontal = horizontalPadding ?: metrics.horizontalPadding),
+            horizontalArrangement = Arrangement.spacedBy(paneSpacing ?: metrics.spacing)
         ) {
             Box(
                 modifier = Modifier
@@ -245,6 +247,8 @@ fun AdaptiveReaderReturnThreePane(
     windowInfo: AdaptiveWindowInfo,
     progress: Float,
     modifier: Modifier = Modifier,
+    horizontalPadding: Dp? = null,
+    paneSpacing: Dp? = null,
     startPane: @Composable () -> Unit,
     movingPane: @Composable () -> Unit,
     readerPane: @Composable () -> Unit
@@ -255,15 +259,19 @@ fun AdaptiveReaderReturnThreePane(
             .clipToBounds()
     ) {
         val metrics = adaptivePaneMetrics(maxWidth, windowInfo)
-        val endPaneWidth = (maxWidth - metrics.horizontalPadding * 2 - metrics.startPaneWidth - metrics.spacing)
+        val resolvedHorizontalPadding = horizontalPadding ?: metrics.horizontalPadding
+        val resolvedPaneSpacing = paneSpacing ?: metrics.spacing
+        val endPaneWidth = (maxWidth - resolvedHorizontalPadding * 2 -
+            metrics.startPaneWidth - resolvedPaneSpacing)
             .coerceAtLeast(metrics.minEndPaneWidth)
         val returnProgress = progress.coerceIn(0f, 1f)
-        val startPaneFinalX = metrics.horizontalPadding
-        val startPaneInitialX = startPaneFinalX - metrics.startPaneWidth - metrics.spacing
-        val movingPaneInitialX = metrics.horizontalPadding
-        val movingPaneFinalX = metrics.horizontalPadding + metrics.startPaneWidth + metrics.spacing
+        val startPaneFinalX = resolvedHorizontalPadding
+        val startPaneInitialX = startPaneFinalX - metrics.startPaneWidth - resolvedPaneSpacing
+        val movingPaneInitialX = resolvedHorizontalPadding
+        val movingPaneFinalX =
+            resolvedHorizontalPadding + metrics.startPaneWidth + resolvedPaneSpacing
         val readerPaneInitialX = movingPaneFinalX
-        val readerPaneFinalX = maxWidth + metrics.spacing
+        val readerPaneFinalX = maxWidth + resolvedPaneSpacing
 
         Box(
             modifier = Modifier
@@ -300,6 +308,8 @@ fun AdaptiveReaderOpenThreePane(
     windowInfo: AdaptiveWindowInfo,
     progress: Float,
     modifier: Modifier = Modifier,
+    horizontalPadding: Dp? = null,
+    paneSpacing: Dp? = null,
     startPane: @Composable () -> Unit,
     movingPane: @Composable () -> Unit,
     readerPane: @Composable () -> Unit
@@ -308,6 +318,8 @@ fun AdaptiveReaderOpenThreePane(
         windowInfo = windowInfo,
         progress = 1f - progress.coerceIn(0f, 1f),
         modifier = modifier,
+        horizontalPadding = horizontalPadding,
+        paneSpacing = paneSpacing,
         startPane = startPane,
         movingPane = movingPane,
         readerPane = readerPane

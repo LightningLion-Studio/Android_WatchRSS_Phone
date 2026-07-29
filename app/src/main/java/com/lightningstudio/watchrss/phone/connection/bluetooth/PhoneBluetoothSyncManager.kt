@@ -1,15 +1,18 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth
 
+import android.annotation.SuppressLint
 import android.content.Context
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneLibrarySyncWindow
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPreset
+import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundTranscoder
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
@@ -38,6 +41,7 @@ data class PhoneBluetoothSyncProgress(
 class PhoneBluetoothSyncManager(
     context: Context,
     private val repository: PhoneCompanionRepository,
+    private val readerPresetRepository: ReaderPresetRepository,
     private val deviceId: String,
     private val debugLog: BluetoothDebugLog,
     private val buildAccountSyncRequest: suspend (watchDeviceId: String, watchInstallId: String?, watchDisplayName: String?) -> JSONObject =
@@ -45,6 +49,8 @@ class PhoneBluetoothSyncManager(
     private val onLibrarySyncCompleted: suspend () -> Unit = {}
 ) {
     private val client = PhoneBluetoothSyncClient(context.applicationContext, debugLog)
+    private val watchBackgroundTranscoder =
+        WatchBackgroundTranscoder(context.applicationContext, readerPresetRepository)
 
     suspend fun probeLibrarySyncTargets(
         onProbe: (completed: Int, total: Int) -> Unit = { _, _ -> }
@@ -428,6 +434,11 @@ class PhoneBluetoothSyncManager(
                     "fallbackReason" to window.fallbackReason
                 )
             )
+            if (exchange.manifestResponse.optInt("version") >= 11 &&
+                exchange.manifestResponse.optBoolean("supportsReaderPresets", true)
+            ) {
+                syncReaderPresets(exchange.deviceAddress, sessionId)
+            }
             PhoneBluetoothSyncResult(
                 deviceName = exchange.deviceName,
                 libraryStats = LibrarySyncStats(
@@ -452,13 +463,75 @@ class PhoneBluetoothSyncManager(
         }.getOrThrow()
     }
 
+    suspend fun syncReaderPresets(
+        deviceAddress: String,
+        parentSessionId: String = BluetoothDebugLog.newSessionId("syncReader")
+    ) {
+        client.capabilitiesFor(deviceAddress)?.let { capabilities ->
+            watchBackgroundTranscoder.prepareAll(capabilities)
+        }
+        val snapshot = readerPresetRepository.exportSnapshot()
+        delay(READER_RECONNECT_DELAY_MS)
+        val manifest = exchange(
+            request = ReaderPresetSyncPayload.buildManifest(snapshot, deviceId),
+            timeoutMs = READER_EXCHANGE_TIMEOUT_MS,
+            sessionId = "$parentSessionId-reader-manifest",
+            deviceAddress = deviceAddress
+        ).response
+        requireSuccess(manifest)
+        ReaderPresetSyncPayload.mergeManifest(manifest, readerPresetRepository)
+
+        ReaderPresetSyncPayload.missingResources(manifest).forEachIndexed { resourceIndex, resource ->
+            ReaderPresetSyncPayload.pushFrames(readerPresetRepository, resource)
+                .forEachIndexed { chunkIndex, frame ->
+                    delay(READER_RECONNECT_DELAY_MS)
+                    val ack = exchange(
+                        request = frame,
+                        timeoutMs = READER_EXCHANGE_TIMEOUT_MS,
+                        sessionId = "$parentSessionId-reader-push-$resourceIndex-$chunkIndex",
+                        deviceAddress = deviceAddress
+                    ).response
+                    requireSuccess(ack)
+                    require(ack.optBoolean("received")) { "手表未确认收到资源分块" }
+                    require(ack.optString("chunkSha256") == frame.optString("chunkSha256")) {
+                        "手表资源分块 ACK 校验失败"
+                    }
+                    if (chunkIndex == frame.optInt("chunkCount") - 1) {
+                        require(ack.optBoolean("applied")) { "手表未确认资源完整落盘" }
+                    }
+                }
+        }
+
+        ReaderPresetSyncPayload.locallyMissing(readerPresetRepository)
+            .forEachIndexed { resourceIndex, resource ->
+                var chunkIndex = 0
+                var complete = false
+                while (!complete) {
+                    delay(READER_RECONNECT_DELAY_MS)
+                    val response = exchange(
+                        request = ReaderPresetSyncPayload.pullRequest(resource, chunkIndex),
+                        timeoutMs = READER_EXCHANGE_TIMEOUT_MS,
+                        sessionId = "$parentSessionId-reader-pull-$resourceIndex-$chunkIndex",
+                        deviceAddress = deviceAddress
+                    ).response
+                    requireSuccess(response)
+                    complete = ReaderPresetSyncPayload.applyPulledChunk(
+                        response,
+                        resource,
+                        readerPresetRepository
+                    )
+                    chunkIndex += 1
+                }
+            }
+    }
+
     suspend fun updateReaderPresetPreview(
         deviceAddress: String,
         sessionId: String,
         sequence: Long,
         preset: ReaderPreset
     ): String {
-        delay(PREVIEW_RECONNECT_DELAY_MS)
+        delay(READER_RECONNECT_DELAY_MS)
         val exchange = exchange(
             request = ReaderPresetPreviewPayload.update(sessionId, sequence, preset),
             timeoutMs = PREVIEW_EXCHANGE_TIMEOUT_MS,
@@ -475,8 +548,11 @@ class PhoneBluetoothSyncManager(
         return exchange.deviceName
     }
 
-    suspend fun stopReaderPresetPreview(deviceAddress: String, sessionId: String) {
-        delay(PREVIEW_RECONNECT_DELAY_MS)
+    suspend fun stopReaderPresetPreview(
+        deviceAddress: String,
+        sessionId: String
+    ) {
+        delay(READER_RECONNECT_DELAY_MS)
         val response = exchange(
             request = ReaderPresetPreviewPayload.stop(sessionId),
             timeoutMs = PREVIEW_EXCHANGE_TIMEOUT_MS,
@@ -516,6 +592,7 @@ class PhoneBluetoothSyncManager(
         }
     }
 
+    @SuppressLint("MissingPermission")
     private suspend fun exchangeLibrary(
         buildManifestRequest: suspend (String) -> JSONObject,
         buildArticleRequests: suspend (JSONObject, Boolean) -> List<JSONObject>,
@@ -593,7 +670,8 @@ class PhoneBluetoothSyncManager(
         private const val LIBRARY_PROBE_TIMEOUT_MS = 10_000L
         private const val QUICK_EXCHANGE_TIMEOUT_MS = 30_000L
         private const val LIBRARY_SYNC_TIMEOUT_MS = 900_000L
+        private const val READER_EXCHANGE_TIMEOUT_MS = 90_000L
+        private const val READER_RECONNECT_DELAY_MS = 180L
         private const val PREVIEW_EXCHANGE_TIMEOUT_MS = 15_000L
-        private const val PREVIEW_RECONNECT_DELAY_MS = 180L
     }
 }

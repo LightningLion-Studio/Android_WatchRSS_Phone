@@ -59,6 +59,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -110,6 +111,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -119,11 +121,17 @@ import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
+import com.lightningstudio.watchrss.phone.data.ai.PhoneAiSummaryResult
 import com.lightningstudio.watchrss.phone.data.importer.WebArticleImporter
 import com.lightningstudio.watchrss.phone.data.local.ARTICLE_TEXT_CHUNK_BYTES
 import com.lightningstudio.watchrss.phone.data.local.isArticleContentMarker
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.repo.PhoneImportedTextReader
+import com.lightningstudio.watchrss.phone.ui.reader.ProvideReaderPreset
+import com.lightningstudio.watchrss.phone.ui.reader.LocalReaderPresetRuntime
+import com.lightningstudio.watchrss.phone.ui.reader.ReaderBackgroundSurface
+import com.lightningstudio.watchrss.phone.ui.reader.ReaderTextRole
+import com.lightningstudio.watchrss.phone.ui.reader.readerTextStyle
 import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWidthClass
@@ -168,39 +176,43 @@ class ArticleReaderActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val articleId = intent.getStringExtra(EXTRA_ARTICLE_ID).orEmpty()
         val repository = (application as PhoneCompanionApplication).container.repository
+        val readerPresetRepository =
+            (application as PhoneCompanionApplication).container.readerPresetRepository
 
         setContent {
             WatchRssPhoneTheme {
-                val article by remember(articleId) {
-                    repository.observeArticle(articleId)
-                }.collectAsState(initial = null)
-                val importedTextReader by produceState<PhoneImportedTextReader?>(
-                    initialValue = null,
-                    articleId
-                ) {
-                    value = repository.getImportedTextReader(articleId)
-                }
-                ArticleReaderScreen(
-                    article = article,
-                    importedTextReader = importedTextReader,
-                    invalidArticleId = articleId.isBlank(),
-                    onLoadImportedTextChunk = repository::loadImportedTextChunk,
-                    onSaveReadingProgress = { progress ->
-                        repository.updateArticleReadingProgress(articleId, progress)
-                    },
-                    onBack = { finish() },
-                    onOpenImportedArticle = { url ->
-                        val targetId = runCatching {
-                            WebArticleImporter.stableArticleId(url)
-                        }.getOrNull()
-                        if (targetId != null) {
-                            startActivity(createIntent(this, targetId))
-                        }
-                    },
-                    onOpenOriginal = { url ->
-                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                ProvideReaderPreset(readerPresetRepository) {
+                    val article by remember(articleId) {
+                        repository.observeArticle(articleId)
+                    }.collectAsState(initial = null)
+                    val importedTextReader by produceState<PhoneImportedTextReader?>(
+                        initialValue = null,
+                        articleId
+                    ) {
+                        value = repository.getImportedTextReader(articleId)
                     }
-                )
+                    ArticleReaderScreen(
+                        article = article,
+                        importedTextReader = importedTextReader,
+                        invalidArticleId = articleId.isBlank(),
+                        onLoadImportedTextChunk = repository::loadImportedTextChunk,
+                        onSaveReadingProgress = { progress ->
+                            repository.updateArticleReadingProgress(articleId, progress)
+                        },
+                        onBack = { finish() },
+                        onOpenImportedArticle = { url ->
+                            val targetId = runCatching {
+                                WebArticleImporter.stableArticleId(url)
+                            }.getOrNull()
+                            if (targetId != null) {
+                                startActivity(createIntent(this, targetId))
+                            }
+                        },
+                        onOpenOriginal = { url ->
+                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                        }
+                    )
+                }
             }
         }
     }
@@ -395,6 +407,59 @@ internal fun ArticleReaderScreen(
         val onSaveReadingProgressState = rememberUpdatedState(onSaveReadingProgress)
         val onBackState = rememberUpdatedState(onBack)
         val onPositionRestoredState = rememberUpdatedState(onPositionRestored)
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val appContainer = (context.applicationContext as PhoneCompanionApplication).container
+        val aiConfig = remember(safeArticle.articleId) { appContainer.aiSettingsStore.config() }
+        val aiScope = rememberCoroutineScope()
+        var aiJob by remember(safeArticle.articleId) { mutableStateOf<Job?>(null) }
+        var aiResult by remember(safeArticle.articleId) {
+            mutableStateOf<PhoneAiSummaryResult?>(null)
+        }
+        var aiError by remember(safeArticle.articleId) { mutableStateOf<String?>(null) }
+        var aiLoading by remember(safeArticle.articleId) { mutableStateOf(false) }
+        var showAiSummary by remember(safeArticle.articleId) { mutableStateOf(false) }
+
+        suspend fun summaryArticle(): PhoneArticleEntity {
+            val reader = importedTextReader ?: return safeArticle
+            val text = buildString {
+                for (index in 0 until reader.chunkCount) {
+                    if (length >= 160_000) break
+                    append(onLoadImportedTextChunk(reader.marker, index).orEmpty())
+                    append('\n')
+                }
+            }
+            return safeArticle.copy(contentHtml = null, contentText = text)
+        }
+
+        fun startAiSummary() {
+            showAiSummary = true
+            aiJob?.cancel()
+            aiJob = aiScope.launch {
+                aiLoading = true
+                aiError = null
+                aiResult = runCatching {
+                    appContainer.aiSummaryService.summarize(summaryArticle())
+                }.fold(
+                    onSuccess = { it },
+                    onFailure = {
+                        if (it is CancellationException) return@launch
+                        aiError = it.message ?: "总结失败"
+                        null
+                    }
+                )
+                aiLoading = false
+            }
+        }
+
+        LaunchedEffect(safeArticle.articleId, aiConfig.autoSummarize, aiConfig.enabled) {
+            aiJob?.cancel()
+            aiResult = null
+            aiError = null
+            if (aiConfig.enabled && aiConfig.autoSummarize) startAiSummary()
+        }
+        DisposableEffect(safeArticle.articleId) {
+            onDispose { aiJob?.cancel() }
+        }
 
         LaunchedEffect(safeArticle.articleId, hasRestoredPosition) {
             if (hasRestoredPosition) {
@@ -684,7 +749,7 @@ internal fun ArticleReaderScreen(
             },
             onBack = onBackState.value
         ) {
-            val backgroundColor = MaterialTheme.colorScheme.background
+            val backgroundColor = Color.Transparent
             val surfaceColorArgb = MaterialTheme.colorScheme.surface.toArgb()
             val backdrop = rememberLayerBackdrop {
                 drawRect(backgroundColor)
@@ -897,6 +962,15 @@ internal fun ArticleReaderScreen(
                                 Text("原网页")
                             }
                         }
+                        if (aiConfig.enabled) {
+                            GlassButton(onClick = {
+                                if (aiResult == null && !aiLoading) startAiSummary()
+                                else showAiSummary = true
+                            }) {
+                                Icon(Icons.Default.AutoAwesome, contentDescription = null)
+                                Text("AI总结")
+                            }
+                        }
                         if (embedded && onOpenFullscreen != null) {
                             GlassButton(onClick = onOpenFullscreen) {
                                 Icon(
@@ -905,6 +979,52 @@ internal fun ArticleReaderScreen(
                                 )
                                 Text(if (embeddedFullscreen) "缩小" else "全屏")
                             }
+                        }
+                    }
+                }
+            }
+
+            if (showAiSummary) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = bottomBarHeight + 12.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f)
+                ) {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("AI 总结", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                            GlassButton(onClick = { showAiSummary = false }) { Text("关闭") }
+                        }
+                        when {
+                            aiLoading -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                CircularProgressIndicator(Modifier.size(20.dp))
+                                Text("正在处理长正文…")
+                            }
+                            aiError != null -> {
+                                Text(aiError.orEmpty(), color = MaterialTheme.colorScheme.error)
+                                GlassButton(onClick = ::startAiSummary) { Text("重试") }
+                            }
+                            aiResult != null -> {
+                                SelectionContainer {
+                                    Text(aiResult!!.text, style = readerTextStyle(ReaderTextRole.BODY))
+                                }
+                                if (aiConfig.showTokenUsage) {
+                                    Text(
+                                        "Token：输入 ${aiResult!!.promptTokens ?: 0} · 输出 ${aiResult!!.completionTokens ?: 0} · 合计 ${aiResult!!.totalTokens ?: 0}",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                            else -> GlassButton(onClick = ::startAiSummary) { Text("开始总结") }
                         }
                     }
                 }
@@ -939,8 +1059,16 @@ private fun ReaderBackSurface(
         onBeforeBack = onBeforeBack,
         onBack = onBack
     ) {
-        content()
+        ReaderBackgroundSurface(modifier = Modifier.fillMaxSize()) {
+            content()
+        }
     }
+}
+
+@Composable
+private fun androidx.compose.ui.text.TextStyle.withReaderIndent(): androidx.compose.ui.text.TextStyle {
+    val indent = LocalReaderPresetRuntime.current.preset.body.firstLineIndentEm
+    return if (indent <= 0f) this else copy(textIndent = TextIndent(firstLine = indent.em))
 }
 
 @Composable
@@ -954,14 +1082,12 @@ private fun ReaderTopContent(
     ) {
         Text(
             text = article.title.ifBlank { article.url },
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold
+            style = readerTextStyle(ReaderTextRole.TITLE)
         )
         article.siteName.takeIf { it.isNotBlank() }?.let {
             Text(
                 text = it,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                style = readerTextStyle(ReaderTextRole.SUBTITLE)
             )
         }
     }
@@ -1071,10 +1197,11 @@ private fun ImportedTextChunkContentView(
             } else if (text.isNotBlank()) {
                 Text(
                     text = text,
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = readerTextStyle(ReaderTextRole.BODY),
                     onTextLayout = { chunkLayouts[index] = it },
-                    modifier = Modifier.padding(vertical = 8.dp),
-                    lineHeight = MaterialTheme.typography.bodyLarge.lineHeight * 1.4f
+                    modifier = Modifier.padding(
+                        vertical = LocalReaderPresetRuntime.current.preset.body.paragraphSpacingDp.dp / 2
+                    )
                 )
             }
         }
@@ -1101,15 +1228,17 @@ private fun ArticleReaderContentView(
         itemsIndexed(nodes) { index, node ->
             when (node) {
                 is ArticleNode.Heading -> {
+                    val titleStyle = readerTextStyle(ReaderTextRole.TITLE)
                     Text(
                         text = node.text,
-                        style = when (node.level) {
-                            1 -> MaterialTheme.typography.headlineLarge
-                            2 -> MaterialTheme.typography.headlineMedium
-                            3 -> MaterialTheme.typography.headlineSmall
-                            else -> MaterialTheme.typography.titleLarge
-                        },
-                        fontWeight = FontWeight.Bold,
+                        style = titleStyle.copy(
+                            fontSize = titleStyle.fontSize * when (node.level) {
+                                1 -> 1f
+                                2 -> 0.88f
+                                3 -> 0.78f
+                                else -> 0.72f
+                            }
+                        ),
                         onTextLayout = { textLayouts[index] = it },
                         modifier = Modifier.padding(vertical = 12.dp)
                     )
@@ -1117,10 +1246,11 @@ private fun ArticleReaderContentView(
                 is ArticleNode.Paragraph -> {
                     Text(
                         text = node.text,
-                        style = MaterialTheme.typography.bodyLarge,
+                        style = readerTextStyle(ReaderTextRole.BODY).withReaderIndent(),
                         onTextLayout = { textLayouts[index] = it },
-                        modifier = Modifier.padding(vertical = 8.dp),
-                        lineHeight = MaterialTheme.typography.bodyLarge.lineHeight * 1.4f
+                        modifier = Modifier.padding(
+                            vertical = LocalReaderPresetRuntime.current.preset.body.paragraphSpacingDp.dp / 2
+                        )
                     )
                 }
                 is ArticleNode.Image -> {
@@ -1164,12 +1294,11 @@ private fun ArticleReaderContentView(
                     ) {
                         Text(
                             text = "•",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = PrimaryRed
+                            style = readerTextStyle(ReaderTextRole.LINK)
                         )
                         Text(
                             text = node.text,
-                            style = MaterialTheme.typography.bodyLarge,
+                            style = readerTextStyle(ReaderTextRole.BODY),
                             onTextLayout = { textLayouts[index] = it },
                             modifier = Modifier.weight(1f)
                         )
@@ -1290,7 +1419,7 @@ private fun ArticleBlockQuote(
     modifier: Modifier = Modifier,
     onTextLayout: (TextLayoutResult) -> Unit = {}
 ) {
-    val lineColor = MaterialTheme.colorScheme.primary
+    val lineColor = Color(LocalReaderPresetRuntime.current.preset.accentColorArgb)
     val lineWidth = 4.dp
     Text(
         text = text,
@@ -1309,8 +1438,7 @@ private fun ArticleBlockQuote(
                 )
             }
             .padding(start = 18.dp, end = 4.dp),
-        style = MaterialTheme.typography.bodyLarge,
-        color = MaterialTheme.colorScheme.onSurfaceVariant
+        style = readerTextStyle(ReaderTextRole.QUOTE)
     )
 }
 
@@ -1341,11 +1469,7 @@ private fun ArticleCodeBlock(
                 modifier = Modifier
                     .horizontalScroll(horizontalScrollState)
                     .padding(horizontal = 16.dp, vertical = 14.dp),
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    fontFamily = FontFamily.Monospace,
-                    letterSpacing = 0.sp
-                ),
-                lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.28f,
+                style = readerTextStyle(ReaderTextRole.CODE),
                 softWrap = false
             )
         }

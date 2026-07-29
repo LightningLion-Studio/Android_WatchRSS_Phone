@@ -82,7 +82,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class PageType { CHANNELS, SOURCE_ARTICLES, FAVORITES, WATCH_LATER, INDEPENDENT, IMPORTED }
+enum class PageType { CHANNELS, SOURCE_ARTICLES, INDEPENDENT, IMPORTED }
 
 class ListPageActivity : ComponentActivity() {
     companion object {
@@ -415,8 +415,6 @@ fun ListPageScreen(
 
     val articles = when (pageType) {
         PageType.SOURCE_ARTICLES -> uiState.rssArticles.filter { it.rssSourceUrl == sourceUrl }
-        PageType.FAVORITES -> uiState.favorites
-        PageType.WATCH_LATER -> uiState.watchLater
         PageType.INDEPENDENT -> uiState.independentArticles
         PageType.IMPORTED -> uiState.importedContentArticles
         else -> emptyList()
@@ -425,8 +423,6 @@ fun ListPageScreen(
     val title = when (pageType) {
         PageType.CHANNELS -> "频道"
         PageType.SOURCE_ARTICLES -> source?.title ?: "频道"
-        PageType.FAVORITES -> "收藏"
-        PageType.WATCH_LATER -> "稍后再看"
         PageType.INDEPENDENT -> "独立文章"
         PageType.IMPORTED -> "小说"
     }
@@ -437,8 +433,6 @@ fun ListPageScreen(
     val emptyText = when (pageType) {
         PageType.CHANNELS -> "暂无频道"
         PageType.SOURCE_ARTICLES -> "此频道暂无文章"
-        PageType.FAVORITES -> "暂无收藏"
-        PageType.WATCH_LATER -> "暂无稍后再看"
         PageType.INDEPENDENT -> "暂无独立文章"
         PageType.IMPORTED -> "暂无导入内容"
     }
@@ -565,13 +559,6 @@ fun ListPageScreen(
             modifier = Modifier.align(Alignment.TopCenter),
             actions = {
                 when (pageType) {
-                    PageType.FAVORITES -> {
-                        if (uiState.favorites.isNotEmpty()) {
-                            IconButton(onClick = onClearImportedContent) {
-                                Icon(Icons.Default.Delete, contentDescription = "清空")
-                            }
-                        }
-                    }
                     PageType.IMPORTED -> {
                         if (uiState.importedContentArticles.isNotEmpty()) {
                             IconButton(onClick = onClearImportedContent) {
@@ -648,24 +635,6 @@ fun ListPageScreen(
                     }
                 }
             }
-            PageType.FAVORITES -> {
-                if (uiState.favorites.isNotEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(end = 16.dp, bottom = TAB_BAR_HEIGHT + 16.dp)
-                    ) {
-                        CapsuleFloatingButton(
-                            backdrop = backdrop,
-                            onClick = onClearImportedContent
-                        ) {
-                            Icon(Icons.Default.Delete, contentDescription = null)
-                            Text("清空")
-                        }
-                    }
-                }
-            }
-            else -> {}
         }
 
         // 底部 TabBar

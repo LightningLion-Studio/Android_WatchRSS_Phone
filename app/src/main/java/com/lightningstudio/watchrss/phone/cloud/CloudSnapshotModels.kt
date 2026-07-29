@@ -2,6 +2,9 @@ package com.lightningstudio.watchrss.phone.cloud
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.InputStream
+import java.security.MessageDigest
 
 const val CLOUD_SNAPSHOT_SCHEMA_VERSION = 2
 const val CLOUD_SNAPSHOT_CHUNK_BYTES = 4 * 1024 * 1024
@@ -9,8 +12,30 @@ const val CLOUD_SNAPSHOT_CHUNK_BYTES = 4 * 1024 * 1024
 data class CloudLogicalObject(
     val name: String,
     val bytes: ByteArray,
-    val compress: Boolean = true
-)
+    val compress: Boolean = true,
+    val file: File? = null
+) {
+    constructor(name: String, file: File, compress: Boolean = true) :
+        this(name, ByteArray(0), compress, file)
+
+    val originalBytes: Long
+        get() = file?.length() ?: bytes.size.toLong()
+
+    fun openStream(): InputStream = file?.inputStream()?.buffered() ?: bytes.inputStream()
+
+    fun sha256(): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        openStream().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+}
 
 data class CloudChunkDescriptor(
     val plaintextSha256: String,

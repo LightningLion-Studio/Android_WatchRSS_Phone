@@ -109,7 +109,11 @@ private fun Element.toImportedRssItem(sourceUrl: String, index: Int): ImportedRs
     val rawLink = childTextAny("link")
     val url = rawLink.takeIf { it.isNotBlank() }?.let { resolveUrl(it, sourceUrl) }
         ?: syntheticItemUrl(sourceUrl, guid ?: childTextAny("title").ifBlank { index.toString() })
-    val contentHtml = childTextAny("content:encoded", "encoded", "description").takeIf { it.isNotBlank() }
+    val media = enclosureMedia(sourceUrl)
+    val contentHtml = appendEnclosureMedia(
+        childTextAny("content:encoded", "encoded", "description").takeIf { it.isNotBlank() },
+        media
+    )
     val contentText = contentHtml?.let { Jsoup.parse(it, url).text().trim() }.orEmpty()
     val excerpt = Jsoup.parse(childTextAny("description").ifBlank { contentHtml.orEmpty() }, url)
         .text()
@@ -121,7 +125,7 @@ private fun Element.toImportedRssItem(sourceUrl: String, index: Int): ImportedRs
         excerpt = excerpt,
         contentHtml = contentHtml,
         contentText = contentText.ifBlank { excerpt },
-        imageUrl = firstMediaUrl(sourceUrl),
+        imageUrl = media.imageUrl,
         guid = guid
     )
 }
@@ -132,7 +136,11 @@ private fun Element.toImportedAtomItem(sourceUrl: String, index: Int): ImportedR
         item.attr("rel").isBlank() || item.attr("rel").equals("alternate", ignoreCase = true)
     }?.absUrl("href")?.takeIf { it.isNotBlank() }
     val url = link ?: syntheticItemUrl(sourceUrl, guid ?: childTextAny("title").ifBlank { index.toString() })
-    val contentHtml = childTextAny("content", "summary").takeIf { it.isNotBlank() }
+    val media = enclosureMedia(sourceUrl)
+    val contentHtml = appendEnclosureMedia(
+        childTextAny("content", "summary").takeIf { it.isNotBlank() },
+        media
+    )
     val contentText = contentHtml?.let { Jsoup.parse(it, url).text().trim() }.orEmpty()
     val excerpt = Jsoup.parse(childTextAny("summary").ifBlank { contentHtml.orEmpty() }, url)
         .text()
@@ -144,7 +152,7 @@ private fun Element.toImportedAtomItem(sourceUrl: String, index: Int): ImportedR
         excerpt = excerpt,
         contentHtml = contentHtml,
         contentText = contentText.ifBlank { excerpt },
-        imageUrl = firstMediaUrl(sourceUrl),
+        imageUrl = media.imageUrl ?: firstMediaUrl(sourceUrl),
         guid = guid
     )
 }
@@ -159,17 +167,92 @@ private fun Element.childTextAny(vararg names: String): String {
 }
 
 private fun Element.firstMediaUrl(sourceUrl: String): String? {
-    val direct = selectFirst("enclosure[url]")?.attr("url")?.takeIf { it.isNotBlank() }
+    val direct = enclosureMedia(sourceUrl).imageUrl
         ?: getAllElements().firstOrNull { element ->
+            val tag = element.tagName().lowercase()
             element.hasAttr("url") &&
-                element.tagName().lowercase() in setOf(
-                    "media:thumbnail",
-                    "thumbnail",
-                    "media:content",
-                    "content"
-                )
-        }?.attr("url")?.takeIf { it.isNotBlank() }
+                tag in setOf("media:thumbnail", "thumbnail")
+        }?.attr("url")?.takeIf { it.isNotBlank() }?.let { resolveUrl(it, sourceUrl) }
     return direct?.let { resolveUrl(it, sourceUrl) }
+}
+
+private data class EnclosureMedia(
+    val imageUrl: String?,
+    val audioUrl: String?,
+    val videoUrl: String?
+)
+
+private fun Element.enclosureMedia(sourceUrl: String): EnclosureMedia {
+    var imageUrl: String? = null
+    var audioUrl: String? = null
+    var videoUrl: String? = null
+
+    getAllElements().forEach { element ->
+        val tag = element.tagName().lowercase()
+        val type = element.attr("type").trim().lowercase()
+        val rawUrl = when {
+            element.hasAttr("url") -> element.attr("url")
+            element.hasAttr("href") -> element.attr("href")
+            else -> ""
+        }.trim()
+        if (rawUrl.isEmpty()) return@forEach
+        val resolved = resolveUrl(rawUrl, sourceUrl)
+
+        when {
+            tag in setOf("media:thumbnail", "thumbnail", "itunes:image") -> {
+                if (imageUrl == null) imageUrl = resolved
+            }
+            tag == "media:content" && type.startsWith("image/") -> {
+                if (imageUrl == null) imageUrl = resolved
+            }
+            tag == "media:content" && type.startsWith("audio/") -> {
+                if (audioUrl == null) audioUrl = resolved
+            }
+            tag == "media:content" && type.startsWith("video/") -> {
+                if (videoUrl == null) videoUrl = resolved
+            }
+            tag == "enclosure" && type.startsWith("image/") -> {
+                if (imageUrl == null) imageUrl = resolved
+            }
+            tag == "enclosure" && type.startsWith("audio/") -> {
+                if (audioUrl == null) audioUrl = resolved
+            }
+            tag == "enclosure" && type.startsWith("video/") -> {
+                if (videoUrl == null) videoUrl = resolved
+            }
+            tag == "link" && element.attr("rel").equals("enclosure", ignoreCase = true) &&
+                type.startsWith("audio/") -> {
+                if (audioUrl == null) audioUrl = resolved
+            }
+            tag == "link" && element.attr("rel").equals("enclosure", ignoreCase = true) &&
+                type.startsWith("video/") -> {
+                if (videoUrl == null) videoUrl = resolved
+            }
+        }
+    }
+    return EnclosureMedia(imageUrl, audioUrl, videoUrl)
+}
+
+private fun appendEnclosureMedia(contentHtml: String?, media: EnclosureMedia): String? {
+    if (media.audioUrl == null && media.videoUrl == null) return contentHtml
+    val document = Jsoup.parseBodyFragment(contentHtml.orEmpty())
+    document.outputSettings().prettyPrint(false)
+    val body = document.body()
+    media.videoUrl?.let { url ->
+        if (body.select("video[src], video source[src]").none { it.attr("src") == url }) {
+            body.appendElement("video")
+                .attr("controls", "")
+                .attr("src", url)
+        }
+    }
+    media.audioUrl?.let { url ->
+        if (body.select("audio[src], audio source[src]").none { it.attr("src") == url }) {
+            body.appendElement("audio")
+                .attr("controls", "")
+                .attr("src", url)
+        }
+    }
+    return body.html().trim().takeIf { it.isNotBlank() }
 }
 
 private fun syntheticItemUrl(sourceUrl: String, key: String): String {

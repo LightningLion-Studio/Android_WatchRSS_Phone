@@ -11,6 +11,11 @@
         android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Samsung FlipFont packages have no exported component to query. The font library
+         filters this visibility to com.monotype.android.font.* and only reads font assets. -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
 
     <application
         android:name=".PhoneCompanionApplication"
@@ -159,6 +164,10 @@
             android:theme="@style/Theme.WatchRSS" />
         <activity
             android:name=".ProfileActivity"
+            android:exported="false"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
+            android:name=".SettingsActivity"
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />
         <activity

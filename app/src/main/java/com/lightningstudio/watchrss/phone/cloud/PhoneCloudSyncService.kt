@@ -94,9 +94,10 @@ class PhoneCloudSyncService(
             downloadBytes += head.manifestSizeBytes
             downloadBytes += snapshot.chunks.sumOf(CloudDownloadObject::sizeBytes)
         }
-        val payload = backupService.createCloudPayload()
-        val uploadBytes = payload.privateLibraryArchive.size.toLong() +
-            payload.rssStateJson.size +
+        val privateArchive = backupService.createCloudPrivateArchiveFile()
+        val rssState = backupService.createCloudRssState()
+        val uploadBytes = privateArchive.length() +
+            rssState.size +
             128 * 1024L
         return CloudTransferEstimate(uploadBytes, downloadBytes)
     }
@@ -612,7 +613,7 @@ class PhoneCloudSyncService(
         val carried: List<CloudObjectDescriptor>
         if (fullTransfer) {
             logicalObjects = listOf(
-                CloudLogicalObject(PRIVATE_LIBRARY_OBJECT, backupService.createCloudPrivateArchive(), false),
+                CloudLogicalObject(PRIVATE_LIBRARY_OBJECT, backupService.createCloudPrivateArchiveFile(), false),
                 CloudLogicalObject(RSS_STATE_OBJECT, backupService.createCloudRssState()),
                 CloudLogicalObject(RELAY_LIBRARY_OBJECT, backupService.createCloudRelayLibrary())
             )
@@ -755,7 +756,7 @@ class PhoneCloudSyncService(
         val description = buildString {
             append("keyVersion:").append(keyVersion).append(';')
             objects.sortedBy(CloudLogicalObject::name).forEach {
-                append(it.name).append(':').append(CloudSnapshotCodec.sha256(it.bytes)).append(';')
+                append(it.name).append(':').append(it.sha256()).append(';')
             }
             carried.sortedBy(CloudObjectDescriptor::name).forEach { descriptor ->
                 append(descriptor.name).append(':')

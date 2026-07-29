@@ -48,28 +48,28 @@ class CloudSnapshotCodec(
             require(logicalObject.name.matches(OBJECT_NAME_PATTERN)) {
                 "云快照对象名称无效：${logicalObject.name}"
             }
-            val encodedChunks = if (logicalObject.compress) {
-                logicalObject.bytes
-                    .asListOfChunks(CLOUD_SNAPSHOT_CHUNK_BYTES)
-                    .map(::gzip)
-            } else {
-                logicalObject.bytes.asListOfChunks(CLOUD_SNAPSHOT_CHUNK_BYTES)
-            }
-            val descriptors = encodedChunks.map { plaintext ->
-                val plaintextHash = sha256(plaintext)
-                reusableByPlaintextHash[plaintextHash] ?: encryptChunk(
-                    accountKey = accountKey,
-                    plaintext = plaintext,
-                    plaintextHash = plaintextHash
-                ).also { encrypted ->
-                    newChunks[encrypted.first.ciphertextSha256] = encrypted.second
-                }.first
+            val descriptors = mutableListOf<CloudChunkDescriptor>()
+            var encodedBytes = 0L
+            logicalObject.openStream().use { input ->
+                while (true) {
+                    val raw = input.readChunk(CLOUD_SNAPSHOT_CHUNK_BYTES) ?: break
+                    val plaintext = if (logicalObject.compress) gzip(raw) else raw
+                    encodedBytes += plaintext.size
+                    val plaintextHash = sha256(plaintext)
+                    descriptors += reusableByPlaintextHash[plaintextHash] ?: encryptChunk(
+                        accountKey = accountKey,
+                        plaintext = plaintext,
+                        plaintextHash = plaintextHash
+                    ).also { encrypted ->
+                        newChunks[encrypted.first.ciphertextSha256] = encrypted.second
+                    }.first
+                }
             }
             CloudObjectDescriptor(
                 name = logicalObject.name,
                 encoding = if (logicalObject.compress) "gzip-chunks-v1" else "identity",
-                originalBytes = logicalObject.bytes.size.toLong(),
-                encodedBytes = encodedChunks.sumOf { it.size.toLong() },
+                originalBytes = logicalObject.originalBytes,
+                encodedBytes = encodedBytes,
                 chunks = descriptors
             )
         }
@@ -351,6 +351,17 @@ class CloudSnapshotCodec(
                     offset = end
                 }
             }
+        }
+
+        private fun java.io.InputStream.readChunk(chunkSize: Int): ByteArray? {
+            val output = ByteArrayOutputStream(chunkSize)
+            val buffer = ByteArray(minOf(DEFAULT_BUFFER_SIZE, chunkSize))
+            while (output.size() < chunkSize) {
+                val read = read(buffer, 0, minOf(buffer.size, chunkSize - output.size()))
+                if (read < 0) break
+                output.write(buffer, 0, read)
+            }
+            return output.takeIf { it.size() > 0 }?.toByteArray()
         }
 
         private fun ByteArray.toBase64(): String =

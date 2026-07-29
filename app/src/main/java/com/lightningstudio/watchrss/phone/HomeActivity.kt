@@ -21,6 +21,7 @@ import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_EXTENSION
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_MIME_TYPE
 import com.lightningstudio.watchrss.phone.ui.MainScreen
+import com.lightningstudio.watchrss.phone.ui.reader.ProvideReaderPreset
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModel
@@ -152,15 +153,16 @@ class HomeActivity : ComponentActivity() {
 
         setContent {
             WatchRssPhoneTheme {
-                val state by viewModel.uiState.collectAsState()
+                ProvideReaderPreset(container.readerPresetRepository) {
+                    val state by viewModel.uiState.collectAsState()
 
-                LaunchedEffect(Unit) {
-                    viewModel.toastEvent.collect { msg ->
-                        Toast.makeText(this@HomeActivity, msg, Toast.LENGTH_SHORT).show()
+                    LaunchedEffect(Unit) {
+                        viewModel.toastEvent.collect { msg ->
+                            Toast.makeText(this@HomeActivity, msg, Toast.LENGTH_SHORT).show()
+                        }
                     }
-                }
 
-                MainScreen(
+                    MainScreen(
                     uiState = state,
                     showAccountFeatures = BuildConfig.DEBUG,
                     onUrlChange = viewModel::updateUrlInput,
@@ -206,6 +208,13 @@ class HomeActivity : ComponentActivity() {
                     onMoveRssSourceToTop = viewModel::moveRssSourceToTop,
                     onReorderContentChannels = viewModel::reorderContentChannels,
                     onToggleRssSourcePinned = viewModel::toggleRssSourcePinned,
+                    onSetRssSourceOriginalContentEnabled =
+                        viewModel::setRssSourceOriginalContentEnabled,
+                    onSetRssSourceContinuePlaybackInBackground =
+                        viewModel::setRssSourceContinuePlaybackInBackground,
+                    onClearRssSourceContent = viewModel::clearRssSourceContent,
+                    rssInventoryMode = container.cloudSyncService::rssInventoryMode,
+                    onSetRssInventoryMode = container.cloudSyncService::setRssInventoryMode,
                     onDeleteRssSource = viewModel::deleteRssSource,
                     onRefreshAllRssSources = viewModel::refreshAllRssSources,
                     onRefreshRssSource = viewModel::refreshRssSource,
@@ -217,8 +226,9 @@ class HomeActivity : ComponentActivity() {
                     onChooseConflictResolution = viewModel::chooseConflictResolution,
                     onShowManualConflictOptions = viewModel::showManualConflictOptions,
                     onDismissMessage = viewModel::clearMessage,
-                    onImportFile = ::selectLocalFile
-                )
+                        onImportFile = ::selectLocalFile
+                    )
+                }
             }
         }
         handleInboundIntent(intent)

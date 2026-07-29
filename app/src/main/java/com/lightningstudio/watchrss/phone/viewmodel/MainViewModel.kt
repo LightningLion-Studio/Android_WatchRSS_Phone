@@ -745,8 +745,13 @@ class MainViewModel(
             )
             val stats = result.libraryStats
             val deviceName = result.deviceName.ifBlank { "手表" }
+            val readerWarning = result.readerSyncWarning
             completeSmoothedSyncProgress()
-            val message = "已与 $deviceName 同步完成"
+            val message = if (readerWarning == null) {
+                "已与 $deviceName 同步完成"
+            } else {
+                "已与 $deviceName 完成资料库同步；阅读器资源同步失败"
+            }
             sessionState.value = sessionState.value.copy(
                 message = message,
                 syncStatusMessage = message,
@@ -755,7 +760,9 @@ class MainViewModel(
                 syncProgress = null
             )
             _toastEvent.tryEmit(
-                if (stats != null) {
+                if (readerWarning != null) {
+                    "$message：$readerWarning"
+                } else if (stats != null) {
                     "已与 $deviceName 同步：文章发送 ${stats.sent}，收到 ${stats.received}，合并 ${stats.merged}；RSS源发送 ${stats.sourcesSent}，收到 ${stats.sourcesReceived}，合并 ${stats.sourcesMerged}"
                 } else {
                     "已与 $deviceName 同步"

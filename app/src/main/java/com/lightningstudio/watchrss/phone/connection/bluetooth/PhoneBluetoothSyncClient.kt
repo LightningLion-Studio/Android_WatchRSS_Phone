@@ -19,6 +19,8 @@ import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
@@ -98,6 +100,7 @@ class PhoneBluetoothSyncClient(
     private val debugLog: BluetoothDebugLog
 ) {
     private val capabilitiesByAddress = mutableMapOf<String, PhoneWatchCapabilities>()
+    private val connectionMutex = Mutex()
 
     fun capabilitiesFor(deviceAddress: String): PhoneWatchCapabilities? =
         synchronized(capabilitiesByAddress) { capabilitiesByAddress[deviceAddress] }
@@ -200,6 +203,23 @@ class PhoneBluetoothSyncClient(
         deviceNameHint: String? = null,
         sessionId: String = BluetoothDebugLog.newSessionId("bt-quick"),
         rememberDeviceOnSuccess: Boolean = true
+    ): BluetoothSyncExchange = connectionMutex.withLock {
+        exchangeUnlocked(
+            request = request,
+            deviceAddress = deviceAddress,
+            deviceNameHint = deviceNameHint,
+            sessionId = sessionId,
+            rememberDeviceOnSuccess = rememberDeviceOnSuccess
+        )
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun exchangeUnlocked(
+        request: JSONObject,
+        deviceAddress: String?,
+        deviceNameHint: String?,
+        sessionId: String,
+        rememberDeviceOnSuccess: Boolean
     ): BluetoothSyncExchange {
         val totalStartedAt = SystemClock.elapsedRealtime()
         var socket: BluetoothSocket? = null
@@ -295,6 +315,33 @@ class PhoneBluetoothSyncClient(
         applyResponse: suspend (BluetoothLibrarySyncExchange) -> Unit = {},
         ackApplied: Boolean = true,
         rememberDeviceOnSuccess: Boolean = true
+    ): BluetoothLibrarySyncExchange = connectionMutex.withLock {
+        exchangeLibraryUnlocked(
+            manifestRequest = manifestRequest,
+            buildManifestRequest = buildManifestRequest,
+            buildArticleRequests = buildArticleRequests,
+            deviceAddress = deviceAddress,
+            deviceNameHint = deviceNameHint,
+            sessionId = sessionId,
+            onProgress = onProgress,
+            applyResponse = applyResponse,
+            ackApplied = ackApplied,
+            rememberDeviceOnSuccess = rememberDeviceOnSuccess
+        )
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun exchangeLibraryUnlocked(
+        manifestRequest: JSONObject?,
+        buildManifestRequest: (suspend (BluetoothDevice) -> JSONObject)?,
+        buildArticleRequests: suspend (JSONObject, Boolean) -> List<JSONObject>,
+        deviceAddress: String?,
+        deviceNameHint: String?,
+        sessionId: String,
+        onProgress: (PhoneBluetoothSyncProgress) -> Unit,
+        applyResponse: suspend (BluetoothLibrarySyncExchange) -> Unit,
+        ackApplied: Boolean,
+        rememberDeviceOnSuccess: Boolean
     ): BluetoothLibrarySyncExchange {
         val totalStartedAt = SystemClock.elapsedRealtime()
         var socket: BluetoothSocket? = null

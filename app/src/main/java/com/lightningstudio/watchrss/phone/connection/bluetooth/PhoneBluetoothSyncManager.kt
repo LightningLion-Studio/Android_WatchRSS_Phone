@@ -10,6 +10,7 @@ import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPreset
 import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundTranscoder
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -22,7 +23,8 @@ data class PhoneBluetoothSyncResult(
     val deviceName: String,
     val importedCount: Int? = null,
     val libraryStats: LibrarySyncStats? = null,
-    val accountSync: AccountSyncResult? = null
+    val accountSync: AccountSyncResult? = null,
+    val readerSyncWarning: String? = null
 )
 
 enum class PhoneBluetoothSyncStage(val displayName: String) {
@@ -434,10 +436,22 @@ class PhoneBluetoothSyncManager(
                     "fallbackReason" to window.fallbackReason
                 )
             )
-            if (exchange.manifestResponse.optInt("version") >= 11 &&
+            val readerSyncWarning = if (exchange.manifestResponse.optInt("version") >= 11 &&
                 exchange.manifestResponse.optBoolean("supportsReaderPresets", true)
             ) {
-                syncReaderPresets(exchange.deviceAddress, sessionId)
+                runCatching {
+                    syncReaderPresets(exchange.deviceAddress, sessionId)
+                }.exceptionOrNull()?.let { throwable ->
+                    debugLog.appendEvent(
+                        event = "sync.reader.failed",
+                        sessionId = sessionId,
+                        fields = failureFields(throwable),
+                        throwable = throwable
+                    )
+                    throwable.message ?: "阅读器资源同步失败"
+                }
+            } else {
+                null
             }
             PhoneBluetoothSyncResult(
                 deviceName = exchange.deviceName,
@@ -448,7 +462,8 @@ class PhoneBluetoothSyncManager(
                     sourcesSent = window.rssSources.size,
                     sourcesReceived = receivedSourcesCount,
                     sourcesMerged = mergedSources
-                )
+                ),
+                readerSyncWarning = readerSyncWarning
             ).also { onLibrarySyncCompleted() }
         }.onFailure { throwable ->
             debugLog.appendEvent(
@@ -472,9 +487,8 @@ class PhoneBluetoothSyncManager(
         }
         val snapshot = readerPresetRepository.exportSnapshot()
         delay(READER_RECONNECT_DELAY_MS)
-        val manifest = exchange(
+        val manifest = exchangeReaderFrame(
             request = ReaderPresetSyncPayload.buildManifest(snapshot, deviceId),
-            timeoutMs = READER_EXCHANGE_TIMEOUT_MS,
             sessionId = "$parentSessionId-reader-manifest",
             deviceAddress = deviceAddress
         ).response
@@ -485,9 +499,8 @@ class PhoneBluetoothSyncManager(
             ReaderPresetSyncPayload.pushFrames(readerPresetRepository, resource)
                 .forEachIndexed { chunkIndex, frame ->
                     delay(READER_RECONNECT_DELAY_MS)
-                    val ack = exchange(
+                    val ack = exchangeReaderFrame(
                         request = frame,
-                        timeoutMs = READER_EXCHANGE_TIMEOUT_MS,
                         sessionId = "$parentSessionId-reader-push-$resourceIndex-$chunkIndex",
                         deviceAddress = deviceAddress
                     ).response
@@ -508,9 +521,8 @@ class PhoneBluetoothSyncManager(
                 var complete = false
                 while (!complete) {
                     delay(READER_RECONNECT_DELAY_MS)
-                    val response = exchange(
+                    val response = exchangeReaderFrame(
                         request = ReaderPresetSyncPayload.pullRequest(resource, chunkIndex),
-                        timeoutMs = READER_EXCHANGE_TIMEOUT_MS,
                         sessionId = "$parentSessionId-reader-pull-$resourceIndex-$chunkIndex",
                         deviceAddress = deviceAddress
                     ).response
@@ -523,6 +535,41 @@ class PhoneBluetoothSyncManager(
                     chunkIndex += 1
                 }
             }
+    }
+
+    private suspend fun exchangeReaderFrame(
+        request: JSONObject,
+        sessionId: String,
+        deviceAddress: String
+    ): BluetoothSyncExchange {
+        var lastFailure: Throwable? = null
+        repeat(READER_EXCHANGE_ATTEMPTS) { attempt ->
+            if (attempt > 0) {
+                delay(READER_EXCHANGE_RETRY_DELAY_MS)
+            }
+            val attemptSessionId = if (attempt == 0) sessionId else "$sessionId-retry-$attempt"
+            try {
+                return exchange(
+                    request = request,
+                    timeoutMs = READER_EXCHANGE_TIMEOUT_MS,
+                    sessionId = attemptSessionId,
+                    deviceAddress = deviceAddress
+                )
+            } catch (throwable: Throwable) {
+                if (throwable is CancellationException) throw throwable
+                lastFailure = throwable
+                debugLog.appendEvent(
+                    event = "sync.reader.exchange.retry",
+                    sessionId = attemptSessionId,
+                    fields = failureFields(throwable) + mapOf(
+                        "attempt" to attempt + 1,
+                        "maxAttempts" to READER_EXCHANGE_ATTEMPTS
+                    ),
+                    throwable = throwable
+                )
+            }
+        }
+        throw checkNotNull(lastFailure)
     }
 
     suspend fun updateReaderPresetPreview(
@@ -672,6 +719,8 @@ class PhoneBluetoothSyncManager(
         private const val LIBRARY_SYNC_TIMEOUT_MS = 900_000L
         private const val READER_EXCHANGE_TIMEOUT_MS = 90_000L
         private const val READER_RECONNECT_DELAY_MS = 180L
+        private const val READER_EXCHANGE_RETRY_DELAY_MS = 700L
+        private const val READER_EXCHANGE_ATTEMPTS = 3
         private const val PREVIEW_EXCHANGE_TIMEOUT_MS = 15_000L
     }
 }

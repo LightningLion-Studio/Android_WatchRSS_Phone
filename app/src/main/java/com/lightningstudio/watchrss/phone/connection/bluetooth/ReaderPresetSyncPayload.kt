@@ -113,20 +113,76 @@ object ReaderPresetSyncPayload {
         val index = response.getInt("chunkIndex")
         val count = response.getInt("chunkCount")
         val target = targetFile(repository, resource.kind, resource.fileName)
-        val partial = File(target.parentFile, "${target.name}.part")
-        RandomAccessFile(partial, "rw").use {
-            val offset = index.toLong() * CHUNK_BYTES
-            require(it.length() == offset) { "下载资源分块顺序不连续" }
-            it.seek(offset)
-            it.write(data)
-            it.fd.sync()
+        if (
+            target.exists() &&
+            target.length() == resource.byteCount &&
+            runBlockingHash(target) == resource.sha256
+        ) {
+            return true
         }
+        val partial = File(target.parentFile, "${target.name}.part")
+        val metadata = File(target.parentFile, "${target.name}.part.meta")
+        applyIncomingChunk(
+            partial = partial,
+            metadata = metadata,
+            index = index,
+            chunkCount = count,
+            data = data,
+            totalBytes = resource.byteCount,
+            expectedHash = resource.sha256
+        )
         if (index != count - 1) return false
         require(partial.length() == resource.byteCount) { "下载资源大小校验失败" }
         require(runBlockingHash(partial) == resource.sha256) { "下载资源完整校验失败" }
         if (target.exists()) target.delete()
         require(partial.renameTo(target)) { "下载资源落盘失败" }
+        metadata.delete()
         return true
+    }
+
+    internal fun applyIncomingChunk(
+        partial: File,
+        metadata: File,
+        index: Int,
+        chunkCount: Int,
+        data: ByteArray,
+        totalBytes: Long,
+        expectedHash: String
+    ) {
+        val signature = "$expectedHash:$totalBytes:$chunkCount"
+        val savedSignature = runCatching { metadata.readText() }.getOrNull()
+        if (savedSignature != signature) {
+            require(index == 0) { "下载资源传输已变化，请从第一块重试" }
+            if (partial.exists()) partial.delete()
+            metadata.parentFile?.mkdirs()
+            metadata.writeText(signature)
+        }
+
+        RandomAccessFile(partial, "rw").use { output ->
+            val offset = index.toLong() * CHUNK_BYTES
+            val end = offset + data.size
+            require(offset <= totalBytes && end <= totalBytes) { "下载资源分块范围异常" }
+            when {
+                output.length() < offset -> error("下载资源分块顺序不连续")
+                output.length() >= end -> {
+                    val existing = ByteArray(data.size)
+                    output.seek(offset)
+                    output.readFully(existing)
+                    if (!existing.contentEquals(data)) {
+                        require(index == 0) { "下载资源分块内容冲突，请从第一块重试" }
+                        output.setLength(0L)
+                        output.seek(0L)
+                        output.write(data)
+                    }
+                }
+                else -> {
+                    output.setLength(offset)
+                    output.seek(offset)
+                    output.write(data)
+                }
+            }
+            output.fd.sync()
+        }
     }
 
     fun snapshotJson(snapshot: ReaderPresetSnapshot): JSONObject = JSONObject().apply {

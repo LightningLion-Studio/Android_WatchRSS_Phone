@@ -33,4 +33,21 @@ class ReaderPresetPreviewPayloadTest {
         assertEquals("preview-session", request.getString("sessionId"))
         assertFalse(request.has("presetJson"))
     }
+
+    @Test
+    fun streamStartNegotiatesPersistentPreviewWithoutChangingPresetPayload() {
+        val request = ReaderPresetPreviewPayload.streamStart(
+            sessionId = "preview-stream",
+            sequence = 0L,
+            preset = ReaderPreset.darkDefault(id = "draft", name = "深色预览")
+        )
+
+        assertEquals(true, request.getBoolean("stream"))
+        assertEquals(ReaderPresetPreviewPayload.PHASE_UPDATE, request.getString("phase"))
+        assertEquals(
+            "深色预览",
+            ReaderPresetCodec.decode(request.getString("presetJson")).name
+        )
+        assertFalse(request.toString().contains("activePresetId"))
+    }
 }

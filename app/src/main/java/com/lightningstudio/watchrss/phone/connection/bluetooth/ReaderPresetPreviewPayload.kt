@@ -19,6 +19,11 @@ object ReaderPresetPreviewPayload {
             put("presetJson", ReaderPresetCodec.encode(preset.normalized()))
         }
 
+    fun streamStart(sessionId: String, sequence: Long, preset: ReaderPreset): JSONObject =
+        update(sessionId, sequence, preset).apply {
+            put("stream", true)
+        }
+
     fun stop(sessionId: String): JSONObject = JSONObject().apply {
         put("version", VERSION)
         put("action", BluetoothSyncProtocol.ACTION_PREVIEW_READER)

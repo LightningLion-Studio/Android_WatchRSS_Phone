@@ -87,7 +87,6 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -139,16 +138,19 @@ import com.lightningstudio.watchrss.phone.ui.reader.ReaderTextRole
 import com.lightningstudio.watchrss.phone.ui.reader.readerTextStyle
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
 class SettingsActivity : ComponentActivity() {
@@ -245,9 +247,11 @@ internal fun ReaderSettingsHost(
     var watchPreviewStarting by remember { mutableStateOf(false) }
     var watchPreviewDeviceAddress by remember { mutableStateOf<String?>(null) }
     var watchPreviewSessionId by remember { mutableStateOf<String?>(null) }
-    var watchPreviewSequence by remember { mutableStateOf(0L) }
     var watchPreviewStatus by remember { mutableStateOf("关闭") }
-    val watchPreviewMutex = remember { Mutex() }
+    var watchPreviewUpdates by remember { mutableStateOf<Channel<ReaderPreset>?>(null) }
+    var watchPreviewJob by remember { mutableStateOf<Job?>(null) }
+    var watchPreviewFontSignature by remember { mutableStateOf("") }
+    val watchPreviewStopRequested = remember { AtomicBoolean(false) }
     var paneTransition by remember { mutableStateOf<SettingsPaneTransition?>(null) }
     var paneTransitionProgress by remember { mutableFloatStateOf(1f) }
     var showFontImportSourcePicker by remember { mutableStateOf(false) }
@@ -310,20 +314,20 @@ internal fun ReaderSettingsHost(
     }
 
     fun stopWatchPreview(showStatus: Boolean = true) {
-        val address = watchPreviewDeviceAddress
-        val sessionId = watchPreviewSessionId
+        val updates = watchPreviewUpdates
+        val job = watchPreviewJob
+        watchPreviewStopRequested.set(true)
         watchPreviewEnabled = false
         watchPreviewStarting = false
         watchPreviewDeviceAddress = null
         watchPreviewSessionId = null
+        watchPreviewUpdates = null
+        watchPreviewJob = null
         if (showStatus) watchPreviewStatus = "关闭"
-        if (address != null && sessionId != null) {
+        updates?.close()
+        if (job != null) {
             scope.launch {
-                runCatching {
-                    watchPreviewMutex.withLock {
-                        container.bluetoothSyncManager.stopReaderPresetPreview(address, sessionId)
-                    }
-                }
+                if (withTimeoutOrNull(2_000L) { job.join() } == null) job.cancel()
             }
         }
     }
@@ -339,21 +343,48 @@ internal fun ReaderSettingsHost(
                 require(devices.isNotEmpty()) { "未找到可预览的手表" }
                 require(devices.size == 1) { "发现多块手表，请先只保留目标手表连接" }
                 val device = devices.single()
-                val sessionId = UUID.randomUUID().toString()
-                val deviceName = watchPreviewMutex.withLock {
-                    container.bluetoothSyncManager.updateReaderPresetPreview(
-                        deviceAddress = device.address,
-                        sessionId = sessionId,
-                        sequence = 0L,
-                        preset = current
-                    )
-                }
+                val updates = Channel<ReaderPreset>(Channel.CONFLATED)
+                val firstConnection = CompletableDeferred<String>()
+                watchPreviewStopRequested.set(false)
                 watchPreviewDeviceAddress = device.address
-                watchPreviewSessionId = sessionId
-                watchPreviewSequence = 0L
+                watchPreviewUpdates = updates
+                val job = scope.launch {
+                    while (!watchPreviewStopRequested.get()) {
+                        val attemptSessionId = UUID.randomUUID().toString()
+                        watchPreviewSessionId = attemptSessionId
+                        val attemptPreset = draft ?: current
+                        runCatching {
+                            container.bluetoothSyncManager.streamReaderPresetPreview(
+                                deviceAddress = device.address,
+                                sessionId = attemptSessionId,
+                                initialPreset = attemptPreset,
+                                updates = updates,
+                                onConnected = { deviceName ->
+                                    if (!firstConnection.isCompleted) {
+                                        firstConnection.complete(deviceName)
+                                    }
+                                },
+                                onApplied = {
+                                    scope.launch {
+                                        watchPreviewStatus = "手表已更新"
+                                    }
+                                }
+                            )
+                        }.onFailure {
+                            if (!watchPreviewStopRequested.get()) {
+                                watchPreviewStatus = "连接中断，正在重新连接…"
+                                delay(500L)
+                            }
+                        }
+                    }
+                }
+                watchPreviewJob = job
+                val deviceName = withTimeout(20_000L) { firstConnection.await() }
                 watchPreviewEnabled = true
+                watchPreviewFontSignature = current.usedFontSignature()
                 watchPreviewStatus = "正在“${deviceName.ifBlank { device.name }}”上预览"
             }.onFailure {
+                stopWatchPreview(showStatus = false)
                 watchPreviewStatus = it.message ?: "无法开启手表预览"
             }
             watchPreviewStarting = false
@@ -515,57 +546,21 @@ internal fun ReaderSettingsHost(
         }
     }
 
-    val latestDraft by rememberUpdatedState(draft)
     LaunchedEffect(
         watchPreviewEnabled,
-        draft?.editableFingerprint(),
-        watchPreviewDeviceAddress,
-        watchPreviewSessionId
+        draft?.editableFingerprint()
     ) {
         if (!watchPreviewEnabled) return@LaunchedEffect
         val current = draft ?: return@LaunchedEffect
-        val address = watchPreviewDeviceAddress ?: return@LaunchedEffect
-        val sessionId = watchPreviewSessionId ?: return@LaunchedEffect
-        delay(300L)
-        runCatching {
-            watchPreviewMutex.withLock {
-                val sequence = watchPreviewSequence + 1L
-                watchPreviewSequence = sequence
-                container.bluetoothSyncManager.updateReaderPresetPreview(
-                    deviceAddress = address,
-                    sessionId = sessionId,
-                    sequence = sequence,
-                    preset = current
-                )
-            }
-        }.onSuccess {
-            watchPreviewStatus = "手表已更新"
-        }.onFailure {
-            watchPreviewStatus = "更新失败：${it.message ?: "蓝牙连接异常"}"
-        }
+        watchPreviewUpdates?.trySend(current)
     }
-    LaunchedEffect(watchPreviewEnabled, watchPreviewDeviceAddress, watchPreviewSessionId) {
+    LaunchedEffect(watchPreviewEnabled, draft?.usedFontSignature()) {
         if (!watchPreviewEnabled) return@LaunchedEffect
-        val address = watchPreviewDeviceAddress ?: return@LaunchedEffect
-        val sessionId = watchPreviewSessionId ?: return@LaunchedEffect
-        while (isActive) {
-            delay(10_000L)
-            val current = latestDraft ?: continue
-            runCatching {
-                watchPreviewMutex.withLock {
-                    val sequence = watchPreviewSequence + 1L
-                    watchPreviewSequence = sequence
-                    container.bluetoothSyncManager.updateReaderPresetPreview(
-                        deviceAddress = address,
-                        sessionId = sessionId,
-                        sequence = sequence,
-                        preset = current
-                    )
-                }
-            }.onFailure {
-                watchPreviewStatus = "连接中断，调整任意选项即可重试"
-            }
-        }
+        val signature = draft?.usedFontSignature().orEmpty()
+        if (signature == watchPreviewFontSignature) return@LaunchedEffect
+        stopWatchPreview(showStatus = false)
+        delay(50L)
+        startWatchPreview()
     }
     LaunchedEffect(page) {
         if (
@@ -2965,6 +2960,13 @@ private fun formatNumericValue(value: Float): String =
 
 private fun ReaderPreset.editableFingerprint(): String =
     ReaderPresetCodec.encode(copy(updatedAt = 0L, modifiedBy = "", deleted = false))
+
+private fun ReaderPreset.usedFontSignature(): String = buildSet {
+    body.fontAssetId?.let(::add)
+    ReaderTypographyRole.entries.forEach { role ->
+        resolvedStyle(role).fontAssetId?.let(::add)
+    }
+}.sorted().joinToString("|")
 
 private fun ReaderPreset.safeExportName(): String =
     name.trim()

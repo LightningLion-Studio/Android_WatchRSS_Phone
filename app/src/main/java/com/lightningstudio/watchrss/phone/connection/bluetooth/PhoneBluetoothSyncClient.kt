@@ -18,7 +18,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
@@ -211,6 +215,89 @@ class PhoneBluetoothSyncClient(
             sessionId = sessionId,
             rememberDeviceOnSuccess = rememberDeviceOnSuccess
         )
+    }
+
+    @SuppressLint("MissingPermission")
+    suspend fun streamReaderPresetPreview(
+        initialRequest: JSONObject,
+        deviceAddress: String,
+        sessionId: String,
+        nextRequest: suspend () -> JSONObject,
+        onResponse: (deviceName: String, response: JSONObject) -> Unit
+    ): BluetoothSyncExchange = connectionMutex.withLock {
+        requireBluetoothConnectPermission()
+        val adapter = context.getSystemService(BluetoothManager::class.java)
+            ?.adapter
+            ?: error("此设备没有蓝牙适配器")
+        require(adapter.isEnabled) { "蓝牙未开启" }
+        val device = selectBondedWatchDevice(
+            devices = adapter.bondedDevices.orEmpty(),
+            deviceAddress = deviceAddress,
+            deviceNameHint = null
+        )
+        cancelDiscoveryLogged(adapter, sessionId)
+        var socket: BluetoothSocket? = null
+        val cancellationHandle = installSocketCancellationLogger(
+            sessionId = sessionId,
+            owner = "readerPreviewStream",
+            socketProvider = { socket }
+        )
+        try {
+            socket = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
+            connectLogged(socket, sessionId, device)
+            var request = initialRequest
+            writeFrameLogged(socket, sessionId, "previewFrame", request)
+            var response = readFrameLogged(socket, sessionId, "previewResponse")
+            require(response.optBoolean("success")) {
+                response.optString("message").ifBlank { "手表实时预览失败" }
+            }
+            onResponse(device.name.orEmpty(), response)
+            coroutineScope {
+                val sender = launch {
+                    var lastWriteAt = SystemClock.elapsedRealtime()
+                    while (true) {
+                        request = nextRequest()
+                        val remaining = PREVIEW_MAX_FRAME_INTERVAL_MS -
+                            (SystemClock.elapsedRealtime() - lastWriteAt)
+                        if (remaining > 0L) delay(remaining)
+                        writeFrameLogged(socket, sessionId, "previewFrame", request)
+                        lastWriteAt = SystemClock.elapsedRealtime()
+                        if (request.optString("phase") == ReaderPresetPreviewPayload.PHASE_STOP) {
+                            return@launch
+                        }
+                    }
+                }
+                val receiver = launch {
+                    while (true) {
+                        response = readFrameLogged(socket, sessionId, "previewResponse")
+                        require(response.optBoolean("success")) {
+                            response.optString("message").ifBlank { "手表实时预览失败" }
+                        }
+                        onResponse(device.name.orEmpty(), response)
+                        if (response.optString("phase") == ReaderPresetPreviewPayload.PHASE_STOP) {
+                            return@launch
+                        }
+                    }
+                }
+                sender.invokeOnCompletion { cause ->
+                    if (cause != null) runCatching { socket.close() }
+                }
+                receiver.invokeOnCompletion { cause ->
+                    if (cause != null) runCatching { socket.close() }
+                }
+                joinAll(sender, receiver)
+            }
+            rememberSuccessfulDevice(device, sessionId)
+            BluetoothSyncExchange(
+                deviceName = device.name.orEmpty(),
+                deviceAddress = device.address,
+                request = request,
+                response = response
+            )
+        } finally {
+            cancellationHandle?.dispose()
+            socket?.let { closeSocketLogged(it, sessionId, "readerPreviewStream") }
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -1333,6 +1420,7 @@ class PhoneBluetoothSyncClient(
         SystemClock.elapsedRealtime() - startedAt
 
     companion object {
+        private const val PREVIEW_MAX_FRAME_INTERVAL_MS = 17L
         private const val TAG = "WatchRSS_BtSyncClient"
         private const val PHASE_COMPLETE = "complete"
         private const val MAX_DEVICE_PROBE_CANDIDATES = 3

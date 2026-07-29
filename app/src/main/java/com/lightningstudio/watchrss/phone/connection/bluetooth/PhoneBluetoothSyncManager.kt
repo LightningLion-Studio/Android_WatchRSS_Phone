@@ -9,13 +9,18 @@ import com.lightningstudio.watchrss.phone.data.repo.PhoneLibrarySyncWindow
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPreset
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetSnapshot
+import com.lightningstudio.watchrss.phone.data.reader.ReaderTypographyRole
 import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundTranscoder
+import android.os.SystemClock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.channels.ReceiveChannel
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -595,6 +600,119 @@ class PhoneBluetoothSyncManager(
         return exchange.deviceName
     }
 
+    suspend fun streamReaderPresetPreview(
+        deviceAddress: String,
+        sessionId: String,
+        initialPreset: ReaderPreset,
+        updates: ReceiveChannel<ReaderPreset>,
+        onConnected: (String) -> Unit,
+        onApplied: (Long) -> Unit
+    ) {
+        var sequence = 0L
+        var latestPreset = initialPreset
+        var connected = false
+        var lastPresetChangeAt = SystemClock.elapsedRealtime()
+        syncReaderPreviewFonts(deviceAddress, initialPreset, sessionId)
+        delay(READER_RECONNECT_DELAY_MS)
+        withContext(Dispatchers.IO) {
+            client.streamReaderPresetPreview(
+                initialRequest = ReaderPresetPreviewPayload.streamStart(
+                    sessionId = sessionId,
+                    sequence = sequence,
+                    preset = latestPreset
+                ),
+                deviceAddress = deviceAddress,
+                sessionId = "$sessionId-preview-stream",
+                nextRequest = {
+                val active = SystemClock.elapsedRealtime() - lastPresetChangeAt <
+                    PREVIEW_ACTIVE_TAIL_MS
+                val next = withTimeoutOrNull(
+                    if (active) PREVIEW_ACTIVE_FRAME_INTERVAL_MS else PREVIEW_HEARTBEAT_MS
+                ) {
+                    updates.receiveCatching()
+                }
+                if (next == null) {
+                    sequence += 1L
+                    ReaderPresetPreviewPayload.update(sessionId, sequence, latestPreset)
+                } else {
+                    val preset = next.getOrNull()
+                    if (preset == null) {
+                        ReaderPresetPreviewPayload.stop(sessionId)
+                    } else {
+                        latestPreset = preset
+                        lastPresetChangeAt = SystemClock.elapsedRealtime()
+                        sequence += 1L
+                        ReaderPresetPreviewPayload.update(sessionId, sequence, latestPreset)
+                    }
+                }
+                },
+                onResponse = { deviceName, response ->
+                    require(response.optString("sessionId") == sessionId) {
+                        "手表预览会话校验失败"
+                    }
+                    if (!connected) {
+                        connected = true
+                        onConnected(deviceName)
+                    }
+                    if (response.optString("phase") == ReaderPresetPreviewPayload.PHASE_UPDATE) {
+                        onApplied(response.optLong("sequence"))
+                    }
+                }
+            )
+        }
+    }
+
+    private suspend fun syncReaderPreviewFonts(
+        deviceAddress: String,
+        preset: ReaderPreset,
+        parentSessionId: String
+    ) {
+        val referencedIds = buildSet {
+            preset.body.fontAssetId?.let(::add)
+            ReaderTypographyRole.entries.forEach { role ->
+                preset.resolvedStyle(role).fontAssetId?.let(::add)
+            }
+        }
+        if (referencedIds.isEmpty()) return
+        val fullSnapshot = readerPresetRepository.exportSnapshot()
+        val previewSnapshot = ReaderPresetSnapshot(
+            presets = emptyList(),
+            fonts = fullSnapshot.fonts.filter { it.id in referencedIds && !it.deleted },
+            backgrounds = emptyList(),
+            deletions = emptyList()
+        )
+        if (previewSnapshot.fonts.isEmpty()) return
+        delay(READER_RECONNECT_DELAY_MS)
+        val manifest = exchangeReaderFrame(
+            request = ReaderPresetSyncPayload.buildManifest(previewSnapshot, deviceId),
+            sessionId = "$parentSessionId-preview-font-manifest",
+            deviceAddress = deviceAddress
+        ).response
+        requireSuccess(manifest)
+        val previewFontFiles = previewSnapshot.fonts.mapTo(mutableSetOf()) { it.fileName }
+        ReaderPresetSyncPayload.missingResources(manifest)
+            .filter { it.kind == "font" && it.fileName in previewFontFiles }
+            .forEachIndexed { resourceIndex, resource ->
+                ReaderPresetSyncPayload.pushFrames(readerPresetRepository, resource)
+                    .forEachIndexed { chunkIndex, frame ->
+                        delay(READER_RECONNECT_DELAY_MS)
+                        val ack = exchangeReaderFrame(
+                            request = frame,
+                            sessionId = "$parentSessionId-preview-font-$resourceIndex-$chunkIndex",
+                            deviceAddress = deviceAddress
+                        ).response
+                        requireSuccess(ack)
+                        require(ack.optBoolean("received")) { "手表未确认收到预览字体分块" }
+                        require(ack.optString("chunkSha256") == frame.optString("chunkSha256")) {
+                            "手表预览字体分块 ACK 校验失败"
+                        }
+                        if (chunkIndex == frame.optInt("chunkCount") - 1) {
+                            require(ack.optBoolean("applied")) { "手表未确认预览字体完整落盘" }
+                        }
+                    }
+            }
+    }
+
     suspend fun stopReaderPresetPreview(
         deviceAddress: String,
         sessionId: String
@@ -722,5 +840,9 @@ class PhoneBluetoothSyncManager(
         private const val READER_EXCHANGE_RETRY_DELAY_MS = 700L
         private const val READER_EXCHANGE_ATTEMPTS = 3
         private const val PREVIEW_EXCHANGE_TIMEOUT_MS = 15_000L
+        private const val PREVIEW_HEARTBEAT_MS = 10_000L
+        // Aim slightly above 30 Hz so RFCOMM write overhead does not pull the stream below it.
+        private const val PREVIEW_ACTIVE_FRAME_INTERVAL_MS = 30L
+        private const val PREVIEW_ACTIVE_TAIL_MS = 250L
     }
 }

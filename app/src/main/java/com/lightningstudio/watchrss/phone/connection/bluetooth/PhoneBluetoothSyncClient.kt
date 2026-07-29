@@ -59,6 +59,67 @@ private data class LibraryResponseRead(
     val stats: LibraryFrameStats
 )
 
+private class PreviewStreamStats {
+    private var windowStartedAt = SystemClock.elapsedRealtime()
+    private var sentFrames = 0
+    private var sentBytes = 0L
+    private var sendElapsedMs = 0L
+    private var receivedFrames = 0
+    private var receivedBytes = 0L
+    private var receiveElapsedMs = 0L
+
+    @Synchronized
+    fun recordSend(bytes: Long, elapsedMs: Long): Map<String, Any?>? {
+        sentFrames += 1
+        sentBytes += bytes
+        sendElapsedMs += elapsedMs
+        return snapshotIfDue()
+    }
+
+    @Synchronized
+    fun recordReceive(bytes: Long, elapsedMs: Long): Map<String, Any?>? {
+        receivedFrames += 1
+        receivedBytes += bytes
+        receiveElapsedMs += elapsedMs
+        return snapshotIfDue()
+    }
+
+    private fun snapshotIfDue(): Map<String, Any?>? {
+        val now = SystemClock.elapsedRealtime()
+        val durationMs = now - windowStartedAt
+        if (durationMs < REPORT_INTERVAL_MS) return null
+        val snapshot = mapOf(
+            "durationMs" to durationMs,
+            "sentFrames" to sentFrames,
+            "sentFps" to framesPerSecond(sentFrames, durationMs),
+            "sentBytes" to sentBytes,
+            "averageSendMs" to average(sendElapsedMs, sentFrames),
+            "receivedFrames" to receivedFrames,
+            "receivedFps" to framesPerSecond(receivedFrames, durationMs),
+            "receivedBytes" to receivedBytes,
+            "averageReceiveMs" to average(receiveElapsedMs, receivedFrames)
+        )
+        windowStartedAt = now
+        sentFrames = 0
+        sentBytes = 0L
+        sendElapsedMs = 0L
+        receivedFrames = 0
+        receivedBytes = 0L
+        receiveElapsedMs = 0L
+        return snapshot
+    }
+
+    private fun framesPerSecond(frames: Int, durationMs: Long): Double =
+        if (durationMs <= 0L) 0.0 else frames * 1_000.0 / durationMs
+
+    private fun average(total: Long, count: Int): Double =
+        if (count <= 0) 0.0 else total.toDouble() / count
+
+    private companion object {
+        const val REPORT_INTERVAL_MS = 1_000L
+    }
+}
+
 data class PhoneBluetoothWatchDevice(
     val name: String,
     val address: String,
@@ -253,14 +314,15 @@ class PhoneBluetoothSyncClient(
             }
             onResponse(device.name.orEmpty(), response)
             coroutineScope {
+                val previewStats = PreviewStreamStats()
                 val sender = launch {
                     var lastWriteAt = SystemClock.elapsedRealtime()
                     while (true) {
                         request = nextRequest()
-                        val remaining = PREVIEW_MAX_FRAME_INTERVAL_MS -
+                        val remaining = PREVIEW_MIN_FRAME_INTERVAL_MS -
                             (SystemClock.elapsedRealtime() - lastWriteAt)
                         if (remaining > 0L) delay(remaining)
-                        writeFrameLogged(socket, sessionId, "previewFrame", request)
+                        writePreviewFrame(socket, sessionId, request, previewStats)
                         lastWriteAt = SystemClock.elapsedRealtime()
                         if (request.optString("phase") == ReaderPresetPreviewPayload.PHASE_STOP) {
                             return@launch
@@ -269,7 +331,7 @@ class PhoneBluetoothSyncClient(
                 }
                 val receiver = launch {
                     while (true) {
-                        response = readFrameLogged(socket, sessionId, "previewResponse")
+                        response = readPreviewFrame(socket, sessionId, previewStats)
                         require(response.optBoolean("success")) {
                             response.optString("message").ifBlank { "手表实时预览失败" }
                         }
@@ -297,6 +359,64 @@ class PhoneBluetoothSyncClient(
         } finally {
             cancellationHandle?.dispose()
             socket?.let { closeSocketLogged(it, sessionId, "readerPreviewStream") }
+        }
+    }
+
+    private fun writePreviewFrame(
+        socket: BluetoothSocket,
+        sessionId: String,
+        payload: JSONObject,
+        stats: PreviewStreamStats
+    ) {
+        val startedAt = SystemClock.elapsedRealtime()
+        var transferredBytes = 0L
+        try {
+            BluetoothSyncProtocol.writeFrame(socket.outputStream, payload) { bytes ->
+                transferredBytes += bytes
+            }
+            stats.recordSend(
+                bytes = transferredBytes,
+                elapsedMs = elapsedSince(startedAt)
+            )?.let { fields ->
+                debugLog.appendEvent("bt.preview.stream.stats", sessionId, fields)
+            }
+        } catch (throwable: Throwable) {
+            debugLog.appendEvent(
+                event = "bt.preview.frame.write.failed",
+                sessionId = sessionId,
+                fields = failureFields(throwable),
+                throwable = throwable
+            )
+            throw throwable
+        }
+    }
+
+    private fun readPreviewFrame(
+        socket: BluetoothSocket,
+        sessionId: String,
+        stats: PreviewStreamStats
+    ): JSONObject {
+        val startedAt = SystemClock.elapsedRealtime()
+        var transferredBytes = 0L
+        return try {
+            BluetoothSyncProtocol.readFrame(socket.inputStream) { bytes ->
+                transferredBytes += bytes
+            }.also { payload ->
+                stats.recordReceive(
+                    bytes = transferredBytes,
+                    elapsedMs = elapsedSince(startedAt)
+                )?.let { fields ->
+                    debugLog.appendEvent("bt.preview.stream.stats", sessionId, fields)
+                }
+            }
+        } catch (throwable: Throwable) {
+            debugLog.appendEvent(
+                event = "bt.preview.frame.read.failed",
+                sessionId = sessionId,
+                fields = failureFields(throwable),
+                throwable = throwable
+            )
+            throw throwable
         }
     }
 
@@ -1420,7 +1540,7 @@ class PhoneBluetoothSyncClient(
         SystemClock.elapsedRealtime() - startedAt
 
     companion object {
-        private const val PREVIEW_MAX_FRAME_INTERVAL_MS = 17L
+        private const val PREVIEW_MIN_FRAME_INTERVAL_MS = 32L
         private const val TAG = "WatchRSS_BtSyncClient"
         private const val PHASE_COMPLETE = "complete"
         private const val MAX_DEVICE_PROBE_CANDIDATES = 3

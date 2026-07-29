@@ -4,6 +4,7 @@ import com.lightningstudio.watchrss.phone.data.reader.ReaderPreset
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetCodec
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ReaderPresetPreviewPayloadTest {
@@ -20,8 +21,9 @@ class ReaderPresetPreviewPayloadTest {
         assertEquals(7L, request.getLong("sequence"))
         assertEquals(
             "实时草稿",
-            ReaderPresetCodec.decode(request.getString("presetJson")).name
+            ReaderPresetCodec.decode(request.getJSONObject("preset").toString()).name
         )
+        assertFalse(request.has("presetJson"))
         assertFalse(request.toString().contains("activePresetId"))
     }
 
@@ -31,7 +33,7 @@ class ReaderPresetPreviewPayloadTest {
 
         assertEquals(ReaderPresetPreviewPayload.PHASE_STOP, request.getString("phase"))
         assertEquals("preview-session", request.getString("sessionId"))
-        assertFalse(request.has("presetJson"))
+        assertFalse(request.has("preset"))
     }
 
     @Test
@@ -46,9 +48,43 @@ class ReaderPresetPreviewPayloadTest {
         assertEquals(ReaderPresetPreviewPayload.PHASE_UPDATE, request.getString("phase"))
         assertEquals(
             "深色预览",
-            ReaderPresetCodec.decode(request.getString("presetJson")).name
+            ReaderPresetCodec.decode(request.getJSONObject("preset").toString()).name
         )
         assertFalse(request.toString().contains("activePresetId"))
+    }
+
+    @Test
+    fun deltaSendsOnlyChangedPresetSections() {
+        val before = ReaderPreset.lightDefault(id = "draft", name = "实时草稿")
+        val after = before.copy(body = before.body.copy(fontSizeSp = 26f))
+
+        val request = ReaderPresetPreviewPayload.delta(
+            sessionId = "preview-stream",
+            sequence = 8L,
+            previous = before,
+            current = after
+        )
+
+        val changes = request.getJSONObject("changes")
+        assertEquals(1, changes.length())
+        assertEquals(26.0, changes.getJSONObject("body").getDouble("fontSizeSp"), 0.0)
+        assertFalse(request.has("preset"))
+        assertTrue(
+            BluetoothSyncProtocol.encodedSize(request) <
+                BluetoothSyncProtocol.encodedSize(
+                    ReaderPresetPreviewPayload.update("preview-stream", 8L, after)
+                )
+        )
+    }
+
+    @Test
+    fun heartbeatDoesNotRepeatPresetPayload() {
+        val request = ReaderPresetPreviewPayload.heartbeat("preview-stream", 9L)
+
+        assertEquals(ReaderPresetPreviewPayload.PHASE_HEARTBEAT, request.getString("phase"))
+        assertEquals(9L, request.getLong("sequence"))
+        assertFalse(request.has("preset"))
+        assertFalse(request.has("changes"))
     }
 
     @Test

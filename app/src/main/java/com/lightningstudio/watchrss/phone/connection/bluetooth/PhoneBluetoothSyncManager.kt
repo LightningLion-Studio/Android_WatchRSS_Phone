@@ -611,6 +611,7 @@ class PhoneBluetoothSyncManager(
     ) {
         var sequence = 0L
         var latestPreset = initialPreset
+        var lastSentPreset = initialPreset
         var connected = false
         var lastPresetChangeAt = SystemClock.elapsedRealtime()
         if (syncReaderPreviewResources(deviceAddress, initialPreset, sessionId)) {
@@ -627,27 +628,38 @@ class PhoneBluetoothSyncManager(
                 deviceAddress = deviceAddress,
                 sessionId = "$sessionId-preview-stream",
                 nextRequest = {
-                val active = SystemClock.elapsedRealtime() - lastPresetChangeAt <
-                    PREVIEW_ACTIVE_TAIL_MS
-                val next = withTimeoutOrNull(
-                    if (active) PREVIEW_ACTIVE_FRAME_INTERVAL_MS else PREVIEW_HEARTBEAT_MS
-                ) {
-                    updates.receiveCatching()
-                }
-                if (next == null) {
-                    sequence += 1L
-                    ReaderPresetPreviewPayload.update(sessionId, sequence, latestPreset)
-                } else {
-                    val preset = next.getOrNull()
-                    if (preset == null) {
-                        ReaderPresetPreviewPayload.stop(sessionId)
-                    } else {
-                        latestPreset = preset
-                        lastPresetChangeAt = SystemClock.elapsedRealtime()
-                        sequence += 1L
-                        ReaderPresetPreviewPayload.update(sessionId, sequence, latestPreset)
+                    val active = SystemClock.elapsedRealtime() - lastPresetChangeAt <
+                        PREVIEW_ACTIVE_TAIL_MS
+                    val next = withTimeoutOrNull(
+                        if (active) PREVIEW_ACTIVE_FRAME_INTERVAL_MS else PREVIEW_HEARTBEAT_MS
+                    ) {
+                        updates.receiveCatching()
                     }
-                }
+                    if (next == null) {
+                        sequence += 1L
+                        ReaderPresetPreviewPayload.heartbeat(sessionId, sequence)
+                    } else {
+                        val preset = next.getOrNull()
+                        if (preset == null) {
+                            ReaderPresetPreviewPayload.stop(sessionId)
+                        } else {
+                            latestPreset = preset
+                            lastPresetChangeAt = SystemClock.elapsedRealtime()
+                            sequence += 1L
+                            val delta = ReaderPresetPreviewPayload.delta(
+                                sessionId = sessionId,
+                                sequence = sequence,
+                                previous = lastSentPreset,
+                                current = latestPreset
+                            )
+                            lastSentPreset = latestPreset
+                            if (delta.getJSONObject("changes").length() == 0) {
+                                ReaderPresetPreviewPayload.heartbeat(sessionId, sequence)
+                            } else {
+                                delta
+                            }
+                        }
+                    }
                 },
                 onResponse = { deviceName, response ->
                     require(response.optString("sessionId") == sessionId) {

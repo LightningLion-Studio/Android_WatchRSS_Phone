@@ -39,6 +39,12 @@ Do not reintroduce QR scanning, manual IP/port WiFi connection, acoustic-guided 
 
 # Run lint checks
 ./gradlew lint
+
+# Screenshot tests - record baseline
+./gradlew :app:executeScreenshotTests -Precord
+
+# Screenshot tests - verify against baseline
+./gradlew :app:executeScreenshotTests
 ```
 
 ## Architecture
@@ -73,6 +79,21 @@ Do not reintroduce QR scanning, manual IP/port WiFi connection, acoustic-guided 
 
 - Custom `WatchRssPhoneTheme` with Material3.
 - Chinese language is used in UI strings (app name: "腕上RSS").
+
+### Inbound File Handling and Error Visibility
+
+The app registers `application/octet-stream` in its intent-filters so that the system delivers unsupported files (e.g. `.apk.1`) to `HomeActivity`. A two-layer validation model is used:
+
+1. **Manifest layer** — broad MIME acceptance (`text/*`, `application/epub+zip`, `application/octet-stream`) so the Intent reaches the app.
+2. **Code layer** — `isSupportedLocalContent` in `HomeActivity` and `LocalContentImporter.importFile` apply a strict whitelist (`.txt`, `.epub`, or matching MIME) and reject everything else.
+
+**Critical design rule**: errors from inbound (external) intents must use `MainViewModel.showContentError`, not `showError`. `showContentError` emits via `_toastEvent` (a `SharedFlow` collected by a top-level `LaunchedEffect` in `HomeActivity`) which renders a Toast that is visible regardless of which `HorizontalPager` page is currently composed. `showError` only writes to `sessionState.error`, which is rendered exclusively inside `ImportActionsCard` on the Imports page — invisible on cold start when the user lands on the Dashboard page (page 0) and `HorizontalPager` does not compose off-screen pages.
+
+| Error source | Correct method | Why |
+|---|---|---|
+| External intent (cold start / share) | `showContentError` | Toast is page-independent |
+| In-app file picker (`importLocalContentLauncher`) | `showError` | User is already on the Imports page |
+| In-app file picker read failure | `showError` | Same as above |
 
 ## Code Conventions
 

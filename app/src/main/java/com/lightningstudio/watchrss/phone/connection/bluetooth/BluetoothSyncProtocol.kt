@@ -19,6 +19,7 @@ object BluetoothSyncProtocol {
     const val ACTION_SYNC_READER = "syncReader"
     const val ACTION_PREVIEW_READER = "previewReader"
     const val ACTION_SYNC_ACCOUNT = "syncAccount"
+    const val ACTION_SYNC_LLM_TOKEN_USAGE = "syncLlmTokenUsage"
     const val ACTION_ACK = "ack"
 
     const val ACK_PHASE_RECEIVED = "received"

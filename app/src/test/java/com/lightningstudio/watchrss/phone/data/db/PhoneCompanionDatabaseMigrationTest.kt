@@ -14,14 +14,15 @@ class PhoneCompanionDatabaseMigrationTest {
 
         PhoneCompanionDatabase.MIGRATION_11_12.migrate(database)
 
-        assertEquals(3, statements.size)
+        val readingPositionColumns = statements
+            .filter { it.startsWith("ALTER TABLE phone_articles ADD COLUMN ") }
         assertEquals(
             setOf(
                 "readingPositionBytes INTEGER NOT NULL DEFAULT 0",
                 "readingPositionContentHash TEXT NOT NULL DEFAULT ''",
                 "readingPositionChangedAt INTEGER NOT NULL DEFAULT 0"
             ),
-            statements.map { it.substringAfter("ADD COLUMN ") }.toSet()
+            readingPositionColumns.map { it.substringAfter("ADD COLUMN ") }.toSet()
         )
         assertFalse(statements.any { it.contains("DROP ", ignoreCase = true) })
         assertFalse(statements.any { it.contains("DELETE ", ignoreCase = true) })

@@ -21,9 +21,11 @@ import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetEntity
         ReaderPresetEntity::class,
         ReaderFontAssetEntity::class,
         ReaderBackgroundAssetEntity::class,
-        ReaderDeletionEntity::class
+        ReaderDeletionEntity::class,
+        AppMetaEntity::class,
+        PhoneLlmTokenUsageEntity::class
     ],
-    version = 12,
+    version = 13,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
@@ -33,6 +35,8 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
     abstract fun syncChangeLogDao(): SyncChangeLogDao
     abstract fun syncPeerStateDao(): SyncPeerStateDao
     abstract fun readerPresetDao(): ReaderPresetDao
+    abstract fun appMetaDao(): AppMetaDao
+    abstract fun llmTokenUsageDao(): PhoneLlmTokenUsageDao
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -189,28 +193,35 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
                 database.execSQL(
                     "ALTER TABLE phone_articles ADD COLUMN isRead INTEGER NOT NULL DEFAULT 0"
                 )
-            }
-        }
-
-        val MIGRATION_9_10 = object : Migration(9, 10) {
-            override fun migrate(database: SupportSQLiteDatabase) {
                 database.execSQL(
                     "ALTER TABLE phone_rss_sources ADD COLUMN useOriginalContent INTEGER NOT NULL DEFAULT 0"
                 )
                 database.execSQL(
                     "ALTER TABLE phone_rss_sources ADD COLUMN continuePlaybackInBackground INTEGER NOT NULL DEFAULT 0"
                 )
+                database.createAppMetaTable()
+                database.createLlmTokenUsageTable()
+            }
+        }
+
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.ensureSplitBaselineSchema()
             }
         }
 
         val MIGRATION_10_11 = object : Migration(10, 11) {
             override fun migrate(database: SupportSQLiteDatabase) {
+                database.ensureSplitBaselineSchema()
                 database.createReaderPresetTables()
             }
         }
 
         val MIGRATION_11_12 = object : Migration(11, 12) {
             override fun migrate(database: SupportSQLiteDatabase) {
+                database.createAppMetaTable()
+                database.createLlmTokenUsageTable()
+                database.createReaderPresetTables()
                 database.execSQL(
                     "ALTER TABLE phone_articles ADD COLUMN readingPositionBytes INTEGER NOT NULL DEFAULT 0"
                 )
@@ -220,6 +231,14 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
                 database.execSQL(
                     "ALTER TABLE phone_articles ADD COLUMN readingPositionChangedAt INTEGER NOT NULL DEFAULT 0"
                 )
+            }
+        }
+
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.createAppMetaTable()
+                database.createLlmTokenUsageTable()
+                database.createReaderPresetTables()
             }
         }
     }
@@ -295,4 +314,82 @@ private fun SupportSQLiteDatabase.createReaderPresetTables() {
         """.trimIndent()
     )
     execSQL("CREATE INDEX IF NOT EXISTS index_reader_deletions_deletedAt ON reader_deletions(deletedAt)")
+}
+
+private fun SupportSQLiteDatabase.ensureSplitBaselineSchema() {
+    addColumnIfMissing(
+        table = "phone_articles",
+        column = "isRead",
+        definition = "INTEGER NOT NULL DEFAULT 0"
+    )
+    addColumnIfMissing(
+        table = "phone_rss_sources",
+        column = "useOriginalContent",
+        definition = "INTEGER NOT NULL DEFAULT 0"
+    )
+    addColumnIfMissing(
+        table = "phone_rss_sources",
+        column = "continuePlaybackInBackground",
+        definition = "INTEGER NOT NULL DEFAULT 0"
+    )
+    createAppMetaTable()
+    createLlmTokenUsageTable()
+}
+
+private fun SupportSQLiteDatabase.addColumnIfMissing(
+    table: String,
+    column: String,
+    definition: String
+) {
+    val exists = query("PRAGMA table_info(`$table`)").use { cursor ->
+        val nameIndex = cursor.getColumnIndex("name")
+        generateSequence { if (cursor.moveToNext()) cursor else null }
+            .any { it.getString(nameIndex) == column }
+    }
+    if (!exists) {
+        execSQL("ALTER TABLE `$table` ADD COLUMN `$column` $definition")
+    }
+}
+
+private fun SupportSQLiteDatabase.createAppMetaTable() {
+    execSQL(
+        """
+        CREATE TABLE IF NOT EXISTS app_meta (
+            key TEXT NOT NULL PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """.trimIndent()
+    )
+}
+
+private fun SupportSQLiteDatabase.createLlmTokenUsageTable() {
+    execSQL(
+        """
+        CREATE TABLE IF NOT EXISTS llm_token_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            requestId TEXT NOT NULL,
+            createdAt INTEGER NOT NULL,
+            promptTokens INTEGER,
+            completionTokens INTEGER,
+            totalTokens INTEGER,
+            reasoningTokens INTEGER,
+            cachedPromptTokens INTEGER,
+            inputTokens INTEGER,
+            outputTokens INTEGER,
+            promptTokenCount INTEGER,
+            candidatesTokenCount INTEGER,
+            totalTokenCount INTEGER
+        )
+        """.trimIndent()
+    )
+    execSQL(
+        "CREATE INDEX IF NOT EXISTS index_llm_token_usage_createdAt " +
+            "ON llm_token_usage(createdAt)"
+    )
+    execSQL(
+        "CREATE INDEX IF NOT EXISTS index_llm_token_usage_provider_model " +
+            "ON llm_token_usage(provider, model)"
+    )
 }

@@ -113,6 +113,7 @@ class ProfileActivity : ComponentActivity() {
                                 accountRepository = accountRepository,
                                 cloudSyncService = container.cloudSyncService,
                                 rssSources = rssSources,
+                                usageTelemetry = container.usageTelemetry,
                                 onBack = onClose,
                                 loginWithPasskey = passkeyCoordinator::login,
                                 createPasskey = passkeyCoordinator::createPasskey,

@@ -30,6 +30,10 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageDailyPojo
+import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageRepository
+import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageStatisticsPojo
+
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -53,7 +57,9 @@ data class MainUiState(
     val bluetoothDevicePrompt: MainBluetoothDevicePromptUi? = null,
     val sharedImportPrompt: SharedImportPromptUi? = null,
     val backupImportPrompt: BackupImportPromptUi? = null,
-    val txtUpdatePrompt: TxtUpdatePromptUi? = null
+    val txtUpdatePrompt: TxtUpdatePromptUi? = null,
+    val llmTokenUsageStats: PhoneLlmTokenUsageStatisticsPojo? = null,
+    val llmTokenUsageDaily: List<PhoneLlmTokenUsageDailyPojo> = emptyList()
 )
 
 data class MainSyncProgressUi(
@@ -128,6 +134,7 @@ private data class LibraryContentLists(
 class MainViewModel(
     private val repository: PhoneCompanionRepository,
     private val bluetoothSyncManager: PhoneBluetoothSyncManager,
+    private val llmTokenUsageRepository: PhoneLlmTokenUsageRepository,
     private val usageTelemetry: PhoneUsageTelemetry,
     private val backupService: WatchRssBackupService
 ) : ViewModel() {
@@ -167,15 +174,19 @@ class MainViewModel(
                 watchLater = watchLater
             )
         },
+        llmTokenUsageRepository.observeStatistics(),
+        llmTokenUsageRepository.observeDaily(),
         sessionState
-    ) { lists, state ->
+    ) { lists, llmStats, llmDaily, state ->
         state.copy(
             rssSources = lists.rssSources,
             rssArticles = lists.rssArticles,
             independentArticles = lists.independentArticles,
             importedContentArticles = lists.importedContentArticles,
             favorites = lists.favorites,
-            watchLater = lists.watchLater
+            watchLater = lists.watchLater,
+            llmTokenUsageStats = llmStats,
+            llmTokenUsageDaily = llmDaily
         )
     }.stateIn(
         viewModelScope,
@@ -230,6 +241,27 @@ class MainViewModel(
     }
 
     fun showError(error: String) {
+        sessionState.value = sessionState.value.copy(
+            syncStatusMessage = null,
+            syncStatusError = null,
+            error = error
+        )
+    }
+
+    /**
+     * Shows a content-level error that must be visible to the user regardless of
+     * which page is currently displayed.
+     *
+     * Uses Toast for immediate visibility (page-independent) and also persists the
+     * error in session state so the Imports page can display it persistently.
+     *
+     * This is critical for cold-start scenarios where the app is launched from an
+     * external intent (e.g. another app shares an unsupported file). The user
+     * lands on the Dashboard page — page-specific error rendering in ImportActionsCard
+     * would be invisible because HorizontalPager only composes the current page.
+     */
+    fun showContentError(error: String) {
+        _toastEvent.tryEmit(error)
         sessionState.value = sessionState.value.copy(
             syncStatusMessage = null,
             syncStatusError = null,
@@ -329,6 +361,11 @@ class MainViewModel(
                     inspection = inspection,
                     replaceArticleId = null
                 )
+                usageTelemetry.recordLocalContentImported(
+                    kind = result.kind.name,
+                    title = result.source.title,
+                    articleCount = result.articleCount
+                )
                 sessionState.value = sessionState.value.copy(
                     message = when (result.kind) {
                         LocalContentImportKind.TXT -> "已导入 TXT 到导入内容，文章 ${result.articleCount} 篇"
@@ -348,6 +385,11 @@ class MainViewModel(
                     inspection = inspection,
                     replaceArticleId = articleId
                 )
+                usageTelemetry.recordLocalContentImported(
+                    kind = result.kind.name,
+                    title = result.source.title,
+                    articleCount = result.articleCount
+                )
                 pendingLocalContentInspection = null
                 sessionState.value = sessionState.value.copy(
                     txtUpdatePrompt = null,
@@ -365,6 +407,11 @@ class MainViewModel(
                 val result = repository.confirmLocalContentImport(
                     inspection = inspection,
                     replaceArticleId = null
+                )
+                usageTelemetry.recordLocalContentImported(
+                    kind = result.kind.name,
+                    title = result.source.title,
+                    articleCount = result.articleCount
                 )
                 pendingLocalContentInspection = null
                 sessionState.value = sessionState.value.copy(
@@ -386,6 +433,10 @@ class MainViewModel(
         viewModelScope.launch {
             runBusy("正在导出资料库…") {
                 val result = backupService.exportTo(uriString)
+                usageTelemetry.recordBackupExported(
+                    articleCount = result.articleCount,
+                    sourceCount = result.sourceCount
+                )
                 sessionState.value = sessionState.value.copy(
                     message = "已导出 WRSS：${result.articleCount} 篇文章，${result.sourceCount} 个 RSS 源",
                     error = null
@@ -431,6 +482,11 @@ class MainViewModel(
             runBusy(if (mode == BackupImportMode.REPLACE) "正在覆盖资料库…" else "正在合并资料库…") {
                 val result = backupService.importFrom(prompt.uriString, mode)
                 val action = if (mode == BackupImportMode.REPLACE) "覆盖" else "合并"
+                usageTelemetry.recordBackupImported(
+                    mode = mode.name,
+                    articleCount = result.articleCount,
+                    sourceCount = result.sourceCount
+                )
                 sessionState.value = sessionState.value.copy(
                     message = "已${action} WRSS：${result.articleCount} 篇文章，${result.sourceCount} 个 RSS 源",
                     error = null
@@ -451,6 +507,11 @@ class MainViewModel(
         viewModelScope.launch {
             runBusy("正在添加 RSS 源…") {
                 val result = repository.addRssSource(url)
+                usageTelemetry.recordRssSourceAdded(
+                    url = result.source.url,
+                    title = result.source.title,
+                    articleCount = result.articleCount
+                )
                 sessionState.value = sessionState.value.copy(
                     message = "已添加 RSS 源：${result.source.title}，导入 ${result.articleCount} 篇",
                     error = null,
@@ -833,6 +894,18 @@ class MainViewModel(
             } else {
                 "已与 $deviceName 完成资料库同步；阅读器资源同步失败"
             }
+            runCatching {
+                bluetoothSyncManager.syncLlmTokenUsage(
+                    PhoneBluetoothWatchDevice(
+                        name = deviceName,
+                        address = result.deviceAddress,
+                        uuidCount = 0,
+                        remoteDeviceId = ""
+                    )
+                )
+            }.onFailure { tokenError ->
+                _toastEvent.tryEmit("Token 用量同步失败：${tokenError.message}")
+            }
             sessionState.value = sessionState.value.copy(
                 message = message,
                 syncStatusMessage = message,
@@ -929,6 +1002,7 @@ class MainViewModel(
         viewModelScope.launch {
             runBusy("正在通过蓝牙发送 RSS 地址…", showInSyncStatus = true) {
                 val result = bluetoothSyncManager.sendRemoteInput(url)
+                usageTelemetry.recordRemoteInputSent(url)
                 val message = "已通过蓝牙发送到 ${result.deviceName.ifBlank { "手表" }}"
                 sessionState.value = sessionState.value.copy(
                     message = message,
@@ -972,6 +1046,11 @@ class MainViewModel(
         viewModelScope.launch {
             runBusy("正在导入网页…") {
                 val article = repository.importWebArticle(url)
+                usageTelemetry.recordArticleImported(
+                    source = "web",
+                    url = article.url,
+                    title = article.title
+                )
                 sessionState.value = sessionState.value.copy(
                     message = "已导入到独立文章：${article.title}",
                     error = null,

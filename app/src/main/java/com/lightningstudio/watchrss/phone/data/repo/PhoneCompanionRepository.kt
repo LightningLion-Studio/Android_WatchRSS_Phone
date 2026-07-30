@@ -19,6 +19,8 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
 import com.lightningstudio.watchrss.phone.data.db.SyncChangeLogDao
 import com.lightningstudio.watchrss.phone.data.db.SyncChangeLogEntity
 import com.lightningstudio.watchrss.phone.data.db.SyncChangeLogEntityState
+import com.lightningstudio.watchrss.phone.data.db.AppMetaDao
+import com.lightningstudio.watchrss.phone.data.db.AppMetaEntity
 import com.lightningstudio.watchrss.phone.data.db.SyncPeerStateDao
 import com.lightningstudio.watchrss.phone.data.db.SyncPeerStateEntity
 import com.lightningstudio.watchrss.phone.data.importer.ImportedLocalContent
@@ -37,6 +39,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.sync.Semaphore
@@ -127,7 +130,17 @@ private object NoopSyncPeerStateDao : SyncPeerStateDao {
     override suspend fun deleteAll() = Unit
 }
 
+private object NoopAppMetaDao : AppMetaDao {
+    override suspend fun getString(key: String): String? = null
+    override fun observeString(key: String): Flow<String?> = flowOf(null)
+    override suspend fun set(entity: AppMetaEntity) = Unit
+    override suspend fun setIfAbsent(entity: AppMetaEntity) = Unit
+    override suspend fun getAll(): List<AppMetaEntity> = emptyList()
+    override suspend fun deleteAll() = Unit
+}
+
 private const val CONTENT_CHANNEL_SORT_STEP = 10_000L
+private const val KEY_FIRST_USE_AT = "first_use_at"
 
 class PhoneCompanionRepository(
     private val savedItemDao: PhoneSavedItemDao,
@@ -145,8 +158,24 @@ class PhoneCompanionRepository(
     private val localContentImporter: suspend (String, String?, ByteArray) -> ImportedLocalContent = { fileName, mimeType, bytes ->
         LocalContentImporter().importFile(fileName, mimeType, bytes)
     },
-    private val articleContentStore: ArticleContentStore? = null
+    private val articleContentStore: ArticleContentStore? = null,
+    private val appMetaDao: AppMetaDao = NoopAppMetaDao
 ) {
+    /** 仅用于 instrumented screenshot tests 直接操作真实数据库。 */
+    val testArticleDao: PhoneArticleDao get() = articleDao
+    /** 仅用于 instrumented screenshot tests 直接操作真实数据库。 */
+    val testRssSourceDao: PhoneRssSourceDao get() = rssSourceDao
+    /** 仅用于 instrumented screenshot tests 直接操作真实数据库。 */
+    val testSavedItemDao: PhoneSavedItemDao get() = savedItemDao
+
+    fun observeFirstUseAt(): Flow<Long?> {
+        return appMetaDao.observeString(KEY_FIRST_USE_AT).map { it?.toLongOrNull() }
+    }
+
+    suspend fun recordFirstUseIfAbsent(timestampMillis: Long) {
+        appMetaDao.setIfAbsent(AppMetaEntity(key = KEY_FIRST_USE_AT, value = timestampMillis.toString()))
+    }
+
     fun observeSavedItems(type: PhoneSavedItemType): Flow<List<PhoneSavedItemEntity>> {
         return savedItemDao.observeByType(type.name)
     }

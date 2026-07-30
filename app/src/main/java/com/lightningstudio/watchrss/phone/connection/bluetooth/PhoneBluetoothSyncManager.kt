@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 import android.annotation.SuppressLint
 import android.content.Context
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
+import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageRepository
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneLibrarySyncWindow
@@ -27,6 +28,7 @@ import org.json.JSONObject
 
 data class PhoneBluetoothSyncResult(
     val deviceName: String,
+    val deviceAddress: String = "",
     val importedCount: Int? = null,
     val libraryStats: LibrarySyncStats? = null,
     val accountSync: AccountSyncResult? = null,
@@ -50,6 +52,7 @@ class PhoneBluetoothSyncManager(
     context: Context,
     private val repository: PhoneCompanionRepository,
     private val readerPresetRepository: ReaderPresetRepository,
+    private val llmTokenUsageRepository: PhoneLlmTokenUsageRepository,
     private val deviceId: String,
     private val debugLog: BluetoothDebugLog,
     private val buildAccountSyncRequest: suspend (watchDeviceId: String, watchInstallId: String?, watchDisplayName: String?) -> JSONObject =
@@ -465,6 +468,7 @@ class PhoneBluetoothSyncManager(
             }
             PhoneBluetoothSyncResult(
                 deviceName = exchange.deviceName,
+                deviceAddress = exchange.deviceAddress,
                 libraryStats = LibrarySyncStats(
                     sent = sentArticles.size,
                     received = receivedArticles,
@@ -849,6 +853,52 @@ class PhoneBluetoothSyncManager(
             deviceAddress = deviceAddress
         ).response
         requireSuccess(response)
+    }
+
+    suspend fun syncLlmTokenUsage(device: PhoneBluetoothWatchDevice): PhoneBluetoothSyncResult {
+        val sessionId = BluetoothDebugLog.newSessionId("syncLlmTokenUsage")
+        debugLog.appendEvent(
+            event = "sync.llmTokenUsage.start",
+            sessionId = sessionId,
+            fields = mapOf("targetAddress" to device.address)
+        )
+        return runCatching {
+            val request = JSONObject().apply {
+                put("version", 1)
+                put("action", BluetoothSyncProtocol.ACTION_SYNC_LLM_TOKEN_USAGE)
+                put("nonce", System.currentTimeMillis().toString())
+                put("limit", 200)
+            }
+            val exchange = exchange(
+                request = request,
+                deviceAddress = device.address,
+                sessionId = sessionId,
+                timeoutMs = 60_000L
+            )
+            requireSuccess(exchange.response)
+            val records = exchange.response.optJSONArray("records") ?: org.json.JSONArray()
+            val recordsList = (0 until records.length()).map { records.getJSONObject(it) }
+            llmTokenUsageRepository.replaceRecords(recordsList)
+            debugLog.appendEvent(
+                event = "sync.llmTokenUsage.complete",
+                sessionId = sessionId,
+                fields = mapOf(
+                    "device" to exchange.deviceName,
+                    "records" to recordsList.size
+                )
+            )
+            PhoneBluetoothSyncResult(
+                deviceName = exchange.deviceName,
+                importedCount = recordsList.size
+            )
+        }.onFailure { throwable ->
+            debugLog.appendEvent(
+                event = "sync.llmTokenUsage.failed",
+                sessionId = sessionId,
+                fields = failureFields(throwable),
+                throwable = throwable
+            )
+        }.getOrThrow()
     }
 
     private suspend fun exchange(

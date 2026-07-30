@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.data.backup
 
+import com.lightningstudio.watchrss.phone.data.db.AppMetaEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
@@ -21,24 +22,43 @@ import java.util.zip.ZipOutputStream
 
 internal object WatchRssBackupArchive {
     private const val FORMAT = "watchrss-library-backup"
-    private const val VERSION = 2
+
+    /**
+     * 备份数据结构版本。每次备份数据结构发生变化时递增。
+     * - v1: 初始版本（sources, articles, saved_items, bodies）
+     * - v2: 历史分支分别加入阅读器资源或 app_meta
+     * - v3: 同时包含阅读器资源与 app_meta
+     */
+    const val CURRENT_DATA_STRUCTURE_VERSION = 3
+
+    /** 最低支持的备份版本（含），低于此版本的备份文件将被拒绝。 */
+    private const val MIN_SUPPORTED_VERSION = 1
     private const val MANIFEST_ENTRY = "manifest.json"
     private const val SOURCES_ENTRY = "sources.json"
     private const val ARTICLES_ENTRY = "articles.json"
     private const val SAVED_ITEMS_ENTRY = "saved_items.json"
     private const val READER_ENTRY = "reader/manifest.json"
+    private const val APP_META_ENTRY = "app_meta.json"
     private const val MAX_ENTRY_COUNT = 100_000
     private const val MAX_ENTRY_BYTES = 512L * 1024L * 1024L
     private const val MAX_EXPANDED_BYTES = 4L * 1024L * 1024L * 1024L
     private val BODY_ENTRY_PATTERN = Regex("""bodies/[0-9a-f]{64}\.(html|txt)""")
     private val READER_RESOURCE_PATTERN =
         Regex("""reader/(fonts|backgrounds|variants)/[0-9a-f]{64}\.bin""")
-    private val METADATA_ENTRIES = setOf(
+
+    /** 所有版本都必须包含的条目。 */
+    private val REQUIRED_METADATA_ENTRIES = setOf(
         MANIFEST_ENTRY,
         SOURCES_ENTRY,
         ARTICLES_ENTRY,
         SAVED_ITEMS_ENTRY
     )
+
+    /** v2+ 必须包含、v1 中可能缺失的条目。 */
+    private val OPTIONAL_METADATA_ENTRIES = setOf(APP_META_ENTRY, READER_ENTRY)
+
+    /** 所有已知的元数据条目名（用于条目名白名单校验）。 */
+    private val ALL_KNOWN_METADATA_ENTRIES = REQUIRED_METADATA_ENTRIES + OPTIONAL_METADATA_ENTRIES
 
     fun write(snapshot: WatchRssBackupSnapshot, output: OutputStream) {
         validateSnapshot(snapshot)
@@ -57,6 +77,7 @@ internal object WatchRssBackupArchive {
             snapshot.readerSnapshot?.let {
                 zip.writeUtf8Entry(READER_ENTRY, ReaderPresetSyncPayload.snapshotJson(it).toString())
             }
+            zip.writeUtf8Entry(APP_META_ENTRY, snapshot.appMeta.toJsonArray { it.toBackupJson() }.toString())
             snapshot.articles.forEach { article ->
                 zip.writeUtf8Entry(bodyTextEntry(article.articleId), article.contentText)
                 article.contentHtml?.let { html ->
@@ -84,6 +105,7 @@ internal object WatchRssBackupArchive {
         return runCatching { parseEntries(entries, readerResourceStore) }
             .getOrElse { throwable ->
                 if (throwable is IllegalArgumentException) throw throwable
+                if (throwable is BackupVersionTooHighException) throw throwable
                 throw IllegalArgumentException("WRSS 数据格式无效", throwable)
             }
     }
@@ -98,8 +120,7 @@ internal object WatchRssBackupArchive {
                 val name = entry.name
                 require(isSafeEntryName(name)) { "WRSS 包含不安全路径：$name" }
                 require(
-                    name in METADATA_ENTRIES ||
-                        name == READER_ENTRY ||
+                    name in ALL_KNOWN_METADATA_ENTRIES ||
                         BODY_ENTRY_PATTERN.matches(name) ||
                         READER_RESOURCE_PATTERN.matches(name)
                 ) {
@@ -132,14 +153,18 @@ internal object WatchRssBackupArchive {
         entries: Map<String, ByteArray>,
         readerResourceStore: ReaderResourceStore?
     ): WatchRssBackupSnapshot {
-        METADATA_ENTRIES.forEach { name ->
+        REQUIRED_METADATA_ENTRIES.forEach { name ->
             require(name in entries) { "WRSS 缺少必要条目：$name" }
         }
         val manifest = JSONObject(entries.getValue(MANIFEST_ENTRY).toString(Charsets.UTF_8))
         require(manifest.getString("format") == FORMAT) { "不是腕上RSS 资料库备份" }
         val version = manifest.getInt("version")
-        require(version in 1..VERSION) {
-            if (version > VERSION) "不支持的 WRSS 备份版本：$version" else "WRSS 备份版本无效：$version"
+        require(version >= MIN_SUPPORTED_VERSION) { "WRSS 备份版本无效：$version" }
+        if (version > CURRENT_DATA_STRUCTURE_VERSION) {
+            throw BackupVersionTooHighException(
+                backupVersion = version,
+                currentVersion = CURRENT_DATA_STRUCTURE_VERSION
+            )
         }
 
         val sources = JSONArray(entries.getValue(SOURCES_ENTRY).toString(Charsets.UTF_8))
@@ -165,15 +190,22 @@ internal object WatchRssBackupArchive {
                 articleFromBackupJson(json, contentHtml, contentText)
             }
 
+        // v2+ 备份包含 app_meta.json；v1 备份可能没有，此时视为空列表
+        val appMeta = entries[APP_META_ENTRY]
+            ?.let { JSONArray(it.toString(Charsets.UTF_8)).mapObjects(::appMetaFromBackupJson) }
+            ?: emptyList()
+
         val actualBodyEntries = entries.keys.filterTo(linkedSetOf()) { BODY_ENTRY_PATTERN.matches(it) }
         require(actualBodyEntries == expectedBodyEntries) { "WRSS 包含未引用或缺失的正文条目" }
         require(manifest.getInt("sourceCount") == sources.size) { "WRSS 的 RSS 源数量不匹配" }
         require(manifest.getInt("articleCount") == articles.size) { "WRSS 的文章数量不匹配" }
         require(manifest.getInt("savedItemCount") == savedItems.size) { "WRSS 的保存项数量不匹配" }
+        if (version >= CURRENT_DATA_STRUCTURE_VERSION) {
+            require(manifest.getInt("appMetaCount") == appMeta.size) { "WRSS 的元数据条目数量不匹配" }
+        }
 
-        val readerSnapshot = if (version >= 2) {
-            val readerJson = entries[READER_ENTRY]?.toString(Charsets.UTF_8)
-                ?: throw IllegalArgumentException("WRSS v2 缺少阅读器清单")
+        val readerSnapshot = entries[READER_ENTRY]?.let { readerEntry ->
+            val readerJson = readerEntry.toString(Charsets.UTF_8)
             val json = JSONObject(readerJson)
             ReaderPresetSnapshot(
                 presets = ReaderPresetSyncPayload.parsePresets(json.optJSONArray("presets")),
@@ -183,17 +215,17 @@ internal object WatchRssBackupArchive {
             ).also { reader ->
                 validateAndInstallReaderResources(entries, reader, readerResourceStore)
             }
-        } else {
-            null
         }
 
         return WatchRssBackupSnapshot(
             exportedAt = manifest.getLong("exportedAt"),
             appVersion = manifest.optString("appVersion"),
+            dataStructureVersion = version,
             sources = sources,
             articles = articles,
             savedItems = savedItems,
-            readerSnapshot = readerSnapshot
+            readerSnapshot = readerSnapshot,
+            appMeta = appMeta
         ).also(::validateSnapshot)
     }
 
@@ -210,11 +242,14 @@ internal object WatchRssBackupArchive {
         require(snapshot.savedItems.map { it.type to it.stableKey }.distinct().size == snapshot.savedItems.size) {
             "WRSS 包含重复保存项"
         }
+        require(snapshot.appMeta.map { it.key }.distinct().size == snapshot.appMeta.size) {
+            "WRSS 包含重复元数据键"
+        }
     }
 
     private fun WatchRssBackupSnapshot.manifestJson(): JSONObject = JSONObject().apply {
         put("format", FORMAT)
-        put("version", if (readerSnapshot == null) 1 else VERSION)
+        put("version", CURRENT_DATA_STRUCTURE_VERSION)
         put("exportedAt", exportedAt)
         put("appVersion", appVersion)
         put("sourceCount", sources.size)
@@ -223,6 +258,7 @@ internal object WatchRssBackupArchive {
         put("readerPresetCount", readerSnapshot?.presets?.size ?: 0)
         put("readerFontCount", readerSnapshot?.fonts?.size ?: 0)
         put("readerBackgroundCount", readerSnapshot?.backgrounds?.size ?: 0)
+        put("appMetaCount", appMeta.size)
     }
 
     private fun PhoneRssSourceEntity.toBackupJson(): JSONObject = JSONObject().apply {
@@ -284,6 +320,11 @@ internal object WatchRssBackupArchive {
         put("channelTitle", channelTitle)
         put("pubDate", pubDate)
         put("syncedAt", syncedAt)
+    }
+
+    private fun AppMetaEntity.toBackupJson(): JSONObject = JSONObject().apply {
+        put("key", key)
+        put("value", value)
     }
 
     private fun sourceFromBackupJson(json: JSONObject): PhoneRssSourceEntity =
@@ -353,6 +394,12 @@ internal object WatchRssBackupArchive {
             channelTitle = json.getString("channelTitle"),
             pubDate = json.getString("pubDate"),
             syncedAt = json.getLong("syncedAt")
+        )
+
+    private fun appMetaFromBackupJson(json: JSONObject): AppMetaEntity =
+        AppMetaEntity(
+            key = json.getString("key"),
+            value = json.getString("value")
         )
 
     private fun bodyTextEntry(articleId: String): String = "bodies/${bodyKey(articleId)}.txt"

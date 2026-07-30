@@ -16,12 +16,14 @@ import com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncService
 import com.lightningstudio.watchrss.phone.data.backup.WatchRssBackupService
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
+import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageRepository
 import com.lightningstudio.watchrss.phone.data.importer.AndroidWebArticleImporter
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
+import com.lightningstudio.watchrss.phone.data.telemetry.OpenPanelAnalytics
 import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -51,7 +53,8 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_8_9,
             PhoneCompanionDatabase.MIGRATION_9_10,
             PhoneCompanionDatabase.MIGRATION_10_11,
-            PhoneCompanionDatabase.MIGRATION_11_12
+            PhoneCompanionDatabase.MIGRATION_11_12,
+            PhoneCompanionDatabase.MIGRATION_12_13
         )
             .build()
     }
@@ -64,6 +67,9 @@ class PhoneCompanionContainer(context: Context) {
         PhoneInstallationIdentity(appContext)
     }
 
+    val firstInstalledAtMillis: Long
+        get() = installationIdentity.firstInstalledAtMillis
+
     val accountRepository: PhoneAccountRepository by lazy {
         PhoneAccountRepository(
             environment = accountEnvironment,
@@ -74,13 +80,18 @@ class PhoneCompanionContainer(context: Context) {
         )
     }
 
+    val openPanelAnalytics: OpenPanelAnalytics by lazy {
+        OpenPanelAnalytics(appContext, appScope)
+    }
+
     val usageTelemetry: PhoneUsageTelemetry by lazy {
         PhoneUsageTelemetry(
             context = appContext,
             environment = accountEnvironment,
             installationIdentity = installationIdentity,
             accountRepository = accountRepository,
-            appScope = appScope
+            appScope = appScope,
+            openPanelAnalytics = openPanelAnalytics
         )
     }
 
@@ -111,6 +122,12 @@ class PhoneCompanionContainer(context: Context) {
         FileArticleContentStore(appContext)
     }
 
+    val llmTokenUsageRepository: PhoneLlmTokenUsageRepository by lazy {
+        PhoneLlmTokenUsageRepository(
+            dao = database.llmTokenUsageDao()
+        )
+    }
+
     val repository: PhoneCompanionRepository by lazy {
         PhoneCompanionRepository(
             savedItemDao = database.phoneSavedItemDao(),
@@ -120,7 +137,8 @@ class PhoneCompanionContainer(context: Context) {
             syncChangeLogDao = database.syncChangeLogDao(),
             syncPeerStateDao = database.syncPeerStateDao(),
             webArticleImporter = webArticleImporter::importUrl,
-            articleContentStore = articleContentStore
+            articleContentStore = articleContentStore,
+            appMetaDao = database.appMetaDao()
         )
     }
 
@@ -169,6 +187,7 @@ class PhoneCompanionContainer(context: Context) {
             context = appContext,
             repository = repository,
             readerPresetRepository = readerPresetRepository,
+            llmTokenUsageRepository = llmTokenUsageRepository,
             deviceId = deviceIdentity.deviceId,
             debugLog = bluetoothDebugLog,
             buildAccountSyncRequest = accountRepository::buildAccountSyncRequest,

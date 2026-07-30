@@ -8,6 +8,7 @@ import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.account.PhoneInstallationIdentity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -22,12 +23,44 @@ class PhoneUsageTelemetry(
     private val installationIdentity: PhoneInstallationIdentity,
     private val accountRepository: PhoneAccountRepository,
     private val appScope: CoroutineScope,
-    private val httpClient: OkHttpClient = defaultHttpClient()
+    private val httpClient: OkHttpClient = defaultHttpClient(),
+    private val openPanelAnalytics: OpenPanelAnalytics? = null
 ) {
     private val preferences = context.applicationContext.getSharedPreferences(
         "watchrss_usage_telemetry",
         Context.MODE_PRIVATE
     )
+
+    init {
+        openPanelAnalytics?.setGlobalProperties(
+            mapOf(
+                "platform" to "phone",
+                "packageName" to context.packageName,
+                "appVersionName" to BuildConfig.VERSION_NAME,
+                "appVersionCode" to BuildConfig.VERSION_CODE,
+                "deviceModel" to "${Build.MANUFACTURER} ${Build.MODEL}",
+                "sdk" to Build.VERSION.SDK_INT,
+                "firstInstalledAt" to installationIdentity.firstInstalledAtMillis
+            )
+        )
+        openPanelAnalytics?.identify(
+            installationIdentity.installId,
+            mapOf("installId" to installationIdentity.installId)
+        )
+        // When user logs in, switch profile to userId.
+        appScope.launch {
+            accountRepository.session.filterNotNull().collect { session ->
+                openPanelAnalytics?.identify(
+                    session.userId,
+                    mapOf(
+                        "installId" to installationIdentity.installId,
+                        "userId" to session.userId,
+                        "phoneMasked" to session.phoneMasked
+                    )
+                )
+            }
+        }
+    }
 
     fun recordAppLaunch() {
         capture("app_opened")
@@ -59,7 +92,77 @@ class PhoneUsageTelemetry(
         )
     }
 
+    fun recordRssSourceAdded(url: String, title: String, articleCount: Int) {
+        capture(
+            event = "rss_source_added",
+            properties = mapOf(
+                "url" to url,
+                "title" to title,
+                "articleCount" to articleCount
+            )
+        )
+    }
+
+    fun recordArticleImported(source: String, url: String, title: String?) {
+        capture(
+            event = "article_imported",
+            properties = mapOf(
+                "source" to source,
+                "url" to url,
+                "title" to title.orEmpty()
+            )
+        )
+    }
+
+    fun recordLocalContentImported(kind: String, title: String?, articleCount: Int) {
+        capture(
+            event = "local_content_imported",
+            properties = mapOf(
+                "kind" to kind,
+                "title" to title.orEmpty(),
+                "articleCount" to articleCount
+            )
+        )
+    }
+
+    fun recordBackupImported(mode: String, articleCount: Int, sourceCount: Int) {
+        capture(
+            event = "backup_imported",
+            properties = mapOf(
+                "mode" to mode,
+                "articleCount" to articleCount,
+                "sourceCount" to sourceCount
+            )
+        )
+    }
+
+    fun recordBackupExported(articleCount: Int, sourceCount: Int) {
+        capture(
+            event = "backup_exported",
+            properties = mapOf(
+                "articleCount" to articleCount,
+                "sourceCount" to sourceCount
+            )
+        )
+    }
+
+    fun recordRemoteInputSent(url: String) {
+        capture(
+            event = "remote_input_sent",
+            properties = mapOf("url" to url)
+        )
+    }
+
+
+    fun recordAccountSignedIn(userId: String) {
+        capture(
+            event = "account_signed_in",
+            properties = mapOf("userId" to userId)
+        )
+    }
+
     private fun capture(event: String, properties: Map<String, Any?> = emptyMap()) {
+        openPanelAnalytics?.track(event, properties.filterValues { it != null }.mapValues { it.value!! })
         if (!environment.isTelemetryConfigured) return
         appScope.launch(Dispatchers.IO) {
             runCatching {
@@ -103,4 +206,3 @@ class PhoneUsageTelemetry(
                 .build()
     }
 }
-

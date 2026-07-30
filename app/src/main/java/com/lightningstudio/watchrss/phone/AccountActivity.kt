@@ -47,6 +47,7 @@ import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.account.PhonePasskeyCoordinator
 import com.lightningstudio.watchrss.phone.cloud.CloudAccountPanel
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncService
+import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
 import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
@@ -69,6 +70,7 @@ class AccountActivity : ComponentActivity() {
                     accountRepository = accountRepository,
                     cloudSyncService = container.cloudSyncService,
                     rssSources = rssSources,
+                    usageTelemetry = container.usageTelemetry,
                     onBack = ::finish,
                     loginWithPasskey = passkeyCoordinator::login,
                     createPasskey = passkeyCoordinator::createPasskey,
@@ -110,8 +112,9 @@ internal fun AccountScreen(
     accountRepository: PhoneAccountRepository,
     cloudSyncService: PhoneCloudSyncService,
     rssSources: List<com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity>,
+    usageTelemetry: PhoneUsageTelemetry,
     onBack: () -> Unit,
-    loginWithPasskey: suspend (String) -> Unit,
+    loginWithPasskey: suspend (String) -> com.lightningstudio.watchrss.phone.account.PhoneAccountSession,
     createPasskey: suspend () -> Unit,
     runAction: (suspend () -> Unit) -> Unit
 ) {
@@ -150,7 +153,10 @@ internal fun AccountScreen(
                         error = null
                         message = null
                         runCatching { loginWithPasskey(phone) }
-                            .onSuccess { message = "Passkey 登录成功" }
+                            .onSuccess { session ->
+                                message = "Passkey 登录成功"
+                                usageTelemetry.recordAccountSignedIn(session.userId)
+                            }
                             .onFailure { error = it.message ?: "Passkey 登录失败" }
                         busy = false
                     }
@@ -200,7 +206,10 @@ internal fun AccountScreen(
                             busy = true
                             error = null
                             runCatching { accountRepository.verifyPhoneOtp(phone, otp) }
-                                .onSuccess { message = "登录成功" }
+                                .onSuccess { session ->
+                                    message = "登录成功"
+                                    usageTelemetry.recordAccountSignedIn(session.userId)
+                                }
                                 .onFailure { error = it.message ?: "登录失败" }
                             busy = false
                         }

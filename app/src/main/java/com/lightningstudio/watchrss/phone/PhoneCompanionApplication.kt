@@ -44,6 +44,7 @@ class PhoneCompanionApplication : Application() {
         appScope.launch {
             container.accountRepository.initialize()
             container.usageTelemetry.recordAppLaunch()
+            container.repository.recordFirstUseIfAbsent(container.firstInstalledAtMillis)
             if (container.accountRepository.session.value != null) {
                 runCatching { container.cloudSyncService.syncNow() }
             }

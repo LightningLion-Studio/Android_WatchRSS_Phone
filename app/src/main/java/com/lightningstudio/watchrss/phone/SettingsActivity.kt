@@ -2949,6 +2949,9 @@ private fun AppFeatureSettings(modifier: Modifier) {
             style = MaterialTheme.typography.bodySmall
         )
         SectionTitle("其他")
+        SettingsEntry("数据管理", "备份、恢复和导出数据", Icons.Default.Settings) {
+            context.startActivity(DataManagementActivity.createIntent(context))
+        }
         SettingsEntry("新手引导", "重新查看手机操作引导", Icons.Default.Edit) {
             context.startActivity(Intent(context, GuideActivity::class.java))
         }

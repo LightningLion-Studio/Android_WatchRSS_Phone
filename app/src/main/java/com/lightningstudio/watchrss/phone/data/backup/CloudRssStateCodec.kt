@@ -30,6 +30,9 @@ internal data class CloudRssArticleState(
     val deleted: Boolean,
     val deletedAt: Long,
     val readingProgress: Float,
+    val readingPositionBytes: Long,
+    val readingPositionContentHash: String,
+    val readingPositionChangedAt: Long,
     val isRead: Boolean
 )
 
@@ -73,6 +76,9 @@ internal object CloudRssStateCodec {
                         put("deleted", article.deleted)
                         put("deletedAt", article.deletedAt)
                         put("readingProgress", article.readingProgress.toDouble())
+                        put("readingPositionBytes", article.readingPositionBytes)
+                        put("readingPositionContentHash", article.readingPositionContentHash)
+                        put("readingPositionChangedAt", article.readingPositionChangedAt)
                         put("isRead", article.isRead)
                     })
                 }
@@ -139,6 +145,9 @@ internal object CloudRssStateCodec {
                         readingProgress = json.optDouble("readingProgress")
                             .toFloat()
                             .coerceIn(0f, 1f),
+                        readingPositionBytes = json.optLong("readingPositionBytes").coerceAtLeast(0L),
+                        readingPositionContentHash = json.optString("readingPositionContentHash"),
+                        readingPositionChangedAt = json.optLong("readingPositionChangedAt").coerceAtLeast(0L),
                         isRead = json.optBoolean("isRead")
                     )
                 )

@@ -21,6 +21,7 @@ import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_EXTENSION
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_MIME_TYPE
 import com.lightningstudio.watchrss.phone.ui.MainScreen
+import com.lightningstudio.watchrss.phone.ui.TxtUpdateDialog
 import com.lightningstudio.watchrss.phone.ui.reader.ProvideReaderPreset
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
@@ -228,6 +229,14 @@ class HomeActivity : ComponentActivity() {
                     onDismissMessage = viewModel::clearMessage,
                         onImportFile = ::selectLocalFile
                     )
+                    state.txtUpdatePrompt?.let { prompt ->
+                        TxtUpdateDialog(
+                            prompt = prompt,
+                            onConfirmReplace = viewModel::confirmTxtUpdate,
+                            onImportAsNew = viewModel::importPendingTxtAsNew,
+                            onDismiss = viewModel::dismissTxtUpdatePrompt
+                        )
+                    }
                 }
             }
         }

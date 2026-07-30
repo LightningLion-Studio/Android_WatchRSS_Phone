@@ -47,5 +47,8 @@ data class PhoneArticleEntity(
     val syncChunkHashesJson: String = "",
     val syncMetadataHash: String = "",
     val readingProgress: Float = 0f,
-    val isRead: Boolean = false
+    val isRead: Boolean = false,
+    val readingPositionBytes: Long = 0L,
+    val readingPositionContentHash: String = "",
+    val readingPositionChangedAt: Long = 0L
 )

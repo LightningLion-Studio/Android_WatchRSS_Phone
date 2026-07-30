@@ -9,6 +9,12 @@ import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
@@ -136,7 +142,12 @@ import com.lightningstudio.watchrss.phone.ui.reader.ReaderBackgroundSurface
 import com.lightningstudio.watchrss.phone.ui.reader.ReaderPresetRuntime
 import com.lightningstudio.watchrss.phone.ui.reader.ReaderTextRole
 import com.lightningstudio.watchrss.phone.ui.reader.readerTextStyle
+import com.lightningstudio.watchrss.phone.ui.PREDICTIVE_BACK_CANCEL_ANIMATION_MS
+import com.lightningstudio.watchrss.phone.ui.PREDICTIVE_BACK_EXIT_ANIMATION_MS
+import com.lightningstudio.watchrss.phone.ui.PREDICTIVE_BACK_EXIT_PROGRESS
+import com.lightningstudio.watchrss.phone.ui.predictiveBackExitPreview
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -579,10 +590,74 @@ internal fun ReaderSettingsHost(
         }
     }
 
-    val back = { backFrom(page) }
-    PredictiveBackHandler(enabled = page != SettingsPage.ROOT) { events ->
-        events.collect { }
-        back()
+    var rootBackProgress by remember { mutableFloatStateOf(0f) }
+    PredictiveBackHandler(
+        enabled = paneTransition == null &&
+            (page != SettingsPage.ROOT || leadingPane != null)
+    ) { events ->
+        val source = page
+        if (source == SettingsPage.ROOT) {
+            try {
+                events.collect { event ->
+                    rootBackProgress = event.progress.coerceIn(0f, 1f)
+                }
+                animate(
+                    initialValue = rootBackProgress,
+                    targetValue = PREDICTIVE_BACK_EXIT_PROGRESS,
+                    animationSpec = tween(PREDICTIVE_BACK_EXIT_ANIMATION_MS)
+                ) { value, _ ->
+                    rootBackProgress = value
+                }
+                onFinish()
+            } catch (exception: CancellationException) {
+                animate(
+                    initialValue = rootBackProgress,
+                    targetValue = 0f,
+                    animationSpec = tween(PREDICTIVE_BACK_CANCEL_ANIMATION_MS)
+                ) { value, _ ->
+                    rootBackProgress = value
+                }
+            }
+            return@PredictiveBackHandler
+        }
+
+        val target = source.parent()
+        val predictiveTransition = SettingsPaneTransition(source, target)
+        paneTransition = predictiveTransition
+        paneTransitionProgress = 0f
+        try {
+            events.collect { event ->
+                paneTransitionProgress = event.progress.coerceIn(0f, 1f)
+            }
+            val remainingDuration = (
+                320 * (1f - paneTransitionProgress.coerceIn(0f, 1f))
+                ).roundToInt().coerceAtLeast(1)
+            animate(
+                initialValue = paneTransitionProgress,
+                targetValue = 1f,
+                animationSpec = tween(
+                    durationMillis = remainingDuration,
+                    easing = FastOutSlowInEasing
+                )
+            ) { value, _ ->
+                paneTransitionProgress = value
+            }
+            page = target
+            paneTransition = null
+            paneTransitionProgress = 1f
+        } catch (exception: CancellationException) {
+            animate(
+                initialValue = paneTransitionProgress,
+                targetValue = 0f,
+                animationSpec = tween(PREDICTIVE_BACK_CANCEL_ANIMATION_MS)
+            ) { value, _ ->
+                paneTransitionProgress = value
+            }
+            if (paneTransition == predictiveTransition) {
+                paneTransition = null
+                paneTransitionProgress = 1f
+            }
+        }
     }
 
     val renderPage: @Composable (SettingsPage) -> Unit = { renderedPage ->
@@ -769,7 +844,11 @@ internal fun ReaderSettingsHost(
         }
     }
 
-    AdaptiveWindowScope(modifier = Modifier.fillMaxSize()) { windowInfo ->
+    AdaptiveWindowScope(
+        modifier = Modifier
+            .fillMaxSize()
+            .predictiveBackExitPreview(rootBackProgress)
+    ) { windowInfo ->
         if (leadingPane != null && windowInfo.isMediumOrExpanded) {
             SettingsPaneStack(
                 windowInfo = windowInfo,
@@ -779,8 +858,51 @@ internal fun ReaderSettingsHost(
                 leadingPane = leadingPane,
                 renderPage = renderPage
             )
+        } else if (paneTransition != null) {
+            SettingsSinglePaneTransition(
+                transition = paneTransition!!,
+                progress = paneTransitionProgress,
+                renderPage = renderPage
+            )
         } else {
-            renderPage(page)
+            AnimatedContent(
+                targetState = page,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clipToBounds(),
+                transitionSpec = {
+                    val direction = if (targetState.parent() == initialState) {
+                        1
+                    } else {
+                        -1
+                    }
+                    (
+                        slideInHorizontally(
+                            animationSpec = tween(
+                                durationMillis = 320,
+                                easing = FastOutSlowInEasing
+                            )
+                        ) { fullWidth -> fullWidth * direction } +
+                            fadeIn(
+                                animationSpec = tween(
+                                    durationMillis = 220,
+                                    delayMillis = 60
+                                )
+                            )
+                        ) togetherWith (
+                        slideOutHorizontally(
+                            animationSpec = tween(
+                                durationMillis = 320,
+                                easing = FastOutSlowInEasing
+                            )
+                        ) { fullWidth -> -fullWidth * direction } +
+                            fadeOut(animationSpec = tween(durationMillis = 160))
+                        )
+                },
+                label = "settings-compact-page"
+            ) { renderedPage ->
+                renderPage(renderedPage)
+            }
         }
     }
 
@@ -957,6 +1079,52 @@ internal fun ReaderSettingsHost(
 }
 
 @Composable
+private fun SettingsSinglePaneTransition(
+    transition: SettingsPaneTransition,
+    progress: Float,
+    renderPage: @Composable (SettingsPage) -> Unit
+) {
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .clipToBounds()
+    ) {
+        val transitionProgress = progress.coerceIn(0f, 1f)
+        if (transition.isForward) {
+            Box(
+                modifier = Modifier
+                    .offset(x = -(maxWidth * 0.12f * transitionProgress))
+                    .fillMaxSize()
+            ) {
+                renderPage(transition.from)
+            }
+            Box(
+                modifier = Modifier
+                    .offset(x = maxWidth * (1f - transitionProgress))
+                    .fillMaxSize()
+            ) {
+                renderPage(transition.to)
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .offset(x = -(maxWidth * 0.12f * (1f - transitionProgress)))
+                    .fillMaxSize()
+            ) {
+                renderPage(transition.to)
+            }
+            Box(
+                modifier = Modifier
+                    .offset(x = maxWidth * transitionProgress)
+                    .fillMaxSize()
+            ) {
+                renderPage(transition.from)
+            }
+        }
+    }
+}
+
+@Composable
 private fun SettingsPaneStack(
     windowInfo: AdaptiveWindowInfo,
     page: SettingsPage,
@@ -987,6 +1155,15 @@ private fun SettingsPaneStack(
                     else -> renderPage(page)
                 }
             }
+        )
+        return
+    }
+
+    if (transition.from.depth == transition.to.depth) {
+        SettingsSinglePaneTransition(
+            transition = transition,
+            progress = transitionProgress,
+            renderPage = renderPage
         )
         return
     }

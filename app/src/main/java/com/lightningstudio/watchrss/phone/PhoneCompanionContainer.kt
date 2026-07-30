@@ -50,7 +50,8 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_7_8,
             PhoneCompanionDatabase.MIGRATION_8_9,
             PhoneCompanionDatabase.MIGRATION_9_10,
-            PhoneCompanionDatabase.MIGRATION_10_11
+            PhoneCompanionDatabase.MIGRATION_10_11,
+            PhoneCompanionDatabase.MIGRATION_11_12
         )
             .build()
     }

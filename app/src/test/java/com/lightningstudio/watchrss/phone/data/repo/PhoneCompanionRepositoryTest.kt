@@ -342,6 +342,131 @@ class PhoneCompanionRepositoryTest {
     }
 
     @Test
+    fun inspectAndConfirmTxtUpdate_matchesVersionedNameAndKeepsArticleState() = runBlocking {
+        val sourceDao = FakePhoneRssSourceDao()
+        val articleDao = FakePhoneArticleDao()
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone",
+            localContentImporter = ::txtImportForTest
+        )
+        val oldText = "第一章 开始\n\n第二章 继续\n\n第三章 转折\n\n第四章 暂停"
+        repository.importLocalContent(
+            "星河传说 1-60章 完整版.txt",
+            "text/plain",
+            oldText.toByteArray()
+        )
+        val old = articleDao.items.single()
+        val oldPosition = oldText.substringBefore("第四章").toByteArray().size.toLong()
+        articleDao.items = listOf(
+            old.copy(
+                favoriteSaved = true,
+                watchLaterSaved = true,
+                readingProgress = oldPosition.toFloat() / oldText.toByteArray().size,
+                readingPositionBytes = oldPosition,
+                readingPositionContentHash = old.contentHash,
+                readingPositionChangedAt = 1234L
+            )
+        )
+        val newText = "$oldText\n\n第五章 新篇\n\n第六章 未完待续"
+
+        val inspection = repository.inspectLocalContentImport(
+            "星河传说 更新至80章 2026-07-30.txt",
+            "text/plain",
+            newText.toByteArray()
+        )
+        val candidate = inspection.candidates.single()
+
+        assertEquals(TxtUpdateRelation.APPEND_ONLY, candidate.relation)
+        assertEquals(old.articleId, candidate.articleId)
+        assertEquals(oldPosition, candidate.inheritedPositionBytes)
+        assertEquals(
+            oldPosition.toFloat() / newText.toByteArray().size,
+            candidate.inheritedProgress,
+            0.0001f
+        )
+
+        repository.confirmLocalContentImport(inspection, candidate.articleId)
+        val updated = articleDao.items.single()
+        assertEquals(old.articleId, updated.articleId)
+        assertEquals("星河传说 更新至80章 2026-07-30", updated.title)
+        assertEquals(true, updated.favoriteSaved)
+        assertEquals(true, updated.watchLaterSaved)
+        assertEquals(old.importedAt, updated.importedAt)
+        assertEquals(oldPosition, updated.readingPositionBytes)
+    }
+
+    @Test
+    fun appendFrom60To80Sections_mapsOldHalfToThirtySevenPointFivePercent() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone",
+            localContentImporter = ::txtImportForTest
+        )
+        val oldText = "a\n".repeat(60)
+        val newText = oldText + "b\n".repeat(20)
+        repository.importLocalContent("连载故事 1-60章.txt", "text/plain", oldText.toByteArray())
+        val old = articleDao.items.single()
+        articleDao.items = listOf(
+            old.copy(
+                readingProgress = 0.5f,
+                readingPositionBytes = oldText.toByteArray().size / 2L,
+                readingPositionContentHash = old.contentHash,
+                readingPositionChangedAt = 10L
+            )
+        )
+
+        val candidate = repository.inspectLocalContentImport(
+            "连载故事 更新至80章.txt",
+            "text/plain",
+            newText.toByteArray()
+        ).candidates.single()
+
+        assertEquals(TxtUpdateRelation.APPEND_ONLY, candidate.relation)
+        assertEquals(0.375f, candidate.inheritedProgress, 0.0001f)
+    }
+
+    @Test
+    fun inspectTxtUpdate_distinguishesIdenticalOlderAndMiddleRevision() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone",
+            localContentImporter = ::txtImportForTest
+        )
+        val oldText = "第一章 原文\n\n第二章 原文\n\n第三章 原文\n\n第四章 原文"
+        repository.importLocalContent("长篇故事 1-60章.txt", "text/plain", oldText.toByteArray())
+
+        val identical = repository.inspectLocalContentImport(
+            "长篇故事 完整版.txt",
+            "text/plain",
+            oldText.toByteArray()
+        )
+        val older = repository.inspectLocalContentImport(
+            "长篇故事 1-40章.txt",
+            "text/plain",
+            oldText.substringBefore("\n\n第四章").toByteArray()
+        )
+        val revision = repository.inspectLocalContentImport(
+            "长篇故事 修订版.txt",
+            "text/plain",
+            oldText.replace("第二章 原文", "第二章 已修订").toByteArray()
+        )
+
+        assertEquals(TxtUpdateRelation.IDENTICAL, identical.candidates.single().relation)
+        assertEquals(TxtUpdateRelation.OLDER_VERSION, older.candidates.single().relation)
+        assertEquals(TxtUpdateRelation.POSSIBLE_REVISION, revision.candidates.single().relation)
+        assertEquals(true, revision.candidates.single().approximateProgress)
+    }
+
+    @Test
     fun importLocalContent_externalizesLargeTxtWithoutSplitting() = runBlocking {
         val sourceDao = FakePhoneRssSourceDao()
         val articleDao = FakePhoneArticleDao()
@@ -1577,6 +1702,36 @@ class PhoneCompanionRepositoryTest {
         }
     }
 
+    private fun txtImportForTest(
+        fileName: String,
+        @Suppress("UNUSED_PARAMETER") mimeType: String?,
+        bytes: ByteArray
+    ): ImportedLocalContent {
+        val title = fileName.substringBeforeLast('.', fileName)
+        val text = bytes.toString(Charsets.UTF_8)
+        return ImportedLocalContent(
+            kind = LocalContentImportKind.TXT,
+            source = ImportedRssSource(
+                url = ImportedContentIds.ROOT_SOURCE_URL,
+                title = ImportedContentIds.ROOT_SOURCE_TITLE,
+                description = "导入",
+                siteUrl = null,
+                imageUrl = null,
+                items = listOf(
+                    ImportedRssItem(
+                        url = ImportedContentIds.txtArticleUrl("test-${title.hashCode()}"),
+                        title = title,
+                        excerpt = text.take(32),
+                        contentHtml = null,
+                        contentText = text,
+                        imageUrl = null,
+                        guid = "test-${title.hashCode()}"
+                    )
+                )
+            )
+        )
+    }
+
     private class FakePhoneArticleDao : PhoneArticleDao {
         var items: List<PhoneArticleEntity> = emptyList()
 
@@ -1620,10 +1775,21 @@ class PhoneCompanionRepositoryTest {
             }
         }
 
-        override suspend fun updateReadingProgress(articleId: String, progress: Float) {
+        override suspend fun updateReadingProgress(
+            articleId: String,
+            progress: Float,
+            positionBytes: Long,
+            positionContentHash: String,
+            positionChangedAt: Long
+        ) {
             items = items.map { article ->
                 if (article.articleId == articleId) {
-                    article.copy(readingProgress = progress)
+                    article.copy(
+                        readingProgress = progress,
+                        readingPositionBytes = positionBytes,
+                        readingPositionContentHash = positionContentHash,
+                        readingPositionChangedAt = positionChangedAt
+                    )
                 } else {
                     article
                 }

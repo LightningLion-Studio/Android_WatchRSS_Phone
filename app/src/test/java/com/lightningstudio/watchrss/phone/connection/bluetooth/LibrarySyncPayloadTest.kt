@@ -36,7 +36,10 @@ class LibrarySyncPayloadTest {
             watchLaterSortOrder = 0L,
             deleted = false,
             deletedAt = 0L,
-            readingProgress = 0.42f
+            readingProgress = 0.42f,
+            readingPositionBytes = 420L,
+            readingPositionContentHash = "hash",
+            readingPositionChangedAt = 23L
         )
 
         val request = LibrarySyncPayload.buildArticlesRequest("phone", listOf(article))
@@ -47,6 +50,9 @@ class LibrarySyncPayloadTest {
         assertTrue(parsed.independentSaved)
         assertTrue(parsed.favoriteSaved)
         assertEquals(article.readingProgress, parsed.readingProgress, 0.0001f)
+        assertEquals(article.readingPositionBytes, parsed.readingPositionBytes)
+        assertEquals(article.readingPositionContentHash, parsed.readingPositionContentHash)
+        assertEquals(article.readingPositionChangedAt, parsed.readingPositionChangedAt)
         assertEquals("syncLibrary", request.getString("action"))
         assertEquals("articles", request.getString("phase"))
     }
@@ -79,7 +85,10 @@ class LibrarySyncPayloadTest {
             watchLaterSortOrder = 0L,
             deleted = false,
             deletedAt = 0L,
-            readingProgress = 0.36f
+            readingProgress = 0.36f,
+            readingPositionBytes = 360L,
+            readingPositionContentHash = "hash",
+            readingPositionChangedAt = 24L
         )
         val source = PhoneRssSourceEntity(
             url = "https://example.com/feed.xml",
@@ -116,6 +125,9 @@ class LibrarySyncPayloadTest {
         assertEquals(article.contentHash, manifest.contentHash)
         assertEquals(article.favoriteChangedAt, manifest.favoriteChangedAt)
         assertEquals(article.readingProgress, manifest.readingProgress, 0.0001f)
+        assertEquals(article.readingPositionBytes, manifest.readingPositionBytes)
+        assertEquals(article.readingPositionContentHash, manifest.readingPositionContentHash)
+        assertEquals(article.readingPositionChangedAt, manifest.readingPositionChangedAt)
         assertEquals(source.title, parsedSource.title)
         assertEquals(source.isPinned, parsedSource.isPinned)
         assertTrue(LibrarySyncPayload.supportsChangeSequences(request))
@@ -265,6 +277,47 @@ class LibrarySyncPayloadTest {
         assertEquals(
             listOf(article),
             LibrarySyncPayload.filterArticlesNeedingSync(listOf(article), listOf(staleProgressRemote))
+        )
+    }
+
+    @Test
+    fun filterArticlesNeedingSync_usesPositionTimestampSoBackwardReadingWins() {
+        val article = testArticle("article-backward", "正文").copy(
+            readingProgress = 0.2f,
+            readingPositionBytes = 200L,
+            readingPositionContentHash = "hash-article-backward",
+            readingPositionChangedAt = 200L
+        )
+        val olderRemote = ArticleSyncManifestEntry(
+            articleId = article.articleId,
+            contentHash = article.contentHash,
+            updatedAt = article.updatedAt,
+            independentChangedAt = article.independentChangedAt,
+            favoriteChangedAt = article.favoriteChangedAt,
+            watchLaterChangedAt = article.watchLaterChangedAt,
+            deletedAt = article.deletedAt,
+            readingProgress = 0.8f,
+            readingPositionBytes = 800L,
+            readingPositionContentHash = article.contentHash,
+            readingPositionChangedAt = 100L
+        )
+
+        assertEquals(
+            listOf(article),
+            LibrarySyncPayload.filterArticlesNeedingSync(listOf(article), listOf(olderRemote))
+        )
+        assertEquals(
+            emptyList<PhoneArticleEntity>(),
+            LibrarySyncPayload.filterArticlesNeedingSync(
+                listOf(article),
+                listOf(
+                    olderRemote.copy(
+                        readingProgress = 0.2f,
+                        readingPositionBytes = 200L,
+                        readingPositionChangedAt = 200L
+                    )
+                )
+            )
         )
     }
 

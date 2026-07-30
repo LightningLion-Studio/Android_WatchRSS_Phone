@@ -2,7 +2,11 @@ package com.lightningstudio.watchrss.phone.data.local
 
 import android.content.Context
 import java.io.File
+import java.io.FileOutputStream
 import java.io.RandomAccessFile
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import kotlin.math.ceil
 
 interface ArticleContentStore {
@@ -38,7 +42,28 @@ class FileArticleContentStore(context: Context) : ArticleContentStore {
             directory.mkdirs()
         }
         val marker = markerFor(articleId)
-        File(directory, marker.removePrefix(ARTICLE_CONTENT_MARKER_PREFIX)).writeText(text, Charsets.UTF_8)
+        val target = File(directory, marker.removePrefix(ARTICLE_CONTENT_MARKER_PREFIX))
+        val temporary = File(directory, "${target.name}.part")
+        val encoded = text.toByteArray(Charsets.UTF_8)
+        FileOutputStream(temporary).use { output ->
+            output.write(encoded)
+            output.fd.sync()
+        }
+        check(temporary.length() == encoded.size.toLong()) { "正文临时文件校验失败" }
+        try {
+            Files.move(
+                temporary.toPath(),
+                target.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING
+            )
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(
+                temporary.toPath(),
+                target.toPath(),
+                StandardCopyOption.REPLACE_EXISTING
+            )
+        }
         return marker
     }
 

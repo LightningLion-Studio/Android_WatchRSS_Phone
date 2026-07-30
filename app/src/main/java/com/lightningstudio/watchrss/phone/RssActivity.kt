@@ -60,6 +60,7 @@ import com.lightningstudio.watchrss.phone.ui.MainTab
 import com.lightningstudio.watchrss.phone.ui.GlassTopBar
 import com.lightningstudio.watchrss.phone.ui.RefreshablePageColumn
 import com.lightningstudio.watchrss.phone.ui.TAB_BAR_HEIGHT
+import com.lightningstudio.watchrss.phone.ui.TxtUpdateDialog
 import com.lightningstudio.watchrss.phone.ui.canDeleteArticle
 import com.lightningstudio.watchrss.phone.ui.theme.AppCard
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
@@ -189,6 +190,14 @@ class RssActivity : ComponentActivity() {
                     },
                     onDismissMessage = viewModel::clearMessage
                 )
+                uiState.txtUpdatePrompt?.let { prompt ->
+                    TxtUpdateDialog(
+                        prompt = prompt,
+                        onConfirmReplace = viewModel::confirmTxtUpdate,
+                        onImportAsNew = viewModel::importPendingTxtAsNew,
+                        onDismiss = viewModel::dismissTxtUpdatePrompt
+                    )
+                }
 
                 if (showAddRssDialog) {
                     AddRssSourceDialog(

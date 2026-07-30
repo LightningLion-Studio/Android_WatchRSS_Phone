@@ -44,6 +44,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
+import com.lightningstudio.watchrss.phone.account.PhonePasskeyCoordinator
 import com.lightningstudio.watchrss.phone.cloud.CloudAccountPanel
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncService
 import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
@@ -58,6 +59,7 @@ class AccountActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val container = (application as PhoneCompanionApplication).container
         val accountRepository = container.accountRepository
+        val passkeyCoordinator = PhonePasskeyCoordinator(this, accountRepository)
 
         setContent {
             WatchRssPhoneTheme {
@@ -68,6 +70,8 @@ class AccountActivity : ComponentActivity() {
                     cloudSyncService = container.cloudSyncService,
                     rssSources = rssSources,
                     onBack = ::finish,
+                    loginWithPasskey = passkeyCoordinator::login,
+                    createPasskey = passkeyCoordinator::createPasskey,
                     runAction = { action ->
                         lifecycleScope.launch { action() }
                     }
@@ -107,6 +111,8 @@ internal fun AccountScreen(
     cloudSyncService: PhoneCloudSyncService,
     rssSources: List<com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity>,
     onBack: () -> Unit,
+    loginWithPasskey: suspend (String) -> Unit,
+    createPasskey: suspend () -> Unit,
     runAction: (suspend () -> Unit) -> Unit
 ) {
     val session by accountRepository.session.collectAsState()
@@ -119,12 +125,12 @@ internal fun AccountScreen(
     val accountControls: @Composable ColumnScope.() -> Unit = {
         if (session == null) {
             Text(
-                "手机号登录",
+                "登录",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                "登录后可管理云端资料和设备归属。",
+                "使用 Passkey，或通过短信验证码登录。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -136,6 +142,28 @@ internal fun AccountScreen(
                 enabled = !busy,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                 modifier = Modifier.fillMaxWidth()
+            )
+            Button(
+                onClick = {
+                    runAction {
+                        busy = true
+                        error = null
+                        message = null
+                        runCatching { loginWithPasskey(phone) }
+                            .onSuccess { message = "Passkey 登录成功" }
+                            .onFailure { error = it.message ?: "Passkey 登录失败" }
+                        busy = false
+                    }
+                },
+                enabled = !busy && phone.isNotBlank(),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("使用 Passkey 登录")
+            }
+            Text(
+                "首次使用请先通过短信登录，并在账号页创建 Passkey。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             OutlinedTextField(
                 value = otp,
@@ -184,6 +212,33 @@ internal fun AccountScreen(
                 }
             }
         } else {
+            Text(
+                "Passkey",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                "创建后可使用指纹、人脸或设备屏幕锁登录，无需短信验证码。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Button(
+                onClick = {
+                    runAction {
+                        busy = true
+                        error = null
+                        message = null
+                        runCatching { createPasskey() }
+                            .onSuccess { message = "Passkey 创建成功" }
+                            .onFailure { error = it.message ?: "Passkey 创建失败" }
+                        busy = false
+                    }
+                },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("创建 Passkey")
+            }
             CloudAccountPanel(
                 service = cloudSyncService,
                 userId = requireNotNull(session).userId,
@@ -231,7 +286,7 @@ internal fun AccountScreen(
             )
         }
         Text(
-            text = "微信、QQ、OPPO 欢太账号登录已预留后端能力，当前版本先使用手机号验证码。",
+            text = "短信验证码保留为首次绑定和 Passkey 不可用时的回退方式。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )

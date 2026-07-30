@@ -41,6 +41,9 @@ data class ArticleSyncManifestEntry(
     val bodyAvailable: Boolean = true,
     val bodySyncMode: String = ARTICLE_BODY_SYNC_MODE_FULL,
     val readingProgress: Float = 0f,
+    val readingPositionBytes: Long = 0L,
+    val readingPositionContentHash: String = "",
+    val readingPositionChangedAt: Long = 0L,
     val isRead: Boolean = false
 )
 
@@ -52,7 +55,8 @@ data class LibraryChangeSequence(
 )
 
 object LibrarySyncPayload {
-    const val PROTOCOL_VERSION = 11
+    const val PROTOCOL_VERSION = 12
+    const val MIN_SUPPORTED_WATCH_PROTOCOL_VERSION = 12
     const val LEGACY_PROTOCOL_VERSION = 4
     const val MAX_BODY_REQUEST_CHUNKS_PER_SYNC = Int.MAX_VALUE
     const val MAX_ARTICLE_REQUEST_BATCH_COUNT = 256
@@ -386,6 +390,9 @@ object LibrarySyncPayload {
                             .trim()
                             .ifBlank { ARTICLE_BODY_SYNC_MODE_FULL },
                         readingProgress = item.optFiniteProgress("readingProgress"),
+                        readingPositionBytes = item.optLong("readingPositionBytes").coerceAtLeast(0L),
+                        readingPositionContentHash = item.optString("readingPositionContentHash").trim(),
+                        readingPositionChangedAt = item.optLong("readingPositionChangedAt").coerceAtLeast(0L),
                         isRead = item.optBoolean("isRead")
                     )
                 )
@@ -420,7 +427,12 @@ object LibrarySyncPayload {
                     remote.watchLaterChangedAt > local.watchLaterChangedAt ||
                     remote.deletedAt > local.deletedAt ||
                     remote.deleted != local.deleted ||
-                    remote.readingProgress.isMeaningfullyAheadOf(local.readingProgress) ||
+                    remote.readingPositionChangedAt > local.readingPositionChangedAt ||
+                    (
+                        remote.readingPositionChangedAt == 0L &&
+                            local.readingPositionChangedAt == 0L &&
+                            remote.readingProgress.isMeaningfullyAheadOf(local.readingProgress)
+                        ) ||
                     (remote.isRead && !local.isRead)
             }
             val hasReusableLocalBody = local?.canReuseLocalBodyFor(remote) == true
@@ -525,7 +537,12 @@ object LibrarySyncPayload {
                 article.watchLaterChangedAt > remote.watchLaterChangedAt ||
                 article.deletedAt > remote.deletedAt ||
                 article.deleted != remote.deleted ||
-                article.readingProgress.isMeaningfullyAheadOf(remote.readingProgress) ||
+                article.readingPositionChangedAt > remote.readingPositionChangedAt ||
+                (
+                    article.readingPositionChangedAt == 0L &&
+                        remote.readingPositionChangedAt == 0L &&
+                        article.readingProgress.isMeaningfullyAheadOf(remote.readingProgress)
+                    ) ||
                 (article.isRead && !remote.isRead)
         }
     }
@@ -690,6 +707,9 @@ object LibrarySyncPayload {
                         deleted = item.optBoolean("deleted"),
                         deletedAt = item.optLong("deletedAt"),
                         readingProgress = item.optFiniteProgress("readingProgress"),
+                        readingPositionBytes = item.optLong("readingPositionBytes").coerceAtLeast(0L),
+                        readingPositionContentHash = item.optString("readingPositionContentHash").trim(),
+                        readingPositionChangedAt = item.optLong("readingPositionChangedAt").coerceAtLeast(0L),
                         isRead = item.optBoolean("isRead")
                     )
                 )
@@ -933,6 +953,9 @@ object LibrarySyncPayload {
             put("bodyAvailable", true)
             put("bodySyncMode", bodySyncModeForSync())
             put("readingProgress", readingProgress.coerceIn(0f, 1f))
+            put("readingPositionBytes", readingPositionBytes.coerceAtLeast(0L))
+            put("readingPositionContentHash", readingPositionContentHash)
+            put("readingPositionChangedAt", readingPositionChangedAt.coerceAtLeast(0L))
             put("isRead", isRead)
         }
     }
@@ -964,6 +987,9 @@ object LibrarySyncPayload {
             put("bodyAvailable", bodyAvailable)
             put("bodySyncMode", bodySyncMode)
             put("readingProgress", readingProgress.coerceIn(0f, 1f))
+            put("readingPositionBytes", readingPositionBytes.coerceAtLeast(0L))
+            put("readingPositionContentHash", readingPositionContentHash)
+            put("readingPositionChangedAt", readingPositionChangedAt.coerceAtLeast(0L))
             put("isRead", isRead)
         }
     }
@@ -998,6 +1024,9 @@ object LibrarySyncPayload {
             put("deleted", deleted)
             put("deletedAt", deletedAt)
             put("readingProgress", readingProgress.coerceIn(0f, 1f))
+            put("readingPositionBytes", readingPositionBytes.coerceAtLeast(0L))
+            put("readingPositionContentHash", readingPositionContentHash)
+            put("readingPositionChangedAt", readingPositionChangedAt.coerceAtLeast(0L))
             put("isRead", isRead)
         }
     }

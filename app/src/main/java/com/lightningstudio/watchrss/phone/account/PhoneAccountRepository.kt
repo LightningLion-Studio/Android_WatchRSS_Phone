@@ -30,6 +30,32 @@ class PhoneAccountRepository(
         }
     }
 
+    suspend fun startPasskeyRegistration(): PasskeyOptions {
+        val session = session.value ?: error("请先使用手机号验证码登录")
+        require(!session.isExpired) { "登录已过期，请重新登录" }
+        return accountClient.startPasskeyRegistration(session)
+    }
+
+    suspend fun finishPasskeyRegistration(
+        challengeId: String,
+        credentialJson: String
+    ) {
+        val session = session.value ?: error("请先使用手机号验证码登录")
+        accountClient.finishPasskeyRegistration(session, challengeId, credentialJson)
+    }
+
+    suspend fun startPasskeyAuthentication(phone: String): PasskeyOptions {
+        return accountClient.startPasskeyAuthentication(phone)
+    }
+
+    suspend fun finishPasskeyAuthentication(
+        challengeId: String,
+        credentialJson: String
+    ): PhoneAccountSession {
+        return accountClient.finishPasskeyAuthentication(challengeId, credentialJson)
+            .also { sessionStore.save(it) }
+    }
+
     suspend fun logout() {
         sessionStore.clear()
     }
@@ -75,4 +101,3 @@ class PhoneAccountRepository(
         }
     }
 }
-

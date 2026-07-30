@@ -385,7 +385,25 @@ class WatchRssBackupService(
             watchLaterSortOrder = if (watchLaterRemote) incoming.watchLaterSortOrder else watchLaterSortOrder,
             deleted = if (deletionRemote) incoming.deleted else deleted,
             deletedAt = if (deletionRemote) incoming.deletedAt else deletedAt,
-            readingProgress = maxOf(readingProgress, incoming.readingProgress),
+            readingProgress = if (incoming.readingPositionChangedAt > readingPositionChangedAt) {
+                incoming.readingProgress
+            } else {
+                readingProgress
+            },
+            readingPositionBytes = if (incoming.readingPositionChangedAt > readingPositionChangedAt) {
+                incoming.readingPositionBytes
+            } else {
+                readingPositionBytes
+            },
+            readingPositionContentHash = if (incoming.readingPositionChangedAt > readingPositionChangedAt) {
+                incoming.readingPositionContentHash
+            } else {
+                readingPositionContentHash
+            },
+            readingPositionChangedAt = maxOf(
+                readingPositionChangedAt,
+                incoming.readingPositionChangedAt
+            ),
             isRead = isRead || incoming.isRead
         )
     }

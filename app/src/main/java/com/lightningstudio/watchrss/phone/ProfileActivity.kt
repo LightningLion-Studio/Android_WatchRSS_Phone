@@ -59,12 +59,14 @@ import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
+import com.lightningstudio.watchrss.phone.account.PhonePasskeyCoordinator
 
 class ProfileActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val container = (application as PhoneCompanionApplication).container
         val accountRepository = container.accountRepository
+        val passkeyCoordinator = PhonePasskeyCoordinator(this, accountRepository)
 
         setContent {
             WatchRssPhoneTheme {
@@ -112,6 +114,8 @@ class ProfileActivity : ComponentActivity() {
                                 cloudSyncService = container.cloudSyncService,
                                 rssSources = rssSources,
                                 onBack = onClose,
+                                loginWithPasskey = passkeyCoordinator::login,
+                                createPasskey = passkeyCoordinator::createPasskey,
                                 runAction = { action ->
                                     lifecycleScope.launch { action() }
                                 }

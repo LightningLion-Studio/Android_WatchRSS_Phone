@@ -170,7 +170,10 @@ class WatchRssBackupArchiveTest {
                 syncChunkSize = 16,
                 syncChunkHashesJson = "[\"sync-secret\"]",
                 syncMetadataHash = "sync-secret",
-                readingProgress = 0.75f
+                readingProgress = 0.75f,
+                readingPositionBytes = 750L,
+                readingPositionContentHash = "body-hash",
+                readingPositionChangedAt = 88L
             )
         ),
         savedItems = listOf(

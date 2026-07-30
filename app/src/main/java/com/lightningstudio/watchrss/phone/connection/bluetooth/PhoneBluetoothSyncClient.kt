@@ -817,6 +817,7 @@ class PhoneBluetoothSyncClient(
         }
         val exchange = probeResult.getOrNull()
         if (exchange != null && LibrarySyncPayload.isProbeResponse(exchange.response)) {
+            requireSupportedLibraryProtocol(exchange.response)
             debugLog.appendEvent(
                 event = "bt.library.probe.direct.success",
                 sessionId = sessionId,
@@ -828,6 +829,7 @@ class PhoneBluetoothSyncClient(
             )
         }
         if (exchange != null && exchange.response.optBoolean("success", false)) {
+            requireSupportedLibraryProtocol(exchange.response)
             debugLog.appendEvent(
                 event = "bt.library.probe.direct.compat.success",
                 sessionId = sessionId,
@@ -858,11 +860,19 @@ class PhoneBluetoothSyncClient(
                 ackApplied = false,
                 rememberDeviceOnSuccess = false
             ).manifestResponse.let {
+                requireSupportedLibraryProtocol(it)
                 ProbeIdentity(
                     it.optString("deviceId").trim(),
                     it.optJSONObject("watchCapabilities")?.toWatchCapabilities()
                 )
             }
+        }
+    }
+
+    private fun requireSupportedLibraryProtocol(payload: JSONObject) {
+        val version = payload.optInt("version", 0)
+        require(version >= LibrarySyncPayload.MIN_SUPPORTED_WATCH_PROTOCOL_VERSION) {
+            "手表资料库同步协议为 v$version，至少需要 v${LibrarySyncPayload.MIN_SUPPORTED_WATCH_PROTOCOL_VERSION}；请先升级手表端"
         }
     }
 

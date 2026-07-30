@@ -266,6 +266,9 @@ internal object WatchRssBackupArchive {
             put("deleted", deleted)
             put("deletedAt", deletedAt)
             put("readingProgress", readingProgress.toDouble())
+            put("readingPositionBytes", readingPositionBytes)
+            put("readingPositionContentHash", readingPositionContentHash)
+            put("readingPositionChangedAt", readingPositionChangedAt)
             put("isRead", isRead)
             put("contentTextEntry", textEntry)
             putNullable("contentHtmlEntry", htmlEntry)
@@ -333,6 +336,9 @@ internal object WatchRssBackupArchive {
         deleted = json.getBoolean("deleted"),
         deletedAt = json.getLong("deletedAt"),
         readingProgress = json.optDouble("readingProgress").toFloat().coerceIn(0f, 1f),
+        readingPositionBytes = json.optLong("readingPositionBytes").coerceAtLeast(0L),
+        readingPositionContentHash = json.optString("readingPositionContentHash"),
+        readingPositionChangedAt = json.optLong("readingPositionChangedAt").coerceAtLeast(0L),
         isRead = json.optBoolean("isRead")
     )
 

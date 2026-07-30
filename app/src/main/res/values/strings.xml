@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">腕上RSS</string>
+    <string name="asset_statements" translatable="false">[{
+      \"include\": \"https://sly-data-plane.watchrss.cn/.well-known/assetlinks.json\"
+    }]</string>
 </resources>

@@ -57,6 +57,64 @@ class PhoneAccountClient(
         }
     }
 
+    suspend fun startPasskeyRegistration(
+        session: PhoneAccountSession
+    ): PasskeyOptions = withContext(Dispatchers.IO) {
+        requireConfigured()
+        post(
+            path = "/functions/v1/account/passkeys/registration/options",
+            body = JSONObject(),
+            bearerToken = session.accessToken
+        ).use { response ->
+            parsePasskeyOptions(response.jsonBody())
+        }
+    }
+
+    suspend fun finishPasskeyRegistration(
+        session: PhoneAccountSession,
+        challengeId: String,
+        credentialJson: String
+    ) = withContext(Dispatchers.IO) {
+        requireConfigured()
+        post(
+            path = "/functions/v1/account/passkeys/registration/verify",
+            body = JSONObject().apply {
+                put("challengeId", challengeId)
+                put("credential", JSONObject(credentialJson))
+            },
+            bearerToken = session.accessToken
+        ).close()
+    }
+
+    suspend fun startPasskeyAuthentication(phone: String): PasskeyOptions =
+        withContext(Dispatchers.IO) {
+            requireConfigured()
+            post(
+                path = "/functions/v1/account/passkeys/authentication/options",
+                body = JSONObject().apply { put("phone", phone.trim()) },
+                bearerToken = null
+            ).use { response ->
+                parsePasskeyOptions(response.jsonBody())
+            }
+        }
+
+    suspend fun finishPasskeyAuthentication(
+        challengeId: String,
+        credentialJson: String
+    ): PhoneAccountSession = withContext(Dispatchers.IO) {
+        requireConfigured()
+        post(
+            path = "/functions/v1/account/passkeys/authentication/verify",
+            body = JSONObject().apply {
+                put("challengeId", challengeId)
+                put("credential", JSONObject(credentialJson))
+            },
+            bearerToken = null
+        ).use { response ->
+            parsePasskeySession(response.jsonBody())
+        }
+    }
+
     suspend fun issueWatchDeviceToken(
         session: PhoneAccountSession,
         phoneDeviceId: String,
@@ -129,6 +187,36 @@ class PhoneAccountClient(
         )
     }
 
+    private fun parsePasskeyOptions(json: JSONObject): PasskeyOptions {
+        val challengeId = json.optString("challengeId").trim()
+        val publicKey = json.optJSONObject("publicKey")
+        require(challengeId.isNotBlank() && publicKey != null) {
+            "后端返回的 Passkey 挑战无效"
+        }
+        return PasskeyOptions(
+            challengeId = challengeId,
+            requestJson = publicKey.toString()
+        )
+    }
+
+    private fun parsePasskeySession(json: JSONObject): PhoneAccountSession {
+        val userId = json.optString("userId").trim()
+        val accessToken = json.optString("accessToken").trim()
+        val expiresInSeconds = json.optLong("expiresIn", 3600L)
+        val expiresAtMillis = json.optLong("expiresAt").takeIf { it > 0L }
+            ?: (System.currentTimeMillis() + expiresInSeconds * 1000L)
+        require(userId.isNotBlank() && accessToken.isNotBlank()) {
+            "Passkey 登录响应缺少账号信息"
+        }
+        return PhoneAccountSession(
+            userId = userId,
+            phoneMasked = json.optString("phoneMasked").ifBlank { "已登录账号" },
+            accessToken = accessToken,
+            refreshToken = json.optString("refreshToken"),
+            expiresAtMillis = expiresAtMillis
+        )
+    }
+
     private fun JSONArray?.toStringList(): List<String> {
         if (this == null) return emptyList()
         return buildList {
@@ -155,4 +243,3 @@ class PhoneAccountClient(
                 .build()
     }
 }
-

@@ -17,7 +17,8 @@ interface PhoneArticleDao {
                favoriteSaved, favoriteChangedAt, favoriteSortOrder,
                watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
                deleted, deletedAt, syncBodyHash, syncBodyByteCount,
-               syncChunkSize, syncChunkHashesJson, syncMetadataHash, readingProgress, isRead
+               syncChunkSize, syncChunkHashesJson, syncMetadataHash, readingProgress, isRead,
+               readingPositionBytes, readingPositionContentHash, readingPositionChangedAt
         FROM phone_articles
         WHERE deleted = 0
         ORDER BY updatedAt DESC, importedAt DESC
@@ -35,7 +36,8 @@ interface PhoneArticleDao {
                favoriteSaved, favoriteChangedAt, favoriteSortOrder,
                watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
                deleted, deletedAt, syncBodyHash, syncBodyByteCount,
-               syncChunkSize, syncChunkHashesJson, syncMetadataHash, readingProgress, isRead
+               syncChunkSize, syncChunkHashesJson, syncMetadataHash, readingProgress, isRead,
+               readingPositionBytes, readingPositionContentHash, readingPositionChangedAt
         FROM phone_articles
         WHERE deleted = 0 AND independentSaved = 1
         ORDER BY independentSortOrder DESC, independentChangedAt DESC, title ASC
@@ -76,7 +78,10 @@ interface PhoneArticleDao {
                phone_articles.syncChunkHashesJson AS syncChunkHashesJson,
                phone_articles.syncMetadataHash AS syncMetadataHash,
                phone_articles.readingProgress AS readingProgress,
-               phone_articles.isRead AS isRead
+               phone_articles.isRead AS isRead,
+               phone_articles.readingPositionBytes AS readingPositionBytes,
+               phone_articles.readingPositionContentHash AS readingPositionContentHash,
+               phone_articles.readingPositionChangedAt AS readingPositionChangedAt
         FROM phone_articles
         LEFT JOIN phone_rss_sources ON phone_rss_sources.url = phone_articles.rssSourceUrl
         WHERE phone_articles.deleted = 0
@@ -126,7 +131,10 @@ interface PhoneArticleDao {
                phone_articles.syncChunkHashesJson AS syncChunkHashesJson,
                phone_articles.syncMetadataHash AS syncMetadataHash,
                phone_articles.readingProgress AS readingProgress,
-               phone_articles.isRead AS isRead
+               phone_articles.isRead AS isRead,
+               phone_articles.readingPositionBytes AS readingPositionBytes,
+               phone_articles.readingPositionContentHash AS readingPositionContentHash,
+               phone_articles.readingPositionChangedAt AS readingPositionChangedAt
         FROM phone_articles
         LEFT JOIN phone_rss_sources ON phone_rss_sources.url = phone_articles.rssSourceUrl
         WHERE phone_articles.deleted = 0
@@ -154,7 +162,8 @@ interface PhoneArticleDao {
                favoriteSaved, favoriteChangedAt, favoriteSortOrder,
                watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
                deleted, deletedAt, syncBodyHash, syncBodyByteCount,
-               syncChunkSize, syncChunkHashesJson, syncMetadataHash, readingProgress, isRead
+               syncChunkSize, syncChunkHashesJson, syncMetadataHash, readingProgress, isRead,
+               readingPositionBytes, readingPositionContentHash, readingPositionChangedAt
         FROM phone_articles
         WHERE deleted = 0 AND favoriteSaved = 1
         ORDER BY favoriteSortOrder DESC, favoriteChangedAt DESC, title ASC
@@ -171,7 +180,8 @@ interface PhoneArticleDao {
                favoriteSaved, favoriteChangedAt, favoriteSortOrder,
                watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
                deleted, deletedAt, syncBodyHash, syncBodyByteCount,
-               syncChunkSize, syncChunkHashesJson, syncMetadataHash, readingProgress, isRead
+               syncChunkSize, syncChunkHashesJson, syncMetadataHash, readingProgress, isRead,
+               readingPositionBytes, readingPositionContentHash, readingPositionChangedAt
         FROM phone_articles
         WHERE deleted = 0 AND watchLaterSaved = 1
         ORDER BY watchLaterSortOrder DESC, watchLaterChangedAt DESC, title ASC
@@ -198,11 +208,20 @@ interface PhoneArticleDao {
         """
         UPDATE phone_articles
         SET readingProgress = :progress,
+            readingPositionBytes = :positionBytes,
+            readingPositionContentHash = :positionContentHash,
+            readingPositionChangedAt = :positionChangedAt,
             isRead = CASE WHEN :progress > 0 THEN 1 ELSE isRead END
         WHERE articleId = :articleId
         """
     )
-    suspend fun updateReadingProgress(articleId: String, progress: Float)
+    suspend fun updateReadingProgress(
+        articleId: String,
+        progress: Float,
+        positionBytes: Long,
+        positionContentHash: String,
+        positionChangedAt: Long
+    )
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(article: PhoneArticleEntity)

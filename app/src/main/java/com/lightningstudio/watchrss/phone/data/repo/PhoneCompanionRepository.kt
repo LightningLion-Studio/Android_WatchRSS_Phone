@@ -46,6 +46,8 @@ import org.jsoup.Jsoup
 import org.json.JSONArray
 import java.lang.Long.max
 import java.net.URI
+import java.text.Normalizer
+import kotlin.math.roundToLong
 
 data class PhoneRssSourceImportResult(
     val source: PhoneRssSourceEntity,
@@ -56,6 +58,33 @@ data class PhoneLocalContentImportResult(
     val source: PhoneRssSourceEntity,
     val articleCount: Int,
     val kind: LocalContentImportKind
+)
+
+enum class TxtUpdateRelation {
+    IDENTICAL,
+    APPEND_ONLY,
+    OLDER_VERSION,
+    POSSIBLE_REVISION
+}
+
+data class PhoneTxtUpdateCandidate(
+    val articleId: String,
+    val existingTitle: String,
+    val newTitle: String,
+    val relation: TxtUpdateRelation,
+    val nameSimilarity: Float,
+    val oldByteCount: Long,
+    val newByteCount: Long,
+    val inheritedProgress: Float,
+    val inheritedPositionBytes: Long,
+    val approximateProgress: Boolean
+)
+
+data class PhoneLocalContentImportInspection(
+    val fileName: String,
+    val mimeType: String?,
+    val imported: ImportedLocalContent,
+    val candidates: List<PhoneTxtUpdateCandidate>
 )
 
 data class PhoneLibrarySyncWindow(
@@ -171,10 +200,11 @@ class PhoneCompanionRepository(
         return articleDao.observeById(articleId).map { article ->
             withContext(Dispatchers.IO) {
                 article?.let { entity ->
-                    if (entity.isFileBackedImportedText()) {
-                        entity
+                    val migrated = entity.migrateLegacyReadingPositionIfNeeded()
+                    if (migrated.isFileBackedImportedText()) {
+                        migrated
                     } else {
-                        entity.hydrateExternalText()
+                        migrated.hydrateExternalText()
                     }
                 }
             }
@@ -184,10 +214,11 @@ class PhoneCompanionRepository(
     suspend fun getArticle(articleId: String): PhoneArticleEntity? =
         withContext(Dispatchers.IO) {
             val article = articleDao.getById(articleId) ?: return@withContext null
-            if (article.isFileBackedImportedText()) {
-                article
+            val migrated = article.migrateLegacyReadingPositionIfNeeded()
+            if (migrated.isFileBackedImportedText()) {
+                migrated
             } else {
-                article.hydrateExternalText()
+                migrated.hydrateExternalText()
             }
         }
 
@@ -271,7 +302,24 @@ class PhoneCompanionRepository(
         }
 
     suspend fun updateArticleReadingProgress(articleId: String, progress: Float) = withContext(Dispatchers.IO) {
-        articleDao.updateReadingProgress(articleId, progress.coerceIn(0f, 1f))
+        val article = articleDao.getById(articleId) ?: return@withContext
+        val clamped = progress.coerceIn(0f, 1f)
+        val byteLength = article.hydrateExternalText().contentText
+            .toByteArray(Charsets.UTF_8)
+            .size
+            .toLong()
+        val positionBytes = (byteLength.toDouble() * clamped.toDouble())
+            .roundToLong()
+            .coerceIn(0L, byteLength)
+        val changedAt = System.currentTimeMillis()
+        articleDao.updateReadingProgress(
+            articleId = articleId,
+            progress = clamped,
+            positionBytes = positionBytes,
+            positionContentHash = article.contentHash,
+            positionChangedAt = changedAt
+        )
+        recordArticleChange(articleId, "readingProgress", changedAt)
     }
 
     suspend fun importWebArticle(input: String): PhoneArticleEntity =
@@ -340,6 +388,164 @@ class PhoneCompanionRepository(
                 kind = imported.kind
             )
         }
+
+    suspend fun inspectLocalContentImport(
+        fileName: String,
+        mimeType: String?,
+        bytes: ByteArray
+    ): PhoneLocalContentImportInspection = withContext(Dispatchers.IO) {
+        val imported = localContentImporter(fileName, mimeType, bytes)
+        if (imported.kind != LocalContentImportKind.TXT) {
+            return@withContext PhoneLocalContentImportInspection(
+                fileName = fileName,
+                mimeType = mimeType,
+                imported = imported,
+                candidates = emptyList()
+            )
+        }
+        val newItem = imported.source.items.single()
+        val newText = newItem.contentText
+        val newHash = WebArticleImporter.sha256(newText)
+        val newByteCount = newText.toByteArray(Charsets.UTF_8).size.toLong()
+        val candidates = articleDao.getByRssSourceUrl(ImportedContentIds.ROOT_SOURCE_URL)
+            .asSequence()
+            .filterNot { it.deleted }
+            .filter { ImportedContentIds.isImportedTextArticleUrl(it.url) }
+            .mapNotNull { existing ->
+                val similarity = importedTxtNameSimilarity(existing.title, newItem.title)
+                if (similarity < MIN_TXT_NAME_SIMILARITY && existing.contentHash != newHash) {
+                    return@mapNotNull null
+                }
+                val oldText = existing.hydrateExternalText().contentText
+                val relation = classifyTxtUpdate(
+                    oldText = oldText,
+                    newText = newText,
+                    sameContent = existing.contentHash == newHash
+                )
+                if (similarity < MIN_TXT_NAME_SIMILARITY &&
+                    relation == TxtUpdateRelation.POSSIBLE_REVISION
+                ) {
+                    return@mapNotNull null
+                }
+                val oldByteCount = oldText.toByteArray(Charsets.UTF_8).size.toLong()
+                val storedPosition = existing.readingPositionBytes
+                    .takeIf {
+                        it > 0L &&
+                            (
+                                existing.readingPositionContentHash.isBlank() ||
+                                    existing.readingPositionContentHash == existing.contentHash
+                                )
+                    }
+                    ?: (oldByteCount.toDouble() * existing.readingProgress.toDouble())
+                        .roundToLong()
+                val mapped = mapTxtReadingPosition(
+                    oldText = oldText,
+                    newText = newText,
+                    oldPositionBytes = storedPosition,
+                    appendOnly = relation == TxtUpdateRelation.APPEND_ONLY
+                )
+                PhoneTxtUpdateCandidate(
+                    articleId = existing.articleId,
+                    existingTitle = existing.title,
+                    newTitle = newItem.title,
+                    relation = relation,
+                    nameSimilarity = similarity,
+                    oldByteCount = oldByteCount,
+                    newByteCount = newByteCount,
+                    inheritedProgress = if (newByteCount > 0L) {
+                        (mapped.positionBytes.toDouble() / newByteCount.toDouble())
+                            .toFloat()
+                            .coerceIn(0f, 1f)
+                    } else {
+                        0f
+                    },
+                    inheritedPositionBytes = mapped.positionBytes,
+                    approximateProgress = mapped.approximate
+                )
+            }
+            .sortedWith(
+                compareBy<PhoneTxtUpdateCandidate> {
+                    when (it.relation) {
+                        TxtUpdateRelation.IDENTICAL -> 0
+                        TxtUpdateRelation.APPEND_ONLY -> 1
+                        TxtUpdateRelation.OLDER_VERSION -> 2
+                        TxtUpdateRelation.POSSIBLE_REVISION -> 3
+                    }
+                }.thenByDescending { it.nameSimilarity }
+                    .thenByDescending { it.oldByteCount }
+            )
+            .toList()
+        PhoneLocalContentImportInspection(
+            fileName = fileName,
+            mimeType = mimeType,
+            imported = imported,
+            candidates = candidates
+        )
+    }
+
+    suspend fun confirmLocalContentImport(
+        inspection: PhoneLocalContentImportInspection,
+        replaceArticleId: String?
+    ): PhoneLocalContentImportResult = withContext(Dispatchers.IO) {
+        if (replaceArticleId == null || inspection.imported.kind != LocalContentImportKind.TXT) {
+            val result = saveImportedSource(
+                imported = inspection.imported.source,
+                replaceExistingArticles = inspection.imported.kind == LocalContentImportKind.EPUB
+            )
+            return@withContext PhoneLocalContentImportResult(
+                source = result.source,
+                articleCount = result.articleCount,
+                kind = inspection.imported.kind
+            )
+        }
+        val candidate = inspection.candidates.firstOrNull { it.articleId == replaceArticleId }
+            ?: error("待覆盖的 TXT 候选已失效")
+        val existing = articleDao.getById(replaceArticleId)
+            ?.takeUnless { it.deleted }
+            ?: error("待覆盖的 TXT 已不存在")
+        val importedItem = inspection.imported.source.items.single()
+        if (candidate.relation == TxtUpdateRelation.IDENTICAL) {
+            return@withContext PhoneLocalContentImportResult(
+                source = requireNotNull(rssSourceDao.getByUrl(ImportedContentIds.ROOT_SOURCE_URL)),
+                articleCount = 0,
+                kind = LocalContentImportKind.TXT
+            )
+        }
+        val now = System.currentTimeMillis()
+        val contentHash = WebArticleImporter.sha256(importedItem.contentText)
+        val hydrated = existing.copy(
+            sourceDeviceId = deviceId,
+            title = importedItem.title,
+            excerpt = importedItem.excerpt,
+            contentHtml = null,
+            contentText = importedItem.contentText,
+            imageUrl = importedItem.imageUrl,
+            contentHash = contentHash,
+            updatedAt = now,
+            deleted = false,
+            deletedAt = 0L,
+            readingProgress = candidate.inheritedProgress,
+            readingPositionBytes = candidate.inheritedPositionBytes,
+            readingPositionContentHash = contentHash,
+            readingPositionChangedAt = now
+        ).withCurrentSyncMetadata()
+        val stored = articleContentStore?.let { store ->
+            val marker = store.storeText(
+                "${existing.articleId}-text-${contentHash.take(16)}",
+                importedItem.contentText
+            )
+            hydrated.copy(contentText = marker)
+        } ?: hydrated
+        articleDao.upsert(stored)
+        recordArticleChange(stored.articleId, "txtRevision", now)
+        val source = rssSourceDao.getByUrl(ImportedContentIds.ROOT_SOURCE_URL)
+            ?: error("导入内容频道不存在")
+        PhoneLocalContentImportResult(
+            source = source,
+            articleCount = 1,
+            kind = LocalContentImportKind.TXT
+        )
+    }
 
     suspend fun toggleSaved(article: PhoneArticleEntity, type: PhoneSavedItemType): PhoneArticleEntity =
         withContext(Dispatchers.IO) {
@@ -1274,7 +1480,10 @@ class PhoneCompanionRepository(
             watchLaterSaved = existing.watchLaterSaved,
             watchLaterChangedAt = existing.watchLaterChangedAt,
             watchLaterSortOrder = existing.watchLaterSortOrder,
-            readingProgress = existing.readingProgress
+            readingProgress = existing.readingProgress,
+            readingPositionBytes = existing.readingPositionBytes,
+            readingPositionContentHash = existing.readingPositionContentHash,
+            readingPositionChangedAt = existing.readingPositionChangedAt
         )
     }
 
@@ -1449,7 +1658,33 @@ class PhoneCompanionRepository(
         val independentSaved = if (independentFromRemote) remote.independentSaved else local.independentSaved
         val independentChangedAt = if (independentFromRemote) remote.independentChangedAt else local.independentChangedAt
         val independentSortOrder = if (independentFromRemote) remote.independentSortOrder else local.independentSortOrder
-        val readingProgress = maxOf(local.readingProgress, remote.readingProgress)
+        val remoteContentIsSelected =
+            remote.contentHash == metadata.contentHash && local.contentHash != metadata.contentHash
+        val localContentIsSelected =
+            local.contentHash == metadata.contentHash && remote.contentHash != metadata.contentHash
+        val remoteReadingPositionNewer = remoteContentIsSelected ||
+            (!localContentIsSelected &&
+                remote.readingPositionChangedAt > local.readingPositionChangedAt)
+        val localReadingPositionNewer = localContentIsSelected ||
+            (!remoteContentIsSelected &&
+                local.readingPositionChangedAt > remote.readingPositionChangedAt)
+        val readingProgress = when {
+            remoteReadingPositionNewer -> remote.readingProgress
+            localReadingPositionNewer -> local.readingProgress
+            else -> maxOf(local.readingProgress, remote.readingProgress)
+        }
+        val readingPositionBytes = when {
+            remoteReadingPositionNewer -> remote.readingPositionBytes
+            localReadingPositionNewer -> local.readingPositionBytes
+            remote.readingProgress > local.readingProgress -> remote.readingPositionBytes
+            else -> local.readingPositionBytes
+        }
+        val readingPositionContentHash = when {
+            remoteReadingPositionNewer -> remote.readingPositionContentHash
+            localReadingPositionNewer -> local.readingPositionContentHash
+            remote.readingProgress > local.readingProgress -> remote.readingPositionContentHash
+            else -> local.readingPositionContentHash
+        }
         val rssSourceUrl = remote.rssSourceUrl?.takeIf { it.isNotBlank() }
             ?: local.rssSourceUrl?.takeIf { it.isNotBlank() }
         val rssSourceTitle = remote.rssSourceTitle?.takeIf { it.isNotBlank() }
@@ -1485,6 +1720,13 @@ class PhoneCompanionRepository(
             deleted = deleted,
             deletedAt = deletedAt,
             readingProgress = readingProgress,
+            readingPositionBytes = readingPositionBytes,
+            readingPositionContentHash = readingPositionContentHash,
+            readingPositionChangedAt = when {
+                remoteReadingPositionNewer -> remote.readingPositionChangedAt
+                localReadingPositionNewer -> local.readingPositionChangedAt
+                else -> maxOf(local.readingPositionChangedAt, remote.readingPositionChangedAt)
+            },
             isRead = local.isRead || remote.isRead
         )
     }
@@ -1521,6 +1763,13 @@ class PhoneCompanionRepository(
             !local.deleted -> local
             else -> mergeArticleByLatest(local, remote)
         }
+        val remoteReadingPositionWins = when {
+            remote.contentHash == base.contentHash && local.contentHash != base.contentHash -> true
+            local.contentHash == base.contentHash && remote.contentHash != base.contentHash -> false
+            remote.readingPositionChangedAt > local.readingPositionChangedAt -> true
+            local.readingPositionChangedAt > remote.readingPositionChangedAt -> false
+            else -> remote.readingProgress > local.readingProgress
+        }
         val favoriteSaved = local.favoriteSaved || remote.favoriteSaved
         val watchLaterSaved = local.watchLaterSaved || remote.watchLaterSaved
         val independentSaved = local.independentSaved || remote.independentSaved
@@ -1542,7 +1791,26 @@ class PhoneCompanionRepository(
             watchLaterSortOrder = maxOf(local.watchLaterSortOrder, remote.watchLaterSortOrder),
             deleted = false,
             deletedAt = 0L,
-            readingProgress = maxOf(local.readingProgress, remote.readingProgress),
+            readingProgress = if (remoteReadingPositionWins) {
+                remote.readingProgress
+            } else {
+                local.readingProgress
+            },
+            readingPositionBytes = if (remoteReadingPositionWins) {
+                remote.readingPositionBytes
+            } else {
+                local.readingPositionBytes
+            },
+            readingPositionContentHash = if (remoteReadingPositionWins) {
+                remote.readingPositionContentHash
+            } else {
+                local.readingPositionContentHash
+            },
+            readingPositionChangedAt = if (remoteReadingPositionWins) {
+                remote.readingPositionChangedAt
+            } else {
+                local.readingPositionChangedAt
+            },
             isRead = local.isRead || remote.isRead
         )
     }
@@ -1819,6 +2087,9 @@ class PhoneCompanionRepository(
             bodyAvailable = bodyAvailable,
             bodySyncMode = bodySyncModeForSync(),
             readingProgress = readingProgress,
+            readingPositionBytes = readingPositionBytes,
+            readingPositionContentHash = readingPositionContentHash,
+            readingPositionChangedAt = readingPositionChangedAt,
             isRead = isRead
         )
     }
@@ -1889,6 +2160,34 @@ class PhoneCompanionRepository(
             contentText
         }
         return copy(contentHtml = html, contentText = text)
+    }
+
+    private suspend fun PhoneArticleEntity.migrateLegacyReadingPositionIfNeeded(): PhoneArticleEntity {
+        if (readingPositionBytes > 0L || readingProgress <= 0f) return this
+        val byteLength = if (isFileBackedImportedText()) {
+            articleContentStore
+                ?.textChunkHandle(contentText, ARTICLE_TEXT_CHUNK_BYTES)
+                ?.byteLength
+                ?: 0L
+        } else {
+            hydrateExternalText().contentText.toByteArray(Charsets.UTF_8).size.toLong()
+        }
+        if (byteLength <= 0L) return this
+        val positionBytes = (byteLength.toDouble() * readingProgress.toDouble())
+            .roundToLong()
+            .coerceIn(0L, byteLength)
+        articleDao.updateReadingProgress(
+            articleId = articleId,
+            progress = readingProgress,
+            positionBytes = positionBytes,
+            positionContentHash = contentHash,
+            positionChangedAt = 0L
+        )
+        recordArticleChange(articleId, "readingPositionMigration")
+        return copy(
+            readingPositionBytes = positionBytes,
+            readingPositionContentHash = contentHash
+        )
     }
 
     private fun PhoneArticleEntity.hydrateExternalTextForBackup(): PhoneArticleEntity {
@@ -2000,6 +2299,129 @@ class PhoneCompanionRepository(
             .trim()
     }
 
+    private fun classifyTxtUpdate(
+        oldText: String,
+        newText: String,
+        sameContent: Boolean
+    ): TxtUpdateRelation {
+        if (sameContent || oldText == newText) return TxtUpdateRelation.IDENTICAL
+        val oldParagraphs = normalizedTxtParagraphs(oldText)
+        val newParagraphs = normalizedTxtParagraphs(newText)
+        return when {
+            oldParagraphs.isNotEmpty() &&
+                newParagraphs.size > oldParagraphs.size &&
+                newParagraphs.subList(0, oldParagraphs.size) == oldParagraphs ->
+                TxtUpdateRelation.APPEND_ONLY
+            newParagraphs.isNotEmpty() &&
+                oldParagraphs.size > newParagraphs.size &&
+                oldParagraphs.subList(0, newParagraphs.size) == newParagraphs ->
+                TxtUpdateRelation.OLDER_VERSION
+            else -> TxtUpdateRelation.POSSIBLE_REVISION
+        }
+    }
+
+    private fun normalizedTxtParagraphs(text: String): List<String> =
+        text.lineSequence()
+            .map { line ->
+                Normalizer.normalize(line, Normalizer.Form.NFKC)
+                    .replace(Regex("""\s+"""), " ")
+                    .trim()
+            }
+            .filter { it.isNotBlank() }
+            .toList()
+
+    private fun importedTxtNameSimilarity(existingTitle: String, newTitle: String): Float {
+        val left = normalizedTxtName(existingTitle)
+        val right = normalizedTxtName(newTitle)
+        if (left.isBlank() || right.isBlank()) return 0f
+        if (left == right) return 1f
+        if ((left.contains(right) || right.contains(left)) && minOf(left.length, right.length) >= 3) {
+            return 0.9f
+        }
+        val leftPairs = left.windowed(2, 1, partialWindows = true).toSet()
+        val rightPairs = right.windowed(2, 1, partialWindows = true).toSet()
+        if (leftPairs.isEmpty() || rightPairs.isEmpty()) return 0f
+        return (2f * leftPairs.intersect(rightPairs).size) /
+            (leftPairs.size + rightPairs.size).toFloat()
+    }
+
+    private fun normalizedTxtName(value: String): String {
+        var normalized = Normalizer.normalize(value, Normalizer.Form.NFKC)
+            .substringBeforeLast('.', value)
+            .lowercase()
+            .trim()
+        val suffixPatterns = listOf(
+            Regex("""(?:更新至|更新到|截至|共)?\s*\d+\s*(?:[-~至到]\s*\d+\s*)?(?:章|回|节).*$"""),
+            Regex("""(?:完整版|完结版|全本|精校版|修订版|最新版)$"""),
+            Regex("""(?:副本|copy)\s*\d*$"""),
+            Regex("""[\[(（]\s*\d+\s*[\])）]$"""),
+            Regex("""(?:19|20)\d{2}[-_.年]\d{1,2}(?:[-_.月]\d{1,2}日?)?$""")
+        )
+        var changed: Boolean
+        do {
+            val before = normalized
+            suffixPatterns.forEach { normalized = normalized.replace(it, "") }
+            normalized = normalized.trim()
+            changed = normalized != before
+        } while (changed && normalized.isNotBlank())
+        return normalized.replace(Regex("""[^\p{L}\p{N}]"""), "")
+    }
+
+    private data class MappedTxtPosition(
+        val positionBytes: Long,
+        val approximate: Boolean
+    )
+
+    private fun mapTxtReadingPosition(
+        oldText: String,
+        newText: String,
+        oldPositionBytes: Long,
+        appendOnly: Boolean
+    ): MappedTxtPosition {
+        val newByteCount = newText.toByteArray(Charsets.UTF_8).size.toLong()
+        val clampedOldPosition = oldPositionBytes.coerceAtLeast(0L)
+        if (appendOnly && newText.startsWith(oldText)) {
+            return MappedTxtPosition(
+                positionBytes = clampedOldPosition.coerceAtMost(newByteCount),
+                approximate = false
+            )
+        }
+        val oldCharIndex = utf8CharIndexAtByte(oldText, clampedOldPosition)
+        val anchorStart = (oldCharIndex - TXT_POSITION_ANCHOR_RADIUS).coerceAtLeast(0)
+        val anchorEnd = (oldCharIndex + TXT_POSITION_ANCHOR_RADIUS).coerceAtMost(oldText.length)
+        val anchor = oldText.substring(anchorStart, anchorEnd).trim()
+        if (anchor.length >= MIN_TXT_POSITION_ANCHOR_CHARS) {
+            val first = newText.indexOf(anchor)
+            if (first >= 0 && first == newText.lastIndexOf(anchor)) {
+                val mappedCharIndex = (first + oldCharIndex - anchorStart)
+                    .coerceIn(0, newText.length)
+                return MappedTxtPosition(
+                    positionBytes = newText.substring(0, mappedCharIndex)
+                        .toByteArray(Charsets.UTF_8)
+                        .size
+                        .toLong(),
+                    approximate = false
+                )
+            }
+        }
+        return MappedTxtPosition(
+            positionBytes = clampedOldPosition.coerceAtMost(newByteCount),
+            approximate = true
+        )
+    }
+
+    private fun utf8CharIndexAtByte(text: String, byteOffset: Long): Int {
+        val target = byteOffset.coerceAtLeast(0L)
+        var low = 0
+        var high = text.length
+        while (low < high) {
+            val middle = (low + high + 1) ushr 1
+            val bytes = text.substring(0, middle).toByteArray(Charsets.UTF_8).size.toLong()
+            if (bytes <= target) low = middle else high = middle - 1
+        }
+        return low
+    }
+
     companion object {
         private const val CHANGE_SEQUENCE_PROTOCOL_VERSION = 8
         private const val DEFAULT_LIBRARY_PEER_ID = "watch"
@@ -2009,6 +2431,9 @@ class PhoneCompanionRepository(
         private const val MAX_INLINE_CONTENT_CHARS = 100_000
         private const val MAX_REPAIRED_TITLE_CHARS = 80
         private const val MIN_HTML_TOC_LINKS = 3
+        private const val MIN_TXT_NAME_SIMILARITY = 0.48f
+        private const val TXT_POSITION_ANCHOR_RADIUS = 96
+        private const val MIN_TXT_POSITION_ANCHOR_CHARS = 48
         private val GENERIC_IMPORTED_TITLES = setOf(
             "unknown",
             "untitled",

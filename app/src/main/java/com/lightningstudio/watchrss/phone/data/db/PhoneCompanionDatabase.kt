@@ -23,7 +23,7 @@ import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetEntity
         ReaderBackgroundAssetEntity::class,
         ReaderDeletionEntity::class
     ],
-    version = 11,
+    version = 12,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
@@ -206,6 +206,20 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
         val MIGRATION_10_11 = object : Migration(10, 11) {
             override fun migrate(database: SupportSQLiteDatabase) {
                 database.createReaderPresetTables()
+            }
+        }
+
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "ALTER TABLE phone_articles ADD COLUMN readingPositionBytes INTEGER NOT NULL DEFAULT 0"
+                )
+                database.execSQL(
+                    "ALTER TABLE phone_articles ADD COLUMN readingPositionContentHash TEXT NOT NULL DEFAULT ''"
+                )
+                database.execSQL(
+                    "ALTER TABLE phone_articles ADD COLUMN readingPositionChangedAt INTEGER NOT NULL DEFAULT 0"
+                )
             }
         }
     }

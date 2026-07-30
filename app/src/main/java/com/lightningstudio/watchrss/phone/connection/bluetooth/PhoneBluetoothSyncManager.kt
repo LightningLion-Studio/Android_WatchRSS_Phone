@@ -296,6 +296,10 @@ class PhoneBluetoothSyncManager(
                 },
                 buildArticleRequests = { manifestResponse, supportsArticleBatches ->
                     requireSuccess(manifestResponse)
+                    val remoteProtocolVersion = manifestResponse.optInt("version", 0)
+                    require(remoteProtocolVersion >= LibrarySyncPayload.MIN_SUPPORTED_WATCH_PROTOCOL_VERSION) {
+                        "手表资料库同步协议为 v$remoteProtocolVersion，至少需要 v${LibrarySyncPayload.MIN_SUPPORTED_WATCH_PROTOCOL_VERSION}；请先升级手表端"
+                    }
                     val window = syncWindow ?: error("同步窗口尚未准备")
                     val remoteManifest = LibrarySyncPayload.parseArticleManifest(manifestResponse)
                     val supportsChunkedBodies = manifestResponse.optBoolean("supportsChunkedBodies", false) &&

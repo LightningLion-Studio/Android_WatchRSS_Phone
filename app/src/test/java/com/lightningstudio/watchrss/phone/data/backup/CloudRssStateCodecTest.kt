@@ -19,7 +19,11 @@ class CloudRssStateCodecTest {
             sources = listOf(source)
         )
 
-        assertTrue(CloudRssStateCodec.decode(encoded).single().isRead)
+        val decoded = CloudRssStateCodec.decode(encoded).single()
+        assertTrue(decoded.isRead)
+        assertEquals(article.readingPositionBytes, decoded.readingPositionBytes)
+        assertEquals(article.readingPositionContentHash, decoded.readingPositionContentHash)
+        assertEquals(article.readingPositionChangedAt, decoded.readingPositionChangedAt)
         assertEquals(source, CloudRssStateCodec.decodeSources(encoded).single())
     }
 
@@ -31,7 +35,11 @@ class CloudRssStateCodecTest {
             }]}
         """.trimIndent().toByteArray()
 
-        assertFalse(CloudRssStateCodec.decode(encoded).single().isRead)
+        val decoded = CloudRssStateCodec.decode(encoded).single()
+        assertFalse(decoded.isRead)
+        assertEquals(0L, decoded.readingPositionBytes)
+        assertEquals("", decoded.readingPositionContentHash)
+        assertEquals(0L, decoded.readingPositionChangedAt)
         assertTrue(CloudRssStateCodec.decodeSources(encoded).isEmpty())
     }
 
@@ -77,6 +85,9 @@ class CloudRssStateCodecTest {
         deleted = false,
         deletedAt = 0L,
         readingProgress = 0.25f,
+        readingPositionBytes = 250L,
+        readingPositionContentHash = "hash",
+        readingPositionChangedAt = 7L,
         isRead = isRead
     )
 }

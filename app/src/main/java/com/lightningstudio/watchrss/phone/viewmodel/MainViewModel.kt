@@ -16,6 +16,9 @@ import com.lightningstudio.watchrss.phone.data.importer.LocalContentImportKind
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
+import com.lightningstudio.watchrss.phone.data.repo.PhoneLocalContentImportInspection
+import com.lightningstudio.watchrss.phone.data.repo.PhoneTxtUpdateCandidate
+import com.lightningstudio.watchrss.phone.data.repo.TxtUpdateRelation
 import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
@@ -49,7 +52,8 @@ data class MainUiState(
     val conflictPrompt: MainConflictPromptUi? = null,
     val bluetoothDevicePrompt: MainBluetoothDevicePromptUi? = null,
     val sharedImportPrompt: SharedImportPromptUi? = null,
-    val backupImportPrompt: BackupImportPromptUi? = null
+    val backupImportPrompt: BackupImportPromptUi? = null,
+    val txtUpdatePrompt: TxtUpdatePromptUi? = null
 )
 
 data class MainSyncProgressUi(
@@ -100,6 +104,11 @@ data class BackupImportPromptUi(
     val confirmingReplace: Boolean = false
 )
 
+data class TxtUpdatePromptUi(
+    val fileName: String,
+    val candidates: List<PhoneTxtUpdateCandidate>
+)
+
 private data class LibraryLists(
     val rssSources: List<PhoneRssSourceEntity>,
     val rssArticles: List<PhoneArticleEntity>,
@@ -122,6 +131,7 @@ class MainViewModel(
     private val usageTelemetry: PhoneUsageTelemetry,
     private val backupService: WatchRssBackupService
 ) : ViewModel() {
+    private var pendingLocalContentInspection: PhoneLocalContentImportInspection? = null
     private val _toastEvent = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val toastEvent: SharedFlow<String> = _toastEvent.asSharedFlow()
 
@@ -287,8 +297,38 @@ class MainViewModel(
 
     fun importLocalContent(fileName: String, mimeType: String?, bytes: ByteArray) {
         viewModelScope.launch {
-            runBusy("正在导入文件…") {
-                val result = repository.importLocalContent(fileName, mimeType, bytes)
+            runBusy("正在检查文件…") {
+                val inspection = repository.inspectLocalContentImport(fileName, mimeType, bytes)
+                val identical = inspection.candidates.firstOrNull {
+                    it.relation == TxtUpdateRelation.IDENTICAL
+                }
+                if (identical != null) {
+                    pendingLocalContentInspection = null
+                    sessionState.value = sessionState.value.copy(
+                        txtUpdatePrompt = null,
+                        message = "该 TXT 已导入：${identical.existingTitle}",
+                        error = null
+                    )
+                    return@runBusy
+                }
+                if (inspection.imported.kind == LocalContentImportKind.TXT &&
+                    inspection.candidates.isNotEmpty()
+                ) {
+                    pendingLocalContentInspection = inspection
+                    sessionState.value = sessionState.value.copy(
+                        txtUpdatePrompt = TxtUpdatePromptUi(
+                            fileName = fileName,
+                            candidates = inspection.candidates
+                        ),
+                        message = null,
+                        error = null
+                    )
+                    return@runBusy
+                }
+                val result = repository.confirmLocalContentImport(
+                    inspection = inspection,
+                    replaceArticleId = null
+                )
                 sessionState.value = sessionState.value.copy(
                     message = when (result.kind) {
                         LocalContentImportKind.TXT -> "已导入 TXT 到导入内容，文章 ${result.articleCount} 篇"
@@ -298,6 +338,47 @@ class MainViewModel(
                 )
             }
         }
+    }
+
+    fun confirmTxtUpdate(articleId: String) {
+        val inspection = pendingLocalContentInspection ?: return
+        viewModelScope.launch {
+            runBusy("正在覆盖 TXT…") {
+                val result = repository.confirmLocalContentImport(
+                    inspection = inspection,
+                    replaceArticleId = articleId
+                )
+                pendingLocalContentInspection = null
+                sessionState.value = sessionState.value.copy(
+                    txtUpdatePrompt = null,
+                    message = "已更新 TXT：${result.source.title}，阅读进度已继承",
+                    error = null
+                )
+            }
+        }
+    }
+
+    fun importPendingTxtAsNew() {
+        val inspection = pendingLocalContentInspection ?: return
+        viewModelScope.launch {
+            runBusy("正在导入新 TXT…") {
+                val result = repository.confirmLocalContentImport(
+                    inspection = inspection,
+                    replaceArticleId = null
+                )
+                pendingLocalContentInspection = null
+                sessionState.value = sessionState.value.copy(
+                    txtUpdatePrompt = null,
+                    message = "已作为新 TXT 导入，文章 ${result.articleCount} 篇",
+                    error = null
+                )
+            }
+        }
+    }
+
+    fun dismissTxtUpdatePrompt() {
+        pendingLocalContentInspection = null
+        sessionState.value = sessionState.value.copy(txtUpdatePrompt = null)
     }
 
     fun exportBackup(uriString: String) {

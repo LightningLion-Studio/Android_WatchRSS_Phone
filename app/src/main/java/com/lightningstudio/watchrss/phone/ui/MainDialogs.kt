@@ -3,6 +3,8 @@ package com.lightningstudio.watchrss.phone.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -10,6 +12,10 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -19,6 +25,8 @@ import com.lightningstudio.watchrss.phone.viewmodel.MainBluetoothDeviceUi
 import com.lightningstudio.watchrss.phone.viewmodel.MainConflictPromptUi
 import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptKind
 import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptUi
+import com.lightningstudio.watchrss.phone.viewmodel.TxtUpdatePromptUi
+import com.lightningstudio.watchrss.phone.data.repo.TxtUpdateRelation
 
 @Composable
 fun AddRssSourceDialog(
@@ -97,6 +105,90 @@ fun AddArticleDialog(
         dismissButton = {
             Button(onClick = onDismiss) {
                 Text("取消")
+            }
+        }
+    )
+}
+
+@Composable
+fun TxtUpdateDialog(
+    prompt: TxtUpdatePromptUi,
+    onConfirmReplace: (String) -> Unit,
+    onImportAsNew: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedArticleId by remember(prompt) {
+        mutableStateOf(prompt.candidates.firstOrNull()?.articleId)
+    }
+    val selected = prompt.candidates.firstOrNull { it.articleId == selectedArticleId }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("发现可能的 TXT 更新") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "“${prompt.fileName}”可能与已导入文本相同。请选择要覆盖的文本，或作为新文本保留。",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                prompt.candidates.forEach { candidate ->
+                    val relation = when (candidate.relation) {
+                        TxtUpdateRelation.IDENTICAL -> "内容完全相同"
+                        TxtUpdateRelation.APPEND_ONLY -> "旧正文完整位于新文件开头，确定为追加更新"
+                        TxtUpdateRelation.OLDER_VERSION -> "新文件可能是较旧版本"
+                        TxtUpdateRelation.POSSIBLE_REVISION -> "疑似同一本修订版"
+                    }
+                    val progress = (candidate.inheritedProgress * 100).toInt()
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { selectedArticleId = candidate.articleId }
+                    ) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                text = if (selectedArticleId == candidate.articleId) {
+                                    "✓ ${candidate.existingTitle}"
+                                } else {
+                                    candidate.existingTitle
+                                },
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "$relation；继承后约 $progress%" +
+                                    if (candidate.approximateProgress) "（位置为近似值）" else "",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                selected?.takeIf { it.relation == TxtUpdateRelation.OLDER_VERSION }?.let {
+                    Text(
+                        text = "所选文件比现有文本短，覆盖可能丢失后续正文。",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { selectedArticleId?.let(onConfirmReplace) },
+                enabled = selectedArticleId != null
+            ) {
+                Text("覆盖并继承进度")
+            }
+        },
+        dismissButton = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                OutlinedButton(onClick = onImportAsNew) {
+                    Text("作为新文本导入")
+                }
+                OutlinedButton(onClick = onDismiss) {
+                    Text("取消")
+                }
             }
         }
     )

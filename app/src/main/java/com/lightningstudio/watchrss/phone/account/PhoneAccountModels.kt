@@ -25,3 +25,7 @@ data class WatchDeviceToken(
     val entitlement: WatchEntitlementSnapshot
 )
 
+data class PasskeyOptions(
+    val challengeId: String,
+    val requestJson: String
+)

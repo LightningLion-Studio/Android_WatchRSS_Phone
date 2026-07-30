@@ -57,6 +57,7 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.ui.DeleteConflictDialog
 import com.lightningstudio.watchrss.phone.ui.SharedImportDialog
+import com.lightningstudio.watchrss.phone.ui.TxtUpdateDialog
 import com.lightningstudio.watchrss.phone.ui.BluetoothDeviceChooserDialog
 import com.lightningstudio.watchrss.phone.viewmodel.MainBluetoothDeviceUi
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
@@ -248,6 +249,14 @@ class ListPageActivity : ComponentActivity() {
                             }
                         },
                         onDismiss = viewModel::dismissSharedImportPrompt
+                    )
+                }
+                uiState.txtUpdatePrompt?.let { prompt ->
+                    TxtUpdateDialog(
+                        prompt = prompt,
+                        onConfirmReplace = viewModel::confirmTxtUpdate,
+                        onImportAsNew = viewModel::importPendingTxtAsNew,
+                        onDismiss = viewModel::dismissTxtUpdatePrompt
                     )
                 }
                 uiState.bluetoothDevicePrompt?.let { prompt ->

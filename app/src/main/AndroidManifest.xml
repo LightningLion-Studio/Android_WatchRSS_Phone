@@ -11,6 +11,7 @@
         android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <!-- Samsung FlipFont packages have no exported component to query. The font library
          filters this visibility to com.monotype.android.font.* and only reads font assets. -->
     <uses-permission
@@ -29,6 +30,9 @@
         android:theme="@style/Theme.WatchRSS"
         android:networkSecurityConfig="@xml/network_security_config"
         android:usesCleartextTraffic="true">
+        <meta-data
+            android:name="asset_statements"
+            android:resource="@string/asset_statements" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -176,6 +180,10 @@
             android:theme="@style/Theme.WatchRSS" />
         <activity
             android:name=".DebugBluetoothSyncActivity"
+            android:exported="true"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
+            android:name=".BleBandwidthTestActivity"
             android:exported="true"
             android:theme="@style/Theme.WatchRSS" />
     </application>

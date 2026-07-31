@@ -649,6 +649,13 @@ internal class WatchBleBandwidthServer(
         return url
     }
 
+    fun prepareLocalHttpVideo(videoId: String): String {
+        require(videoId in BUNDLED_VIDEO_IDS) { "未知测试视频：$videoId" }
+        val descriptor = localAudioProbeServer.start(videoId)
+        reportStatus("HTTP 视频已就绪，BLE 数据传输已停用")
+        return descriptor
+    }
+
     private suspend fun sendVideoFrame(payload: ByteArray, frameIndex: Int) {
         sendPayload(payload, frameIndex, BleBandwidthProtocol.PAYLOAD_KIND_VIDEO)
     }

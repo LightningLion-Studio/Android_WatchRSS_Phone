@@ -37,8 +37,8 @@ class BleBandwidthTestActivity : ComponentActivity() {
         runOnUiThread {
             statusView.text = message
             startButton.isEnabled = server?.watchReady == true && !running
-            videoButton.isEnabled = server?.videoReady == true && !running
-            rickrollButton.isEnabled = server?.videoReady == true && !running
+            videoButton.isEnabled = server != null && !running
+            rickrollButton.isEnabled = server != null && !running
             ipProbeButton.isEnabled = server?.videoReady == true && !running
         }
     }
@@ -239,7 +239,11 @@ class BleBandwidthTestActivity : ComponentActivity() {
             "正在把 HTTP 音频和视频地址发送给手表…"
         lifecycleScope.launch {
             runCatching {
-                activeServer.sendLocalAudioProbeUrl(selectedVideoId)
+                if (activeServer.videoReady) {
+                    activeServer.sendLocalAudioProbeUrl(selectedVideoId)
+                } else {
+                    activeServer.prepareLocalHttpVideo(selectedVideoId)
+                }
             }.onSuccess {
                 statusView.text = "HTTP 音视频地址已发送"
                 resultView.text = "手表正在通过手机 HTTP 服务拉取音频和 5 FPS 视频帧"
@@ -249,8 +253,8 @@ class BleBandwidthTestActivity : ComponentActivity() {
             }
             running = false
             startButton.isEnabled = activeServer.watchReady
-            videoButton.isEnabled = activeServer.videoReady
-            rickrollButton.isEnabled = activeServer.videoReady
+            videoButton.isEnabled = true
+            rickrollButton.isEnabled = true
         }
     }
 

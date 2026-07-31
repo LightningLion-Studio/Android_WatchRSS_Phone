@@ -38,7 +38,7 @@ internal class LocalAudioProbeServer(
             }
         }
         val base = "http://${phoneIpv4Address()}:$PORT"
-        return "$base/audio.mp3|$base/frame.bin?index=|${frameOffsets.size}|$sourceFps"
+        return "$base/audio.mp3|$base/frame.bin?index=|65535|$sourceFps"
     }
 
     private fun loadVideo(videoId: String) {

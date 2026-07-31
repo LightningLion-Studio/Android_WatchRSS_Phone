@@ -4,7 +4,6 @@ import android.content.Context
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.net.Inet4Address
-import java.net.InetAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
@@ -16,7 +15,6 @@ internal class LocalAudioProbeServer(
     private val report: (String) -> Unit
 ) : AutoCloseable {
     private val appContext = context.applicationContext
-    private val mdnsResponder = LocalMdnsResponder(appContext, report)
     private val running = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
     @Volatile private var audio = ByteArray(0)
@@ -39,9 +37,7 @@ internal class LocalAudioProbeServer(
                 }
             }
         }
-        val address = phoneIpv4Address()
-        mdnsResponder.start(InetAddress.getByName(address) as Inet4Address)
-        val base = "http://${LocalMdnsResponder.HOSTNAME}:$PORT"
+        val base = "http://${phoneIpv4Address()}:$PORT"
         return "$base/audio.mp3|$base/frame.bin?index=|65535|$sourceFps"
     }
 
@@ -150,7 +146,6 @@ internal class LocalAudioProbeServer(
         running.set(false)
         runCatching { serverSocket?.close() }
         serverSocket = null
-        mdnsResponder.close()
     }
 
     companion object {

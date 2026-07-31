@@ -242,6 +242,9 @@ class HomeActivity : ComponentActivity() {
             }
         }
         handleInboundIntent(intent)
+        ensureBluetoothPermissions {
+            (application as PhoneCompanionApplication).startWatchBaseStationIfPermitted()
+        }
     }
 
     override fun onResume() {
@@ -272,6 +275,7 @@ class HomeActivity : ComponentActivity() {
         val permissions = buildList {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
                 add(android.Manifest.permission.BLUETOOTH_CONNECT)
+                add(android.Manifest.permission.BLUETOOTH_ADVERTISE)
             }
         }
         val missing = permissions.filter {

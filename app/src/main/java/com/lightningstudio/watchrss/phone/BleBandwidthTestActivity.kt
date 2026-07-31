@@ -10,6 +10,7 @@ import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -25,9 +26,22 @@ class BleBandwidthTestActivity : ComponentActivity() {
     private lateinit var statusView: TextView
     private lateinit var resultView: TextView
     private lateinit var startButton: Button
+    private lateinit var videoButton: Button
+    private lateinit var rickrollButton: Button
+    private lateinit var ipProbeButton: Button
+    private lateinit var motionBlurCheck: CheckBox
     private var server: WatchBleBandwidthServer? = null
     private var running = false
     private val results = mutableListOf<BleBandwidthTrialResult>()
+    private val statusListener: (String) -> Unit = { message ->
+        runOnUiThread {
+            statusView.text = message
+            startButton.isEnabled = server?.watchReady == true && !running
+            videoButton.isEnabled = server?.videoReady == true && !running
+            rickrollButton.isEnabled = server?.videoReady == true && !running
+            ipProbeButton.isEnabled = server?.videoReady == true && !running
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -83,6 +97,47 @@ class BleBandwidthTestActivity : ComponentActivity() {
                 dp(56)
             )
         )
+        videoButton = Button(this).apply {
+            text = "串流完整版 Bad Apple"
+            isEnabled = false
+            setOnClickListener { startVideoStream("bad-apple", "Bad Apple") }
+        }
+        content.addView(
+            videoButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(56)
+            )
+        )
+        rickrollButton = Button(this).apply {
+            text = "串流完整版 Never Gonna Give You Up"
+            isEnabled = false
+            setOnClickListener { startVideoStream("rickroll", "Never Gonna Give You Up") }
+        }
+        content.addView(
+            rickrollButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(56)
+            )
+        )
+        ipProbeButton = Button(this).apply {
+            text = "测试手表直连手机 HTTP"
+            isEnabled = false
+            setOnClickListener { startIpProbe() }
+        }
+        content.addView(
+            ipProbeButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(56)
+            )
+        )
+        motionBlurCheck = CheckBox(this).apply {
+            text = "开启动态模糊（源帧率五帧曝光）"
+            textSize = 16f
+        }
+        content.addView(motionBlurCheck)
         resultView = TextView(this).apply {
             text = "将依次发送 32 / 64 / 128 / 256 KiB，每档 2 次。\n" +
                 "计时口径：BEGIN 通知 → 手表完成序号、大小、checksum 校验并写回 ACK。"
@@ -131,14 +186,9 @@ class BleBandwidthTestActivity : ComponentActivity() {
     private fun startServer() {
         if (server != null) return
         runCatching {
-            WatchBleBandwidthServer(applicationContext) { message ->
-                runOnUiThread {
-                    statusView.text = message
-                    startButton.isEnabled = server?.watchReady == true && !running
-                }
-                Log.i(TAG, message)
-            }.also {
+            WatchBleBandwidthServer.processInstance(applicationContext).also {
                 server = it
+                it.bindStatusListener(statusListener)
                 it.start()
             }
         }.onFailure { error ->
@@ -151,6 +201,8 @@ class BleBandwidthTestActivity : ComponentActivity() {
         val activeServer = server ?: return
         running = true
         startButton.isEnabled = false
+        videoButton.isEnabled = false
+        rickrollButton.isEnabled = false
         results.clear()
         resultView.text = "测试开始…"
         lifecycleScope.launch {
@@ -170,6 +222,52 @@ class BleBandwidthTestActivity : ComponentActivity() {
             }
             running = false
             startButton.isEnabled = activeServer.watchReady
+            videoButton.isEnabled = activeServer.videoReady
+            rickrollButton.isEnabled = activeServer.videoReady
+        }
+    }
+
+    private fun startVideoStream(videoId: String, title: String) {
+        val activeServer = server ?: return
+        val selectedVideoId = if (motionBlurCheck.isChecked) "$videoId-blur" else videoId
+        running = true
+        startButton.isEnabled = false
+        videoButton.isEnabled = false
+        rickrollButton.isEnabled = false
+        resultView.text =
+            "准备 $title · ${if (motionBlurCheck.isChecked) "动态模糊 · " else ""}" +
+            "正在把 HTTP 音频和视频地址发送给手表…"
+        lifecycleScope.launch {
+            runCatching {
+                activeServer.sendLocalAudioProbeUrl(selectedVideoId)
+            }.onSuccess {
+                statusView.text = "HTTP 音视频地址已发送"
+                resultView.text = "手表正在通过手机 HTTP 服务拉取音频和 5 FPS 视频帧"
+            }.onFailure { error ->
+                statusView.text = "蓝牙视频失败：${error.message}"
+                Log.e(TAG, "BLE video stream failed", error)
+            }
+            running = false
+            startButton.isEnabled = activeServer.watchReady
+            videoButton.isEnabled = activeServer.videoReady
+            rickrollButton.isEnabled = activeServer.videoReady
+        }
+    }
+
+    private fun startIpProbe() {
+        val activeServer = server ?: return
+        ipProbeButton.isEnabled = false
+        resultView.text = "正在启动手机 HTTP 服务并把 URL 发给手表…"
+        lifecycleScope.launch {
+            runCatching { activeServer.sendLocalAudioProbeUrl() }
+                .onSuccess { url ->
+                    resultView.text =
+                        "已发送：$url\n等待手表请求。若命中，手机顶部状态会显示 HTTP 命中。"
+                }
+                .onFailure { error ->
+                    resultView.text = "IP 直连探针失败：${error.message}"
+                }
+            ipProbeButton.isEnabled = activeServer.videoReady && !running
         }
     }
 
@@ -207,7 +305,7 @@ class BleBandwidthTestActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        server?.close()
+        server?.unbindStatusListener(statusListener)
         server = null
         super.onDestroy()
     }

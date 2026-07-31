@@ -2964,6 +2964,13 @@ private fun AppFeatureSettings(modifier: Modifier) {
                 "调试构建显示；正式构建不会暴露性能入口。",
                 style = MaterialTheme.typography.bodySmall
             )
+            SettingsEntry(
+                "BLE 视频串流",
+                "向 RTOS 手表串流 4:3 · 6 fps Bad Apple",
+                Icons.Default.Sync
+            ) {
+                context.startActivity(Intent(context, BleBandwidthTestActivity::class.java))
+            }
         }
     }
 }

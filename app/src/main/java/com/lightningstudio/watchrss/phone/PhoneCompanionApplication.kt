@@ -2,9 +2,15 @@ package com.lightningstudio.watchrss.phone
 
 import android.app.Application
 import android.app.Activity
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Build
 import android.os.SystemClock
+import android.util.Log
+import androidx.core.content.ContextCompat
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncWorker
+import com.lightningstudio.watchrss.phone.connection.ble.WatchBleBandwidthServer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -24,6 +30,7 @@ class PhoneCompanionApplication : Application() {
         container.startCloudChangeScheduler()
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
+                startWatchBaseStationIfPermitted()
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastForegroundSyncAt < FOREGROUND_SYNC_THROTTLE_MS) return
                 lastForegroundSyncAt = now
@@ -51,7 +58,26 @@ class PhoneCompanionApplication : Application() {
         }
     }
 
+    fun startWatchBaseStationIfPermitted(): Boolean {
+        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            listOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE)
+        } else {
+            emptyList()
+        }
+        if (permissions.any {
+                ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+            }
+        ) return false
+        return runCatching {
+            WatchBleBandwidthServer.processInstance(this).start()
+            true
+        }.onFailure { error ->
+            Log.e(TAG, "Failed to start watch base station", error)
+        }.getOrDefault(false)
+    }
+
     private companion object {
+        private const val TAG = "WatchRSS_BaseStation"
         private const val FOREGROUND_SYNC_THROTTLE_MS = 5 * 60 * 1000L
     }
 }

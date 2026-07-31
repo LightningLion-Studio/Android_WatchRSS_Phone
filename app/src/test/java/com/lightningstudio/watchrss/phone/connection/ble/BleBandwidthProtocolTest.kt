@@ -1,11 +1,29 @@
 package com.lightningstudio.watchrss.phone.connection.ble
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BleBandwidthProtocolTest {
+    @Test
+    fun advertisementMarkerIsStable() {
+        assertEquals(0xffff, BleBandwidthProtocol.ADVERTISEMENT_MANUFACTURER_ID)
+        assertArrayEquals(
+            byteArrayOf(0x57, 0x52, 0x53, 0x33),
+            BleBandwidthProtocol.ADVERTISEMENT_MARKER
+        )
+        assertEquals(
+            BleBandwidthProtocol.DATA_UUID,
+            BleBandwidthProtocol.CONTROL_UUID
+        )
+        assertEquals(3, BleBandwidthProtocol.DATA_UUIDS.size)
+        assertEquals(4, BleBandwidthProtocol.CONTROL_UUIDS.size)
+        assertTrue(BleBandwidthProtocol.DATA_UUIDS.contains(BleBandwidthProtocol.V1_DATA_UUID))
+        assertTrue(BleBandwidthProtocol.CONTROL_UUIDS.contains(BleBandwidthProtocol.V1_CONTROL_UUID))
+    }
+
     @Test
     fun `encodes deterministic data packets and checksum`() {
         val packet = BleBandwidthProtocol.encodeData(
@@ -28,6 +46,26 @@ class BleBandwidthProtocolTest {
     }
 
     @Test
+    fun `marks watch audio and video envelopes independently`() {
+        val audio = BleBandwidthProtocol.encodeBegin(
+            trialId = 9,
+            sizeBytes = 1024,
+            repetition = 0,
+            payloadKind = BleBandwidthProtocol.PAYLOAD_KIND_AUDIO
+        )
+        val video = BleBandwidthProtocol.encodeBegin(
+            trialId = 10,
+            sizeBytes = 2048,
+            repetition = 3,
+            payloadKind = BleBandwidthProtocol.PAYLOAD_KIND_VIDEO
+        )
+        assertEquals(BleBandwidthProtocol.PAYLOAD_KIND_AUDIO, audio[10].toInt())
+        assertEquals(BleBandwidthProtocol.PAYLOAD_KIND_VIDEO, video[10].toInt())
+        assertEquals(4, BleBandwidthProtocol.PAYLOAD_KIND_AUDIO_CHUNK)
+        assertEquals(5, BleBandwidthProtocol.PAYLOAD_KIND_AUDIO_FINAL)
+    }
+
+    @Test
     fun `decodes ready and integrity ack`() {
         assertEquals(
             ControlMessage.Ready,
@@ -35,6 +73,15 @@ class BleBandwidthProtocolTest {
                 byteArrayOf(
                     BleBandwidthProtocol.VERSION.toByte(),
                     BleBandwidthProtocol.TYPE_READY.toByte()
+                )
+            )
+        )
+        assertEquals(
+            ControlMessage.VideoReady,
+            BleBandwidthProtocol.decodeControl(
+                byteArrayOf(
+                    BleBandwidthProtocol.VERSION.toByte(),
+                    BleBandwidthProtocol.TYPE_VIDEO_READY.toByte()
                 )
             )
         )

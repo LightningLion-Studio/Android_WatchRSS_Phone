@@ -19,16 +19,29 @@ import android.content.Context
 import android.os.Build
 import android.os.ParcelUuid
 import android.os.SystemClock
+import android.util.Log
+import com.lightningstudio.watchrss.phone.connection.bili.BiliBaseStationRequest
+import com.lightningstudio.watchrss.phone.connection.bili.BiliPlaybackRequest
+import com.lightningstudio.watchrss.phone.connection.bili.BiliRealtimeTranscoder
+import com.lightningstudio.watchrss.phone.connection.bili.PhoneBiliGateway
+import com.lightningstudio.watchrss.phone.connection.bili.failureResponse
+import com.lightningstudio.watchrss.phone.connection.bili.successResponse
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 @SuppressLint("MissingPermission")
 internal class WatchBleBandwidthServer(
-    context: Context,
-    private val onStatus: (String) -> Unit
+    context: Context
 ) : AutoCloseable {
     private val appContext = context.applicationContext
     private val bluetoothManager =
@@ -36,55 +49,117 @@ internal class WatchBleBandwidthServer(
     private val pendingAcks = ConcurrentHashMap<Int, CompletableDeferred<ControlMessage.Ack>>()
     private val trialCounter = AtomicInteger(0)
     private val notificationLock = Any()
+    private val rpcLock = Any()
+    private val baseStationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val outboundMutex = Mutex()
+    private val biliGateway = PhoneBiliGateway()
+    private val realtimeTranscoder = BiliRealtimeTranscoder(appContext)
+    private val localAudioProbeServer = LocalAudioProbeServer(appContext, ::reportStatus)
 
     private var gattServer: BluetoothGattServer? = null
     private var advertiser: BluetoothLeAdvertiser? = null
     private var connectedDevice: BluetoothDevice? = null
     private var pendingNotification: CompletableDeferred<Int>? = null
+    private var activeNotificationCharacteristic: BluetoothGattCharacteristic? = null
     private var notificationsEnabled = false
     private var advertising = false
     private var mtu = BleBandwidthProtocol.DEFAULT_MTU
+    private var nextServiceToRegister = 0
+    private var incomingRpc: IncomingRpc? = null
+    private var videoStreamJob: Job? = null
+
+    @Volatile
+    private var statusListener: ((String) -> Unit)? = null
+
+    @Volatile
+    var lastStatus: String = "BLE 服务尚未启动"
+        private set
 
     @Volatile
     var watchReady: Boolean = false
         private set
 
-    private val dataCharacteristic = BluetoothGattCharacteristic(
-        BleBandwidthProtocol.DATA_UUID,
-        BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-        BluetoothGattCharacteristic.PERMISSION_READ
-    ).apply {
-        addDescriptor(
-            BluetoothGattDescriptor(
-                BleBandwidthProtocol.CCCD_UUID,
-                BluetoothGattDescriptor.PERMISSION_READ or
-                    BluetoothGattDescriptor.PERMISSION_WRITE
+    @Volatile
+    var videoReady: Boolean = false
+        private set
+
+    @Volatile
+    var baseReady: Boolean = false
+        private set
+
+    private fun createDuplexDataCharacteristic(uuid: java.util.UUID) =
+        BluetoothGattCharacteristic(
+            uuid,
+            BluetoothGattCharacteristic.PROPERTY_READ or
+                BluetoothGattCharacteristic.PROPERTY_NOTIFY or
+                BluetoothGattCharacteristic.PROPERTY_WRITE or
+                BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
+            BluetoothGattCharacteristic.PERMISSION_READ or
+                BluetoothGattCharacteristic.PERMISSION_WRITE
+        ).apply {
+            addDescriptor(
+                BluetoothGattDescriptor(
+                    BleBandwidthProtocol.CCCD_UUID,
+                    BluetoothGattDescriptor.PERMISSION_READ or
+                        BluetoothGattDescriptor.PERMISSION_WRITE
+                )
             )
-        )
+        }
+
+    private fun createService(
+        serviceUuid: java.util.UUID,
+        dataCharacteristic: BluetoothGattCharacteristic,
+        controlCharacteristic: BluetoothGattCharacteristic? = null
+    ) = BluetoothGattService(
+        serviceUuid,
+        BluetoothGattService.SERVICE_TYPE_PRIMARY
+    ).apply {
+        addCharacteristic(dataCharacteristic)
+        controlCharacteristic?.let(::addCharacteristic)
     }
 
-    private val controlCharacteristic = BluetoothGattCharacteristic(
-        BleBandwidthProtocol.CONTROL_UUID,
+    private val v1DataCharacteristic =
+        createDuplexDataCharacteristic(BleBandwidthProtocol.V1_DATA_UUID)
+    private val v1ControlCharacteristic = BluetoothGattCharacteristic(
+        BleBandwidthProtocol.V1_CONTROL_UUID,
         BluetoothGattCharacteristic.PROPERTY_WRITE or
             BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
         BluetoothGattCharacteristic.PERMISSION_WRITE
     )
+    private val v2DataCharacteristic =
+        createDuplexDataCharacteristic(BleBandwidthProtocol.V2_DATA_UUID)
+    private val dataCharacteristic =
+        createDuplexDataCharacteristic(BleBandwidthProtocol.DATA_UUID)
 
-    private val service = BluetoothGattService(
-        BleBandwidthProtocol.SERVICE_UUID,
-        BluetoothGattService.SERVICE_TYPE_PRIMARY
-    ).apply {
-        addCharacteristic(dataCharacteristic)
-        addCharacteristic(controlCharacteristic)
-    }
+    private val servicesToRegister = listOf(
+        createService(
+            BleBandwidthProtocol.V1_SERVICE_UUID,
+            v1DataCharacteristic,
+            v1ControlCharacteristic
+        ),
+        createService(
+            BleBandwidthProtocol.V2_SERVICE_UUID,
+            v2DataCharacteristic
+        ),
+        createService(
+            BleBandwidthProtocol.SERVICE_UUID,
+            dataCharacteristic
+        )
+    )
 
     private val gattCallback = object : BluetoothGattServerCallback() {
         override fun onServiceAdded(status: Int, service: BluetoothGattService) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                onStatus("BLE 服务注册失败：$status")
+                reportStatus("BLE 服务 ${service.uuid} 注册失败：$status")
                 return
             }
-            startAdvertising()
+            nextServiceToRegister += 1
+            if (nextServiceToRegister < servicesToRegister.size) {
+                addNextService()
+            } else {
+                reportStatus("兼容服务 V1 / V2 / V3 已注册")
+                startAdvertising()
+            }
         }
 
         override fun onConnectionStateChange(
@@ -95,28 +170,42 @@ internal class WatchBleBandwidthServer(
             if (status == BluetoothGatt.GATT_SUCCESS &&
                 newState == BluetoothProfile.STATE_CONNECTED
             ) {
+                // Android terminates a connectable legacy advertisement once a
+                // central connects. Reflect that state so a later disconnect
+                // can make this server discoverable again.
+                advertising = false
                 connectedDevice = device
                 mtu = BleBandwidthProtocol.DEFAULT_MTU
+                activeNotificationCharacteristic = null
                 notificationsEnabled = false
                 watchReady = false
-                onStatus("手表已连接，等待订阅测速通道")
+                videoReady = false
+                baseReady = false
+                reportStatus("手表已连接，等待订阅测速通道")
                 return
             }
 
             if (connectedDevice?.address == device.address) {
                 connectedDevice = null
+                activeNotificationCharacteristic = null
                 notificationsEnabled = false
                 watchReady = false
+                videoReady = false
+                baseReady = false
+                synchronized(rpcLock) { incomingRpc = null }
+                videoStreamJob?.cancel()
+                videoStreamJob = null
                 mtu = BleBandwidthProtocol.DEFAULT_MTU
                 failPending("手表 BLE 已断开：status=$status")
-                onStatus("等待手表重新连接")
+                reportStatus("等待手表重新连接")
+                restartAdvertising()
             }
         }
 
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
             if (connectedDevice?.address == device.address) {
                 this@WatchBleBandwidthServer.mtu = mtu
-                onStatus("手表已连接，MTU $mtu，等待 READY")
+                reportStatus("手表已连接，MTU $mtu，等待 READY")
             }
         }
 
@@ -140,6 +229,23 @@ internal class WatchBleBandwidthServer(
             )
         }
 
+        override fun onCharacteristicReadRequest(
+            device: BluetoothDevice,
+            requestId: Int,
+            offset: Int,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            val valid =
+                characteristic.uuid in BleBandwidthProtocol.DATA_UUIDS && offset == 0
+            gattServer?.sendResponse(
+                device,
+                requestId,
+                if (valid) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE,
+                offset,
+                if (valid) byteArrayOf() else null
+            )
+        }
+
         override fun onDescriptorWriteRequest(
             device: BluetoothDevice,
             requestId: Int,
@@ -155,7 +261,14 @@ internal class WatchBleBandwidthServer(
             if (valid) {
                 notificationsEnabled =
                     value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                if (!notificationsEnabled) watchReady = false
+                if (notificationsEnabled) {
+                    activeNotificationCharacteristic = descriptor.characteristic
+                } else {
+                    activeNotificationCharacteristic = null
+                    watchReady = false
+                    videoReady = false
+                    baseReady = false
+                }
             }
             if (responseNeeded) {
                 gattServer?.sendResponse(
@@ -167,7 +280,7 @@ internal class WatchBleBandwidthServer(
                 )
             }
             if (valid) {
-                onStatus(
+                reportStatus(
                     if (notificationsEnabled) {
                         "测速通知已订阅，等待手表 READY"
                     } else {
@@ -187,7 +300,7 @@ internal class WatchBleBandwidthServer(
             value: ByteArray
         ) {
             val control = if (
-                characteristic.uuid == BleBandwidthProtocol.CONTROL_UUID &&
+                characteristic.uuid in BleBandwidthProtocol.CONTROL_UUIDS &&
                 !preparedWrite &&
                 offset == 0
             ) {
@@ -207,7 +320,8 @@ internal class WatchBleBandwidthServer(
             when (control) {
                 ControlMessage.Ready -> {
                     watchReady = notificationsEnabled
-                    onStatus(
+                    videoReady = false
+                    reportStatus(
                         if (watchReady) {
                             "WatchRSS 自有 BLE 已就绪，可以开始测试"
                         } else {
@@ -215,6 +329,35 @@ internal class WatchBleBandwidthServer(
                         }
                     )
                 }
+
+                ControlMessage.VideoReady -> {
+                    videoReady = notificationsEnabled
+                    watchReady = false
+                    reportStatus(
+                        if (videoReady) {
+                            "手表视频播放器已就绪，可以开始串流"
+                        } else {
+                            "收到 VIDEO READY，但手表尚未订阅通知"
+                        }
+                    )
+                }
+
+                ControlMessage.BaseReady -> {
+                    baseReady = notificationsEnabled
+                    watchReady = false
+                    videoReady = false
+                    reportStatus(
+                        if (baseReady) {
+                            "手表 B 站客户端已连接，手机基站就绪"
+                        } else {
+                            "收到 BASE READY，但手表尚未订阅通知"
+                        }
+                    )
+                }
+
+                is ControlMessage.RpcBegin -> beginRpc(control)
+                is ControlMessage.RpcData -> appendRpc(control)
+                is ControlMessage.RpcEnd -> finishRpc(control)
 
                 is ControlMessage.Ack -> pendingAcks[control.trialId]?.complete(control)
                 null -> Unit
@@ -229,20 +372,124 @@ internal class WatchBleBandwidthServer(
         }
     }
 
+    private fun beginRpc(message: ControlMessage.RpcBegin) {
+        if (!baseReady || message.sizeBytes !in 1..MAX_RPC_REQUEST_BYTES) return
+        synchronized(rpcLock) {
+            incomingRpc = IncomingRpc(
+                requestId = message.requestId,
+                bytes = ByteArray(message.sizeBytes)
+            )
+        }
+    }
+
+    private fun appendRpc(message: ControlMessage.RpcData) {
+        synchronized(rpcLock) {
+            val incoming = incomingRpc ?: return
+            if (incoming.requestId != message.requestId ||
+                incoming.sequence != message.sequence ||
+                incoming.offset + message.payload.size > incoming.bytes.size
+            ) {
+                incomingRpc = null
+                return
+            }
+            message.payload.copyInto(incoming.bytes, incoming.offset)
+            incoming.offset += message.payload.size
+            incoming.sequence += 1
+            for (byte in message.payload) {
+                incoming.checksum =
+                    (incoming.checksum + (byte.toInt() and 0xff)) and 0xffff_ffffL
+            }
+        }
+    }
+
+    private fun finishRpc(message: ControlMessage.RpcEnd) {
+        val completed = synchronized(rpcLock) {
+            val incoming = incomingRpc
+            incomingRpc = null
+            incoming?.takeIf {
+                it.requestId == message.requestId &&
+                    it.offset == it.bytes.size &&
+                    it.checksum == message.checksum
+            }
+        } ?: return
+        baseStationScope.launch { handleRpc(completed.bytes) }
+    }
+
+    private suspend fun handleRpc(bytes: ByteArray) {
+        var requestId = 0
+        val response = runCatching {
+            val request = BiliBaseStationRequest.decode(bytes)
+            requestId = request.id
+            if (request.method == "video.start") {
+                startRealtimeVideo(
+                    BiliPlaybackRequest(
+                        url = request.params.getString("url"),
+                        referer = request.params.getString("referer"),
+                        durationMs = request.params.optLong("durationMs"),
+                        cookieHeader = request.cookieHeader
+                    )
+                )
+                successResponse(request.id, org.json.JSONObject().put("started", true))
+            } else if (request.method == "video.stop") {
+                videoStreamJob?.cancel()
+                videoStreamJob = null
+                successResponse(request.id, org.json.JSONObject().put("stopped", true))
+            } else {
+                successResponse(
+                    request.id,
+                    biliGateway.execute(request.method, request.params, request.cookieHeader)
+                )
+            }
+        }.getOrElse { error -> failureResponse(requestId, error) }
+        outboundMutex.withLock {
+            sendPayload(
+                response,
+                requestId,
+                BleBandwidthProtocol.PAYLOAD_KIND_RPC
+            )
+        }
+    }
+
+    private fun startRealtimeVideo(request: BiliPlaybackRequest) {
+        videoStreamJob?.cancel()
+        videoStreamJob = baseStationScope.launch {
+            delay(250)
+            runCatching {
+                realtimeTranscoder.stream(request) { frameIndex, payload ->
+                    outboundMutex.withLock {
+                        sendPayload(
+                            payload,
+                            frameIndex,
+                            BleBandwidthProtocol.PAYLOAD_KIND_VIDEO
+                        )
+                    }
+                }
+            }.onFailure { error ->
+                if (error !is kotlinx.coroutines.CancellationException) {
+                    Log.e(TAG, "Bilibili realtime stream failed", error)
+                }
+            }
+        }
+    }
+
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
             advertising = true
-            onStatus("正在广播 WatchRSS BLE，等待手表扫描连接")
+            reportStatus("正在广播 WatchRSS BLE，等待手表扫描连接")
         }
 
         override fun onStartFailure(errorCode: Int) {
             advertising = false
-            onStatus("WatchRSS BLE 广播失败：$errorCode")
+            reportStatus("WatchRSS BLE 广播失败：$errorCode")
         }
     }
 
+    @Synchronized
     fun start() {
-        if (gattServer != null) return
+        if (gattServer != null) {
+            if (connectedDevice == null && !advertising) startAdvertising()
+            return
+        }
         val adapter = bluetoothManager.adapter
             ?: error("手机没有蓝牙适配器")
         require(adapter.isEnabled) { "请先开启手机蓝牙" }
@@ -250,10 +497,35 @@ internal class WatchBleBandwidthServer(
             ?: error("手机不支持 BLE 广播")
         gattServer = bluetoothManager.openGattServer(appContext, gattCallback)
             ?: error("无法创建 BLE GATT Server")
+        nextServiceToRegister = 0
+        addNextService()
+        reportStatus("正在注册 WatchRSS BLE 兼容服务")
+    }
+
+    private fun addNextService() {
+        val service = servicesToRegister[nextServiceToRegister]
         require(gattServer?.addService(service) == true) {
-            "无法注册 WatchRSS BLE 服务"
+            "无法注册 WatchRSS BLE 服务 ${service.uuid}"
         }
-        onStatus("正在注册 WatchRSS BLE 服务")
+    }
+
+    @Synchronized
+    fun bindStatusListener(listener: (String) -> Unit) {
+        statusListener = listener
+        listener(lastStatus)
+    }
+
+    @Synchronized
+    fun unbindStatusListener(listener: (String) -> Unit) {
+        if (statusListener === listener) {
+            statusListener = null
+        }
+    }
+
+    private fun reportStatus(message: String) {
+        lastStatus = message
+        Log.i(TAG, message)
+        statusListener?.invoke(message)
     }
 
     private fun startAdvertising() {
@@ -267,8 +539,26 @@ internal class WatchBleBandwidthServer(
             .setIncludeDeviceName(false)
             .setIncludeTxPowerLevel(false)
             .addServiceUuid(ParcelUuid(BleBandwidthProtocol.SERVICE_UUID))
+            .addManufacturerData(
+                BleBandwidthProtocol.ADVERTISEMENT_MANUFACTURER_ID,
+                BleBandwidthProtocol.ADVERTISEMENT_MARKER
+            )
             .build()
-        advertiser?.startAdvertising(settings, data, advertiseCallback)
+        val scanResponse = AdvertiseData.Builder()
+            .setIncludeDeviceName(true)
+            .setIncludeTxPowerLevel(false)
+            .build()
+        advertiser?.startAdvertising(settings, data, scanResponse, advertiseCallback)
+    }
+
+    @Synchronized
+    private fun restartAdvertising() {
+        if (gattServer == null || connectedDevice != null) return
+        if (advertising) {
+            runCatching { advertiser?.stopAdvertising(advertiseCallback) }
+        }
+        advertising = false
+        startAdvertising()
     }
 
     suspend fun runBenchmark(
@@ -288,6 +578,125 @@ internal class WatchBleBandwidthServer(
         return results
     }
 
+    suspend fun streamBundledVideo(
+        videoId: String,
+        onFrame: (frameIndex: Int, frameCount: Int, skippedFrames: Int) -> Unit
+    ) {
+        require(videoReady) { "请先在手表打开“蓝牙串流视频”页面" }
+        require(videoId in BUNDLED_VIDEO_IDS) { "未知测试视频：$videoId" }
+        val stream = appContext.assets.open("bluetooth-video/$videoId-466-4x3.wvs")
+            .use { it.readBytes() }
+        require(stream.size >= 272 && stream.copyOfRange(0, 4).decodeToString() == "WVS1") {
+            "蓝牙视频资源损坏"
+        }
+        val sourceFps = stream[5].toInt() and 0xff
+        val frameCount = readAssetUInt16(stream, 12)
+        val dictionarySize = stream[14].toInt() and 0xff
+        var offset = 16 + dictionarySize * 4
+        val frameOffsets = IntArray(frameCount)
+        val frameSizes = IntArray(frameCount)
+        for (frameIndex in 0 until frameCount) {
+            require(offset + 2 <= stream.size) { "蓝牙视频帧索引损坏：$frameIndex" }
+            val size = readAssetUInt16(stream, offset)
+            offset += 2
+            require(offset + size <= stream.size) { "蓝牙视频帧损坏：$frameIndex" }
+            frameOffsets[frameIndex] = offset
+            frameSizes[frameIndex] = size
+            offset += size
+        }
+
+        val startedAt = SystemClock.elapsedRealtime()
+        var lastFrameIndex = -1
+        var sendTick = 0L
+        var skippedFrames = 0
+        while (lastFrameIndex + 1 < frameCount) {
+            require(videoReady) { "手表已退出蓝牙视频页面" }
+            val elapsedMs = SystemClock.elapsedRealtime() - startedAt
+            val frameIndex = minOf(
+                frameCount - 1,
+                ((elapsedMs * sourceFps) / 1000L).toInt()
+            )
+            if (frameIndex <= lastFrameIndex) {
+                sendTick += 1
+                val nextAt = startedAt + sendTick * 1000L / VIDEO_STREAM_FPS
+                delay((nextAt - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                continue
+            }
+            skippedFrames += (frameIndex - lastFrameIndex - 1).coerceAtLeast(0)
+            val payload = stream.copyOfRange(
+                frameOffsets[frameIndex],
+                frameOffsets[frameIndex] + frameSizes[frameIndex]
+            )
+            sendVideoFrame(payload, frameIndex)
+            onFrame(frameIndex, frameCount, skippedFrames)
+            lastFrameIndex = frameIndex
+            sendTick += 1
+            val nextAt = startedAt + sendTick * 1000L / VIDEO_STREAM_FPS
+            delay((nextAt - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+        }
+    }
+
+    suspend fun sendLocalAudioProbeUrl(videoId: String = "bad-apple"): String {
+        require(videoReady) { "请先在手表打开“蓝牙串流视频”页面" }
+        require(videoId in BUNDLED_VIDEO_IDS) { "未知测试视频：$videoId" }
+        val url = localAudioProbeServer.start(videoId)
+        sendPayload(
+            url.toByteArray(Charsets.US_ASCII),
+            0,
+            BleBandwidthProtocol.PAYLOAD_KIND_AUDIO_URL
+        )
+        reportStatus("已发送本机 HTTP 地址：$url")
+        return url
+    }
+
+    private suspend fun sendVideoFrame(payload: ByteArray, frameIndex: Int) {
+        sendPayload(payload, frameIndex, BleBandwidthProtocol.PAYLOAD_KIND_VIDEO)
+    }
+
+    private suspend fun sendPayload(payload: ByteArray, index: Int, payloadKind: Int) {
+        val trialId = trialCounter.updateAndGet { current ->
+            if (current >= 0xffff) 1 else current + 1
+        }
+        sendPayloadEnvelope(trialId, payload, index, payloadKind)
+    }
+
+    private suspend fun sendPayloadEnvelope(
+        trialId: Int,
+        payload: ByteArray,
+        index: Int,
+        payloadKind: Int
+    ) {
+        val maxPayload = BleBandwidthProtocol.maxPayloadBytes(mtu)
+        var offset = 0
+        var sequence = 0
+        var checksum = 0L
+        sendNotification(
+            BleBandwidthProtocol.encodeBegin(
+                trialId,
+                payload.size,
+                index,
+                payloadKind
+            )
+        )
+        while (offset < payload.size) {
+            val count = minOf(maxPayload, payload.size - offset)
+            val packet = BleBandwidthProtocol.encodeData(
+                trialId, sequence, payload, offset, count
+            )
+            checksum = BleBandwidthProtocol.updateChecksum(checksum, packet)
+            sendNotification(packet)
+            offset += count
+            sequence += 1
+        }
+        // RPC responses and video frames are independent envelopes. The watch
+        // drops a damaged message and recovers at the next BEGIN.
+        sendNotification(BleBandwidthProtocol.encodeEnd(trialId, payload.size, checksum))
+    }
+
+    private fun readAssetUInt16(source: ByteArray, offset: Int): Int =
+        (source[offset].toInt() and 0xff) or
+            ((source[offset + 1].toInt() and 0xff) shl 8)
+
     private suspend fun runTrial(
         sizeBytes: Int,
         repetition: Int
@@ -306,7 +715,7 @@ internal class WatchBleBandwidthServer(
         val startedAt = SystemClock.elapsedRealtime()
 
         try {
-            onStatus("${sizeBytes / 1024} KiB #$repetition：正在发送")
+            reportStatus("${sizeBytes / 1024} KiB #$repetition：正在发送")
             sendNotification(BleBandwidthProtocol.encodeBegin(trialId, sizeBytes, repetition))
             while (offset < sizeBytes) {
                 val count = minOf(maxPayload, sizeBytes - offset)
@@ -348,6 +757,9 @@ internal class WatchBleBandwidthServer(
     private suspend fun sendNotification(value: ByteArray) {
         val server = requireNotNull(gattServer) { "GATT Server 未启动" }
         val device = requireNotNull(connectedDevice) { "手表 BLE 未连接" }
+        val characteristic = requireNotNull(activeNotificationCharacteristic) {
+            "手表未选择通知特征"
+        }
         require(notificationsEnabled) { "手表未订阅通知" }
 
         val completion = CompletableDeferred<Int>()
@@ -358,15 +770,15 @@ internal class WatchBleBandwidthServer(
         val accepted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             server.notifyCharacteristicChanged(
                 device,
-                dataCharacteristic,
+                characteristic,
                 false,
                 value
             ) == BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION")
-            dataCharacteristic.value = value
+            characteristic.value = value
             @Suppress("DEPRECATION")
-            server.notifyCharacteristicChanged(device, dataCharacteristic, false)
+            server.notifyCharacteristicChanged(device, characteristic, false)
         }
         if (!accepted) {
             synchronized(notificationLock) {
@@ -392,8 +804,15 @@ internal class WatchBleBandwidthServer(
 
     override fun close() {
         failPending("BLE 测试页已关闭")
+        localAudioProbeServer.close()
         watchReady = false
+        videoReady = false
+        baseReady = false
+        synchronized(rpcLock) { incomingRpc = null }
+        videoStreamJob?.cancel()
+        videoStreamJob = null
         connectedDevice = null
+        activeNotificationCharacteristic = null
         notificationsEnabled = false
         if (advertising) {
             runCatching { advertiser?.stopAdvertising(advertiseCallback) }
@@ -404,4 +823,32 @@ internal class WatchBleBandwidthServer(
         runCatching { gattServer?.close() }
         gattServer = null
     }
+
+    private data class IncomingRpc(
+        val requestId: Int,
+        val bytes: ByteArray,
+        var offset: Int = 0,
+        var sequence: Int = 0,
+        var checksum: Long = 0
+    )
+
+    companion object {
+        private const val TAG = "WatchRSS_OwnBleBandwidth"
+        private const val MAX_RPC_REQUEST_BYTES = 64 * 1024
+        private const val VIDEO_STREAM_FPS = 5
+        private val BUNDLED_VIDEO_IDS = setOf(
+            "bad-apple", "bad-apple-blur", "rickroll", "rickroll-blur"
+        )
+
+        @Volatile
+        private var processInstance: WatchBleBandwidthServer? = null
+
+        fun processInstance(context: Context): WatchBleBandwidthServer =
+            processInstance ?: synchronized(this) {
+                processInstance ?: WatchBleBandwidthServer(
+                    context.applicationContext
+                ).also { processInstance = it }
+            }
+    }
+
 }

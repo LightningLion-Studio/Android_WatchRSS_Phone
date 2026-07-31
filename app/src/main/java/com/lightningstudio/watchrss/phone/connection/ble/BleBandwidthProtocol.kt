@@ -9,6 +9,19 @@ internal object BleBandwidthProtocol {
     const val TYPE_END = 3
     const val TYPE_ACK = 4
     const val TYPE_READY = 5
+    const val TYPE_VIDEO_READY = 6
+    const val TYPE_RPC_BEGIN = 7
+    const val TYPE_RPC_DATA = 8
+    const val TYPE_RPC_END = 9
+    const val TYPE_BASE_READY = 10
+
+    const val PAYLOAD_KIND_BENCHMARK = 0
+    const val PAYLOAD_KIND_RPC = 1
+    const val PAYLOAD_KIND_VIDEO = 2
+    const val PAYLOAD_KIND_AUDIO = 3
+    const val PAYLOAD_KIND_AUDIO_CHUNK = 4
+    const val PAYLOAD_KIND_AUDIO_FINAL = 5
+    const val PAYLOAD_KIND_AUDIO_URL = 6
 
     const val ACK_OK = 0
     const val ACK_SEQUENCE_ERROR = 1
@@ -20,21 +33,43 @@ internal object BleBandwidthProtocol {
     const val DEFAULT_MTU = 23
     const val REQUESTED_MTU = 247
     const val MAX_ATTRIBUTE_BYTES = 512
+    const val ADVERTISEMENT_MANUFACTURER_ID = 0xffff
 
-    val SERVICE_UUID: UUID = UUID.fromString("7e57c001-1f7d-4f0b-9f3d-2d7d3a65b001")
-    val DATA_UUID: UUID = UUID.fromString("7e57c001-1f7d-4f0b-9f3d-2d7d3a65b002")
-    val CONTROL_UUID: UUID = UUID.fromString("7e57c001-1f7d-4f0b-9f3d-2d7d3a65b003")
+    val ADVERTISEMENT_MARKER = byteArrayOf(
+        'W'.code.toByte(),
+        'R'.code.toByte(),
+        'S'.code.toByte(),
+        '3'.code.toByte()
+    )
+
+    val SERVICE_UUID: UUID = UUID.fromString("7e57c201-1f7d-4f0b-9f3d-2d7d3a65b201")
+    val DATA_UUID: UUID = UUID.fromString("7e57c201-1f7d-4f0b-9f3d-2d7d3a65b202")
+    val CONTROL_UUID: UUID = DATA_UUID
+    val V2_SERVICE_UUID: UUID = UUID.fromString("7e57c101-1f7d-4f0b-9f3d-2d7d3a65b101")
+    val V2_DATA_UUID: UUID = UUID.fromString("7e57c101-1f7d-4f0b-9f3d-2d7d3a65b102")
+    val V1_SERVICE_UUID: UUID = UUID.fromString("7e57c001-1f7d-4f0b-9f3d-2d7d3a65b001")
+    val V1_DATA_UUID: UUID = UUID.fromString("7e57c001-1f7d-4f0b-9f3d-2d7d3a65b002")
+    val V1_CONTROL_UUID: UUID = UUID.fromString("7e57c001-1f7d-4f0b-9f3d-2d7d3a65b003")
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+    val DATA_UUIDS = setOf(DATA_UUID, V2_DATA_UUID, V1_DATA_UUID)
+    val CONTROL_UUIDS = DATA_UUIDS + V1_CONTROL_UUID
 
     val testSizesBytes = listOf(32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024)
 
-    fun encodeBegin(trialId: Int, sizeBytes: Int, repetition: Int): ByteArray =
+    fun encodeBegin(
+        trialId: Int,
+        sizeBytes: Int,
+        repetition: Int,
+        payloadKind: Int = PAYLOAD_KIND_BENCHMARK
+    ): ByteArray =
         ByteArray(12).also { packet ->
             packet[0] = VERSION.toByte()
             packet[1] = TYPE_BEGIN.toByte()
             putUInt16(packet, 2, trialId)
             putUInt32(packet, 4, sizeBytes.toLong())
             putUInt16(packet, 8, repetition)
+            packet[10] = payloadKind.toByte()
         }
 
     fun encodeData(
@@ -55,6 +90,24 @@ internal object BleBandwidthProtocol {
             packet[DATA_HEADER_BYTES + index] =
                 (((position * 31) xor (position ushr 3) xor (trialId * 17)) and 0xff).toByte()
         }
+        return packet
+    }
+
+    fun encodeData(
+        trialId: Int,
+        sequence: Int,
+        payload: ByteArray,
+        offset: Int,
+        payloadLength: Int
+    ): ByteArray {
+        require(offset >= 0 && payloadLength > 0 && offset + payloadLength <= payload.size)
+        val packet = ByteArray(DATA_HEADER_BYTES + payloadLength)
+        packet[0] = VERSION.toByte()
+        packet[1] = TYPE_DATA.toByte()
+        putUInt16(packet, 2, trialId)
+        putUInt16(packet, 4, sequence)
+        putUInt16(packet, 6, payloadLength)
+        payload.copyInto(packet, DATA_HEADER_BYTES, offset, offset + payloadLength)
         return packet
     }
 
@@ -83,6 +136,32 @@ internal object BleBandwidthProtocol {
         if (value.size < 2 || unsigned(value[0]) != VERSION) return null
         return when (unsigned(value[1])) {
             TYPE_READY -> ControlMessage.Ready
+            TYPE_VIDEO_READY -> ControlMessage.VideoReady
+            TYPE_BASE_READY -> ControlMessage.BaseReady
+            TYPE_RPC_BEGIN -> {
+                if (value.size < 8) return null
+                ControlMessage.RpcBegin(
+                    requestId = readUInt16(value, 2),
+                    sizeBytes = readUInt32(value, 4).toInt()
+                )
+            }
+            TYPE_RPC_DATA -> {
+                if (value.size < 8) return null
+                val payloadLength = readUInt16(value, 6)
+                if (value.size != DATA_HEADER_BYTES + payloadLength) return null
+                ControlMessage.RpcData(
+                    requestId = readUInt16(value, 2),
+                    sequence = readUInt16(value, 4),
+                    payload = value.copyOfRange(DATA_HEADER_BYTES, value.size)
+                )
+            }
+            TYPE_RPC_END -> {
+                if (value.size < 8) return null
+                ControlMessage.RpcEnd(
+                    requestId = readUInt16(value, 2),
+                    checksum = readUInt32(value, 4)
+                )
+            }
             TYPE_ACK -> {
                 if (value.size < 16) return null
                 ControlMessage.Ack(
@@ -130,6 +209,16 @@ internal object BleBandwidthProtocol {
 
 internal sealed interface ControlMessage {
     data object Ready : ControlMessage
+    data object VideoReady : ControlMessage
+    data object BaseReady : ControlMessage
+
+    data class RpcBegin(val requestId: Int, val sizeBytes: Int) : ControlMessage
+    data class RpcData(
+        val requestId: Int,
+        val sequence: Int,
+        val payload: ByteArray
+    ) : ControlMessage
+    data class RpcEnd(val requestId: Int, val checksum: Long) : ControlMessage
 
     data class Ack(
         val trialId: Int,

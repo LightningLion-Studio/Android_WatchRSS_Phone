@@ -122,7 +122,7 @@ internal class LocalAudioProbeServer(
 
     private fun serveFrames(socket: Socket, target: String) {
         val start = target.substringAfter("start=", "-1").substringBefore('&').toIntOrNull() ?: -1
-        val requested = target.substringAfter("count=", "10").substringBefore('&').toIntOrNull() ?: 10
+        val requested = target.substringAfter("count=", "2").substringBefore('&').toIntOrNull() ?: 2
         val offsets = frameOffsets
         val sizes = frameSizes
         val currentVideo = video
@@ -130,7 +130,7 @@ internal class LocalAudioProbeServer(
             socket.getOutputStream().write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".toByteArray())
             return
         }
-        val count = minOf(requested.coerceIn(1, 12), offsets.size - start)
+        val count = minOf(requested.coerceIn(1, 2), offsets.size - start)
         val bodySize = 2 + (0 until count).sumOf { 2 + sizes[start + it] }
         val output = BufferedOutputStream(socket.getOutputStream())
         output.write(

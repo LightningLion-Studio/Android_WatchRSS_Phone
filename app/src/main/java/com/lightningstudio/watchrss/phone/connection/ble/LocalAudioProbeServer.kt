@@ -38,7 +38,7 @@ internal class LocalAudioProbeServer(
             }
         }
         val base = "http://${phoneIpv4Address()}:$PORT"
-        return "$base/audio.mp3|$base/frame.bin?index=|65535|$sourceFps"
+        return "$base/audio.mp3|$base/frames.bin?start=|65535|$sourceFps"
     }
 
     private fun loadVideo(videoId: String) {
@@ -71,6 +71,10 @@ internal class LocalAudioProbeServer(
         val request = readHeader(BufferedInputStream(socket.getInputStream()))
         val firstLine = request.lineSequence().firstOrNull().orEmpty()
         val target = firstLine.split(' ').getOrNull(1).orEmpty()
+        if (target.startsWith("/frames.bin")) {
+            serveFrames(socket, target)
+            return
+        }
         if (target.startsWith("/frame.bin")) {
             serveFrame(socket, target)
             return
@@ -114,6 +118,39 @@ internal class LocalAudioProbeServer(
         output.write(currentVideo, offsets[index], sizes[index])
         output.flush()
         if (index % 25 == 0) report("HTTP 视频帧：$index/${offsets.size}")
+    }
+
+    private fun serveFrames(socket: Socket, target: String) {
+        val start = target.substringAfter("start=", "-1").substringBefore('&').toIntOrNull() ?: -1
+        val requested = target.substringAfter("count=", "10").substringBefore('&').toIntOrNull() ?: 10
+        val offsets = frameOffsets
+        val sizes = frameSizes
+        val currentVideo = video
+        if (start !in offsets.indices) {
+            socket.getOutputStream().write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".toByteArray())
+            return
+        }
+        val count = minOf(requested.coerceIn(1, 12), offsets.size - start)
+        val bodySize = 2 + (0 until count).sumOf { 2 + sizes[start + it] }
+        val output = BufferedOutputStream(socket.getOutputStream())
+        output.write(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n".plus(
+                "Content-Length: $bodySize\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+            ).toByteArray(Charsets.US_ASCII)
+        )
+        writeUInt16(output, count)
+        for (relative in 0 until count) {
+            val index = start + relative
+            writeUInt16(output, sizes[index])
+            output.write(currentVideo, offsets[index], sizes[index])
+        }
+        output.flush()
+        report("HTTP 批量视频帧：$start..${start + count - 1}/${offsets.size}")
+    }
+
+    private fun writeUInt16(output: BufferedOutputStream, value: Int) {
+        output.write(value and 0xff)
+        output.write((value ushr 8) and 0xff)
     }
 
     private fun readHeader(input: BufferedInputStream): String {

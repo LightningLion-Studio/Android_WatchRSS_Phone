@@ -580,11 +580,18 @@ internal class WatchBleBandwidthServer(
 
     suspend fun streamBundledVideo(
         videoId: String,
+        profile: BleVideoProfile,
         onFrame: (frameIndex: Int, frameCount: Int, skippedFrames: Int) -> Unit
     ) {
         require(videoReady) { "请先在手表打开“蓝牙串流视频”页面" }
         require(videoId in BUNDLED_VIDEO_IDS) { "未知测试视频：$videoId" }
-        val stream = appContext.assets.open("bluetooth-video/$videoId-466-4x3.wvs")
+        // Quality mode sends the measured-width hybrid stream at 6 FPS.
+        // Smooth mode sends the fixed 44 x 70, 5-bit Hanzi stream at 12 FPS.
+        // Both formats may use independent LZ4 blocks when that saves enough
+        // bytes; the watch auto-detects the frame marker.
+        val stream = appContext.assets.open(
+            "bluetooth-video/$videoId${profile.assetSuffix}"
+        )
             .use { it.readBytes() }
         require(stream.size >= 272 && stream.copyOfRange(0, 4).decodeToString() == "WVS1") {
             "蓝牙视频资源损坏"
@@ -607,7 +614,6 @@ internal class WatchBleBandwidthServer(
 
         val startedAt = SystemClock.elapsedRealtime()
         var lastFrameIndex = -1
-        var sendTick = 0L
         var skippedFrames = 0
         while (lastFrameIndex + 1 < frameCount) {
             require(videoReady) { "手表已退出蓝牙视频页面" }
@@ -617,59 +623,79 @@ internal class WatchBleBandwidthServer(
                 ((elapsedMs * sourceFps) / 1000L).toInt()
             )
             if (frameIndex <= lastFrameIndex) {
-                sendTick += 1
-                val nextAt = startedAt + sendTick * 1000L / VIDEO_STREAM_FPS
-                delay((nextAt - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                delay(10)
                 continue
             }
             skippedFrames += (frameIndex - lastFrameIndex - 1).coerceAtLeast(0)
-            val payload = stream.copyOfRange(
-                frameOffsets[frameIndex],
-                frameOffsets[frameIndex] + frameSizes[frameIndex]
-            )
-            sendVideoFrame(payload, frameIndex)
+            val payloadOffset = frameOffsets[frameIndex]
+            val payloadSize = frameSizes[frameIndex]
+            val frameSendStartedAt = SystemClock.elapsedRealtime()
+            sendVideoFrame(stream, payloadOffset, payloadSize, frameIndex)
             onFrame(frameIndex, frameCount, skippedFrames)
+            if ((frameIndex + 1) % 25 == 0) {
+                reportStatus("BLE 视频帧：${frameIndex + 1}/$frameCount · 跳过 $skippedFrames")
+            }
             lastFrameIndex = frameIndex
-            sendTick += 1
-            val nextAt = startedAt + sendTick * 1000L / VIDEO_STREAM_FPS
-            delay((nextAt - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+            val minimumFrameMs = 1000L / profile.targetFps
+            val bitrateBudgetMs =
+                (payloadSize * 8_000L + BLE_VIDEO_TARGET_BPS - 1) / BLE_VIDEO_TARGET_BPS
+            val frameBudgetMs = maxOf(minimumFrameMs, bitrateBudgetMs)
+            val spentMs = SystemClock.elapsedRealtime() - frameSendStartedAt
+            delay((frameBudgetMs - spentMs).coerceAtLeast(0))
         }
     }
 
-    suspend fun sendLocalAudioProbeUrl(videoId: String = "bad-apple"): String {
+    suspend fun sendLocalAudioProbeUrl(
+        videoId: String = "bad-apple",
+        profile: BleVideoProfile = BleVideoProfile.SMOOTH
+    ): String {
         require(videoReady) { "请先在手表打开“蓝牙串流视频”页面" }
         require(videoId in BUNDLED_VIDEO_IDS) { "未知测试视频：$videoId" }
-        val url = localAudioProbeServer.start(videoId)
+        val url = localAudioProbeServer.start(videoId, profile)
         sendPayload(
             url.toByteArray(Charsets.US_ASCII),
             0,
             BleBandwidthProtocol.PAYLOAD_KIND_AUDIO_URL
         )
+        // Let the watch finish parsing the descriptor and start its native
+        // HTTP audio player before the first burst of video notifications.
+        delay(BLE_VIDEO_START_GRACE_MS)
+        require(videoReady) { "手表在 BLE 视频启动前已退出" }
         reportStatus("已发送本机 HTTP 地址：$url")
         return url
     }
 
-    fun prepareLocalHttpVideo(videoId: String): String {
-        require(videoId in BUNDLED_VIDEO_IDS) { "未知测试视频：$videoId" }
-        val descriptor = localAudioProbeServer.start(videoId)
-        reportStatus("HTTP 视频已就绪，BLE 数据传输已停用")
-        return descriptor
-    }
-
-    private suspend fun sendVideoFrame(payload: ByteArray, frameIndex: Int) {
-        sendPayload(payload, frameIndex, BleBandwidthProtocol.PAYLOAD_KIND_VIDEO)
+    private suspend fun sendVideoFrame(
+        source: ByteArray,
+        sourceOffset: Int,
+        sourceSize: Int,
+        frameIndex: Int
+    ) {
+        val trialId = trialCounter.updateAndGet { current ->
+            if (current >= 0xffff) 1 else current + 1
+        }
+        sendPayloadEnvelope(
+            trialId,
+            source,
+            sourceOffset,
+            sourceSize,
+            frameIndex,
+            BleBandwidthProtocol.PAYLOAD_KIND_VIDEO
+        )
     }
 
     private suspend fun sendPayload(payload: ByteArray, index: Int, payloadKind: Int) {
         val trialId = trialCounter.updateAndGet { current ->
             if (current >= 0xffff) 1 else current + 1
         }
-        sendPayloadEnvelope(trialId, payload, index, payloadKind)
+        sendPayloadEnvelope(trialId, payload, 0, payload.size, index, payloadKind)
     }
 
     private suspend fun sendPayloadEnvelope(
         trialId: Int,
-        payload: ByteArray,
+        source: ByteArray,
+        sourceOffset: Int,
+        sourceSize: Int,
         index: Int,
         payloadKind: Int
     ) {
@@ -680,24 +706,33 @@ internal class WatchBleBandwidthServer(
         sendNotification(
             BleBandwidthProtocol.encodeBegin(
                 trialId,
-                payload.size,
+                sourceSize,
                 index,
                 payloadKind
             )
         )
-        while (offset < payload.size) {
-            val count = minOf(maxPayload, payload.size - offset)
+        while (offset < sourceSize) {
+            if (payloadKind == BleBandwidthProtocol.PAYLOAD_KIND_VIDEO) {
+                require(videoReady && notificationsEnabled) { "手表已退出 BLE 视频页面" }
+            }
+            val count = minOf(maxPayload, sourceSize - offset)
             val packet = BleBandwidthProtocol.encodeData(
-                trialId, sequence, payload, offset, count
+                trialId, sequence, source, sourceOffset + offset, count
             )
             checksum = BleBandwidthProtocol.updateChecksum(checksum, packet)
             sendNotification(packet)
             offset += count
             sequence += 1
+            if (payloadKind == BleBandwidthProtocol.PAYLOAD_KIND_VIDEO && offset < sourceSize) {
+                // Spread each frame across its selected 83 or 166 ms slot.
+                // Without this yield, notifications arrive as one JS-event
+                // burst and can freeze the constrained RTOS renderer.
+                delay(BLE_VIDEO_PACKET_INTERVAL_MS)
+            }
         }
         // RPC responses and video frames are independent envelopes. The watch
         // drops a damaged message and recovers at the next BEGIN.
-        sendNotification(BleBandwidthProtocol.encodeEnd(trialId, payload.size, checksum))
+        sendNotification(BleBandwidthProtocol.encodeEnd(trialId, sourceSize, checksum))
     }
 
     private fun readAssetUInt16(source: ByteArray, offset: Int): Int =
@@ -842,7 +877,11 @@ internal class WatchBleBandwidthServer(
     companion object {
         private const val TAG = "WatchRSS_OwnBleBandwidth"
         private const val MAX_RPC_REQUEST_BYTES = 64 * 1024
-        private const val VIDEO_STREAM_FPS = 5
+        // Per-profile cadence is selected by the user. This cap only prevents
+        // a large compressed frame from being emitted as a tight GATT burst.
+        private const val BLE_VIDEO_TARGET_BPS = 240_000L
+        private const val BLE_VIDEO_PACKET_INTERVAL_MS = 8L
+        private const val BLE_VIDEO_START_GRACE_MS = 750L
         private val BUNDLED_VIDEO_IDS = setOf(
             "bad-apple", "bad-apple-blur", "rickroll", "rickroll-blur"
         )

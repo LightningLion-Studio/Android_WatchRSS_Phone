@@ -7,6 +7,7 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
@@ -18,52 +19,38 @@ internal class LocalAudioProbeServer(
     private val running = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
     @Volatile private var audio = ByteArray(0)
-    @Volatile private var video = ByteArray(0)
-    @Volatile private var frameOffsets = IntArray(0)
-    @Volatile private var frameSizes = IntArray(0)
-    @Volatile private var sourceFps = 5
 
-    fun start(videoId: String = "bad-apple"): String {
-        loadVideo(videoId)
+    fun start(
+        videoId: String = "bad-apple",
+        profile: BleVideoProfile = BleVideoProfile.SMOOTH
+    ): String {
+        loadAudio(videoId)
         if (running.compareAndSet(false, true)) {
             val socket = ServerSocket(PORT).apply { reuseAddress = true }
             serverSocket = socket
-            thread(name = "watchrss-http-video", isDaemon = true) {
+            thread(name = "watchrss-http-audio", isDaemon = true) {
                 while (running.get()) {
                     val client = runCatching { socket.accept() }.getOrNull() ?: break
                     thread(name = "watchrss-http-client", isDaemon = true) {
-                        client.use(::serve)
+                        try {
+                            client.use(::serve)
+                        } catch (error: SocketException) {
+                            report("客户端已断开：${error.message ?: "socket closed"}")
+                        } catch (error: Exception) {
+                            report("本地串流连接失败：${error.message ?: error.javaClass.simpleName}")
+                        }
                     }
                 }
             }
         }
         val base = "http://${phoneIpv4Address()}:$PORT"
-        return "$base/audio.mp3|$base/frames.bin?start=|65535|$sourceFps"
+        return "$base/audio.mp3|||${profile.targetFps}|ble|${profile.wireName}"
     }
 
-    private fun loadVideo(videoId: String) {
+    private fun loadAudio(videoId: String) {
         val baseId = videoId.removeSuffix("-blur")
         val audioName = if (baseId == "bad-apple") "bad-apple-full" else baseId
-        val nextAudio = appContext.assets.open("bluetooth-video/$audioName.mp3").use { it.readBytes() }
-        val nextVideo = appContext.assets.open("bluetooth-video/$videoId-466-4x3.wvs").use { it.readBytes() }
-        require(nextVideo.copyOfRange(0, 4).decodeToString() == "WVS1")
-        val count = uint16(nextVideo, 12)
-        val dictionarySize = nextVideo[14].toInt() and 0xff
-        val offsets = IntArray(count)
-        val sizes = IntArray(count)
-        var cursor = 16 + dictionarySize * 4
-        for (index in 0 until count) {
-            val size = uint16(nextVideo, cursor)
-            cursor += 2
-            offsets[index] = cursor
-            sizes[index] = size
-            cursor += size
-        }
-        audio = nextAudio
-        video = nextVideo
-        frameOffsets = offsets
-        frameSizes = sizes
-        sourceFps = nextVideo[5].toInt() and 0xff
+        audio = appContext.assets.open("bluetooth-video/$audioName.mp3").use { it.readBytes() }
     }
 
     private fun serve(socket: Socket) {
@@ -71,12 +58,11 @@ internal class LocalAudioProbeServer(
         val request = readHeader(BufferedInputStream(socket.getInputStream()))
         val firstLine = request.lineSequence().firstOrNull().orEmpty()
         val target = firstLine.split(' ').getOrNull(1).orEmpty()
-        if (target.startsWith("/frames.bin")) {
-            serveFrames(socket, target)
-            return
-        }
-        if (target.startsWith("/frame.bin")) {
-            serveFrame(socket, target)
+        if (!target.startsWith("/audio.mp3")) {
+            socket.getOutputStream().write(
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .toByteArray(Charsets.US_ASCII)
+            )
             return
         }
         val range = request.lineSequence()
@@ -98,59 +84,6 @@ internal class LocalAudioProbeServer(
         if (!firstLine.startsWith("HEAD ")) output.write(currentAudio, start, length)
         output.flush()
         report("HTTP 命中：${socket.inetAddress.hostAddress} · ${range ?: "完整请求"}")
-    }
-
-    private fun serveFrame(socket: Socket, target: String) {
-        val index = target.substringAfter("index=", "-1").substringBefore('&').toIntOrNull() ?: -1
-        val offsets = frameOffsets
-        val sizes = frameSizes
-        val currentVideo = video
-        if (index !in offsets.indices) {
-            socket.getOutputStream().write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".toByteArray())
-            return
-        }
-        val output = BufferedOutputStream(socket.getOutputStream())
-        output.write(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n".plus(
-                "Content-Length: ${sizes[index]}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
-            ).toByteArray(Charsets.US_ASCII)
-        )
-        output.write(currentVideo, offsets[index], sizes[index])
-        output.flush()
-        if (index % 25 == 0) report("HTTP 视频帧：$index/${offsets.size}")
-    }
-
-    private fun serveFrames(socket: Socket, target: String) {
-        val start = target.substringAfter("start=", "-1").substringBefore('&').toIntOrNull() ?: -1
-        val requested = target.substringAfter("count=", "2").substringBefore('&').toIntOrNull() ?: 2
-        val offsets = frameOffsets
-        val sizes = frameSizes
-        val currentVideo = video
-        if (start !in offsets.indices) {
-            socket.getOutputStream().write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".toByteArray())
-            return
-        }
-        val count = minOf(requested.coerceIn(1, 2), offsets.size - start)
-        val bodySize = 2 + (0 until count).sumOf { 2 + sizes[start + it] }
-        val output = BufferedOutputStream(socket.getOutputStream())
-        output.write(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n".plus(
-                "Content-Length: $bodySize\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
-            ).toByteArray(Charsets.US_ASCII)
-        )
-        writeUInt16(output, count)
-        for (relative in 0 until count) {
-            val index = start + relative
-            writeUInt16(output, sizes[index])
-            output.write(currentVideo, offsets[index], sizes[index])
-        }
-        output.flush()
-        report("HTTP 批量视频帧：$start..${start + count - 1}/${offsets.size}")
-    }
-
-    private fun writeUInt16(output: BufferedOutputStream, value: Int) {
-        output.write(value and 0xff)
-        output.write((value ushr 8) and 0xff)
     }
 
     private fun readHeader(input: BufferedInputStream): String {
@@ -187,14 +120,21 @@ internal class LocalAudioProbeServer(
 
     companion object {
         private const val PORT = 18765
-        private fun uint16(source: ByteArray, offset: Int): Int =
-            (source[offset].toInt() and 0xff) or
-                ((source[offset + 1].toInt() and 0xff) shl 8)
-
         internal fun parseRangeStart(value: String?, size: Int): Int {
             if (value == null || !value.startsWith("bytes=")) return 0
             return value.removePrefix("bytes=").substringBefore('-').toIntOrNull()
                 ?.coerceIn(0, (size - 1).coerceAtLeast(0)) ?: 0
         }
+
     }
+}
+
+internal enum class BleVideoProfile(
+    val wireName: String,
+    val targetFps: Int,
+    val assetSuffix: String,
+    val summary: String
+) {
+    QUALITY("quality", 6, "-466-4x3.wvs", "约 93 × 70 · 6 FPS"),
+    SMOOTH("smooth", 12, "-compact-466-4x3.wvs", "44 × 70 · 12 FPS")
 }

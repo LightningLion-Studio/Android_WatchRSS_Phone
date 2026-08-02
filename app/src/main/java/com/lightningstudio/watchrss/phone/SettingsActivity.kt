@@ -2966,7 +2966,7 @@ private fun AppFeatureSettings(modifier: Modifier) {
             )
             SettingsEntry(
                 "BLE 视频串流",
-                "向 RTOS 手表串流 4:3 · 6 fps Bad Apple",
+                "向 RTOS 手表串流 4:3 视频，可选清晰或流畅优先",
                 Icons.Default.Sync
             ) {
                 context.startActivity(Intent(context, BleBandwidthTestActivity::class.java))

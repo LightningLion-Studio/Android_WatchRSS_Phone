@@ -20,10 +20,15 @@ data class WatchEntitlementSnapshot(
 )
 
 data class WatchDeviceToken(
-    val token: String,
-    val expiresAtMillis: Long,
+    val accessToken: String,
+    val accessTokenExpiresAtMillis: Long,
+    val refreshToken: String,
+    val refreshTokenExpiresAtMillis: Long,
     val entitlement: WatchEntitlementSnapshot
-)
+) {
+    val token: String get() = accessToken
+    val expiresAtMillis: Long get() = accessTokenExpiresAtMillis
+}
 
 data class PasskeyOptions(
     val challengeId: String,

@@ -12,6 +12,8 @@ import androidx.credentials.exceptions.CreateCredentialException
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.credentials.exceptions.GetCredentialException
 import androidx.credentials.exceptions.NoCredentialException
+import androidx.credentials.exceptions.domerrors.InvalidStateError
+import androidx.credentials.exceptions.publickeycredential.CreatePublicKeyCredentialDomException
 
 class PhonePasskeyCoordinator(
     private val activity: ComponentActivity,
@@ -60,6 +62,16 @@ class PhonePasskeyCoordinator(
     private fun createErrorMessage(error: CreateCredentialException): String =
         when (error) {
             is CreateCredentialCancellationException -> "已取消创建 Passkey"
+            is CreatePublicKeyCredentialDomException -> {
+                if (
+                    error.domError is InvalidStateError ||
+                    error.errorMessage?.contains("excluded credential", ignoreCase = true) == true
+                ) {
+                    "本机已有这个账号的 Passkey，可直接使用 Passkey 登录"
+                } else {
+                    "无法创建 Passkey，请确认系统凭据服务和屏幕锁可用"
+                }
+            }
             else -> "无法创建 Passkey，请确认系统凭据服务和屏幕锁可用"
         }
 

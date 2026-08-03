@@ -29,3 +29,10 @@ data class PasskeyOptions(
     val challengeId: String,
     val requestJson: String
 )
+
+data class RegisteredPasskey(
+    val credentialId: String,
+    val displayName: String,
+    val createdAtMillis: Long,
+    val lastUsedAtMillis: Long?
+)

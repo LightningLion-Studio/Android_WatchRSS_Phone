@@ -18,7 +18,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ElevatedCard
@@ -30,7 +32,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -45,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.account.PhonePasskeyCoordinator
+import com.lightningstudio.watchrss.phone.account.RegisteredPasskey
 import com.lightningstudio.watchrss.phone.cloud.CloudAccountPanel
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncService
 import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
@@ -52,6 +57,9 @@ import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 class AccountActivity : ComponentActivity() {
     private var screenStartedAt: Long = 0L
@@ -124,6 +132,30 @@ internal fun AccountScreen(
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var registeredPasskeys by remember(session?.userId) {
+        mutableStateOf<List<RegisteredPasskey>>(emptyList())
+    }
+    var passkeysLoading by remember(session?.userId) { mutableStateOf(session != null) }
+    var renameTarget by remember(session?.userId) {
+        mutableStateOf<RegisteredPasskey?>(null)
+    }
+    var renameValue by remember(session?.userId) { mutableStateOf("") }
+    var deleteTarget by remember(session?.userId) {
+        mutableStateOf<RegisteredPasskey?>(null)
+    }
+
+    LaunchedEffect(session?.userId) {
+        if (session == null) {
+            registeredPasskeys = emptyList()
+            passkeysLoading = false
+            return@LaunchedEffect
+        }
+        passkeysLoading = true
+        val result = runCatching { accountRepository.listRegisteredPasskeys() }
+        result.onSuccess { registeredPasskeys = it }
+            .onFailure { error = it.message ?: "已有 Passkey 加载失败" }
+        passkeysLoading = false
+    }
 
     val accountControls: @Composable ColumnScope.() -> Unit = {
         if (session == null) {
@@ -231,22 +263,64 @@ internal fun AccountScreen(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            when {
+                passkeysLoading -> Text(
+                    "正在读取已有 Passkey…",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                registeredPasskeys.isEmpty() -> Text(
+                    "尚未创建 Passkey",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                else -> {
+                    Text(
+                        "已有 Passkey（${registeredPasskeys.size}）",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    registeredPasskeys.forEach { passkey ->
+                        RegisteredPasskeyCard(
+                            passkey = passkey,
+                            enabled = !busy,
+                            onRename = {
+                                renameTarget = passkey
+                                renameValue = passkey.displayName.ifBlank { "Passkey" }
+                            },
+                            onDelete = { deleteTarget = passkey }
+                        )
+                    }
+                }
+            }
             Button(
                 onClick = {
                     runAction {
                         busy = true
                         error = null
                         message = null
-                        runCatching { createPasskey() }
-                            .onSuccess { message = "Passkey 创建成功" }
-                            .onFailure { error = it.message ?: "Passkey 创建失败" }
+                        val creation = runCatching { createPasskey() }
+                        if (creation.isSuccess) {
+                            message = "Passkey 创建成功"
+                            runCatching { accountRepository.listRegisteredPasskeys() }
+                                .onSuccess { registeredPasskeys = it }
+                        } else {
+                            error = creation.exceptionOrNull()?.message ?: "Passkey 创建失败"
+                        }
                         busy = false
                     }
                 },
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("创建 Passkey")
+                Text(if (registeredPasskeys.isEmpty()) "创建 Passkey" else "添加其他 Passkey")
+            }
+            if (registeredPasskeys.isNotEmpty()) {
+                Text(
+                    "当前设备已有时，请在系统窗口中选择其他密码管理器或其他设备。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
             CloudAccountPanel(
                 service = cloudSyncService,
@@ -298,6 +372,118 @@ internal fun AccountScreen(
             text = "短信验证码保留为首次绑定和 Passkey 不可用时的回退方式。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+
+    renameTarget?.let { passkey ->
+        AlertDialog(
+            onDismissRequest = {
+                if (!busy) renameTarget = null
+            },
+            title = { Text("重命名 Passkey") },
+            text = {
+                OutlinedTextField(
+                    value = renameValue,
+                    onValueChange = { value ->
+                        if (value.length <= MAX_PASSKEY_DISPLAY_NAME_CHARS) {
+                            renameValue = value
+                        }
+                    },
+                    label = { Text("名称") },
+                    singleLine = true,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val displayName = renameValue.trim()
+                        runAction {
+                            busy = true
+                            error = null
+                            message = null
+                            runCatching {
+                                accountRepository.renameRegisteredPasskey(
+                                    passkey.credentialId,
+                                    displayName
+                                )
+                                accountRepository.listRegisteredPasskeys()
+                            }.onSuccess {
+                                registeredPasskeys = it
+                                renameTarget = null
+                                message = "Passkey 已重命名"
+                            }.onFailure {
+                                error = it.message ?: "Passkey 重命名失败"
+                            }
+                            busy = false
+                        }
+                    },
+                    enabled = !busy && renameValue.trim().isNotEmpty()
+                ) {
+                    Text("保存")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { renameTarget = null },
+                    enabled = !busy
+                ) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    deleteTarget?.let { passkey ->
+        val displayName = passkey.displayName.ifBlank { "Passkey" }
+        AlertDialog(
+            onDismissRequest = {
+                if (!busy) deleteTarget = null
+            },
+            title = { Text("删除 Passkey？") },
+            text = {
+                Text(
+                    "删除“$displayName”后，它将立即无法用于腕上RSS登录。" +
+                        "系统密码管理器中的副本需要在系统中另行删除。"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        runAction {
+                            busy = true
+                            error = null
+                            message = null
+                            runCatching {
+                                accountRepository.deleteRegisteredPasskey(passkey.credentialId)
+                                accountRepository.listRegisteredPasskeys()
+                            }.onSuccess {
+                                registeredPasskeys = it
+                                deleteTarget = null
+                                message = "Passkey 已删除"
+                            }.onFailure {
+                                error = it.message ?: "Passkey 删除失败"
+                            }
+                            busy = false
+                        }
+                    },
+                    enabled = !busy,
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text("删除")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { deleteTarget = null },
+                    enabled = !busy
+                ) {
+                    Text("取消")
+                }
+            }
         )
     }
 
@@ -367,3 +553,68 @@ private fun AccountIdentityPanel(
         }
     }
 }
+
+@Composable
+private fun RegisteredPasskeyCard(
+    passkey: RegisteredPasskey,
+    enabled: Boolean,
+    onRename: () -> Unit,
+    onDelete: () -> Unit
+) {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = passkey.displayName.ifBlank { "Passkey" },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = passkeyMetadata(passkey),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            TextButton(onClick = onRename, enabled = enabled) {
+                Text("重命名")
+            }
+            TextButton(
+                onClick = onDelete,
+                enabled = enabled,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                Text("删除")
+            }
+        }
+    }
+}
+
+private fun passkeyMetadata(passkey: RegisteredPasskey): String = buildString {
+    append("创建于 ")
+    append(formatPasskeyDate(passkey.createdAtMillis))
+    passkey.lastUsedAtMillis?.let {
+        append(" · 最近使用 ")
+        append(formatPasskeyDate(it))
+    }
+}
+
+private fun formatPasskeyDate(timestampMillis: Long): String {
+    if (timestampMillis <= 0L) return "未知时间"
+    return PASSKEY_DATE_FORMATTER.format(
+        Instant.ofEpochMilli(timestampMillis).atZone(ZoneId.systemDefault())
+    )
+}
+
+private val PASSKEY_DATE_FORMATTER: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("yyyy-MM-dd")
+
+private const val MAX_PASSKEY_DISPLAY_NAME_CHARS = 64

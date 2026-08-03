@@ -36,6 +36,24 @@ class PhoneAccountRepository(
         return accountClient.startPasskeyRegistration(session)
     }
 
+    suspend fun listRegisteredPasskeys(): List<RegisteredPasskey> {
+        val session = session.value ?: error("请先使用手机号验证码登录")
+        require(!session.isExpired) { "登录已过期，请重新登录" }
+        return accountClient.listRegisteredPasskeys(session)
+    }
+
+    suspend fun renameRegisteredPasskey(credentialId: String, displayName: String) {
+        val session = session.value ?: error("请先使用手机号验证码登录")
+        require(!session.isExpired) { "登录已过期，请重新登录" }
+        accountClient.renameRegisteredPasskey(session, credentialId, displayName)
+    }
+
+    suspend fun deleteRegisteredPasskey(credentialId: String) {
+        val session = session.value ?: error("请先使用手机号验证码登录")
+        require(!session.isExpired) { "登录已过期，请重新登录" }
+        accountClient.deleteRegisteredPasskey(session, credentialId)
+    }
+
     suspend fun finishPasskeyRegistration(
         challengeId: String,
         credentialJson: String

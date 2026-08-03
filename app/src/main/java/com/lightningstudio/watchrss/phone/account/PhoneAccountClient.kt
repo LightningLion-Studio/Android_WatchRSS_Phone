@@ -2,6 +2,8 @@ package com.lightningstudio.watchrss.phone.account
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -68,6 +70,42 @@ class PhoneAccountClient(
         ).use { response ->
             parsePasskeyOptions(response.jsonBody())
         }
+    }
+
+    suspend fun listRegisteredPasskeys(
+        session: PhoneAccountSession
+    ): List<RegisteredPasskey> = withContext(Dispatchers.IO) {
+        requireConfigured()
+        get(
+            path = "/functions/v1/account/passkeys",
+            bearerToken = session.accessToken
+        ).use { response ->
+            parseRegisteredPasskeys(response.jsonBody())
+        }
+    }
+
+    suspend fun renameRegisteredPasskey(
+        session: PhoneAccountSession,
+        credentialId: String,
+        displayName: String
+    ) = withContext(Dispatchers.IO) {
+        requireConfigured()
+        patch(
+            url = passkeyCredentialUrl(credentialId),
+            body = JSONObject().apply { put("displayName", displayName) },
+            bearerToken = session.accessToken
+        ).close()
+    }
+
+    suspend fun deleteRegisteredPasskey(
+        session: PhoneAccountSession,
+        credentialId: String
+    ) = withContext(Dispatchers.IO) {
+        requireConfigured()
+        delete(
+            url = passkeyCredentialUrl(credentialId),
+            bearerToken = session.accessToken
+        ).close()
     }
 
     suspend fun finishPasskeyRegistration(
@@ -167,6 +205,77 @@ class PhoneAccountClient(
         return response
     }
 
+    private fun get(path: String, bearerToken: String?): okhttp3.Response {
+        val request = Request.Builder()
+            .url(environment.backendBaseUrl + path)
+            .addHeader("apikey", environment.supabaseAnonKey)
+            .apply {
+                if (!bearerToken.isNullOrBlank()) {
+                    addHeader("authorization", "Bearer $bearerToken")
+                }
+            }
+            .get()
+            .build()
+        val response = httpClient.newCall(request).execute()
+        if (!response.isSuccessful) {
+            val text = response.body?.string().orEmpty()
+            response.close()
+            throw IOException("HTTP ${response.code}: ${text.ifBlank { response.message }}")
+        }
+        return response
+    }
+
+    private fun patch(
+        url: HttpUrl,
+        body: JSONObject,
+        bearerToken: String?
+    ): okhttp3.Response {
+        val request = Request.Builder()
+            .url(url)
+            .addHeader("apikey", environment.supabaseAnonKey)
+            .addHeader("content-type", JSON_MEDIA_TYPE.toString())
+            .apply {
+                if (!bearerToken.isNullOrBlank()) {
+                    addHeader("authorization", "Bearer $bearerToken")
+                }
+            }
+            .patch(body.toString().toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+        return execute(request)
+    }
+
+    private fun delete(url: HttpUrl, bearerToken: String?): okhttp3.Response {
+        val request = Request.Builder()
+            .url(url)
+            .addHeader("apikey", environment.supabaseAnonKey)
+            .apply {
+                if (!bearerToken.isNullOrBlank()) {
+                    addHeader("authorization", "Bearer $bearerToken")
+                }
+            }
+            .delete()
+            .build()
+        return execute(request)
+    }
+
+    private fun execute(request: Request): okhttp3.Response {
+        val response = httpClient.newCall(request).execute()
+        if (!response.isSuccessful) {
+            val text = response.body?.string().orEmpty()
+            response.close()
+            throw IOException("HTTP ${response.code}: ${text.ifBlank { response.message }}")
+        }
+        return response
+    }
+
+    private fun passkeyCredentialUrl(credentialId: String): HttpUrl {
+        require(credentialId.isNotBlank()) { "Passkey 凭据 ID 无效" }
+        return environment.backendBaseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("functions/v1/account/passkeys")
+            .addPathSegment(credentialId)
+            .build()
+    }
+
     private fun okhttp3.Response.jsonBody(): JSONObject {
         val text = body?.string().orEmpty()
         return if (text.isBlank()) JSONObject() else JSONObject(text)
@@ -241,5 +350,24 @@ class PhoneAccountClient(
                 .readTimeout(20, TimeUnit.SECONDS)
                 .writeTimeout(20, TimeUnit.SECONDS)
                 .build()
+    }
+}
+
+internal fun parseRegisteredPasskeys(json: JSONObject): List<RegisteredPasskey> {
+    val passkeys = json.optJSONArray("passkeys") ?: return emptyList()
+    return buildList {
+        for (index in 0 until passkeys.length()) {
+            val item = passkeys.optJSONObject(index) ?: continue
+            val credentialId = item.optString("credentialId").trim()
+            if (credentialId.isBlank()) continue
+            add(
+                RegisteredPasskey(
+                    credentialId = credentialId,
+                    displayName = item.optString("displayName").trim(),
+                    createdAtMillis = item.optLong("createdAt"),
+                    lastUsedAtMillis = item.optLong("lastUsedAt").takeIf { it > 0L }
+                )
+            )
+        }
     }
 }

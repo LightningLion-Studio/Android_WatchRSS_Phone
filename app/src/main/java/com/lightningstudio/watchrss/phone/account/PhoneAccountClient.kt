@@ -175,11 +175,17 @@ class PhoneAccountClient(
         ).use { response ->
             val json = response.jsonBody()
             WatchDeviceToken(
-                token = json.optString("watchDeviceToken").trim(),
-                expiresAtMillis = json.optLong("tokenExpiresAt"),
+                accessToken = json.optString("watchAccessToken")
+                    .ifBlank { json.optString("watchDeviceToken") }.trim(),
+                accessTokenExpiresAtMillis = json.optLong(
+                    "accessTokenExpiresAt", json.optLong("tokenExpiresAt")
+                ),
+                refreshToken = json.optString("watchRefreshToken").trim(),
+                refreshTokenExpiresAtMillis = json.optLong("refreshTokenExpiresAt"),
                 entitlement = parseEntitlement(json.optJSONObject("entitlement"))
             ).also {
-                require(it.token.isNotBlank()) { "后端未返回手表设备 token" }
+                require(it.accessToken.isNotBlank()) { "后端未返回手表 access token" }
+                require(it.refreshToken.isNotBlank()) { "后端未返回手表 refresh token" }
             }
         }
     }

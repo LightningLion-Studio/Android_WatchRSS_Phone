@@ -12,6 +12,7 @@ class NoteRepository(
     fun observeFolders(): Flow<List<NoteFolderEntity>> = dao.observeFolders()
     fun observeConflicts(): Flow<List<NoteConflictEntity>> = dao.observeUnresolvedConflicts()
     suspend fun allNotes(): List<NoteEntity> = dao.allNotes()
+    suspend fun registerAsset(asset: NoteAssetEntity) = dao.upsertAssets(listOf(asset))
 
     suspend fun save(
         noteId: String? = null,

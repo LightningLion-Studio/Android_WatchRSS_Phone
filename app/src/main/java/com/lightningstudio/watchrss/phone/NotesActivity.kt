@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -25,6 +27,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
@@ -35,12 +38,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.unit.dp
 import com.lightningstudio.watchrss.phone.data.note.NoteEntity
 import com.lightningstudio.watchrss.phone.data.note.NoteRepository
+import com.lightningstudio.watchrss.phone.data.note.NoteAssetStore
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import com.mohamedrejeb.richeditor.model.rememberRichTextState
 import com.mohamedrejeb.richeditor.ui.material3.RichTextEditor
@@ -52,16 +57,27 @@ import androidx.lifecycle.lifecycleScope
 class NotesActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val repository = (application as PhoneCompanionApplication).container.noteRepository
-        val noteSync = (application as PhoneCompanionApplication).container.noteBluetoothSyncManager
-        setContent { WatchRssPhoneTheme { NotesScreen(repository, ::finish, lifecycleScope, { noteSync.sync() }) } }
+        val container = (application as PhoneCompanionApplication).container
+        val repository = container.noteRepository
+        val noteSync = container.noteBluetoothSyncManager
+        setContent {
+            WatchRssPhoneTheme {
+                NotesScreen(repository, ::finish, lifecycleScope, { noteSync.sync() }, container.cloudSyncService::syncNow)
+            }
+        }
     }
     companion object { fun createIntent(context: Context) = Intent(context, NotesActivity::class.java) }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun NotesScreen(repository: NoteRepository, onBack: () -> Unit, scope: CoroutineScope, syncNotes: suspend () -> Unit) {
+private fun NotesScreen(
+    repository: NoteRepository,
+    onBack: () -> Unit,
+    scope: CoroutineScope,
+    syncNotes: suspend () -> Unit,
+    syncCloud: suspend () -> Unit
+) {
     val notes by repository.observeNotes().collectAsStateWithLifecycle(emptyList())
     var selected by remember { mutableStateOf<NoteEntity?>(null) }
     var creating by remember { mutableStateOf(false) }
@@ -71,7 +87,7 @@ private fun NotesScreen(repository: NoteRepository, onBack: () -> Unit, scope: C
     ) { padding ->
         val note = selected
         if (note == null && !creating) NoteList(notes, { selected = it }, Modifier.padding(padding))
-        else NoteEditor(note, repository, { selected = null; creating = false }, scope, Modifier.padding(padding))
+        else NoteEditor(note, repository, { selected = null; creating = false }, scope, syncCloud, Modifier.padding(padding))
     }
 }
 
@@ -81,9 +97,28 @@ private fun NoteList(notes: List<NoteEntity>, onOpen: (NoteEntity) -> Unit, modi
 }
 
 @Composable
-private fun NoteEditor(note: NoteEntity?, repository: NoteRepository, onSaved: () -> Unit, scope: CoroutineScope, modifier: Modifier = Modifier) {
+private fun NoteEditor(
+    note: NoteEntity?,
+    repository: NoteRepository,
+    onSaved: () -> Unit,
+    scope: CoroutineScope,
+    syncCloud: suspend () -> Unit,
+    modifier: Modifier = Modifier
+) {
     var title by remember(note?.noteId) { mutableStateOf(note?.title.orEmpty()) }
+    var keepOriginal by remember(note?.noteId) { mutableStateOf(false) }
     val editor = rememberRichTextState()
+    val context = LocalContext.current
+    val imageStore = remember(context) { NoteAssetStore(context) }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val existing = note ?: return@rememberLauncherForActivityResult
+        if (uri != null) scope.launch {
+            val asset = imageStore.importImage(existing.noteId, uri, keepOriginal)
+            repository.registerAsset(asset.entity)
+            asset.additionalAssets.forEach { repository.registerAsset(it) }
+            editor.addTextAfterSelection("![${asset.entity.displayName}](${asset.markdownPath})")
+        }
+    }
     LaunchedEffect(note?.noteId) { editor.setMarkdown(note?.markdown.orEmpty()) }
     Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         OutlinedTextField(title, { title = it }, label = { Text("标题") }, modifier = Modifier.fillMaxWidth())
@@ -92,8 +127,23 @@ private fun NoteEditor(note: NoteEntity?, repository: NoteRepository, onSaved: (
             TextButton(onClick = { editor.toggleSpanStyle(SpanStyle(fontStyle = FontStyle.Italic)) }) { Text("斜体") }
             TextButton(onClick = editor::toggleUnorderedList) { Text("列表") }
             TextButton(onClick = editor::toggleCodeSpan) { Text("代码") }
+            if (note != null) TextButton(onClick = { imagePicker.launch("image/*") }) { Text("图片") }
+        }
+        if (note != null) Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Switch(checked = keepOriginal, onCheckedChange = { keepOriginal = it })
+            Text("同时保留原图")
         }
         RichTextEditor(state = editor, modifier = Modifier.weight(1f).fillMaxWidth())
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { TextButton(onClick = { scope.launch { repository.save(note?.noteId, title, editor.toMarkdown(), note?.folderId, note?.pinned ?: false); onSaved() } }) { Text("保存") } }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = {
+                scope.launch {
+                    repository.save(note?.noteId, title, editor.toMarkdown(), note?.folderId, note?.pinned ?: false)
+                    // The encrypted cloud service is the authority for account/session checks;
+                    // a local edit must nevertheless request an immediate upload.
+                    runCatching { syncCloud() }
+                    onSaved()
+                }
+            }) { Text("保存") }
+        }
     }
 }

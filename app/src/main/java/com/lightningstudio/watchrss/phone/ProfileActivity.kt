@@ -100,9 +100,6 @@ class ProfileActivity : ComponentActivity() {
                             )
                         )
                     },
-                    onNotesClick = {
-                        startActivity(NotesActivity.createIntent(this@ProfileActivity))
-                    },
                     settingsContent = { leadingPane, onClose ->
                         ReaderSettingsHost(
                             repository = container.readerPresetRepository,
@@ -200,7 +197,6 @@ private fun ProfileScreen(
     onSettingsClick: () -> Unit,
     onAboutClick: () -> Unit,
     onContactDeveloperClick: () -> Unit,
-    onNotesClick: () -> Unit,
     settingsContent: @Composable (
         leadingPane: @Composable () -> Unit,
         onClose: () -> Unit
@@ -224,8 +220,7 @@ private fun ProfileScreen(
                     onAboutClick = { onDetailSelected(ProfileDetailPage.ABOUT) },
                     onContactDeveloperClick = {
                         onDetailSelected(ProfileDetailPage.CONTACT)
-                    },
-                    onNotesClick = onNotesClick
+                    }
                 )
             }
             if (selectedDetail == ProfileDetailPage.SETTINGS) {
@@ -269,7 +264,6 @@ private fun ProfileScreen(
                 onSettingsClick = onSettingsClick,
                 onAboutClick = onAboutClick,
                 onContactDeveloperClick = onContactDeveloperClick
-                ,onNotesClick = onNotesClick
             )
         }
     }
@@ -285,7 +279,6 @@ private fun ProfileMasterPane(
     onSettingsClick: () -> Unit,
     onAboutClick: () -> Unit,
     onContactDeveloperClick: () -> Unit
-    ,onNotesClick: () -> Unit
 ) {
     Scaffold(
         topBar = {
@@ -319,12 +312,6 @@ private fun ProfileMasterPane(
                     accountSummary = accountSummary,
                     onClick = onAccountClick
                 )
-                ElevatedCard(onClick = onNotesClick, modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("笔记", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Text("Markdown、图片与手机手表同步", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
                 ProfileNavigation(
                     windowInfo = windowInfo,
                     onSettingsClick = onSettingsClick,

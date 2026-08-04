@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -46,6 +47,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.unit.dp
 import com.lightningstudio.watchrss.phone.data.note.NoteEntity
+import com.lightningstudio.watchrss.phone.data.note.NoteConflictEntity
 import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.note.NoteAssetStore
 import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
@@ -82,8 +84,10 @@ private fun NotesScreen(
     syncCloud: suspend () -> Unit
 ) {
     val notes by repository.observeNotes().collectAsStateWithLifecycle(emptyList())
+    val conflicts by repository.observeConflicts().collectAsStateWithLifecycle(emptyList())
     var selected by remember { mutableStateOf<NoteEntity?>(null) }
     var creating by remember { mutableStateOf(false) }
+    var selectedConflict by remember { mutableStateOf<NoteConflictEntity?>(null) }
     val context = LocalContext.current
     val transfer = remember(context, repository) { NoteImportExportService(context, repository) }
     val zipExport = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
@@ -104,6 +108,7 @@ private fun NotesScreen(
                 navigationIcon = { IconButton(onClick = { if (selected != null || creating) { selected = null; creating = false } else onBack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
                 actions = {
                     if (selected == null && !creating) {
+                        if (conflicts.isNotEmpty()) TextButton(onClick = { selectedConflict = conflicts.first() }) { Text("冲突 ${conflicts.size}") }
                         IconButton(onClick = { zipImport.launch(arrayOf("application/zip", "application/x-zip-compressed")) }) { Icon(Icons.Default.FileOpen, "导入 ZIP") }
                         IconButton(onClick = { zipExport.launch("watchrss-notes.zip") }) { Icon(Icons.Default.Save, "导出 ZIP") }
                     }
@@ -116,6 +121,46 @@ private fun NotesScreen(
         if (note == null && !creating) NoteList(notes, { selected = it }, Modifier.padding(padding))
         else NoteEditor(note, repository, { selected = null; creating = false }, scope, syncCloud, Modifier.padding(padding))
     }
+    selectedConflict?.let { conflict ->
+        NoteConflictDialog(
+            conflict = conflict,
+            onResolve = { markdown ->
+                scope.launch {
+                    repository.resolveConflict(conflict, markdown)
+                    runCatching { syncCloud() }
+                    selectedConflict = null
+                }
+            },
+            onDismiss = { selectedConflict = null }
+        )
+    }
+}
+
+@Composable
+private fun NoteConflictDialog(
+    conflict: NoteConflictEntity,
+    onResolve: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var merged by remember(conflict.conflictId) { mutableStateOf(conflict.localMarkdown) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("笔记同步冲突") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("共同祖先", fontWeight = FontWeight.Bold)
+                Text(conflict.baseMarkdown.take(500), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("本地版本", fontWeight = FontWeight.Bold)
+                TextButton(onClick = { merged = conflict.localMarkdown }) { Text("使用本地版本") }
+                Text("远端版本（${conflict.remoteDeviceId}）", fontWeight = FontWeight.Bold)
+                TextButton(onClick = { merged = conflict.remoteMarkdown }) { Text("使用远端版本") }
+                OutlinedTextField(merged, { merged = it }, label = { Text("合并后的 Markdown") }, modifier = Modifier.fillMaxWidth())
+            }
+        },
+        confirmButton = { TextButton(onClick = { onResolve(merged) }) { Text("保存合并") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("稍后处理") }
+        }
+    )
 }
 
 @Composable

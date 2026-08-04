@@ -67,6 +67,10 @@ class PhoneCompanionContainer(context: Context) {
         PhoneDeviceIdentity(appContext)
     }
 
+    /** Stable peer id shared by RFCOMM and the RTOS BLE note transports. */
+    val syncDeviceId: String
+        get() = deviceIdentity.deviceId
+
     private val installationIdentity: PhoneInstallationIdentity by lazy {
         PhoneInstallationIdentity(appContext)
     }

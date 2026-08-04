@@ -16,6 +16,13 @@ object NoteSyncPayload {
         put("notes", JSONArray().apply { notes.forEach { put(it.toJson(includeBody = true)) } })
     }
 
+    /**
+     * BLE base-station RPC is a different transport from RFCOMM, but it uses the
+     * exact same durable note envelope.  Keeping this conversion here prevents
+     * the two watch implementations from drifting in their field names.
+     */
+    fun fromJson(payload: JSONObject): List<NoteEntity> = decodeNotes(payload)
+
     fun decodeNotes(payload: JSONObject): List<NoteEntity> {
         require(payload.optString("action") == ACTION_SYNC_NOTES) { "不是笔记同步载荷" }
         return payload.optJSONArray("notes")?.let { array ->

@@ -21,6 +21,7 @@ import com.lightningstudio.watchrss.phone.data.importer.AndroidWebArticleImporte
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
+import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import com.lightningstudio.watchrss.phone.data.telemetry.OpenPanelAnalytics
@@ -54,7 +55,8 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_9_10,
             PhoneCompanionDatabase.MIGRATION_10_11,
             PhoneCompanionDatabase.MIGRATION_11_12,
-            PhoneCompanionDatabase.MIGRATION_12_13
+            PhoneCompanionDatabase.MIGRATION_12_13,
+            PhoneCompanionDatabase.MIGRATION_13_14
         )
             .build()
     }
@@ -140,6 +142,10 @@ class PhoneCompanionContainer(context: Context) {
             articleContentStore = articleContentStore,
             appMetaDao = database.appMetaDao()
         )
+    }
+
+    val noteRepository: NoteRepository by lazy {
+        NoteRepository(database.noteDao(), deviceIdentity.deviceId)
     }
 
     val backupService: WatchRssBackupService by lazy {

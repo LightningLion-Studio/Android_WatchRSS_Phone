@@ -1,0 +1,69 @@
+package com.lightningstudio.watchrss.phone.data.note
+
+import kotlinx.coroutines.flow.Flow
+import java.util.UUID
+
+class NoteRepository(
+    private val dao: NoteDao,
+    private val deviceId: String,
+    private val now: () -> Long = System::currentTimeMillis
+) {
+    fun observeNotes(): Flow<List<NoteEntity>> = dao.observeNotes()
+    fun observeFolders(): Flow<List<NoteFolderEntity>> = dao.observeFolders()
+    fun observeConflicts(): Flow<List<NoteConflictEntity>> = dao.observeUnresolvedConflicts()
+
+    suspend fun save(
+        noteId: String? = null,
+        title: String,
+        markdown: String,
+        folderId: String? = null,
+        pinned: Boolean = false
+    ): NoteEntity {
+        require(title.trim().isNotBlank() || MarkdownNoteCodec.toPlainText(markdown).isNotBlank()) {
+            "笔记不能为空"
+        }
+        val previous = if (noteId == null) null else dao.note(noteId)
+        val instant = now()
+        val canonical = markdown.replace("\r\n", "\n").replace('\r', '\n')
+        val hash = MarkdownNoteCodec.sha256(canonical)
+        val saved = NoteEntity(
+            noteId = previous?.noteId ?: UUID.randomUUID().toString(),
+            folderId = folderId,
+            title = title.trim().ifBlank { MarkdownNoteCodec.toPlainText(canonical).lineSequence().firstOrNull().orEmpty().take(80) },
+            markdown = canonical,
+            plainText = MarkdownNoteCodec.toPlainText(canonical),
+            contentHash = hash,
+            baseContentHash = previous?.contentHash ?: hash,
+            baseMarkdown = previous?.markdown ?: canonical,
+            pinned = pinned,
+            createdAt = previous?.createdAt ?: instant,
+            updatedAt = instant,
+            modifiedBy = deviceId,
+            deleted = false,
+            deletedAt = 0L
+        )
+        dao.upsertNotes(listOf(saved))
+        return saved
+    }
+
+    suspend fun applyRemote(remote: NoteEntity, remoteDeviceId: String): MarkdownMergeResult {
+        val local = dao.note(remote.noteId)
+        if (local == null || local.deleted || remote.updatedAt > local.updatedAt && local.contentHash == local.baseContentHash) {
+            dao.upsertNotes(listOf(remote))
+            return MarkdownMergeResult.Merged(remote.markdown)
+        }
+        val result = MarkdownThreeWayMerge.merge(local.baseMarkdown, local.markdown, remote.markdown)
+        if (result is MarkdownMergeResult.Merged) {
+            if (result.markdown != local.markdown) {
+                save(local.noteId, local.title, result.markdown, local.folderId, local.pinned)
+            }
+        } else {
+            dao.upsertConflicts(listOf(NoteConflictEntity(
+                conflictId = UUID.randomUUID().toString(), noteId = local.noteId,
+                baseMarkdown = local.baseMarkdown, localMarkdown = local.markdown,
+                remoteMarkdown = remote.markdown, remoteDeviceId = remoteDeviceId, createdAt = now()
+            )))
+        }
+        return result
+    }
+}

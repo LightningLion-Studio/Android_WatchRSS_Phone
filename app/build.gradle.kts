@@ -43,14 +43,16 @@ android {
         versionName = "1.2.0-5"
         buildConfigField(
             "String",
-            "WATCHRSS_BACKEND_BASE_URL",
+            "WATCHRSS_PRODUCTION_BACKEND_BASE_URL",
             productionSetting("WATCHRSS_BACKEND_BASE_URL").asBuildConfigString()
         )
         buildConfigField(
             "String",
-            "WATCHRSS_SUPABASE_ANON_KEY",
+            "WATCHRSS_PRODUCTION_SUPABASE_ANON_KEY",
             productionSetting("WATCHRSS_SUPABASE_ANON_KEY").asBuildConfigString()
         )
+        buildConfigField("String", "WATCHRSS_TEST_BACKEND_BASE_URL", "\"\"")
+        buildConfigField("String", "WATCHRSS_TEST_SUPABASE_ANON_KEY", "\"\"")
         buildConfigField("String", "WATCHRSS_OPENPANEL_CLIENT_ID", "\"3b151c92-b189-48a3-ae77-148db3235ca1\"")
         buildConfigField("String", "WATCHRSS_OPENPANEL_CLIENT_SECRET", "\"\"")
         buildConfigField("String", "WATCHRSS_OPENPANEL_API_URL", "\"http://10.0.2.2:3001\"")
@@ -77,6 +79,16 @@ android {
 
     buildTypes {
         debug {
+            buildConfigField(
+                "String",
+                "WATCHRSS_TEST_BACKEND_BASE_URL",
+                productionSetting("WATCHRSS_TEST_BACKEND_BASE_URL").asBuildConfigString()
+            )
+            buildConfigField(
+                "String",
+                "WATCHRSS_TEST_SUPABASE_ANON_KEY",
+                productionSetting("WATCHRSS_TEST_SUPABASE_ANON_KEY").asBuildConfigString()
+            )
             if (hasKeystoreProperties) {
                 signingConfig = signingConfigs.getByName("release")
             }

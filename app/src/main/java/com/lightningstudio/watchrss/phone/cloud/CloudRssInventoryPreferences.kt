@@ -8,9 +8,12 @@ enum class CloudRssInventoryMode {
     ALL
 }
 
-class CloudRssInventoryPreferences(context: Context) {
+class CloudRssInventoryPreferences(
+    context: Context,
+    prefsName: String = "watchrss_cloud_rss_inventory"
+) {
     private val preferences = context.applicationContext.getSharedPreferences(
-        "watchrss_cloud_rss_inventory",
+        prefsName,
         Context.MODE_PRIVATE
     )
 

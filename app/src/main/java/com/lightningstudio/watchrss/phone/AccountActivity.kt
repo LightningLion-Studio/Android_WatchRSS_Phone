@@ -6,6 +6,11 @@ import android.os.Bundle
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -23,6 +28,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -56,6 +62,8 @@ import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
 import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -80,6 +88,7 @@ class AccountActivity : ComponentActivity() {
                     rssSources = rssSources,
                     usageTelemetry = container.usageTelemetry,
                     onBack = ::finish,
+                    preparePasskeyLogin = passkeyCoordinator::prepareLogin,
                     loginWithPasskey = passkeyCoordinator::login,
                     createPasskey = passkeyCoordinator::createPasskey,
                     runAction = { action ->
@@ -122,6 +131,7 @@ internal fun AccountScreen(
     rssSources: List<com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity>,
     usageTelemetry: PhoneUsageTelemetry,
     onBack: () -> Unit,
+    preparePasskeyLogin: suspend (String) -> Boolean,
     loginWithPasskey: suspend (String) -> com.lightningstudio.watchrss.phone.account.PhoneAccountSession,
     createPasskey: suspend () -> Unit,
     runAction: (suspend () -> Unit) -> Unit
@@ -132,6 +142,7 @@ internal fun AccountScreen(
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var passkeyLoginAvailable by remember { mutableStateOf(false) }
     var registeredPasskeys by remember(session?.userId) {
         mutableStateOf<List<RegisteredPasskey>>(emptyList())
     }
@@ -157,6 +168,20 @@ internal fun AccountScreen(
         passkeysLoading = false
     }
 
+    val passkeyProbePhone = phoneForPasskeyProbe(phone)
+    LaunchedEffect(session?.userId, passkeyProbePhone) {
+        passkeyLoginAvailable = false
+        if (session != null || passkeyProbePhone == null) return@LaunchedEffect
+        delay(PASSKEY_PROBE_DEBOUNCE_MILLIS)
+        passkeyLoginAvailable = try {
+            preparePasskeyLogin(passkeyProbePhone)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     val accountControls: @Composable ColumnScope.() -> Unit = {
         if (session == null) {
             Text(
@@ -165,7 +190,7 @@ internal fun AccountScreen(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                "使用 Passkey，或通过短信验证码登录。",
+                "输入手机号以继续。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -178,31 +203,47 @@ internal fun AccountScreen(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                 modifier = Modifier.fillMaxWidth()
             )
-            Button(
-                onClick = {
-                    runAction {
-                        busy = true
-                        error = null
-                        message = null
-                        runCatching { loginWithPasskey(phone) }
-                            .onSuccess { session ->
-                                message = "Passkey 登录成功"
-                                usageTelemetry.recordAccountSignedIn(session.userId)
-                            }
-                            .onFailure { error = it.message ?: "Passkey 登录失败" }
-                        busy = false
-                    }
-                },
-                enabled = !busy && phone.isNotBlank(),
-                modifier = Modifier.fillMaxWidth()
+            AnimatedVisibility(
+                visible = passkeyLoginAvailable,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
             ) {
-                Text("使用 Passkey 登录")
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Button(
+                        onClick = {
+                            val readyPhone = passkeyProbePhone ?: return@Button
+                            runAction {
+                                busy = true
+                                error = null
+                                message = null
+                                runCatching { loginWithPasskey(readyPhone) }
+                                    .onSuccess { session ->
+                                        message = "登录成功"
+                                        usageTelemetry.recordAccountSignedIn(session.userId)
+                                    }
+                                    .onFailure { error = it.message ?: "通行密钥登录失败" }
+                                busy = false
+                            }
+                        },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("使用本机通行密钥继续")
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        HorizontalDivider(modifier = Modifier.weight(1f))
+                        Text(
+                            "或使用短信验证码",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        HorizontalDivider(modifier = Modifier.weight(1f))
+                    }
+                }
             }
-            Text(
-                "首次使用请先通过短信登录，并在账号页创建 Passkey。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
             OutlinedTextField(
                 value = otp,
                 onValueChange = { otp = it },
@@ -368,11 +409,6 @@ internal fun AccountScreen(
                 style = MaterialTheme.typography.bodyMedium
             )
         }
-        Text(
-            text = "短信验证码保留为首次绑定和 Passkey 不可用时的回退方式。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
     }
 
     renameTarget?.let { passkey ->
@@ -522,6 +558,17 @@ internal fun AccountScreen(
                 }
             }
         }
+    }
+}
+
+private const val PASSKEY_PROBE_DEBOUNCE_MILLIS = 500L
+
+internal fun phoneForPasskeyProbe(input: String): String? {
+    val digits = input.filter(Char::isDigit)
+    return when {
+        digits.length == 11 && digits.startsWith('1') -> digits
+        digits.length == 13 && digits.startsWith("861") -> "+$digits"
+        else -> null
     }
 }
 

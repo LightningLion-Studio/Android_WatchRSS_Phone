@@ -9,9 +9,12 @@ enum class CloudNetworkPolicy {
     ANY_NETWORK
 }
 
-class PhoneCloudStateStore(context: Context) {
+class PhoneCloudStateStore(
+    context: Context,
+    prefsName: String = "watchrss_cloud_state"
+) {
     private val preferences = context.applicationContext.getSharedPreferences(
-        "watchrss_cloud_state",
+        prefsName,
         Context.MODE_PRIVATE
     )
 

@@ -114,6 +114,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.lightningstudio.watchrss.phone.account.AccountEnvironment
+import com.lightningstudio.watchrss.phone.account.RemoteEnvironment
+import com.lightningstudio.watchrss.phone.account.RemoteEnvironmentStore
 import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundFit
 import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundAssetEntity
 import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundType
@@ -2845,6 +2848,11 @@ private fun AppFeatureSettings(modifier: Modifier) {
     var cookie by remember { mutableStateOf(aiStore.douyinCookie()) }
     var prompt by remember { mutableStateOf(initialAi.prompt) }
     var connectionResult by remember { mutableStateOf<String?>(null) }
+    val remoteEnvironmentStore = remember { RemoteEnvironmentStore(context) }
+    var remoteEnvironment by remember { mutableStateOf(remoteEnvironmentStore.active()) }
+    val testEnvironmentConfigured = remember {
+        AccountEnvironment.forRemoteEnvironment(RemoteEnvironment.TEST).isAuthConfigured
+    }
     fun saveAiConfig() {
         aiStore.saveConfig(
             com.lightningstudio.watchrss.phone.data.ai.PhoneAiConfig(
@@ -2959,6 +2967,31 @@ private fun AppFeatureSettings(modifier: Modifier) {
             context.startActivity(Intent(context, AboutActivity::class.java))
         }
         if (BuildConfig.DEBUG) {
+            SectionTitle("远端环境")
+            ToggleRow(
+                label = "使用测试环境",
+                checked = remoteEnvironment == RemoteEnvironment.TEST,
+                enabled = testEnvironmentConfigured || remoteEnvironment == RemoteEnvironment.TEST
+            ) { useTestEnvironment ->
+                val selected = if (useTestEnvironment) {
+                    RemoteEnvironment.TEST
+                } else {
+                    RemoteEnvironment.PRODUCTION
+                }
+                if (remoteEnvironmentStore.select(selected)) {
+                    remoteEnvironment = selected
+                    (context.applicationContext as PhoneCompanionApplication)
+                        .restartAfterRemoteEnvironmentChange()
+                }
+            }
+            Text(
+                if (testEnvironmentConfigured) {
+                    "当前：${remoteEnvironment.displayName}。切换后应用自动重启；账号、Passkey 与云端状态互相隔离。"
+                } else {
+                    "测试环境尚未配置；当前固定使用生产环境。"
+                },
+                style = MaterialTheme.typography.bodySmall
+            )
             Text("Debug 性能工具", fontWeight = FontWeight.SemiBold)
             Text(
                 "调试构建显示；正式构建不会暴露性能入口。",
@@ -3040,13 +3073,22 @@ private fun SectionTitle(text: String) {
 }
 
 @Composable
-private fun ToggleRow(label: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+private fun ToggleRow(
+    label: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onChecked: (Boolean) -> Unit
+) {
     Row(
         Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(label, Modifier.weight(1f))
-        Switch(checked = checked, onCheckedChange = onChecked)
+        Switch(
+            checked = checked,
+            onCheckedChange = onChecked,
+            enabled = enabled
+        )
     }
 }
 

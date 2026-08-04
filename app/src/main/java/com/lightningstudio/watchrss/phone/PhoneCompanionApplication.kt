@@ -2,10 +2,13 @@ package com.lightningstudio.watchrss.phone
 
 import android.app.Application
 import android.app.Activity
+import android.app.AlarmManager
+import android.app.PendingIntent
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Build
+import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -76,8 +79,31 @@ class PhoneCompanionApplication : Application() {
         }.getOrDefault(false)
     }
 
+    fun restartAfterRemoteEnvironmentChange() {
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+            ?.addFlags(
+                android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                    android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK
+            )
+            ?: error("无法获取应用启动入口")
+        val restartIntent = PendingIntent.getActivity(
+            this,
+            REMOTE_ENVIRONMENT_RESTART_REQUEST_CODE,
+            launchIntent,
+            PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        getSystemService(AlarmManager::class.java).set(
+            AlarmManager.ELAPSED_REALTIME,
+            SystemClock.elapsedRealtime() + REMOTE_ENVIRONMENT_RESTART_DELAY_MS,
+            restartIntent
+        )
+        Process.killProcess(Process.myPid())
+    }
+
     private companion object {
         private const val TAG = "WatchRSS_BaseStation"
         private const val FOREGROUND_SYNC_THROTTLE_MS = 5 * 60 * 1000L
+        private const val REMOTE_ENVIRONMENT_RESTART_REQUEST_CODE = 4821
+        private const val REMOTE_ENVIRONMENT_RESTART_DELAY_MS = 300L
     }
 }

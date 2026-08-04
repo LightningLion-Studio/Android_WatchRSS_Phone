@@ -12,7 +12,10 @@ import java.security.PrivateKey
 import java.security.SecureRandom
 import java.security.spec.ECGenParameterSpec
 
-class CloudKeyManager(context: Context) {
+class CloudKeyManager(
+    context: Context,
+    private val storageSuffix: String = ""
+) {
     private val appContext = context.applicationContext
     private val preferences by lazy {
         val masterKey = MasterKey.Builder(appContext)
@@ -20,7 +23,7 @@ class CloudKeyManager(context: Context) {
             .build()
         EncryptedSharedPreferences.create(
             appContext,
-            "watchrss_cloud_keys",
+            "watchrss_cloud_keys$storageSuffix",
             masterKey,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
@@ -191,7 +194,9 @@ class CloudKeyManager(context: Context) {
         "account_key_${CloudSnapshotCodec.sha256(userId.toByteArray()).take(24)}"
 
     private fun deviceAlias(userId: String, deviceId: String): String =
-        "watchrss_cloud_ecdh_${CloudSnapshotCodec.sha256("$userId:$deviceId".toByteArray()).take(24)}"
+        "watchrss_cloud_ecdh${storageSuffix}_${
+            CloudSnapshotCodec.sha256("$userId:$deviceId".toByteArray()).take(24)
+        }"
 
     private companion object {
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"

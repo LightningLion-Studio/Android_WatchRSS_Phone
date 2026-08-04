@@ -3,8 +3,11 @@ package com.lightningstudio.watchrss.phone.cloud
 import android.content.Context
 import java.io.File
 
-class CloudLocalCache(context: Context) {
-    private val root = File(context.applicationContext.filesDir, "cloud-cache")
+class CloudLocalCache(
+    context: Context,
+    directoryName: String = "cloud-cache"
+) {
+    private val root = File(context.applicationContext.filesDir, directoryName)
 
     fun storeManifest(
         userId: String,

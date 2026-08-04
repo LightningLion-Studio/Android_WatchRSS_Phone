@@ -12,10 +12,11 @@ import java.util.Base64
 
 class SupabaseTusUploader(
     context: Context,
+    prefsName: String = "watchrss_tus_uploads",
     private val http: OkHttpClient = OkHttpClient()
 ) {
     private val preferences = context.applicationContext.getSharedPreferences(
-        "watchrss_tus_uploads",
+        prefsName,
         Context.MODE_PRIVATE
     )
 

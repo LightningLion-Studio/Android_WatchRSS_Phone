@@ -34,7 +34,7 @@ class PhoneCompanionContainer(context: Context) {
     private val appContext = context.applicationContext
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val accountEnvironment: AccountEnvironment by lazy {
-        AccountEnvironment()
+        AccountEnvironment.active(appContext)
     }
 
     private val database: PhoneCompanionDatabase by lazy {
@@ -73,7 +73,10 @@ class PhoneCompanionContainer(context: Context) {
     val accountRepository: PhoneAccountRepository by lazy {
         PhoneAccountRepository(
             environment = accountEnvironment,
-            sessionStore = EncryptedAccountSessionStore(appContext),
+            sessionStore = EncryptedAccountSessionStore(
+                appContext,
+                prefsName = "watchrss_account_session${accountEnvironment.storageSuffix}"
+            ),
             installationIdentity = installationIdentity,
             accountClient = PhoneAccountClient(accountEnvironment),
             phoneDeviceId = deviceIdentity.deviceId
@@ -153,13 +156,35 @@ class PhoneCompanionContainer(context: Context) {
     }
 
     val cloudSyncService: PhoneCloudSyncService by lazy {
+        val storageSuffix = accountEnvironment.storageSuffix
         PhoneCloudSyncService(
             context = appContext,
             accountRepository = accountRepository,
             backupService = backupService,
             repository = repository,
             deviceId = deviceIdentity.deviceId,
-            client = PhoneCloudClient(accountEnvironment)
+            client = PhoneCloudClient(accountEnvironment),
+            keyManager = com.lightningstudio.watchrss.phone.cloud.CloudKeyManager(
+                appContext,
+                storageSuffix = storageSuffix
+            ),
+            settings = com.lightningstudio.watchrss.phone.cloud.PhoneCloudStateStore(
+                appContext,
+                prefsName = "watchrss_cloud_state$storageSuffix"
+            ),
+            cache = com.lightningstudio.watchrss.phone.cloud.CloudLocalCache(
+                appContext,
+                directoryName = "cloud-cache$storageSuffix"
+            ),
+            uploader = com.lightningstudio.watchrss.phone.cloud.SupabaseTusUploader(
+                appContext,
+                prefsName = "watchrss_tus_uploads$storageSuffix"
+            ),
+            rssInventoryPreferences =
+                com.lightningstudio.watchrss.phone.cloud.CloudRssInventoryPreferences(
+                    appContext,
+                    prefsName = "watchrss_cloud_rss_inventory$storageSuffix"
+                )
         )
     }
 

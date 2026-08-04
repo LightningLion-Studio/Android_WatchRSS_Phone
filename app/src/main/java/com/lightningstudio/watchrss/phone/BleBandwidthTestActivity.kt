@@ -22,6 +22,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.connection.ble.BleBandwidthTrialResult
 import com.lightningstudio.watchrss.phone.connection.ble.BleVideoProfile
+import com.lightningstudio.watchrss.phone.connection.ble.BleVideoPlaybackStats
 import com.lightningstudio.watchrss.phone.connection.ble.WatchBleBandwidthServer
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -41,8 +42,9 @@ class BleBandwidthTestActivity : ComponentActivity() {
         runOnUiThread {
             statusView.text = message
             startButton.isEnabled = server?.watchReady == true && !running
-            videoButton.isEnabled = server != null && !running
-            rickrollButton.isEnabled = server != null && !running
+            val canStreamVideo = server?.videoReady == true && !running
+            videoButton.isEnabled = canStreamVideo
+            rickrollButton.isEnabled = canStreamVideo
         }
     }
 
@@ -260,17 +262,17 @@ class BleBandwidthTestActivity : ComponentActivity() {
                             "BLE ${selectedProfile.summary} · ${frame + 1}/$total · 跳过 $skipped"
                     }
                 }
-            }.onSuccess {
+            }.onSuccess { stats ->
                 statusView.text = "BLE 视频已完成"
-                resultView.text = "音频 HTTP 24 kbps · 视频 BLE · ${selectedProfile.summary}"
+                resultView.text = formatVideoStats(stats, selectedProfile)
             }.onFailure { error ->
                 statusView.text = "蓝牙视频失败：${error.message}"
                 Log.e(TAG, "BLE video stream failed", error)
             }
             running = false
             startButton.isEnabled = activeServer.watchReady
-            videoButton.isEnabled = true
-            rickrollButton.isEnabled = true
+            videoButton.isEnabled = activeServer.videoReady
+            rickrollButton.isEnabled = activeServer.videoReady
         }
     }
 
@@ -306,6 +308,37 @@ class BleBandwidthTestActivity : ComponentActivity() {
             )
         }
     }
+
+    private fun formatVideoStats(
+        stats: BleVideoPlaybackStats,
+        profile: BleVideoProfile
+    ): String = String.format(
+        Locale.US,
+        "音频 HTTP 24 kbps · 视频 BLE · %s\n" +
+            "手机：源 %d · 发 %d · 跳 %d · 末帧 %d · %d ms\n" +
+            "手表：收 %d · 显 %d · 丢 %d · 坏 %d · 末收/显 %d/%d\n" +
+            "实际 %.2f fps · 解码 %.1f/%d ms · UI提交 %.1f/%d ms\n" +
+            "最大迟到 %d ms · 手表显示时间 %d ms",
+        profile.summary,
+        stats.sourceFrames,
+        stats.sentFrames,
+        stats.phoneSkippedFrames,
+        stats.lastSentFrameIndex,
+        stats.phoneElapsedMs,
+        stats.receivedFrames,
+        stats.displayedFrames,
+        stats.droppedFrames,
+        stats.rejectedFrames,
+        stats.lastReceivedFrameIndex,
+        stats.lastDisplayedFrameIndex,
+        stats.actualFps,
+        stats.averageDecodeMs,
+        stats.decodeMsMax,
+        stats.averageUiCommitMs,
+        stats.uiCommitMsMax,
+        stats.maxLateMs,
+        stats.watchElapsedMs
+    )
 
     override fun onDestroy() {
         server?.unbindStatusListener(statusListener)

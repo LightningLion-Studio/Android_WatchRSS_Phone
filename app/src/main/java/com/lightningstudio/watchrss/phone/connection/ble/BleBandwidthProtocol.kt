@@ -14,6 +14,7 @@ internal object BleBandwidthProtocol {
     const val TYPE_RPC_DATA = 8
     const val TYPE_RPC_END = 9
     const val TYPE_BASE_READY = 10
+    const val TYPE_VIDEO_STATS = 11
 
     const val PAYLOAD_KIND_BENCHMARK = 0
     const val PAYLOAD_KIND_RPC = 1
@@ -22,6 +23,7 @@ internal object BleBandwidthProtocol {
     const val PAYLOAD_KIND_AUDIO_CHUNK = 4
     const val PAYLOAD_KIND_AUDIO_FINAL = 5
     const val PAYLOAD_KIND_AUDIO_URL = 6
+    const val PAYLOAD_KIND_VIDEO_END = 7
 
     const val ACK_OK = 0
     const val ACK_SEQUENCE_ERROR = 1
@@ -172,6 +174,24 @@ internal object BleBandwidthProtocol {
                     expectedSequence = readUInt16(value, 14)
                 )
             }
+            TYPE_VIDEO_STATS -> {
+                if (value.size < 36) return null
+                ControlMessage.VideoStats(
+                    reportId = readUInt16(value, 2),
+                    displayedFrames = readUInt16(value, 4),
+                    droppedFrames = readUInt16(value, 6),
+                    rejectedFrames = readUInt16(value, 8),
+                    receivedFrames = readUInt16(value, 10),
+                    lastReceivedFrameIndex = decodeFrameIndex(readUInt16(value, 12)),
+                    lastDisplayedFrameIndex = decodeFrameIndex(readUInt16(value, 14)),
+                    elapsedMs = readUInt32(value, 16),
+                    decodeMsTotal = readUInt32(value, 20),
+                    decodeMsMax = readUInt16(value, 24),
+                    maxLateMs = readUInt32(value, 26),
+                    uiCommitMsTotal = readUInt32(value, 30),
+                    uiCommitMsMax = readUInt16(value, 34)
+                )
+            }
             else -> null
         }
     }
@@ -183,6 +203,8 @@ internal object BleBandwidthProtocol {
         if (elapsedMs <= 0) 0.0 else bytes * 8.0 / elapsedMs
 
     private fun unsigned(value: Byte): Int = value.toInt() and 0xff
+
+    private fun decodeFrameIndex(value: Int): Int = if (value == 0xffff) -1 else value
 
     private fun putUInt16(target: ByteArray, offset: Int, value: Int) {
         target[offset] = (value and 0xff).toByte()
@@ -227,6 +249,22 @@ internal sealed interface ControlMessage {
         val checksum: Long,
         val expectedSequence: Int
     ) : ControlMessage
+
+    data class VideoStats(
+        val reportId: Int,
+        val displayedFrames: Int,
+        val droppedFrames: Int,
+        val rejectedFrames: Int,
+        val receivedFrames: Int,
+        val lastReceivedFrameIndex: Int,
+        val lastDisplayedFrameIndex: Int,
+        val elapsedMs: Long,
+        val decodeMsTotal: Long,
+        val decodeMsMax: Int,
+        val maxLateMs: Long,
+        val uiCommitMsTotal: Long,
+        val uiCommitMsMax: Int
+    ) : ControlMessage
 }
 
 internal data class BleBandwidthTrialResult(
@@ -241,4 +279,34 @@ internal data class BleBandwidthTrialResult(
 
     val kilobitsPerSecond: Double
         get() = BleBandwidthProtocol.kilobitsPerSecond(sizeBytes, elapsedMs)
+}
+
+internal data class BleVideoPlaybackStats(
+    val sourceFrames: Int,
+    val sentFrames: Int,
+    val phoneSkippedFrames: Int,
+    val lastSentFrameIndex: Int,
+    val phoneElapsedMs: Long,
+    val displayedFrames: Int,
+    val receivedFrames: Int,
+    val droppedFrames: Int,
+    val rejectedFrames: Int,
+    val lastReceivedFrameIndex: Int,
+    val lastDisplayedFrameIndex: Int,
+    val watchElapsedMs: Long,
+    val decodeMsTotal: Long,
+    val decodeMsMax: Int,
+    val maxLateMs: Long,
+    val uiCommitMsTotal: Long,
+    val uiCommitMsMax: Int
+) {
+    val actualFps: Double
+        get() = if (displayedFrames <= 1 || watchElapsedMs <= 0) 0.0
+        else (displayedFrames - 1) * 1000.0 / watchElapsedMs
+
+    val averageDecodeMs: Double
+        get() = if (displayedFrames == 0) 0.0 else decodeMsTotal.toDouble() / displayedFrames
+
+    val averageUiCommitMs: Double
+        get() = if (displayedFrames == 0) 0.0 else uiCommitMsTotal.toDouble() / displayedFrames
 }

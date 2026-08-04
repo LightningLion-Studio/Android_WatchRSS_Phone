@@ -107,6 +107,70 @@ class BleBandwidthProtocolTest {
     }
 
     @Test
+    fun `decodes final watch playback summary`() {
+        val packet = byteArrayOf(
+            1, 11,
+            0x34, 0x12,
+            0x18, 0x01,
+            19, 0,
+            2, 0,
+            0x2d, 0x01,
+            0x7b, 0x01,
+            0xff.toByte(), 0xff.toByte(),
+            0x60, 0xea.toByte(), 0, 0,
+            0x39, 0x30, 0, 0,
+            0x41, 0x01,
+            0xd7.toByte(), 0x11, 0, 0,
+            0x31, 0xd4.toByte(), 0, 0,
+            0xdb.toByte(), 0x03
+        )
+        assertEquals(
+            ControlMessage.VideoStats(
+                reportId = 0x1234,
+                displayedFrames = 280,
+                droppedFrames = 19,
+                rejectedFrames = 2,
+                receivedFrames = 301,
+                lastReceivedFrameIndex = 379,
+                lastDisplayedFrameIndex = -1,
+                elapsedMs = 60_000,
+                decodeMsTotal = 12_345,
+                decodeMsMax = 321,
+                maxLateMs = 4_567,
+                uiCommitMsTotal = 54_321,
+                uiCommitMsMax = 987
+            ),
+            BleBandwidthProtocol.decodeControl(packet)
+        )
+    }
+
+    @Test
+    fun `calculates watch playback timing`() {
+        val stats = BleVideoPlaybackStats(
+            sourceFrames = 600,
+            sentFrames = 500,
+            phoneSkippedFrames = 100,
+            lastSentFrameIndex = 599,
+            phoneElapsedMs = 100_000,
+            displayedFrames = 280,
+            receivedFrames = 500,
+            droppedFrames = 220,
+            rejectedFrames = 0,
+            lastReceivedFrameIndex = 599,
+            lastDisplayedFrameIndex = 599,
+            watchElapsedMs = 60_000,
+            decodeMsTotal = 14_000,
+            decodeMsMax = 80,
+            maxLateMs = 400,
+            uiCommitMsTotal = 28_000,
+            uiCommitMsMax = 140
+        )
+        assertEquals(4.65, stats.actualFps, 0.001)
+        assertEquals(50.0, stats.averageDecodeMs, 0.001)
+        assertEquals(100.0, stats.averageUiCommitMs, 0.001)
+    }
+
+    @Test
     fun `rejects malformed controls and sizes payload from mtu`() {
         assertNull(BleBandwidthProtocol.decodeControl(byteArrayOf()))
         assertNull(BleBandwidthProtocol.decodeControl(byteArrayOf(2, 5)))

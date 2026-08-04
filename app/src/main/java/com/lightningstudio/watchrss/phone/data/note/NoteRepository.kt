@@ -12,7 +12,10 @@ class NoteRepository(
     fun observeFolders(): Flow<List<NoteFolderEntity>> = dao.observeFolders()
     fun observeConflicts(): Flow<List<NoteConflictEntity>> = dao.observeUnresolvedConflicts()
     suspend fun allNotes(): List<NoteEntity> = dao.allNotes()
-    suspend fun registerAsset(asset: NoteAssetEntity) = dao.upsertAssets(listOf(asset))
+    suspend fun assets(noteId: String): List<NoteAssetEntity> = dao.assets(noteId)
+    suspend fun registerAsset(asset: NoteAssetEntity) {
+        if (dao.assetByHash(asset.sha256) == null) dao.upsertAssets(listOf(asset))
+    }
 
     suspend fun save(
         noteId: String? = null,
@@ -29,7 +32,7 @@ class NoteRepository(
         val canonical = markdown.replace("\r\n", "\n").replace('\r', '\n')
         val hash = MarkdownNoteCodec.sha256(canonical)
         val saved = NoteEntity(
-            noteId = previous?.noteId ?: UUID.randomUUID().toString(),
+            noteId = previous?.noteId ?: noteId ?: UUID.randomUUID().toString(),
             folderId = folderId,
             title = title.trim().ifBlank { MarkdownNoteCodec.toPlainText(canonical).lineSequence().firstOrNull().orEmpty().take(80) },
             markdown = canonical,
@@ -46,6 +49,23 @@ class NoteRepository(
         )
         dao.upsertNotes(listOf(saved))
         return saved
+    }
+
+    suspend fun importMarkdown(markdownFile: String): NoteEntity {
+        val imported = MarkdownNoteCodec.parse(markdownFile)
+        return save(
+            noteId = imported.noteId,
+            title = imported.title.orEmpty(),
+            markdown = imported.markdown,
+            folderId = imported.folderId
+        )
+    }
+
+    suspend fun resolveConflict(conflict: NoteConflictEntity, markdown: String): NoteEntity {
+        val local = dao.note(conflict.noteId) ?: error("冲突笔记不存在")
+        val resolved = save(local.noteId, local.title, markdown, local.folderId, local.pinned)
+        dao.resolveConflict(conflict.conflictId, now())
+        return resolved
     }
 
     suspend fun applyRemote(remote: NoteEntity, remoteDeviceId: String): MarkdownMergeResult {

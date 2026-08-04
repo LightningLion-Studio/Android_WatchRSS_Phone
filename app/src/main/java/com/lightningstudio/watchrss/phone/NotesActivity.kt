@@ -19,6 +19,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -46,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import com.lightningstudio.watchrss.phone.data.note.NoteEntity
 import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.note.NoteAssetStore
+import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import com.mohamedrejeb.richeditor.model.rememberRichTextState
 import com.mohamedrejeb.richeditor.ui.material3.RichTextEditor
@@ -81,8 +84,32 @@ private fun NotesScreen(
     val notes by repository.observeNotes().collectAsStateWithLifecycle(emptyList())
     var selected by remember { mutableStateOf<NoteEntity?>(null) }
     var creating by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val transfer = remember(context, repository) { NoteImportExportService(context, repository) }
+    val zipExport = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) scope.launch {
+            context.contentResolver.openOutputStream(uri)?.use { it.write(transfer.exportZip()) }
+        }
+    }
+    val zipImport = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            context.contentResolver.openInputStream(uri)?.use { transfer.importZip(it.readBytes()) }
+            runCatching { syncCloud() }
+        }
+    }
     Scaffold(
-        topBar = { CenterAlignedTopAppBar(title = { Text(if (selected == null && !creating) "笔记" else "编辑笔记") }, navigationIcon = { IconButton(onClick = { if (selected != null || creating) { selected = null; creating = false } else onBack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } }) },
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = { Text(if (selected == null && !creating) "笔记" else "编辑笔记") },
+                navigationIcon = { IconButton(onClick = { if (selected != null || creating) { selected = null; creating = false } else onBack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
+                actions = {
+                    if (selected == null && !creating) {
+                        IconButton(onClick = { zipImport.launch(arrayOf("application/zip", "application/x-zip-compressed")) }) { Icon(Icons.Default.FileOpen, "导入 ZIP") }
+                        IconButton(onClick = { zipExport.launch("watchrss-notes.zip") }) { Icon(Icons.Default.Save, "导出 ZIP") }
+                    }
+                }
+            )
+        },
         floatingActionButton = { if (selected == null && !creating) Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) { FloatingActionButton(onClick = { scope.launch { syncNotes() } }) { Icon(Icons.Default.Sync, "同步手表笔记") }; FloatingActionButton(onClick = { creating = true }) { Icon(Icons.Default.Add, "新建笔记") } } }
     ) { padding ->
         val note = selected

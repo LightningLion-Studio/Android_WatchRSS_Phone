@@ -23,6 +23,17 @@ class NoteImportExportService(private val context: Context, private val reposito
 
     suspend fun importZip(bytes: ByteArray): Int = importEntries(MarkdownNoteArchive.read(bytes))
 
+    /** Cloud already merges note text through diff3; this only hydrates its image files. */
+    fun restoreAssetsZip(bytes: ByteArray) {
+        MarkdownNoteArchive.read(bytes)
+            .filter { it.path.startsWith("notes/assets/") }
+            .forEach { entry ->
+                val key = MarkdownNoteArchive.safePath(entry.path.removePrefix("notes/assets/")).substringAfterLast('/')
+                val target = File(context.filesDir, "notes/assets/$key").also { it.parentFile?.mkdirs() }
+                if (!target.exists()) target.writeBytes(entry.bytes)
+            }
+    }
+
     suspend fun importDirectory(uri: Uri): Int {
         val root = requireNotNull(DocumentFile.fromTreeUri(context, uri)) { "无法打开导入目录" }
         val entries = mutableListOf<MarkdownArchiveEntry>()

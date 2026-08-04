@@ -14,6 +14,8 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncWorker
 import com.lightningstudio.watchrss.phone.connection.ble.WatchBleBandwidthServer
+import com.lightningstudio.watchrss.phone.connection.ip.WatchIpSyncService
+import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -22,6 +24,9 @@ import kotlinx.coroutines.launch
 class PhoneCompanionApplication : Application() {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastForegroundSyncAt = 0L
+    private val ipSyncService: WatchIpSyncService by lazy {
+        WatchIpSyncService(this, PhoneDeviceIdentity(this).deviceId)
+    }
 
     val container: PhoneCompanionContainer by lazy {
         PhoneCompanionContainer(this)
@@ -72,7 +77,14 @@ class PhoneCompanionApplication : Application() {
             }
         ) return false
         return runCatching {
-            WatchBleBandwidthServer.processInstance(this).start()
+            ipSyncService.start()
+            WatchBleBandwidthServer.processInstance(this).apply {
+                setEndpointDescriptorProvider {
+                    ipSyncService.endpointProvider.descriptor().toBleJson().toString()
+                        .toByteArray(Charsets.UTF_8)
+                }
+                start()
+            }
             true
         }.onFailure { error ->
             Log.e(TAG, "Failed to start watch base station", error)

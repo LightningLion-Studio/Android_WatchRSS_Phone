@@ -944,9 +944,7 @@ class PhoneBluetoothSyncManager(
             withTimeout(LIBRARY_SYNC_TIMEOUT_MS) {
                 withContext(Dispatchers.IO) {
                     client.exchangeLibrary(
-                        buildManifestRequest = { device ->
-                            buildManifestRequest(device.address.ifBlank { device.name.orEmpty().ifBlank { "watch" } })
-                        },
+                        buildManifestRequest = buildManifestRequest,
                         buildArticleRequests = buildArticleRequests,
                         deviceAddress = deviceAddress,
                         sessionId = sessionId,

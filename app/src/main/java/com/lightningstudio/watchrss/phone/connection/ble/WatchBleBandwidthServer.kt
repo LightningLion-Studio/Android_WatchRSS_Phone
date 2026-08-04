@@ -26,6 +26,7 @@ import com.lightningstudio.watchrss.phone.connection.bili.BiliRealtimeTranscoder
 import com.lightningstudio.watchrss.phone.connection.bili.PhoneBiliGateway
 import com.lightningstudio.watchrss.phone.connection.bili.failureResponse
 import com.lightningstudio.watchrss.phone.connection.bili.successResponse
+import com.lightningstudio.watchrss.phone.connection.ip.IpSyncProtocol
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -73,6 +74,9 @@ internal class WatchBleBandwidthServer(
     private var advertisingRestartJob: Job? = null
     private var advertisingRestartGeneration = 0
     private var advertisingAlreadyStartedRetries = 0
+
+    @Volatile
+    private var endpointDescriptorProvider: (() -> ByteArray)? = null
 
     @Volatile
     private var statusListener: ((String) -> Unit)? = null
@@ -136,6 +140,11 @@ internal class WatchBleBandwidthServer(
         createDuplexDataCharacteristic(BleBandwidthProtocol.V2_DATA_UUID)
     private val dataCharacteristic =
         createDuplexDataCharacteristic(BleBandwidthProtocol.DATA_UUID)
+    private val endpointCharacteristic = BluetoothGattCharacteristic(
+        IpSyncProtocol.BLE_ENDPOINT_CHARACTERISTIC_UUID,
+        BluetoothGattCharacteristic.PROPERTY_READ,
+        BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED
+    )
 
     private val servicesToRegister = listOf(
         createService(
@@ -150,7 +159,13 @@ internal class WatchBleBandwidthServer(
         createService(
             BleBandwidthProtocol.SERVICE_UUID,
             dataCharacteristic
-        )
+        ),
+        BluetoothGattService(
+            IpSyncProtocol.BLE_DISCOVERY_SERVICE_UUID,
+            BluetoothGattService.SERVICE_TYPE_PRIMARY
+        ).apply {
+            addCharacteristic(endpointCharacteristic)
+        }
     )
 
     private val gattCallback = object : BluetoothGattServerCallback() {
@@ -242,14 +257,32 @@ internal class WatchBleBandwidthServer(
             offset: Int,
             characteristic: BluetoothGattCharacteristic
         ) {
-            val valid =
+            val endpointRead = characteristic.uuid == IpSyncProtocol.BLE_ENDPOINT_CHARACTERISTIC_UUID
+            val endpointValue = if (endpointRead) {
+                endpointDescriptorProvider?.invoke() ?: byteArrayOf()
+            } else {
+                byteArrayOf()
+            }
+            val validOffset = offset in 0..endpointValue.size
+            val valid = if (endpointRead) {
+                device.bondState == BluetoothDevice.BOND_BONDED && validOffset
+            } else {
                 characteristic.uuid in BleBandwidthProtocol.DATA_UUIDS && offset == 0
+            }
+            val responseValue = when {
+                !valid -> null
+                endpointRead -> endpointValue.copyOfRange(
+                    offset,
+                    minOf(endpointValue.size, offset + BleBandwidthProtocol.MAX_ATTRIBUTE_BYTES)
+                )
+                else -> byteArrayOf()
+            }
             gattServer?.sendResponse(
                 device,
                 requestId,
                 if (valid) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE,
                 offset,
-                if (valid) byteArrayOf() else null
+                responseValue
             )
         }
 
@@ -525,6 +558,10 @@ internal class WatchBleBandwidthServer(
         nextServiceToRegister = 0
         addNextService()
         reportStatus("正在注册 WatchRSS BLE 兼容服务")
+    }
+
+    fun setEndpointDescriptorProvider(provider: () -> ByteArray) {
+        endpointDescriptorProvider = provider
     }
 
     private fun addNextService() {

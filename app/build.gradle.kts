@@ -151,6 +151,7 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.5.0")
     implementation("com.google.zxing:core:3.5.3")
     implementation(libs.nanohttpd)
+    implementation(libs.nanohttpd.websocket)
     implementation(libs.okhttp)
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation(libs.jsoup)

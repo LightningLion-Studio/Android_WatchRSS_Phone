@@ -113,7 +113,8 @@ class PhoneGuidedSessionManager(
                 wifiConfiguration = hotspotReservation.wifiConfiguration,
                 fallback = activeShortConfig?.passphrase
             )
-            val host = resolveHotspotHost() ?: DEFAULT_HOTSPOT_HOST
+            val host = resolveHotspotHost()
+                ?: error("无法获取当前热点地址，已取消固定网关回退")
             val payload = AcousticConnectionProtocol.buildGuidedWifi(
                 ability = ability,
                 ssid = ssid,
@@ -400,7 +401,6 @@ class PhoneGuidedSessionManager(
     )
 
     companion object {
-        private const val DEFAULT_HOTSPOT_HOST = "192.168.43.1"
         private const val TOKEN_LENGTH = 8
         private const val SHORT_SSID_SUFFIX_LENGTH = 3
         private const val SHORT_PASSPHRASE_LENGTH = 8

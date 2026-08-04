@@ -133,6 +133,10 @@
             android:exported="false"
             android:theme="@style/Theme.WatchRSS.Reader" />
         <activity
+            android:name=".NotesActivity"
+            android:exported="false"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
             android:name=".RssActivity"
             android:exported="false"
             android:launchMode="singleTask"

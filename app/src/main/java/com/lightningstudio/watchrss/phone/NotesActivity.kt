@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -52,20 +53,21 @@ class NotesActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val repository = (application as PhoneCompanionApplication).container.noteRepository
-        setContent { WatchRssPhoneTheme { NotesScreen(repository, ::finish, lifecycleScope) } }
+        val noteSync = (application as PhoneCompanionApplication).container.noteBluetoothSyncManager
+        setContent { WatchRssPhoneTheme { NotesScreen(repository, ::finish, lifecycleScope, { noteSync.sync() }) } }
     }
     companion object { fun createIntent(context: Context) = Intent(context, NotesActivity::class.java) }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun NotesScreen(repository: NoteRepository, onBack: () -> Unit, scope: CoroutineScope) {
+private fun NotesScreen(repository: NoteRepository, onBack: () -> Unit, scope: CoroutineScope, syncNotes: suspend () -> Unit) {
     val notes by repository.observeNotes().collectAsStateWithLifecycle(emptyList())
     var selected by remember { mutableStateOf<NoteEntity?>(null) }
     var creating by remember { mutableStateOf(false) }
     Scaffold(
         topBar = { CenterAlignedTopAppBar(title = { Text(if (selected == null && !creating) "笔记" else "编辑笔记") }, navigationIcon = { IconButton(onClick = { if (selected != null || creating) { selected = null; creating = false } else onBack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } }) },
-        floatingActionButton = { if (selected == null && !creating) FloatingActionButton(onClick = { creating = true }) { Icon(Icons.Default.Add, "新建笔记") } }
+        floatingActionButton = { if (selected == null && !creating) Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) { FloatingActionButton(onClick = { scope.launch { syncNotes() } }) { Icon(Icons.Default.Sync, "同步手表笔记") }; FloatingActionButton(onClick = { creating = true }) { Icon(Icons.Default.Add, "新建笔记") } } }
     ) { padding ->
         val note = selected
         if (note == null && !creating) NoteList(notes, { selected = it }, Modifier.padding(padding))

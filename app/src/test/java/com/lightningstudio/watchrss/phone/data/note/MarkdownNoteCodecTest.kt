@@ -2,6 +2,7 @@ package com.lightningstudio.watchrss.phone.data.note
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MarkdownNoteCodecTest {
@@ -21,5 +22,11 @@ class MarkdownNoteCodecTest {
 
     @Test fun `watch projection preserves image meaning without markdown syntax`() {
         assertEquals("标题\n[图片：猫]\n链接", MarkdownNoteCodec.toPlainText("# 标题\n![猫](assets/cat.jpg)\n[链接](https://example.com)"))
+    }
+
+    @Test fun `diff3 merges independent line edits`() {
+        val result = MarkdownThreeWayMerge.merge("one\ntwo\nthree", "ONE\ntwo\nthree", "one\ntwo\nTHREE")
+        assertTrue(result is MarkdownMergeResult.Merged)
+        assertEquals("ONE\ntwo\nTHREE", (result as MarkdownMergeResult.Merged).markdown)
     }
 }

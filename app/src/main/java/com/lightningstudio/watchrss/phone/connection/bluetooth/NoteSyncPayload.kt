@@ -13,7 +13,7 @@ object NoteSyncPayload {
         put("version", PROTOCOL_VERSION)
         put("action", ACTION_SYNC_NOTES)
         put("deviceId", deviceId)
-        put("notes", JSONArray().apply { notes.forEach { put(it.toJson(includeBody = false)) } })
+        put("notes", JSONArray().apply { notes.forEach { put(it.toJson(includeBody = true)) } })
     }
 
     fun decodeNotes(payload: JSONObject): List<NoteEntity> {

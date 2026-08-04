@@ -314,6 +314,7 @@ fun MainScreen(
     onSyncLibrary: () -> Unit,
     onSyncAccount: () -> Unit,
     onOpenProfile: () -> Unit,
+    onOpenNotes: () -> Unit,
     onChooseBluetoothDevice: (MainBluetoothDeviceUi) -> Unit,
     onDismissBluetoothDevicePrompt: () -> Unit,
     onExportBluetoothLog: () -> Unit,
@@ -1194,6 +1195,7 @@ fun MainScreen(
                                     onSyncLibrary = onSyncLibrary,
                                     onSyncAccount = onSyncAccount,
                                     onOpenProfile = onOpenProfile,
+                                    onOpenNotes = onOpenNotes,
                                     showAccountActions = showAccountFeatures,
                                     onExportBluetoothLog = onExportBluetoothLog,
                                     onOpenRss = {
@@ -1289,7 +1291,8 @@ fun MainScreen(
                                 windowInfo = windowInfo,
                                 onSyncLibrary = onSyncLibrary,
                                 onSyncAccount = onSyncAccount,
-                                onOpenProfile = onOpenProfile,
+                                    onOpenProfile = onOpenProfile,
+                                    onOpenNotes = onOpenNotes,
                                 showAccountActions = showAccountFeatures,
                                 onExportBluetoothLog = onExportBluetoothLog,
                                 onOpenRss = {
@@ -1341,6 +1344,7 @@ fun MainScreen(
                                 onSyncLibrary = onSyncLibrary,
                                 onSyncAccount = onSyncAccount,
                                 onOpenProfile = onOpenProfile,
+                                onOpenNotes = onOpenNotes,
                                 showAccountActions = showAccountFeatures,
                                 onExportBluetoothLog = onExportBluetoothLog,
                                 onOpenRss = {
@@ -2750,6 +2754,7 @@ private fun DashboardPage(
     onSyncLibrary: () -> Unit,
     onSyncAccount: () -> Unit,
     onOpenProfile: () -> Unit,
+    onOpenNotes: () -> Unit,
     showAccountActions: Boolean,
     onExportBluetoothLog: () -> Unit,
     onOpenRss: () -> Unit,
@@ -2828,6 +2833,9 @@ private fun DashboardPage(
                             }
                         }
                     }
+                    item {
+                        NotesDashboardCard(onOpenNotes)
+                    }
                 } else {
                     item {
                         SyncStatusCard(
@@ -2857,6 +2865,7 @@ private fun DashboardPage(
                             onOpenImportedContent = onOpenImportedContent
                         )
                     }
+                    item { NotesDashboardCard(onOpenNotes) }
                     item {
                         TokenUsageCard(
                             stats = uiState.llmTokenUsageStats,
@@ -2864,6 +2873,23 @@ private fun DashboardPage(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotesDashboardCard(onOpenNotes: () -> Unit) {
+    ElevatedCard(onClick = onOpenNotes, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Default.Sync, contentDescription = null)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("备忘录", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text("Markdown 笔记、图片与手表同步", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }

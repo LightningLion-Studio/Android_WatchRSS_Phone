@@ -179,6 +179,9 @@ class HomeActivity : ComponentActivity() {
                     onOpenProfile = {
                         startActivity(ProfileActivity.createIntent(this@HomeActivity))
                     },
+                    onOpenNotes = {
+                        startActivity(NotesActivity.createIntent(this@HomeActivity))
+                    },
                     onChooseBluetoothDevice = viewModel::chooseBluetoothDeviceForSync,
                     onDismissBluetoothDevicePrompt = viewModel::dismissBluetoothDevicePrompt,
                     onExportBluetoothLog = ::exportBluetoothLog,

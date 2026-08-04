@@ -150,6 +150,7 @@ dependencies {
     implementation(libs.androidx.media3.transformer)
     implementation(libs.androidx.credentials)
     implementation(libs.androidx.credentials.play.services.auth)
+    implementation("androidx.documentfile:documentfile:1.0.1")
     ksp(libs.androidx.room.compiler)
     // Backdrop source copied locally — see app/src/main/java/com/kyant/backdrop
 

@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -101,6 +102,13 @@ private fun NotesScreen(
             runCatching { syncCloud() }
         }
     }
+    val directoryImport = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) scope.launch {
+            context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            transfer.importDirectory(uri)
+            runCatching { syncCloud() }
+        }
+    }
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
@@ -109,6 +117,7 @@ private fun NotesScreen(
                 actions = {
                     if (selected == null && !creating) {
                         if (conflicts.isNotEmpty()) TextButton(onClick = { selectedConflict = conflicts.first() }) { Text("冲突 ${conflicts.size}") }
+                        IconButton(onClick = { directoryImport.launch(null) }) { Icon(Icons.Default.FolderOpen, "导入目录") }
                         IconButton(onClick = { zipImport.launch(arrayOf("application/zip", "application/x-zip-compressed")) }) { Icon(Icons.Default.FileOpen, "导入 ZIP") }
                         IconButton(onClick = { zipExport.launch("watchrss-notes.zip") }) { Icon(Icons.Default.Save, "导出 ZIP") }
                     }

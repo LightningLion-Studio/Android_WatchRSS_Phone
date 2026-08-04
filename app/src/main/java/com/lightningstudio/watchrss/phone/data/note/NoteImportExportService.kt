@@ -1,6 +1,8 @@
 package com.lightningstudio.watchrss.phone.data.note
 
 import android.content.Context
+import android.net.Uri
+import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
@@ -20,6 +22,25 @@ class NoteImportExportService(private val context: Context, private val reposito
     }
 
     suspend fun importZip(bytes: ByteArray): Int = importEntries(MarkdownNoteArchive.read(bytes))
+
+    suspend fun importDirectory(uri: Uri): Int {
+        val root = requireNotNull(DocumentFile.fromTreeUri(context, uri)) { "无法打开导入目录" }
+        val entries = mutableListOf<MarkdownArchiveEntry>()
+        fun visit(directory: DocumentFile, prefix: String) {
+            directory.listFiles().forEach { child ->
+                val path = if (prefix.isEmpty()) child.name.orEmpty() else "$prefix/${child.name.orEmpty()}"
+                if (child.isDirectory) visit(child, path)
+                else if (child.isFile) {
+                    val safe = MarkdownNoteArchive.safePath(path)
+                    val bytes = context.contentResolver.openInputStream(child.uri)?.use { it.readBytes() }
+                        ?: throw IllegalArgumentException("无法读取 $safe")
+                    entries += MarkdownArchiveEntry(safe, bytes)
+                }
+            }
+        }
+        visit(root, "")
+        return importEntries(entries)
+    }
 
     suspend fun importEntries(entries: List<MarkdownArchiveEntry>): Int {
         val assets = entries.filter { it.path.startsWith("notes/assets/") }.associateBy { it.path.removePrefix("notes/assets/") }

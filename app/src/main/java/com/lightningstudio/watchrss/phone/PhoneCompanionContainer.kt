@@ -164,6 +164,7 @@ class PhoneCompanionContainer(context: Context) {
             accountRepository = accountRepository,
             backupService = backupService,
             repository = repository,
+            noteRepository = noteRepository,
             deviceId = deviceIdentity.deviceId,
             client = PhoneCloudClient(accountEnvironment)
         )

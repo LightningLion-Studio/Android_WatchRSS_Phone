@@ -22,6 +22,12 @@ import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.FormatBold
+import androidx.compose.material.icons.filled.FormatItalic
+import androidx.compose.material.icons.filled.FormatListBulleted
+import androidx.compose.material.icons.filled.FormatListNumbered
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -76,9 +82,7 @@ class NotesActivity : ComponentActivity() {
         setContent {
             WatchRssPhoneTheme {
                 ProvideReaderPreset(container.readerPresetRepository) {
-                    NoteReaderTheme {
-                        NotesScreen(repository, ::finish, lifecycleScope, { noteSync.sync() }, container.cloudSyncService::syncNow)
-                    }
+                    NotesScreen(repository, ::finish, lifecycleScope, { noteSync.sync() }, container.cloudSyncService::syncNow)
                 }
             }
         }
@@ -86,9 +90,12 @@ class NotesActivity : ComponentActivity() {
     companion object { fun createIntent(context: Context) = Intent(context, NotesActivity::class.java) }
 }
 
-/** Shares the active reader's colours and background with the writing surface. */
+/** Shares the active reader's colours and background with the note body only. */
 @Composable
-private fun NoteReaderTheme(content: @Composable () -> Unit) {
+private fun ReaderThemedNoteInput(
+    editor: com.mohamedrejeb.richeditor.model.RichTextState,
+    modifier: Modifier = Modifier
+) {
     val preset = LocalReaderPresetRuntime.current.preset
     val background = Color(preset.background.colorArgb)
     val foreground = Color(preset.body.colorArgb)
@@ -99,7 +106,12 @@ private fun NoteReaderTheme(content: @Composable () -> Unit) {
         lightColorScheme(primary = accent, background = background, surface = background, onBackground = foreground, onSurface = foreground)
     }
     MaterialTheme(colorScheme = colors) {
-        ReaderBackgroundSurface(Modifier.fillMaxSize()) { content() }
+        ReaderBackgroundSurface(modifier) {
+            RichTextEditor(
+                state = editor,
+                modifier = Modifier.fillMaxSize().padding(12.dp)
+            )
+        }
     }
 }
 
@@ -138,7 +150,6 @@ private fun NotesScreen(
         }
     }
     Scaffold(
-        containerColor = Color.Transparent,
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text(if (selected == null && !creating) "笔记" else "编辑笔记") },
@@ -238,18 +249,30 @@ private fun NoteEditor(
             TextButton(onClick = { editor.addTextAfterSelection("### ") }) { Text("H3") }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            TextButton(onClick = { editor.toggleSpanStyle(SpanStyle(fontWeight = FontWeight.Bold)) }) { Text("粗体") }
-            TextButton(onClick = { editor.toggleSpanStyle(SpanStyle(fontStyle = FontStyle.Italic)) }) { Text("斜体") }
-            TextButton(onClick = editor::toggleOrderedList) { Text("有序列表") }
-            TextButton(onClick = editor::toggleUnorderedList) { Text("无序列表") }
-            TextButton(onClick = editor::toggleCodeSpan) { Text("代码") }
-            if (note != null) TextButton(onClick = { imagePicker.launch("image/*") }) { Text("图片") }
+            IconButton(onClick = { editor.toggleSpanStyle(SpanStyle(fontWeight = FontWeight.Bold)) }) {
+                Icon(Icons.Default.FormatBold, contentDescription = "粗体")
+            }
+            IconButton(onClick = { editor.toggleSpanStyle(SpanStyle(fontStyle = FontStyle.Italic)) }) {
+                Icon(Icons.Default.FormatItalic, contentDescription = "斜体")
+            }
+            IconButton(onClick = editor::toggleOrderedList) {
+                Icon(Icons.Default.FormatListNumbered, contentDescription = "有序列表")
+            }
+            IconButton(onClick = editor::toggleUnorderedList) {
+                Icon(Icons.Default.FormatListBulleted, contentDescription = "无序列表")
+            }
+            IconButton(onClick = editor::toggleCodeSpan) {
+                Icon(Icons.Default.Code, contentDescription = "代码")
+            }
+            if (note != null) IconButton(onClick = { imagePicker.launch("image/*") }) {
+                Icon(Icons.Default.Image, contentDescription = "插入图片")
+            }
         }
         if (note != null) Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
             Switch(checked = keepOriginal, onCheckedChange = { keepOriginal = it })
             Text("同时保留原图")
         }
-        RichTextEditor(state = editor, modifier = Modifier.weight(1f).fillMaxWidth())
+        ReaderThemedNoteInput(editor, Modifier.weight(1f).fillMaxWidth())
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             TextButton(onClick = {
                 scope.launch {

@@ -29,6 +29,8 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -42,6 +44,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
@@ -53,6 +57,9 @@ import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.note.NoteAssetStore
 import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import com.lightningstudio.watchrss.phone.ui.reader.LocalReaderPresetRuntime
+import com.lightningstudio.watchrss.phone.ui.reader.ProvideReaderPreset
+import com.lightningstudio.watchrss.phone.ui.reader.ReaderBackgroundSurface
 import com.mohamedrejeb.richeditor.model.rememberRichTextState
 import com.mohamedrejeb.richeditor.ui.material3.RichTextEditor
 import kotlinx.coroutines.launch
@@ -68,11 +75,32 @@ class NotesActivity : ComponentActivity() {
         val noteSync = container.noteBluetoothSyncManager
         setContent {
             WatchRssPhoneTheme {
-                NotesScreen(repository, ::finish, lifecycleScope, { noteSync.sync() }, container.cloudSyncService::syncNow)
+                ProvideReaderPreset(container.readerPresetRepository) {
+                    NoteReaderTheme {
+                        NotesScreen(repository, ::finish, lifecycleScope, { noteSync.sync() }, container.cloudSyncService::syncNow)
+                    }
+                }
             }
         }
     }
     companion object { fun createIntent(context: Context) = Intent(context, NotesActivity::class.java) }
+}
+
+/** Shares the active reader's colours and background with the writing surface. */
+@Composable
+private fun NoteReaderTheme(content: @Composable () -> Unit) {
+    val preset = LocalReaderPresetRuntime.current.preset
+    val background = Color(preset.background.colorArgb)
+    val foreground = Color(preset.body.colorArgb)
+    val accent = Color(preset.accentColorArgb)
+    val colors = if (background.luminance() < 0.45f) {
+        darkColorScheme(primary = accent, background = background, surface = background, onBackground = foreground, onSurface = foreground)
+    } else {
+        lightColorScheme(primary = accent, background = background, surface = background, onBackground = foreground, onSurface = foreground)
+    }
+    MaterialTheme(colorScheme = colors) {
+        ReaderBackgroundSurface(Modifier.fillMaxSize()) { content() }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -110,6 +138,7 @@ private fun NotesScreen(
         }
     }
     Scaffold(
+        containerColor = Color.Transparent,
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text(if (selected == null && !creating) "笔记" else "编辑笔记") },

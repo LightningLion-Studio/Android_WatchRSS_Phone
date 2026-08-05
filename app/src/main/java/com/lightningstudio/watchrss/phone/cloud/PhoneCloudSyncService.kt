@@ -7,6 +7,9 @@ import com.lightningstudio.watchrss.phone.account.PhoneAccountSession
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
 import com.lightningstudio.watchrss.phone.data.backup.WatchRssBackupService
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
+import com.lightningstudio.watchrss.phone.data.note.NoteCloudStateCodec
+import com.lightningstudio.watchrss.phone.data.note.NoteRepository
+import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -52,6 +55,7 @@ class PhoneCloudSyncService(
     private val accountRepository: PhoneAccountRepository,
     private val backupService: WatchRssBackupService,
     private val repository: PhoneCompanionRepository,
+    private val noteRepository: NoteRepository,
     private val deviceId: String,
     private val client: PhoneCloudClient,
     private val keyManager: CloudKeyManager = CloudKeyManager(context),
@@ -63,6 +67,7 @@ class PhoneCloudSyncService(
         CloudRssInventoryPreferences(context),
     private val codec: CloudSnapshotCodec = CloudSnapshotCodec()
 ) {
+    private val noteTransfer = NoteImportExportService(context, noteRepository)
     private val syncMutex = Mutex()
     private val _state = MutableStateFlow(PhoneCloudSyncState())
     val state: StateFlow<PhoneCloudSyncState> = _state
@@ -510,7 +515,7 @@ class PhoneCloudSyncService(
         }
         val manifest = codec.decryptManifest(accountKey, head.id, encryptedManifest)
         val selectedObjects = manifest.objects.filter { descriptor ->
-            fullTransfer || descriptor.name == RSS_STATE_OBJECT
+            fullTransfer || descriptor.name == RSS_STATE_OBJECT || descriptor.name == NOTES_STATE_OBJECT || descriptor.name == NOTES_ARCHIVE_OBJECT
         }
         val chunkUrls = download.chunks.associateBy(CloudDownloadObject::sha256)
         selectedObjects.flatMap(CloudObjectDescriptor::chunks)
@@ -547,6 +552,11 @@ class PhoneCloudSyncService(
             ?.let { backupService.applyCloudRssState(it) }
             ?: (0 to 0)
         changed = changed || rssApplied > 0
+        objects[NOTES_STATE_OBJECT]?.let { bytes ->
+            NoteCloudStateCodec.decode(bytes).forEach { noteRepository.applyRemote(it, it.modifiedBy) }
+            changed = true
+        }
+        objects[NOTES_ARCHIVE_OBJECT]?.let(noteTransfer::restoreAssetsZip)
         cache.storeManifest(
             session.userId,
             head.id,
@@ -612,9 +622,11 @@ class PhoneCloudSyncService(
         val logicalObjects: List<CloudLogicalObject>
         val carried: List<CloudObjectDescriptor>
         if (fullTransfer) {
-            logicalObjects = listOf(
+            logicalObjects = listOfNotNull(
                 CloudLogicalObject(PRIVATE_LIBRARY_OBJECT, backupService.createCloudPrivateArchiveFile(), false),
                 CloudLogicalObject(RSS_STATE_OBJECT, backupService.createCloudRssState()),
+                CloudLogicalObject(NOTES_STATE_OBJECT, NoteCloudStateCodec.encode(noteRepository.allNotes())),
+                runCatching { CloudLogicalObject(NOTES_ARCHIVE_OBJECT, noteTransfer.exportZip()) }.getOrNull(),
                 CloudLogicalObject(RELAY_LIBRARY_OBJECT, backupService.createCloudRelayLibrary())
             )
             carried = emptyList()
@@ -622,8 +634,10 @@ class PhoneCloudSyncService(
             val priorPrivate = previous?.objects?.firstOrNull { it.name == PRIVATE_LIBRARY_OBJECT }
                 ?: return UploadOutcome(false, 0)
             val priorRelay = previous.objects.firstOrNull { it.name == RELAY_LIBRARY_OBJECT }
-            logicalObjects = listOf(
-                CloudLogicalObject(RSS_STATE_OBJECT, backupService.createCloudRssState())
+            logicalObjects = listOfNotNull(
+                CloudLogicalObject(RSS_STATE_OBJECT, backupService.createCloudRssState()),
+                CloudLogicalObject(NOTES_STATE_OBJECT, NoteCloudStateCodec.encode(noteRepository.allNotes())),
+                runCatching { CloudLogicalObject(NOTES_ARCHIVE_OBJECT, noteTransfer.exportZip()) }.getOrNull()
             )
             carried = listOfNotNull(priorPrivate, priorRelay)
         }
@@ -689,7 +703,7 @@ class PhoneCloudSyncService(
         settings.markApplied(deviceId, encrypted.manifest.deviceSequence, full = false)
         settings.markUploaded(contentHash, parentHeads, full = fullTransfer)
         if (fullTransfer) {
-            val stateObjects = logicalObjects.filter { it.name == RSS_STATE_OBJECT }
+            val stateObjects = logicalObjects.filter { it.name == RSS_STATE_OBJECT || it.name == NOTES_STATE_OBJECT || it.name == NOTES_ARCHIVE_OBJECT }
             val bodyObjects = encrypted.manifest.objects.filter {
                 it.name == PRIVATE_LIBRARY_OBJECT || it.name == RELAY_LIBRARY_OBJECT
             }
@@ -806,6 +820,8 @@ class PhoneCloudSyncService(
     private companion object {
         private const val PRIVATE_LIBRARY_OBJECT = "private-library.wrss"
         private const val RSS_STATE_OBJECT = "rss-state.json"
+        private const val NOTES_STATE_OBJECT = "notes-state.json"
+        private const val NOTES_ARCHIVE_OBJECT = "notes-assets.zip"
         private const val RELAY_LIBRARY_OBJECT = "library-sync.json"
     }
 }

@@ -10,6 +10,11 @@ import com.lightningstudio.watchrss.phone.data.reader.ReaderDeletionEntity
 import com.lightningstudio.watchrss.phone.data.reader.ReaderFontAssetEntity
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetDao
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetEntity
+import com.lightningstudio.watchrss.phone.data.note.NoteAssetEntity
+import com.lightningstudio.watchrss.phone.data.note.NoteConflictEntity
+import com.lightningstudio.watchrss.phone.data.note.NoteDao
+import com.lightningstudio.watchrss.phone.data.note.NoteEntity
+import com.lightningstudio.watchrss.phone.data.note.NoteFolderEntity
 
 @Database(
     entities = [
@@ -22,10 +27,14 @@ import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetEntity
         ReaderFontAssetEntity::class,
         ReaderBackgroundAssetEntity::class,
         ReaderDeletionEntity::class,
+        NoteFolderEntity::class,
+        NoteEntity::class,
+        NoteAssetEntity::class,
+        NoteConflictEntity::class,
         AppMetaEntity::class,
         PhoneLlmTokenUsageEntity::class
     ],
-    version = 13,
+    version = 14,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
@@ -35,6 +44,7 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
     abstract fun syncChangeLogDao(): SyncChangeLogDao
     abstract fun syncPeerStateDao(): SyncPeerStateDao
     abstract fun readerPresetDao(): ReaderPresetDao
+    abstract fun noteDao(): NoteDao
     abstract fun appMetaDao(): AppMetaDao
     abstract fun llmTokenUsageDao(): PhoneLlmTokenUsageDao
 
@@ -241,7 +251,27 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
                 database.createReaderPresetTables()
             }
         }
+
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.createNoteTables()
+            }
+        }
     }
+}
+
+private fun SupportSQLiteDatabase.createNoteTables() {
+    execSQL("""CREATE TABLE IF NOT EXISTS note_folders (folderId TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, sortOrder INTEGER NOT NULL, updatedAt INTEGER NOT NULL, modifiedBy TEXT NOT NULL, deleted INTEGER NOT NULL, deletedAt INTEGER NOT NULL)""")
+    execSQL("CREATE INDEX IF NOT EXISTS index_note_folders_deleted_sortOrder ON note_folders(deleted, sortOrder)")
+    execSQL("""CREATE TABLE IF NOT EXISTS notes (noteId TEXT NOT NULL PRIMARY KEY, folderId TEXT, title TEXT NOT NULL, markdown TEXT NOT NULL, plainText TEXT NOT NULL, contentHash TEXT NOT NULL, baseContentHash TEXT NOT NULL, baseMarkdown TEXT NOT NULL, pinned INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, modifiedBy TEXT NOT NULL, deleted INTEGER NOT NULL, deletedAt INTEGER NOT NULL)""")
+    execSQL("CREATE INDEX IF NOT EXISTS index_notes_folderId_deleted_pinned_updatedAt ON notes(folderId, deleted, pinned, updatedAt)")
+    execSQL("CREATE INDEX IF NOT EXISTS index_notes_deleted_updatedAt ON notes(deleted, updatedAt)")
+    execSQL("CREATE INDEX IF NOT EXISTS index_notes_contentHash ON notes(contentHash)")
+    execSQL("""CREATE TABLE IF NOT EXISTS note_assets (assetId TEXT NOT NULL PRIMARY KEY, noteId TEXT NOT NULL, sha256 TEXT NOT NULL, displayName TEXT NOT NULL, mimeType TEXT NOT NULL, byteCount INTEGER NOT NULL, storageKey TEXT NOT NULL, isOriginal INTEGER NOT NULL, createdAt INTEGER NOT NULL, deleted INTEGER NOT NULL, deletedAt INTEGER NOT NULL)""")
+    execSQL("CREATE INDEX IF NOT EXISTS index_note_assets_noteId ON note_assets(noteId)")
+    execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_note_assets_sha256 ON note_assets(sha256)")
+    execSQL("""CREATE TABLE IF NOT EXISTS note_conflicts (conflictId TEXT NOT NULL PRIMARY KEY, noteId TEXT NOT NULL, baseMarkdown TEXT NOT NULL, localMarkdown TEXT NOT NULL, remoteMarkdown TEXT NOT NULL, remoteDeviceId TEXT NOT NULL, createdAt INTEGER NOT NULL, resolvedAt INTEGER NOT NULL)""")
+    execSQL("CREATE INDEX IF NOT EXISTS index_note_conflicts_noteId_resolvedAt ON note_conflicts(noteId, resolvedAt)")
 }
 
 private fun SupportSQLiteDatabase.createReaderPresetTables() {

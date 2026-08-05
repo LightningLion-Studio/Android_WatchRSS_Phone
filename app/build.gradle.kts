@@ -145,6 +145,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.animation:animation")
     implementation("androidx.compose.animation:animation-core")
+    implementation("com.mohamedrejeb.richeditor:richeditor-compose:1.0.0-rc10")
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
@@ -162,6 +163,7 @@ dependencies {
     implementation(libs.androidx.media3.transformer)
     implementation(libs.androidx.credentials)
     implementation(libs.androidx.credentials.play.services.auth)
+    implementation("androidx.documentfile:documentfile:1.0.1")
     ksp(libs.androidx.room.compiler)
     // Backdrop source copied locally — see app/src/main/java/com/kyant/backdrop
 

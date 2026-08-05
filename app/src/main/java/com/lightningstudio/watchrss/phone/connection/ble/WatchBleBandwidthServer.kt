@@ -25,7 +25,9 @@ import com.lightningstudio.watchrss.phone.connection.bili.BiliPlaybackRequest
 import com.lightningstudio.watchrss.phone.connection.bili.BiliRealtimeTranscoder
 import com.lightningstudio.watchrss.phone.connection.bili.PhoneBiliGateway
 import com.lightningstudio.watchrss.phone.connection.bili.failureResponse
+import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import com.lightningstudio.watchrss.phone.connection.bili.successResponse
+import com.lightningstudio.watchrss.phone.connection.bluetooth.NoteSyncPayload
 import com.lightningstudio.watchrss.phone.connection.ip.IpSyncProtocol
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -462,7 +464,9 @@ internal class WatchBleBandwidthServer(
         val response = runCatching {
             val request = BiliBaseStationRequest.decode(bytes)
             requestId = request.id
-            if (request.method == "video.start") {
+            if (request.method == "notes.sync") {
+                handleNotesSync(request)
+            } else if (request.method == "video.start") {
                 startRealtimeVideo(
                     BiliPlaybackRequest(
                         url = request.params.getString("url"),
@@ -490,6 +494,32 @@ internal class WatchBleBandwidthServer(
                 BleBandwidthProtocol.PAYLOAD_KIND_RPC
             )
         }
+    }
+
+    /**
+     * The RTOS watch talks to this long-lived GATT server through the existing
+     * chunked RPC transport.  A note sync stays below its 64 KiB request cap by
+     * transferring one note envelope per call on the watch side; the response
+     * is the phone's current full state and is likewise framed/chunked by the
+     * server's notification sender.
+     */
+    private suspend fun handleNotesSync(request: BiliBaseStationRequest): ByteArray {
+        val payload = request.params.optJSONObject("payload")
+            ?: throw IllegalArgumentException("缺少笔记同步载荷")
+        val application = appContext as? PhoneCompanionApplication
+            ?: throw IllegalStateException("笔记同步需要 PhoneCompanionApplication")
+        val repository = application.container.noteRepository
+        val remoteDeviceId = payload.optString("deviceId").ifBlank { "rtos-watch" }
+        NoteSyncPayload.fromJson(payload).forEach { remote ->
+            repository.applyRemote(remote, remoteDeviceId)
+        }
+        return successResponse(
+            request.id,
+            org.json.JSONObject().put(
+                "payload",
+                NoteSyncPayload.manifest(application.container.syncDeviceId, repository.allNotes())
+            )
+        )
     }
 
     private fun startRealtimeVideo(request: BiliPlaybackRequest) {

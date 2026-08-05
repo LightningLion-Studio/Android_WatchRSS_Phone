@@ -10,6 +10,8 @@ import com.lightningstudio.watchrss.phone.data.ai.PhoneAiSettingsStore
 import com.lightningstudio.watchrss.phone.data.ai.PhoneAiSummaryService
 import com.lightningstudio.watchrss.phone.account.PhoneInstallationIdentity
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncClient
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneNoteBluetoothSyncManager
 import com.lightningstudio.watchrss.phone.connection.guided.PhoneGuidedSessionManager
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudChangeScheduler
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient
@@ -21,6 +23,7 @@ import com.lightningstudio.watchrss.phone.data.importer.AndroidWebArticleImporte
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
+import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import com.lightningstudio.watchrss.phone.data.telemetry.OpenPanelAnalytics
@@ -54,7 +57,8 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_9_10,
             PhoneCompanionDatabase.MIGRATION_10_11,
             PhoneCompanionDatabase.MIGRATION_11_12,
-            PhoneCompanionDatabase.MIGRATION_12_13
+            PhoneCompanionDatabase.MIGRATION_12_13,
+            PhoneCompanionDatabase.MIGRATION_13_14
         )
             .build()
     }
@@ -62,6 +66,10 @@ class PhoneCompanionContainer(context: Context) {
     private val deviceIdentity: PhoneDeviceIdentity by lazy {
         PhoneDeviceIdentity(appContext)
     }
+
+    /** Stable peer id shared by RFCOMM and the RTOS BLE note transports. */
+    val syncDeviceId: String
+        get() = deviceIdentity.deviceId
 
     private val installationIdentity: PhoneInstallationIdentity by lazy {
         PhoneInstallationIdentity(appContext)
@@ -145,6 +153,10 @@ class PhoneCompanionContainer(context: Context) {
         )
     }
 
+    val noteRepository: NoteRepository by lazy {
+        NoteRepository(database.noteDao(), deviceIdentity.deviceId)
+    }
+
     val backupService: WatchRssBackupService by lazy {
         WatchRssBackupService(
             context = appContext,
@@ -162,6 +174,7 @@ class PhoneCompanionContainer(context: Context) {
             accountRepository = accountRepository,
             backupService = backupService,
             repository = repository,
+            noteRepository = noteRepository,
             deviceId = deviceIdentity.deviceId,
             client = PhoneCloudClient(accountEnvironment),
             keyManager = com.lightningstudio.watchrss.phone.cloud.CloudKeyManager(
@@ -205,6 +218,14 @@ class PhoneCompanionContainer(context: Context) {
             context = appContext,
             repository = repository
         )
+    }
+
+    private val bluetoothSyncClient: PhoneBluetoothSyncClient by lazy {
+        PhoneBluetoothSyncClient(appContext, bluetoothDebugLog)
+    }
+
+    val noteBluetoothSyncManager: PhoneNoteBluetoothSyncManager by lazy {
+        PhoneNoteBluetoothSyncManager(noteRepository, bluetoothSyncClient, deviceIdentity.deviceId)
     }
 
     val bluetoothSyncManager: PhoneBluetoothSyncManager by lazy {

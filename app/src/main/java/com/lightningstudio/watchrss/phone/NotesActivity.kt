@@ -204,9 +204,15 @@ private fun NoteEditor(
     Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         OutlinedTextField(title, { title = it }, label = { Text("标题") }, modifier = Modifier.fillMaxWidth())
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            TextButton(onClick = { editor.addTextAfterSelection("# ") }) { Text("H1") }
+            TextButton(onClick = { editor.addTextAfterSelection("## ") }) { Text("H2") }
+            TextButton(onClick = { editor.addTextAfterSelection("### ") }) { Text("H3") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             TextButton(onClick = { editor.toggleSpanStyle(SpanStyle(fontWeight = FontWeight.Bold)) }) { Text("粗体") }
             TextButton(onClick = { editor.toggleSpanStyle(SpanStyle(fontStyle = FontStyle.Italic)) }) { Text("斜体") }
-            TextButton(onClick = editor::toggleUnorderedList) { Text("列表") }
+            TextButton(onClick = editor::toggleOrderedList) { Text("有序列表") }
+            TextButton(onClick = editor::toggleUnorderedList) { Text("无序列表") }
             TextButton(onClick = editor::toggleCodeSpan) { Text("代码") }
             if (note != null) TextButton(onClick = { imagePicker.launch("image/*") }) { Text("图片") }
         }

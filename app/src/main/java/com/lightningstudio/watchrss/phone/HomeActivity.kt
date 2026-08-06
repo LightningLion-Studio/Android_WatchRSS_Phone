@@ -15,6 +15,16 @@ import androidx.activity.viewModels
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -28,6 +38,10 @@ import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModel
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModelFactory
 import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptUi
+import com.lightningstudio.watchrss.phone.update.AppUpdateDownloader
+import com.lightningstudio.watchrss.phone.update.AppUpdateState
+import com.lightningstudio.watchrss.phone.update.PhoneAnnouncement
+import com.lightningstudio.watchrss.phone.update.PhoneAnnouncementRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -59,6 +73,9 @@ class HomeActivity : ComponentActivity() {
     }
 
     private var pendingBluetoothAction: (() -> Unit)? = null
+    private val announcementRepository by lazy { PhoneAnnouncementRepository(this) }
+    private val appUpdateDownloader by lazy { AppUpdateDownloader(this) }
+    private val pendingAnnouncement = mutableStateOf<PhoneAnnouncement?>(null)
     private var homeScreenStartedAt: Long = 0L
 
     private val bluetoothPermissionsLauncher =
@@ -157,6 +174,7 @@ class HomeActivity : ComponentActivity() {
             WatchRssPhoneTheme {
                 ProvideReaderPreset(container.readerPresetRepository) {
                     val state by viewModel.uiState.collectAsState()
+                    val updateState by appUpdateDownloader.state.collectAsState()
 
                     LaunchedEffect(Unit) {
                         viewModel.toastEvent.collect { msg ->
@@ -233,6 +251,70 @@ class HomeActivity : ComponentActivity() {
                     onDismissMessage = viewModel::clearMessage,
                         onImportFile = ::selectLocalFile
                     )
+                    pendingAnnouncement.value?.let { announcement ->
+                        val downloading = updateState is AppUpdateState.Downloading
+                        AlertDialog(
+                            onDismissRequest = {
+                                if (!announcement.forceUpdate && !downloading) {
+                                    announcementRepository.dismiss(announcement.version)
+                                    pendingAnnouncement.value = null
+                                }
+                            },
+                            title = {
+                                Text((if (announcement.forceUpdate) "需要更新 " else "发现新版本 ") + announcement.version)
+                            },
+                            text = {
+                                Column {
+                                    Text(formatChangelog(announcement.changelogMarkdown))
+                                    when (val download = updateState) {
+                                        is AppUpdateState.Downloading -> {
+                                            Spacer(Modifier.height(12.dp))
+                                            val total = download.totalBytes
+                                            if (total != null) {
+                                                LinearProgressIndicator(
+                                                    progress = { (download.bytesRead.toFloat() / total).coerceIn(0f, 1f) }
+                                                )
+                                                Text("${download.bytesRead * 100 / total}%")
+                                            } else {
+                                                LinearProgressIndicator()
+                                                Text("已下载 ${download.bytesRead / 1024} KB")
+                                            }
+                                        }
+                                        is AppUpdateState.Failed -> Text(download.message)
+                                        is AppUpdateState.Ready -> {
+                                            Text("下载完成，正在打开系统安装器")
+                                            LaunchedEffect(download.apk) {
+                                                appUpdateDownloader.launchInstaller(download.apk)
+                                            }
+                                        }
+                                        AppUpdateState.Idle -> Unit
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                TextButton(
+                                    enabled = !downloading,
+                                    onClick = {
+                                        appUpdateDownloader.resetFailure()
+                                        lifecycleScope.launch {
+                                            appUpdateDownloader.download(
+                                                announcement.version,
+                                                announcement.downloadUrl
+                                            )
+                                        }
+                                    }
+                                ) { Text(if (downloading) "下载中" else "下载并安装") }
+                            },
+                            dismissButton = if (announcement.forceUpdate || downloading) null else {
+                                {
+                                    TextButton(onClick = {
+                                        announcementRepository.dismiss(announcement.version)
+                                        pendingAnnouncement.value = null
+                                    }) { Text("稍后") }
+                                }
+                            }
+                        )
+                    }
                     state.txtUpdatePrompt?.let { prompt ->
                         TxtUpdateDialog(
                             prompt = prompt,
@@ -245,6 +327,9 @@ class HomeActivity : ComponentActivity() {
             }
         }
         handleInboundIntent(intent)
+        lifecycleScope.launch {
+            pendingAnnouncement.value = announcementRepository.check()
+        }
         ensureBluetoothPermissions {
             (application as PhoneCompanionApplication).startWatchBaseStationIfPermitted()
         }
@@ -252,9 +337,21 @@ class HomeActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        (appUpdateDownloader.state.value as? AppUpdateState.Ready)?.let { ready ->
+            if (packageManager.canRequestPackageInstalls()) {
+                appUpdateDownloader.launchInstaller(ready.apk)
+            }
+        }
         homeScreenStartedAt = SystemClock.elapsedRealtime()
         (application as PhoneCompanionApplication).container.usageTelemetry.recordScreenOpen("phone_home")
     }
+
+    private fun formatChangelog(markdown: String): String = markdown
+        .replace(Regex("(?m)^#{1,6}\\s*"), "")
+        .replace(Regex("\\*\\*([^*]+)\\*\\*"), "$1")
+        .replace(Regex("`([^`]+)`"), "$1")
+        .replace(Regex("\\[([^]]+)]\\([^)]+\\)"), "$1")
+        .trim()
 
     override fun onPause() {
         super.onPause()

@@ -121,8 +121,9 @@ class PhoneAccountRepository(
     }
 
     suspend fun startPasskeyAuthentication(
+        phone: String,
         transactionId: String? = null
-    ): PasskeyOptions = accountClient.startPasskeyAuthentication(transactionId)
+    ): PasskeyOptions = accountClient.startPasskeyAuthentication(phone, transactionId)
 
     suspend fun finishPasskeyAuthentication(
         challengeId: String,

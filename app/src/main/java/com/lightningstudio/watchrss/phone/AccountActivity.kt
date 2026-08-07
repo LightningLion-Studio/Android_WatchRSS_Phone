@@ -192,7 +192,7 @@ internal fun AccountScreen(
     rssSources: List<com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity>,
     usageTelemetry: PhoneUsageTelemetry,
     onBack: () -> Unit,
-    loginWithPasskey: suspend (String?) -> LoginProgress,
+    loginWithPasskey: suspend (String, String?) -> LoginProgress,
     createPasskey: suspend () -> Unit,
     runAction: (suspend () -> Unit) -> Unit,
     leadingPane: (@Composable () -> Unit)? = null
@@ -296,15 +296,11 @@ internal fun AccountScreen(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                if (loginMethod == LoginMethod.PASSKEY && loginProgress == null) {
-                    "选择保存在本机或其他设备上的通行密钥继续。"
-                } else {
-                    "输入手机号以继续。"
-                },
+                "输入手机号以继续。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            if (loginProgress == null && loginMethod != LoginMethod.PASSKEY) {
+            if (loginProgress == null) {
                 OutlinedTextField(
                     value = phone,
                     onValueChange = {
@@ -510,7 +506,8 @@ internal fun AccountScreen(
                                     busy = true
                                     error = null
                                     runCatching {
-                                        loginWithPasskey(loginProgress?.transactionId)
+                                        val progress = loginProgress ?: accountRepository.startLogin(phone)
+                                        loginWithPasskey(phone, progress.transactionId)
                                     }.onSuccess(::applyLoginProgress)
                                         .onFailure {
                                             Log.w(ACCOUNT_LOG_TAG, "Passkey login failed", it)
@@ -519,7 +516,7 @@ internal fun AccountScreen(
                                     busy = false
                                 }
                             },
-                            enabled = !busy,
+                            enabled = !busy && (phone.isNotBlank() || loginProgress != null),
                             modifier = Modifier.weight(1f)
                         ) { Text("继续") }
                     }

@@ -38,8 +38,8 @@ class PhonePasskeyCoordinator(
         )
     }
 
-    suspend fun login(transactionId: String?): LoginProgress {
-        val options = accountRepository.startPasskeyAuthentication(transactionId)
+    suspend fun login(phone: String, transactionId: String?): LoginProgress {
+        val options = accountRepository.startPasskeyAuthentication(phone, transactionId)
         val request = GetCredentialRequest.Builder()
             .addCredentialOption(GetPublicKeyCredentialOption(options.requestJson))
             .build()

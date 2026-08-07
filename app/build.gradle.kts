@@ -25,10 +25,21 @@ fun productionSetting(name: String): String =
     localProperties.getProperty(name)
         ?: providers.gradleProperty(name).orNull
         ?: providers.environmentVariable(name).orNull
+        ?: if (name == "WATCHRSS_APP_ACCESS_PUBLIC_KEY") {
+            rootProject.file("config/app_access_public_key.pem")
+                .takeIf { it.isFile }
+                ?.readText()
+                ?.trim()
+        } else {
+            null
+        }
         ?: ""
 
 fun String.asBuildConfigString(): String =
-    "\"${replace("\\", "\\\\").replace("\"", "\\\"")}\""
+    "\"${replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")}\""
 
 android {
     namespace = "com.lightningstudio.watchrss.phone"

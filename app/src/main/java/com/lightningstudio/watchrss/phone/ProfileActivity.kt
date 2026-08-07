@@ -31,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.SupportAgent
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ElevatedCard
@@ -88,6 +89,9 @@ class ProfileActivity : ComponentActivity() {
                     },
                     onSettingsClick = {
                         startActivity(SettingsActivity.createIntent(this@ProfileActivity))
+                    },
+                    onManageDataClick = {
+                        startActivity(DataManagementActivity.createIntent(this@ProfileActivity))
                     },
                     onAboutClick = {
                         startActivity(Intent(this@ProfileActivity, AboutActivity::class.java))
@@ -212,6 +216,7 @@ private fun ProfileScreen(
     onBack: () -> Unit,
     onAccountClick: () -> Unit,
     onSettingsClick: () -> Unit,
+    onManageDataClick: () -> Unit,
     onAboutClick: () -> Unit,
     onContactDeveloperClick: () -> Unit,
     accountContent: @Composable (
@@ -240,6 +245,7 @@ private fun ProfileScreen(
                     onBack = onBack,
                     onAccountClick = { onDetailSelected(ProfileDetailPage.ACCOUNT) },
                     onSettingsClick = { onDetailSelected(ProfileDetailPage.SETTINGS) },
+                    onManageDataClick = onManageDataClick,
                     onAboutClick = { onDetailSelected(ProfileDetailPage.ABOUT) },
                     onContactDeveloperClick = {
                         onDetailSelected(ProfileDetailPage.CONTACT)
@@ -289,6 +295,7 @@ private fun ProfileScreen(
                 onBack = onBack,
                 onAccountClick = onAccountClick,
                 onSettingsClick = onSettingsClick,
+                onManageDataClick = onManageDataClick,
                 onAboutClick = onAboutClick,
                 onContactDeveloperClick = onContactDeveloperClick
             )
@@ -304,6 +311,7 @@ private fun ProfileMasterPane(
     onBack: () -> Unit,
     onAccountClick: () -> Unit,
     onSettingsClick: () -> Unit,
+    onManageDataClick: () -> Unit,
     onAboutClick: () -> Unit,
     onContactDeveloperClick: () -> Unit
 ) {
@@ -342,6 +350,7 @@ private fun ProfileMasterPane(
                 ProfileNavigation(
                     windowInfo = windowInfo,
                     onSettingsClick = onSettingsClick,
+                    onManageDataClick = onManageDataClick,
                     onAboutClick = onAboutClick,
                     onContactDeveloperClick = onContactDeveloperClick
                 )
@@ -440,6 +449,7 @@ private fun ProfileIdentityCard(
 private fun ProfileNavigation(
     windowInfo: AdaptiveWindowInfo,
     onSettingsClick: () -> Unit,
+    onManageDataClick: () -> Unit,
     onAboutClick: () -> Unit,
     onContactDeveloperClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -458,6 +468,12 @@ private fun ProfileNavigation(
             },
             icon = Icons.Default.Settings,
             onClick = onSettingsClick
+        )
+        ProfileEntry(
+            title = "管理资料",
+            supportingText = "导出、恢复或删除本机资料库",
+            icon = Icons.Default.Storage,
+            onClick = onManageDataClick
         )
         ProfileGroupTitle("支持与信息")
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {

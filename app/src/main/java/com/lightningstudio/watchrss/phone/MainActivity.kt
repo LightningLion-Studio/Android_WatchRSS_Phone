@@ -128,10 +128,10 @@ class MainActivity : ComponentActivity() {
                 is AppAccessState.Authorized -> Text(if (state.offline) "正在使用离线授权…" else "授权有效")
             }
             if (state !is AppAccessState.Authorized && state !is AppAccessState.Loading) {
-                Row(Modifier.padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { startActivity(Intent(this@MainActivity, DataManagementActivity::class.java)) }) { Text("导出/删除资料") }
-                    OutlinedButton(onClick = { startActivity(Intent(this@MainActivity, ContactDeveloperActivity::class.java)) }) { Text("联系客服") }
-                }
+                OutlinedButton(
+                    onClick = { startActivity(Intent(this@MainActivity, ContactDeveloperActivity::class.java)) },
+                    modifier = Modifier.padding(top = 20.dp)
+                ) { Text("联系客服") }
             }
         }
     }

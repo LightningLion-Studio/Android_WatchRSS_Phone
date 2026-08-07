@@ -30,6 +30,39 @@ class PhoneAccountRepository(
         }
     }
 
+    suspend fun loginWithPassword(phone: String, password: String): PasswordLoginResult {
+        return when (val result = accountClient.loginWithPassword(phone, password)) {
+            is PasswordLoginResult.Complete -> result.also { sessionStore.save(it.session) }
+            is PasswordLoginResult.TotpRequired -> result
+        }
+    }
+
+    suspend fun completePasswordTotp(
+        pending: PendingPasswordLogin,
+        code: String
+    ): PhoneAccountSession = accountClient.completePasswordTotp(pending, code)
+        .also { sessionStore.save(it) }
+
+    suspend fun updatePassword(password: String) {
+        accountClient.updatePassword(requireSession(), password)
+    }
+
+    suspend fun listTotpFactors(): List<TotpFactor> =
+        accountClient.listTotpFactors(requireSession())
+
+    suspend fun beginTotpEnrollment(): TotpEnrollment =
+        accountClient.beginTotpEnrollment(requireSession())
+
+    suspend fun confirmTotpEnrollment(enrollment: TotpEnrollment, code: String) {
+        accountClient.confirmTotpEnrollment(requireSession(), enrollment, code)
+            .also { sessionStore.save(it) }
+    }
+
+    suspend fun disableTotp(factor: TotpFactor, code: String) {
+        accountClient.disableTotp(requireSession(), factor, code)
+            .also { sessionStore.save(it) }
+    }
+
     suspend fun startPasskeyRegistration(): PasskeyOptions {
         val session = session.value ?: error("请先使用手机号验证码登录")
         require(!session.isExpired) { "登录已过期，请重新登录" }
@@ -76,6 +109,17 @@ class PhoneAccountRepository(
 
     suspend fun logout() {
         sessionStore.clear()
+    }
+
+    suspend fun consumeActivationProof(expectedProof: String) {
+        val current = session.value ?: return
+        if (expectedProof.isBlank() || current.activationProof != expectedProof) return
+        sessionStore.save(
+            current.copy(
+                activationProof = "",
+                updatedAtMillis = System.currentTimeMillis()
+            )
+        )
     }
 
     suspend fun appAccessStatus(): AppAccessSummary =

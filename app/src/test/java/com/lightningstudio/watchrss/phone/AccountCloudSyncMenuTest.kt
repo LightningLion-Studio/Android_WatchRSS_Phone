@@ -6,6 +6,12 @@ import org.junit.Test
 
 class AccountCloudSyncMenuTest {
     @Test
+    fun `cloud sync entry is hidden from release builds`() {
+        assertEquals(false, shouldShowCloudSyncEntry(isDebugBuild = false))
+        assertEquals(true, shouldShowCloudSyncEntry(isDebugBuild = true))
+    }
+
+    @Test
     fun `enabled account is summarized without exposing all settings`() {
         assertEquals(
             "已启用 · 端到端加密",

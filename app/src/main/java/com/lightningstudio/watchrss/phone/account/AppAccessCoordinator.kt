@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.security.KeyFactory
 import java.security.Signature
@@ -21,6 +23,7 @@ class AppAccessCoordinator(
     private val scope: CoroutineScope,
     private val store: AppAccessStore = AppAccessStore(context, AccountEnvironment.active(context).storageSuffix)
 ) {
+    private val operationMutex = Mutex()
     private val _state = MutableStateFlow<AppAccessState>(AppAccessState.Loading)
     val state: StateFlow<AppAccessState> = _state.asStateFlow()
 
@@ -29,7 +32,9 @@ class AppAccessCoordinator(
 
     fun initialize() { scope.launch(Dispatchers.IO) { reconcile() } }
 
-    suspend fun reconcile() {
+    suspend fun reconcile() = operationMutex.withLock { reconcileLocked() }
+
+    private suspend fun reconcileLocked() {
         val session = accountRepository.session.value
         if (session == null || session.isExpired) {
             _state.value = AppAccessState.LoggedOut
@@ -38,45 +43,56 @@ class AppAccessCoordinator(
         store.loadPendingOrder()?.let { order ->
             if (order.status == "pending") {
                 _state.value = AppAccessState.PaymentPending(order)
-                refreshPayment(order.orderId)
+                refreshPaymentLocked(order.orderId)
                 return
             }
         }
         val cached = store.load()
         val cachedValid = cached != null && LeaseVerifier.verify(cached.lease, identity.deviceId)
         if (cachedValid) _state.value = AppAccessState.Authorized(cached!!.access, offline = true)
-        runCatching {
-            if (cachedValid) {
+        try {
+            val refreshed = if (cachedValid) {
                 accountRepository.refreshAppAccess(cached!!).also(store::save)
             } else null
-        }.onSuccess { refreshed ->
             if (refreshed != null) _state.value = AppAccessState.Authorized(refreshed.access, offline = false)
-            else loadServerStatus()
-        }.onFailure { error ->
+            else loadServerStatusLocked()
+        } catch (error: Throwable) {
             val http = error as? PhoneAccountHttpException
             if (http?.statusCode == 403) {
                 store.clear()
-                scope.launch { loadServerStatus() }
+                loadServerStatusLocked()
             } else if (!cachedValid) {
                 _state.value = AppAccessState.ValidationError(error.message ?: "授权校验失败")
             }
         }
     }
 
-    suspend fun claim() {
-        runCatching { accountRepository.claimAppAccess(store.claimIdempotencyKey()) }
-            .onSuccess { authorization -> store.save(authorization); store.clearClaimIdempotencyKey(); _state.value = AppAccessState.Authorized(authorization.access, false) }
-            .onFailure { error ->
-                val status = runCatching { accountRepository.appAccessStatus() }.getOrDefault(AppAccessSummary())
-                _state.value = when ((error as? PhoneAccountHttpException)?.statusCode) {
-                    402 -> AppAccessState.PurchaseRequired(status)
-                    409 -> AppAccessState.ReauthenticationRequired(status)
-                    else -> AppAccessState.ValidationError(error.message ?: "设备授权失败")
-                }
+    suspend fun claim() = operationMutex.withLock { claimLocked() }
+
+    private suspend fun claimLocked() {
+        val activationProof = accountRepository.session.value?.activationProof.orEmpty()
+        try {
+            val authorization = accountRepository.claimAppAccess(store.claimIdempotencyKey())
+            store.save(authorization)
+            store.clearClaimIdempotencyKey()
+            accountRepository.consumeActivationProof(activationProof)
+            _state.value = AppAccessState.Authorized(authorization.access, false)
+        } catch (error: Throwable) {
+            val cached = store.load()?.takeIf { LeaseVerifier.verify(it.lease, identity.deviceId) }
+            if (cached != null) {
+                _state.value = AppAccessState.Authorized(cached.access, offline = true)
+                return
             }
+            val status = runCatching { accountRepository.appAccessStatus() }.getOrDefault(AppAccessSummary())
+            _state.value = when ((error as? PhoneAccountHttpException)?.statusCode) {
+                402 -> AppAccessState.PurchaseRequired(status)
+                409 -> AppAccessState.ReauthenticationRequired(status)
+                else -> AppAccessState.ValidationError(error.message ?: "设备授权失败")
+            }
+        }
     }
 
-    suspend fun startPayment(): AppPaymentOrder {
+    suspend fun startPayment(): AppPaymentOrder = operationMutex.withLock {
         val order = accountRepository.createPaymentOrder(store.orderIdempotencyKey())
         store.clearOrderIdempotencyKey()
         store.savePendingOrder(order)
@@ -84,12 +100,16 @@ class AppAccessCoordinator(
         return order
     }
 
-    suspend fun refreshPayment(orderId: String) {
+    suspend fun refreshPayment(orderId: String) = operationMutex.withLock {
+        refreshPaymentLocked(orderId)
+    }
+
+    private suspend fun refreshPaymentLocked(orderId: String) {
         runCatching { accountRepository.paymentOrder(orderId) }.onSuccess { order ->
             when (order.status) {
                 "paid" -> {
                     store.savePendingOrder(null)
-                    claim()
+                    claimLocked()
                 }
                 "pending" -> {
                     store.savePendingOrder(order)
@@ -97,13 +117,13 @@ class AppAccessCoordinator(
                 }
                 else -> {
                     store.savePendingOrder(null)
-                    loadServerStatus()
+                    loadServerStatusLocked()
                 }
             }
         }
     }
 
-    suspend fun logout(): Boolean {
+    suspend fun logout(): Boolean = operationMutex.withLock {
         val current = store.load()
         val released = if (current != null) runCatching { accountRepository.releaseAppAccess(current) }.getOrDefault(false) else true
         if (!released && current != null) {
@@ -121,15 +141,15 @@ class AppAccessCoordinator(
      * Keep local content and the revoked authorization record intact; only forget the account
      * session so AccountActivity presents the real login flow.
      */
-    suspend fun beginReauthentication() {
+    suspend fun beginReauthentication() = operationMutex.withLock {
         accountRepository.logout()
         _state.value = AppAccessState.LoggedOut
     }
 
-    private suspend fun loadServerStatus() {
+    private suspend fun loadServerStatusLocked() {
         runCatching { accountRepository.appAccessStatus() }.onSuccess { summary ->
             if (summary.purchaseCount > 0 && accountRepository.session.value?.activationProof?.isNotBlank() == true) {
-                claim()
+                claimLocked()
                 return@onSuccess
             }
             _state.value = when (summary.deviceStatus) {

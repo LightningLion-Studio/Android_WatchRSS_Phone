@@ -22,12 +22,16 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -36,6 +40,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -50,6 +56,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -62,19 +69,30 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.autofill.ContentType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.semantics.contentType
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.account.AccountLoginAction
 import com.lightningstudio.watchrss.phone.account.AppAccessState
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.account.PhonePasskeyCoordinator
+import com.lightningstudio.watchrss.phone.account.PasswordLoginResult
+import com.lightningstudio.watchrss.phone.account.PendingPasswordLogin
 import com.lightningstudio.watchrss.phone.account.RegisteredPasskey
+import com.lightningstudio.watchrss.phone.account.TotpEnrollment
+import com.lightningstudio.watchrss.phone.account.TotpFactor
 import com.lightningstudio.watchrss.phone.account.accountLoginErrorMessage
 import com.lightningstudio.watchrss.phone.cloud.CloudAccountPanel
 import com.lightningstudio.watchrss.phone.cloud.CloudMemberState
@@ -182,6 +200,10 @@ internal fun AccountScreen(
     var paneTransitionProgress by remember { mutableStateOf(1f) }
     var phone by remember { mutableStateOf("") }
     var otp by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
+    var passwordTotp by remember { mutableStateOf("") }
+    var pendingPasswordLogin by remember { mutableStateOf<PendingPasswordLogin?>(null) }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -197,6 +219,21 @@ internal fun AccountScreen(
     var deleteTarget by remember(session?.userId) {
         mutableStateOf<RegisteredPasskey?>(null)
     }
+    var totpFactors by remember(session?.userId) { mutableStateOf<List<TotpFactor>>(emptyList()) }
+    var totpLoading by remember(session?.userId) { mutableStateOf(session != null) }
+    var showPasswordDialog by remember { mutableStateOf(false) }
+    var newPassword by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
+    var newPasswordVisible by remember { mutableStateOf(false) }
+    var confirmPasswordVisible by remember { mutableStateOf(false) }
+    var passwordDialogError by remember { mutableStateOf<String?>(null) }
+    var totpEnrollment by remember { mutableStateOf<TotpEnrollment?>(null) }
+    var enrollmentCode by remember { mutableStateOf("") }
+    var enrollmentError by remember { mutableStateOf<String?>(null) }
+    var disableTotpTarget by remember { mutableStateOf<TotpFactor?>(null) }
+    var disableTotpCode by remember { mutableStateOf("") }
+    var disableTotpError by remember { mutableStateOf<String?>(null) }
+    val canManageTotp = session?.accessToken?.startsWith("wrp_") == false
 
     LaunchedEffect(session?.userId) {
         if (session == null) {
@@ -209,6 +246,24 @@ internal fun AccountScreen(
         result.onSuccess { registeredPasskeys = it }
             .onFailure { error = it.message ?: "已有 Passkey 加载失败" }
         passkeysLoading = false
+    }
+
+    LaunchedEffect(session?.userId, canManageTotp) {
+        if (session == null) {
+            totpFactors = emptyList()
+            totpLoading = false
+            return@LaunchedEffect
+        }
+        if (!canManageTotp) {
+            totpFactors = emptyList()
+            totpLoading = false
+            return@LaunchedEffect
+        }
+        totpLoading = true
+        runCatching { accountRepository.listTotpFactors() }
+            .onSuccess { totpFactors = it }
+            .onFailure { error = it.message ?: "两步验证状态加载失败" }
+        totpLoading = false
     }
 
     val passkeyProbePhone = phoneForPasskeyProbe(phone)
@@ -244,8 +299,98 @@ internal fun AccountScreen(
                 singleLine = true,
                 enabled = !busy,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .semantics { contentType = ContentType.PhoneNumber }
             )
+            if (pendingPasswordLogin == null) {
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("密码") },
+                    singleLine = true,
+                    enabled = !busy,
+                    visualTransformation = if (passwordVisible) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                            Icon(
+                                imageVector = if (passwordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (passwordVisible) "隐藏密码" else "显示密码"
+                            )
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentType = ContentType.Password }
+                )
+                Button(
+                    onClick = {
+                        runAction {
+                            busy = true
+                            error = null
+                            runCatching { accountRepository.loginWithPassword(phone, password) }
+                                .onSuccess { result ->
+                                    when (result) {
+                                        is PasswordLoginResult.Complete -> {
+                                            message = "登录成功"
+                                            usageTelemetry.recordAccountSignedIn(result.session.userId)
+                                        }
+                                        is PasswordLoginResult.TotpRequired -> {
+                                            pendingPasswordLogin = result.pending
+                                            passwordTotp = ""
+                                            message = "请输入验证器中的 6 位动态验证码"
+                                        }
+                                    }
+                                }
+                                .onFailure { error = it.message ?: "密码登录失败" }
+                            busy = false
+                        }
+                    },
+                    enabled = !busy && phone.isNotBlank() && password.length >= 10,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("使用密码登录") }
+            } else {
+                OutlinedTextField(
+                    value = passwordTotp,
+                    onValueChange = { passwordTotp = it.filter(Char::isDigit).take(6) },
+                    label = { Text("动态验证码") },
+                    singleLine = true,
+                    enabled = !busy,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedButton(
+                        onClick = { pendingPasswordLogin = null; passwordTotp = "" },
+                        enabled = !busy,
+                        modifier = Modifier.weight(1f)
+                    ) { Text("返回") }
+                    Button(
+                        onClick = {
+                            val pending = pendingPasswordLogin ?: return@Button
+                            runAction {
+                                busy = true
+                                error = null
+                                runCatching { accountRepository.completePasswordTotp(pending, passwordTotp) }
+                                    .onSuccess { signedIn ->
+                                        pendingPasswordLogin = null
+                                        message = "登录成功"
+                                        usageTelemetry.recordAccountSignedIn(signedIn.userId)
+                                    }
+                                    .onFailure { error = it.message ?: "动态验证码无效" }
+                                busy = false
+                            }
+                        },
+                        enabled = !busy && passwordTotp.length == 6,
+                        modifier = Modifier.weight(1f)
+                    ) { Text("验证并登录") }
+                }
+            }
             AnimatedVisibility(
                 visible = passkeyLoginAvailable,
                 enter = fadeIn() + expandVertically(),
@@ -285,7 +430,7 @@ internal fun AccountScreen(
                     ) {
                         HorizontalDivider(modifier = Modifier.weight(1f))
                         Text(
-                            "或使用短信验证码",
+                            "或使用 Passkey / 短信验证码",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -424,14 +569,76 @@ internal fun AccountScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            CloudSyncEntryCard(
-                summary = cloudSyncMenuSummary(
-                    member = cloudSyncState.member,
-                    hasLocalKey = cloudSyncService.hasLocalAccountKey()
-                ),
-                enabled = !busy && appAccessState is AppAccessState.Authorized,
-                onClick = onCloudSyncClick
-            )
+            Text("密码与两步验证", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+            OutlinedButton(
+                onClick = {
+                    newPassword = ""
+                    confirmPassword = ""
+                    newPasswordVisible = false
+                    confirmPasswordVisible = false
+                    passwordDialogError = null
+                    showPasswordDialog = true
+                },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("设置或修改密码") }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("TOTP 两步验证", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        when {
+                            totpLoading -> "正在读取状态…"
+                            !canManageTotp -> "请先使用短信验证码或密码登录后管理"
+                            totpFactors.any { it.verified } -> "已开启 · 密码登录需要动态验证码"
+                            else -> "未开启"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = totpFactors.any { it.verified },
+                    enabled = !busy && !totpLoading && canManageTotp,
+                    onCheckedChange = { enabled ->
+                        if (enabled) {
+                            runAction {
+                                busy = true
+                                error = null
+                                enrollmentError = null
+                                runCatching { accountRepository.beginTotpEnrollment() }
+                                    .onSuccess { totpEnrollment = it; enrollmentCode = "" }
+                                    .onFailure { error = it.message ?: "无法开启两步验证" }
+                                busy = false
+                            }
+                        } else {
+                            disableTotpTarget = totpFactors.firstOrNull { it.verified }
+                            disableTotpCode = ""
+                            disableTotpError = null
+                        }
+                    }
+                )
+            }
+            if (totpFactors.any { it.verified }) {
+                Text(
+                    "恢复方式：短信验证码或 Passkey。关闭两步验证前需要当前动态验证码。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (shouldShowCloudSyncEntry(BuildConfig.DEBUG)) {
+                CloudSyncEntryCard(
+                    summary = cloudSyncMenuSummary(
+                        member = cloudSyncState.member,
+                        hasLocalKey = cloudSyncService.hasLocalAccountKey()
+                    ),
+                    enabled = !busy && appAccessState is AppAccessState.Authorized,
+                    onClick = onCloudSyncClick
+                )
+            }
             OutlinedButton(
                 onClick = {
                     runAction {
@@ -492,6 +699,189 @@ internal fun AccountScreen(
     BackHandler(enabled = true) {
         if (paneTransition != null) return@BackHandler
         if (page == AccountPage.CLOUD_SYNC) leaveCloudSync() else onBack()
+    }
+
+    if (showPasswordDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!busy) showPasswordDialog = false },
+            title = { Text("设置账号密码") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("使用至少 10 位的长密码；支持密码管理器生成和保存。密码不保存在应用中。")
+                    OutlinedTextField(
+                        value = newPassword,
+                        onValueChange = { newPassword = it.take(128) },
+                        label = { Text("新密码") },
+                        singleLine = true,
+                        isError = newPassword.isNotEmpty() && newPassword.length < 10,
+                        supportingText = {
+                            if (newPassword.isNotEmpty() && newPassword.length < 10) Text("还需 ${10 - newPassword.length} 位")
+                        },
+                        visualTransformation = if (newPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        trailingIcon = {
+                            IconButton(onClick = { newPasswordVisible = !newPasswordVisible }) {
+                                Icon(
+                                    imageVector = if (newPasswordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                    contentDescription = if (newPasswordVisible) "隐藏密码" else "显示密码"
+                                )
+                            }
+                        },
+                        modifier = Modifier.semantics { contentType = ContentType.NewPassword }
+                    )
+                    OutlinedTextField(
+                        value = confirmPassword,
+                        onValueChange = { confirmPassword = it.take(128) },
+                        label = { Text("确认密码") },
+                        singleLine = true,
+                        isError = confirmPassword.isNotEmpty() && confirmPassword != newPassword,
+                        supportingText = {
+                            if (confirmPassword.isNotEmpty() && confirmPassword != newPassword) Text("两次输入不一致")
+                        },
+                        visualTransformation = if (confirmPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        trailingIcon = {
+                            IconButton(onClick = { confirmPasswordVisible = !confirmPasswordVisible }) {
+                                Icon(
+                                    imageVector = if (confirmPasswordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                    contentDescription = if (confirmPasswordVisible) "隐藏密码" else "显示密码"
+                                )
+                            }
+                        },
+                        modifier = Modifier.semantics { contentType = ContentType.NewPassword }
+                    )
+                    passwordDialogError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        runAction {
+                            busy = true
+                            passwordDialogError = null
+                            runCatching { accountRepository.updatePassword(newPassword) }
+                                .onSuccess { showPasswordDialog = false; message = "密码已更新" }
+                                .onFailure { passwordDialogError = it.message ?: "密码更新失败" }
+                            busy = false
+                        }
+                    },
+                    enabled = !busy && newPassword.length >= 10 && newPassword == confirmPassword
+                ) { Text("保存") }
+            },
+            dismissButton = { TextButton(onClick = { showPasswordDialog = false }, enabled = !busy) { Text("取消") } }
+        )
+    }
+
+    totpEnrollment?.let { enrollment ->
+        AlertDialog(
+            onDismissRequest = { if (!busy) totpEnrollment = null },
+            title = { Text("开启 TOTP 两步验证") },
+            text = {
+                Column(
+                    modifier = Modifier.heightIn(max = 620.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text("1. 扫描二维码", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text("使用任意验证器应用扫描。动态验证码验证成功前，两步验证不会开启。")
+                    val qrCode = remember(enrollment.uri) {
+                        runCatching { generateQRCode(enrollment.uri, 512).asImageBitmap() }.getOrNull()
+                    }
+                    qrCode?.let {
+                        Image(
+                            bitmap = it,
+                            contentDescription = "TOTP 设置二维码",
+                            modifier = Modifier
+                                .align(Alignment.CenterHorizontally)
+                                .widthIn(max = 280.dp)
+                                .fillMaxWidth()
+                                .aspectRatio(1f)
+                        )
+                    }
+                    Text("也可以手动输入以下密钥：", style = MaterialTheme.typography.bodySmall)
+                    SelectionContainer {
+                        Text(enrollment.secret.chunked(4).joinToString(" "), fontWeight = FontWeight.Bold)
+                    }
+                    Text("账户名称：腕上RSS", style = MaterialTheme.typography.bodySmall)
+                    Text("2. 输入动态验证码", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    OutlinedTextField(
+                        value = enrollmentCode,
+                        onValueChange = { enrollmentCode = it.filter(Char::isDigit).take(6) },
+                        label = { Text("动态验证码") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                    )
+                    enrollmentError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        runAction {
+                            busy = true
+                            enrollmentError = null
+                            runCatching {
+                                accountRepository.confirmTotpEnrollment(enrollment, enrollmentCode)
+                                accountRepository.listTotpFactors()
+                            }.onSuccess {
+                                totpFactors = it
+                                totpEnrollment = null
+                                message = "TOTP 两步验证已开启"
+                            }.onFailure { enrollmentError = it.message ?: "动态验证码无效" }
+                            busy = false
+                        }
+                    },
+                    enabled = !busy && enrollmentCode.length == 6
+                ) { Text("开启") }
+            },
+            dismissButton = { TextButton(onClick = { totpEnrollment = null }, enabled = !busy) { Text("取消") } }
+        )
+    }
+
+    disableTotpTarget?.let { factor ->
+        AlertDialog(
+            onDismissRequest = { if (!busy) disableTotpTarget = null },
+            title = { Text("关闭两步验证？") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("请输入当前验证器中的 6 位动态验证码确认关闭。")
+                    OutlinedTextField(
+                        value = disableTotpCode,
+                        onValueChange = { disableTotpCode = it.filter(Char::isDigit).take(6) },
+                        label = { Text("动态验证码") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                    )
+                    disableTotpError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        runAction {
+                            busy = true
+                            disableTotpError = null
+                            runCatching {
+                                accountRepository.disableTotp(factor, disableTotpCode)
+                                accountRepository.listTotpFactors()
+                            }.onSuccess {
+                                totpFactors = it
+                                disableTotpTarget = null
+                                message = "TOTP 两步验证已关闭"
+                            }.onFailure { disableTotpError = it.message ?: "无法关闭两步验证" }
+                            busy = false
+                        }
+                    },
+                    enabled = !busy && disableTotpCode.length == 6
+                ) { Text("关闭") }
+            },
+            dismissButton = { TextButton(onClick = { disableTotpTarget = null }, enabled = !busy) { Text("取消") } }
+        )
     }
 
     renameTarget?.let { passkey ->
@@ -747,6 +1137,8 @@ internal fun cloudSyncMenuSummary(
     hasLocalKey -> "已启用 · 端到端加密"
     else -> "云备份可用 · 等待启用或恢复"
 }
+
+internal fun shouldShowCloudSyncEntry(isDebugBuild: Boolean): Boolean = isDebugBuild
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

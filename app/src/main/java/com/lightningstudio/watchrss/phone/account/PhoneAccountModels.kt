@@ -42,3 +42,25 @@ data class RegisteredPasskey(
     val createdAtMillis: Long,
     val lastUsedAtMillis: Long?
 )
+
+data class TotpFactor(
+    val id: String,
+    val friendlyName: String,
+    val verified: Boolean
+)
+
+data class TotpEnrollment(
+    val factorId: String,
+    val secret: String,
+    val uri: String
+)
+
+data class PendingPasswordLogin(
+    val session: PhoneAccountSession,
+    val factorId: String
+)
+
+sealed interface PasswordLoginResult {
+    data class Complete(val session: PhoneAccountSession) : PasswordLoginResult
+    data class TotpRequired(val pending: PendingPasswordLogin) : PasswordLoginResult
+}

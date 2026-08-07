@@ -249,7 +249,6 @@ class PhoneAccountClient(
     }
 
     suspend fun startPasskeyAuthentication(
-        phone: String,
         transactionId: String? = null
     ): PasskeyOptions =
         withContext(Dispatchers.IO) {
@@ -257,7 +256,6 @@ class PhoneAccountClient(
             post(
                 path = "/functions/v1/account/passkeys/authentication/options",
                 body = JSONObject().apply {
-                    put("phone", phone.trim())
                     transactionId?.let { put("loginTransactionId", it) }
                 },
                 bearerToken = null

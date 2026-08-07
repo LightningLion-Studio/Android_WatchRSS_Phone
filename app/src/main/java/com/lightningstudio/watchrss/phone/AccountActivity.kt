@@ -108,7 +108,6 @@ import com.lightningstudio.watchrss.phone.ui.AdaptiveReaderReturnThreePane
 import com.lightningstudio.watchrss.phone.ui.AdaptiveTwoPane
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -134,7 +133,6 @@ class AccountActivity : ComponentActivity() {
                     rssSources = rssSources,
                     usageTelemetry = container.usageTelemetry,
                     onBack = ::finish,
-                    preparePasskeyLogin = passkeyCoordinator::prepareLogin,
                     loginWithPasskey = passkeyCoordinator::login,
                     createPasskey = passkeyCoordinator::createPasskey,
                     runAction = { action ->
@@ -194,8 +192,7 @@ internal fun AccountScreen(
     rssSources: List<com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity>,
     usageTelemetry: PhoneUsageTelemetry,
     onBack: () -> Unit,
-    preparePasskeyLogin: suspend (String) -> Boolean,
-    loginWithPasskey: suspend (String, String?) -> LoginProgress,
+    loginWithPasskey: suspend (String?) -> LoginProgress,
     createPasskey: suspend () -> Unit,
     runAction: (suspend () -> Unit) -> Unit,
     leadingPane: (@Composable () -> Unit)? = null
@@ -222,7 +219,6 @@ internal fun AccountScreen(
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var passkeyLoginAvailable by remember { mutableStateOf(false) }
     var registeredPasskeys by remember(session?.userId) {
         mutableStateOf<List<RegisteredPasskey>>(emptyList())
     }
@@ -281,20 +277,6 @@ internal fun AccountScreen(
         totpLoading = false
     }
 
-    val passkeyProbePhone = phoneForPasskeyProbe(phone)
-    LaunchedEffect(session?.userId, passkeyProbePhone) {
-        passkeyLoginAvailable = false
-        if (session != null || passkeyProbePhone == null) return@LaunchedEffect
-        delay(PASSKEY_PROBE_DEBOUNCE_MILLIS)
-        passkeyLoginAvailable = try {
-            preparePasskeyLogin(passkeyProbePhone)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Exception) {
-            false
-        }
-    }
-
     LaunchedEffect(otpResendAvailableAt) {
         while (SystemClock.elapsedRealtime() < otpResendAvailableAt) {
             elapsedRealtime = SystemClock.elapsedRealtime()
@@ -314,25 +296,31 @@ internal fun AccountScreen(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                "输入手机号以继续。",
+                if (loginMethod == LoginMethod.PASSKEY && loginProgress == null) {
+                    "选择保存在本机或其他设备上的通行密钥继续。"
+                } else {
+                    "输入手机号以继续。"
+                },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            OutlinedTextField(
-                value = phone,
-                onValueChange = {
-                    phone = it
-                    loginProgress = null
-                    otpResendAvailableAt = 0L
-                },
-                label = { Text("手机号") },
-                singleLine = true,
-                enabled = !busy,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .semantics { contentType = ContentType.PhoneNumber }
-            )
+            if (loginProgress == null && loginMethod != LoginMethod.PASSKEY) {
+                OutlinedTextField(
+                    value = phone,
+                    onValueChange = {
+                        phone = it
+                        loginProgress = null
+                        otpResendAvailableAt = 0L
+                    },
+                    label = { Text("手机号") },
+                    singleLine = true,
+                    enabled = !busy,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentType = ContentType.PhoneNumber }
+                )
+            }
             fun applyLoginProgress(progress: LoginProgress) {
                 loginProgress = progress
                 progress.session?.let { signedIn ->
@@ -423,7 +411,7 @@ internal fun AccountScreen(
                                     busy = false
                                 }
                             },
-                            enabled = !busy && phone.isNotBlank() && password.length >= 10,
+                            enabled = !busy && password.length >= 10 && (phone.isNotBlank() || loginProgress != null),
                             modifier = Modifier.weight(1f)
                         ) { Text("继续") }
                     }
@@ -456,7 +444,7 @@ internal fun AccountScreen(
                                         busy = false
                                     }
                                 },
-                                enabled = !busy && phone.isNotBlank() && otpResendSecondsRemaining == 0L
+                                enabled = !busy && (phone.isNotBlank() || loginProgress != null) && otpResendSecondsRemaining == 0L
                             ) { Text(if (otpResendSecondsRemaining > 0) "${otpResendSecondsRemaining}s 后重发" else "发送验证码") }
                         },
                         modifier = Modifier.fillMaxWidth()
@@ -477,7 +465,7 @@ internal fun AccountScreen(
                                     busy = false
                                 }
                             },
-                            enabled = !busy && phone.isNotBlank() && otp.length == 6,
+                            enabled = !busy && otp.length == 6 && (phone.isNotBlank() || loginProgress != null),
                             modifier = Modifier.weight(1f)
                         ) { Text("继续") }
                     }
@@ -514,24 +502,15 @@ internal fun AccountScreen(
                 }
                 LoginMethod.PASSKEY -> {
                     loginHint()
-                    if (!passkeyLoginAvailable) {
-                        Text(
-                            "输入手机号后，系统会检查本机是否有可用的通行密钥。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         loginMethodPicker(Modifier.weight(1f))
                         Button(
                             onClick = {
-                                val readyPhone = passkeyProbePhone ?: return@Button
                                 runAction {
                                     busy = true
                                     error = null
                                     runCatching {
-                                        val progress = loginProgress ?: accountRepository.startLogin(phone)
-                                        loginWithPasskey(readyPhone, progress.transactionId)
+                                        loginWithPasskey(loginProgress?.transactionId)
                                     }.onSuccess(::applyLoginProgress)
                                         .onFailure {
                                             Log.w(ACCOUNT_LOG_TAG, "Passkey login failed", it)
@@ -540,7 +519,7 @@ internal fun AccountScreen(
                                     busy = false
                                 }
                             },
-                            enabled = !busy && passkeyLoginAvailable,
+                            enabled = !busy,
                             modifier = Modifier.weight(1f)
                         ) { Text("继续") }
                     }
@@ -1160,17 +1139,7 @@ internal fun AccountScreen(
     }
 }
 
-private const val PASSKEY_PROBE_DEBOUNCE_MILLIS = 500L
 private const val ACCOUNT_LOG_TAG = "AccountActivity"
-
-internal fun phoneForPasskeyProbe(input: String): String? {
-    val digits = input.filter(Char::isDigit)
-    return when {
-        digits.length == 11 && digits.startsWith('1') -> digits
-        digits.length == 13 && digits.startsWith("861") -> "+$digits"
-        else -> null
-    }
-}
 
 internal fun cloudSyncMenuSummary(
     member: CloudMemberState?,

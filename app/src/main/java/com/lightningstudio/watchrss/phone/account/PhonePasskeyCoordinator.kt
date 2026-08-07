@@ -1,14 +1,11 @@
 package com.lightningstudio.watchrss.phone.account
 
-import android.os.Build
 import androidx.activity.ComponentActivity
-import androidx.annotation.RequiresApi
 import androidx.credentials.CreatePublicKeyCredentialRequest
 import androidx.credentials.CreatePublicKeyCredentialResponse
 import androidx.credentials.CredentialManager
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.GetPublicKeyCredentialOption
-import androidx.credentials.PrepareGetCredentialResponse
 import androidx.credentials.PublicKeyCredential
 import androidx.credentials.exceptions.CreateCredentialCancellationException
 import androidx.credentials.exceptions.CreateCredentialException
@@ -23,8 +20,6 @@ class PhonePasskeyCoordinator(
     private val accountRepository: PhoneAccountRepository,
     private val credentialManager: CredentialManager = CredentialManager.create(activity)
 ) {
-    private var preparedLogin: PreparedPasskeyLogin? = null
-
     suspend fun createPasskey() {
         val options = accountRepository.startPasskeyRegistration()
         val response = try {
@@ -43,22 +38,10 @@ class PhonePasskeyCoordinator(
         )
     }
 
-    suspend fun login(phone: String, transactionId: String?): LoginProgress {
-        val normalizedPhone = phone.trim()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            preparedLogin
-                ?.takeIf { it.phone == normalizedPhone && it.transactionId == transactionId }
-                ?.let { return finishPreparedLogin(it) }
-            if (!prepareLoginApi34(normalizedPhone, transactionId)) {
-                error("本机没有可用的通行密钥")
-            }
-            return finishPreparedLogin(requireNotNull(preparedLogin))
-        }
-
-        val options = accountRepository.startPasskeyAuthentication(phone, transactionId)
+    suspend fun login(transactionId: String?): LoginProgress {
+        val options = accountRepository.startPasskeyAuthentication(transactionId)
         val request = GetCredentialRequest.Builder()
             .addCredentialOption(GetPublicKeyCredentialOption(options.requestJson))
-            .setPreferImmediatelyAvailableCredentials(true)
             .build()
         val response = try {
             credentialManager.getCredential(
@@ -72,68 +55,6 @@ class PhonePasskeyCoordinator(
             ?: error("系统未返回 Passkey 登录凭据")
         return accountRepository.finishPasskeyAuthentication(
             challengeId = options.challengeId,
-            credentialJson = passkey.authenticationResponseJson
-        )
-    }
-
-    /**
-     * Checks for a matching local passkey without presenting Credential Manager UI.
-     * Android does not expose reliable candidate metadata before API 34, so older
-     * releases deliberately keep the shortcut hidden and retain SMS as the fallback.
-     */
-    suspend fun prepareLogin(phone: String, transactionId: String? = null): Boolean {
-        preparedLogin = null
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return false
-        return prepareLoginApi34(phone.trim(), transactionId)
-    }
-
-    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    private suspend fun prepareLoginApi34(phone: String, transactionId: String?): Boolean {
-        val options = accountRepository.startPasskeyAuthentication(phone, transactionId)
-        val request = GetCredentialRequest.Builder()
-            .addCredentialOption(GetPublicKeyCredentialOption(options.requestJson))
-            .setPreferImmediatelyAvailableCredentials(true)
-            .build()
-        val prepared = try {
-            credentialManager.prepareGetCredential(request)
-        } catch (_: GetCredentialException) {
-            return false
-        } catch (_: SecurityException) {
-            return false
-        }
-        val hasLocalCandidate =
-            prepared.hasCredentialResults(PublicKeyCredential.TYPE_PUBLIC_KEY_CREDENTIAL)
-        val hasRemoteCandidate = prepared.hasRemoteResults()
-        if (!shouldOfferPasskeyLogin(hasLocalCandidate, hasRemoteCandidate)) {
-            return false
-        }
-        val handle = prepared.pendingGetCredentialHandle ?: return false
-        preparedLogin = PreparedPasskeyLogin(
-            phone = phone,
-            transactionId = transactionId,
-            challengeId = options.challengeId,
-            handle = handle
-        )
-        return true
-    }
-
-    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    private suspend fun finishPreparedLogin(
-        prepared: PreparedPasskeyLogin
-    ): LoginProgress {
-        preparedLogin = null
-        val response = try {
-            credentialManager.getCredential(
-                context = activity,
-                pendingGetCredentialHandle = prepared.handle
-            )
-        } catch (error: GetCredentialException) {
-            throw IllegalStateException(getErrorMessage(error), error)
-        }
-        val passkey = response.credential as? PublicKeyCredential
-            ?: error("系统未返回 Passkey 登录凭据")
-        return accountRepository.finishPasskeyAuthentication(
-            challengeId = prepared.challengeId,
             credentialJson = passkey.authenticationResponseJson
         )
     }
@@ -161,16 +82,4 @@ class PhonePasskeyCoordinator(
             else -> "Passkey 登录失败，请改用短信验证码"
         }
 
-    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    private data class PreparedPasskeyLogin(
-        val phone: String,
-        val transactionId: String?,
-        val challengeId: String,
-        val handle: PrepareGetCredentialResponse.PendingGetCredentialHandle
-    )
 }
-
-internal fun shouldOfferPasskeyLogin(
-    hasLocalCandidate: Boolean,
-    hasRemoteCandidate: Boolean
-): Boolean = hasLocalCandidate && !hasRemoteCandidate

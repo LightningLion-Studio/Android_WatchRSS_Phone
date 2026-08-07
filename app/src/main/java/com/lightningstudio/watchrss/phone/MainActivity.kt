@@ -114,7 +114,7 @@ class MainActivity : ComponentActivity() {
             Text("腕上RSS", style = MaterialTheme.typography.headlineMedium)
             when (state) {
                 AppAccessState.Loading -> CircularProgressIndicator(Modifier.padding(24.dp))
-                AppAccessState.LoggedOut -> GateMessage("首次使用请登录", "短信验证码和 Passkey 均可使用") { openAccount() }
+                AppAccessState.LoggedOut -> GateMessage("首次使用请登录", null) { openAccount() }
                 is AppAccessState.PurchaseRequired -> GateMessage(
                     "¥6 永久开通，可授权 3 台手机",
                     "已购买 ${state.summary.purchaseCount} 次 · 容量 ${state.summary.capacity} 台"
@@ -137,9 +137,11 @@ class MainActivity : ComponentActivity() {
     }
 
     @androidx.compose.runtime.Composable
-    private fun GateMessage(title: String, detail: String, action: () -> Unit) {
+    private fun GateMessage(title: String, detail: String?, action: () -> Unit) {
         Text(title, Modifier.padding(top = 24.dp), style = MaterialTheme.typography.titleLarge)
-        Text(detail, Modifier.padding(vertical = 12.dp), style = MaterialTheme.typography.bodyMedium)
+        detail?.let {
+            Text(it, Modifier.padding(vertical = 12.dp), style = MaterialTheme.typography.bodyMedium)
+        }
         Button(onClick = action) { Text(if (title.contains("¥6") || title.contains("支付")) "去支付" else "继续") }
     }
 

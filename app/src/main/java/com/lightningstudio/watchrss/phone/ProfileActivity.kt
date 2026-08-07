@@ -111,6 +111,7 @@ class ProfileActivity : ComponentActivity() {
                             rssSources = rssSources,
                             usageTelemetry = container.usageTelemetry,
                             onBack = onClose,
+                            onLoginComplete = {},
                             loginWithPasskey = passkeyCoordinator::login,
                             createPasskey = passkeyCoordinator::createPasskey,
                             runAction = { action ->
@@ -134,6 +135,7 @@ class ProfileActivity : ComponentActivity() {
                                 rssSources = rssSources,
                                 usageTelemetry = container.usageTelemetry,
                                 onBack = onClose,
+                                onLoginComplete = {},
                                 loginWithPasskey = passkeyCoordinator::login,
                                 createPasskey = passkeyCoordinator::createPasskey,
                                 runAction = { action ->

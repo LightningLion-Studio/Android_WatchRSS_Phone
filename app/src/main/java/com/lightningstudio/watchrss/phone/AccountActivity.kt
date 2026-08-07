@@ -122,6 +122,7 @@ class AccountActivity : ComponentActivity() {
         val container = (application as PhoneCompanionApplication).container
         val accountRepository = container.accountRepository
         val passkeyCoordinator = PhonePasskeyCoordinator(this, accountRepository)
+        val finishAfterLogin = intent.getBooleanExtra(EXTRA_FINISH_AFTER_LOGIN, false)
 
         setContent {
             WatchRssPhoneTheme {
@@ -133,6 +134,14 @@ class AccountActivity : ComponentActivity() {
                     rssSources = rssSources,
                     usageTelemetry = container.usageTelemetry,
                     onBack = ::finish,
+                    onLoginComplete = {
+                        if (finishAfterLogin) {
+                            lifecycleScope.launch {
+                                container.appAccessCoordinator.reconcile()
+                                finish()
+                            }
+                        }
+                    },
                     loginWithPasskey = passkeyCoordinator::login,
                     createPasskey = passkeyCoordinator::createPasskey,
                     runAction = { action ->
@@ -162,8 +171,13 @@ class AccountActivity : ComponentActivity() {
     }
 
     companion object {
-        fun createIntent(context: Context): Intent =
-            Intent(context, AccountActivity::class.java)
+        private const val EXTRA_FINISH_AFTER_LOGIN =
+            "com.lightningstudio.watchrss.phone.extra.FINISH_AFTER_LOGIN"
+
+        fun createIntent(context: Context, finishAfterLogin: Boolean = false): Intent =
+            Intent(context, AccountActivity::class.java).apply {
+                putExtra(EXTRA_FINISH_AFTER_LOGIN, finishAfterLogin)
+            }
     }
 }
 
@@ -192,6 +206,7 @@ internal fun AccountScreen(
     rssSources: List<com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity>,
     usageTelemetry: PhoneUsageTelemetry,
     onBack: () -> Unit,
+    onLoginComplete: () -> Unit,
     loginWithPasskey: suspend (String, String?) -> LoginProgress,
     createPasskey: suspend () -> Unit,
     runAction: (suspend () -> Unit) -> Unit,
@@ -322,6 +337,7 @@ internal fun AccountScreen(
                 progress.session?.let { signedIn ->
                     message = "登录成功"
                     usageTelemetry.recordAccountSignedIn(signedIn.userId)
+                    onLoginComplete()
                 } ?: run {
                     message = "已完成一种验证方式，请再选择另一种不同方式。"
                 }

@@ -145,7 +145,7 @@ class MainActivity : ComponentActivity() {
         Button(onClick = action) { Text(if (title.contains("¥6") || title.contains("支付")) "去支付" else "继续") }
     }
 
-    private fun openAccount() = startActivity(Intent(this, AccountActivity::class.java))
+    private fun openAccount() = startActivity(AccountActivity.createIntent(this, finishAfterLogin = true))
     private fun reauthenticate() {
         lifecycleScope.launch {
             coordinator.beginReauthentication()

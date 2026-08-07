@@ -55,6 +55,14 @@ data class TotpEnrollment(
     val uri: String
 )
 
+data class LoginProgress(
+    val transactionId: String,
+    val requiredFactorCount: Int,
+    val completedFactors: List<String>,
+    val complete: Boolean,
+    val session: PhoneAccountSession?
+)
+
 data class PendingPasswordLogin(
     val session: PhoneAccountSession,
     val factorId: String

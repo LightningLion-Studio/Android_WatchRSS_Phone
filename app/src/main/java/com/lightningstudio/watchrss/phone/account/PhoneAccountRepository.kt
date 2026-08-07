@@ -24,6 +24,33 @@ class PhoneAccountRepository(
         accountClient.requestPhoneOtp(phone)
     }
 
+    suspend fun startLogin(phone: String): LoginProgress = accountClient.startLogin(phone)
+
+    suspend fun loginWithPasswordFactor(transactionId: String, password: String): LoginProgress {
+        return accountClient.loginWithPasswordFactor(transactionId, password).let { progress ->
+            saveCompletedLogin(progress)
+            progress
+        }
+    }
+
+    suspend fun requestPhoneOtpFactor(transactionId: String) {
+        accountClient.requestPhoneOtpFactor(transactionId)
+    }
+
+    suspend fun verifyPhoneOtpFactor(transactionId: String, otp: String): LoginProgress {
+        return accountClient.verifyPhoneOtpFactor(transactionId, otp).let { progress ->
+            saveCompletedLogin(progress)
+            progress
+        }
+    }
+
+    suspend fun verifyTotpFactor(transactionId: String, code: String): LoginProgress {
+        return accountClient.verifyTotpFactor(transactionId, code).let { progress ->
+            saveCompletedLogin(progress)
+            progress
+        }
+    }
+
     suspend fun verifyPhoneOtp(phone: String, otp: String): PhoneAccountSession {
         return accountClient.verifyPhoneOtp(phone, otp).also { session ->
             sessionStore.save(session)
@@ -55,12 +82,10 @@ class PhoneAccountRepository(
 
     suspend fun confirmTotpEnrollment(enrollment: TotpEnrollment, code: String) {
         accountClient.confirmTotpEnrollment(requireSession(), enrollment, code)
-            .also { sessionStore.save(it) }
     }
 
     suspend fun disableTotp(factor: TotpFactor, code: String) {
         accountClient.disableTotp(requireSession(), factor, code)
-            .also { sessionStore.save(it) }
     }
 
     suspend fun startPasskeyRegistration(): PasskeyOptions {
@@ -95,16 +120,23 @@ class PhoneAccountRepository(
         accountClient.finishPasskeyRegistration(session, challengeId, credentialJson)
     }
 
-    suspend fun startPasskeyAuthentication(phone: String): PasskeyOptions {
-        return accountClient.startPasskeyAuthentication(phone)
-    }
+    suspend fun startPasskeyAuthentication(
+        phone: String,
+        transactionId: String? = null
+    ): PasskeyOptions = accountClient.startPasskeyAuthentication(phone, transactionId)
 
     suspend fun finishPasskeyAuthentication(
         challengeId: String,
         credentialJson: String
-    ): PhoneAccountSession {
-        return accountClient.finishPasskeyAuthentication(challengeId, credentialJson)
-            .also { sessionStore.save(it) }
+    ): LoginProgress {
+        return accountClient.finishPasskeyAuthentication(challengeId, credentialJson).let { progress ->
+            saveCompletedLogin(progress)
+            progress
+        }
+    }
+
+    private suspend fun saveCompletedLogin(progress: LoginProgress) {
+        progress.session?.let { sessionStore.save(it) }
     }
 
     suspend fun logout() {

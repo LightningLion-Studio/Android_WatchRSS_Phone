@@ -18,6 +18,47 @@ class PhoneAccountClient(
     private val deviceAccessToken: () -> String? = { null },
     private val httpClient: OkHttpClient = defaultHttpClient()
 ) {
+    suspend fun startLogin(phone: String): LoginProgress = withContext(Dispatchers.IO) {
+        requireConfigured()
+        post(
+            path = "/functions/v1/account/login/start",
+            body = JSONObject().apply {
+                put("phone", normalizeAccountPhone(phone))
+                put("licenseDeviceId", licenseIdentity.deviceId)
+                put("devicePublicKey", licenseIdentity.publicKeyPem)
+            },
+            bearerToken = null
+        ).use { parseLoginProgress(it.jsonBody()) }
+    }
+
+    suspend fun loginWithPasswordFactor(transactionId: String, password: String): LoginProgress =
+        withContext(Dispatchers.IO) {
+            requireConfigured()
+            post(
+                path = "/functions/v1/account/login/mfa/password",
+                body = JSONObject().apply {
+                    put("transactionId", transactionId)
+                    put("password", password)
+                },
+                bearerToken = null
+            ).use { parseLoginProgress(it.jsonBody()) }
+        }
+
+    suspend fun requestPhoneOtpFactor(transactionId: String) = withContext(Dispatchers.IO) {
+        requireConfigured()
+        post(
+            path = "/functions/v1/account/login/mfa/sms/request",
+            body = JSONObject().put("transactionId", transactionId),
+            bearerToken = null
+        ).close()
+    }
+
+    suspend fun verifyPhoneOtpFactor(transactionId: String, otp: String): LoginProgress =
+        verifyLoginCode("/functions/v1/account/login/mfa/sms/verify", transactionId, otp)
+
+    suspend fun verifyTotpFactor(transactionId: String, code: String): LoginProgress =
+        verifyLoginCode("/functions/v1/account/login/mfa/totp/verify", transactionId, code)
+
     suspend fun loginWithPassword(phone: String, password: String): PasswordLoginResult = withContext(Dispatchers.IO) {
         requireConfigured()
         require(password.length in 10..128) { "密码长度必须为 10–128 位" }
@@ -57,54 +98,44 @@ class PhoneAccountClient(
     }
 
     suspend fun listTotpFactors(session: PhoneAccountSession): List<TotpFactor> = withContext(Dispatchers.IO) {
-        authRequest(authUrl("user"), session.accessToken).get().build().let(::execute).use {
+        get("/functions/v1/account/totp", session.accessToken).use {
             parseTotpFactors(it.jsonBody())
         }
     }
 
     suspend fun beginTotpEnrollment(session: PhoneAccountSession): TotpEnrollment = withContext(Dispatchers.IO) {
-        post(
-            path = "/functions/v1/account/totp/prepare",
-            body = JSONObject(),
-            bearerToken = session.accessToken
-        ).close()
-        listTotpFactors(session).filterNot { it.verified }.forEach { pending ->
-            authRequest(authUrl("factors").newBuilder().addPathSegment(pending.id).build(), session.accessToken)
-                .delete().build().let(::execute).close()
+        post("/functions/v1/account/totp", JSONObject(), session.accessToken).use { response ->
+            val json = response.jsonBody()
+            TotpEnrollment(
+                factorId = json.getString("factorId"),
+                secret = json.getString("secret"),
+                uri = json.getString("uri")
+            )
         }
-        authRequest(authUrl("factors"), session.accessToken)
-            .post(JSONObject().apply {
-                put("factor_type", "totp")
-                put("friendly_name", "腕上RSS 验证器")
-            }.toString().toRequestBody(JSON_MEDIA_TYPE))
-            .build().let(::execute).use { response ->
-                val json = response.jsonBody()
-                val totp = json.optJSONObject("totp") ?: JSONObject()
-                TotpEnrollment(
-                    factorId = json.getString("id"),
-                    secret = totp.getString("secret"),
-                    uri = totp.getString("uri")
-                )
-            }
     }
 
     suspend fun confirmTotpEnrollment(
         session: PhoneAccountSession,
         enrollment: TotpEnrollment,
         code: String
-    ): PhoneAccountSession = withContext(Dispatchers.IO) {
-        verifyTotp(session, enrollment.factorId, code)
+    ) = withContext(Dispatchers.IO) {
+        post(
+            "/functions/v1/account/totp/${enrollment.factorId}/confirm",
+            JSONObject().put("code", code),
+            session.accessToken
+        ).close()
     }
 
     suspend fun disableTotp(
         session: PhoneAccountSession,
         factor: TotpFactor,
         code: String
-    ): PhoneAccountSession = withContext(Dispatchers.IO) {
-        val upgraded = verifyTotp(session, factor.id, code)
-        authRequest(authUrl("factors").newBuilder().addPathSegment(factor.id).build(), upgraded.accessToken)
-            .delete().build().let(::execute).close()
-        upgraded
+    ) = withContext(Dispatchers.IO) {
+        deleteWithBody(
+            "/functions/v1/account/totp/${factor.id}",
+            JSONObject().put("code", code),
+            session.accessToken
+        ).close()
     }
     suspend fun requestPhoneOtp(phone: String) = withContext(Dispatchers.IO) {
         requireConfigured()
@@ -217,12 +248,18 @@ class PhoneAccountClient(
         ).close()
     }
 
-    suspend fun startPasskeyAuthentication(phone: String): PasskeyOptions =
+    suspend fun startPasskeyAuthentication(
+        phone: String,
+        transactionId: String? = null
+    ): PasskeyOptions =
         withContext(Dispatchers.IO) {
             requireConfigured()
             post(
                 path = "/functions/v1/account/passkeys/authentication/options",
-                body = JSONObject().apply { put("phone", phone.trim()) },
+                body = JSONObject().apply {
+                    put("phone", phone.trim())
+                    transactionId?.let { put("loginTransactionId", it) }
+                },
                 bearerToken = null
             ).use { response ->
                 parsePasskeyOptions(response.jsonBody())
@@ -232,7 +269,7 @@ class PhoneAccountClient(
     suspend fun finishPasskeyAuthentication(
         challengeId: String,
         credentialJson: String
-    ): PhoneAccountSession = withContext(Dispatchers.IO) {
+    ): LoginProgress = withContext(Dispatchers.IO) {
         requireConfigured()
         post(
             path = "/functions/v1/account/passkeys/authentication/verify",
@@ -244,7 +281,7 @@ class PhoneAccountClient(
             },
             bearerToken = null
         ).use { response ->
-            parsePasskeySession(response.jsonBody())
+            parseLoginProgress(response.jsonBody())
         }
     }
 
@@ -303,6 +340,22 @@ class PhoneAccountClient(
             .build()
         val response = httpClient.newCall(request).execute()
         return checkResponse(response)
+    }
+
+    private suspend fun verifyLoginCode(
+        path: String,
+        transactionId: String,
+        code: String
+    ): LoginProgress = withContext(Dispatchers.IO) {
+        requireConfigured()
+        post(
+            path = path,
+            body = JSONObject().apply {
+                put("transactionId", transactionId)
+                put("code", code.trim())
+            },
+            bearerToken = null
+        ).use { parseLoginProgress(it.jsonBody()) }
     }
 
     private fun backendPut(path: String, body: JSONObject, bearerToken: String): okhttp3.Response {
@@ -420,6 +473,21 @@ class PhoneAccountClient(
         return execute(request)
     }
 
+    private fun deleteWithBody(
+        path: String,
+        body: JSONObject,
+        bearerToken: String
+    ): okhttp3.Response {
+        val request = Request.Builder()
+            .url(environment.backendBaseUrl + path)
+            .addHeader("apikey", environment.supabaseAnonKey)
+            .addHeader("content-type", JSON_MEDIA_TYPE.toString())
+            .addHeader("authorization", "Bearer $bearerToken")
+            .delete(body.toString().toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+        return execute(request)
+    }
+
     private fun execute(request: Request): okhttp3.Response {
         return checkResponse(httpClient.newCall(request).execute())
     }
@@ -493,6 +561,22 @@ class PhoneAccountClient(
             refreshToken = json.optString("refreshToken"),
             expiresAtMillis = expiresAtMillis,
             activationProof = json.optString("activationProof")
+        )
+    }
+
+    private fun parseLoginProgress(json: JSONObject): LoginProgress {
+        val transactionId = json.optString("transactionId").trim()
+        require(transactionId.isNotBlank()) { "登录响应缺少事务信息" }
+        val complete = json.optBoolean("complete", false)
+        val sessionJson = json.optJSONObject("session")
+        val session = sessionJson?.let(::parsePasskeySession)
+        require(!complete || session != null) { "登录响应缺少账号信息" }
+        return LoginProgress(
+            transactionId = transactionId,
+            requiredFactorCount = json.optInt("requiredFactorCount", 1),
+            completedFactors = json.optJSONArray("completedFactors").toStringList(),
+            complete = complete,
+            session = session
         )
     }
 
@@ -615,14 +699,16 @@ internal fun parseTotpFactors(json: JSONObject): List<TotpFactor> {
     return buildList {
         for (index in 0 until factors.length()) {
             val factor = factors.optJSONObject(index) ?: continue
-            if (factor.optString("factor_type") != "totp") continue
+            if (factor.has("factor_type") && factor.optString("factor_type") != "totp") continue
             val id = factor.optString("id").trim()
             if (id.isBlank()) continue
             add(
                 TotpFactor(
                     id = id,
-                    friendlyName = factor.optString("friendly_name").ifBlank { "验证器" },
-                    verified = factor.optString("status") == "verified"
+                    friendlyName = factor.optString("friendlyName")
+                        .ifBlank { factor.optString("friendly_name") }
+                        .ifBlank { "验证器" },
+                    verified = factor.optBoolean("verified", factor.optString("status") == "verified")
                 )
             )
         }

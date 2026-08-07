@@ -22,6 +22,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -39,6 +40,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -46,6 +48,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ElevatedCard
@@ -63,6 +67,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -88,8 +93,7 @@ import com.lightningstudio.watchrss.phone.account.AccountLoginAction
 import com.lightningstudio.watchrss.phone.account.AppAccessState
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.account.PhonePasskeyCoordinator
-import com.lightningstudio.watchrss.phone.account.PasswordLoginResult
-import com.lightningstudio.watchrss.phone.account.PendingPasswordLogin
+import com.lightningstudio.watchrss.phone.account.LoginProgress
 import com.lightningstudio.watchrss.phone.account.RegisteredPasskey
 import com.lightningstudio.watchrss.phone.account.TotpEnrollment
 import com.lightningstudio.watchrss.phone.account.TotpFactor
@@ -175,6 +179,13 @@ private enum class AccountPaneTransition {
     CLOSING_CLOUD
 }
 
+private enum class LoginMethod(val label: String, val supportingText: String, val factorName: String) {
+    PASSWORD("密码", "使用账号密码验证。", "password"),
+    OTP("验证码", "验证码将发送至此手机号。", "sms"),
+    TOTP("TOTP 验证器", "输入验证器中的 6 位动态验证码。", "totp"),
+    PASSKEY("通行密钥", "使用指纹、人脸或设备屏幕锁。", "passkey")
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun AccountScreen(
@@ -184,7 +195,7 @@ internal fun AccountScreen(
     usageTelemetry: PhoneUsageTelemetry,
     onBack: () -> Unit,
     preparePasskeyLogin: suspend (String) -> Boolean,
-    loginWithPasskey: suspend (String) -> com.lightningstudio.watchrss.phone.account.PhoneAccountSession,
+    loginWithPasskey: suspend (String, String?) -> LoginProgress,
     createPasskey: suspend () -> Unit,
     runAction: (suspend () -> Unit) -> Unit,
     leadingPane: (@Composable () -> Unit)? = null
@@ -203,7 +214,11 @@ internal fun AccountScreen(
     var password by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
     var passwordTotp by remember { mutableStateOf("") }
-    var pendingPasswordLogin by remember { mutableStateOf<PendingPasswordLogin?>(null) }
+    var loginProgress by remember { mutableStateOf<LoginProgress?>(null) }
+    var loginMethod by remember { mutableStateOf(LoginMethod.OTP) }
+    var loginMethodMenuExpanded by remember { mutableStateOf(false) }
+    var otpResendAvailableAt by rememberSaveable { mutableLongStateOf(0L) }
+    var elapsedRealtime by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -233,7 +248,7 @@ internal fun AccountScreen(
     var disableTotpTarget by remember { mutableStateOf<TotpFactor?>(null) }
     var disableTotpCode by remember { mutableStateOf("") }
     var disableTotpError by remember { mutableStateOf<String?>(null) }
-    val canManageTotp = session?.accessToken?.startsWith("wrp_") == false
+    val canManageTotp = session != null
 
     LaunchedEffect(session?.userId) {
         if (session == null) {
@@ -280,6 +295,17 @@ internal fun AccountScreen(
         }
     }
 
+    LaunchedEffect(otpResendAvailableAt) {
+        while (SystemClock.elapsedRealtime() < otpResendAvailableAt) {
+            elapsedRealtime = SystemClock.elapsedRealtime()
+            delay(1_000)
+        }
+        elapsedRealtime = SystemClock.elapsedRealtime()
+    }
+
+    val otpResendSecondsRemaining = ((otpResendAvailableAt - elapsedRealtime + 999L) / 1_000L)
+        .coerceAtLeast(0L)
+
     val accountControls: @Composable ColumnScope.(() -> Unit) -> Unit = { onCloudSyncClick ->
         if (session == null) {
             Text(
@@ -294,7 +320,11 @@ internal fun AccountScreen(
             )
             OutlinedTextField(
                 value = phone,
-                onValueChange = { phone = it },
+                onValueChange = {
+                    phone = it
+                    loginProgress = null
+                    otpResendAvailableAt = 0L
+                },
                 label = { Text("手机号") },
                 singleLine = true,
                 enabled = !busy,
@@ -303,200 +333,197 @@ internal fun AccountScreen(
                     .fillMaxWidth()
                     .semantics { contentType = ContentType.PhoneNumber }
             )
-            if (pendingPasswordLogin == null) {
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = { password = it },
-                    label = { Text("密码") },
-                    singleLine = true,
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { loginMethodMenuExpanded = true },
                     enabled = !busy,
-                    visualTransformation = if (passwordVisible) {
-                        VisualTransformation.None
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("${loginMethod.label}登录", modifier = Modifier.weight(1f))
+                    Icon(Icons.Filled.ArrowDropDown, contentDescription = "切换登录方式")
+                }
+                DropdownMenu(
+                    expanded = loginMethodMenuExpanded,
+                    onDismissRequest = { loginMethodMenuExpanded = false }
+                ) {
+                    LoginMethod.entries.forEach { method ->
+                        DropdownMenuItem(
+                            text = { Text(method.label) },
+                            enabled = method.factorName !in (loginProgress?.completedFactors ?: emptyList()),
+                            onClick = {
+                                loginMethod = method
+                                loginMethodMenuExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
+            Text(
+                loginMethod.supportingText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            loginProgress?.takeIf { !it.complete }?.let { progress ->
+                Text(
+                    if (progress.requiredFactorCount > progress.completedFactors.size) {
+                        "已完成 ${progress.completedFactors.size} 项验证；请选择另一种方式继续。"
                     } else {
-                        PasswordVisualTransformation()
+                        "正在完成登录验证。"
                     },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    trailingIcon = {
-                        IconButton(onClick = { passwordVisible = !passwordVisible }) {
-                            Icon(
-                                imageVector = if (passwordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                contentDescription = if (passwordVisible) "隐藏密码" else "显示密码"
-                            )
-                        }
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .semantics { contentType = ContentType.Password }
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
                 )
-                Button(
-                    onClick = {
-                        runAction {
-                            busy = true
-                            error = null
-                            runCatching { accountRepository.loginWithPassword(phone, password) }
-                                .onSuccess { result ->
-                                    when (result) {
-                                        is PasswordLoginResult.Complete -> {
-                                            message = "登录成功"
-                                            usageTelemetry.recordAccountSignedIn(result.session.userId)
-                                        }
-                                        is PasswordLoginResult.TotpRequired -> {
-                                            pendingPasswordLogin = result.pending
-                                            passwordTotp = ""
-                                            message = "请输入验证器中的 6 位动态验证码"
-                                        }
-                                    }
-                                }
-                                .onFailure { error = it.message ?: "密码登录失败" }
-                            busy = false
-                        }
-                    },
-                    enabled = !busy && phone.isNotBlank() && password.length >= 10,
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("使用密码登录") }
-            } else {
-                OutlinedTextField(
-                    value = passwordTotp,
-                    onValueChange = { passwordTotp = it.filter(Char::isDigit).take(6) },
-                    label = { Text("动态验证码") },
-                    singleLine = true,
-                    enabled = !busy,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton(
-                        onClick = { pendingPasswordLogin = null; passwordTotp = "" },
+            }
+            fun applyLoginProgress(progress: LoginProgress) {
+                loginProgress = progress
+                progress.session?.let { signedIn ->
+                    message = "登录成功"
+                    usageTelemetry.recordAccountSignedIn(signedIn.userId)
+                } ?: run {
+                    message = "已完成一种验证方式，请再选择另一种不同方式。"
+                }
+            }
+            when (loginMethod) {
+                LoginMethod.PASSWORD -> {
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        label = { Text("密码") },
+                        singleLine = true,
                         enabled = !busy,
-                        modifier = Modifier.weight(1f)
-                    ) { Text("返回") }
+                        visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        trailingIcon = {
+                            IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                                Icon(
+                                    imageVector = if (passwordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                    contentDescription = if (passwordVisible) "隐藏密码" else "显示密码"
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Password }
+                    )
                     Button(
                         onClick = {
-                            val pending = pendingPasswordLogin ?: return@Button
                             runAction {
                                 busy = true
                                 error = null
-                                runCatching { accountRepository.completePasswordTotp(pending, passwordTotp) }
-                                    .onSuccess { signedIn ->
-                                        pendingPasswordLogin = null
-                                        message = "登录成功"
-                                        usageTelemetry.recordAccountSignedIn(signedIn.userId)
+                                runCatching {
+                                    val progress = loginProgress ?: accountRepository.startLogin(phone)
+                                    accountRepository.loginWithPasswordFactor(progress.transactionId, password)
+                                }.onSuccess(::applyLoginProgress)
+                                    .onFailure { error = it.message ?: "密码验证失败" }
+                                busy = false
+                            }
+                        },
+                        enabled = !busy && phone.isNotBlank() && password.length >= 10,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("继续") }
+                }
+                LoginMethod.OTP -> {
+                    OutlinedTextField(
+                        value = otp,
+                        onValueChange = { otp = it.filter(Char::isDigit).take(6) },
+                        label = { Text("验证码") },
+                        singleLine = true,
+                        enabled = !busy,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                        trailingIcon = {
+                            TextButton(
+                                onClick = {
+                                    runAction {
+                                        busy = true
+                                        error = null
+                                        runCatching {
+                                            val progress = loginProgress ?: accountRepository.startLogin(phone)
+                                            loginProgress = progress
+                                            accountRepository.requestPhoneOtpFactor(progress.transactionId)
+                                        }.onSuccess {
+                                            otpResendAvailableAt = SystemClock.elapsedRealtime() + 60_000L
+                                            message = "验证码已发送"
+                                        }.onFailure {
+                                            Log.w(ACCOUNT_LOG_TAG, "Phone OTP request failed", it)
+                                            error = accountLoginErrorMessage(AccountLoginAction.REQUEST_OTP, it)
+                                        }
+                                        busy = false
                                     }
+                                },
+                                enabled = !busy && phone.isNotBlank() && otpResendSecondsRemaining == 0L
+                            ) { Text(if (otpResendSecondsRemaining > 0) "${otpResendSecondsRemaining}s 后重发" else "发送验证码") }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Button(
+                        onClick = {
+                            runAction {
+                                busy = true
+                                error = null
+                                runCatching {
+                                    val progress = loginProgress ?: accountRepository.startLogin(phone)
+                                    accountRepository.verifyPhoneOtpFactor(progress.transactionId, otp)
+                                }.onSuccess(::applyLoginProgress)
+                                    .onFailure { error = accountLoginErrorMessage(AccountLoginAction.VERIFY_OTP, it) }
+                                busy = false
+                            }
+                        },
+                        enabled = !busy && phone.isNotBlank() && otp.length == 6,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("继续") }
+                }
+                LoginMethod.TOTP -> {
+                    OutlinedTextField(
+                        value = passwordTotp,
+                        onValueChange = { passwordTotp = it.filter(Char::isDigit).take(6) },
+                        label = { Text("验证器动态码") },
+                        singleLine = true,
+                        enabled = !busy,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Button(
+                        onClick = {
+                            val progress = loginProgress ?: return@Button
+                            runAction {
+                                busy = true
+                                error = null
+                                runCatching { accountRepository.verifyTotpFactor(progress.transactionId, passwordTotp) }
+                                    .onSuccess(::applyLoginProgress)
                                     .onFailure { error = it.message ?: "动态验证码无效" }
                                 busy = false
                             }
                         },
-                        enabled = !busy && passwordTotp.length == 6,
-                        modifier = Modifier.weight(1f)
-                    ) { Text("验证并登录") }
+                        enabled = !busy && loginProgress != null && passwordTotp.length == 6,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("继续") }
                 }
-            }
-            AnimatedVisibility(
-                visible = passkeyLoginAvailable,
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically()
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                LoginMethod.PASSKEY -> {
                     Button(
                         onClick = {
                             val readyPhone = passkeyProbePhone ?: return@Button
                             runAction {
                                 busy = true
                                 error = null
-                                message = null
-                                runCatching { loginWithPasskey(readyPhone) }
-                                    .onSuccess { session ->
-                                        message = "登录成功"
-                                        usageTelemetry.recordAccountSignedIn(session.userId)
-                                    }
+                                runCatching {
+                                    val progress = loginProgress ?: accountRepository.startLogin(phone)
+                                    loginWithPasskey(readyPhone, progress.transactionId)
+                                }.onSuccess(::applyLoginProgress)
                                     .onFailure {
                                         Log.w(ACCOUNT_LOG_TAG, "Passkey login failed", it)
-                                        error = accountLoginErrorMessage(
-                                            AccountLoginAction.PASSKEY_LOGIN,
-                                            it
-                                        )
+                                        error = accountLoginErrorMessage(AccountLoginAction.PASSKEY_LOGIN, it)
                                     }
                                 busy = false
                             }
                         },
-                        enabled = !busy,
+                        enabled = !busy && passkeyLoginAvailable,
                         modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("使用本机通行密钥继续")
-                    }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        HorizontalDivider(modifier = Modifier.weight(1f))
+                    ) { Text("使用通行密钥继续") }
+                    if (!passkeyLoginAvailable) {
                         Text(
-                            "或使用 Passkey / 短信验证码",
-                            style = MaterialTheme.typography.labelMedium,
+                            "输入手机号后，系统会检查本机是否有可用的通行密钥。",
+                            style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        HorizontalDivider(modifier = Modifier.weight(1f))
                     }
-                }
-            }
-            OutlinedTextField(
-                value = otp,
-                onValueChange = { otp = it },
-                label = { Text("验证码") },
-                singleLine = true,
-                enabled = !busy,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth()
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                OutlinedButton(
-                    onClick = {
-                        runAction {
-                            busy = true
-                            error = null
-                            runCatching { accountRepository.requestPhoneOtp(phone) }
-                                .onSuccess { message = "验证码已发送" }
-                                .onFailure {
-                                    Log.w(ACCOUNT_LOG_TAG, "Phone OTP request failed", it)
-                                    error = accountLoginErrorMessage(
-                                        AccountLoginAction.REQUEST_OTP,
-                                        it
-                                    )
-                                }
-                            busy = false
-                        }
-                    },
-                    enabled = !busy && phone.isNotBlank(),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("获取验证码")
-                }
-                Button(
-                    onClick = {
-                        runAction {
-                            busy = true
-                            error = null
-                            runCatching { accountRepository.verifyPhoneOtp(phone, otp) }
-                                .onSuccess { session ->
-                                    message = "登录成功"
-                                    usageTelemetry.recordAccountSignedIn(session.userId)
-                                }
-                                .onFailure {
-                                    Log.w(ACCOUNT_LOG_TAG, "Phone OTP verification failed", it)
-                                    error = accountLoginErrorMessage(
-                                        AccountLoginAction.VERIFY_OTP,
-                                        it
-                                    )
-                                }
-                            busy = false
-                        }
-                    },
-                    enabled = !busy && phone.isNotBlank() && otp.isNotBlank(),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("登录")
                 }
             }
         } else {

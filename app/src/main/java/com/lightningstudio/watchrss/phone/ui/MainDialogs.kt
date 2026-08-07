@@ -26,6 +26,7 @@ import com.lightningstudio.watchrss.phone.viewmodel.MainConflictPromptUi
 import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptKind
 import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptUi
 import com.lightningstudio.watchrss.phone.viewmodel.TxtUpdatePromptUi
+import com.lightningstudio.watchrss.phone.viewmodel.TxtChapterPromptUi
 import com.lightningstudio.watchrss.phone.data.repo.TxtUpdateRelation
 
 @Composable
@@ -189,6 +190,36 @@ fun TxtUpdateDialog(
                 OutlinedButton(onClick = onDismiss) {
                     Text("取消")
                 }
+            }
+        }
+    )
+}
+
+@Composable
+fun TxtChapterImportDialog(
+    prompt: TxtChapterPromptUi,
+    onChooseChapterImport: (Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("按章节导入 TXT？") },
+        text = {
+            Text(
+                text = "已在“${prompt.fileName}”中识别到 ${prompt.chapterCount} 个章节。" +
+                    "按章节导入会创建“${prompt.bookTitle}”频道并显示在主页，" +
+                    "每章可单独阅读；不分章节则作为一篇内容放入“导入内容”。",
+                style = MaterialTheme.typography.bodyMedium
+            )
+        },
+        confirmButton = {
+            Button(onClick = { onChooseChapterImport(true) }) {
+                Text("按章节导入")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = { onChooseChapterImport(false) }) {
+                Text("不分章节")
             }
         }
     )

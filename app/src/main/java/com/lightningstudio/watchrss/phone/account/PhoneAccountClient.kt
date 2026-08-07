@@ -10,11 +10,12 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 class PhoneAccountClient(
     private val environment: AccountEnvironment,
+    private val licenseIdentity: LicenseDeviceIdentity,
+    private val deviceAccessToken: () -> String? = { null },
     private val httpClient: OkHttpClient = defaultHttpClient()
 ) {
     suspend fun requestPhoneOtp(phone: String) = withContext(Dispatchers.IO) {
@@ -24,7 +25,7 @@ class PhoneAccountClient(
             put("create_user", true)
         }
         post(
-            path = "/auth/v1/otp",
+            path = "/functions/v1/account/login/phone/request",
             body = body,
             bearerToken = null
         ).close()
@@ -34,11 +35,12 @@ class PhoneAccountClient(
         requireConfigured()
         val body = JSONObject().apply {
             put("phone", phone.trim())
-            put("token", otp.trim())
-            put("type", "sms")
+            put("otp", otp.trim())
+            put("licenseDeviceId", licenseIdentity.deviceId)
+            put("devicePublicKey", licenseIdentity.publicKeyPem)
         }
         post(
-            path = "/auth/v1/verify",
+            path = "/functions/v1/account/login/phone/verify",
             body = body,
             bearerToken = null
         ).use { response ->
@@ -54,7 +56,8 @@ class PhoneAccountClient(
                 phoneMasked = maskPhone(user.optString("phone").ifBlank { phone }),
                 accessToken = accessToken,
                 refreshToken = refreshToken,
-                expiresAtMillis = System.currentTimeMillis() + expiresInSeconds * 1000L
+                expiresAtMillis = System.currentTimeMillis() + expiresInSeconds * 1000L,
+                activationProof = json.optString("activationProof")
             )
         }
     }
@@ -119,6 +122,8 @@ class PhoneAccountClient(
             body = JSONObject().apply {
                 put("challengeId", challengeId)
                 put("credential", JSONObject(credentialJson))
+                put("licenseDeviceId", licenseIdentity.deviceId)
+                put("devicePublicKey", licenseIdentity.publicKeyPem)
             },
             bearerToken = session.accessToken
         ).close()
@@ -146,6 +151,8 @@ class PhoneAccountClient(
             body = JSONObject().apply {
                 put("challengeId", challengeId)
                 put("credential", JSONObject(credentialJson))
+                put("licenseDeviceId", licenseIdentity.deviceId)
+                put("devicePublicKey", licenseIdentity.publicKeyPem)
             },
             bearerToken = null
         ).use { response ->
@@ -168,11 +175,15 @@ class PhoneAccountClient(
             put("watchInstallId", watchInstallId.orEmpty())
             put("displayName", displayName.orEmpty())
         }
-        post(
-            path = "/functions/v1/issue-watch-device-token",
-            body = body,
-            bearerToken = session.accessToken
-        ).use { response ->
+        val response = deviceAccessToken()?.let { token ->
+            postWithDeviceToken(
+                path = "/functions/v1/issue-watch-device-token",
+                body = body,
+                bearerToken = session.accessToken,
+                deviceToken = token
+            )
+        } ?: error("手机尚未授权")
+        response.use { response ->
             val json = response.jsonBody()
             WatchDeviceToken(
                 accessToken = json.optString("watchAccessToken")
@@ -203,12 +214,7 @@ class PhoneAccountClient(
             .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
         val response = httpClient.newCall(request).execute()
-        if (!response.isSuccessful) {
-            val text = response.body?.string().orEmpty()
-            response.close()
-            throw IOException("HTTP ${response.code}: ${text.ifBlank { response.message }}")
-        }
-        return response
+        return checkResponse(response)
     }
 
     private fun get(path: String, bearerToken: String?): okhttp3.Response {
@@ -223,12 +229,7 @@ class PhoneAccountClient(
             .get()
             .build()
         val response = httpClient.newCall(request).execute()
-        if (!response.isSuccessful) {
-            val text = response.body?.string().orEmpty()
-            response.close()
-            throw IOException("HTTP ${response.code}: ${text.ifBlank { response.message }}")
-        }
-        return response
+        return checkResponse(response)
     }
 
     private fun patch(
@@ -265,11 +266,18 @@ class PhoneAccountClient(
     }
 
     private fun execute(request: Request): okhttp3.Response {
-        val response = httpClient.newCall(request).execute()
+        return checkResponse(httpClient.newCall(request).execute())
+    }
+
+    private fun checkResponse(response: okhttp3.Response): okhttp3.Response {
         if (!response.isSuccessful) {
             val text = response.body?.string().orEmpty()
+            val error = PhoneAccountHttpException(
+                statusCode = response.code,
+                responseBody = text
+            )
             response.close()
-            throw IOException("HTTP ${response.code}: ${text.ifBlank { response.message }}")
+            throw error
         }
         return response
     }
@@ -328,9 +336,78 @@ class PhoneAccountClient(
             phoneMasked = json.optString("phoneMasked").ifBlank { "已登录账号" },
             accessToken = accessToken,
             refreshToken = json.optString("refreshToken"),
-            expiresAtMillis = expiresAtMillis
+            expiresAtMillis = expiresAtMillis,
+            activationProof = json.optString("activationProof")
         )
     }
+
+    suspend fun appAccessStatus(session: PhoneAccountSession): AppAccessSummary = withContext(Dispatchers.IO) {
+        get(
+            path = "/functions/v1/account/app-access?licenseDeviceId=${licenseIdentity.deviceId}",
+            bearerToken = session.accessToken
+        ).use { it.jsonBody().toAccessSummary() }
+    }
+
+    suspend fun claimAppAccess(session: PhoneAccountSession, idempotencyKey: String): AppAuthorization = withContext(Dispatchers.IO) {
+        require(session.activationProof.isNotBlank()) { "请重新完成短信或 Passkey 登录" }
+        post(
+            path = "/functions/v1/account/phone-authorizations/claim",
+            body = JSONObject().apply {
+                put("activationProof", session.activationProof)
+                put("licenseDeviceId", licenseIdentity.deviceId)
+                put("devicePublicKey", licenseIdentity.publicKeyPem)
+                put("idempotencyKey", idempotencyKey)
+            },
+            bearerToken = session.accessToken
+        ).use { parseAuthorization(it.jsonBody()) }
+    }
+
+    suspend fun refreshAppAccess(session: PhoneAccountSession, current: AppAuthorization): AppAuthorization = withContext(Dispatchers.IO) {
+        postWithDeviceToken(
+            path = "/functions/v1/account/app-access/refresh",
+            body = JSONObject().apply { put("licenseDeviceId", licenseIdentity.deviceId) },
+            bearerToken = session.accessToken,
+            deviceToken = current.deviceAccessToken
+        ).use { parseAuthorization(it.jsonBody()) }
+    }
+
+    suspend fun releaseAppAccess(session: PhoneAccountSession, current: AppAuthorization): Boolean = withContext(Dispatchers.IO) {
+        postWithDeviceToken(
+            path = "/functions/v1/account/phone-authorizations/release",
+            body = JSONObject().apply { put("licenseDeviceId", licenseIdentity.deviceId) },
+            bearerToken = session.accessToken,
+            deviceToken = current.deviceAccessToken
+        ).use { it.jsonBody().optBoolean("released") }
+    }
+
+    suspend fun createPaymentOrder(session: PhoneAccountSession, idempotencyKey: String): AppPaymentOrder = withContext(Dispatchers.IO) {
+        post(
+            path = "/functions/v1/payments/xunhupay/orders",
+            body = JSONObject().apply { put("idempotencyKey", idempotencyKey) },
+            bearerToken = session.accessToken
+        ).use { it.jsonBody().toPaymentOrder() }
+    }
+
+    suspend fun paymentOrder(session: PhoneAccountSession, orderId: String): AppPaymentOrder = withContext(Dispatchers.IO) {
+        get("/functions/v1/payments/orders/$orderId", session.accessToken).use { it.jsonBody().toPaymentOrder() }
+    }
+
+    private fun postWithDeviceToken(path: String, body: JSONObject, bearerToken: String, deviceToken: String): okhttp3.Response {
+        val request = Request.Builder().url(environment.backendBaseUrl + path)
+            .addHeader("apikey", environment.supabaseAnonKey)
+            .addHeader("content-type", JSON_MEDIA_TYPE.toString())
+            .addHeader("authorization", "Bearer $bearerToken")
+            .addHeader("x-watchrss-device-authorization", "Bearer $deviceToken")
+            .post(body.toString().toRequestBody(JSON_MEDIA_TYPE)).build()
+        return execute(request)
+    }
+
+    private fun parseAuthorization(json: JSONObject) = AppAuthorization(
+        deviceAccessToken = json.getString("deviceAccessToken"),
+        deviceAccessTokenExpiresAt = json.getLong("deviceAccessTokenExpiresAt"),
+        lease = json.getString("lease"), leaseExpiresAt = json.getLong("leaseExpiresAt"),
+        releaseGrant = json.optString("releaseGrant"), access = json.getJSONObject("access").toAccessSummary()
+    )
 
     private fun JSONArray?.toStringList(): List<String> {
         if (this == null) return emptyList()

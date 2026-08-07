@@ -84,6 +84,18 @@ class CloudKeyManager(
         check(editor.commit()) { "账号密钥保存失败" }
     }
 
+    @Synchronized
+    fun clearAccountKeys(userId: String) {
+        val prefix = accountKeyPrefix(userId)
+        val editor = preferences.edit()
+            .remove(currentVersionName(userId))
+            .remove(legacyAccountKeyName(userId))
+        preferences.all.keys
+            .filter { it.startsWith(prefix) }
+            .forEach(editor::remove)
+        check(editor.commit()) { "本机云端账号密钥清理失败" }
+    }
+
     fun createRecoverySetup(
         userId: String,
         accountKey: ByteArray = getOrCreateAccountKey(userId),

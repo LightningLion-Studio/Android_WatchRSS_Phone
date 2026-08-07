@@ -112,6 +112,7 @@ class EncryptedAccountSessionStore(
             put("accessToken", session.accessToken)
             put("refreshToken", session.refreshToken)
             put("expiresAtMillis", session.expiresAtMillis)
+            put("activationProof", session.activationProof)
             put("updatedAtMillis", session.updatedAtMillis)
         }.toString()
 
@@ -124,6 +125,7 @@ class EncryptedAccountSessionStore(
                 accessToken = json.optString("accessToken").trim(),
                 refreshToken = json.optString("refreshToken").trim(),
                 expiresAtMillis = json.optLong("expiresAtMillis"),
+                activationProof = json.optString("activationProof"),
                 updatedAtMillis = json.optLong("updatedAtMillis")
             ).takeIf { it.userId.isNotBlank() && it.accessToken.isNotBlank() }
         }.getOrNull()
@@ -134,4 +136,3 @@ class EncryptedAccountSessionStore(
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
     }
 }
-

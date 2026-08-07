@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.coroutines.runBlocking
 import java.io.ByteArrayOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -47,6 +48,49 @@ class LocalContentImporterTest {
         assertEquals("长篇小说", article.title)
         assertEquals(longText.length, article.contentText.length)
         assertNull(article.contentHtml)
+    }
+
+    @Test
+    fun importTxt_offersStandaloneNovelChannelForCommonChineseChapterHeadings() {
+        val result = importer.importFile(
+            fileName = "我不是戏神.txt",
+            mimeType = "text/plain",
+            bytes = """
+                这是一本关于戏神与灾厄的故事，所有人物均为虚构。
+
+                第1章戏鬼回家
+                夜色落下后，陈伶终于回到了久违的家门口。
+
+                第2章我们在看着你
+                屋里的人没有出声，窗外却传来陌生的脚步。
+
+                第三章 灾厄
+                灰色的雾气吞没街道，新的灾厄已经降临。
+            """.trimIndent().toByteArray()
+        )
+
+        val chaptered = requireNotNull(
+            runBlocking { importer.buildTxtChapterSource(requireNotNull(result.txtChapterPlan)) }
+        )
+        assertEquals("我不是戏神", chaptered.title)
+        assertTrue(chaptered.url.startsWith("${ImportedContentIds.TXT_NOVEL_SOURCE_ROOT_URL}/"))
+        assertEquals(listOf("前言", "第1章戏鬼回家", "第2章我们在看着你", "第三章 灾厄"), chaptered.items.map { it.title })
+        assertTrue(chaptered.items.all { it.url.startsWith("${chaptered.url}/chapter/") })
+    }
+
+    @Test
+    fun importTxt_doesNotTreatBodySentencesAsSectionHeadings() {
+        val result = importer.importFile(
+            fileName = "课堂记录.txt",
+            mimeType = "text/plain",
+            bytes = """
+                第一节课是语文课，老师开始讲课。
+                第二部分内容是复习。
+                第三节课结束后大家离开教室。
+            """.trimIndent().toByteArray()
+        )
+
+        assertNull(result.txtChapterPlan)
     }
 
     @Test

@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit
 
 class PhoneCloudClient(
     private val environment: AccountEnvironment,
+    private val deviceAccessToken: () -> String? = { null },
     private val http: OkHttpClient = defaultHttpClient()
 ) {
     suspend fun membership(session: PhoneAccountSession): CloudMemberState =
@@ -257,6 +258,23 @@ class PhoneCloudClient(
         ).close()
     }
 
+    suspend fun resetLibrary(session: PhoneAccountSession): CloudLibraryResetResult =
+        post(
+            session,
+            "/functions/v1/cloud/library/reset",
+            JSONObject().apply { put("confirmation", RESET_LIBRARY_CONFIRMATION) }
+        ).use { response ->
+            response.jsonBody().let { body ->
+                require(body.optBoolean("libraryDeleted")) { "服务端未确认云端资料库删除" }
+                CloudLibraryResetResult(
+                    snapshotsDeleted = body.optLong("snapshotsDeleted"),
+                    chunksDeleted = body.optLong("chunksDeleted"),
+                    releasedBytes = body.optLong("releasedBytes"),
+                    storageObjectsQueued = body.optLong("storageObjectsQueued")
+                )
+            }
+        }
+
     suspend fun download(url: String, expectedSize: Long, expectedSha256: String): ByteArray =
         withContext(Dispatchers.IO) {
             http.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
@@ -318,6 +336,11 @@ class PhoneCloudClient(
         require(!session.isExpired) { "登录已过期，请重新登录" }
         val request = builder
             .header("authorization", "Bearer ${session.accessToken}")
+            .apply {
+                deviceAccessToken()?.takeIf { it.isNotBlank() }?.let {
+                    header("x-watchrss-device-authorization", "Bearer $it")
+                }
+            }
             .header("apikey", environment.supabaseAnonKey)
             .header("accept", "application/json")
             .build()
@@ -399,6 +422,7 @@ class PhoneCloudClient(
         }
 
     companion object {
+        private const val RESET_LIBRARY_CONFIRMATION = "DELETE_CLOUD_LIBRARY"
         private val JSON = "application/json; charset=utf-8".toMediaType()
 
         private fun defaultHttpClient() = OkHttpClient.Builder()

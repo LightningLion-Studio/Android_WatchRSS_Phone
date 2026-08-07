@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.AlarmManager
 import android.app.PendingIntent
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Build
@@ -24,6 +25,7 @@ import kotlinx.coroutines.launch
 class PhoneCompanionApplication : Application() {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastForegroundSyncAt = 0L
+    @Volatile private var resumedActivity: Activity? = null
     private val ipSyncService: WatchIpSyncService by lazy {
         WatchIpSyncService(this, PhoneDeviceIdentity(this).deviceId)
     }
@@ -34,11 +36,30 @@ class PhoneCompanionApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        PhoneCloudSyncWorker.schedule(this)
-        container.startCloudChangeScheduler()
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
-                startWatchBaseStationIfPermitted()
+                resumedActivity = activity
+                appScope.launch {
+                    container.appAccessCoordinator.reconcile()
+                    if (container.appAccessCoordinator.isAuthorized) {
+                        PhoneCloudSyncWorker.schedule(this@PhoneCompanionApplication)
+                        container.startCloudChangeScheduler()
+                        startWatchBaseStationIfPermitted()
+                    } else {
+                        PhoneCloudSyncWorker.cancel(this@PhoneCompanionApplication)
+                        container.stopCloudChangeScheduler()
+                        stopWatchBaseStation()
+                        if (activity !is MainActivity && activity !is AccountActivity &&
+                            activity !is DataManagementActivity && activity !is ContactDeveloperActivity
+                        ) {
+                            activity.startActivity(
+                                Intent(activity, MainActivity::class.java)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                            )
+                            activity.finish()
+                        }
+                    }
+                }
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastForegroundSyncAt < FOREGROUND_SYNC_THROTTLE_MS) return
                 lastForegroundSyncAt = now
@@ -51,22 +72,26 @@ class PhoneCompanionApplication : Application() {
 
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
             override fun onActivityStarted(activity: Activity) = Unit
-            override fun onActivityPaused(activity: Activity) = Unit
+            override fun onActivityPaused(activity: Activity) {
+                if (resumedActivity === activity) resumedActivity = null
+            }
             override fun onActivityStopped(activity: Activity) = Unit
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
             override fun onActivityDestroyed(activity: Activity) = Unit
         })
         appScope.launch {
             container.accountRepository.initialize()
+            container.appAccessCoordinator.initialize()
             container.usageTelemetry.recordAppLaunch()
             container.repository.recordFirstUseIfAbsent(container.firstInstalledAtMillis)
-            if (container.accountRepository.session.value != null) {
+            if (container.accountRepository.session.value != null && container.appAccessCoordinator.isAuthorized) {
                 runCatching { container.cloudSyncService.syncNow() }
             }
         }
     }
 
     fun startWatchBaseStationIfPermitted(): Boolean {
+        if (!container.appAccessCoordinator.isAuthorized) return false
         val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             listOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE)
         } else {
@@ -89,6 +114,18 @@ class PhoneCompanionApplication : Application() {
         }.onFailure { error ->
             Log.e(TAG, "Failed to start watch base station", error)
         }.getOrDefault(false)
+    }
+
+    private fun stopWatchBaseStation() {
+        runCatching { ipSyncService.close() }
+        runCatching { WatchBleBandwidthServer.processInstance(this).close() }
+    }
+
+    /** Only foreground phone sessions may be opened by a watch request. */
+    fun requestWatchBiliLogin(): Boolean {
+        val activity = resumedActivity ?: return false
+        activity.startActivity(BiliWatchLoginActivity.createIntent(activity))
+        return true
     }
 
     fun restartAfterRemoteEnvironmentChange() {

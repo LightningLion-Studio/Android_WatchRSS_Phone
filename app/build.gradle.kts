@@ -58,6 +58,11 @@ android {
         buildConfigField("String", "WATCHRSS_OPENPANEL_API_URL", "\"http://10.0.2.2:3001\"")
         buildConfigField("String", "WATCHRSS_POSTHOG_HOST", "\"\"")
         buildConfigField("String", "WATCHRSS_POSTHOG_API_KEY", "\"\"")
+        buildConfigField(
+            "String",
+            "WATCHRSS_APP_ACCESS_PUBLIC_KEY",
+            productionSetting("WATCHRSS_APP_ACCESS_PUBLIC_KEY").asBuildConfigString()
+        )
 
         testInstrumentationRunner = "com.karumi.shot.ShotTestRunner"
 

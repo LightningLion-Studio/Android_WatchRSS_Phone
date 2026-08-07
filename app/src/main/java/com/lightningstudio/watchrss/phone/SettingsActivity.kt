@@ -126,8 +126,15 @@ import com.lightningstudio.watchrss.phone.data.reader.ReaderHyphenation
 import com.lightningstudio.watchrss.phone.data.reader.ReaderLineBreakMode
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPreset
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetCodec
+import com.lightningstudio.watchrss.phone.data.reader.PreparedReaderPresetImport
+import com.lightningstudio.watchrss.phone.data.reader.READER_PRESET_PACKAGE_EXTENSION
+import com.lightningstudio.watchrss.phone.data.reader.READER_PRESET_PACKAGE_MIME_TYPE
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetLibraryImportChoice
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetPackageScope
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetSelection
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetSingleImportChoice
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetUndoEntry
 import com.lightningstudio.watchrss.phone.data.reader.ReaderRenderMode
 import com.lightningstudio.watchrss.phone.data.reader.ReaderThemeMode
 import com.lightningstudio.watchrss.phone.data.reader.ReaderTextAlignment
@@ -199,6 +206,12 @@ private enum class FontSizeMode {
     ABSOLUTE
 }
 
+private data class ImportedPresetApplyTarget(
+    val id: String,
+    val name: String,
+    val warnings: List<String>
+)
+
 private data class SettingsPaneTransition(
     val from: SettingsPage,
     val to: SettingsPage
@@ -231,11 +244,13 @@ internal fun ReaderSettingsHost(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val container = (context.applicationContext as PhoneCompanionApplication).container
+    val transferService = container.readerPresetTransferService
     val presets by repository.presets.collectAsStateWithLifecycle()
     val active by repository.activePreset.collectAsStateWithLifecycle()
     val selection by repository.selection.collectAsStateWithLifecycle()
     val fonts by repository.fonts.collectAsStateWithLifecycle()
     val backgrounds by repository.backgrounds.collectAsStateWithLifecycle()
+    val importUndoEntries by transferService.undoEntries.collectAsStateWithLifecycle()
     val isSystemDark = isSystemInDarkTheme()
     LaunchedEffect(isSystemDark) {
         repository.setSystemDark(isSystemDark)
@@ -254,6 +269,14 @@ internal fun ReaderSettingsHost(
     var redoHistory by remember { mutableStateOf<List<ReaderPreset>>(emptyList()) }
     var lastHistoryAt by remember { mutableStateOf(0L) }
     var pendingPresetExport by remember { mutableStateOf<ReaderPreset?>(null) }
+    var pendingLibraryExport by remember { mutableStateOf(false) }
+    var preparedPresetImport by remember { mutableStateOf<PreparedReaderPresetImport?>(null) }
+    var presetTransferBusy by remember { mutableStateOf(false) }
+    var importedPresetApplyTarget by remember {
+        mutableStateOf<ImportedPresetApplyTarget?>(null)
+    }
+    var confirmImportUndoAfterChanges by remember { mutableStateOf(false) }
+    var undoNowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
     var editorApplyTarget by remember { mutableStateOf<ReaderPreset?>(null) }
     var syncAfterPermission by remember { mutableStateOf(false) }
     var previewAfterPermission by remember { mutableStateOf(false) }
@@ -272,6 +295,14 @@ internal fun ReaderSettingsHost(
     var showSystemFontPicker by remember { mutableStateOf(false) }
     var systemFontsLoading by remember { mutableStateOf(false) }
     var systemFonts by remember { mutableStateOf<List<SystemReaderFont>>(emptyList()) }
+
+    LaunchedEffect(transferService) {
+        while (true) {
+            undoNowMillis = System.currentTimeMillis()
+            transferService.refreshUndoHistory()
+            delay(1_000L)
+        }
+    }
 
     fun beginEditing(preset: ReaderPreset) {
         draft = preset
@@ -461,21 +492,52 @@ internal fun ReaderSettingsHost(
     }
     val presetExportPicker =
         rememberLauncherForActivityResult(
-            ActivityResultContracts.CreateDocument("application/json")
+            ActivityResultContracts.CreateDocument(READER_PRESET_PACKAGE_MIME_TYPE)
         ) { uri ->
             val preset = pendingPresetExport
             pendingPresetExport = null
             if (uri == null || preset == null) return@rememberLauncherForActivityResult
             scope.launch {
                 message = runCatching {
-                    withContext(Dispatchers.IO) {
-                        context.contentResolver.openOutputStream(uri, "wt")
-                            ?.bufferedWriter(Charsets.UTF_8)
-                            ?.use { it.write(ReaderPresetCodec.encode(preset)) }
-                            ?: error("无法创建导出文件")
-                    }
-                    "已导出“${preset.name}”"
-                }.getOrElse { it.message ?: "预设导出失败" }
+                    transferService.exportSingle(preset.id, uri)
+                    "已导出“${preset.name}”，包含引用资源"
+                }.getOrElse { it.message ?: "预设包导出失败" }
+            }
+        }
+    val presetLibraryExportPicker =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument(READER_PRESET_PACKAGE_MIME_TYPE)
+        ) { uri ->
+            if (uri == null) {
+                pendingLibraryExport = false
+                return@rememberLauncherForActivityResult
+            }
+            scope.launch {
+                message = runCatching {
+                    transferService.exportLibrary(uri)
+                    pendingLibraryExport = false
+                    "已导出全部预设、字体和背景资源"
+                }.getOrElse {
+                    pendingLibraryExport = false
+                    it.message ?: "全部预设导出失败"
+                }
+            }
+        }
+    val presetImportPicker =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            uri ?: return@rememberLauncherForActivityResult
+            scope.launch {
+                presetTransferBusy = true
+                runCatching {
+                    persistReadPermission(context, uri)
+                    transferService.inspect(uri)
+                }.onSuccess { prepared ->
+                    preparedPresetImport?.let(transferService::discard)
+                    preparedPresetImport = prepared
+                }.onFailure {
+                    message = it.message ?: "无法读取预设包"
+                }
+                presetTransferBusy = false
             }
         }
     fun openFontFilePicker() {
@@ -514,6 +576,74 @@ internal fun ReaderSettingsHost(
                     message = it.message ?: "无法读取系统字体"
                 }
             systemFontsLoading = false
+        }
+    }
+
+    fun importSinglePreset(choice: ReaderPresetSingleImportChoice) {
+        val prepared = preparedPresetImport ?: return
+        presetTransferBusy = true
+        scope.launch {
+            runCatching { transferService.importSingle(prepared, choice) }
+                .onSuccess { result ->
+                    preparedPresetImport = null
+                    importedPresetApplyTarget = ImportedPresetApplyTarget(
+                        id = result.importedPresetIds.single(),
+                        name = result.importedPresetNames.single(),
+                        warnings = result.warnings
+                    )
+                }
+                .onFailure {
+                    preparedPresetImport = null
+                    message = it.message ?: "预设导入失败"
+                }
+            presetTransferBusy = false
+        }
+    }
+
+    fun importPresetLibrary(choice: ReaderPresetLibraryImportChoice) {
+        val prepared = preparedPresetImport ?: return
+        presetTransferBusy = true
+        scope.launch {
+            runCatching { transferService.importLibrary(prepared, choice) }
+                .onSuccess { result ->
+                    preparedPresetImport = null
+                    val action = if (choice == ReaderPresetLibraryImportChoice.MERGE) {
+                        "合并"
+                    } else {
+                        "替换"
+                    }
+                    message = buildString {
+                        append("已${action}${result.importedPresetIds.size}个预设")
+                        if (result.warnings.isNotEmpty()) {
+                            append("\n")
+                            append(result.warnings.joinToString("\n"))
+                        }
+                    }
+                }
+                .onFailure {
+                    preparedPresetImport = null
+                    message = it.message ?: "预设库导入失败"
+                }
+            presetTransferBusy = false
+        }
+    }
+
+    fun undoLatestImport(force: Boolean = false) {
+        presetTransferBusy = true
+        scope.launch {
+            runCatching { transferService.undoLatest(force) }
+                .onSuccess { result ->
+                    if (result.requiresConfirmation) {
+                        confirmImportUndoAfterChanges = true
+                    } else if (result.restoredLabel != null) {
+                        confirmImportUndoAfterChanges = false
+                        message = "已撤销：${result.restoredLabel}"
+                    } else {
+                        message = "没有可撤销的导入操作"
+                    }
+                }
+                .onFailure { message = it.message ?: "撤销导入失败" }
+            presetTransferBusy = false
         }
     }
 
@@ -755,8 +885,34 @@ internal fun ReaderSettingsHost(
                         }
                     },
                     onRename = { renamePreset = it },
-                    onDelete = { deletePreset = it }
-                    ,
+                    onDelete = { deletePreset = it },
+                    undoEntries = importUndoEntries,
+                    undoNowMillis = undoNowMillis,
+                    transferBusy = presetTransferBusy || pendingLibraryExport,
+                    onImport = {
+                        presetImportPicker.launch(
+                            arrayOf(
+                                READER_PRESET_PACKAGE_MIME_TYPE,
+                                "application/zip",
+                                "application/json",
+                                "*/*"
+                            )
+                        )
+                    },
+                    onExportAll = {
+                        pendingLibraryExport = true
+                        presetLibraryExportPicker.launch(
+                            "WatchRSS-reader-presets-${System.currentTimeMillis()}" +
+                                READER_PRESET_PACKAGE_EXTENSION
+                        )
+                    },
+                    onExportPreset = { preset ->
+                        pendingPresetExport = preset
+                        presetExportPicker.launch(
+                            "${preset.safeExportName()}$READER_PRESET_PACKAGE_EXTENSION"
+                        )
+                    },
+                    onUndoImport = { undoLatestImport() },
                     onSync = ::requestSync
                 )
                 SettingsPage.EDITOR -> {
@@ -790,7 +946,7 @@ internal fun ReaderSettingsHost(
                             onExport = {
                                 pendingPresetExport = current
                                 presetExportPicker.launch(
-                                    "${current.safeExportName()}.reader-preset.json"
+                                    "${current.safeExportName()}$READER_PRESET_PACKAGE_EXTENSION"
                                 )
                             },
                             onApply = {
@@ -1037,6 +1193,87 @@ internal fun ReaderSettingsHost(
         )
     }
 
+    preparedPresetImport?.let { prepared ->
+        PresetImportDialog(
+            prepared = prepared,
+            busy = presetTransferBusy,
+            onDismiss = {
+                transferService.discard(prepared)
+                preparedPresetImport = null
+            },
+            onSingleOverwrite = {
+                importSinglePreset(ReaderPresetSingleImportChoice.OVERWRITE)
+            },
+            onSingleCopy = {
+                importSinglePreset(ReaderPresetSingleImportChoice.COPY)
+            },
+            onLibraryMerge = {
+                importPresetLibrary(ReaderPresetLibraryImportChoice.MERGE)
+            },
+            onLibraryReplace = {
+                importPresetLibrary(ReaderPresetLibraryImportChoice.REPLACE)
+            }
+        )
+    }
+
+    importedPresetApplyTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { importedPresetApplyTarget = null },
+            title = { Text("已导入“${target.name}”") },
+            text = {
+                Text(
+                    buildString {
+                        append("选择是否立即应用到本机阅读器。")
+                        if (target.warnings.isNotEmpty()) {
+                            append("\n\n")
+                            append(target.warnings.joinToString("\n"))
+                        }
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        repository.setLightPreset(target.id)
+                        importedPresetApplyTarget = null
+                    }
+                ) { Text("应用于浅色") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { importedPresetApplyTarget = null }) {
+                        Text("暂不应用")
+                    }
+                    TextButton(
+                        onClick = {
+                            repository.setDarkPreset(target.id)
+                            importedPresetApplyTarget = null
+                        }
+                    ) { Text("应用于深色") }
+                }
+            }
+        )
+    }
+
+    if (confirmImportUndoAfterChanges) {
+        AlertDialog(
+            onDismissRequest = { confirmImportUndoAfterChanges = false },
+            title = { Text("预设库在导入后已有修改") },
+            text = { Text("继续撤销会恢复到该次导入前的阅读器预设库，并覆盖之后的手工修改。") },
+            confirmButton = {
+                TextButton(
+                    onClick = { undoLatestImport(force = true) },
+                    enabled = !presetTransferBusy
+                ) { Text("仍然撤销") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmImportUndoAfterChanges = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
     message?.let {
         AlertDialog(
             onDismissRequest = { message = null },
@@ -1079,6 +1316,99 @@ internal fun ReaderSettingsHost(
             }
         )
     }
+}
+
+@Composable
+private fun PresetImportDialog(
+    prepared: PreparedReaderPresetImport,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onSingleOverwrite: () -> Unit,
+    onSingleCopy: () -> Unit,
+    onLibraryMerge: () -> Unit,
+    onLibraryReplace: () -> Unit
+) {
+    val preview = prepared.preview
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = {
+            Text(
+                if (preview.scope == ReaderPresetPackageScope.SINGLE) {
+                    "导入阅读器预设"
+                } else {
+                    "导入全部预设"
+                }
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "预设 ${preview.presetCount} 个 · 字体 ${preview.fontCount} 个 · " +
+                        "背景 ${preview.backgroundCount} 个"
+                )
+                Text(
+                    "文件大小：${formatBytes(preview.packageBytes ?: preview.resourceBytes)}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    preview.presetNames.take(5).joinToString("、") +
+                        if (preview.presetNames.size > 5) " 等" else "",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (preview.hasSingleIdConflict) {
+                    Text(
+                        "本机已有同一预设，可覆盖原项或另存为新预设。",
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                preview.warnings.forEach { warning ->
+                    Text(
+                        warning,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                if (preview.scope == ReaderPresetPackageScope.LIBRARY) {
+                    Text(
+                        "合并会保留本机独有内容；替换只影响预设、字体和背景库。两种操作均可在五分钟内撤销。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                if (busy) Text("正在处理…", color = MaterialTheme.colorScheme.primary)
+            }
+        },
+        confirmButton = {
+            when (preview.scope) {
+                ReaderPresetPackageScope.SINGLE -> TextButton(
+                    onClick = onSingleOverwrite,
+                    enabled = !busy
+                ) {
+                    Text(if (preview.hasSingleIdConflict) "覆盖原预设" else "导入")
+                }
+                ReaderPresetPackageScope.LIBRARY -> TextButton(
+                    onClick = onLibraryMerge,
+                    enabled = !busy
+                ) { Text("合并") }
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onDismiss, enabled = !busy) { Text("取消") }
+                if (preview.scope == ReaderPresetPackageScope.SINGLE &&
+                    preview.hasSingleIdConflict
+                ) {
+                    TextButton(onClick = onSingleCopy, enabled = !busy) {
+                        Text("另存为新预设")
+                    }
+                }
+                if (preview.scope == ReaderPresetPackageScope.LIBRARY) {
+                    TextButton(onClick = onLibraryReplace, enabled = !busy) {
+                        Text("替换", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        }
+    )
 }
 
 @Composable
@@ -1342,13 +1672,60 @@ private fun PresetManager(
     onDuplicate: (ReaderPreset) -> Unit,
     onRename: (ReaderPreset) -> Unit,
     onDelete: (ReaderPreset) -> Unit,
+    undoEntries: List<ReaderPresetUndoEntry>,
+    undoNowMillis: Long,
+    transferBusy: Boolean,
+    onImport: () -> Unit,
+    onExportAll: () -> Unit,
+    onExportPreset: (ReaderPreset) -> Unit,
+    onUndoImport: () -> Unit,
     onSync: () -> Unit
 ) {
     var applyTarget by remember { mutableStateOf<ReaderPreset?>(null) }
+    var cardMenuPresetId by remember { mutableStateOf<String?>(null) }
     SettingsColumn(modifier) {
         Button(onClick = onNew, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Default.Add, contentDescription = null)
             Text(" 新建预设")
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = onImport,
+                enabled = !transferBusy,
+                modifier = Modifier.weight(1f)
+            ) { Text("导入预设包") }
+            OutlinedButton(
+                onClick = onExportAll,
+                enabled = !transferBusy,
+                modifier = Modifier.weight(1f)
+            ) { Text("导出全部") }
+        }
+        undoEntries.lastOrNull()?.let { latest ->
+            val remainingSeconds = ((latest.expiresAt - undoNowMillis + 999L) / 1_000L)
+                .coerceAtLeast(0L)
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("可撤销 ${undoEntries.size} 次导入", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "最近：${latest.label} · 剩余 ${remainingSeconds / 60}分" +
+                                "${(remainingSeconds % 60).toString().padStart(2, '0')}秒",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    TextButton(onClick = onUndoImport, enabled = !transferBusy) {
+                        Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = null)
+                        Text(" 撤销")
+                    }
+                }
+            }
         }
         OutlinedButton(onClick = onSync, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Default.Sync, contentDescription = null)
@@ -1407,8 +1784,32 @@ private fun PresetManager(
                         TextButton(onClick = { onEdit(preset) }) { Text("编辑") }
                         TextButton(onClick = { onDuplicate(preset) }) { Text("复制") }
                         TextButton(onClick = { onRename(preset) }) { Text("重命名") }
-                        IconButton(onClick = { onDelete(preset) }) {
-                            Icon(Icons.Default.Delete, contentDescription = "删除")
+                        Box {
+                            IconButton(onClick = { cardMenuPresetId = preset.id }) {
+                                Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                            }
+                            DropdownMenu(
+                                expanded = cardMenuPresetId == preset.id,
+                                onDismissRequest = { cardMenuPresetId = null }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("导出此预设") },
+                                    onClick = {
+                                        cardMenuPresetId = null
+                                        onExportPreset(preset)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("删除") },
+                                    onClick = {
+                                        cardMenuPresetId = null
+                                        onDelete(preset)
+                                    },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Delete, contentDescription = null)
+                                    }
+                                )
+                            }
                         }
                     }
                 }

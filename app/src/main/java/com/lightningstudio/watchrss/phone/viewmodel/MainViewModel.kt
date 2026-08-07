@@ -57,6 +57,7 @@ data class MainUiState(
     val bluetoothDevicePrompt: MainBluetoothDevicePromptUi? = null,
     val sharedImportPrompt: SharedImportPromptUi? = null,
     val backupImportPrompt: BackupImportPromptUi? = null,
+    val txtChapterPrompt: TxtChapterPromptUi? = null,
     val txtUpdatePrompt: TxtUpdatePromptUi? = null,
     val llmTokenUsageStats: PhoneLlmTokenUsageStatisticsPojo? = null,
     val llmTokenUsageDaily: List<PhoneLlmTokenUsageDailyPojo> = emptyList()
@@ -113,6 +114,12 @@ data class BackupImportPromptUi(
 data class TxtUpdatePromptUi(
     val fileName: String,
     val candidates: List<PhoneTxtUpdateCandidate>
+)
+
+data class TxtChapterPromptUi(
+    val fileName: String,
+    val bookTitle: String,
+    val chapterCount: Int
 )
 
 private data class LibraryLists(
@@ -331,50 +338,90 @@ class MainViewModel(
         viewModelScope.launch {
             runBusy("正在检查文件…") {
                 val inspection = repository.inspectLocalContentImport(fileName, mimeType, bytes)
-                val identical = inspection.candidates.firstOrNull {
-                    it.relation == TxtUpdateRelation.IDENTICAL
-                }
-                if (identical != null) {
-                    pendingLocalContentInspection = null
-                    sessionState.value = sessionState.value.copy(
-                        txtUpdatePrompt = null,
-                        message = "该 TXT 已导入：${identical.existingTitle}",
-                        error = null
-                    )
-                    return@runBusy
-                }
-                if (inspection.imported.kind == LocalContentImportKind.TXT &&
-                    inspection.candidates.isNotEmpty()
-                ) {
+                inspection.imported.txtChapterPlan?.let { chapterPlan ->
                     pendingLocalContentInspection = inspection
                     sessionState.value = sessionState.value.copy(
-                        txtUpdatePrompt = TxtUpdatePromptUi(
+                        txtChapterPrompt = TxtChapterPromptUi(
                             fileName = fileName,
-                            candidates = inspection.candidates
+                            bookTitle = chapterPlan.bookTitle,
+                            chapterCount = chapterPlan.headings.size
                         ),
+                        txtUpdatePrompt = null,
                         message = null,
                         error = null
                     )
                     return@runBusy
                 }
-                val result = repository.confirmLocalContentImport(
-                    inspection = inspection,
-                    replaceArticleId = null
-                )
-                usageTelemetry.recordLocalContentImported(
-                    kind = result.kind.name,
-                    title = result.source.title,
-                    articleCount = result.articleCount
-                )
-                sessionState.value = sessionState.value.copy(
-                    message = when (result.kind) {
-                        LocalContentImportKind.TXT -> "已导入 TXT 到导入内容，文章 ${result.articleCount} 篇"
-                        LocalContentImportKind.EPUB -> "已导入 EPUB 频道：${result.source.title}，章节 ${result.articleCount} 篇"
-                    },
-                    error = null
-                )
+                continueLocalContentImport(inspection)
             }
         }
+    }
+
+    fun chooseTxtChapterImport(splitIntoChapters: Boolean) {
+        val inspection = pendingLocalContentInspection ?: return
+        viewModelScope.launch {
+            runBusy(if (splitIntoChapters) "正在按章节导入 TXT…" else "正在导入 TXT…") {
+                val selectedInspection = if (splitIntoChapters) {
+                    repository.useTxtChapterImport(inspection)
+                } else {
+                    inspection
+                }
+                pendingLocalContentInspection = null
+                sessionState.value = sessionState.value.copy(txtChapterPrompt = null)
+                continueLocalContentImport(selectedInspection)
+            }
+        }
+    }
+
+    fun dismissTxtChapterPrompt() {
+        pendingLocalContentInspection = null
+        sessionState.value = sessionState.value.copy(txtChapterPrompt = null)
+    }
+
+    private suspend fun continueLocalContentImport(inspection: PhoneLocalContentImportInspection) {
+        val identical = inspection.candidates.firstOrNull {
+            it.relation == TxtUpdateRelation.IDENTICAL
+        }
+        if (identical != null) {
+            pendingLocalContentInspection = null
+            sessionState.value = sessionState.value.copy(
+                txtUpdatePrompt = null,
+                message = "该 TXT 已导入：${identical.existingTitle}",
+                error = null
+            )
+            return
+        }
+        if (inspection.imported.kind == LocalContentImportKind.TXT &&
+            inspection.candidates.isNotEmpty()
+        ) {
+            pendingLocalContentInspection = inspection
+            sessionState.value = sessionState.value.copy(
+                txtUpdatePrompt = TxtUpdatePromptUi(
+                    fileName = inspection.fileName,
+                    candidates = inspection.candidates
+                ),
+                message = null,
+                error = null
+            )
+            return
+        }
+        val result = repository.confirmLocalContentImport(
+            inspection = inspection,
+            replaceArticleId = null
+        )
+        usageTelemetry.recordLocalContentImported(
+            kind = result.kind.name,
+            title = result.source.title,
+            articleCount = result.articleCount
+        )
+        sessionState.value = sessionState.value.copy(
+            message = when (result.kind) {
+                LocalContentImportKind.TXT -> "已导入 TXT 到导入内容，文章 ${result.articleCount} 篇"
+                LocalContentImportKind.TXT_CHAPTERS -> "已导入 TXT 频道：${result.source.title}，章节 ${result.articleCount} 篇"
+                LocalContentImportKind.EPUB -> "已导入 EPUB 频道：${result.source.title}，章节 ${result.articleCount} 篇"
+            },
+            error = null
+        )
     }
 
     fun confirmTxtUpdate(articleId: String) {

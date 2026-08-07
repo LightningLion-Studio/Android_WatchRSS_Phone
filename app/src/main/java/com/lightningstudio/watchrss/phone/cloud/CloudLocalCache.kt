@@ -43,6 +43,11 @@ class CloudLocalCache(
             CloudSnapshotCodec.sha256(it) == sha256
         }
 
+    fun clear(userId: String) {
+        val directory = userDirectory(userId)
+        check(!directory.exists() || directory.deleteRecursively()) { "本机云端缓存清理失败" }
+    }
+
     private fun manifestFile(userId: String, snapshotId: String): File {
         require(snapshotId.matches(SAFE_ID)) { "快照标识无效" }
         return File(userDirectory(userId), "manifests/$snapshotId.bin")

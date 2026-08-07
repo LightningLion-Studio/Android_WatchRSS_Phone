@@ -409,7 +409,7 @@ class PhoneCompanionRepository(
             val imported = localContentImporter(fileName, mimeType, bytes)
             val result = saveImportedSource(
                 imported = imported.source,
-                replaceExistingArticles = imported.kind == LocalContentImportKind.EPUB
+                replaceExistingArticles = imported.kind != LocalContentImportKind.TXT
             )
             PhoneLocalContentImportResult(
                 source = result.source,
@@ -519,7 +519,7 @@ class PhoneCompanionRepository(
         if (replaceArticleId == null || inspection.imported.kind != LocalContentImportKind.TXT) {
             val result = saveImportedSource(
                 imported = inspection.imported.source,
-                replaceExistingArticles = inspection.imported.kind == LocalContentImportKind.EPUB
+                replaceExistingArticles = inspection.imported.kind != LocalContentImportKind.TXT
             )
             return@withContext PhoneLocalContentImportResult(
                 source = result.source,
@@ -573,6 +573,23 @@ class PhoneCompanionRepository(
             source = source,
             articleCount = 1,
             kind = LocalContentImportKind.TXT
+        )
+    }
+
+    /** Selects the pre-parsed chapterized alternative without decoding the file a second time. */
+    suspend fun useTxtChapterImport(
+        inspection: PhoneLocalContentImportInspection
+    ): PhoneLocalContentImportInspection = withContext(Dispatchers.Default) {
+        val chapterPlan = inspection.imported.txtChapterPlan
+            ?: error("TXT 未识别到可用章节")
+        val chapteredSource = LocalContentImporter().buildTxtChapterSource(chapterPlan)
+            ?: error("TXT 章节正文不足")
+        inspection.copy(
+            imported = inspection.imported.copy(
+                kind = LocalContentImportKind.TXT_CHAPTERS,
+                source = chapteredSource
+            ),
+            candidates = emptyList()
         )
     }
 

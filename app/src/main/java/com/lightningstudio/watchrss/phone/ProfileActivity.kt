@@ -100,6 +100,22 @@ class ProfileActivity : ComponentActivity() {
                             )
                         )
                     },
+                    accountContent = { leadingPane, onClose ->
+                        AccountScreen(
+                            accountRepository = accountRepository,
+                            cloudSyncService = container.cloudSyncService,
+                            rssSources = rssSources,
+                            usageTelemetry = container.usageTelemetry,
+                            onBack = onClose,
+                            preparePasskeyLogin = passkeyCoordinator::prepareLogin,
+                            loginWithPasskey = passkeyCoordinator::login,
+                            createPasskey = passkeyCoordinator::createPasskey,
+                            runAction = { action ->
+                                lifecycleScope.launch { action() }
+                            },
+                            leadingPane = leadingPane
+                        )
+                    },
                     settingsContent = { leadingPane, onClose ->
                         ReaderSettingsHost(
                             repository = container.readerPresetRepository,
@@ -198,6 +214,10 @@ private fun ProfileScreen(
     onSettingsClick: () -> Unit,
     onAboutClick: () -> Unit,
     onContactDeveloperClick: () -> Unit,
+    accountContent: @Composable (
+        leadingPane: @Composable () -> Unit,
+        onClose: () -> Unit
+    ) -> Unit,
     settingsContent: @Composable (
         leadingPane: @Composable () -> Unit,
         onClose: () -> Unit
@@ -207,7 +227,9 @@ private fun ProfileScreen(
     AdaptiveWindowScope(modifier = Modifier.fillMaxSize()) { windowInfo ->
         val closeDetail = { onDetailSelected(null) }
         if (windowInfo.isMediumOrExpanded) {
-            PredictiveBackHandler(enabled = selectedDetail != null) { events ->
+            PredictiveBackHandler(
+                enabled = selectedDetail != null && selectedDetail != ProfileDetailPage.ACCOUNT
+            ) { events ->
                 events.collect { }
                 closeDetail()
             }
@@ -224,34 +246,38 @@ private fun ProfileScreen(
                     }
                 )
             }
-            if (selectedDetail == ProfileDetailPage.SETTINGS) {
-                settingsContent(masterPane, closeDetail)
-            } else {
-                AdaptiveTwoPane(
-                    windowInfo = windowInfo,
-                    horizontalPadding = 0.dp,
-                    paneSpacing = 0.dp,
-                    startPane = masterPane,
-                    endPane = {
-                        AnimatedContent(
-                            targetState = selectedDetail,
-                            transitionSpec = {
-                                (slideInHorizontally { it / 5 } + fadeIn()) togetherWith
-                                    (slideOutHorizontally { -it / 8 } + fadeOut())
-                            },
-                            label = "profile-detail-page"
-                        ) { detail ->
-                            if (detail == null) {
-                                ProfileDetailPlaceholder()
-                            } else {
-                                detailContent(detail, closeDetail)
+            when (selectedDetail) {
+                ProfileDetailPage.ACCOUNT -> accountContent(masterPane, closeDetail)
+                ProfileDetailPage.SETTINGS -> settingsContent(masterPane, closeDetail)
+                else -> {
+                    AdaptiveTwoPane(
+                        windowInfo = windowInfo,
+                        horizontalPadding = 0.dp,
+                        paneSpacing = 0.dp,
+                        startPane = masterPane,
+                        endPane = {
+                            AnimatedContent(
+                                targetState = selectedDetail,
+                                transitionSpec = {
+                                    (slideInHorizontally { it / 5 } + fadeIn()) togetherWith
+                                        (slideOutHorizontally { -it / 8 } + fadeOut())
+                                },
+                                label = "profile-detail-page"
+                            ) { detail ->
+                                if (detail == null) {
+                                    ProfileDetailPlaceholder()
+                                } else {
+                                    detailContent(detail, closeDetail)
+                                }
                             }
                         }
-                    }
-                )
+                    )
+                }
             }
         } else if (selectedDetail != null) {
-            PredictiveBackHandler(enabled = true) { events ->
+            PredictiveBackHandler(
+                enabled = selectedDetail != ProfileDetailPage.ACCOUNT
+            ) { events ->
                 events.collect { }
                 closeDetail()
             }

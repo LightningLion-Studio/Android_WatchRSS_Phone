@@ -6,14 +6,16 @@ import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.account.PhoneAccountSession
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
 import com.lightningstudio.watchrss.phone.data.backup.WatchRssBackupService
-import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.note.NoteCloudStateCodec
-import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
+import com.lightningstudio.watchrss.phone.data.note.NoteRepository
+import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.security.SecureRandom
 
 enum class CloudSyncPhase {
@@ -199,6 +201,31 @@ class PhoneCloudSyncService(
         client.deleteSnapshot(requireSession(), snapshotId)
     }
 
+    suspend fun resetCloudLibrary(confirmationPhrase: String): CloudLibraryResetResult =
+        syncMutex.withLock {
+            require(isCloudLibraryDeleteConfirmed(confirmationPhrase)) {
+                "请输入“$CLOUD_LIBRARY_DELETE_PHRASE”确认"
+            }
+            val session = requireSession()
+            update(CloudSyncPhase.CHECKING, "正在永久删除云端资料库")
+            val result = client.resetLibrary(session)
+            try {
+                withContext(Dispatchers.IO) {
+                    keyManager.clearAccountKeys(session.userId)
+                    settings.clearLibraryState()
+                    cache.clear(session.userId)
+                }
+            } catch (error: Exception) {
+                update(CloudSyncPhase.ERROR, "云端资料库已删除，但本机云状态清理失败")
+                throw IllegalStateException(
+                    "云端资料库已删除，但本机云状态清理失败：${error.message.orEmpty()}",
+                    error
+                )
+            }
+            update(CloudSyncPhase.IDLE, "云端资料库已删除，本机资料仍保留")
+            result
+        }
+
     suspend fun prepareFirstDevice(): RecoveryKeySetup {
         val session = requireSession()
         val bootstrap = client.bootstrap(session)
@@ -219,6 +246,16 @@ class PhoneCloudSyncService(
         val session = requireSession()
         val bootstrap = client.bootstrap(session)
         require(bootstrap.member.writable) { "当前会员状态不能启用云备份" }
+        if (
+            isCloudKeySetupComplete(
+                envelopes = bootstrap.keyEnvelopes,
+                devices = bootstrap.devices,
+                deviceId = deviceId,
+                keyVersion = setup.envelope.keyVersion
+            )
+        ) {
+            return
+        }
         require(bootstrap.keyEnvelopes.none { it.recipientType == "recovery" }) {
             "账号已存在恢复密钥信封，不能覆盖"
         }
@@ -824,4 +861,24 @@ class PhoneCloudSyncService(
         private const val NOTES_ARCHIVE_OBJECT = "notes-assets.zip"
         private const val RELAY_LIBRARY_OBJECT = "library-sync.json"
     }
+}
+
+internal fun isCloudKeySetupComplete(
+    envelopes: List<StoredCloudKeyEnvelope>,
+    devices: List<RegisteredCloudDevice>,
+    deviceId: String,
+    keyVersion: Int
+): Boolean {
+    val recoveryReady = envelopes.any {
+        it.recipientType == "recovery" && it.envelope.keyVersion == keyVersion
+    }
+    val deviceEnvelopeReady = envelopes.any {
+        it.recipientType == "device" &&
+            it.recipientDeviceId == deviceId &&
+            it.envelope.keyVersion == keyVersion
+    }
+    val deviceReady = devices.any {
+        it.deviceId == deviceId && it.revokedAt == null && it.keyVersion == keyVersion
+    }
+    return recoveryReady && deviceEnvelopeReady && deviceReady
 }

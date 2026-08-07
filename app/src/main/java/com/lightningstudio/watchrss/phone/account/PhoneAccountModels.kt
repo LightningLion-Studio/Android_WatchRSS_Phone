@@ -6,6 +6,7 @@ data class PhoneAccountSession(
     val accessToken: String,
     val refreshToken: String,
     val expiresAtMillis: Long,
+    val activationProof: String = "",
     val updatedAtMillis: Long = System.currentTimeMillis()
 ) {
     val isExpired: Boolean

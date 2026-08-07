@@ -20,12 +20,12 @@ import android.os.Build
 import android.os.ParcelUuid
 import android.os.SystemClock
 import android.util.Log
+import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import com.lightningstudio.watchrss.phone.connection.bili.BiliBaseStationRequest
 import com.lightningstudio.watchrss.phone.connection.bili.BiliPlaybackRequest
 import com.lightningstudio.watchrss.phone.connection.bili.BiliRealtimeTranscoder
 import com.lightningstudio.watchrss.phone.connection.bili.PhoneBiliGateway
 import com.lightningstudio.watchrss.phone.connection.bili.failureResponse
-import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import com.lightningstudio.watchrss.phone.connection.bili.successResponse
 import com.lightningstudio.watchrss.phone.connection.bluetooth.NoteSyncPayload
 import com.lightningstudio.watchrss.phone.connection.ip.IpSyncProtocol
@@ -466,6 +466,11 @@ internal class WatchBleBandwidthServer(
             requestId = request.id
             if (request.method == "notes.sync") {
                 handleNotesSync(request)
+            } else if (request.method == "auth.open") {
+                val app = appContext as? PhoneCompanionApplication
+                    ?: error("手机登录服务不可用")
+                if (!app.requestWatchBiliLogin()) error("请先在手机打开腕上RSS，再从手表发起登录")
+                successResponse(request.id, org.json.JSONObject().put("status", "opened"))
             } else if (request.method == "video.start") {
                 startRealtimeVideo(
                     BiliPlaybackRequest(

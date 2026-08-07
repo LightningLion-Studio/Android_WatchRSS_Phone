@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="sharedpref" path="watchrss_account_session.xml" />
+    <exclude domain="sharedpref" path="watchrss_account_session_test.xml" />
+    <exclude domain="sharedpref" path="watchrss_app_access.xml" />
+    <exclude domain="sharedpref" path="watchrss_app_access_test.xml" />
+    <exclude domain="sharedpref" path="watchrss_installation_identity.xml" />
+</full-backup-content>

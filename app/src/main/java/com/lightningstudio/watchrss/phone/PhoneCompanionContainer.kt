@@ -9,6 +9,8 @@ import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.data.ai.PhoneAiSettingsStore
 import com.lightningstudio.watchrss.phone.data.ai.PhoneAiSummaryService
 import com.lightningstudio.watchrss.phone.account.PhoneInstallationIdentity
+import com.lightningstudio.watchrss.phone.account.LicenseDeviceIdentity
+import com.lightningstudio.watchrss.phone.account.AppAccessCoordinator
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncClient
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneNoteBluetoothSyncManager
@@ -26,6 +28,7 @@ import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
+import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetTransferService
 import com.lightningstudio.watchrss.phone.data.telemetry.OpenPanelAnalytics
 import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
 import kotlinx.coroutines.CoroutineScope
@@ -75,6 +78,10 @@ class PhoneCompanionContainer(context: Context) {
         PhoneInstallationIdentity(appContext)
     }
 
+    val licenseDeviceIdentity: LicenseDeviceIdentity by lazy {
+        LicenseDeviceIdentity(appContext)
+    }
+
     val firstInstalledAtMillis: Long
         get() = installationIdentity.firstInstalledAtMillis
 
@@ -86,9 +93,22 @@ class PhoneCompanionContainer(context: Context) {
                 prefsName = "watchrss_account_session${accountEnvironment.storageSuffix}"
             ),
             installationIdentity = installationIdentity,
-            accountClient = PhoneAccountClient(accountEnvironment),
+            accountClient = PhoneAccountClient(
+                accountEnvironment,
+                licenseDeviceIdentity,
+                deviceAccessToken = {
+                    com.lightningstudio.watchrss.phone.account.AppAccessStore(
+                        appContext,
+                        accountEnvironment.storageSuffix
+                    ).load()?.deviceAccessToken
+                }
+            ),
             phoneDeviceId = deviceIdentity.deviceId
         )
+    }
+
+    val appAccessCoordinator: AppAccessCoordinator by lazy {
+        AppAccessCoordinator(appContext, accountRepository, licenseDeviceIdentity, appScope)
     }
 
     val openPanelAnalytics: OpenPanelAnalytics by lazy {
@@ -120,6 +140,10 @@ class PhoneCompanionContainer(context: Context) {
         ).also { repository ->
             appScope.launch { repository.ensureSeeded() }
         }
+    }
+
+    val readerPresetTransferService: ReaderPresetTransferService by lazy {
+        ReaderPresetTransferService(appContext, readerPresetRepository)
     }
 
     val aiSettingsStore: PhoneAiSettingsStore by lazy { PhoneAiSettingsStore(appContext) }
@@ -176,7 +200,10 @@ class PhoneCompanionContainer(context: Context) {
             repository = repository,
             noteRepository = noteRepository,
             deviceId = deviceIdentity.deviceId,
-            client = PhoneCloudClient(accountEnvironment),
+            client = PhoneCloudClient(
+                accountEnvironment,
+                deviceAccessToken = { appAccessCoordinator.deviceAccessToken }
+            ),
             keyManager = com.lightningstudio.watchrss.phone.cloud.CloudKeyManager(
                 appContext,
                 storageSuffix = storageSuffix
@@ -211,6 +238,10 @@ class PhoneCompanionContainer(context: Context) {
 
     fun startCloudChangeScheduler() {
         cloudChangeScheduler.start()
+    }
+
+    fun stopCloudChangeScheduler() {
+        cloudChangeScheduler.stop()
     }
 
     val guidedSessionManager: PhoneGuidedSessionManager by lazy {

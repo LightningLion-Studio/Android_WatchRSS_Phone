@@ -16,6 +16,11 @@ import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -25,6 +30,7 @@ import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -44,6 +50,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListItemInfo
 import androidx.compose.foundation.lazy.LazyListState
@@ -60,14 +67,21 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -80,6 +94,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -93,7 +108,7 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
@@ -158,6 +173,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
@@ -409,6 +426,72 @@ internal fun ArticleReaderScreen(
         val onPositionRestoredState = rememberUpdatedState(onPositionRestored)
         val context = androidx.compose.ui.platform.LocalContext.current
         val appContainer = (context.applicationContext as PhoneCompanionApplication).container
+        val autoScrollPreferences = remember {
+            context.getSharedPreferences(AUTO_SCROLL_PREFERENCES, Context.MODE_PRIVATE)
+        }
+        var autoScrollEnabled by remember {
+            mutableStateOf(autoScrollPreferences.getBoolean(AUTO_SCROLL_ENABLED_KEY, false))
+        }
+        var autoScrollLinesPerSecond by remember {
+            mutableStateOf(
+                autoScrollPreferences
+                    .getFloat(AUTO_SCROLL_LINES_PER_SECOND_KEY, AUTO_SCROLL_DEFAULT_LINES_PER_SECOND)
+                    .coerceIn(AUTO_SCROLL_MIN_LINES_PER_SECOND, AUTO_SCROLL_MAX_LINES_PER_SECOND)
+            )
+        }
+        var autoScrollPaused by remember(safeArticle.articleId) { mutableStateOf(false) }
+        var showAutoScrollSettings by remember { mutableStateOf(false) }
+        var autoScrollFeedbackPlaying by remember { mutableStateOf<Boolean?>(null) }
+        val bodyLineHeightPx = with(density) {
+            (
+                LocalReaderPresetRuntime.current.preset.body.fontSizeSp.sp *
+                    LocalReaderPresetRuntime.current.preset.body.lineHeightEm
+                ).toPx()
+        }.coerceAtLeast(1f)
+
+        fun saveAutoScrollSettings() {
+            autoScrollPreferences.edit()
+                .putBoolean(AUTO_SCROLL_ENABLED_KEY, autoScrollEnabled)
+                .putFloat(AUTO_SCROLL_LINES_PER_SECOND_KEY, autoScrollLinesPerSecond)
+                .apply()
+        }
+
+        fun setAutoScrollPaused(paused: Boolean, showFeedback: Boolean = true) {
+            autoScrollPaused = paused
+            if (showFeedback) autoScrollFeedbackPlaying = !paused
+        }
+
+        LaunchedEffect(autoScrollFeedbackPlaying) {
+            if (autoScrollFeedbackPlaying != null) {
+                delay(AUTO_SCROLL_FEEDBACK_DURATION_MS)
+                autoScrollFeedbackPlaying = null
+            }
+        }
+
+        LaunchedEffect(
+            autoScrollEnabled,
+            autoScrollPaused,
+            hasRestoredPosition,
+            contentReady,
+            bodyLineHeightPx,
+            autoScrollLinesPerSecond
+        ) {
+            if (!autoScrollEnabled || autoScrollPaused || !hasRestoredPosition || !contentReady) {
+                return@LaunchedEffect
+            }
+            var previousFrameNanos = 0L
+            while (isActive) {
+                val frameNanos = withFrameNanos { it }
+                if (previousFrameNanos != 0L) {
+                    val elapsedSeconds = (frameNanos - previousFrameNanos) / 1_000_000_000f
+                    val deltaPx = autoScrollLinesPerSecond * bodyLineHeightPx * elapsedSeconds
+                    if (deltaPx > 0f && listState.scrollBy(deltaPx) == 0f) {
+                        setAutoScrollPaused(paused = true, showFeedback = false)
+                    }
+                }
+                previousFrameNanos = frameNanos
+            }
+        }
         val aiConfig = remember(safeArticle.articleId) { appContainer.aiSettingsStore.config() }
         val aiScope = rememberCoroutineScope()
         var aiJob by remember(safeArticle.articleId) { mutableStateOf<Job?>(null) }
@@ -749,10 +832,29 @@ internal fun ArticleReaderScreen(
             },
             onBack = onBackState.value
         ) {
-            val backgroundColor = Color.Transparent
-            val surfaceColorArgb = MaterialTheme.colorScheme.surface.toArgb()
+            val readerPreset = LocalReaderPresetRuntime.current.preset
+            // The chrome is part of the reader, not the app shell.  Derive both
+            // its tint and its controls from the active reader preset so a light
+            // book stays light (and a dark one stays dark) independently of the
+            // phone's Material theme.
+            val readerBackgroundColor = Color(readerPreset.background.colorArgb)
+            val readerControlColor = Color(readerPreset.body.colorArgb)
+            val readerChromeTint = if (readerControlColor.luminance() > 0.5f) {
+                Color.White
+            } else {
+                Color.Black
+            }
+            val readerChromeSurfaceAlpha = if (readerControlColor.luminance() > 0.5f) {
+                0.18f
+            } else {
+                0.12f
+            }
             val backdrop = rememberLayerBackdrop {
-                drawRect(backgroundColor)
+                // The reader background lives outside this layer when it is an
+                // image/video.  Seed the capture with the preset base color so
+                // the bar never falls back to the app theme while that asset is
+                // loading or unavailable.
+                drawRect(readerBackgroundColor)
                 drawContent()
             }
 
@@ -776,6 +878,15 @@ internal fun ArticleReaderScreen(
                     end = readerHorizontalPadding,
                     bottom = 20.dp
                 )
+                val autoScrollTapModifier = if (autoScrollEnabled) {
+                    Modifier.pointerInput(autoScrollPaused) {
+                        detectTapGestures {
+                            setAutoScrollPaused(paused = !autoScrollPaused)
+                        }
+                    }
+                } else {
+                    Modifier
+                }
                 val reader = importedTextReader
                 val hideContentUntilRestore = safeArticle.readingProgress > ARTICLE_RESTORE_HIDE_PROGRESS_EPSILON &&
                     !hasRestoredPosition
@@ -823,7 +934,8 @@ internal fun ArticleReaderScreen(
                                     onLoadImportedTextChunk = onLoadImportedTextChunk,
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .restoreVisibility(),
+                                        .restoreVisibility()
+                                        .then(autoScrollTapModifier),
                                     contentPadding = readerContentPadding
                                 )
                                 if (hideContentUntilRestore) {
@@ -873,7 +985,8 @@ internal fun ArticleReaderScreen(
                                     previewSourceNodeIndex = previewImage?.sourceNodeIndex,
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .restoreVisibility(),
+                                        .restoreVisibility()
+                                        .then(autoScrollTapModifier),
                                     contentPadding = readerContentPadding
                                 )
                                 if (hideContentUntilRestore) {
@@ -901,7 +1014,9 @@ internal fun ArticleReaderScreen(
                     .fillMaxWidth()
                     .offset { IntOffset(0, -topBarOffsetPx) }
                     .gaussianBlurBackdrop(
-                        backdrop = backdrop
+                        backdrop = backdrop,
+                        tint = readerChromeTint,
+                        surfaceAlpha = readerChromeSurfaceAlpha
                     )
                     .padding(bottom = 12.dp)
             ) {
@@ -934,7 +1049,9 @@ internal fun ArticleReaderScreen(
                     .fillMaxWidth()
                     .offset { IntOffset(0, bottomBarOffsetPx) }
                     .gaussianBlurBackdrop(
-                        backdrop = backdrop
+                        backdrop = backdrop,
+                        tint = readerChromeTint,
+                        surfaceAlpha = readerChromeSurfaceAlpha
                     )
             ) {
                 Box(
@@ -948,39 +1065,98 @@ internal fun ArticleReaderScreen(
                                 mediumMaxWidth = 720.dp,
                                 expandedMaxWidth = 760.dp
                             )
+                            .horizontalScroll(rememberScrollState())
                             .padding(horizontal = 16.dp, vertical = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        GlassButton(onClick = ::handleBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
-                            Text("返回")
-                        }
-                        if (safeArticle.url.isNotBlank() && !ImportedContentIds.isImportedContentUrl(safeArticle.url)) {
-                            GlassButton(onClick = { onOpenOriginal(safeArticle.url) }) {
-                                Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
-                                Text("原网页")
+                        CompositionLocalProvider(LocalContentColor provides readerControlColor) {
+                            GlassButton(onClick = ::handleBack) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+                                Text("返回")
                             }
-                        }
-                        if (aiConfig.enabled) {
-                            GlassButton(onClick = {
-                                if (aiResult == null && !aiLoading) startAiSummary()
-                                else showAiSummary = true
-                            }) {
-                                Icon(Icons.Default.AutoAwesome, contentDescription = null)
-                                Text("AI总结")
+                            if (safeArticle.url.isNotBlank() && !ImportedContentIds.isImportedContentUrl(safeArticle.url)) {
+                                GlassButton(onClick = { onOpenOriginal(safeArticle.url) }) {
+                                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
+                                    Text("原网页")
+                                }
                             }
-                        }
-                        if (embedded && onOpenFullscreen != null) {
-                            GlassButton(onClick = onOpenFullscreen) {
+                            if (aiConfig.enabled) {
+                                GlassButton(onClick = {
+                                    if (aiResult == null && !aiLoading) startAiSummary()
+                                    else showAiSummary = true
+                                }) {
+                                    Icon(Icons.Default.AutoAwesome, contentDescription = null)
+                                    Text("AI总结")
+                                }
+                            }
+                            GlassButton(onClick = { showAutoScrollSettings = true }) {
                                 Icon(
-                                    if (embeddedFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                                    if (autoScrollEnabled && !autoScrollPaused) {
+                                        Icons.Default.Pause
+                                    } else {
+                                        Icons.Default.PlayArrow
+                                    },
                                     contentDescription = null
                                 )
-                                Text(if (embeddedFullscreen) "缩小" else "全屏")
+                                Text("自动滚动")
+                            }
+                            if (embedded && onOpenFullscreen != null) {
+                                GlassButton(onClick = onOpenFullscreen) {
+                                    Icon(
+                                        if (embeddedFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                                        contentDescription = null
+                                    )
+                                    Text(if (embeddedFullscreen) "缩小" else "全屏")
+                                }
                             }
                         }
                     }
+                }
+            }
+
+            if (showAutoScrollSettings) {
+                AutoScrollSettingsCard(
+                    enabled = autoScrollEnabled,
+                    linesPerSecond = autoScrollLinesPerSecond,
+                    onEnabledChange = { enabled ->
+                        autoScrollEnabled = enabled
+                        autoScrollPaused = false
+                        saveAutoScrollSettings()
+                    },
+                    onLinesPerSecondChange = { linesPerSecond ->
+                        autoScrollLinesPerSecond = linesPerSecond
+                        saveAutoScrollSettings()
+                    },
+                    onDismiss = { showAutoScrollSettings = false },
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .zIndex(AUTO_SCROLL_SETTINGS_Z_INDEX)
+                )
+            }
+
+            AnimatedVisibility(
+                visible = autoScrollFeedbackPlaying != null,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .zIndex(AUTO_SCROLL_FEEDBACK_Z_INDEX),
+                enter = fadeIn() + scaleIn(),
+                exit = fadeOut() + scaleOut()
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(28.dp),
+                    color = MaterialTheme.colorScheme.inverseSurface.copy(alpha = 0.88f)
+                ) {
+                    Icon(
+                        imageVector = if (autoScrollFeedbackPlaying == true) {
+                            Icons.Default.PlayArrow
+                        } else {
+                            Icons.Default.Pause
+                        },
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.inverseOnSurface,
+                        modifier = Modifier.padding(24.dp).size(42.dp)
+                    )
                 }
             }
 
@@ -1137,9 +1313,89 @@ private fun GlassButton(
     }
 }
 
+@Composable
+private fun AutoScrollSettingsCard(
+    enabled: Boolean,
+    linesPerSecond: Float,
+    onEnabledChange: (Boolean) -> Unit,
+    onLinesPerSecondChange: (Float) -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .widthIn(max = 380.dp)
+            .padding(horizontal = 24.dp),
+        shape = RoundedCornerShape(32.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f),
+        shadowElevation = 16.dp
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 22.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("自动滚动", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "打开阅读器后自动开始",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = enabled, onCheckedChange = onEnabledChange)
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("自动滚动速率（行/秒）", style = MaterialTheme.typography.titleMedium)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        enabled = linesPerSecond > AUTO_SCROLL_MIN_LINES_PER_SECOND,
+                        onClick = {
+                            onLinesPerSecondChange(
+                                (linesPerSecond - AUTO_SCROLL_STEP_LINES_PER_SECOND)
+                                    .coerceAtLeast(AUTO_SCROLL_MIN_LINES_PER_SECOND)
+                            )
+                        }
+                    ) {
+                        Icon(Icons.Default.Remove, contentDescription = "降低速率")
+                    }
+                    Text(
+                        String.format(java.util.Locale.US, "%.1f", linesPerSecond),
+                        style = MaterialTheme.typography.displaySmall
+                    )
+                    IconButton(
+                        enabled = linesPerSecond < AUTO_SCROLL_MAX_LINES_PER_SECOND,
+                        onClick = {
+                            onLinesPerSecondChange(
+                                (linesPerSecond + AUTO_SCROLL_STEP_LINES_PER_SECOND)
+                                    .coerceAtMost(AUTO_SCROLL_MAX_LINES_PER_SECOND)
+                            )
+                        }
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = "提高速率")
+                    }
+                }
+            }
+            GlassButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
+                Text("完成")
+            }
+        }
+    }
+}
+
 // 阅读页统一的无圆角高斯模糊效果
 private fun Modifier.gaussianBlurBackdrop(
-    backdrop: LayerBackdrop
+    backdrop: LayerBackdrop,
+    tint: Color,
+    surfaceAlpha: Float
 ) = drawBackdrop(
     backdrop = backdrop,
     shape = { RectangleShape },
@@ -1147,6 +1403,10 @@ private fun Modifier.gaussianBlurBackdrop(
     shadow = null,
     effects = {
         blur(18f.dp.toPx())
+        vibrancy()
+    },
+    onDrawSurface = {
+        drawRect(tint.copy(alpha = surfaceAlpha))
     }
 )
 
@@ -3099,6 +3359,16 @@ private const val MAX_ARTICLE_TEXT_NODE_CHARS = 2_000
 private const val ARTICLE_IMAGE_READING_UNITS = 520
 private const val IMPORTED_TEXT_CHUNK_KEY_PREFIX = "importedText:"
 private const val READER_CHROME_SNAP_ANIMATION_MS = 140
+private const val AUTO_SCROLL_PREFERENCES = "reader_auto_scroll"
+private const val AUTO_SCROLL_ENABLED_KEY = "enabled"
+private const val AUTO_SCROLL_LINES_PER_SECOND_KEY = "lines_per_second"
+private const val AUTO_SCROLL_DEFAULT_LINES_PER_SECOND = 2f
+private const val AUTO_SCROLL_MIN_LINES_PER_SECOND = 0.5f
+private const val AUTO_SCROLL_MAX_LINES_PER_SECOND = 10f
+private const val AUTO_SCROLL_STEP_LINES_PER_SECOND = 0.5f
+private const val AUTO_SCROLL_FEEDBACK_DURATION_MS = 700L
+private const val AUTO_SCROLL_SETTINGS_Z_INDEX = 20f
+private const val AUTO_SCROLL_FEEDBACK_Z_INDEX = 21f
 private const val PREVIEW_OVERLAY_Z_INDEX = 10f
 private const val PREVIEW_BACKGROUND_ALPHA = 0.96f
 private const val PREVIEW_BACKGROUND_DISMISS_ALPHA_LOSS = 0.94f

@@ -61,6 +61,7 @@ import com.lightningstudio.watchrss.phone.ui.GlassTopBar
 import com.lightningstudio.watchrss.phone.ui.RefreshablePageColumn
 import com.lightningstudio.watchrss.phone.ui.TAB_BAR_HEIGHT
 import com.lightningstudio.watchrss.phone.ui.TxtUpdateDialog
+import com.lightningstudio.watchrss.phone.ui.TxtChapterImportDialog
 import com.lightningstudio.watchrss.phone.ui.canDeleteArticle
 import com.lightningstudio.watchrss.phone.ui.theme.AppCard
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
@@ -191,6 +192,13 @@ class RssActivity : ComponentActivity() {
                     },
                     onDismissMessage = viewModel::clearMessage
                 )
+                uiState.txtChapterPrompt?.let { prompt ->
+                    TxtChapterImportDialog(
+                        prompt = prompt,
+                        onChooseChapterImport = viewModel::chooseTxtChapterImport,
+                        onDismiss = viewModel::dismissTxtChapterPrompt
+                    )
+                }
                 uiState.txtUpdatePrompt?.let { prompt ->
                     TxtUpdateDialog(
                         prompt = prompt,

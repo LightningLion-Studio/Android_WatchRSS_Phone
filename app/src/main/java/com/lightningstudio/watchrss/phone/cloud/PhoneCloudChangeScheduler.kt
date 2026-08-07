@@ -6,15 +6,18 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 
 class PhoneCloudChangeScheduler(
     private val changeLogDao: SyncChangeLogDao,
     private val cloudSyncService: PhoneCloudSyncService,
     private val scope: CoroutineScope
 ) {
+    private var job: Job? = null
     @OptIn(FlowPreview::class)
     fun start() {
-        scope.launch {
+        if (job != null) return
+        job = scope.launch {
             changeLogDao.observeMaxSeq()
                 .drop(1)
                 .debounce(10 * 60 * 1000L)
@@ -23,4 +26,6 @@ class PhoneCloudChangeScheduler(
                 }
         }
     }
+
+    fun stop() { job?.cancel(); job = null }
 }

@@ -78,6 +78,30 @@ class PhoneAccountRepository(
         sessionStore.clear()
     }
 
+    suspend fun appAccessStatus(): AppAccessSummary =
+        accountClient.appAccessStatus(requireSession())
+
+    suspend fun claimAppAccess(idempotencyKey: String): AppAuthorization =
+        accountClient.claimAppAccess(requireSession(), idempotencyKey)
+
+    suspend fun refreshAppAccess(current: AppAuthorization): AppAuthorization =
+        accountClient.refreshAppAccess(requireSession(), current)
+
+    suspend fun releaseAppAccess(current: AppAuthorization): Boolean =
+        accountClient.releaseAppAccess(requireSession(), current)
+
+    suspend fun createPaymentOrder(idempotencyKey: String): AppPaymentOrder =
+        accountClient.createPaymentOrder(requireSession(), idempotencyKey)
+
+    suspend fun paymentOrder(orderId: String): AppPaymentOrder =
+        accountClient.paymentOrder(requireSession(), orderId)
+
+    private fun requireSession(): PhoneAccountSession {
+        val current = session.value ?: error("请先登录")
+        require(!current.isExpired) { "登录已过期，请重新登录" }
+        return current
+    }
+
     suspend fun buildAccountSyncRequest(
         watchDeviceId: String,
         watchInstallId: String? = null,

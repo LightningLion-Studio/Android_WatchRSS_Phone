@@ -71,6 +71,20 @@ class PhoneCloudStateStore(
             .apply()
     }
 
+    fun clearLibraryState() {
+        check(
+            preferences.edit()
+                .remove(KEY_DEVICE_SEQUENCE)
+                .remove(KEY_APPLIED_FULL)
+                .remove(KEY_APPLIED_STATE)
+                .remove(KEY_CONTENT_HASH)
+                .remove(KEY_CONTENT_HASH_FULL)
+                .remove(KEY_CONTENT_HASH_STATE)
+                .remove(KEY_PARENT_HEADS)
+                .commit()
+        ) { "本机云同步状态清理失败" }
+    }
+
     private fun appliedHeads(full: Boolean): JSONObject =
         runCatching {
             JSONObject(preferences.getString(appliedKey(full), "{}").orEmpty())

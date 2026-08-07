@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.cloud
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,8 +9,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -50,6 +51,11 @@ fun CloudAccountPanel(
     var restorePreview by remember { mutableStateOf<CloudSnapshotRestorePreview?>(null) }
     var overwriteConfirm by remember { mutableStateOf<CloudSnapshotRestorePreview?>(null) }
     var deleteCandidate by remember { mutableStateOf<CloudSnapshotHead?>(null) }
+    var showResetWarning by remember(userId) { mutableStateOf(false) }
+    var showResetConfirmation by remember(userId) { mutableStateOf(false) }
+    var resetConfirmationInput by remember(userId) { mutableStateOf("") }
+    var resetError by remember(userId) { mutableStateOf<String?>(null) }
+    var activationInFlight by remember(userId) { mutableStateOf(false) }
 
     fun refresh() {
         runAction {
@@ -69,7 +75,6 @@ fun CloudAccountPanel(
 
     val member = syncState.member
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        HorizontalDivider()
         Text("会员云空间", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         if (member == null) {
             Text("正在读取会员状态…")
@@ -128,24 +133,36 @@ fun CloudAccountPanel(
                                 modifier = Modifier.fillMaxWidth()
                             )
                             Button(
-                                onClick = {
+                                onClick = activate@{
+                                    if (activationInFlight) return@activate
+                                    val pendingSetup = setup ?: return@activate
+                                    val confirmedWords = RecoveryWords.parse(recoveryInput)
+                                    if (confirmedWords.size != 24) return@activate
+                                    activationInFlight = true
+                                    onBusyChange(true)
                                     runAction {
-                                        onBusyChange(true)
-                                        runCatching {
-                                            service.activateFirstDevice(
-                                                setup!!,
-                                                RecoveryWords.parse(recoveryInput)
-                                            )
-                                            bootstrap = service.loadBootstrap()
-                                        }.onSuccess {
-                                            setup = null
-                                            recoveryInput = ""
-                                            onMessage("加密云备份已启用")
-                                        }.onFailure { onError(it.message ?: "恢复词确认失败") }
-                                        onBusyChange(false)
+                                        try {
+                                            runCatching {
+                                                service.activateFirstDevice(
+                                                    pendingSetup,
+                                                    confirmedWords
+                                                )
+                                                bootstrap = service.loadBootstrap()
+                                            }.onSuccess {
+                                                setup = null
+                                                recoveryInput = ""
+                                                onMessage("加密云备份已启用")
+                                            }.onFailure {
+                                                onError(it.message ?: "恢复词确认失败")
+                                            }
+                                        } finally {
+                                            activationInFlight = false
+                                            onBusyChange(false)
+                                        }
                                     }
                                 },
-                                enabled = !busy && RecoveryWords.parse(recoveryInput).size == 24,
+                                enabled = !busy && !activationInFlight &&
+                                    RecoveryWords.parse(recoveryInput).size == 24,
                                 modifier = Modifier.fillMaxWidth()
                             ) { Text("我已安全保存，正式启用") }
                         }
@@ -178,6 +195,11 @@ fun CloudAccountPanel(
                 ) { Text("使用恢复词授权此手机") }
                 Text("仅短信登录不能解密；也可由另一台已授权设备批准。")
             } else if (hasLocalKey) {
+                Text(
+                    "✓ 端到端加密云备份已启用",
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold
+                )
                 Text("快照保留", fontWeight = FontWeight.Medium)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf(7 to "7天", 30 to "30天", 90 to "90天", 0 to "永久").forEach { (days, label) ->
@@ -381,7 +403,146 @@ fun CloudAccountPanel(
                     }
                 }
             }
+            if (recoveryEnvelopeExists) {
+                OutlinedButton(
+                    onClick = { showResetWarning = true },
+                    enabled = !busy,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "忘记恢复密钥？删除旧云端库并重新开始",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
         }
+    }
+
+    if (showResetWarning) {
+        AlertDialog(
+            onDismissRequest = { if (!busy) showResetWarning = false },
+            title = { Text("无法恢复旧云端库？") },
+            text = {
+                Text(
+                    "仅当已经无法找回 24 词恢复密钥，并接受放弃所有旧云端快照时继续。" +
+                        "若另一台设备仍有需要保留的资料，请先取消并从该设备恢复或导出。" +
+                        "旧云端快照、加密密钥和设备授权会永久删除，服务器无法找回；" +
+                        "这台手机上的本地文章、订阅和阅读状态不会删除。"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showResetWarning = false
+                        resetConfirmationInput = ""
+                        resetError = null
+                        showResetConfirmation = true
+                    },
+                    enabled = !busy
+                ) { Text("我理解，继续") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showResetWarning = false },
+                    enabled = !busy
+                ) { Text("取消") }
+            }
+        )
+    }
+
+    if (showResetConfirmation) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!busy) {
+                    showResetConfirmation = false
+                    resetConfirmationInput = ""
+                    resetError = null
+                }
+            },
+            title = { Text("永久删除云端库") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("此操作不可撤销。请输入“$CLOUD_LIBRARY_DELETE_PHRASE”完成最终确认。")
+                    OutlinedTextField(
+                        value = resetConfirmationInput,
+                        onValueChange = {
+                            resetConfirmationInput = it
+                            resetError = null
+                        },
+                        label = { Text(CLOUD_LIBRARY_DELETE_PHRASE) },
+                        singleLine = true,
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (busy) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Text("正在永久删除云端库，请勿关闭页面")
+                    }
+                    resetError?.let { visibleError ->
+                        Text(
+                            visibleError,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val confirmation = resetConfirmationInput
+                        resetError = null
+                        runAction {
+                            onBusyChange(true)
+                            runCatching { service.resetCloudLibrary(confirmation) }
+                                .onSuccess { result ->
+                                    showResetConfirmation = false
+                                    resetConfirmationInput = ""
+                                    resetError = null
+                                    recoveryInput = ""
+                                    setup = null
+                                    snapshotHeads = emptyList()
+                                    bootstrap = runCatching { service.loadBootstrap() }
+                                        .getOrElse {
+                                            bootstrap?.copy(
+                                                devices = emptyList(),
+                                                keyEnvelopes = emptyList()
+                                            )
+                                        }
+                                    onMessage(
+                                        if (result.storageObjectsQueued > 0) {
+                                            "旧云端库已删除，本机资料仍保留；密文对象正在后台清理"
+                                        } else {
+                                            "旧云端库已删除，本机资料仍保留，现在可重新启用云备份"
+                                        }
+                                    )
+                                }
+                                .onFailure {
+                                    val visibleError = cloudLibraryResetErrorMessage(it)
+                                    resetError = visibleError
+                                    onError(visibleError)
+                                }
+                            onBusyChange(false)
+                        }
+                    },
+                    enabled = !busy && isCloudLibraryDeleteConfirmed(resetConfirmationInput),
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    )
+                ) { Text("永久删除") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showResetConfirmation = false
+                        resetConfirmationInput = ""
+                        resetError = null
+                    },
+                    enabled = !busy
+                ) { Text("取消") }
+            }
+        )
     }
 
     estimate?.let { pending ->

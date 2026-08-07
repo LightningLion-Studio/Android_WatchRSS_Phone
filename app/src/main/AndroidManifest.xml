@@ -23,6 +23,8 @@
     <application
         android:name=".PhoneCompanionApplication"
         android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -44,16 +46,9 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
-        <activity
-            android:name=".HomeActivity"
-            android:exported="true"
-            android:launchMode="singleTask"
-            android:theme="@style/Theme.WatchRSS">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="text/plain" />
                 <data android:mimeType="text/*" />
                 <data android:mimeType="application/epub+zip" />
                 <data android:mimeType="application/octet-stream" />
@@ -68,68 +63,25 @@
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.OPENABLE" />
-                <data
-                    android:mimeType="text/plain"
-                    android:scheme="content" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="watchrss" android:host="payment-return" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.OPENABLE" />
-                <data
-                    android:mimeType="text/*"
-                    android:scheme="content" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.OPENABLE" />
-                <data
-                    android:mimeType="application/epub+zip"
-                    android:scheme="content" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.OPENABLE" />
-                <data
-                    android:mimeType="application/octet-stream"
-                    android:scheme="content" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.OPENABLE" />
-                <data
-                    android:mimeType="text/plain"
-                    android:scheme="file" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.OPENABLE" />
-                <data
-                    android:mimeType="text/*"
-                    android:scheme="file" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.OPENABLE" />
-                <data
-                    android:mimeType="application/epub+zip"
-                    android:scheme="file" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.OPENABLE" />
-                <data
-                    android:mimeType="application/octet-stream"
-                    android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="application/epub+zip" />
+                <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".HomeActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.WatchRSS" />
         <activity
             android:name=".ArticleReaderActivity"
             android:exported="false"
@@ -154,6 +106,10 @@
             android:theme="@style/Theme.WatchRSS" />
         <activity
             android:name=".PlatformWebViewActivity"
+            android:exported="false"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
+            android:name=".BiliWatchLoginActivity"
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />
         <activity
@@ -186,16 +142,16 @@
             android:theme="@style/Theme.WatchRSS" />
         <activity
             android:name=".DebugGuidedSessionActivity"
-            android:exported="true"
+            android:exported="false"
             android:theme="@style/Theme.WatchRSS" />
         <activity
             android:name=".DebugBluetoothSyncActivity"
-            android:exported="true"
+            android:exported="false"
             android:theme="@style/Theme.WatchRSS" />
         <activity
             android:name=".BleBandwidthTestActivity"
             android:configChanges="keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize"
-            android:exported="true"
+            android:exported="false"
             android:theme="@style/Theme.WatchRSS" />
     </application>
 

@@ -28,6 +28,19 @@ data class ReaderPresetSelection(
     val darkFollowsLight: Boolean
 )
 
+enum class ReaderPresetRepositoryImportMode {
+    SINGLE_OVERWRITE,
+    SINGLE_COPY,
+    LIBRARY_MERGE,
+    LIBRARY_REPLACE
+}
+
+data class ReaderPresetRepositoryImportResult(
+    val importedPresetIds: List<String>,
+    val importedPresetNames: List<String>,
+    val warning: String? = null
+)
+
 class ReaderPresetRepository(
     context: Context,
     private val database: PhoneCompanionDatabase,
@@ -416,6 +429,355 @@ class ReaderPresetRepository(
         deletions = dao.allDeletions()
     )
 
+    fun currentSelection(): ReaderPresetSelection = selectionState.value
+
+    suspend fun applyImportedSnapshot(
+        incoming: ReaderPresetSnapshot,
+        mode: ReaderPresetRepositoryImportMode
+    ): ReaderPresetRepositoryImportResult {
+        val incomingPresets = incoming.presets
+            .filterNot(ReaderPresetEntity::deleted)
+            .map { record ->
+                val preset = ReaderPresetCodec.decode(record.payloadJson)
+                require(preset.id == record.id) { "预设 ID 与内容不匹配" }
+                require(preset.name.isNotBlank()) { "预设名称不能为空" }
+                preset.copy(deleted = false)
+            }
+        require(incomingPresets.isNotEmpty()) { "预设包中没有可导入的预设" }
+        if (mode == ReaderPresetRepositoryImportMode.SINGLE_COPY ||
+            mode == ReaderPresetRepositoryImportMode.SINGLE_OVERWRITE
+        ) {
+            require(incomingPresets.size == 1) { "单项预设包只能包含一个预设" }
+        }
+        require(incoming.fonts.none(ReaderFontAssetEntity::deleted)) {
+            "预设包不能包含已删除字体"
+        }
+        require(incoming.backgrounds.none(ReaderBackgroundAssetEntity::deleted)) {
+            "预设包不能包含已删除背景"
+        }
+
+        val savedPresets = mutableListOf<ReaderPreset>()
+        database.withTransaction {
+            val localPresetRecords = dao.allPresetRecords()
+            val localFontRecords = dao.allFontRecords()
+            val localBackgroundRecords = dao.allBackgroundRecords()
+            val localDeletions = dao.allDeletions()
+            var timestamp = maxOf(
+                System.currentTimeMillis(),
+                localPresetRecords.maxOfOrNull(ReaderPresetEntity::updatedAt)?.plus(1L) ?: 0L,
+                localFontRecords.maxOfOrNull(ReaderFontAssetEntity::updatedAt)?.plus(1L) ?: 0L,
+                localBackgroundRecords.maxOfOrNull(ReaderBackgroundAssetEntity::updatedAt)
+                    ?.plus(1L) ?: 0L,
+                localDeletions.maxOfOrNull(ReaderDeletionEntity::deletedAt)?.plus(1L) ?: 0L
+            )
+            fun nextTimestamp(): Long = timestamp++
+
+            val incomingFontIds = incoming.fonts.mapTo(hashSetOf(), ReaderFontAssetEntity::id)
+            val incomingBackgroundIds = incoming.backgrounds
+                .mapTo(hashSetOf(), ReaderBackgroundAssetEntity::id)
+
+            incoming.fonts.forEach { font ->
+                require(font.id == font.sha256) { "字体资源 ID 与哈希不匹配" }
+                dao.upsertFont(
+                    font.copy(
+                        updatedAt = nextTimestamp(),
+                        modifiedBy = deviceId,
+                        deleted = false
+                    )
+                )
+                dao.deleteDeletion(DELETION_KIND_FONT, font.id)
+            }
+            incoming.backgrounds.forEach { background ->
+                require(background.id == background.sha256) { "背景资源 ID 与哈希不匹配" }
+                dao.upsertBackground(
+                    background.copy(
+                        updatedAt = nextTimestamp(),
+                        modifiedBy = deviceId,
+                        deleted = false
+                    )
+                )
+                dao.deleteDeletion(DELETION_KIND_BACKGROUND, background.id)
+            }
+
+            if (mode == ReaderPresetRepositoryImportMode.LIBRARY_REPLACE) {
+                localPresetRecords.filterNot(ReaderPresetEntity::deleted)
+                    .filter { local -> incomingPresets.none { it.id == local.id } }
+                    .forEach { local ->
+                        val deletedAt = nextTimestamp()
+                        val tombstone = runCatching {
+                            ReaderPresetCodec.decode(local.payloadJson)
+                        }.getOrElse {
+                            ReaderPreset(id = local.id, name = local.name)
+                        }.copy(
+                            updatedAt = deletedAt,
+                            modifiedBy = deviceId,
+                            deleted = true
+                        )
+                        dao.upsertPreset(tombstone.toEntity())
+                        dao.upsertDeletion(
+                            ReaderDeletionEntity(
+                                kind = DELETION_KIND_PRESET,
+                                entityId = local.id,
+                                deletedAt = deletedAt,
+                                deletedBy = deviceId
+                            )
+                        )
+                    }
+                localFontRecords.filterNot(ReaderFontAssetEntity::deleted)
+                    .filter { it.id !in incomingFontIds }
+                    .forEach { local ->
+                        val deletedAt = nextTimestamp()
+                        dao.upsertFont(
+                            local.copy(
+                                updatedAt = deletedAt,
+                                modifiedBy = deviceId,
+                                deleted = true
+                            )
+                        )
+                        dao.upsertDeletion(
+                            ReaderDeletionEntity(
+                                kind = DELETION_KIND_FONT,
+                                entityId = local.id,
+                                deletedAt = deletedAt,
+                                deletedBy = deviceId
+                            )
+                        )
+                    }
+                localBackgroundRecords.filterNot(ReaderBackgroundAssetEntity::deleted)
+                    .filter { it.id !in incomingBackgroundIds }
+                    .forEach { local ->
+                        val deletedAt = nextTimestamp()
+                        dao.upsertBackground(
+                            local.copy(
+                                updatedAt = deletedAt,
+                                modifiedBy = deviceId,
+                                deleted = true
+                            )
+                        )
+                        dao.upsertDeletion(
+                            ReaderDeletionEntity(
+                                kind = DELETION_KIND_BACKGROUND,
+                                entityId = local.id,
+                                deletedAt = deletedAt,
+                                deletedBy = deviceId
+                            )
+                        )
+                    }
+            }
+
+            val namesInUse = localPresetRecords.asSequence()
+                .filterNot(ReaderPresetEntity::deleted)
+                .filter { local ->
+                    when (mode) {
+                        ReaderPresetRepositoryImportMode.LIBRARY_REPLACE -> false
+                        ReaderPresetRepositoryImportMode.SINGLE_COPY -> true
+                        else -> incomingPresets.none { it.id == local.id }
+                    }
+                }
+                .map { canonicalPresetName(it.name) }
+                .toMutableSet()
+
+            incomingPresets.sortedBy { it.name.lowercase() }.forEach { imported ->
+                val targetId = if (mode == ReaderPresetRepositoryImportMode.SINGLE_COPY) {
+                    UUID.randomUUID().toString()
+                } else {
+                    imported.id
+                }
+                val uniqueName = uniqueNameFromSet(imported.name, namesInUse)
+                namesInUse += canonicalPresetName(uniqueName)
+                val saved = imported.copy(
+                    id = targetId,
+                    name = uniqueName,
+                    updatedAt = nextTimestamp(),
+                    modifiedBy = deviceId,
+                    deleted = false
+                ).normalized()
+                dao.upsertPreset(saved.toEntity())
+                dao.deleteDeletion(DELETION_KIND_PRESET, targetId)
+                savedPresets += saved
+            }
+        }
+
+        if (mode == ReaderPresetRepositoryImportMode.LIBRARY_REPLACE) {
+            val importedIds = savedPresets.mapTo(hashSetOf(), ReaderPreset::id)
+            val firstId = savedPresets.sortedBy { it.name.lowercase() }.first().id
+            val current = selectionState.value
+            val lightId = current.lightPresetId?.takeIf { it in importedIds } ?: firstId
+            val keepIndependentDark = !current.darkFollowsLight && current.darkPresetId in importedIds
+            updateSelection(
+                current.copy(
+                    lightPresetId = lightId,
+                    darkPresetId = current.darkPresetId.takeIf { keepIndependentDark },
+                    darkFollowsLight = !keepIndependentDark
+                )
+            )
+        }
+
+        return ReaderPresetRepositoryImportResult(
+            importedPresetIds = savedPresets.map(ReaderPreset::id),
+            importedPresetNames = savedPresets.map(ReaderPreset::name)
+        )
+    }
+
+    suspend fun restoreImportSnapshot(
+        desired: ReaderPresetSnapshot,
+        desiredSelection: ReaderPresetSelection
+    ) {
+        database.withTransaction {
+            val currentPresets = dao.allPresetRecords()
+            val currentFonts = dao.allFontRecords()
+            val currentBackgrounds = dao.allBackgroundRecords()
+            val currentDeletions = dao.allDeletions()
+            var timestamp = maxOf(
+                System.currentTimeMillis(),
+                currentPresets.maxOfOrNull(ReaderPresetEntity::updatedAt)?.plus(1L) ?: 0L,
+                currentFonts.maxOfOrNull(ReaderFontAssetEntity::updatedAt)?.plus(1L) ?: 0L,
+                currentBackgrounds.maxOfOrNull(ReaderBackgroundAssetEntity::updatedAt)
+                    ?.plus(1L) ?: 0L,
+                currentDeletions.maxOfOrNull(ReaderDeletionEntity::deletedAt)?.plus(1L) ?: 0L
+            )
+            fun nextTimestamp(): Long = timestamp++
+
+            val desiredPresetMap = desired.presets.associateBy(ReaderPresetEntity::id)
+            val desiredFontMap = desired.fonts.associateBy(ReaderFontAssetEntity::id)
+            val desiredBackgroundMap = desired.backgrounds
+                .associateBy(ReaderBackgroundAssetEntity::id)
+
+            currentPresets.filterNot(ReaderPresetEntity::deleted)
+                .filter { desiredPresetMap[it.id]?.deleted != false }
+                .forEach { current ->
+                    val deletedAt = nextTimestamp()
+                    val tombstone = ReaderPresetCodec.decode(current.payloadJson).copy(
+                        updatedAt = deletedAt,
+                        modifiedBy = deviceId,
+                        deleted = true
+                    )
+                    dao.upsertPreset(tombstone.toEntity())
+                    dao.upsertDeletion(
+                        ReaderDeletionEntity(
+                            DELETION_KIND_PRESET,
+                            current.id,
+                            deletedAt,
+                            deviceId
+                        )
+                    )
+                }
+            desiredPresetMap.values.forEach { record ->
+                val changedAt = nextTimestamp()
+                val restored = ReaderPresetCodec.decode(record.payloadJson).copy(
+                    updatedAt = changedAt,
+                    modifiedBy = deviceId,
+                    deleted = record.deleted
+                )
+                dao.upsertPreset(restored.toEntity())
+                if (record.deleted) {
+                    dao.upsertDeletion(
+                        ReaderDeletionEntity(
+                            DELETION_KIND_PRESET,
+                            record.id,
+                            changedAt,
+                            deviceId
+                        )
+                    )
+                } else {
+                    dao.deleteDeletion(DELETION_KIND_PRESET, record.id)
+                }
+            }
+
+            restoreAssetRecords(
+                current = currentFonts,
+                desired = desiredFontMap,
+                kind = DELETION_KIND_FONT,
+                nextTimestamp = ::nextTimestamp,
+                upsert = dao::upsertFont,
+                tombstone = { entity, changedAt ->
+                    entity.copy(
+                        updatedAt = changedAt,
+                        modifiedBy = deviceId,
+                        deleted = true
+                    )
+                },
+                restore = { entity, changedAt ->
+                    entity.copy(updatedAt = changedAt, modifiedBy = deviceId)
+                },
+                id = ReaderFontAssetEntity::id,
+                deleted = ReaderFontAssetEntity::deleted
+            )
+            restoreAssetRecords(
+                current = currentBackgrounds,
+                desired = desiredBackgroundMap,
+                kind = DELETION_KIND_BACKGROUND,
+                nextTimestamp = ::nextTimestamp,
+                upsert = dao::upsertBackground,
+                tombstone = { entity, changedAt ->
+                    entity.copy(
+                        updatedAt = changedAt,
+                        modifiedBy = deviceId,
+                        deleted = true
+                    )
+                },
+                restore = { entity, changedAt ->
+                    entity.copy(updatedAt = changedAt, modifiedBy = deviceId)
+                },
+                id = ReaderBackgroundAssetEntity::id,
+                deleted = ReaderBackgroundAssetEntity::deleted
+            )
+        }
+
+        val availableIds = desired.presets.asSequence()
+            .filterNot(ReaderPresetEntity::deleted)
+            .mapTo(hashSetOf(), ReaderPresetEntity::id)
+        val fallbackId = desired.presets.asSequence()
+            .filterNot(ReaderPresetEntity::deleted)
+            .sortedBy { it.name.lowercase() }
+            .firstOrNull()?.id ?: ReaderPreset.FALLBACK_ID
+        val lightId = desiredSelection.lightPresetId
+            ?.takeIf { it == ReaderPreset.FALLBACK_ID || it in availableIds }
+            ?: fallbackId
+        val keepIndependentDark = !desiredSelection.darkFollowsLight &&
+            desiredSelection.darkPresetId in availableIds
+        updateSelection(
+            desiredSelection.copy(
+                lightPresetId = lightId,
+                darkPresetId = desiredSelection.darkPresetId.takeIf { keepIndependentDark },
+                darkFollowsLight = !keepIndependentDark
+            )
+        )
+    }
+
+    private suspend fun <T> restoreAssetRecords(
+        current: List<T>,
+        desired: Map<String, T>,
+        kind: String,
+        nextTimestamp: () -> Long,
+        upsert: suspend (T) -> Unit,
+        tombstone: (T, Long) -> T,
+        restore: (T, Long) -> T,
+        id: (T) -> String,
+        deleted: (T) -> Boolean
+    ) {
+        current.filterNot(deleted)
+            .filter { desired[id(it)]?.let(deleted) != false }
+            .forEach { record ->
+                val changedAt = nextTimestamp()
+                upsert(tombstone(record, changedAt))
+                dao.upsertDeletion(
+                    ReaderDeletionEntity(kind, id(record), changedAt, deviceId)
+                )
+            }
+        desired.values.forEach { record ->
+            val changedAt = nextTimestamp()
+            upsert(restore(record, changedAt))
+            if (deleted(record)) {
+                dao.upsertDeletion(
+                    ReaderDeletionEntity(kind, id(record), changedAt, deviceId)
+                )
+            } else {
+                dao.deleteDeletion(kind, id(record))
+            }
+        }
+    }
+
     private suspend fun uniqueName(candidate: String): String {
         val base = candidate.trim().take(ReaderPreset.MAX_PRESET_NAME_LENGTH).ifBlank { "未命名预设" }
         if (dao.countNameConflicts(base, "") == 0) return base
@@ -424,6 +786,19 @@ class ReaderPresetRepository(
             val suffixText = " $suffix"
             val value = base.take(ReaderPreset.MAX_PRESET_NAME_LENGTH - suffixText.length) + suffixText
             if (dao.countNameConflicts(value, "") == 0) return value
+            suffix += 1
+        }
+    }
+
+    private fun uniqueNameFromSet(candidate: String, namesInUse: Set<String>): String {
+        val base = candidate.trim().take(ReaderPreset.MAX_PRESET_NAME_LENGTH)
+            .ifBlank { "未命名预设" }
+        if (canonicalPresetName(base) !in namesInUse) return base
+        var suffix = 2
+        while (true) {
+            val suffixText = " $suffix"
+            val value = base.take(ReaderPreset.MAX_PRESET_NAME_LENGTH - suffixText.length) + suffixText
+            if (canonicalPresetName(value) !in namesInUse) return value
             suffix += 1
         }
     }

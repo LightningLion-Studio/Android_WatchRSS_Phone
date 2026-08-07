@@ -414,6 +414,24 @@ class ReaderResourceStore(context: Context) {
         sha256Blocking(file)
     }
 
+    suspend fun pruneUnreferencedFiles(
+        keepFonts: Set<String>,
+        keepBackgrounds: Set<String>,
+        keepVariants: Set<String>
+    ) = withContext(Dispatchers.IO) {
+        pruneDirectory(fonts, keepFonts)
+        pruneDirectory(backgrounds, keepBackgrounds)
+        pruneDirectory(variants, keepVariants)
+    }
+
+    private fun pruneDirectory(directory: File, keepNames: Set<String>) {
+        directory.listFiles().orEmpty()
+            .filter(File::isFile)
+            .filterNot { it.name.startsWith('.') }
+            .filter { it.name !in keepNames }
+            .forEach(File::delete)
+    }
+
     private fun copyUri(uri: Uri, target: File, limitBytes: Long) {
         val input = appContext.contentResolver.openInputStream(uri)
             ?: throw IllegalArgumentException("无法读取所选文件")

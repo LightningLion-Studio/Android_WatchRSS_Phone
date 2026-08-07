@@ -2828,13 +2828,11 @@ private fun DashboardPage(
                                     onOpenFavorites = onOpenFavorites,
                                     onOpenWatchLater = onOpenWatchLater,
                                     onOpenIndependent = onOpenIndependent,
-                                    onOpenImportedContent = onOpenImportedContent
+                                    onOpenImportedContent = onOpenImportedContent,
+                                    onOpenNotes = onOpenNotes
                                 )
                             }
                         }
-                    }
-                    item {
-                        NotesDashboardCard(onOpenNotes)
                     }
                 } else {
                     item {
@@ -2862,10 +2860,10 @@ private fun DashboardPage(
                             onOpenFavorites = onOpenFavorites,
                             onOpenWatchLater = onOpenWatchLater,
                             onOpenIndependent = onOpenIndependent,
-                            onOpenImportedContent = onOpenImportedContent
+                            onOpenImportedContent = onOpenImportedContent,
+                            onOpenNotes = onOpenNotes
                         )
                     }
-                    item { NotesDashboardCard(onOpenNotes) }
                     item {
                         TokenUsageCard(
                             stats = uiState.llmTokenUsageStats,
@@ -2873,23 +2871,6 @@ private fun DashboardPage(
                         )
                     }
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun NotesDashboardCard(onOpenNotes: () -> Unit) {
-    ElevatedCard(onClick = onOpenNotes, modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.padding(20.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(Icons.Default.Sync, contentDescription = null)
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text("备忘录", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                Text("Markdown 笔记、图片与手表同步", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -3126,7 +3107,8 @@ private fun LibrarySummaryCard(
     onOpenFavorites: () -> Unit,
     onOpenWatchLater: () -> Unit,
     onOpenIndependent: () -> Unit,
-    onOpenImportedContent: () -> Unit
+    onOpenImportedContent: () -> Unit,
+    onOpenNotes: () -> Unit
 ) {
     val cardColors = defaultMainElevatedCardColors()
 
@@ -3197,7 +3179,16 @@ private fun LibrarySummaryCard(
                         .weight(1f)
                         .testTag("tile_imported")
                 )
-                Spacer(modifier = Modifier.weight(1f))
+                SummaryTile(
+                    title = "备忘录",
+                    value = "Markdown",
+                    supporting = "与手表同步",
+                    icon = { Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null) },
+                    onClick = onOpenNotes,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("tile_notes")
+                )
             }
         }
     }

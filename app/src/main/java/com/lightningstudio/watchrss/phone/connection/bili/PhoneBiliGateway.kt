@@ -23,8 +23,7 @@ internal class PhoneBiliGateway(
         .build()
 ) {
     fun execute(method: String, params: JSONObject, cookieHeader: String): JSONObject = when (method) {
-        "auth.qr" -> requestQrCode()
-        "auth.poll" -> pollQrCode(params.getString("key"))
+        "auth.poll" -> WatchBiliLoginSession.watchResponse()
         "account.status" -> accountStatus(cookieHeader)
         "feed" -> feed(cookieHeader)
         "search" -> search(
@@ -79,7 +78,7 @@ internal class PhoneBiliGateway(
         else -> error("unsupported_method:$method")
     }
 
-    private fun requestQrCode(): JSONObject {
+    internal fun requestQrCode(): JSONObject {
         val response = get("https://passport.bilibili.com/x/passport-login/web/qrcode/generate")
         val root = checkedJson(response.body)
         val data = root.getJSONObject("data")
@@ -88,7 +87,7 @@ internal class PhoneBiliGateway(
             .put("url", data.getString("url"))
     }
 
-    private fun pollQrCode(key: String): JSONObject {
+    internal fun pollQrCode(key: String): JSONObject {
         val url = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
             .toHttpUrl().newBuilder()
             .addQueryParameter("qrcode_key", key)

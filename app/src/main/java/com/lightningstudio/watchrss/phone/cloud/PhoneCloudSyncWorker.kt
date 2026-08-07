@@ -17,7 +17,7 @@ class PhoneCloudSyncWorker(
 ) : CoroutineWorker(appContext, parameters) {
     override suspend fun doWork(): Result {
         val container = (applicationContext as PhoneCompanionApplication).container
-        if (container.accountRepository.session.value == null) return Result.success()
+        if (container.accountRepository.session.value == null || !container.appAccessCoordinator.isAuthorized) return Result.success()
         return runCatching {
             container.cloudSyncService.syncNow()
             Result.success()
@@ -49,6 +49,10 @@ class PhoneCloudSyncWorker(
                 ExistingPeriodicWorkPolicy.UPDATE,
                 request
             )
+        }
+
+        fun cancel(context: Context) {
+            WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
         }
     }
 }

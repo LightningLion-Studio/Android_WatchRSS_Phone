@@ -11,15 +11,35 @@ import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
 import java.util.zip.ZipInputStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 enum class LocalContentImportKind {
     TXT,
+    TXT_CHAPTERS,
     EPUB
 }
 
 data class ImportedLocalContent(
     val kind: LocalContentImportKind,
-    val source: ImportedRssSource
+    val source: ImportedRssSource,
+    /** A lightweight chapter plan. Chapter bodies and hashes are built only after confirmation. */
+    val txtChapterPlan: TxtChapterImportPlan? = null
+)
+
+data class TxtChapterImportPlan(
+    val bookTitle: String,
+    val fileName: String,
+    val contentKey: String,
+    val text: String,
+    val headings: List<TxtChapterHeading>
+)
+
+data class TxtChapterHeading(
+    val start: Int,
+    val title: String
 )
 
 class LocalContentImporter {
@@ -56,16 +76,116 @@ class LocalContentImporter {
             imageUrl = null,
             guid = contentKey
         )
+        val continuousSource = ImportedRssSource(
+            url = ImportedContentIds.ROOT_SOURCE_URL,
+            title = ImportedContentIds.ROOT_SOURCE_TITLE,
+            description = "从手机导入的 TXT 内容",
+            siteUrl = null,
+            imageUrl = null,
+            items = listOf(item)
+        )
         return ImportedLocalContent(
             kind = LocalContentImportKind.TXT,
-            source = ImportedRssSource(
-                url = ImportedContentIds.ROOT_SOURCE_URL,
-                title = ImportedContentIds.ROOT_SOURCE_TITLE,
-                description = "从手机导入的 TXT 内容",
-                siteUrl = null,
-                imageUrl = null,
-                items = listOf(item)
+            source = continuousSource,
+            txtChapterPlan = buildTxtChapterPlan(
+                bookTitle = title,
+                fileName = fileName,
+                contentKey = contentKey,
+                text = text
             )
+        )
+    }
+
+    /**
+     * Splits only heading-shaped standalone lines.  Requiring at least two headings prevents
+     * prose such as “第一节课” from unexpectedly becoming a one-chapter book.
+     */
+    private fun buildTxtChapterPlan(
+        bookTitle: String,
+        fileName: String,
+        contentKey: String,
+        text: String
+    ): TxtChapterImportPlan? {
+        val headings = TXT_CHAPTER_HEADING.findAll(text)
+            .map { match ->
+                TxtChapterHeading(
+                    start = match.range.first,
+                    title = match.value.trim().replace(Regex("""\s+"""), " ")
+                )
+            }
+            .toList()
+        if (headings.size < MIN_TXT_CHAPTERS) return null
+
+        return TxtChapterImportPlan(
+            bookTitle = bookTitle,
+            fileName = fileName,
+            contentKey = contentKey,
+            text = text,
+            headings = headings
+        )
+    }
+
+    /** Called only after the user chooses chapter import. */
+    suspend fun buildTxtChapterSource(plan: TxtChapterImportPlan): ImportedRssSource? = coroutineScope {
+        val bookKey = WebArticleImporter.sha256("${plan.fileName}\n${plan.contentKey}").take(32)
+        val preface = plan.text.substring(0, plan.headings.first().start).trim()
+        val hasPreface = preface.length >= MIN_PREFACE_CHARS
+        val ranges = plan.headings.mapIndexed { headingIndex, heading ->
+            TxtChapterRange(
+                index = headingIndex + 1 + if (hasPreface) 1 else 0,
+                title = heading.title,
+                start = heading.start,
+                end = plan.headings.getOrNull(headingIndex + 1)?.start ?: plan.text.length
+            )
+        }
+        // Hashing and copying chapter text dominates large novels. Bound concurrency so a
+        // multi-core phone benefits without spawning thousands of tiny jobs or raising peak RAM.
+        val workerCount = minOf(MAX_CHAPTER_BUILD_WORKERS, Runtime.getRuntime().availableProcessors())
+            .coerceAtLeast(1)
+        val batchSize = (ranges.size + workerCount - 1) / workerCount
+        val chapterItems = ranges.chunked(batchSize)
+            .map { batch ->
+                async(Dispatchers.Default) {
+                    batch.mapNotNull { range ->
+                        val chapterText = plan.text.substring(range.start, range.end).trim()
+                        chapterText.takeIf { it.length >= MIN_CHAPTER_CHARS }?.let { text ->
+                            txtChapterItem(bookKey, range.index, range.title, text)
+                        }
+                    }
+                }
+            }
+            .awaitAll()
+            .flatten()
+        val chapters = buildList {
+            if (hasPreface) add(txtChapterItem(bookKey, 1, "前言", preface))
+            addAll(chapterItems)
+        }
+        if (chapters.size < MIN_TXT_CHAPTERS) return@coroutineScope null
+        ImportedRssSource(
+            url = ImportedContentIds.txtNovelSourceUrl(bookKey),
+            title = plan.bookTitle,
+            description = "从 TXT 分章节导入：${plan.fileName}",
+            siteUrl = null,
+            imageUrl = null,
+            items = chapters
+        )
+    }
+
+    private fun txtChapterItem(
+        bookKey: String,
+        chapterIndex: Int,
+        title: String,
+        text: String
+    ): ImportedRssItem {
+        val chapterKey = WebArticleImporter.sha256("$title\n$text").take(16)
+        return ImportedRssItem(
+            url = ImportedContentIds.txtNovelChapterUrl(bookKey, chapterIndex, chapterKey),
+            title = title,
+            excerpt = excerpt(text),
+            contentHtml = null,
+            contentText = text,
+            imageUrl = null,
+            guid = "${chapterIndex}-${chapterKey}"
         )
     }
 
@@ -501,11 +621,30 @@ class LocalContentImporter {
         val chapterKey: String
     )
 
+    private data class TxtChapterRange(
+        val index: Int,
+        val title: String,
+        val start: Int,
+        val end: Int
+    )
+
     companion object {
         private const val MAX_EXCERPT_CHARS = 280
         private const val MAX_TITLE_CHARS = 80
         private const val MIN_HTML_TOC_LINKS = 3
         private const val MIN_HTML_TOC_FALLBACK_LINKS = 8
+        private const val MIN_TXT_CHAPTERS = 2
+        private const val MIN_CHAPTER_CHARS = 8
+        private const val MIN_PREFACE_CHARS = 24
+        private const val MAX_CHAPTER_BUILD_WORKERS = 4
+        /**
+         * Chinese web novels commonly use 第N章/回/卷/篇/部/集, with Arabic or Chinese
+         * numerals. English e-books often use “Chapter N”.  The whole-line anchor is
+         * intentional: it avoids splitting ordinary prose that merely mentions a chapter.
+         */
+        private val TXT_CHAPTER_HEADING = Regex(
+            """(?im)^[\t 　]*(?:(?:第\s*[0-9０-９一二三四五六七八九十百千万亿零〇两壹贰叁肆伍陆柒捌玖拾佰仟萬]+\s*[章回卷篇部集])|(?:chapter\s+(?:[0-9]+|[ivxlcdm]+)))[\t 　:：、.．—-]*[^\r\n]{0,100}$"""
+        )
         private val GENERIC_EPUB_TITLES = setOf(
             "unknown",
             "untitled",

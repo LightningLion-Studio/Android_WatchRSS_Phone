@@ -462,7 +462,11 @@ private fun ProfileNavigation(
         ProfileEntry(
             title = "设置",
             supportingText = if (windowInfo.isMediumOrExpanded) {
-                "阅读器预设、字体、背景、AI 总结及应用行为"
+                if (BuildConfig.DEBUG) {
+                    "阅读器预设、字体、背景、AI 总结及应用行为"
+                } else {
+                    "阅读器预设、字体、背景及应用行为"
+                }
             } else {
                 "阅读器、预设、字体与应用功能"
             },

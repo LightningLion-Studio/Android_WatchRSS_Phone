@@ -2,7 +2,6 @@ package com.lightningstudio.watchrss.phone.account
 
 import android.content.Context
 import android.util.Base64
-import com.lightningstudio.watchrss.phone.BuildConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,6 +23,7 @@ class AppAccessCoordinator(
     private val store: AppAccessStore = AppAccessStore(context, AccountEnvironment.active(context).storageSuffix)
 ) {
     private val operationMutex = Mutex()
+    private val environment = AccountEnvironment.active(context)
     private val _state = MutableStateFlow<AppAccessState>(AppAccessState.Loading)
     val state: StateFlow<AppAccessState> = _state.asStateFlow()
 
@@ -35,36 +35,56 @@ class AppAccessCoordinator(
     suspend fun reconcile() = operationMutex.withLock { reconcileLocked() }
 
     private suspend fun reconcileLocked() {
-        val session = accountRepository.session.value
-        if (session == null || session.isExpired) {
-            _state.value = AppAccessState.LoggedOut
+        val cached = store.load()
+        val cachedValid = cached != null && LeaseVerifier.verify(
+            compact = cached.lease,
+            expectedDeviceId = identity.deviceId,
+            publicKeyPem = environment.appAccessPublicKey
+        )
+        if (cached != null && !cachedValid) store.clear()
+        val hasUsableSession = accountRepository.hasUsableSession
+        initialAppAccessState(
+            cachedSummary = cached?.access,
+            cachedLeaseValid = cachedValid,
+            hasUsableSession = hasUsableSession
+        )?.let { _state.value = it }
+
+        if (!hasUsableSession) {
             return
         }
-        store.loadPendingOrder()?.let { order ->
-            if (order.status == "pending") {
-                _state.value = AppAccessState.PaymentPending(order)
-                refreshPaymentLocked(order.orderId)
-                return
+
+        if (!cachedValid) {
+            store.loadPendingOrder()?.let { order ->
+                if (order.status == "pending") {
+                    _state.value = AppAccessState.PaymentPending(order)
+                    refreshPaymentLocked(order.orderId)
+                    return
+                }
             }
+            loadServerStatusLocked()
+            return
         }
-        val cached = store.load()
-        val cachedValid = cached != null && LeaseVerifier.verify(cached.lease, identity.deviceId)
-        if (cachedValid) _state.value = AppAccessState.Authorized(cached!!.access, offline = true)
+
         try {
-            val refreshed = if (cachedValid) {
-                accountRepository.refreshAppAccess(cached!!).also(store::save)
-            } else null
-            if (refreshed != null) _state.value = AppAccessState.Authorized(refreshed.access, offline = false)
-            else loadServerStatusLocked()
+            val refreshed = accountRepository.refreshAppAccess(cached!!).also(store::save)
+            _state.value = AppAccessState.Authorized(refreshed.access, offline = false)
         } catch (error: Throwable) {
-            val http = error as? PhoneAccountHttpException
-            if (http?.statusCode == 403) {
-                store.clear()
-                loadServerStatusLocked()
-            } else if (!cachedValid) {
-                _state.value = AppAccessState.ValidationError(error.message ?: "授权校验失败")
-            }
+            handleValidLeaseRefreshFailure(cached!!, error)
         }
+    }
+
+    private suspend fun handleValidLeaseRefreshFailure(
+        cached: AppAuthorization,
+        error: Throwable
+    ) {
+        if (error.findAccountHttpException()?.statusCode != 403) {
+            _state.value = AppAccessState.Authorized(cached.access, offline = true)
+            return
+        }
+        val serverSummary = runCatching { accountRepository.appAccessStatus() }.getOrNull()
+        val decision = validLeaseRefreshDecision(cached.access, serverSummary)
+        if (decision.clearCache) store.clear()
+        _state.value = decision.state
     }
 
     suspend fun claim() = operationMutex.withLock { claimLocked() }
@@ -78,7 +98,13 @@ class AppAccessCoordinator(
             accountRepository.consumeActivationProof(activationProof)
             _state.value = AppAccessState.Authorized(authorization.access, false)
         } catch (error: Throwable) {
-            val cached = store.load()?.takeIf { LeaseVerifier.verify(it.lease, identity.deviceId) }
+            val cached = store.load()?.takeIf {
+                LeaseVerifier.verify(
+                    compact = it.lease,
+                    expectedDeviceId = identity.deviceId,
+                    publicKeyPem = environment.appAccessPublicKey
+                )
+            }
             if (cached != null) {
                 _state.value = AppAccessState.Authorized(cached.access, offline = true)
                 return
@@ -162,8 +188,55 @@ class AppAccessCoordinator(
     }
 }
 
+internal data class ValidLeaseRefreshDecision(
+    val state: AppAccessState,
+    val clearCache: Boolean
+)
+
+internal fun initialAppAccessState(
+    cachedSummary: AppAccessSummary?,
+    cachedLeaseValid: Boolean,
+    hasUsableSession: Boolean
+): AppAccessState? = when {
+    cachedLeaseValid && cachedSummary != null ->
+        AppAccessState.Authorized(cachedSummary, offline = true)
+    !hasUsableSession -> AppAccessState.LoggedOut
+    else -> null
+}
+
+internal fun validLeaseRefreshDecision(
+    cachedSummary: AppAccessSummary,
+    serverSummary: AppAccessSummary?
+): ValidLeaseRefreshDecision = when (serverSummary?.deviceStatus) {
+    "authorized" -> ValidLeaseRefreshDecision(
+        AppAccessState.Authorized(serverSummary, offline = true),
+        clearCache = false
+    )
+    "revoked" -> ValidLeaseRefreshDecision(
+        AppAccessState.Revoked(serverSummary),
+        clearCache = true
+    )
+    "unclaimed" -> ValidLeaseRefreshDecision(
+        AppAccessState.ReauthenticationRequired(serverSummary),
+        clearCache = true
+    )
+    "purchase_required" -> ValidLeaseRefreshDecision(
+        AppAccessState.PurchaseRequired(serverSummary),
+        clearCache = true
+    )
+    else -> ValidLeaseRefreshDecision(
+        AppAccessState.Authorized(cachedSummary, offline = true),
+        clearCache = false
+    )
+}
+
 private object LeaseVerifier {
-    fun verify(compact: String, expectedDeviceId: String, nowSeconds: Long = System.currentTimeMillis() / 1000): Boolean = runCatching {
+    fun verify(
+        compact: String,
+        expectedDeviceId: String,
+        publicKeyPem: String,
+        nowSeconds: Long = System.currentTimeMillis() / 1000
+    ): Boolean = runCatching {
         val parts = compact.split('.')
         require(parts.size == 3)
         val header = JSONObject(String(Base64.decode(parts[0], FLAGS)))
@@ -171,9 +244,8 @@ private object LeaseVerifier {
         val payload = JSONObject(String(Base64.decode(parts[1], FLAGS)))
         require(payload.getString("licenseDeviceId") == expectedDeviceId)
         require(payload.getLong("expiresAt") > nowSeconds)
-        val pem = BuildConfig.WATCHRSS_APP_ACCESS_PUBLIC_KEY
-        require(pem.isNotBlank())
-        val der = Base64.decode(pem.replace("-----BEGIN PUBLIC KEY-----", "").replace("-----END PUBLIC KEY-----", "").replace("\n", ""), Base64.DEFAULT)
+        require(publicKeyPem.isNotBlank())
+        val der = Base64.decode(publicKeyPem.replace("-----BEGIN PUBLIC KEY-----", "").replace("-----END PUBLIC KEY-----", "").replace("\n", ""), Base64.DEFAULT)
         val key = KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(der))
         val verifier = Signature.getInstance("SHA256withECDSA")
         verifier.initVerify(key)

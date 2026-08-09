@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.account
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -27,6 +28,8 @@ class TotpFactorParsingTest {
     fun `normalizes mainland phone numbers for password login`() {
         assertEquals("+8613800138000", normalizeAccountPhone("138 0013 8000"))
         assertEquals("+8613800138000", normalizeAccountPhone("8613800138000"))
-        assertEquals("+886912345678", normalizeAccountPhone("+886912345678"))
+        assertThrows(IllegalArgumentException::class.java) {
+            normalizeAccountPhone("+886912345678")
+        }
     }
 }

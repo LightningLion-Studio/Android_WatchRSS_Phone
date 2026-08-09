@@ -24,6 +24,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.account.AppAccessState
+import com.lightningstudio.watchrss.phone.account.RemoteEnvironment
+import com.lightningstudio.watchrss.phone.account.RemoteEnvironmentStore
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -127,6 +129,18 @@ class MainActivity : ComponentActivity() {
                 is AppAccessState.ValidationError -> GateMessage("授权校验失败", state.message) { lifecycleScope.launch { coordinator.reconcile() } }
                 is AppAccessState.Authorized -> Text(if (state.offline) "正在使用离线授权…" else "授权有效")
             }
+            val remoteEnvironment = RemoteEnvironmentStore(this@MainActivity).active()
+            if (shouldShowProductionEnvironmentSwitch(BuildConfig.DEBUG, remoteEnvironment)) {
+                OutlinedButton(
+                    onClick = ::switchToProductionEnvironment,
+                    modifier = Modifier.padding(top = 20.dp)
+                ) { Text("切换到生产环境") }
+                Text(
+                    "当前为测试环境；切换后请重新打开应用。",
+                    modifier = Modifier.padding(top = 8.dp),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
             if (state !is AppAccessState.Authorized && state !is AppAccessState.Loading) {
                 OutlinedButton(
                     onClick = { startActivity(Intent(this@MainActivity, ContactDeveloperActivity::class.java)) },
@@ -152,7 +166,18 @@ class MainActivity : ComponentActivity() {
             openAccount()
         }
     }
+    private fun switchToProductionEnvironment() {
+        if (!BuildConfig.DEBUG) return
+        if (RemoteEnvironmentStore(this).select(RemoteEnvironment.PRODUCTION)) {
+            (application as PhoneCompanionApplication).restartAfterRemoteEnvironmentChange()
+        }
+    }
     private fun startPayment() { lifecycleScope.launch { coordinator.startPayment().paymentUrl?.let { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it))) }; startPaymentPolling() } }
 
     private companion object { const val KEY_PENDING_INTENT = "pending_inbound_intent" }
 }
+
+internal fun shouldShowProductionEnvironmentSwitch(
+    isDebugBuild: Boolean,
+    remoteEnvironment: RemoteEnvironment
+): Boolean = isDebugBuild && remoteEnvironment == RemoteEnvironment.TEST

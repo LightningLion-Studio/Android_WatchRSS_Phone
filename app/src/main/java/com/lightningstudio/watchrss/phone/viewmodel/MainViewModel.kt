@@ -1234,6 +1234,20 @@ class MainViewModel(
 
     private fun updateSmoothedSyncProgress(progress: MainSyncProgressUi) {
         val visible = sessionState.value.syncProgress
+        val phaseChanged = visible?.phase != null && visible.phase != progress.phase
+        if (phaseChanged) {
+            smoothedSyncProgressJob?.cancel()
+            smoothedSyncProgressJob = null
+            smoothedSyncProgressTarget = progress.copy(percent = progress.percent.coerceIn(0, 100))
+            sessionState.value = sessionState.value.copy(
+                message = progress.phase,
+                syncStatusMessage = progress.phase,
+                syncStatusError = null,
+                error = null,
+                syncProgress = progress.copy(percent = progress.percent.coerceIn(0, 100))
+            )
+            return
+        }
         val visiblePercent = visible?.percent ?: progress.percent
         val targetPercent = maxOf(progress.percent, visiblePercent).coerceIn(0, 100)
         smoothedSyncProgressTarget = progress.copy(percent = targetPercent)

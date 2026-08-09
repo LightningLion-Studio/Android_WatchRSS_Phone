@@ -8,12 +8,17 @@ import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.UUID
+import kotlin.math.roundToInt
 
 data class StoredNoteAsset(val entity: NoteAssetEntity, val markdownPath: String, val additionalAssets: List<NoteAssetEntity>)
 
-/** Stores a sync-safe app-private image; normal imports are bounded to 720p. */
+/** Stores a sync-safe app-private image; normal imports are bounded to 680 pixels. */
 class NoteAssetStore(private val context: Context) {
     suspend fun importImage(noteId: String, uri: Uri, keepOriginal: Boolean): StoredNoteAsset {
+        if (keepOriginal) {
+            val original = copyOriginal(noteId, uri)
+            return StoredNoteAsset(original, "assets/${original.storageKey}", emptyList())
+        }
         val assetId = UUID.randomUUID().toString()
         val directory = File(context.filesDir, "notes/assets").also { it.mkdirs() }
         val target = File(directory, "$assetId.jpg")
@@ -21,7 +26,7 @@ class NoteAssetStore(private val context: Context) {
             requireNotNull(input) { "无法读取图片" }
             requireNotNull(BitmapFactory.decodeStream(input)) { "图片格式不受支持" }
         }
-        val scaled = scaleTo720p(bitmap)
+        val scaled = scaleTo680Pixels(bitmap)
         FileOutputStream(target).use { output ->
             check(scaled.compress(Bitmap.CompressFormat.JPEG, 85, output)) { "图片压缩失败" }
         }
@@ -38,27 +43,37 @@ class NoteAssetStore(private val context: Context) {
             isOriginal = false,
             createdAt = System.currentTimeMillis()
         )
-        val original = if (keepOriginal) copyOriginal(noteId, uri, directory, sourceName) else null
-        return StoredNoteAsset(entity, "assets/${target.name}", listOfNotNull(original))
+        return StoredNoteAsset(entity, "assets/${target.name}", emptyList())
     }
 
-    private fun scaleTo720p(source: Bitmap): Bitmap {
-        val longest = maxOf(source.width, source.height)
-        if (longest <= 1280) return source
-        val ratio = 1280f / longest
-        return Bitmap.createScaledBitmap(source, (source.width * ratio).toInt(), (source.height * ratio).toInt(), true)
+    private fun scaleTo680Pixels(source: Bitmap): Bitmap {
+        val (width, height) = scaledImageDimensions(source.width, source.height)
+        if (width == source.width && height == source.height) return source
+        return Bitmap.createScaledBitmap(source, width, height, true)
     }
 
-    private fun copyOriginal(noteId: String, uri: Uri, directory: File, displayName: String): NoteAssetEntity {
+    private fun copyOriginal(noteId: String, uri: Uri): NoteAssetEntity {
         val assetId = UUID.randomUUID().toString()
-        val target = File(directory, "$assetId.original")
+        val directory = File(context.filesDir, "notes/assets").also { it.mkdirs() }
+        val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
+        val extension = when (mimeType.lowercase()) {
+            "image/jpeg" -> "jpg"
+            "image/png" -> "png"
+            "image/webp" -> "webp"
+            "image/gif" -> "gif"
+            "image/heic", "image/heif" -> "heic"
+            "image/avif" -> "avif"
+            else -> "original"
+        }
+        val target = File(directory, "$assetId.$extension")
         context.contentResolver.openInputStream(uri).use { input ->
             requireNotNull(input) { "无法读取原图" }
             FileOutputStream(target).use(input::copyTo)
         }
+        val displayName = uri.lastPathSegment?.substringAfterLast('/')?.take(120).orEmpty().ifBlank { "图片" }
         return NoteAssetEntity(
             assetId = assetId, noteId = noteId, sha256 = target.inputStream().use(::sha256),
-            displayName = displayName, mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream",
+            displayName = displayName, mimeType = mimeType,
             byteCount = target.length(), storageKey = target.name, isOriginal = true, createdAt = System.currentTimeMillis()
         )
     }
@@ -73,4 +88,12 @@ class NoteAssetStore(private val context: Context) {
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
+}
+
+internal fun scaledImageDimensions(width: Int, height: Int, maxEdge: Int = 680): Pair<Int, Int> {
+    require(width > 0 && height > 0 && maxEdge > 0)
+    val longest = maxOf(width, height)
+    if (longest <= maxEdge) return width to height
+    val ratio = maxEdge.toFloat() / longest
+    return maxOf(1, (width * ratio).roundToInt()) to maxOf(1, (height * ratio).roundToInt())
 }

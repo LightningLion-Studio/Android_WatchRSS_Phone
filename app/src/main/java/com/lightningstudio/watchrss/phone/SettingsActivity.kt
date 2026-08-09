@@ -1641,7 +1641,11 @@ private fun SettingsRoot(
                     )
                     SettingsEntry(
                         "应用功能",
-                        "缓存、分享、抖音 Cookie、AI 总结、引导与性能工具",
+                        if (BuildConfig.DEBUG) {
+                            "缓存、分享、抖音 Cookie、AI 总结、引导与性能工具"
+                        } else {
+                            "缓存、分享、抖音 Cookie 与数据管理"
+                        },
                         Icons.Default.Settings,
                         onOpenApp
                     )
@@ -3296,73 +3300,77 @@ private fun AppFeatureSettings(modifier: Modifier) {
             },
             enabled = cookie.isNotBlank()
         ) { Text("写入平台 WebView") }
-        SectionTitle("AI 总结")
-        ToggleRow("启用 AI 总结", aiEnabled) {
-            aiEnabled = it
-            saveAiConfig()
-        }
-        ToggleRow("切换文章后自动总结", autoSummary) {
-            autoSummary = it
-            saveAiConfig()
-        }
-        ToggleRow("显示 Token 用量", tokenUsage) {
-            tokenUsage = it
-            saveAiConfig()
-        }
-        OutlinedTextField(
-            value = provider,
-            onValueChange = { provider = it },
-            label = { Text("供应商") },
-            modifier = Modifier.fillMaxWidth()
-        )
-        OutlinedTextField(
-            value = baseUrl,
-            onValueChange = { baseUrl = it },
-            label = { Text("OpenAI 兼容 Base URL") },
-            modifier = Modifier.fillMaxWidth()
-        )
-        OutlinedTextField(
-            value = model,
-            onValueChange = { model = it },
-            label = { Text("模型") },
-            modifier = Modifier.fillMaxWidth()
-        )
-        OutlinedTextField(
-            value = apiKey,
-            onValueChange = { apiKey = it },
-            label = { Text("API Key（本机加密）") },
-            modifier = Modifier.fillMaxWidth()
-        )
-        OutlinedTextField(
-            value = prompt,
-            onValueChange = { prompt = it },
-            label = { Text("提示词") },
-            minLines = 4,
-            modifier = Modifier.fillMaxWidth()
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = ::saveAiConfig) { Text("保存配置") }
-            OutlinedButton(onClick = {
+        if (BuildConfig.DEBUG) {
+            SectionTitle("AI 总结")
+            ToggleRow("启用 AI 总结", aiEnabled) {
+                aiEnabled = it
                 saveAiConfig()
-                connectionResult = "测试中…"
-                scope.launch {
-                    connectionResult = runCatching {
-                        container.aiSummaryService.testConnection()
-                    }.getOrElse { it.message ?: "连接失败" }
-                }
-            }) { Text("连通测试") }
+            }
+            ToggleRow("切换文章后自动总结", autoSummary) {
+                autoSummary = it
+                saveAiConfig()
+            }
+            ToggleRow("显示 Token 用量", tokenUsage) {
+                tokenUsage = it
+                saveAiConfig()
+            }
+            OutlinedTextField(
+                value = provider,
+                onValueChange = { provider = it },
+                label = { Text("供应商") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = baseUrl,
+                onValueChange = { baseUrl = it },
+                label = { Text("OpenAI 兼容 Base URL") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = model,
+                onValueChange = { model = it },
+                label = { Text("模型") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = apiKey,
+                onValueChange = { apiKey = it },
+                label = { Text("API Key（本机加密）") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = prompt,
+                onValueChange = { prompt = it },
+                label = { Text("提示词") },
+                minLines = 4,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = ::saveAiConfig) { Text("保存配置") }
+                OutlinedButton(onClick = {
+                    saveAiConfig()
+                    connectionResult = "测试中…"
+                    scope.launch {
+                        connectionResult = runCatching {
+                            container.aiSummaryService.testConnection()
+                        }.getOrElse { it.message ?: "连接失败" }
+                    }
+                }) { Text("连通测试") }
+            }
+            connectionResult?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
+            Text(
+                "API Key 与供应商配置使用本机加密存储，不进入预设、蓝牙、备份或云同步。",
+                style = MaterialTheme.typography.bodySmall
+            )
         }
-        connectionResult?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
-        Text(
-            "API Key 与供应商配置使用本机加密存储，不进入预设、蓝牙、备份或云同步。",
-            style = MaterialTheme.typography.bodySmall
-        )
         SectionTitle("其他")
         SettingsEntry("数据管理", "备份、恢复和导出数据", Icons.Default.Settings) {
             context.startActivity(DataManagementActivity.createIntent(context))
         }
-        SettingsEntry("新手引导", "重新查看手机操作引导", Icons.Default.Edit) {
-            context.startActivity(Intent(context, GuideActivity::class.java))
+        if (BuildConfig.DEBUG) {
+            SettingsEntry("新手引导", "重新查看手机操作引导", Icons.Default.Edit) {
+                context.startActivity(Intent(context, GuideActivity::class.java))
+            }
         }
         SettingsEntry("备案信息", "在关于页面查看", Icons.Default.Settings) {
             context.startActivity(Intent(context, AboutActivity::class.java))

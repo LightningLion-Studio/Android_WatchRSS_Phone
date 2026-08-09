@@ -101,6 +101,12 @@ data class PhoneLibrarySyncWindow(
     val fallbackReason: String
 )
 
+data class PhoneLibrarySyncCursorSnapshot(
+    val localMaxSeq: Long,
+    val lastRemoteSeqApplied: Long,
+    val lastLocalSeqAckedByPeer: Long
+)
+
 data class PhoneImportedTextReader(
     val marker: String,
     val byteLength: Long,
@@ -863,7 +869,23 @@ class PhoneCompanionRepository(
             .filter { it.url in urlSet }
     }
 
-    suspend fun prepareLibrarySyncWindow(peerDeviceId: String): PhoneLibrarySyncWindow =
+    suspend fun getLibrarySyncCursor(peerDeviceId: String?): PhoneLibrarySyncCursorSnapshot =
+        withContext(Dispatchers.IO) {
+            val peerState = peerDeviceId
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { syncPeerStateDao.get(it) }
+            PhoneLibrarySyncCursorSnapshot(
+                localMaxSeq = syncChangeLogDao.maxSeq(),
+                lastRemoteSeqApplied = peerState?.lastRemoteSeqApplied ?: 0L,
+                lastLocalSeqAckedByPeer = peerState?.lastLocalSeqAckedByPeer ?: 0L
+            )
+        }
+
+    suspend fun prepareLibrarySyncWindow(
+        peerDeviceId: String,
+        peerAppliedLocalSeq: Long? = null
+    ): PhoneLibrarySyncWindow =
         withContext(Dispatchers.IO) {
             val normalizedPeerId = peerDeviceId.ifBlank { DEFAULT_LIBRARY_PEER_ID }
             val peerState = syncPeerStateDao.get(normalizedPeerId)
@@ -871,10 +893,13 @@ class PhoneCompanionRepository(
             val fullArticleManifest = getArticleManifestsForSync()
             repairMissingArticleChangeLogEntries(fullArticleManifest)
             val maxSeq = syncChangeLogDao.maxSeq()
-            val peerAckedSeq = peerState?.lastLocalSeqAckedByPeer ?: 0L
+            val cachedPeerAckedSeq = peerState?.lastLocalSeqAckedByPeer ?: 0L
+            val peerAckedSeq = peerAppliedLocalSeq?.coerceAtLeast(0L) ?: cachedPeerAckedSeq
             val fullSnapshotReason = when {
                 peerState == null -> "newPeer"
                 peerState.lastProtocolVersion < CHANGE_SEQUENCE_PROTOCOL_VERSION -> "peerProtocol"
+                peerAppliedLocalSeq != null && peerAckedSeq < cachedPeerAckedSeq -> "peerCursorBehind"
+                peerAppliedLocalSeq != null && peerAckedSeq > maxSeq -> "peerCursorAhead"
                 peerState.lastFullSyncAt <= 0L -> "noFullSnapshot"
                 now - peerState.lastFullSyncAt >= FULL_SNAPSHOT_INTERVAL_MS -> "periodicFull"
                 else -> ""
@@ -2469,7 +2494,7 @@ class PhoneCompanionRepository(
     }
 
     companion object {
-        private const val CHANGE_SEQUENCE_PROTOCOL_VERSION = 8
+        private const val CHANGE_SEQUENCE_PROTOCOL_VERSION = 13
         private const val DEFAULT_LIBRARY_PEER_ID = "watch"
         private const val FULL_SNAPSHOT_INTERVAL_MS = 7L * 24L * 60L * 60L * 1000L
         private const val SYNC_KIND_ARTICLE = "article"

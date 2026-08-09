@@ -24,6 +24,19 @@ class MarkdownNoteCodecTest {
         assertEquals("标题\n[图片：猫]\n链接", MarkdownNoteCodec.toPlainText("# 标题\n![猫](assets/cat.jpg)\n[链接](https://example.com)"))
     }
 
+    @Test fun `rich html projection removes style tags and keeps list text`() {
+        val richHtml = """
+            <p><span style="color: rgba(216, 74, 74, 1);">红色正文</span></p>
+            <ol><li><b>第一项</b></li><li>第二项</li></ol>
+        """.trimIndent()
+
+        assertEquals("红色正文\n第一项\n第二项", MarkdownNoteCodec.toPlainText(richHtml))
+    }
+
+    @Test fun `plain markdown projection keeps intentional paragraph spacing`() {
+        assertEquals("标题\n\n正文", MarkdownNoteCodec.toPlainText("# 标题\n\n正文"))
+    }
+
     @Test fun `diff3 merges independent line edits`() {
         val result = MarkdownThreeWayMerge.merge("one\ntwo\nthree", "ONE\ntwo\nthree", "one\ntwo\nTHREE")
         assertTrue(result is MarkdownMergeResult.Merged)

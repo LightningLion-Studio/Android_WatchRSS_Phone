@@ -25,13 +25,15 @@ fun productionSetting(name: String): String =
     localProperties.getProperty(name)
         ?: providers.gradleProperty(name).orNull
         ?: providers.environmentVariable(name).orNull
-        ?: if (name == "WATCHRSS_APP_ACCESS_PUBLIC_KEY") {
-            rootProject.file("config/app_access_public_key.pem")
+        ?: when (name) {
+            "WATCHRSS_APP_ACCESS_PUBLIC_KEY" -> "config/app_access_public_key.pem"
+            "WATCHRSS_TEST_APP_ACCESS_PUBLIC_KEY" -> "config/app_access_test_public_key.pem"
+            else -> null
+        }?.let { relativePath ->
+            rootProject.file(relativePath)
                 .takeIf { it.isFile }
                 ?.readText()
                 ?.trim()
-        } else {
-            null
         }
         ?: ""
 
@@ -62,7 +64,6 @@ android {
             "WATCHRSS_PRODUCTION_SUPABASE_ANON_KEY",
             productionSetting("WATCHRSS_SUPABASE_ANON_KEY").asBuildConfigString()
         )
-        buildConfigField("String", "WATCHRSS_TEST_BACKEND_BASE_URL", "\"\"")
         buildConfigField("String", "WATCHRSS_TEST_SUPABASE_ANON_KEY", "\"\"")
         buildConfigField("String", "WATCHRSS_OPENPANEL_CLIENT_ID", "\"3b151c92-b189-48a3-ae77-148db3235ca1\"")
         buildConfigField("String", "WATCHRSS_OPENPANEL_CLIENT_SECRET", "\"\"")
@@ -74,6 +75,7 @@ android {
             "WATCHRSS_APP_ACCESS_PUBLIC_KEY",
             productionSetting("WATCHRSS_APP_ACCESS_PUBLIC_KEY").asBuildConfigString()
         )
+        buildConfigField("String", "WATCHRSS_TEST_APP_ACCESS_PUBLIC_KEY", "\"\"")
 
         testInstrumentationRunner = "com.karumi.shot.ShotTestRunner"
 
@@ -97,13 +99,13 @@ android {
         debug {
             buildConfigField(
                 "String",
-                "WATCHRSS_TEST_BACKEND_BASE_URL",
-                productionSetting("WATCHRSS_TEST_BACKEND_BASE_URL").asBuildConfigString()
+                "WATCHRSS_TEST_SUPABASE_ANON_KEY",
+                productionSetting("WATCHRSS_TEST_SUPABASE_ANON_KEY").asBuildConfigString()
             )
             buildConfigField(
                 "String",
-                "WATCHRSS_TEST_SUPABASE_ANON_KEY",
-                productionSetting("WATCHRSS_TEST_SUPABASE_ANON_KEY").asBuildConfigString()
+                "WATCHRSS_TEST_APP_ACCESS_PUBLIC_KEY",
+                productionSetting("WATCHRSS_TEST_APP_ACCESS_PUBLIC_KEY").asBuildConfigString()
             )
             if (hasKeystoreProperties) {
                 signingConfig = signingConfigs.getByName("release")

@@ -35,12 +35,12 @@ object BluetoothSyncProtocol {
         val dataInput = DataInputStream(input)
         val length = dataInput.readInt()
         onBytesTransferred?.invoke(LENGTH_PREFIX_BYTES.toLong())
-        require(length in 1..MAX_FRAME_BYTES) { "蓝牙消息长度异常：$length" }
+        require(length in 1..MAX_FRAME_BYTES) { "同步消息长度异常：$length" }
         val bytes = ByteArray(length)
         var offset = 0
         while (offset < length) {
             val read = dataInput.read(bytes, offset, minOf(TRANSFER_CHUNK_BYTES, length - offset))
-            if (read < 0) throw EOFException("蓝牙消息读取中断：$offset/$length")
+            if (read < 0) throw EOFException("同步消息读取中断：$offset/$length")
             offset += read
             onBytesTransferred?.invoke(read.toLong())
         }
@@ -53,7 +53,7 @@ object BluetoothSyncProtocol {
         onBytesTransferred: ((Long) -> Unit)? = null
     ) {
         val bytes = encodeFrame(payload)
-        require(bytes.size <= MAX_FRAME_BYTES) { "蓝牙消息过大：${bytes.size}" }
+        require(bytes.size <= MAX_FRAME_BYTES) { "同步消息过大：${bytes.size}" }
         val dataOutput = DataOutputStream(output)
         dataOutput.writeInt(bytes.size)
         onBytesTransferred?.invoke(LENGTH_PREFIX_BYTES.toLong())

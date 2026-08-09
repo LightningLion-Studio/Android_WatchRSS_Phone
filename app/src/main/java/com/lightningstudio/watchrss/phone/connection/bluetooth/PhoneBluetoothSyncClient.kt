@@ -15,6 +15,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSession
 import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSessionRegistry
+import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.InternalCoroutinesApi
@@ -44,6 +45,7 @@ data class BluetoothSyncExchange(
 data class BluetoothLibrarySyncExchange(
     val deviceName: String,
     val deviceAddress: String,
+    val cursorResponse: JSONObject? = null,
     val request: JSONObject,
     val manifestResponse: JSONObject,
     val articleRequestFrameCount: Int,
@@ -162,7 +164,8 @@ data class PhoneWatchCapabilities(
 
 private data class ProbeIdentity(
     val deviceId: String,
-    val capabilities: PhoneWatchCapabilities?
+    val capabilities: PhoneWatchCapabilities?,
+    val ipUpgradeAccepted: Boolean
 )
 
 class PhoneBluetoothSyncClient(
@@ -187,26 +190,17 @@ class PhoneBluetoothSyncClient(
             sessionId = sessionId,
             fields = mapOf("perDeviceTimeoutMs" to perDeviceTimeoutMs)
         )
-        val ipSessions = PhoneIpSyncSessionRegistry.activeSessions()
-        if (ipSessions.isNotEmpty()) {
-            val results = ipSessions.mapIndexed { index, ipSession ->
-                PhoneBluetoothWatchProbeResult(
-                    device = PhoneBluetoothWatchDevice(
-                        name = "WatchRSS 手表 (${ipSession.routeKind.wireName})",
-                        address = PhoneIpSyncSessionRegistry.IP_DEVICE_PREFIX + ipSession.watchDeviceId,
-                        uuidCount = 0,
-                        remoteDeviceId = ipSession.watchDeviceId
-                    ),
-                    reachable = true,
-                    message = "IP HELLO 已认证"
-                ).also { result -> onProbe(index + 1, ipSessions.size, result) }
-            }
+        val previousIpSessions = PhoneIpSyncSessionRegistry.activeSessions()
+        if (previousIpSessions.isNotEmpty()) {
             debugLog.appendEvent(
-                event = "ip.library.probe.complete",
+                event = "ip.library.probe.sessions.invalidated",
                 sessionId = sessionId,
-                fields = mapOf("reachable" to results.size, "elapsedMs" to elapsedSince(startedAt))
+                fields = mapOf("count" to previousIpSessions.size)
             )
-            return results
+            // A Bluetooth-proxy WebSocket can remain locally open after the watch has already
+            // reclaimed its background route. A manual sync therefore always revalidates the
+            // paired watch over RFCOMM and obtains a fresh signed IP endpoint descriptor.
+            PhoneIpSyncSessionRegistry.closeAll()
         }
         requireBluetoothConnectPermission()
         val adapter = context.getSystemService(BluetoothManager::class.java)
@@ -607,8 +601,9 @@ class PhoneBluetoothSyncClient(
 
     @SuppressLint("MissingPermission")
     suspend fun exchangeLibrary(
+        cursorRequest: JSONObject? = null,
         manifestRequest: JSONObject? = null,
-        buildManifestRequest: (suspend (String) -> JSONObject)? = null,
+        buildManifestRequest: (suspend (String, JSONObject?) -> JSONObject)? = null,
         buildArticleRequests: suspend (JSONObject, Boolean) -> List<JSONObject>,
         deviceAddress: String? = null,
         deviceNameHint: String? = null,
@@ -619,6 +614,7 @@ class PhoneBluetoothSyncClient(
         rememberDeviceOnSuccess: Boolean = true
     ): BluetoothLibrarySyncExchange = connectionMutex.withLock {
         exchangeLibraryUnlocked(
+            cursorRequest = cursorRequest,
             manifestRequest = manifestRequest,
             buildManifestRequest = buildManifestRequest,
             buildArticleRequests = buildArticleRequests,
@@ -634,8 +630,9 @@ class PhoneBluetoothSyncClient(
 
     @SuppressLint("MissingPermission")
     private suspend fun exchangeLibraryUnlocked(
+        cursorRequest: JSONObject?,
         manifestRequest: JSONObject?,
-        buildManifestRequest: (suspend (String) -> JSONObject)?,
+        buildManifestRequest: (suspend (String, JSONObject?) -> JSONObject)?,
         buildArticleRequests: suspend (JSONObject, Boolean) -> List<JSONObject>,
         deviceAddress: String?,
         deviceNameHint: String?,
@@ -650,6 +647,7 @@ class PhoneBluetoothSyncClient(
             try {
                 return exchangeLibraryIpUnlocked(
                     ipSession = ipSession,
+                    cursorRequest = cursorRequest,
                     manifestRequest = manifestRequest,
                     buildManifestRequest = buildManifestRequest,
                     buildArticleRequests = buildArticleRequests,
@@ -720,13 +718,7 @@ class PhoneBluetoothSyncClient(
                 deviceNameHint = deviceNameHint
             )
             selectedDevice = device
-            val request = manifestRequest
-                ?: buildManifestRequest?.invoke(
-                    device.address.ifBlank { device.name.orEmpty().ifBlank { "watch" } }
-                )
-                ?: error("缺少资料库同步请求")
             debugLog.appendEvent("bt.device.selected", sessionId, deviceFields(device))
-            debugLog.appendEvent("bt.library.manifest.prepared", sessionId, payloadFields("manifestRequest", request))
             Log.i(TAG, "connecting library sync to name=${device.name} address=${device.address} uuid=${BluetoothSyncProtocol.SERVICE_UUID}")
             cancelDiscoveryLogged(adapter, sessionId)
 
@@ -739,9 +731,40 @@ class PhoneBluetoothSyncClient(
             )
             connectLogged(socket, sessionId, device)
             report(PhoneBluetoothSyncStage.CONNECTING, 20)
-            writeFrameLogged(socket, sessionId, "manifestRequest", request, tracker)
+            val cursorResponse = cursorRequest?.let { cursorPayload ->
+                writeFrameLogged(socket, sessionId, "cursorRequest", cursorPayload, tracker)
+                readFrameLogged(socket, sessionId, "cursorResponse", tracker).also { response ->
+                    require(response.optBoolean("success", false)) {
+                        response.optString("message").ifBlank { "手表游标握手失败" }
+                    }
+                    requireSupportedLibraryProtocol(response)
+                    require(response.optString("phase") == LibrarySyncPayload.PHASE_CURSOR) {
+                        "手表未返回资料库游标"
+                    }
+                }
+            }
+            val peerDeviceId = cursorResponse?.optString("deviceId")?.trim().orEmpty()
+                .ifBlank { device.address.ifBlank { device.name.orEmpty().ifBlank { "watch" } } }
+            val request = manifestRequest
+                ?: buildManifestRequest?.invoke(peerDeviceId, cursorResponse)
+                ?: error("缺少资料库同步请求")
+            debugLog.appendEvent("bt.library.manifest.prepared", sessionId, payloadFields("manifestRequest", request))
+            val manifestRequests = if (cursorResponse?.let(LibrarySyncPayload::supportsManifestBatches) == true) {
+                LibrarySyncPayload.buildManifestFrames(request)
+            } else {
+                listOf(request)
+            }
+            manifestRequests.forEachIndexed { index, frame ->
+                writeFrameLogged(
+                    socket,
+                    sessionId,
+                    batchLabel("manifestRequest", index, manifestRequests.size),
+                    frame,
+                    tracker
+                )
+            }
             report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
-            val manifestResponse = readFrameLogged(socket, sessionId, "manifestResponse", tracker)
+            val manifestResponse = readManifestFrames(socket.inputStream, sessionId, tracker)
             if (!manifestResponse.optBoolean("success", true)) {
                 debugLog.appendEvent(
                     event = "bt.library.manifest.rejected",
@@ -753,6 +776,7 @@ class PhoneBluetoothSyncClient(
                 return BluetoothLibrarySyncExchange(
                     deviceName = device.name.orEmpty(),
                     deviceAddress = device.address,
+                    cursorResponse = cursorResponse,
                     request = request,
                     manifestResponse = manifestResponse,
                     articleRequestFrameCount = 0,
@@ -799,6 +823,7 @@ class PhoneBluetoothSyncClient(
             val exchange = BluetoothLibrarySyncExchange(
                 deviceName = device.name.orEmpty(),
                 deviceAddress = device.address,
+                cursorResponse = cursorResponse,
                 request = request,
                 manifestResponse = manifestResponse,
                 articleRequestFrameCount = articleRequestFrameCount,
@@ -863,8 +888,9 @@ class PhoneBluetoothSyncClient(
 
     private suspend fun exchangeLibraryIpUnlocked(
         ipSession: PhoneIpSyncSession,
+        cursorRequest: JSONObject?,
         manifestRequest: JSONObject?,
-        buildManifestRequest: (suspend (String) -> JSONObject)?,
+        buildManifestRequest: (suspend (String, JSONObject?) -> JSONObject)?,
         buildArticleRequests: suspend (JSONObject, Boolean) -> List<JSONObject>,
         sessionId: String,
         onProgress: (PhoneBluetoothSyncProgress) -> Unit,
@@ -891,26 +917,52 @@ class PhoneBluetoothSyncClient(
         }
         val cancellationHandle = installIpCancellationLogger(ipSession, sessionId, "library")
         val ipAddress = PhoneIpSyncSessionRegistry.IP_DEVICE_PREFIX + ipSession.watchDeviceId
-        val request = manifestRequest
-            ?: buildManifestRequest?.invoke(ipSession.watchDeviceId)
-            ?: error("缺少资料库同步请求")
         report(PhoneBluetoothSyncStage.CONNECTING, 5, force = true)
         debugLog.appendEvent(
             event = "ip.library.start",
             sessionId = sessionId,
-            fields = payloadFields("manifestRequest", request) + mapOf(
+            fields = (manifestRequest?.let { payloadFields("manifestRequest", it) } ?: emptyMap()) + mapOf(
                 "watchDeviceId" to ipSession.watchDeviceId,
                 "route" to ipSession.routeKind.wireName
             )
         )
         try {
             report(PhoneBluetoothSyncStage.CONNECTING, 20)
-            writeFrameLogged(ipSession.outputStream, sessionId, "manifestRequest", request, tracker)
+            val cursorResponse = cursorRequest?.let { cursorPayload ->
+                writeFrameLogged(ipSession.outputStream, sessionId, "cursorRequest", cursorPayload, tracker)
+                readFrameLogged(ipSession.inputStream, sessionId, "cursorResponse", tracker).also { response ->
+                    require(response.optBoolean("success", false)) {
+                        response.optString("message").ifBlank { "手表游标握手失败" }
+                    }
+                    requireSupportedLibraryProtocol(response)
+                    require(response.optString("phase") == LibrarySyncPayload.PHASE_CURSOR) {
+                        "手表未返回资料库游标"
+                    }
+                }
+            }
+            val peerDeviceId = cursorResponse?.optString("deviceId")?.trim().orEmpty()
+                .ifBlank { ipSession.watchDeviceId }
+            val request = manifestRequest
+                ?: buildManifestRequest?.invoke(peerDeviceId, cursorResponse)
+                ?: error("缺少资料库同步请求")
+            val manifestRequests = if (cursorResponse?.let(LibrarySyncPayload::supportsManifestBatches) == true) {
+                LibrarySyncPayload.buildManifestFrames(request)
+            } else {
+                listOf(request)
+            }
+            manifestRequests.forEachIndexed { index, frame ->
+                writeFrameLogged(
+                    ipSession.outputStream,
+                    sessionId,
+                    batchLabel("manifestRequest", index, manifestRequests.size),
+                    frame,
+                    tracker
+                )
+            }
             report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
-            val manifestResponse = readFrameLogged(
+            val manifestResponse = readManifestFrames(
                 ipSession.inputStream,
                 sessionId,
-                "manifestResponse",
                 tracker
             )
             if (!manifestResponse.optBoolean("success", true)) {
@@ -923,6 +975,7 @@ class PhoneBluetoothSyncClient(
                 return BluetoothLibrarySyncExchange(
                     deviceName = "WatchRSS 手表",
                     deviceAddress = ipAddress,
+                    cursorResponse = cursorResponse,
                     request = request,
                     manifestResponse = manifestResponse,
                     articleRequestFrameCount = 0,
@@ -964,6 +1017,7 @@ class PhoneBluetoothSyncClient(
             val exchange = BluetoothLibrarySyncExchange(
                 deviceName = "WatchRSS 手表",
                 deviceAddress = ipAddress,
+                cursorResponse = cursorResponse,
                 request = request,
                 manifestResponse = manifestResponse,
                 articleRequestFrameCount = articleRequests.size,
@@ -1011,7 +1065,7 @@ class PhoneBluetoothSyncClient(
             debugLog.appendEvent(
                 event = "ip.library.failed",
                 sessionId = sessionId,
-                fields = payloadFields("manifestRequest", request) + failureFields(throwable),
+                fields = (manifestRequest?.let { payloadFields("manifestRequest", it) } ?: emptyMap()) + failureFields(throwable),
                 throwable = throwable
             )
             throw throwable
@@ -1040,11 +1094,22 @@ class PhoneBluetoothSyncClient(
                 fallbackTimeoutMs = timeoutMs
             )
         }
+        val ipSession = result.getOrNull()
+            ?.takeIf { it.ipUpgradeAccepted && it.deviceId.isNotBlank() }
+            ?.let { awaitIpSession(it.deviceId, IP_UPGRADE_WAIT_MS) }
         val probe = result.fold(
             onSuccess = { identity ->
                 PhoneBluetoothWatchProbeResult(
-                    device = device.toWatchDevice(identity.deviceId),
+                    device = ipSession?.let { session ->
+                        PhoneBluetoothWatchDevice(
+                            name = "${device.name.orEmpty()} (${session.routeKind.wireName})",
+                            address = PhoneIpSyncSessionRegistry.IP_DEVICE_PREFIX + identity.deviceId,
+                            uuidCount = device.uuids?.size ?: 0,
+                            remoteDeviceId = identity.deviceId
+                        )
+                    } ?: device.toWatchDevice(identity.deviceId),
                     reachable = true,
+                    message = if (ipSession != null) "已通过蓝牙升级到 IP" else null,
                     capabilities = identity.capabilities
                 )
             },
@@ -1059,6 +1124,9 @@ class PhoneBluetoothSyncClient(
         probe.capabilities?.let {
             synchronized(capabilitiesByAddress) {
                 capabilitiesByAddress[device.address] = it
+                if (probe.device.address.startsWith(PhoneIpSyncSessionRegistry.IP_DEVICE_PREFIX)) {
+                    capabilitiesByAddress[probe.device.address] = it
+                }
             }
         }
         debugLog.appendEvent(
@@ -1081,7 +1149,11 @@ class PhoneBluetoothSyncClient(
         val probeResult = runCatching {
             withTimeout(DIRECT_PROBE_TIMEOUT_MS) {
                 exchange(
-                    request = LibrarySyncPayload.buildProbeRequest(deviceId),
+                    request = LibrarySyncPayload.buildProbeRequest(deviceId).apply {
+                        (context.applicationContext as? PhoneCompanionApplication)
+                            ?.currentIpEndpointDescriptorForSync()
+                            ?.let { put(FIELD_IP_ENDPOINT_DESCRIPTOR, it) }
+                    },
                     deviceAddress = device.address,
                     sessionId = "$sessionId-direct",
                     rememberDeviceOnSuccess = false
@@ -1098,7 +1170,8 @@ class PhoneBluetoothSyncClient(
             )
             return ProbeIdentity(
                 exchange.response.optString("deviceId").trim(),
-                exchange.response.optJSONObject("watchCapabilities")?.toWatchCapabilities()
+                exchange.response.optJSONObject("watchCapabilities")?.toWatchCapabilities(),
+                exchange.response.optBoolean(FIELD_IP_UPGRADE_ACCEPTED, false)
             )
         }
         if (exchange != null && exchange.response.optBoolean("success", false)) {
@@ -1110,7 +1183,8 @@ class PhoneBluetoothSyncClient(
             )
             return ProbeIdentity(
                 exchange.response.optString("deviceId").trim(),
-                exchange.response.optJSONObject("watchCapabilities")?.toWatchCapabilities()
+                exchange.response.optJSONObject("watchCapabilities")?.toWatchCapabilities(),
+                exchange.response.optBoolean(FIELD_IP_UPGRADE_ACCEPTED, false)
             )
         }
         probeResult.exceptionOrNull()?.let { throwable ->
@@ -1136,10 +1210,20 @@ class PhoneBluetoothSyncClient(
                 requireSupportedLibraryProtocol(it)
                 ProbeIdentity(
                     it.optString("deviceId").trim(),
-                    it.optJSONObject("watchCapabilities")?.toWatchCapabilities()
+                    it.optJSONObject("watchCapabilities")?.toWatchCapabilities(),
+                    it.optBoolean(FIELD_IP_UPGRADE_ACCEPTED, false)
                 )
             }
         }
+    }
+
+    private suspend fun awaitIpSession(deviceId: String, timeoutMs: Long): PhoneIpSyncSession? {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            PhoneIpSyncSessionRegistry.session(deviceId)?.let { return it }
+            delay(IP_UPGRADE_POLL_INTERVAL_MS)
+        }
+        return PhoneIpSyncSessionRegistry.session(deviceId)
     }
 
     private fun requireSupportedLibraryProtocol(payload: JSONObject) {
@@ -1238,6 +1322,33 @@ class PhoneBluetoothSyncClient(
             response = accumulator.toPayload(),
             stats = stats
         )
+    }
+
+    private fun readManifestFrames(
+        inputStream: InputStream,
+        sessionId: String,
+        byteTracker: ByteTransferTracker
+    ): JSONObject {
+        val first = readFrameLogged(
+            inputStream = inputStream,
+            sessionId = sessionId,
+            label = "manifestResponse",
+            byteTracker = byteTracker
+        )
+        if (!first.optBoolean("success", true)) return first
+        val batchCount = LibrarySyncPayload.manifestBatchCount(first)
+        if (batchCount <= 1) return first
+        val frames = ArrayList<JSONObject>(batchCount)
+        frames += first
+        for (index in 1 until batchCount) {
+            frames += readFrameLogged(
+                inputStream = inputStream,
+                sessionId = sessionId,
+                label = batchLabel("manifestResponse", index, batchCount),
+                byteTracker = byteTracker
+            )
+        }
+        return LibrarySyncPayload.combineManifestFrames(frames)
     }
 
     private class CombinedLibraryResponse(first: JSONObject) {
@@ -1924,6 +2035,10 @@ class PhoneBluetoothSyncClient(
         private const val MAX_DEVICE_PROBE_CANDIDATES = 3
         private const val DEFAULT_DEVICE_PROBE_TIMEOUT_MS = 2_000L
         private const val DIRECT_PROBE_TIMEOUT_MS = 4_000L
+        private const val IP_UPGRADE_WAIT_MS = 5_000L
+        private const val IP_UPGRADE_POLL_INTERVAL_MS = 50L
+        private const val FIELD_IP_ENDPOINT_DESCRIPTOR = "ipEndpointDescriptor"
+        private const val FIELD_IP_UPGRADE_ACCEPTED = "ipUpgradeAccepted"
         private const val PREFS_NAME = "watchrss_bluetooth_sync"
         private const val KEY_LAST_DEVICE_ADDRESS = "last_successful_device_address"
         private val EMPTY_FRAME_STATS = LibraryFrameStats(

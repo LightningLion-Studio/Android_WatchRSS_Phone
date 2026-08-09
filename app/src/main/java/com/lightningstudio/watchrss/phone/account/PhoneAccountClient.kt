@@ -140,7 +140,7 @@ class PhoneAccountClient(
     suspend fun requestPhoneOtp(phone: String) = withContext(Dispatchers.IO) {
         requireConfigured()
         val body = JSONObject().apply {
-            put("phone", phone.trim())
+            put("phone", normalizeAccountPhone(phone))
             put("create_user", true)
         }
         post(
@@ -152,8 +152,9 @@ class PhoneAccountClient(
 
     suspend fun verifyPhoneOtp(phone: String, otp: String): PhoneAccountSession = withContext(Dispatchers.IO) {
         requireConfigured()
+        val normalizedPhone = normalizeAccountPhone(phone)
         val body = JSONObject().apply {
-            put("phone", phone.trim())
+            put("phone", normalizedPhone)
             put("otp", otp.trim())
             put("licenseDeviceId", licenseIdentity.deviceId)
             put("devicePublicKey", licenseIdentity.publicKeyPem)
@@ -172,7 +173,7 @@ class PhoneAccountClient(
             require(accessToken.isNotBlank() && userId.isNotBlank()) { "登录响应缺少账号信息" }
             PhoneAccountSession(
                 userId = userId,
-                phoneMasked = maskPhone(user.optString("phone").ifBlank { phone }),
+                phoneMasked = maskPhone(user.optString("phone").ifBlank { normalizedPhone }),
                 accessToken = accessToken,
                 refreshToken = refreshToken,
                 expiresAtMillis = System.currentTimeMillis() + expiresInSeconds * 1000L,
@@ -257,7 +258,7 @@ class PhoneAccountClient(
             post(
                 path = "/functions/v1/account/passkeys/authentication/options",
                 body = JSONObject().apply {
-                    put("phone", phone.trim())
+                    put("phone", normalizeAccountPhone(phone))
                     transactionId?.let { put("loginTransactionId", it) }
                 },
                 bearerToken = null
@@ -717,9 +718,12 @@ internal fun parseTotpFactors(json: JSONObject): List<TotpFactor> {
 
 internal fun normalizeAccountPhone(phone: String): String {
     val compact = phone.trim().filterNot { it == ' ' || it == '-' }
-    return when {
+    val localPhone = when {
         compact.matches(Regex("1\\d{10}")) -> "+86$compact"
         compact.matches(Regex("86\\d{11}")) -> "+$compact"
-        else -> compact
+        compact.matches(Regex("\\+861\\d{10}")) -> compact
+        else -> throw IllegalArgumentException("目前仅支持中国大陆手机号")
     }
+    require(localPhone.matches(Regex("\\+861[3-9]\\d{9}"))) { "请输入正确的中国大陆手机号" }
+    return localPhone
 }

@@ -10,6 +10,11 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
+import com.lightningstudio.watchrss.phone.data.db.SyncChangeLogDao
+import com.lightningstudio.watchrss.phone.data.db.SyncChangeLogEntity
+import com.lightningstudio.watchrss.phone.data.db.SyncChangeLogEntityState
+import com.lightningstudio.watchrss.phone.data.db.SyncPeerStateDao
+import com.lightningstudio.watchrss.phone.data.db.SyncPeerStateEntity
 import com.lightningstudio.watchrss.phone.data.importer.ImportedLocalContent
 import com.lightningstudio.watchrss.phone.data.importer.ImportedRssItem
 import com.lightningstudio.watchrss.phone.data.importer.ImportedRssSource
@@ -21,6 +26,7 @@ import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
@@ -29,6 +35,47 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PhoneCompanionRepositoryTest {
+    @Test
+    fun prepareLibrarySyncWindow_usesReportedPeerCursorAndFallsBackWhenPeerWentBackwards() = runBlocking {
+        val changeLogDao = FakeSyncChangeLogDao(maxSeq = 100L)
+        val peerStateDao = FakeSyncPeerStateDao(
+            SyncPeerStateEntity(
+                peerDeviceId = "watch-device",
+                lastLocalSeqAckedByPeer = 80L,
+                lastRemoteSeqApplied = 40L,
+                lastFullSyncAt = System.currentTimeMillis(),
+                lastProtocolVersion = 13,
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = FakePhoneArticleDao(),
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "phone-device",
+            syncChangeLogDao = changeLogDao,
+            syncPeerStateDao = peerStateDao
+        )
+
+        val cursor = repository.getLibrarySyncCursor("watch-device")
+        val forwardWindow = repository.prepareLibrarySyncWindow(
+            peerDeviceId = "watch-device",
+            peerAppliedLocalSeq = 90L
+        )
+        val resetWindow = repository.prepareLibrarySyncWindow(
+            peerDeviceId = "watch-device",
+            peerAppliedLocalSeq = 0L
+        )
+
+        assertEquals(PhoneLibrarySyncCursorSnapshot(100L, 40L, 80L), cursor)
+        assertEquals(false, forwardWindow.fullSnapshot)
+        assertEquals(90L, forwardWindow.fromSeqExclusive)
+        assertEquals(90L, forwardWindow.peerAckedSeq)
+        assertEquals(true, resetWindow.fullSnapshot)
+        assertEquals("peerCursorBehind", resetWindow.fallbackReason)
+        assertEquals(0L, resetWindow.fromSeqExclusive)
+    }
+
     @Test
     fun replaceSavedItems_usesPayloadContentWithoutFetchingMetadata() = runBlocking {
         val dao = FakePhoneSavedItemDao()
@@ -1699,6 +1746,48 @@ class PhoneCompanionRepositoryTest {
 
         override suspend fun deleteAll() {
             items = emptyList()
+        }
+    }
+
+    private class FakeSyncChangeLogDao(
+        private var maxSeq: Long
+    ) : SyncChangeLogDao {
+        override suspend fun insert(change: SyncChangeLogEntity): Long {
+            maxSeq += 1L
+            return maxSeq
+        }
+
+        override suspend fun maxSeq(): Long = maxSeq
+
+        override fun observeMaxSeq(): Flow<Long> = flowOf(maxSeq)
+
+        override suspend fun entityIdsChangedAfter(kind: String, afterSeq: Long): List<String> = emptyList()
+
+        override suspend fun maxChangedAtByEntityIds(
+            kind: String,
+            entityIds: List<String>
+        ): List<SyncChangeLogEntityState> = emptyList()
+
+        override suspend fun deleteAll() {
+            maxSeq = 0L
+        }
+    }
+
+    private class FakeSyncPeerStateDao(
+        initial: SyncPeerStateEntity? = null
+    ) : SyncPeerStateDao {
+        private var state = initial
+
+        override suspend fun get(peerDeviceId: String): SyncPeerStateEntity? {
+            return state?.takeIf { it.peerDeviceId == peerDeviceId }
+        }
+
+        override suspend fun upsert(state: SyncPeerStateEntity) {
+            this.state = state
+        }
+
+        override suspend fun deleteAll() {
+            state = null
         }
     }
 

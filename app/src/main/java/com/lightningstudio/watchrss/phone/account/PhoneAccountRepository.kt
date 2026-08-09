@@ -13,6 +13,9 @@ class PhoneAccountRepository(
 ) {
     val session: StateFlow<PhoneAccountSession?> = sessionStore.session
 
+    val hasUsableSession: Boolean
+        get() = session.value?.isExpired == false
+
     val installId: String
         get() = installationIdentity.installId
 
@@ -80,8 +83,17 @@ class PhoneAccountRepository(
     suspend fun beginTotpEnrollment(): TotpEnrollment =
         accountClient.beginTotpEnrollment(requireSession())
 
-    suspend fun confirmTotpEnrollment(enrollment: TotpEnrollment, code: String) {
-        accountClient.confirmTotpEnrollment(requireSession(), enrollment, code)
+    suspend fun confirmTotpEnrollmentAndInvalidateSession(
+        enrollment: TotpEnrollment,
+        code: String
+    ) {
+        val current = requireSession()
+        completeTotpEnrollmentTransition(
+            confirmEnrollment = {
+                accountClient.confirmTotpEnrollment(current, enrollment, code)
+            },
+            invalidateSession = sessionStore::clear
+        )
     }
 
     suspend fun disableTotp(factor: TotpFactor, code: String) {
@@ -222,4 +234,12 @@ class PhoneAccountRepository(
             })
         }
     }
+}
+
+internal suspend fun completeTotpEnrollmentTransition(
+    confirmEnrollment: suspend () -> Unit,
+    invalidateSession: suspend () -> Unit
+) {
+    confirmEnrollment()
+    invalidateSession()
 }

@@ -82,7 +82,7 @@ private fun parseErrorResponse(raw: String): AccountErrorResponse {
     return AccountErrorResponse(code = code)
 }
 
-private fun Throwable.findAccountHttpException(): PhoneAccountHttpException? {
+internal fun Throwable.findAccountHttpException(): PhoneAccountHttpException? {
     var current: Throwable? = this
     while (current != null) {
         if (current is PhoneAccountHttpException) return current

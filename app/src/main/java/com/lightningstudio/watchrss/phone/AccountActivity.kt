@@ -863,12 +863,15 @@ internal fun AccountScreen(
                             busy = true
                             enrollmentError = null
                             runCatching {
-                                accountRepository.confirmTotpEnrollment(enrollment, enrollmentCode)
-                                accountRepository.listTotpFactors()
+                                accountRepository.confirmTotpEnrollmentAndInvalidateSession(
+                                    enrollment,
+                                    enrollmentCode
+                                )
                             }.onSuccess {
-                                totpFactors = it
                                 totpEnrollment = null
-                                message = "TOTP 两步验证已开启"
+                                enrollmentCode = ""
+                                loginProgress = null
+                                message = "TOTP 两步验证已开启，请重新登录"
                             }.onFailure { enrollmentError = it.message ?: "动态验证码无效" }
                             busy = false
                         }

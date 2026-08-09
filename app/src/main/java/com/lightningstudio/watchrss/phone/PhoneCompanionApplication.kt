@@ -21,6 +21,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 class PhoneCompanionApplication : Application() {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -42,9 +43,14 @@ class PhoneCompanionApplication : Application() {
                 appScope.launch {
                     container.appAccessCoordinator.reconcile()
                     if (container.appAccessCoordinator.isAuthorized) {
-                        PhoneCloudSyncWorker.schedule(this@PhoneCompanionApplication)
-                        container.startCloudChangeScheduler()
                         startWatchBaseStationIfPermitted()
+                        if (container.accountRepository.hasUsableSession) {
+                            PhoneCloudSyncWorker.schedule(this@PhoneCompanionApplication)
+                            container.startCloudChangeScheduler()
+                        } else {
+                            PhoneCloudSyncWorker.cancel(this@PhoneCompanionApplication)
+                            container.stopCloudChangeScheduler()
+                        }
                     } else {
                         PhoneCloudSyncWorker.cancel(this@PhoneCompanionApplication)
                         container.stopCloudChangeScheduler()
@@ -64,7 +70,7 @@ class PhoneCompanionApplication : Application() {
                 if (now - lastForegroundSyncAt < FOREGROUND_SYNC_THROTTLE_MS) return
                 lastForegroundSyncAt = now
                 appScope.launch {
-                    if (container.accountRepository.session.value != null) {
+                    if (container.accountRepository.hasUsableSession) {
                         runCatching { container.cloudSyncService.syncNow() }
                     }
                 }
@@ -84,7 +90,7 @@ class PhoneCompanionApplication : Application() {
             container.appAccessCoordinator.initialize()
             container.usageTelemetry.recordAppLaunch()
             container.repository.recordFirstUseIfAbsent(container.firstInstalledAtMillis)
-            if (container.accountRepository.session.value != null && container.appAccessCoordinator.isAuthorized) {
+            if (container.accountRepository.hasUsableSession && container.appAccessCoordinator.isAuthorized) {
                 runCatching { container.cloudSyncService.syncNow() }
             }
         }
@@ -115,6 +121,9 @@ class PhoneCompanionApplication : Application() {
             Log.e(TAG, "Failed to start watch base station", error)
         }.getOrDefault(false)
     }
+
+    fun currentIpEndpointDescriptorForSync(): JSONObject? =
+        ipSyncService.currentEndpointDescriptorJson()
 
     private fun stopWatchBaseStation() {
         runCatching { ipSyncService.close() }

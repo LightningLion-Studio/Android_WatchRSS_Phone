@@ -17,7 +17,7 @@ class PhoneCloudSyncWorker(
 ) : CoroutineWorker(appContext, parameters) {
     override suspend fun doWork(): Result {
         val container = (applicationContext as PhoneCompanionApplication).container
-        if (container.accountRepository.session.value == null || !container.appAccessCoordinator.isAuthorized) return Result.success()
+        if (!container.accountRepository.hasUsableSession || !container.appAccessCoordinator.isAuthorized) return Result.success()
         return runCatching {
             container.cloudSyncService.syncNow()
             Result.success()

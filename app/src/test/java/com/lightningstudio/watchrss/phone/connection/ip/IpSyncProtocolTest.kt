@@ -9,6 +9,13 @@ import java.util.Base64
 
 class IpSyncProtocolTest {
     @Test
+    fun syncServerPorts_fitHeyTapBluetoothProxySignedPortField() {
+        assertTrue(IP_SYNC_PORT_CANDIDATES.all { it in 1..Short.MAX_VALUE })
+        assertFalse(18_765 in IP_SYNC_PORT_CANDIDATES)
+        assertEquals(10 * 60 * 1_000, IP_SYNC_SOCKET_READ_TIMEOUT_MS)
+    }
+
+    @Test
     fun descriptor_roundTripsCompactBlePayloadAndRejectsTampering() {
         val unsigned = descriptor(hmac = "")
         val signed = unsigned.copy(

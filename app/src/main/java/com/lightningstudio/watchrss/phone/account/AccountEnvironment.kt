@@ -7,6 +7,7 @@ data class AccountEnvironment(
     val remoteEnvironment: RemoteEnvironment = RemoteEnvironment.PRODUCTION,
     val backendBaseUrl: String = BuildConfig.WATCHRSS_PRODUCTION_BACKEND_BASE_URL.trimEnd('/'),
     val supabaseAnonKey: String = BuildConfig.WATCHRSS_PRODUCTION_SUPABASE_ANON_KEY,
+    val appAccessPublicKey: String = BuildConfig.WATCHRSS_APP_ACCESS_PUBLIC_KEY,
     val posthogHost: String = BuildConfig.WATCHRSS_POSTHOG_HOST.trimEnd('/'),
     val posthogApiKey: String = BuildConfig.WATCHRSS_POSTHOG_API_KEY
 ) {
@@ -28,12 +29,23 @@ data class AccountEnvironment(
                 RemoteEnvironment.PRODUCTION -> AccountEnvironment()
                 RemoteEnvironment.TEST -> AccountEnvironment(
                     remoteEnvironment = RemoteEnvironment.TEST,
-                    backendBaseUrl = BuildConfig.WATCHRSS_TEST_BACKEND_BASE_URL.trimEnd('/'),
-                    supabaseAnonKey = BuildConfig.WATCHRSS_TEST_SUPABASE_ANON_KEY
+                    backendBaseUrl = testBackendBaseUrl(
+                        BuildConfig.WATCHRSS_PRODUCTION_BACKEND_BASE_URL
+                    ),
+                    supabaseAnonKey = BuildConfig.WATCHRSS_TEST_SUPABASE_ANON_KEY,
+                    appAccessPublicKey = BuildConfig.WATCHRSS_TEST_APP_ACCESS_PUBLIC_KEY
                 )
             }
     }
 }
+
+internal fun testBackendBaseUrl(productionBackendBaseUrl: String): String =
+    productionBackendBaseUrl
+        .trim()
+        .trimEnd('/')
+        .takeIf(String::isNotBlank)
+        ?.plus("/test")
+        .orEmpty()
 
 enum class RemoteEnvironment(
     val persistedValue: String,

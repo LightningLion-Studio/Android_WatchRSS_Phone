@@ -2,12 +2,69 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LibrarySyncPayloadTest {
+    @Test
+    fun manifestFrames_splitAndReassemblePayloadLargerThanTransportFrame() {
+        val manifest = JSONArray().also { array ->
+            repeat(5_600) { index ->
+                array.put(
+                    JSONObject()
+                        .put("articleId", "article-$index")
+                        .put("contentHash", "hash-$index")
+                        .put("metadataHash", "m".repeat(512))
+                )
+            }
+        }
+        val payload = JSONObject().apply {
+            put("version", LibrarySyncPayload.PROTOCOL_VERSION)
+            put("action", BluetoothSyncProtocol.ACTION_SYNC_LIBRARY)
+            put("phase", LibrarySyncPayload.PHASE_MANIFEST)
+            put("deviceId", "phone")
+            put("sentAt", 123L)
+            put("articleManifest", manifest)
+            put("rssSources", JSONArray().put(JSONObject().put("url", "https://example.com/feed")))
+        }
+
+        assertTrue(BluetoothSyncProtocol.encodedSize(payload) > BluetoothSyncProtocol.MAX_FRAME_BYTES)
+        val frames = LibrarySyncPayload.buildManifestFrames(payload)
+        assertTrue(frames.size > 1)
+        assertTrue(frames.all { BluetoothSyncProtocol.encodedSize(it) <= BluetoothSyncProtocol.MAX_FRAME_BYTES })
+
+        val combined = LibrarySyncPayload.combineManifestFrames(frames)
+        assertEquals(5_600, combined.getJSONArray("articleManifest").length())
+        assertEquals(1, combined.getJSONArray("rssSources").length())
+        assertEquals("phone", combined.getString("deviceId"))
+    }
+
+    @Test
+    fun cursorHandshake_roundTripsDirectionalProgress() {
+        val cursor = LibrarySyncCursor(
+            localMaxSeq = 120L,
+            lastRemoteSeqApplied = 78L,
+            lastLocalSeqAckedByPeer = 91L
+        )
+
+        val request = LibrarySyncPayload.buildCursorRequest("phone-device", cursor)
+        val response = LibrarySyncPayload.buildCursorResponse("watch-device", cursor)
+
+        assertEquals(LibrarySyncPayload.PROTOCOL_VERSION, request.getInt("version"))
+        assertEquals(BluetoothSyncProtocol.ACTION_SYNC_LIBRARY, request.getString("action"))
+        assertEquals(LibrarySyncPayload.PHASE_CURSOR, request.getString("phase"))
+        assertTrue(LibrarySyncPayload.supportsManifestBatches(request))
+        assertEquals("phone-device", request.getString("deviceId"))
+        assertEquals(cursor, LibrarySyncPayload.parseCursor(request))
+        assertTrue(response.getBoolean("success"))
+        assertTrue(LibrarySyncPayload.supportsManifestBatches(response))
+        assertEquals("watch-device", response.getString("deviceId"))
+        assertEquals(cursor, LibrarySyncPayload.parseCursor(response))
+    }
+
     @Test
     fun buildArticlesRequest_roundTripsCompressedArticleContent() {
         val article = PhoneArticleEntity(
@@ -114,11 +171,17 @@ class LibrarySyncPayloadTest {
                 toSeqInclusive = 9L,
                 fullSnapshot = false,
                 fallbackReason = ""
+            ),
+            cursor = LibrarySyncCursor(
+                localMaxSeq = 9L,
+                lastRemoteSeqApplied = 5L,
+                lastLocalSeqAckedByPeer = 7L
             )
         )
         val manifest = LibrarySyncPayload.parseArticleManifest(request).single()
         val parsedSource = LibrarySyncPayload.parseRssSources(request).single()
         val changeSequence = LibrarySyncPayload.parseChangeSequence(request)
+        val cursor = LibrarySyncPayload.parseCursor(request)
 
         assertEquals(0, LibrarySyncPayload.parseArticles(request).size)
         assertEquals(article.articleId, manifest.articleId)
@@ -135,6 +198,9 @@ class LibrarySyncPayloadTest {
         assertEquals(7L, changeSequence.fromSeqExclusive)
         assertEquals(9L, changeSequence.toSeqInclusive)
         assertEquals(false, changeSequence.fullSnapshot)
+        assertEquals(9L, cursor.localMaxSeq)
+        assertEquals(5L, cursor.lastRemoteSeqApplied)
+        assertEquals(7L, cursor.lastLocalSeqAckedByPeer)
         assertEquals(LibrarySyncPayload.PROTOCOL_VERSION, request.getInt("version"))
         assertEquals("syncLibrary", request.getString("action"))
         assertEquals("manifest", request.getString("phase"))

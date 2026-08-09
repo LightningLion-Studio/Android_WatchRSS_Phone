@@ -10,8 +10,9 @@ import java.util.Base64
 import java.util.UUID
 
 internal class WatchIpSyncServer(
-    private val descriptorProvider: IpEndpointProvider
-) : NanoWSD(0), AutoCloseable {
+    private val descriptorProvider: IpEndpointProvider,
+    port: Int
+) : NanoWSD(port), AutoCloseable {
     override fun openWebSocket(handshake: IHTTPSession): WebSocket = SyncWebSocket(handshake)
 
     override fun serveHttp(session: IHTTPSession): Response {

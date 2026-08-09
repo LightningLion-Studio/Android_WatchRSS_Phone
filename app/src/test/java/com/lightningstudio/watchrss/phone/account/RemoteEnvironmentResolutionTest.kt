@@ -5,6 +5,19 @@ import org.junit.Test
 
 class RemoteEnvironmentResolutionTest {
     @Test
+    fun testBackendIsDerivedFromProductionBackend() {
+        assertEquals(
+            "https://sly-data-plane.watchrss.cn/test",
+            testBackendBaseUrl("https://sly-data-plane.watchrss.cn/")
+        )
+    }
+
+    @Test
+    fun testBackendStaysEmptyWhenProductionBackendIsMissing() {
+        assertEquals("", testBackendBaseUrl("  "))
+    }
+
+    @Test
     fun debugBuildUsesPersistedTestEnvironment() {
         assertEquals(
             RemoteEnvironment.TEST,

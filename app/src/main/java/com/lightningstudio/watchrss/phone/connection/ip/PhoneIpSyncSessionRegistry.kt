@@ -73,5 +73,9 @@ internal object PhoneIpSyncSessionRegistry {
         sessionsByDeviceId.values.filterNot { it.isClosed }
             .sortedByDescending { it.routeKind.priority }
 
+    fun closeAll() {
+        activeSessions().forEach(PhoneIpSyncSession::close)
+    }
+
     const val IP_DEVICE_PREFIX = "ip:"
 }

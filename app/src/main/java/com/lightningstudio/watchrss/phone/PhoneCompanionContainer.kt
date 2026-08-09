@@ -269,7 +269,7 @@ class PhoneCompanionContainer(context: Context) {
             debugLog = bluetoothDebugLog,
             buildAccountSyncRequest = accountRepository::buildAccountSyncRequest,
             onLibrarySyncCompleted = {
-                if (accountRepository.session.value != null) {
+                if (accountRepository.hasUsableSession) {
                     runCatching { cloudSyncService.syncNow() }
                 }
             }

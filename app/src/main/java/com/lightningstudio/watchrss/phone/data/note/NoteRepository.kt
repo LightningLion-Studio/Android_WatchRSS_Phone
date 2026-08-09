@@ -13,8 +13,10 @@ class NoteRepository(
     fun observeConflicts(): Flow<List<NoteConflictEntity>> = dao.observeUnresolvedConflicts()
     suspend fun allNotes(): List<NoteEntity> = dao.allNotes()
     suspend fun assets(noteId: String): List<NoteAssetEntity> = dao.assets(noteId)
-    suspend fun registerAsset(asset: NoteAssetEntity) {
-        if (dao.assetByHash(asset.sha256) == null) dao.upsertAssets(listOf(asset))
+    suspend fun registerAsset(asset: NoteAssetEntity): NoteAssetEntity {
+        dao.assetByHash(asset.sha256)?.let { return it }
+        dao.upsertAssets(listOf(asset))
+        return asset
     }
 
     suspend fun save(
@@ -51,11 +53,12 @@ class NoteRepository(
         return saved
     }
 
-    suspend fun importMarkdown(markdownFile: String): NoteEntity {
+    suspend fun importMarkdown(markdownFile: String, fallbackTitle: String? = null): NoteEntity {
         val imported = MarkdownNoteCodec.parse(markdownFile)
         return save(
             noteId = imported.noteId,
-            title = imported.title.orEmpty(),
+            title = imported.title
+                ?: fallbackTitle.takeIf { imported.noteId == null }.orEmpty(),
             markdown = imported.markdown,
             folderId = imported.folderId
         )

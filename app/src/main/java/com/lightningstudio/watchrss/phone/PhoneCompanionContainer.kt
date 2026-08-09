@@ -12,8 +12,6 @@ import com.lightningstudio.watchrss.phone.account.PhoneInstallationIdentity
 import com.lightningstudio.watchrss.phone.account.LicenseDeviceIdentity
 import com.lightningstudio.watchrss.phone.account.AppAccessCoordinator
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
-import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncClient
-import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneNoteBluetoothSyncManager
 import com.lightningstudio.watchrss.phone.connection.guided.PhoneGuidedSessionManager
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudChangeScheduler
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient
@@ -251,18 +249,11 @@ class PhoneCompanionContainer(context: Context) {
         )
     }
 
-    private val bluetoothSyncClient: PhoneBluetoothSyncClient by lazy {
-        PhoneBluetoothSyncClient(appContext, bluetoothDebugLog)
-    }
-
-    val noteBluetoothSyncManager: PhoneNoteBluetoothSyncManager by lazy {
-        PhoneNoteBluetoothSyncManager(noteRepository, bluetoothSyncClient, deviceIdentity.deviceId)
-    }
-
     val bluetoothSyncManager: PhoneBluetoothSyncManager by lazy {
         PhoneBluetoothSyncManager(
             context = appContext,
             repository = repository,
+            noteRepository = noteRepository,
             readerPresetRepository = readerPresetRepository,
             llmTokenUsageRepository = llmTokenUsageRepository,
             deviceId = deviceIdentity.deviceId,

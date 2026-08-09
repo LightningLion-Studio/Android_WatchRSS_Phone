@@ -3,23 +3,25 @@ package com.lightningstudio.watchrss.phone
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.provider.OpenableColumns
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -47,7 +49,9 @@ import com.lightningstudio.watchrss.phone.data.note.NoteConflictEntity
 import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
 import com.lightningstudio.watchrss.phone.ui.reader.ProvideReaderPreset
+import com.lightningstudio.watchrss.phone.ui.theme.AppListCard
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import com.lightningstudio.watchrss.phone.ui.theme.roundedClickable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CoroutineScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -58,7 +62,6 @@ class NotesActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val container = (application as PhoneCompanionApplication).container
         val repository = container.noteRepository
-        val noteSync = container.noteBluetoothSyncManager
         setContent {
             WatchRssPhoneTheme {
                 ProvideReaderPreset(container.readerPresetRepository) {
@@ -66,7 +69,6 @@ class NotesActivity : ComponentActivity() {
                         repository,
                         ::finish,
                         lifecycleScope,
-                        { noteSync.sync() },
                         container.cloudSyncService::syncNow
                     )
                 }
@@ -82,7 +84,6 @@ private fun NotesScreen(
     repository: NoteRepository,
     onBack: () -> Unit,
     scope: CoroutineScope,
-    syncNotes: suspend () -> Unit,
     syncCloud: suspend () -> Unit
 ) {
     val notes by repository.observeNotes().collectAsStateWithLifecycle(emptyList())
@@ -99,15 +100,53 @@ private fun NotesScreen(
     }
     val zipImport = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch {
-            context.contentResolver.openInputStream(uri)?.use { transfer.importZip(it.readBytes()) }
-            runCatching { syncCloud() }
+            runCatching {
+                val count = context.contentResolver.openInputStream(uri)
+                    ?.use { transfer.importZip(it.readBytes()) }
+                    ?: error("无法读取 ZIP 文件")
+                require(count > 0) { "ZIP 中没有 Markdown（.md）笔记" }
+                runCatching { syncCloud() }
+                count
+            }.onSuccess { count ->
+                Toast.makeText(context, "已导入 $count 条备忘录", Toast.LENGTH_SHORT).show()
+            }.onFailure { throwable ->
+                Toast.makeText(context, "ZIP 导入失败：${throwable.message ?: "未知错误"}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+    val markdownImport = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            runCatching {
+                val fileName = context.queryDisplayName(uri)
+                    ?: uri.lastPathSegment?.substringAfterLast('/')
+                    ?: "未命名.md"
+                val mimeType = context.contentResolver.getType(uri)
+                val bytes = context.contentResolver.openInputStream(uri)
+                    ?.use { it.readBytes() }
+                    ?: error("无法读取 Markdown 文件")
+                val note = transfer.importMarkdown(fileName, mimeType, bytes)
+                runCatching { syncCloud() }
+                note
+            }.onSuccess { note ->
+                Toast.makeText(context, "已导入备忘录：${note.title}", Toast.LENGTH_SHORT).show()
+            }.onFailure { throwable ->
+                Toast.makeText(context, "Markdown 导入失败：${throwable.message ?: "未知错误"}", Toast.LENGTH_LONG).show()
+            }
         }
     }
     val directoryImport = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) scope.launch {
-            context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            transfer.importDirectory(uri)
-            runCatching { syncCloud() }
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                val count = transfer.importDirectory(uri)
+                require(count > 0) { "所选目录中没有 Markdown（.md）笔记" }
+                runCatching { syncCloud() }
+                count
+            }.onSuccess { count ->
+                Toast.makeText(context, "已导入 $count 条备忘录", Toast.LENGTH_SHORT).show()
+            }.onFailure { throwable ->
+                Toast.makeText(context, "目录导入失败：${throwable.message ?: "未知错误"}", Toast.LENGTH_LONG).show()
+            }
         }
     }
     Scaffold(
@@ -119,13 +158,20 @@ private fun NotesScreen(
                     if (selected == null && !creating) {
                         if (conflicts.isNotEmpty()) TextButton(onClick = { selectedConflict = conflicts.first() }) { Text("冲突 ${conflicts.size}") }
                         IconButton(onClick = { directoryImport.launch(null) }) { Icon(Icons.Default.FolderOpen, "导入目录") }
-                        IconButton(onClick = { zipImport.launch(arrayOf("application/zip", "application/x-zip-compressed")) }) { Icon(Icons.Default.FileOpen, "导入 ZIP") }
+                        IconButton(onClick = { markdownImport.launch(arrayOf("text/markdown", "text/x-markdown", "text/plain", "application/octet-stream", "*/*")) }) { Icon(Icons.Default.Description, "导入 Markdown") }
+                        IconButton(onClick = { zipImport.launch(arrayOf("application/zip", "application/x-zip-compressed")) }) { Icon(Icons.Default.Archive, "导入 ZIP") }
                         IconButton(onClick = { zipExport.launch("watchrss-notes.zip") }) { Icon(Icons.Default.Save, "导出 ZIP") }
                     }
                 }
             )
         },
-        floatingActionButton = { if (selected == null && !creating) Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) { FloatingActionButton(onClick = { scope.launch { syncNotes() } }) { Icon(Icons.Default.Sync, "同步手表笔记") }; FloatingActionButton(onClick = { creating = true }) { Icon(Icons.Default.Add, "新建笔记") } } }
+        floatingActionButton = {
+            if (selected == null && !creating) {
+                FloatingActionButton(onClick = { creating = true }) {
+                    Icon(Icons.Default.Add, "新建笔记")
+                }
+            }
+        }
     ) { padding ->
         val note = selected
         if (note == null && !creating) NoteList(notes, { selected = it }, Modifier.padding(padding))
@@ -145,6 +191,14 @@ private fun NotesScreen(
         )
     }
 }
+
+private fun Context.queryDisplayName(uri: android.net.Uri): String? = runCatching {
+    contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+        if (!cursor.moveToFirst()) return@use null
+        val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+        if (index >= 0) cursor.getString(index) else null
+    }
+}.getOrNull()?.takeIf { it.isNotBlank() }
 
 @Composable
 private fun NoteConflictDialog(
@@ -174,6 +228,36 @@ private fun NoteConflictDialog(
 }
 
 @Composable
-private fun NoteList(notes: List<NoteEntity>, onOpen: (NoteEntity) -> Unit, modifier: Modifier = Modifier) = LazyColumn(modifier = modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-    items(notes, key = { it.noteId }) { note -> TextButton(onClick = { onOpen(note) }, modifier = Modifier.fillMaxWidth()) { Column(Modifier.fillMaxWidth()) { Text(note.title, fontWeight = FontWeight.Bold); Text(note.plainText.take(100), color = MaterialTheme.colorScheme.onSurfaceVariant) } } }
+private fun NoteList(
+    notes: List<NoteEntity>,
+    onOpen: (NoteEntity) -> Unit,
+    modifier: Modifier = Modifier
+) = LazyColumn(
+    modifier = modifier
+        .fillMaxSize()
+        .padding(16.dp),
+    verticalArrangement = Arrangement.spacedBy(12.dp)
+) {
+    items(notes, key = { it.noteId }) { note ->
+        AppListCard(
+            modifier = Modifier.fillMaxWidth(),
+            interactionModifier = Modifier.roundedClickable(
+                shape = RoundedCornerShape(12.dp),
+                onClick = { onOpen(note) }
+            )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(note.title, fontWeight = FontWeight.Bold)
+                Text(
+                    note.plainText.take(100),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
 }

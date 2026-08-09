@@ -32,7 +32,8 @@ class ReaderPresetModelsTest {
                 assetId = "video-hash",
                 videoTrimStartMs = 20_000,
                 videoTrimEndMs = 99_000
-            )
+            ),
+            codeBackgroundColorArgb = 0xFFF1E1B8
         )
 
         val decoded = ReaderPresetCodec.decode(ReaderPresetCodec.encode(source))
@@ -47,6 +48,29 @@ class ReaderPresetModelsTest {
         assertTrue(decoded.quote.strikethrough == true)
         assertTrue(decoded.categoryTypographyEnabled)
         assertEquals(80_000, decoded.background.videoTrimEndMs)
+        assertEquals(0xFFF1E1B8, decoded.codeBackgroundColorArgb)
+    }
+
+    @Test
+    fun legacyPresetWithoutCodeBackground_usesWarmColorDerivedFromBackground() {
+        val backgroundColor = 0xFFF8F3EC
+        val json = JSONObject(
+            ReaderPresetCodec.encode(
+                ReaderPreset.lightDefault(name = "旧浅色预设").copy(
+                    background = ReaderBackground(colorArgb = backgroundColor)
+                )
+            )
+        ).apply {
+            remove("codeBackgroundColorArgb")
+        }
+
+        val decoded = ReaderPresetCodec.decode(json.toString())
+
+        assertEquals(0xFFF2E5C9, decoded.codeBackgroundColorArgb)
+        assertEquals(
+            defaultReaderCodeBackgroundColorArgb(backgroundColor),
+            decoded.codeBackgroundColorArgb
+        )
     }
 
     @Test

@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import com.lightningstudio.watchrss.phone.data.note.NoteEntity
+import com.lightningstudio.watchrss.phone.data.note.MarkdownNoteCodec
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -39,7 +40,7 @@ object NoteSyncPayload {
 
     private fun JSONObject.toNote(): NoteEntity = NoteEntity(
         noteId = getString("noteId"), folderId = if (isNull("folderId")) null else optString("folderId"), title = optString("title"),
-        markdown = optString("markdown"), plainText = "", contentHash = optString("contentHash"),
+        markdown = optString("markdown"), plainText = MarkdownNoteCodec.toPlainText(optString("markdown")), contentHash = optString("contentHash"),
         baseContentHash = optString("baseContentHash"), baseMarkdown = optString("baseMarkdown"), pinned = optBoolean("pinned"),
         createdAt = optLong("createdAt"), updatedAt = optLong("updatedAt"), modifiedBy = optString("modifiedBy"),
         deleted = optBoolean("deleted"), deletedAt = optLong("deletedAt")

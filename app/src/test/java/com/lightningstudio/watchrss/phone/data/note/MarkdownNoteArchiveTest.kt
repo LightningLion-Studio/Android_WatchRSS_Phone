@@ -16,4 +16,18 @@ class MarkdownNoteArchiveTest {
     @Test fun `rejects traversal paths`() {
         assertThrows(IllegalArgumentException::class.java) { MarkdownNoteArchive.safePath("../secret.md") }
     }
+
+    @Test fun `directory import accepts markdown at root and arbitrary subdirectories`() {
+        val entries = listOf(
+            MarkdownArchiveEntry("第一导入.md", byteArrayOf(1)),
+            MarkdownArchiveEntry("work/todo.MD", byteArrayOf(2)),
+            MarkdownArchiveEntry("notes/assets/cat.jpg", byteArrayOf(3)),
+            MarkdownArchiveEntry("readme.txt", byteArrayOf(4))
+        )
+
+        assertEquals(
+            listOf("第一导入.md", "work/todo.MD"),
+            markdownNoteEntries(entries).map { it.path }
+        )
+    }
 }

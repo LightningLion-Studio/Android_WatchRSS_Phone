@@ -10,14 +10,32 @@ import java.security.MessageDigest
 import java.util.UUID
 import kotlin.math.roundToInt
 
-data class StoredNoteAsset(val entity: NoteAssetEntity, val markdownPath: String, val additionalAssets: List<NoteAssetEntity>)
+data class StoredNoteAsset(
+    val entity: NoteAssetEntity,
+    val additionalAssets: List<NoteAssetEntity>,
+    val pixelWidth: Int,
+    val pixelHeight: Int
+)
 
 /** Stores a sync-safe app-private image; normal imports are bounded to 680 pixels. */
 class NoteAssetStore(private val context: Context) {
+    fun discardImportedAsset(storageKey: String) {
+        require(storageKey == File(storageKey).name) { "图片文件名无效" }
+        File(context.filesDir, "notes/assets/$storageKey").delete()
+    }
+
     suspend fun importImage(noteId: String, uri: Uri, keepOriginal: Boolean): StoredNoteAsset {
         if (keepOriginal) {
             val original = copyOriginal(noteId, uri)
-            return StoredNoteAsset(original, "assets/${original.storageKey}", emptyList())
+            val (pixelWidth, pixelHeight) = imagePixelDimensions(
+                File(context.filesDir, "notes/assets/${original.storageKey}")
+            ) ?: (1 to 1)
+            return StoredNoteAsset(
+                original,
+                emptyList(),
+                pixelWidth,
+                pixelHeight
+            )
         }
         val assetId = UUID.randomUUID().toString()
         val directory = File(context.filesDir, "notes/assets").also { it.mkdirs() }
@@ -43,7 +61,12 @@ class NoteAssetStore(private val context: Context) {
             isOriginal = false,
             createdAt = System.currentTimeMillis()
         )
-        return StoredNoteAsset(entity, "assets/${target.name}", emptyList())
+        return StoredNoteAsset(
+            entity,
+            emptyList(),
+            scaled.width,
+            scaled.height
+        )
     }
 
     private fun scaleTo680Pixels(source: Bitmap): Bitmap {
@@ -87,6 +110,16 @@ class NoteAssetStore(private val context: Context) {
             digest.update(buffer, 0, read)
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+}
+
+private fun imagePixelDimensions(file: File): Pair<Int, Int>? {
+    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(file.absolutePath, options)
+    return if (options.outWidth > 0 && options.outHeight > 0) {
+        options.outWidth to options.outHeight
+    } else {
+        null
     }
 }
 

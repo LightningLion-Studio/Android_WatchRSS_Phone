@@ -27,15 +27,159 @@ class NoteRichTextEditorTest {
     }
 
     @Test
-    fun `inserted local image stays in portable note markup`() {
-        val editor = RichTextState().setText("")
-        editor.insertImage("assets/example.jpg", "示例")
+    fun `aligned table spaces survive rich editor round trip`() {
+        val markdown = """
+            Option  Type  Default  Description
+
+            `outer_padding`  int  `32`  Legacy fallback for all four edge paddings.
+            `max_preview_scale`  float  `0.95`  Maximum preview scale.
+        """.trimIndent()
+        val editor = RichTextState().setMarkdown(markdown.toNoteEditorMarkup())
 
         val saved = editor.toNoteStorageMarkup()
 
-        assertTrue(saved.contains("<img"))
+        assertTrue(saved.contains("Option  Type  Default  Description"))
+        assertTrue(saved.contains("`outer_padding`  int  `32`  Legacy fallback"))
+        assertFalse(saved.contains("`outer_padding` int `32` Legacy fallback"))
+    }
+
+    @Test
+    fun `preview markup remains authoritative when saving without editing`() {
+        val original = "| Option | Type |\n| --- | --- |\n| `outer_padding` | int |"
+
+        val saved = selectNoteStorageMarkup(
+            previewMode = true,
+            previewMarkup = original,
+            editorMarkup = "Option Type outer_padding int"
+        )
+
+        assertEquals(original, saved)
+    }
+
+    @Test
+    fun `hymission style markdown table becomes a preview table`() {
+        val markdown = """
+            Before
+
+            | Lua function | Legacy dispatcher | Arguments | Behavior | Why it exists |
+            | --- | :--- | :---: | ---: | --- |
+            | `hl.plugin.hymission.toggle(args?)` | `hymission:toggle` | Optional scope | Opens overview | Entry point |
+
+            After
+        """.trimIndent()
+
+        val blocks = parseNotePreviewBlocks(markdown)
+        val table = blocks.filterIsInstance<NotePreviewBlock.Table>().single().table
+
+        assertEquals(5, table.columnCount)
+        assertEquals(2, table.rows.size)
+        assertEquals(NoteTableAlignment.Start, table.alignments[0])
+        assertEquals(NoteTableAlignment.Center, table.alignments[2])
+        assertEquals(NoteTableAlignment.End, table.alignments[3])
+        assertEquals("Before", (blocks.first() as NotePreviewBlock.RichText).markup.trim())
+        assertEquals("After", (blocks.last() as NotePreviewBlock.RichText).markup.trim())
+        assertTrue(markdown.containsMarkdownTable())
+    }
+
+    @Test
+    fun `tab separated rows become a preview table`() {
+        val tsv = "Name\tType\tDescription\nlayout_engine\tstring\tGeometry solver\nniri_mode\tbool\tOverflow mode"
+
+        val table = parseNotePreviewBlocks(tsv)
+            .filterIsInstance<NotePreviewBlock.Table>()
+            .single()
+            .table
+
+        assertEquals(3, table.columnCount)
+        assertEquals(3, table.rows.size)
+        assertEquals("layout_engine", table.rows[1][0])
+        assertTrue(tsv.containsMarkdownTable())
+    }
+
+    @Test
+    fun `pipe and tab content inside code fences stays code`() {
+        val markdown = """
+            ```text
+            A\tB\tC
+            | Header | Value |
+            | --- | --- |
+            ```
+        """.trimIndent()
+
+        val blocks = parseNotePreviewBlocks(markdown)
+
+        assertEquals(1, blocks.size)
+        assertTrue(blocks.single() is NotePreviewBlock.RichText)
+        assertFalse(markdown.containsMarkdownTable())
+    }
+
+    @Test
+    fun `inserted local image stays in portable note markup`() {
+        val editor = RichTextState().setText("")
+        editor.insertImagePlaceholder("assets/example.jpg", "示例", widthSp = 320f, heightSp = 180f)
+
+        val saved = editor.toNoteStorageMarkup()
+
+        assertTrue(saved.contains("![示例]"))
         assertTrue(saved.contains("assets/example.jpg"))
-        assertTrue(RichTextState().setHtml(saved).toHtml().contains("assets/example.jpg"))
+        val reloaded = RichTextState().setMarkdown(saved.toNoteEditorMarkup())
+        assertTrue(reloaded.annotatedString.text.contains("🖼 示例"))
+        assertFalse(reloaded.annotatedString.text.contains('\uFFFD'))
+    }
+
+    @Test
+    fun `inserting image preserves every following paragraph`() {
+        val original = "Before image\nFirst line after\nSecond line after"
+        val editor = RichTextState().setText(original)
+        editor.selection = TextRange("Before image\n".length)
+
+        editor.insertImagePlaceholder("assets/example.jpg", "示例", widthSp = 320f, heightSp = 180f)
+
+        val saved = editor.toNoteStorageMarkup()
+        assertTrue(saved.contains("Before image"))
+        assertTrue(saved.contains("First line after"))
+        assertTrue(saved.contains("Second line after"))
+        assertFalse(saved.contains("econd line afte<"))
+    }
+
+    @Test
+    fun `portable markdown image becomes an external preview block`() {
+        val blocks = parseNotePreviewBlocks("Before\n![示例](assets/example.jpg)\nAfter")
+
+        val image = blocks.filterIsInstance<NotePreviewBlock.Image>().single()
+        assertEquals("assets/example.jpg", image.path)
+        assertEquals("示例", image.description)
+        assertTrue((blocks.first() as NotePreviewBlock.RichText).markup.contains("Before"))
+        assertTrue((blocks.last() as NotePreviewBlock.RichText).markup.contains("After"))
+        assertTrue("Before\n![示例](assets/example.jpg)\nAfter".shouldOpenInNotePreview())
+    }
+
+    @Test
+    fun `plain text stays editable while persisted images reopen in preview`() {
+        assertFalse("普通正文".shouldOpenInNotePreview())
+        assertTrue("<p>前文</p><img src=\"assets/example.jpg\" alt=\"示例\"><p>后文</p>".shouldOpenInNotePreview())
+    }
+
+    @Test
+    fun `image display size keeps aspect ratio within editor bounds`() {
+        assertEquals(
+            320f to 180f,
+            fitNoteImageDisplaySize(1920, 1080, maxWidthSp = 320f, maxHeightSp = 480f)
+        )
+        assertEquals(
+            270f to 480f,
+            fitNoteImageDisplaySize(1080, 1920, maxWidthSp = 320f, maxHeightSp = 480f)
+        )
+    }
+
+    @Test
+    fun `image dimensions are stored as integers for library reload`() {
+        val html = "<p><img src=\"assets/example.jpg\" width=\"320.0\" height=\"180.0\"></img></p>"
+
+        val normalized = html.normalizeNoteImageDimensionAttributes()
+
+        assertTrue(normalized.contains("width=\"320\""))
+        assertTrue(normalized.contains("height=\"180\""))
     }
 
     @Test

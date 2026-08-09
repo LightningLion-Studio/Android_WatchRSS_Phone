@@ -6,6 +6,8 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageRepository
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
+import com.lightningstudio.watchrss.phone.data.note.MarkdownMergeResult
+import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.repo.PhoneLibrarySyncWindow
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
@@ -25,21 +27,55 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.channels.ReceiveChannel
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.security.MessageDigest
 
 data class PhoneBluetoothSyncResult(
     val deviceName: String,
     val deviceAddress: String = "",
     val importedCount: Int? = null,
     val libraryStats: LibrarySyncStats? = null,
+    val noteStats: NoteSyncStats? = null,
     val accountSync: AccountSyncResult? = null,
     val readerSyncWarning: String? = null
+)
+
+data class NoteSyncStats(
+    val sent: Int,
+    val received: Int,
+    val appliedOnWatch: Int,
+    val conflictsOnPhone: Int
 )
 
 enum class PhoneBluetoothSyncStage(val displayName: String) {
     CONNECTING("建立连接中"),
     TRANSFERRING("信息传输中"),
     SYNCING_READER_RESOURCES("阅读器资源同步中"),
+    SYNCING_NOTES("备忘录同步中"),
     VERIFYING("校验中")
+}
+
+private fun java.io.InputStream.readNoteAssetChunk(maxBytes: Int): ByteArray {
+    val buffer = ByteArray(maxBytes)
+    var size = 0
+    while (size < maxBytes) {
+        val count = read(buffer, size, maxBytes - size)
+        if (count < 0) break
+        if (count == 0) continue
+        size += count
+    }
+    return if (size == buffer.size) buffer else buffer.copyOf(size)
+}
+
+private fun File.sha256(): String = inputStream().use { input ->
+    val digest = MessageDigest.getInstance("SHA-256")
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        digest.update(buffer, 0, count)
+    }
+    digest.digest().joinToString("") { "%02x".format(it) }
 }
 
 data class PhoneBluetoothSyncProgress(
@@ -52,6 +88,7 @@ data class PhoneBluetoothSyncProgress(
 class PhoneBluetoothSyncManager(
     context: Context,
     private val repository: PhoneCompanionRepository,
+    private val noteRepository: NoteRepository,
     private val readerPresetRepository: ReaderPresetRepository,
     private val llmTokenUsageRepository: PhoneLlmTokenUsageRepository,
     private val deviceId: String,
@@ -60,7 +97,8 @@ class PhoneBluetoothSyncManager(
         { _, _, _ -> error("账号同步未配置") },
     private val onLibrarySyncCompleted: suspend () -> Unit = {}
 ) {
-    private val client = PhoneBluetoothSyncClient(context.applicationContext, debugLog)
+    private val appContext = context.applicationContext
+    private val client = PhoneBluetoothSyncClient(appContext, debugLog)
     private val watchBackgroundTranscoder =
         WatchBackgroundTranscoder(context.applicationContext, readerPresetRepository)
 
@@ -502,6 +540,12 @@ class PhoneBluetoothSyncManager(
             } else {
                 null
             }
+            reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_NOTES, 0)
+            val noteStats = syncNotes(
+                deviceAddress = exchange.deviceAddress,
+                parentSessionId = sessionId
+            )
+            reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_NOTES, 100)
             reportProgress(onProgress, PhoneBluetoothSyncStage.VERIFYING, 100)
             PhoneBluetoothSyncResult(
                 deviceName = exchange.deviceName,
@@ -514,6 +558,7 @@ class PhoneBluetoothSyncManager(
                     sourcesReceived = receivedSourcesCount,
                     sourcesMerged = mergedSources
                 ),
+                noteStats = noteStats,
                 readerSyncWarning = readerSyncWarning
             ).also { onLibrarySyncCompleted() }
         }.onFailure { throwable ->
@@ -527,6 +572,115 @@ class PhoneBluetoothSyncManager(
                 throwable = throwable
             )
         }.getOrThrow()
+    }
+
+    private suspend fun syncNotes(
+        deviceAddress: String,
+        parentSessionId: String
+    ): NoteSyncStats {
+        val sessionId = "$parentSessionId-notes"
+        val localNotes = noteRepository.allNotes()
+        debugLog.appendEvent(
+            event = "sync.notes.start",
+            sessionId = sessionId,
+            fields = mapOf(
+                "targetAddress" to deviceAddress,
+                "sent" to localNotes.size
+            )
+        )
+        return runCatching {
+            val exchange = client.exchange(
+                request = NoteSyncPayload.manifest(deviceId, localNotes),
+                deviceAddress = deviceAddress,
+                sessionId = sessionId,
+                rememberDeviceOnSuccess = false
+            )
+            requireSuccess(exchange.response)
+            require(exchange.response.optString("action") == NoteSyncPayload.ACTION_SYNC_NOTES) {
+                "手表不支持备忘录同步，请升级手表端"
+            }
+            val remoteDeviceId = exchange.response.optString("deviceId").ifBlank { "watch" }
+            val remoteNotes = NoteSyncPayload.decodeNotes(exchange.response)
+            var conflicts = 0
+            remoteNotes.forEach { note ->
+                if (noteRepository.applyRemote(note, remoteDeviceId) is MarkdownMergeResult.Conflict) {
+                    conflicts += 1
+                }
+            }
+            syncNoteAssets(localNotes, deviceAddress, sessionId)
+            NoteSyncStats(
+                sent = localNotes.size,
+                received = remoteNotes.size,
+                appliedOnWatch = exchange.response.optInt("applied"),
+                conflictsOnPhone = conflicts
+            ).also { stats ->
+                debugLog.appendEvent(
+                    event = "sync.notes.complete",
+                    sessionId = sessionId,
+                    fields = mapOf(
+                        "device" to exchange.deviceName,
+                        "sent" to stats.sent,
+                        "received" to stats.received,
+                        "appliedOnWatch" to stats.appliedOnWatch,
+                        "conflictsOnPhone" to stats.conflictsOnPhone
+                    )
+                )
+            }
+        }.onFailure { throwable ->
+            debugLog.appendEvent(
+                event = "sync.notes.failed",
+                sessionId = sessionId,
+                fields = failureFields(throwable),
+                throwable = throwable
+            )
+        }.getOrThrow()
+    }
+
+    private suspend fun syncNoteAssets(
+        notes: List<com.lightningstudio.watchrss.phone.data.note.NoteEntity>,
+        deviceAddress: String,
+        parentSessionId: String
+    ) {
+        val storageKeys = linkedSetOf<String>()
+        notes.filterNot { it.deleted }.forEach { note ->
+            storageKeys += noteRepository.assets(note.noteId)
+                .asSequence()
+                .filterNot { it.deleted }
+                .map { it.storageKey }
+                .filter(NoteAssetSyncPayload::isSafeStorageKey)
+                .toList()
+            storageKeys += NoteAssetSyncPayload.referencedStorageKeys(note.markdown)
+        }
+        storageKeys.forEach assetLoop@ { storageKey ->
+                val file = File(appContext.filesDir, "notes/assets/$storageKey")
+                if (!file.isFile) return@assetLoop
+                val sha256 = file.sha256()
+                val chunkCount = ((file.length() + NoteAssetSyncPayload.CHUNK_BYTES - 1) /
+                    NoteAssetSyncPayload.CHUNK_BYTES).toInt().coerceAtLeast(1)
+                file.inputStream().buffered().use { input ->
+                    repeat(chunkCount) { chunkIndex ->
+                        val bytes = input.readNoteAssetChunk(NoteAssetSyncPayload.CHUNK_BYTES)
+                        delay(READER_RECONNECT_DELAY_MS)
+                        val response = client.exchange(
+                            request = NoteAssetSyncPayload.chunk(
+                                storageKey = storageKey,
+                                sha256 = sha256,
+                                chunkIndex = chunkIndex,
+                                chunkCount = chunkCount,
+                                bytes = bytes
+                            ),
+                            deviceAddress = deviceAddress,
+                            sessionId = "$parentSessionId-asset-$storageKey-$chunkIndex",
+                            rememberDeviceOnSuccess = false
+                        ).response
+                        requireSuccess(response)
+                        require(response.optString("action") == NoteAssetSyncPayload.ACTION) {
+                            "手表不支持备忘录图片同步，请升级手表端"
+                        }
+                        if (response.optBoolean("alreadyPresent")) return@assetLoop
+                    }
+                }
+            }
     }
 
     suspend fun syncReaderPresets(

@@ -5610,6 +5610,7 @@ private fun MainScreenSharedImportDialog(
                 text = when (prompt.kind) {
                     SharedImportPromptKind.LINK -> "导入链接"
                     SharedImportPromptKind.FILE -> "导入文件"
+                    SharedImportPromptKind.MARKDOWN_FILE -> "导入 Markdown"
                 }
             )
         },
@@ -5621,7 +5622,8 @@ private fun MainScreenSharedImportDialog(
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis
                 )
-                SharedImportPromptKind.FILE -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SharedImportPromptKind.FILE,
+                SharedImportPromptKind.MARKDOWN_FILE -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
                         text = prompt.fileName.ifBlank { "未命名文件" },
                         style = MaterialTheme.typography.bodyMedium,
@@ -5681,6 +5683,16 @@ private fun MainScreenSharedImportDialog(
                             Icon(Icons.Default.FileOpen, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("导入")
+                        }
+                    }
+                    SharedImportPromptKind.MARKDOWN_FILE -> {
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { onConfirmFileImport(prompt) }
+                        ) {
+                            Icon(Icons.Default.Description, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("导入到备忘录")
                         }
                     }
                 }

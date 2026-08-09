@@ -30,6 +30,9 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_EXTENSION
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_MIME_TYPE
+import com.lightningstudio.watchrss.phone.data.importer.LocalFileImportTarget
+import com.lightningstudio.watchrss.phone.data.importer.classifyLocalFileImport
+import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
 import com.lightningstudio.watchrss.phone.ui.MainScreen
 import com.lightningstudio.watchrss.phone.ui.TxtUpdateDialog
 import com.lightningstudio.watchrss.phone.ui.TxtChapterImportDialog
@@ -76,6 +79,12 @@ class HomeActivity : ComponentActivity() {
     private var pendingBluetoothAction: (() -> Unit)? = null
     private val announcementRepository by lazy { PhoneAnnouncementRepository(this) }
     private val appUpdateDownloader by lazy { AppUpdateDownloader(this) }
+    private val noteImportService by lazy {
+        NoteImportExportService(
+            this,
+            (application as PhoneCompanionApplication).container.noteRepository
+        )
+    }
     private val pendingAnnouncement = mutableStateOf<PhoneAnnouncement?>(null)
     private var homeScreenStartedAt: Long = 0L
 
@@ -141,11 +150,7 @@ class HomeActivity : ComponentActivity() {
                         viewModel.inspectBackup(fileName, uri.toString())
                     } else {
                         val file = readSelectedLocalContent(uri)
-                        viewModel.importLocalContent(
-                            fileName = file.fileName,
-                            mimeType = file.mimeType,
-                            bytes = file.bytes
-                        )
+                        importSelectedFile(file)
                     }
                 }.onFailure { throwable ->
                     Log.e(TAG, "Failed to read local content", throwable)
@@ -434,15 +439,33 @@ class HomeActivity : ComponentActivity() {
             runCatching {
                 readSelectedLocalContent(uri, prompt.mimeType)
             }.onSuccess { file ->
-                viewModel.importLocalContent(
-                    fileName = file.fileName,
-                    mimeType = file.mimeType,
-                    bytes = file.bytes
-                )
+                runCatching { importSelectedFile(file) }
+                    .onFailure { throwable ->
+                        Log.e(TAG, "Failed to import shared local content", throwable)
+                        viewModel.showContentError("文件导入失败：${throwable.message ?: "未知错误"}")
+                    }
             }.onFailure { throwable ->
                 Log.e(TAG, "Failed to read shared local content", throwable)
-                viewModel.showError("文件导入失败：${throwable.message ?: "未知错误"}")
+                viewModel.showContentError("文件导入失败：${throwable.message ?: "未知错误"}")
             }
+        }
+    }
+
+    private suspend fun importSelectedFile(file: SelectedLocalContent) {
+        when (classifyLocalFileImport(file.fileName, file.mimeType)) {
+            LocalFileImportTarget.MARKDOWN_NOTE -> {
+                val note = noteImportService.importMarkdown(file.fileName, file.mimeType, file.bytes)
+                runCatching {
+                    (application as PhoneCompanionApplication).container.cloudSyncService.syncNow()
+                }
+                viewModel.showContentMessage("已导入备忘录：${note.title}")
+            }
+            LocalFileImportTarget.LOCAL_CONTENT -> viewModel.importLocalContent(
+                fileName = file.fileName,
+                mimeType = file.mimeType,
+                bytes = file.bytes
+            )
+            LocalFileImportTarget.UNSUPPORTED -> error("只支持 Markdown（.md）、TXT 和 EPUB 文件")
         }
     }
 
@@ -492,7 +515,7 @@ class HomeActivity : ComponentActivity() {
                         val errorMessage = inspectError?.message
                         viewModel.showContentError(
                             if (errorMessage.isNullOrBlank()) {
-                                "只支持导入 TXT 或 EPUB 文件"
+                                "只支持导入 Markdown（.md）、TXT 或 EPUB 文件"
                             } else {
                                 "无法读取文件：$errorMessage"
                             }
@@ -541,17 +564,20 @@ class HomeActivity : ComponentActivity() {
                 ?: uri.lastPathSegment?.substringAfterLast('/')
                 ?: "未命名文件"
             val mimeType = contentResolver.getType(uri) ?: intentMimeType
-            if (!isSupportedLocalContent(fileName, mimeType)) return@withContext null
+            val importTarget = classifyLocalFileImport(fileName, mimeType)
+            if (importTarget == LocalFileImportTarget.UNSUPPORTED) return@withContext null
             InboundLocalFile(
                 fileName = fileName,
                 mimeType = mimeType,
-                uriString = uri.toString()
+                uriString = uri.toString(),
+                importTarget = importTarget
             )
         } ?: return false
         viewModel.showSharedFilePrompt(
             fileName = file.fileName,
             mimeType = file.mimeType,
-            uriString = file.uriString
+            uriString = file.uriString,
+            markdownNote = file.importTarget == LocalFileImportTarget.MARKDOWN_NOTE
         )
         return true
     }
@@ -591,15 +617,6 @@ class HomeActivity : ComponentActivity() {
             mimeType.equals(WATCHRSS_BACKUP_MIME_TYPE, ignoreCase = true)
     }
 
-    private fun isSupportedLocalContent(fileName: String, mimeType: String?): Boolean {
-        val lowerName = fileName.lowercase()
-        val lowerMime = mimeType.orEmpty().lowercase()
-        return lowerName.endsWith(".txt") ||
-            lowerName.endsWith(".epub") ||
-            lowerMime.startsWith("text/") ||
-            lowerMime == "application/epub+zip"
-    }
-
     private fun String.trimUrlTail(): String =
         trimEnd('.', ',', ';', ':', '!', '?', ')', ']', '}', '>', '。', '，', '；', '：', '！', '？', '）', '】', '》')
 }
@@ -607,5 +624,6 @@ class HomeActivity : ComponentActivity() {
 private data class InboundLocalFile(
     val fileName: String,
     val mimeType: String?,
-    val uriString: String
+    val uriString: String,
+    val importTarget: LocalFileImportTarget
 )

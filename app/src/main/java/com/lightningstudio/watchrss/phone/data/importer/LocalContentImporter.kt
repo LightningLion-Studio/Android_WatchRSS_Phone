@@ -49,6 +49,11 @@ class LocalContentImporter {
         val lowerName = safeName.lowercase()
         val lowerMime = mimeType.orEmpty().lowercase()
         return when {
+            isMarkdownFileName(lowerName) ||
+                lowerMime == "text/markdown" ||
+                lowerMime == "text/x-markdown" -> {
+                error("Markdown 文件应导入备忘录")
+            }
             lowerName.endsWith(".epub") || lowerMime == "application/epub+zip" -> {
                 importEpub(safeName, bytes)
             }

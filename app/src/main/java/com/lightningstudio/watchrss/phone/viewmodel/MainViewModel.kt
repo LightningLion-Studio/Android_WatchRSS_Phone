@@ -93,7 +93,8 @@ enum class MainBluetoothDevicePromptPurpose {
 
 enum class SharedImportPromptKind {
     LINK,
-    FILE
+    FILE,
+    MARKDOWN_FILE
 }
 
 data class SharedImportPromptUi(
@@ -276,6 +277,16 @@ class MainViewModel(
         )
     }
 
+    fun showContentMessage(message: String) {
+        _toastEvent.tryEmit(message)
+        sessionState.value = sessionState.value.copy(
+            message = message,
+            syncStatusMessage = null,
+            syncStatusError = null,
+            error = null
+        )
+    }
+
     fun importIndependentArticle() {
         importWebArticle(sessionState.value.urlInput.trim())
     }
@@ -296,7 +307,12 @@ class MainViewModel(
         )
     }
 
-    fun showSharedFilePrompt(fileName: String, mimeType: String?, uriString: String) {
+    fun showSharedFilePrompt(
+        fileName: String,
+        mimeType: String?,
+        uriString: String,
+        markdownNote: Boolean = false
+    ) {
         if (uriString.isBlank()) return
         sessionState.value = sessionState.value.copy(
             message = null,
@@ -304,7 +320,11 @@ class MainViewModel(
             syncStatusError = null,
             error = null,
             sharedImportPrompt = SharedImportPromptUi(
-                kind = SharedImportPromptKind.FILE,
+                kind = if (markdownNote) {
+                    SharedImportPromptKind.MARKDOWN_FILE
+                } else {
+                    SharedImportPromptKind.FILE
+                },
                 fileName = fileName.ifBlank { "未命名文件" },
                 mimeType = mimeType,
                 uriString = uriString
@@ -933,13 +953,14 @@ class MainViewModel(
                 resolveDeleteConflicts = ::resolveDeleteConflicts
             )
             val stats = result.libraryStats
+            val noteStats = result.noteStats
             val deviceName = result.deviceName.ifBlank { "手表" }
             val readerWarning = result.readerSyncWarning
             completeSmoothedSyncProgress()
             val message = if (readerWarning == null) {
                 "已与 $deviceName 同步完成"
             } else {
-                "已与 $deviceName 完成资料库同步；阅读器资源同步失败"
+                "已与 $deviceName 完成资料库和备忘录同步；阅读器资源同步失败"
             }
             runCatching {
                 bluetoothSyncManager.syncLlmTokenUsage(
@@ -964,7 +985,16 @@ class MainViewModel(
                 if (readerWarning != null) {
                     "$message：$readerWarning"
                 } else if (stats != null) {
-                    "已与 $deviceName 同步：文章发送 ${stats.sent}，收到 ${stats.received}，合并 ${stats.merged}；RSS源发送 ${stats.sourcesSent}，收到 ${stats.sourcesReceived}，合并 ${stats.sourcesMerged}"
+                    buildString {
+                        append("已与 $deviceName 同步：文章发送 ${stats.sent}，收到 ${stats.received}，合并 ${stats.merged}")
+                        append("；RSS源发送 ${stats.sourcesSent}，收到 ${stats.sourcesReceived}，合并 ${stats.sourcesMerged}")
+                        if (noteStats != null) {
+                            append("；备忘录发送 ${noteStats.sent}，手表应用 ${noteStats.appliedOnWatch}，收到 ${noteStats.received}")
+                            if (noteStats.conflictsOnPhone > 0) {
+                                append("，冲突 ${noteStats.conflictsOnPhone}")
+                            }
+                        }
+                    }
                 } else {
                     "已与 $deviceName 同步"
                 }

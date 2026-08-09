@@ -21,7 +21,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -142,6 +141,7 @@ import com.lightningstudio.watchrss.phone.data.local.ARTICLE_TEXT_CHUNK_BYTES
 import com.lightningstudio.watchrss.phone.data.local.isArticleContentMarker
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.repo.PhoneImportedTextReader
+import com.lightningstudio.watchrss.phone.data.reader.ReaderTypographyRole
 import com.lightningstudio.watchrss.phone.ui.reader.ProvideReaderPreset
 import com.lightningstudio.watchrss.phone.ui.reader.LocalReaderPresetRuntime
 import com.lightningstudio.watchrss.phone.ui.reader.ReaderBackgroundSurface
@@ -1709,18 +1709,15 @@ private fun ArticleCodeBlock(
     onTextLayout: (TextLayoutResult) -> Unit = {}
 ) {
     val horizontalScrollState = rememberScrollState()
+    val preset = LocalReaderPresetRuntime.current.preset
     Surface(
         modifier = modifier
             .fillMaxWidth()
             .padding(vertical = 8.dp),
         shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        contentColor = MaterialTheme.colorScheme.onSurface,
-        tonalElevation = 1.dp,
-        border = BorderStroke(
-            width = 1.dp,
-            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)
-        )
+        color = Color(preset.codeBackgroundColorArgb),
+        contentColor = Color(preset.resolvedStyle(ReaderTypographyRole.CODE).colorArgb),
+        tonalElevation = 0.dp
     ) {
         SelectionContainer {
             Text(

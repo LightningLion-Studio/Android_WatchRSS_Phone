@@ -2279,6 +2279,14 @@ private fun PresetEditor(
         ColorField("强调色", draft.accentColorArgb) {
             onDraftChange(draft.copy(accentColorArgb = it))
         }
+        ColorField("代码背景", draft.codeBackgroundColorArgb) {
+            onDraftChange(draft.copy(codeBackgroundColorArgb = it))
+        }
+        Text(
+            "用于文章与备忘录中的代码块和行内代码；始终使用纯色圆角背景，不绘制边框。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
         if (background.type == ReaderBackgroundType.VIDEO) {
             SectionTitle("视频")
             NumericSlider(
@@ -2536,10 +2544,17 @@ private fun ReaderPresetPreview(
                         "“真正舒服的排版，往往是在你忘记排版本身的时候。”",
                         style = readerTextStyle(ReaderTextRole.QUOTE)
                     )
-                    Text(
-                        "reader.apply(preset)\nrender(title, body, quote, code, link)",
-                        style = readerTextStyle(ReaderTextRole.CODE)
-                    )
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(preset.codeBackgroundColorArgb))
+                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                    ) {
+                        Text(
+                            "reader.apply(preset)\nrender(title, body, quote, code, link)",
+                            style = readerTextStyle(ReaderTextRole.CODE)
+                        )
+                    }
                     Text(
                         "链接与强调色示例：继续阅读完整内容",
                         style = readerTextStyle(ReaderTextRole.LINK)

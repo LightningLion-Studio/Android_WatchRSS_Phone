@@ -6,26 +6,38 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.FormatAlignLeft
 import androidx.compose.material.icons.automirrored.filled.FormatAlignRight
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.FormatAlignCenter
 import androidx.compose.material.icons.filled.FormatAlignJustify
@@ -38,14 +50,17 @@ import androidx.compose.material.icons.filled.FormatListNumbered
 import androidx.compose.material.icons.filled.FormatUnderlined
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.StrikethroughS
 import androidx.compose.material.icons.filled.TableChart
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -67,15 +82,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.ParagraphStyle
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontSynthesis
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -84,10 +108,13 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.rememberAsyncImagePainter
 import com.lightningstudio.watchrss.phone.data.note.NoteAssetStore
 import com.lightningstudio.watchrss.phone.data.note.NoteEntity
 import com.lightningstudio.watchrss.phone.data.note.NoteRepository
+import com.lightningstudio.watchrss.phone.ui.reader.LocalReaderPresetRuntime
 import com.lightningstudio.watchrss.phone.ui.reader.ReaderBackgroundSurface
 import com.lightningstudio.watchrss.phone.ui.reader.ReaderTextRole
 import com.lightningstudio.watchrss.phone.ui.reader.readerTextStyle
@@ -95,14 +122,17 @@ import com.mohamedrejeb.richeditor.model.RichTextState
 import com.mohamedrejeb.richeditor.model.ImageData
 import com.mohamedrejeb.richeditor.model.ImageLoader
 import com.mohamedrejeb.richeditor.model.LocalImageLoader
-import com.mohamedrejeb.richeditor.model.RichSpanStyle
 import com.mohamedrejeb.richeditor.model.rememberRichTextState
 import com.mohamedrejeb.richeditor.ui.BasicRichTextEditor
+import com.mohamedrejeb.richeditor.ui.BasicRichText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.io.File
+import java.nio.charset.StandardCharsets
+import java.util.Base64
 import java.util.UUID
+import kotlin.math.roundToInt
 
 private val Heading1Style = SpanStyle(fontSize = 2.em, fontWeight = FontWeight.Bold)
 private val Heading2Style = SpanStyle(fontSize = 1.5.em, fontWeight = FontWeight.Bold)
@@ -122,9 +152,21 @@ internal fun NoteEditor(
     var keepOriginal by remember(note?.noteId) { mutableStateOf(false) }
     var linkDialogVisible by remember { mutableStateOf(false) }
     var tableDialogVisible by remember { mutableStateOf(false) }
+    var previewMarkup by remember(note?.noteId) { mutableStateOf(note?.markdown.orEmpty()) }
+    var previewMode by remember(note?.noteId) {
+        mutableStateOf(note?.markdown?.shouldOpenInNotePreview() == true)
+    }
+    var focusEditorAfterPreview by remember(note?.noteId) { mutableStateOf(false) }
+    var viewerImage by remember(note?.noteId) { mutableStateOf<NotePreviewBlock.Image?>(null) }
     val editorNoteId = remember(note?.noteId) { note?.noteId ?: UUID.randomUUID().toString() }
     val editor = rememberRichTextState()
+    val editorScrollState = rememberScrollState()
     val editorFocusRequester = remember { FocusRequester() }
+    var editorFocused by remember(note?.noteId) { mutableStateOf(false) }
+    var editorTextLayout by remember(note?.noteId) {
+        mutableStateOf<TextLayoutResult?>(null)
+    }
+    val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val restoreEditorFocus = {
         editorFocusRequester.requestFocus()
@@ -132,21 +174,45 @@ internal fun NoteEditor(
         Unit
     }
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val density = LocalDensity.current
     val imageStore = remember(context) { NoteAssetStore(context) }
     val imageLoader = remember(context) { NoteImageLoader(context.filesDir) }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) scope.launch {
             val asset = imageStore.importImage(editorNoteId, uri, keepOriginal)
-            repository.registerAsset(asset.entity)
+            val registeredAsset = repository.registerAsset(asset.entity)
             asset.additionalAssets.forEach { repository.registerAsset(it) }
-            editor.insertImage(asset.markdownPath, asset.entity.displayName)
-            restoreEditorFocus()
+            if (registeredAsset.storageKey != asset.entity.storageKey) {
+                imageStore.discardImportedAsset(asset.entity.storageKey)
+            }
+            val (imageWidthSp, imageHeightSp) = fitNoteImageDisplaySize(
+                pixelWidth = asset.pixelWidth,
+                pixelHeight = asset.pixelHeight,
+                maxWidthSp = (
+                    (configuration.screenWidthDp - 72).coerceAtLeast(160) /
+                        density.fontScale
+                    ).coerceAtMost(560f),
+                maxHeightSp = 640f / density.fontScale
+            )
+            editor.insertImagePlaceholder(
+                "assets/${registeredAsset.storageKey}",
+                asset.entity.displayName,
+                imageWidthSp,
+                imageHeightSp
+            )
+            previewMarkup = editor.toNoteStorageMarkup()
+            focusManager.clearFocus()
+            keyboardController?.hide()
+            previewMode = true
         }
     }
 
     LaunchedEffect(editor, note?.noteId) {
         val markup = note?.markdown.orEmpty()
-        if (markup.isNoteRichHtmlMarkup()) editor.setHtml(markup) else editor.setMarkdown(markup)
+        val editorMarkup = markup.toNoteEditorMarkup()
+        if (markup.isNoteRichHtmlMarkup()) editor.setHtml(editorMarkup) else editor.setMarkdown(editorMarkup)
+        editor.selection = TextRange.Zero
         var previousText = editor.annotatedString.text
         snapshotFlow { editor.annotatedString.text to editor.selection }
             .collectLatest { (currentText, selection) ->
@@ -163,12 +229,28 @@ internal fun NoteEditor(
                 previousText = currentText
             }
     }
+    LaunchedEffect(previewMode, focusEditorAfterPreview) {
+        if (!previewMode && focusEditorAfterPreview) {
+            focusEditorAfterPreview = false
+            restoreEditorFocus()
+        }
+    }
 
     val bodyTextStyle = readerTextStyle(ReaderTextRole.BODY)
+    val codeTextStyle = readerTextStyle(ReaderTextRole.CODE)
     val editorTextStyle = bodyTextStyle.copy(
         fontSynthesis = FontSynthesis.All,
         textAlign = TextAlign.Justify
     )
+    val codeBackgroundColor = Color(
+        LocalReaderPresetRuntime.current.preset.codeBackgroundColorArgb
+    )
+    LaunchedEffect(editor, codeTextStyle.color, codeBackgroundColor) {
+        editor.applyNoteCodeStyle(
+            textColor = codeTextStyle.color,
+            backgroundColor = codeBackgroundColor
+        )
+    }
     val editorShape = RoundedCornerShape(20.dp)
     Column(
         modifier = modifier.fillMaxSize(),
@@ -179,20 +261,37 @@ internal fun NoteEditor(
             onValueChange = { title = it },
             label = { Text("标题") },
             singleLine = true,
+            readOnly = previewMode,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
         )
 
-        NoteFormattingToolbar(
-            editor = editor,
-            readerTextColor = bodyTextStyle.color,
-            onRestoreEditorFocus = restoreEditorFocus,
-            onEditLink = { linkDialogVisible = true },
-            onInsertTable = { tableDialogVisible = true },
-            onInsertImage = { imagePicker.launch("image/*") },
-            modifier = Modifier.fillMaxWidth()
-        )
+        if (previewMode) {
+            NotePreviewToolbar(
+                onEdit = {
+                    previewMode = false
+                    focusEditorAfterPreview = true
+                },
+                modifier = Modifier.fillMaxWidth()
+            )
+        } else {
+            NoteFormattingToolbar(
+                editor = editor,
+                readerTextColor = bodyTextStyle.color,
+                onRestoreEditorFocus = restoreEditorFocus,
+                onPreview = {
+                    previewMarkup = editor.toNoteStorageMarkup()
+                    focusManager.clearFocus()
+                    keyboardController?.hide()
+                    previewMode = true
+                },
+                onEditLink = { linkDialogVisible = true },
+                onInsertTable = { tableDialogVisible = true },
+                onInsertImage = { imagePicker.launch("image/*") },
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
 
         ReaderBackgroundSurface(
             modifier = Modifier
@@ -208,24 +307,98 @@ internal fun NoteEditor(
                 border = BorderStroke(1.dp, bodyTextStyle.color.copy(alpha = 0.22f)),
                 modifier = Modifier.fillMaxSize()
             ) {
-                Box(Modifier.fillMaxSize()) {
-                    if (editor.annotatedString.text.isEmpty()) {
-                        Text(
-                            text = "开始记录…",
-                            style = editorTextStyle,
-                            color = bodyTextStyle.color.copy(alpha = 0.52f),
-                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)
-                        )
-                    }
-                    CompositionLocalProvider(LocalImageLoader provides imageLoader) {
-                        BasicRichTextEditor(
-                            state = editor,
+                BoxWithConstraints(Modifier.fillMaxSize()) {
+                    val editorViewportHeight = maxHeight
+                    if (previewMode) {
+                        NoteMarkdownPreview(
+                            markup = previewMarkup,
                             textStyle = editorTextStyle,
+                            textColor = bodyTextStyle.color,
+                            codeTextColor = codeTextStyle.color,
+                            codeBackgroundColor = codeBackgroundColor,
+                            imageLoader = imageLoader,
+                            onImageClick = { viewerImage = it },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        val editorContentPadding = 20.dp
+                        val editorContentPaddingPx = with(density) {
+                            editorContentPadding.toPx()
+                        }
+                        Column(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .focusRequester(editorFocusRequester)
-                                .padding(horizontal = 20.dp, vertical = 16.dp)
-                        )
+                                .verticalScroll(editorScrollState)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = editorViewportHeight)
+                            ) {
+                                if (editor.annotatedString.text.isEmpty()) {
+                                    Text(
+                                        text = "开始记录…",
+                                        style = editorTextStyle,
+                                        color = bodyTextStyle.color.copy(alpha = 0.52f),
+                                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)
+                                    )
+                                }
+                                CompositionLocalProvider(LocalImageLoader provides imageLoader) {
+                                    BasicRichTextEditor(
+                                        state = editor,
+                                        textStyle = editorTextStyle,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(min = editorViewportHeight)
+                                            .focusRequester(editorFocusRequester)
+                                            .onFocusChanged { editorFocused = it.isFocused }
+                                            .padding(
+                                                horizontal = editorContentPadding,
+                                                vertical = 16.dp
+                                            ),
+                                        onTextLayout = { editorTextLayout = it }
+                                    )
+                                }
+                                if (!editorFocused) {
+                                    Box(
+                                        modifier = Modifier
+                                            .matchParentSize()
+                                            .pointerInput(editorTextLayout) {
+                                                awaitEachGesture {
+                                                    val down = awaitFirstDown(
+                                                        requireUnconsumed = false,
+                                                        pass = PointerEventPass.Initial
+                                                    )
+                                                    val up = waitForUpOrCancellation(
+                                                        pass = PointerEventPass.Initial
+                                                    )
+                                                    if (
+                                                        up != null &&
+                                                        (up.position - down.position).getDistance() <=
+                                                        viewConfiguration.touchSlop
+                                                    ) {
+                                                        val layout = editorTextLayout
+                                                        if (layout != null) {
+                                                            val textPosition = Offset(
+                                                                x = (up.position.x - editorContentPaddingPx)
+                                                                    .coerceAtLeast(0f),
+                                                                y = (up.position.y - with(density) {
+                                                                    16.dp.toPx()
+                                                                }).coerceAtLeast(0f)
+                                                            )
+                                                            editor.selection = TextRange(
+                                                                layout.getOffsetForPosition(textPosition)
+                                                            )
+                                                        }
+                                                        editorFocusRequester.requestFocus()
+                                                        keyboardController?.show()
+                                                    }
+                                                }
+                                            }
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -248,10 +421,15 @@ internal fun NoteEditor(
             Button(
                 onClick = {
                     scope.launch {
+                        val editorMarkup = editor.toNoteStorageMarkup()
                         repository.save(
                             editorNoteId,
                             title,
-                            editor.toNoteStorageMarkup(),
+                            selectNoteStorageMarkup(
+                                previewMode = previewMode,
+                                previewMarkup = previewMarkup,
+                                editorMarkup = editorMarkup
+                            ),
                             note?.folderId,
                             note?.pinned ?: false
                         )
@@ -281,13 +459,23 @@ internal fun NoteEditor(
         TableInsertDialog(
             onConfirm = { rows, columns ->
                 editor.addTextAfterSelection(markdownTable(rows, columns))
+                previewMarkup = editor.toNoteStorageMarkup()
                 tableDialogVisible = false
-                restoreEditorFocus()
+                focusManager.clearFocus()
+                keyboardController?.hide()
+                previewMode = true
             },
             onDismiss = {
                 tableDialogVisible = false
                 restoreEditorFocus()
             }
+        )
+    }
+    viewerImage?.let { image ->
+        NoteImageViewerDialog(
+            image = image,
+            imageLoader = imageLoader,
+            onDismiss = { viewerImage = null }
         )
     }
 }
@@ -297,6 +485,7 @@ private fun NoteFormattingToolbar(
     editor: RichTextState,
     readerTextColor: Color,
     onRestoreEditorFocus: () -> Unit,
+    onPreview: () -> Unit,
     onEditLink: () -> Unit,
     onInsertTable: () -> Unit,
     onInsertImage: () -> Unit,
@@ -322,6 +511,12 @@ private fun NoteFormattingToolbar(
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            item {
+                EditorToolButton(label = "预览", onClick = onPreview) {
+                    Icon(Icons.Default.Visibility, contentDescription = null)
+                }
+            }
+            item { ToolbarDivider() }
             item {
                 HeadingToolButton("P", "正文", heading == 0) {
                     applyAndRestoreFocus { HeadingStyles.forEach(editor::removeSpanStyle) }
@@ -484,6 +679,37 @@ private fun NoteFormattingToolbar(
     }
 }
 
+@Composable
+private fun NotePreviewToolbar(
+    onEdit: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        tonalElevation = 2.dp
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "阅读预览",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onEdit) {
+                Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("编辑")
+            }
+        }
+    }
+}
+
 private class NoteImageLoader(private val filesDir: File) : ImageLoader {
     @Composable
     override fun load(model: Any): ImageData {
@@ -498,18 +724,177 @@ private class NoteImageLoader(private val filesDir: File) : ImageLoader {
     }
 }
 
-internal fun RichTextState.insertImage(markdownPath: String, description: String) {
-    addTextAfterSelection("\n")
-    addRichSpan(
-        RichSpanStyle.Image(
-            model = markdownPath,
-            width = 20.em,
-            height = 0.sp,
-            contentDescription = description
-        )
+internal fun RichTextState.insertImagePlaceholder(
+    markdownPath: String,
+    description: String,
+    widthSp: Float = 320f,
+    heightSp: Float = 240f
+) {
+    require(widthSp > 0f && heightSp > 0f)
+    val insertionStart = selection.min
+    val payload = NoteEditorImagePayload(
+        path = markdownPath,
+        description = description,
+        widthSp = widthSp.roundToInt().coerceAtLeast(1),
+        heightSp = heightSp.roundToInt().coerceAtLeast(1)
     )
-    addTextAfterSelection("\n")
+    val label = "🖼 ${description.ifBlank { "图片" }.take(48)}"
+    addTextAfterSelection(label)
+    addLinkToTextRange(payload.toEditorUrl(), TextRange(insertionStart, insertionStart + label.length))
+    selection = TextRange(insertionStart + label.length)
 }
+
+private fun String.escapeNoteHtmlAttribute(): String =
+    replace("&", "&amp;")
+        .replace("\"", "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+
+private data class NoteEditorImagePayload(
+    val path: String,
+    val description: String,
+    val widthSp: Int,
+    val heightSp: Int
+) {
+    fun toEditorUrl(): String {
+        val bytes = listOf(path, description, widthSp.toString(), heightSp.toString())
+            .joinToString("\u0000")
+            .toByteArray(StandardCharsets.UTF_8)
+        return NoteEditorImageUrlPrefix + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+    }
+
+    fun toHtmlImage(): String = buildString {
+        append("<img src=\"")
+        append(path.escapeNoteHtmlAttribute())
+        append("\" width=\"")
+        append(widthSp.coerceAtLeast(1))
+        append("\" height=\"")
+        append(heightSp.coerceAtLeast(1))
+        append("\" alt=\"")
+        append(description.escapeNoteHtmlAttribute())
+        append("\"></img>")
+    }
+
+    fun toMarkdownImage(): String =
+        "![${description.escapeMarkdownLabel()}](${path.replace(" ", "%20")})"
+}
+
+private const val NoteEditorImageUrlPrefix = "watchrss-note-image:"
+
+private fun String.escapeMarkdownLabel(): String = replace("\\", "\\\\").replace("]", "\\]")
+
+private fun String.toNoteEditorImagePayload(): NoteEditorImagePayload? {
+    if (!startsWith(NoteEditorImageUrlPrefix)) return null
+    val encoded = removePrefix(NoteEditorImageUrlPrefix)
+    val decoded = runCatching {
+        String(Base64.getUrlDecoder().decode(encoded), StandardCharsets.UTF_8)
+    }.getOrNull() ?: return null
+    val fields = decoded.split('\u0000', limit = 4)
+    if (fields.size != 4) return null
+    return NoteEditorImagePayload(
+        path = fields[0],
+        description = fields[1],
+        widthSp = fields[2].toIntOrNull()?.coerceAtLeast(1) ?: return null,
+        heightSp = fields[3].toIntOrNull()?.coerceAtLeast(1) ?: return null
+    )
+}
+
+private val NoteEditorHtmlLinkRegex = Regex(
+    """(?is)<a\b[^>]*\bhref=[\"'](watchrss-note-image:[^\"']+)[\"'][^>]*>.*?</a>"""
+)
+private val NoteEditorMarkdownLinkRegex = Regex(
+    """\[[^]]*]\((watchrss-note-image:[^)\s]+)\)"""
+)
+private val NoteMarkdownImageRegex = Regex(
+    """!\[([^]]*)]\(([^)\s]+)(?:\s+[\"'][^\"']*[\"'])?\)"""
+)
+
+internal fun String.toNoteEditorMarkup(): String {
+    val htmlConverted = NoteImageTagRegex.replace(this) { match ->
+        val payload = match.value.toImagePayload() ?: return@replace match.value
+        "<a href=\"${payload.toEditorUrl()}\">🖼 ${payload.description.escapeNoteHtmlAttribute()}</a>"
+    }
+    val imageConverted = NoteMarkdownImageRegex.replace(htmlConverted) { match ->
+        val path = match.groupValues[2].replace("%20", " ")
+        if (!path.startsWith("assets/")) return@replace match.value
+        val payload = NoteEditorImagePayload(
+            path = path,
+            description = match.groupValues[1],
+            widthSp = 320,
+            heightSp = 240
+        )
+        "[🖼 ${payload.description.escapeMarkdownLabel()}](${payload.toEditorUrl()})"
+    }
+    return imageConverted.preserveNoteEditorRepeatedSpaces()
+}
+
+private fun String.preserveNoteEditorRepeatedSpaces(): String =
+    replace(NOTE_EDITOR_REPEATED_SPACE_REGEX) { match ->
+        NOTE_EDITOR_PRESERVED_SPACE.toString().repeat(match.value.length)
+    }
+
+private fun String.restoreNoteEditorRepeatedSpaces(): String =
+    replace(NOTE_EDITOR_PRESERVED_SPACE, ' ')
+
+private fun String.restoreNoteImagePlaceholders(): String {
+    val htmlConverted = NoteEditorHtmlLinkRegex.replace(this) { match ->
+        match.groupValues[1].toNoteEditorImagePayload()?.toHtmlImage() ?: match.value
+    }
+    return NoteEditorMarkdownLinkRegex.replace(htmlConverted) { match ->
+        match.groupValues[1].toNoteEditorImagePayload()?.toMarkdownImage() ?: match.value
+    }
+}
+
+private fun String.toImagePayload(): NoteEditorImagePayload? {
+    val path = htmlAttribute("src") ?: return null
+    if (!path.startsWith("assets/")) return null
+    val description = htmlAttribute("alt").orEmpty()
+    return NoteEditorImagePayload(
+        path = path,
+        description = description,
+        widthSp = htmlAttribute("width")?.toFloatOrNull()?.roundToInt()?.coerceAtLeast(1) ?: 320,
+        heightSp = htmlAttribute("height")?.toFloatOrNull()?.roundToInt()?.coerceAtLeast(1) ?: 240
+    )
+}
+
+private fun String.htmlAttribute(name: String): String? =
+    Regex("""(?is)\b${Regex.escape(name)}\s*=\s*[\"']([^\"']*)[\"']""")
+        .find(this)
+        ?.groupValues
+        ?.get(1)
+
+internal fun fitNoteImageDisplaySize(
+    pixelWidth: Int,
+    pixelHeight: Int,
+    maxWidthSp: Float,
+    maxHeightSp: Float
+): Pair<Float, Float> {
+    require(pixelWidth > 0 && pixelHeight > 0)
+    require(maxWidthSp > 0f && maxHeightSp > 0f)
+    val heightAtMaxWidth = maxWidthSp * pixelHeight / pixelWidth
+    return if (heightAtMaxWidth <= maxHeightSp) {
+        maxWidthSp to heightAtMaxWidth
+    } else {
+        maxHeightSp * pixelWidth / pixelHeight to maxHeightSp
+    }
+}
+
+private val NoteImageTagRegex = Regex("""(?is)<img\b[^>]*>(?:\s*</img>)?""")
+private val NoteImageDimensionRegex = Regex(
+    """(?i)(\b(?:width|height)=[\"'])(\d+(?:\.\d+)?)([\"'])"""
+)
+
+internal fun String.normalizeNoteImageDimensionAttributes(): String =
+    NoteImageTagRegex.replace(this) { imageTag ->
+        NoteImageDimensionRegex.replace(imageTag.value) dimensionReplace@ { dimension ->
+            val integerValue = dimension.groupValues[2]
+                .toFloatOrNull()
+                ?.roundToInt()
+                ?.coerceAtLeast(0)
+                ?: return@dimensionReplace dimension.value
+            dimension.groupValues[1] + integerValue + dimension.groupValues[3]
+        }
+    }
 
 @Composable
 private fun TableInsertDialog(
@@ -561,6 +946,530 @@ internal fun markdownTable(rows: Int, columns: Int): String {
         (1..columns).joinToString(" | ", prefix = "| ", postfix = " |") { column -> "内容$row-$column" }
     }
     return "\n$header\n$separator\n$body\n"
+}
+
+internal sealed interface NotePreviewBlock {
+    data class RichText(val markup: String, val html: Boolean = false) : NotePreviewBlock
+    data class Image(val path: String, val description: String) : NotePreviewBlock
+    data class Table(val table: NotePreviewTable) : NotePreviewBlock
+}
+
+internal data class NotePreviewTable(
+    val rows: List<List<String>>,
+    val headerRows: Int,
+    val alignments: List<NoteTableAlignment>
+) {
+    val columnCount: Int = rows.maxOfOrNull { it.size } ?: 0
+}
+
+internal enum class NoteTableAlignment { Start, Center, End }
+
+internal fun String.containsMarkdownTable(): Boolean =
+    !isNoteRichHtmlMarkup() && parseNotePreviewBlocks(this).any { it is NotePreviewBlock.Table }
+
+internal fun String.shouldOpenInNotePreview(): Boolean =
+    parseNotePreviewBlocks(this).any {
+        it is NotePreviewBlock.Image || it is NotePreviewBlock.Table
+    }
+
+/**
+ * Splits portable Markdown into rich-text runs and independently scrollable tables. Besides GFM
+ * pipe tables, pasted TSV blocks are accepted so tabular text does not collapse into one line.
+ */
+internal fun parseNotePreviewBlocks(markup: String): List<NotePreviewBlock> {
+    if (markup.isNoteRichHtmlMarkup()) return parseHtmlNotePreviewBlocks(markup)
+    return parseMarkdownImagePreviewBlocks(markup)
+}
+
+private fun parseHtmlNotePreviewBlocks(markup: String): List<NotePreviewBlock> {
+    val result = mutableListOf<NotePreviewBlock>()
+    var cursor = 0
+    NoteImageTagRegex.findAll(markup).forEach { imageMatch ->
+        val before = markup.substring(cursor, imageMatch.range.first)
+        if (before.isNotBlank()) result += NotePreviewBlock.RichText(before, html = true)
+        val payload = imageMatch.value.toImagePayload()
+        if (payload != null) {
+            result += NotePreviewBlock.Image(payload.path, payload.description)
+        } else {
+            result += NotePreviewBlock.RichText(imageMatch.value, html = true)
+        }
+        cursor = imageMatch.range.last + 1
+    }
+    val after = markup.substring(cursor)
+    if (after.isNotBlank()) result += NotePreviewBlock.RichText(after, html = true)
+    return result.ifEmpty { listOf(NotePreviewBlock.RichText(markup, html = true)) }
+}
+
+private fun parseMarkdownImagePreviewBlocks(markup: String): List<NotePreviewBlock> {
+    val result = mutableListOf<NotePreviewBlock>()
+    val richText = StringBuilder()
+    var fence: MarkdownFence? = null
+
+    fun flushRichText() {
+        if (richText.isNotEmpty()) {
+            result += parseMarkdownTablePreviewBlocks(richText.toString())
+            richText.clear()
+        }
+    }
+
+    markup.replace("\r\n", "\n").replace('\r', '\n').split('\n').forEachIndexed { index, line ->
+        val fenceMarker = markdownFenceMarker(line)
+        if (fence != null) {
+            if (richText.isNotEmpty()) richText.append('\n')
+            richText.append(line)
+            if (fenceMarker?.closes(fence) == true) fence = null
+            return@forEachIndexed
+        }
+        if (fenceMarker != null) {
+            fence = fenceMarker
+            if (richText.isNotEmpty()) richText.append('\n')
+            richText.append(line)
+            return@forEachIndexed
+        }
+
+        val matches = NoteMarkdownImageRegex.findAll(line).toList()
+        if (matches.isEmpty()) {
+            if (richText.isNotEmpty()) richText.append('\n')
+            richText.append(line)
+            return@forEachIndexed
+        }
+
+        if (index > 0 && richText.isNotEmpty()) richText.append('\n')
+        var cursor = 0
+        matches.forEach { imageMatch ->
+            richText.append(line.substring(cursor, imageMatch.range.first))
+            flushRichText()
+            result += NotePreviewBlock.Image(
+                path = imageMatch.groupValues[2].replace("%20", " "),
+                description = imageMatch.groupValues[1]
+            )
+            cursor = imageMatch.range.last + 1
+        }
+        richText.append(line.substring(cursor))
+    }
+    flushRichText()
+    return result
+}
+
+private fun parseMarkdownTablePreviewBlocks(markup: String): List<NotePreviewBlock> {
+    val normalized = markup.replace("\r\n", "\n").replace('\r', '\n')
+    val lines = normalized.split('\n')
+    val result = mutableListOf<NotePreviewBlock>()
+    val richText = StringBuilder()
+    var index = 0
+    var fence: MarkdownFence? = null
+
+    fun appendRichTextLine(line: String) {
+        if (richText.isNotEmpty()) richText.append('\n')
+        richText.append(line)
+    }
+
+    fun flushRichText() {
+        if (richText.isNotEmpty()) {
+            result += NotePreviewBlock.RichText(richText.toString())
+            richText.clear()
+        }
+    }
+
+    while (index < lines.size) {
+        val line = lines[index]
+        val fenceMarker = markdownFenceMarker(line)
+        if (fence != null) {
+            appendRichTextLine(line)
+            if (fenceMarker?.closes(fence) == true) fence = null
+            index++
+            continue
+        }
+        if (fenceMarker != null) {
+            fence = fenceMarker
+            appendRichTextLine(line)
+            index++
+            continue
+        }
+
+        val pipeTable = parsePipeTable(lines, index)
+        if (pipeTable != null) {
+            flushRichText()
+            result += NotePreviewBlock.Table(pipeTable.table)
+            index = pipeTable.nextLine
+            continue
+        }
+
+        val tabTable = parseTabTable(lines, index)
+        if (tabTable != null) {
+            flushRichText()
+            result += NotePreviewBlock.Table(tabTable.table)
+            index = tabTable.nextLine
+            continue
+        }
+
+        appendRichTextLine(line)
+        index++
+    }
+    flushRichText()
+    return result
+}
+
+private data class ParsedNoteTable(val table: NotePreviewTable, val nextLine: Int)
+
+private fun parsePipeTable(lines: List<String>, start: Int): ParsedNoteTable? {
+    if (start + 1 >= lines.size) return null
+    val header = splitMarkdownPipeRow(lines[start]) ?: return null
+    val separators = splitMarkdownPipeRow(lines[start + 1]) ?: return null
+    if (header.size < 2 || separators.size != header.size) return null
+    val alignments = separators.map(::parseTableSeparator)
+    if (alignments.any { it == null }) return null
+
+    val rows = mutableListOf(header)
+    var index = start + 2
+    while (index < lines.size) {
+        val row = splitMarkdownPipeRow(lines[index]) ?: break
+        if (row.isEmpty()) break
+        rows += row.padTableRow(header.size)
+        index++
+    }
+    return ParsedNoteTable(
+        table = NotePreviewTable(
+            rows = rows,
+            headerRows = 1,
+            alignments = alignments.filterNotNull()
+        ),
+        nextLine = index
+    )
+}
+
+private fun parseTabTable(lines: List<String>, start: Int): ParsedNoteTable? {
+    val first = splitTabRow(lines[start]) ?: return null
+    val rows = mutableListOf(first)
+    var index = start + 1
+    while (index < lines.size) {
+        val row = splitTabRow(lines[index]) ?: break
+        rows += row
+        index++
+    }
+    // One row with three or more columns is intentional enough to treat as a small TSV table;
+    // two-column content needs at least a header and one data row to avoid catching prose tabs.
+    if (rows.size < 2 && first.size < 3) return null
+    val columns = rows.maxOf { it.size }
+    return ParsedNoteTable(
+        table = NotePreviewTable(
+            rows = rows.map { it.padTableRow(columns) },
+            headerRows = 1,
+            alignments = List(columns) { NoteTableAlignment.Start }
+        ),
+        nextLine = index
+    )
+}
+
+private fun splitMarkdownPipeRow(line: String): List<String>? {
+    val trimmed = line.trim()
+    if ('|' !in trimmed || trimmed.startsWith("    ")) return null
+    val content = trimmed.removePrefix("|").removeSuffix("|")
+    val cells = mutableListOf<String>()
+    val cell = StringBuilder()
+    var escaped = false
+    content.forEach { character ->
+        when {
+            escaped -> {
+                cell.append(character)
+                escaped = false
+            }
+            character == '\\' -> escaped = true
+            character == '|' -> {
+                cells += cell.toString().trim()
+                cell.clear()
+            }
+            else -> cell.append(character)
+        }
+    }
+    if (escaped) cell.append('\\')
+    cells += cell.toString().trim()
+    return cells.takeIf { it.size >= 2 }
+}
+
+private fun splitTabRow(line: String): List<String>? {
+    if ('\t' !in line || line.startsWith("    ")) return null
+    return line.split('\t').map(String::trim).takeIf { it.size >= 2 }
+}
+
+private fun parseTableSeparator(value: String): NoteTableAlignment? {
+    val trimmed = value.trim()
+    if (!Regex(":?-{3,}:?").matches(trimmed)) return null
+    return when {
+        trimmed.startsWith(':') && trimmed.endsWith(':') -> NoteTableAlignment.Center
+        trimmed.endsWith(':') -> NoteTableAlignment.End
+        else -> NoteTableAlignment.Start
+    }
+}
+
+private fun List<String>.padTableRow(size: Int): List<String> =
+    take(size) + List((size - this.size).coerceAtLeast(0)) { "" }
+
+private data class MarkdownFence(val marker: Char, val length: Int) {
+    fun closes(open: MarkdownFence): Boolean = marker == open.marker && length >= open.length
+}
+
+private fun markdownFenceMarker(line: String): MarkdownFence? {
+    val trimmed = line.trimStart()
+    if (line.length - trimmed.length > 3) return null
+    val marker = trimmed.firstOrNull()?.takeIf { it == '`' || it == '~' } ?: return null
+    val length = trimmed.takeWhile { it == marker }.length
+    return MarkdownFence(marker, length).takeIf { length >= 3 }
+}
+
+@Composable
+private fun NoteMarkdownPreview(
+    markup: String,
+    textStyle: androidx.compose.ui.text.TextStyle,
+    textColor: Color,
+    codeTextColor: Color,
+    codeBackgroundColor: Color,
+    imageLoader: ImageLoader,
+    onImageClick: (NotePreviewBlock.Image) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val blocks = remember(markup) { parseNotePreviewBlocks(markup) }
+    val verticalScrollState = rememberScrollState()
+    Column(
+        modifier = modifier
+            .verticalScroll(verticalScrollState)
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        blocks.forEachIndexed { index, block ->
+            androidx.compose.runtime.key(index, block) {
+                when (block) {
+                    is NotePreviewBlock.RichText -> NoteRichTextPreviewBlock(
+                        markup = block.markup,
+                        html = block.html,
+                        textStyle = textStyle,
+                        codeTextColor = codeTextColor,
+                        codeBackgroundColor = codeBackgroundColor,
+                        imageLoader = imageLoader
+                    )
+                    is NotePreviewBlock.Image -> NoteImagePreviewBlock(
+                        image = block,
+                        textStyle = textStyle,
+                        imageLoader = imageLoader,
+                        onClick = { onImageClick(block) }
+                    )
+                    is NotePreviewBlock.Table -> NoteTablePreview(
+                        table = block.table,
+                        textStyle = textStyle,
+                        textColor = textColor,
+                        codeTextColor = codeTextColor,
+                        codeBackgroundColor = codeBackgroundColor
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NoteRichTextPreviewBlock(
+    markup: String,
+    html: Boolean,
+    textStyle: androidx.compose.ui.text.TextStyle,
+    codeTextColor: Color,
+    codeBackgroundColor: Color,
+    imageLoader: ImageLoader
+) {
+    val state = remember(markup, codeTextColor, codeBackgroundColor) {
+        RichTextState().also {
+            it.applyNoteCodeStyle(codeTextColor, codeBackgroundColor)
+            if (html) it.setHtml(markup) else it.setMarkdown(markup)
+        }
+    }
+    CompositionLocalProvider(LocalImageLoader provides imageLoader) {
+        BasicRichText(
+            state = state,
+            style = textStyle,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+@Composable
+private fun NoteImagePreviewBlock(
+    image: NotePreviewBlock.Image,
+    textStyle: androidx.compose.ui.text.TextStyle,
+    imageLoader: ImageLoader,
+    onClick: () -> Unit
+) {
+    val data = imageLoader.load(image.path)
+    if (data == null) {
+        Text(
+            text = "图片加载失败：${image.description.ifBlank { image.path }}",
+            style = textStyle,
+            color = MaterialTheme.colorScheme.error
+        )
+        return
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        androidx.compose.foundation.Image(
+            painter = data.painter,
+            contentDescription = data.contentDescription ?: image.description,
+            alignment = data.alignment,
+            contentScale = data.contentScale,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 640.dp)
+                .clickable(
+                    onClickLabel = "查看图片",
+                    onClick = onClick
+                )
+        )
+        if (image.description.isNotBlank()) {
+            Text(
+                text = image.description,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun NoteImageViewerDialog(
+    image: NotePreviewBlock.Image,
+    imageLoader: ImageLoader,
+    onDismiss: () -> Unit
+) {
+    var scale by remember(image.path) { mutableStateOf(1f) }
+    var offset by remember(image.path) { mutableStateOf(Offset.Zero) }
+    val data = imageLoader.load(image.path)
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .pointerInput(image.path) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        val nextScale = (scale * zoom).coerceIn(1f, 5f)
+                        scale = nextScale
+                        offset = if (nextScale == 1f) Offset.Zero else offset + pan
+                    }
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            if (data != null) {
+                androidx.compose.foundation.Image(
+                    painter = data.painter,
+                    contentDescription = data.contentDescription ?: image.description,
+                    alignment = data.alignment,
+                    contentScale = data.contentScale,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(20.dp)
+                        .graphicsLayer(
+                            scaleX = scale,
+                            scaleY = scale,
+                            translationX = offset.x,
+                            translationY = offset.y
+                        )
+                )
+            } else {
+                Text("图片加载失败", color = Color.White)
+            }
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(18.dp)
+                    .background(Color.Black.copy(alpha = 0.56f), CircleShape)
+            ) {
+                Icon(Icons.Default.Close, contentDescription = "关闭图片查看器", tint = Color.White)
+            }
+            if (image.description.isNotBlank()) {
+                Text(
+                    text = image.description,
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .background(Color.Black.copy(alpha = 0.56f), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NoteTablePreview(
+    table: NotePreviewTable,
+    textStyle: androidx.compose.ui.text.TextStyle,
+    textColor: Color,
+    codeTextColor: Color,
+    codeBackgroundColor: Color
+) {
+    if (table.columnCount == 0) return
+    val horizontalScrollState = rememberScrollState()
+    val cellWidth = 176.dp
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = Color.Transparent,
+        border = BorderStroke(1.dp, textColor.copy(alpha = 0.22f))
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(horizontalScrollState)
+        ) {
+            Column(modifier = Modifier.width(cellWidth * table.columnCount)) {
+                table.rows.forEachIndexed { rowIndex, row ->
+                    Row(modifier = Modifier.height(IntrinsicSize.Min)) {
+                        row.padTableRow(table.columnCount).forEachIndexed { columnIndex, cell ->
+                            val alignment = table.alignments.getOrNull(columnIndex)
+                                ?: NoteTableAlignment.Start
+                            Box(
+                                modifier = Modifier
+                                    .width(cellWidth)
+                                    .fillMaxHeight()
+                                    .background(
+                                        if (rowIndex < table.headerRows) textColor.copy(alpha = 0.08f)
+                                        else Color.Transparent
+                                    )
+                                    .border(0.5.dp, textColor.copy(alpha = 0.18f))
+                                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                            ) {
+                                val state = remember(cell, codeTextColor, codeBackgroundColor) {
+                                    RichTextState().also {
+                                        it.applyNoteCodeStyle(codeTextColor, codeBackgroundColor)
+                                        it.setMarkdown(cell)
+                                    }
+                                }
+                                BasicRichText(
+                                    state = state,
+                                    style = textStyle.copy(
+                                        textAlign = when (alignment) {
+                                            NoteTableAlignment.Start -> TextAlign.Start
+                                            NoteTableAlignment.Center -> TextAlign.Center
+                                            NoteTableAlignment.End -> TextAlign.End
+                                        },
+                                        fontWeight = if (rowIndex < table.headerRows) {
+                                            FontWeight.SemiBold
+                                        } else {
+                                            textStyle.fontWeight
+                                        }
+                                    ),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -766,6 +1675,12 @@ private fun RichTextState.toggleHighlight(color: Color) {
     else addSpanStyle(SpanStyle(background = color))
 }
 
+private fun RichTextState.applyNoteCodeStyle(textColor: Color, backgroundColor: Color) {
+    config.codeSpanColor = textColor
+    config.codeSpanBackgroundColor = backgroundColor
+    config.codeSpanStrokeColor = Color.Transparent
+}
+
 internal fun shouldExitHeadingAfterEdit(
     previousText: String,
     currentText: String,
@@ -885,8 +1800,21 @@ private fun LinkEditorDialog(editor: RichTextState, onDismiss: () -> Unit) {
  */
 internal fun RichTextState.toNoteStorageMarkup(): String {
     val html = toHtml()
-    return if (html.isNoteRichHtmlMarkup()) html else toMarkdown()
+    val editorMarkup = if (html.isNoteRichHtmlMarkup()) html else toMarkdown()
+    return editorMarkup
+        .restoreNoteEditorRepeatedSpaces()
+        .restoreNoteImagePlaceholders()
+        .normalizeNoteImageDimensionAttributes()
 }
+
+internal fun selectNoteStorageMarkup(
+    previewMode: Boolean,
+    previewMarkup: String,
+    editorMarkup: String
+): String = if (previewMode) previewMarkup else editorMarkup
+
+private const val NOTE_EDITOR_PRESERVED_SPACE = '\u00A0'
+private val NOTE_EDITOR_REPEATED_SPACE_REGEX = Regex(" {2,}")
 
 internal fun String.isNoteRichHtmlMarkup(): Boolean = listOf(
         "color:",

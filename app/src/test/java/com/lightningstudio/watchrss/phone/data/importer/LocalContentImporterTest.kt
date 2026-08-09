@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.data.importer
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlinx.coroutines.runBlocking
@@ -12,6 +13,15 @@ import java.util.zip.ZipOutputStream
 
 class LocalContentImporterTest {
     private val importer = LocalContentImporter()
+
+    @Test
+    fun `markdown cannot fall through to imported text content`() {
+        val error = assertThrows(IllegalStateException::class.java) {
+            importer.importFile("第一导入.md", "text/plain", "# 备忘录".toByteArray())
+        }
+
+        assertEquals("Markdown 文件应导入备忘录", error.message)
+    }
 
     @Test
     fun importTxt_buildsArticleUnderImportContentChannel() {

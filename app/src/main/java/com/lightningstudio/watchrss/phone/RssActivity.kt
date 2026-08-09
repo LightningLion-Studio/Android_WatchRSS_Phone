@@ -48,6 +48,9 @@ import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.backdrops.layerBackdrop
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
+import com.lightningstudio.watchrss.phone.data.importer.LocalFileImportTarget
+import com.lightningstudio.watchrss.phone.data.importer.classifyLocalFileImport
+import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
 import com.lightningstudio.watchrss.phone.ui.AddArticleDialog
 import com.lightningstudio.watchrss.phone.ui.AddRssSourceDialog
@@ -89,6 +92,10 @@ class RssActivity : ComponentActivity() {
             (application as PhoneCompanionApplication).container.backupService
         )
     }
+    private val noteImportService by lazy {
+        val container = (application as PhoneCompanionApplication).container
+        NoteImportExportService(this, container.noteRepository)
+    }
 
     private val importLocalContentLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -98,13 +105,8 @@ class RssActivity : ComponentActivity() {
             }
             lifecycleScope.launch {
                 runCatching {
-                    readSelectedLocalContent(uri)
-                }.onSuccess { file ->
-                    viewModel.importLocalContent(
-                        fileName = file.fileName,
-                        mimeType = file.mimeType,
-                        bytes = file.bytes
-                    )
+                    val file = readSelectedLocalContent(uri)
+                    importSelectedFile(file)
                 }.onFailure { throwable ->
                     Log.e("RssActivity", "Failed to read local content", throwable)
                     viewModel.showError("文件导入失败：${throwable.message ?: "未知错误"}")
@@ -249,6 +251,22 @@ class RssActivity : ComponentActivity() {
                 ?: error("无法读取文件")
             SelectedLocalContent(fileName, mimeType, bytes)
         }
+
+    private suspend fun importSelectedFile(file: SelectedLocalContent) {
+        when (classifyLocalFileImport(file.fileName, file.mimeType)) {
+            LocalFileImportTarget.MARKDOWN_NOTE -> {
+                val note = noteImportService.importMarkdown(file.fileName, file.mimeType, file.bytes)
+                runCatching { (application as PhoneCompanionApplication).container.cloudSyncService.syncNow() }
+                viewModel.showContentMessage("已导入备忘录：${note.title}")
+            }
+            LocalFileImportTarget.LOCAL_CONTENT -> viewModel.importLocalContent(
+                fileName = file.fileName,
+                mimeType = file.mimeType,
+                bytes = file.bytes
+            )
+            LocalFileImportTarget.UNSUPPORTED -> error("只支持 Markdown（.md）、TXT 和 EPUB 文件")
+        }
+    }
 
     private fun queryDisplayName(uri: Uri): String? {
         return runCatching {

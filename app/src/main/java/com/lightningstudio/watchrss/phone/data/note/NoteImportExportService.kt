@@ -3,6 +3,10 @@ package com.lightningstudio.watchrss.phone.data.note
 import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
+import com.lightningstudio.watchrss.phone.data.importer.LocalFileImportTarget
+import com.lightningstudio.watchrss.phone.data.importer.classifyLocalFileImport
+import com.lightningstudio.watchrss.phone.data.importer.isMarkdownFileName
+import com.lightningstudio.watchrss.phone.data.importer.markdownTitleFromFileName
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
@@ -22,6 +26,17 @@ class NoteImportExportService(private val context: Context, private val reposito
     }
 
     suspend fun importZip(bytes: ByteArray): Int = importEntries(MarkdownNoteArchive.read(bytes))
+
+    suspend fun importMarkdown(fileName: String, mimeType: String?, bytes: ByteArray): NoteEntity {
+        require(classifyLocalFileImport(fileName, mimeType) == LocalFileImportTarget.MARKDOWN_NOTE) {
+            "只支持导入 Markdown（.md）文件"
+        }
+        require(bytes.isNotEmpty()) { "Markdown 文件内容为空" }
+        return repository.importMarkdown(
+            markdownFile = bytes.toString(Charsets.UTF_8),
+            fallbackTitle = markdownTitleFromFileName(fileName)
+        )
+    }
 
     /** Cloud already merges note text through diff3; this only hydrates its image files. */
     fun restoreAssetsZip(bytes: ByteArray) {
@@ -54,15 +69,25 @@ class NoteImportExportService(private val context: Context, private val reposito
     }
 
     suspend fun importEntries(entries: List<MarkdownArchiveEntry>): Int {
-        val assets = entries.filter { it.path.startsWith("notes/assets/") }.associateBy { it.path.removePrefix("notes/assets/") }
+        val entriesByPath = entries.associateBy { MarkdownNoteArchive.safePath(it.path) }
         var count = 0
-        entries.filter { it.path.startsWith("notes/") && it.path.endsWith(".md") }.forEach { entry ->
-            val note = repository.importMarkdown(entry.bytes.toString(Charsets.UTF_8))
+        markdownNoteEntries(entries).forEach { entry ->
+            val notePath = MarkdownNoteArchive.safePath(entry.path)
+            val note = repository.importMarkdown(
+                entry.bytes.toString(Charsets.UTF_8),
+                markdownTitleFromFileName(notePath)
+            )
             // Markdown points at assets/<key>; only restore names that the note actually references.
             Regex("!\\[[^]]*]\\(assets/([^)]*)\\)").findAll(note.markdown).forEach { image ->
-                val key = image.groupValues[1]
-                val source = assets[key] ?: return@forEach
-                val safeKey = MarkdownNoteArchive.safePath(key).substringAfterLast('/')
+                val relativeAssetPath = MarkdownNoteArchive.safePath("assets/${image.groupValues[1]}")
+                val noteDirectory = notePath.substringBeforeLast('/', missingDelimiterValue = "")
+                val archiveAssetPath = if (noteDirectory.isEmpty()) {
+                    relativeAssetPath
+                } else {
+                    "$noteDirectory/$relativeAssetPath"
+                }
+                val source = entriesByPath[archiveAssetPath] ?: return@forEach
+                val safeKey = relativeAssetPath.substringAfterLast('/')
                 val target = File(context.filesDir, "notes/assets/$safeKey").also { it.parentFile?.mkdirs() }
                 if (!target.exists()) target.writeBytes(source.bytes)
                 repository.registerAsset(NoteAssetEntity(
@@ -80,3 +105,6 @@ class NoteImportExportService(private val context: Context, private val reposito
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes).joinToString("") { "%02x".format(it) }
 }
+
+internal fun markdownNoteEntries(entries: List<MarkdownArchiveEntry>): List<MarkdownArchiveEntry> =
+    entries.filter { isMarkdownFileName(it.path) }

@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -19,6 +20,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -26,6 +28,7 @@ import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.account.AppAccessState
 import com.lightningstudio.watchrss.phone.account.RemoteEnvironment
 import com.lightningstudio.watchrss.phone.account.RemoteEnvironmentStore
+import com.lightningstudio.watchrss.phone.privacy.PhonePrivacyConsentStore
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -36,9 +39,25 @@ class MainActivity : ComponentActivity() {
     private val coordinator get() = (application as PhoneCompanionApplication).container.appAccessCoordinator
     private var pendingInbound: Intent? = null
     private var pollJob: Job? = null
+    private lateinit var privacyConsentStore: PhonePrivacyConsentStore
+    private val oobeComplete = mutableStateOf(false)
+    private var oobeLaunchPending = false
+    private val oobeLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        oobeLaunchPending = false
+        oobeComplete.value = privacyConsentStore.isOobeComplete()
+        if (oobeComplete.value) {
+            lifecycleScope.launch { coordinator.reconcile() }
+        } else {
+            launchOobeIfRequired()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        privacyConsentStore = PhonePrivacyConsentStore(this)
+        oobeComplete.value = privacyConsentStore.isOobeComplete()
         pendingInbound = if (android.os.Build.VERSION.SDK_INT >= 33) {
             savedInstanceState?.getParcelable(KEY_PENDING_INTENT, Intent::class.java)
         } else {
@@ -47,13 +66,26 @@ class MainActivity : ComponentActivity() {
         setContent {
             WatchRssPhoneTheme {
                 val state by coordinator.state.collectAsState()
-                LaunchedEffect(state) {
-                    if (state is AppAccessState.Authorized) enterApplication()
+                val onboardingComplete = oobeComplete.value
+                LaunchedEffect(state, onboardingComplete) {
+                    if (onboardingComplete && state is AppAccessState.Authorized) {
+                        enterApplication()
+                    }
                 }
-                Surface(Modifier.fillMaxSize()) { AccessGate(state) }
+                Surface(Modifier.fillMaxSize()) {
+                    if (onboardingComplete) {
+                        AccessGate(state)
+                    } else {
+                        OobeLoadingGate()
+                    }
+                }
             }
         }
-        lifecycleScope.launch { coordinator.reconcile() }
+        if (oobeComplete.value) {
+            lifecycleScope.launch { coordinator.reconcile() }
+        } else {
+            launchOobeIfRequired()
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -61,11 +93,16 @@ class MainActivity : ComponentActivity() {
         if (!(intent.data?.scheme == "watchrss" && intent.data?.host == "payment-return")) {
             pendingInbound = Intent(intent)
         }
-        lifecycleScope.launch { coordinator.reconcile() }
+        if (oobeComplete.value) lifecycleScope.launch { coordinator.reconcile() }
     }
 
     override fun onResume() {
         super.onResume()
+        oobeComplete.value = privacyConsentStore.isOobeComplete()
+        if (!oobeComplete.value) {
+            launchOobeIfRequired()
+            return
+        }
         lifecycleScope.launch { coordinator.reconcile() }
         startPaymentPolling()
     }
@@ -104,6 +141,25 @@ class MainActivity : ComponentActivity() {
         startActivity(target)
         finish()
         overridePendingTransition(0, 0)
+    }
+
+    private fun launchOobeIfRequired() {
+        if (oobeLaunchPending || privacyConsentStore.isOobeComplete()) return
+        oobeLaunchPending = true
+        oobeLauncher.launch(PhoneOobeActivity.createIntent(this))
+    }
+
+    @androidx.compose.runtime.Composable
+    private fun OobeLoadingGate() {
+        Column(
+            Modifier.fillMaxSize().padding(28.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("腕上RSS", style = MaterialTheme.typography.headlineMedium)
+            CircularProgressIndicator(Modifier.padding(24.dp))
+            Text("正在准备首次使用引导")
+        }
     }
 
     @androidx.compose.runtime.Composable

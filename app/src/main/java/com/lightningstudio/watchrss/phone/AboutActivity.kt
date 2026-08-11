@@ -39,6 +39,22 @@ class AboutActivity : ComponentActivity() {
                 val onBack = { finish() }
                 AboutScreen(
                     onBackClick = onBack,
+                    onOpenUserAgreement = {
+                        startActivity(
+                            LegalDocumentActivity.createIntent(
+                                this,
+                                LegalDocument.USER_AGREEMENT
+                            )
+                        )
+                    },
+                    onOpenPrivacyPolicy = {
+                        startActivity(
+                            LegalDocumentActivity.createIntent(
+                                this,
+                                LegalDocument.PRIVACY_POLICY
+                            )
+                        )
+                    },
                     onBeianClick = {
                         val intent = Intent(Intent.ACTION_VIEW)
                         intent.data = Uri.parse("https://beian.miit.gov.cn/")
@@ -52,7 +68,12 @@ class AboutActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AboutScreen(onBackClick: () -> Unit, onBeianClick: () -> Unit) {
+fun AboutScreen(
+    onBackClick: () -> Unit,
+    onOpenUserAgreement: () -> Unit,
+    onOpenPrivacyPolicy: () -> Unit,
+    onBeianClick: () -> Unit
+) {
     var visible by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
@@ -104,8 +125,16 @@ fun AboutScreen(onBackClick: () -> Unit, onBeianClick: () -> Unit) {
                             verticalArrangement = Arrangement.spacedBy(20.dp)
                         ) {
                             AboutSection()
-                            ServiceAgreementSection()
-                            PrivacyPolicySection()
+                            LegalDocumentSection(
+                                title = "用户协议",
+                                description = "查看腕上RSS 手机版的服务内容、账号授权和使用规则",
+                                onClick = onOpenUserAgreement
+                            )
+                            LegalDocumentSection(
+                                title = "隐私政策",
+                                description = "查看账号、同步、统计分析及第三方服务的数据处理说明",
+                                onClick = onOpenPrivacyPolicy
+                            )
                             Spacer(modifier = Modifier.height(64.dp))
                         }
                     }
@@ -179,9 +208,14 @@ fun AboutSection() {
 }
 
 @Composable
-fun ServiceAgreementSection() {
+fun LegalDocumentSection(
+    title: String,
+    description: String,
+    onClick: () -> Unit
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
+        onClick = onClick,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
@@ -190,133 +224,20 @@ fun ServiceAgreementSection() {
             modifier = Modifier.padding(20.dp)
         ) {
             Text(
-                text = "服务协议",
+                text = title,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.primary
             )
             Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = "1. 服务说明",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "腕上RSS为用户提供RSS订阅管理服务，帮助用户在OPPO Watch上便捷阅读订阅内容。",
+                text = description,
                 fontSize = 13.sp,
                 lineHeight = 18.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = "2. 用户责任",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "用户应确保订阅的RSS源内容合法合规，不得用于传播违法信息。用户对自己添加的订阅源内容负责。",
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = "3. 服务变更",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "我们保留随时修改或中断服务的权利，恕不另行通知。我们不对任何服务变更承担责任。",
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-@Composable
-fun PrivacyPolicySection() {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp)
-        ) {
-            Text(
-                text = "隐私政策",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = "1. 信息收集",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "我们仅收集必要的信息以提供服务，包括您添加的RSS订阅源地址。我们不会收集您的个人身份信息、联系方式或其他敏感数据。",
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = "2. 数据安全保障",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "• 本地通信：应用仅在您的手机和手表之间建立蓝牙 RFCOMM 连接，数据不经过第三方服务器\n" +
-                        "• 已配对设备：同步仅面向系统中已配对的手表设备\n" +
-                        "• 无云存储：您的订阅数据仅存储在本地设备，不上传至云端\n" +
-                        "• 权限最小化：应用仅请求必要的网络和蓝牙权限",
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = "3. 数据使用",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "我们收集的信息仅用于提供RSS订阅管理服务，不会用于任何其他目的，也不会与第三方共享。",
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = "4. 用户权利",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "您可以随时删除应用以清除所有本地数据。由于我们不收集云端数据，卸载应用即可完全清除您的所有信息。",
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Text("查看完整内容 ›", color = MaterialTheme.colorScheme.primary)
         }
     }
 }

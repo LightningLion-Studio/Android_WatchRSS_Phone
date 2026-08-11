@@ -155,6 +155,17 @@ class NoteRichTextEditorTest {
     }
 
     @Test
+    fun `html preview image keeps persisted dimensions`() {
+        val blocks = parseNotePreviewBlocks(
+            "<p>Before</p><img src=\"assets/example.jpg\" width=\"320\" height=\"180\" alt=\"示例\"></img>"
+        )
+
+        val image = blocks.filterIsInstance<NotePreviewBlock.Image>().single()
+        assertEquals(320f, image.widthSp)
+        assertEquals(180f, image.heightSp)
+    }
+
+    @Test
     fun `plain text stays editable while persisted images reopen in preview`() {
         assertFalse("普通正文".shouldOpenInNotePreview())
         assertTrue("<p>前文</p><img src=\"assets/example.jpg\" alt=\"示例\"><p>后文</p>".shouldOpenInNotePreview())

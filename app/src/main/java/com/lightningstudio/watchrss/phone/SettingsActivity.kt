@@ -401,7 +401,8 @@ internal fun ReaderSettingsHost(
                 val updates = Channel<ReaderPreset>(Channel.CONFLATED)
                 val firstConnection = CompletableDeferred<String>()
                 watchPreviewStopRequested.set(false)
-                watchPreviewDeviceAddress = device.address
+                val previewAddress = device.readerPreviewAddress
+                watchPreviewDeviceAddress = previewAddress
                 watchPreviewUpdates = updates
                 val job = scope.launch {
                     while (!watchPreviewStopRequested.get()) {
@@ -410,7 +411,7 @@ internal fun ReaderSettingsHost(
                         val attemptPreset = draft ?: current
                         runCatching {
                             container.bluetoothSyncManager.streamReaderPresetPreview(
-                                deviceAddress = device.address,
+                                deviceAddress = previewAddress,
                                 sessionId = attemptSessionId,
                                 initialPreset = attemptPreset,
                                 updates = updates,

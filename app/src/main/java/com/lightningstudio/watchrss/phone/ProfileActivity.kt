@@ -148,6 +148,22 @@ class ProfileActivity : ComponentActivity() {
                             )
                             ProfileDetailPage.ABOUT -> AboutScreen(
                                 onBackClick = onClose,
+                                onOpenUserAgreement = {
+                                    startActivity(
+                                        LegalDocumentActivity.createIntent(
+                                            this@ProfileActivity,
+                                            LegalDocument.USER_AGREEMENT
+                                        )
+                                    )
+                                },
+                                onOpenPrivacyPolicy = {
+                                    startActivity(
+                                        LegalDocumentActivity.createIntent(
+                                            this@ProfileActivity,
+                                            LegalDocument.PRIVACY_POLICY
+                                        )
+                                    )
+                                },
                                 onBeianClick = {
                                     startActivity(
                                         Intent(

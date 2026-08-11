@@ -6,6 +6,7 @@ import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.account.PhoneInstallationIdentity
+import com.lightningstudio.watchrss.phone.privacy.PhonePrivacyConsentStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.filterNotNull
@@ -26,40 +27,64 @@ class PhoneUsageTelemetry(
     private val httpClient: OkHttpClient = defaultHttpClient(),
     private val openPanelAnalytics: OpenPanelAnalytics? = null
 ) {
+    private val consentStore = PhonePrivacyConsentStore(context)
     private val preferences = context.applicationContext.getSharedPreferences(
         "watchrss_usage_telemetry",
         Context.MODE_PRIVATE
     )
 
+    @Volatile
+    private var analyticsInitialized = false
+
     init {
-        openPanelAnalytics?.setGlobalProperties(
-            mapOf(
-                "platform" to "phone",
-                "packageName" to context.packageName,
-                "appVersionName" to BuildConfig.VERSION_NAME,
-                "appVersionCode" to BuildConfig.VERSION_CODE,
-                "deviceModel" to "${Build.MANUFACTURER} ${Build.MODEL}",
-                "sdk" to Build.VERSION.SDK_INT,
-                "firstInstalledAt" to installationIdentity.firstInstalledAtMillis
-            )
-        )
-        openPanelAnalytics?.identify(
-            installationIdentity.installId,
-            mapOf("installId" to installationIdentity.installId)
-        )
-        // When user logs in, switch profile to userId.
+        // This collector is local until consent is granted. Network analytics initialization is
+        // deferred to ensureAnalyticsInitialized(), which is called only by an accepted event.
         appScope.launch {
             accountRepository.session.filterNotNull().collect { session ->
-                openPanelAnalytics?.identify(
-                    session.userId,
-                    mapOf(
-                        "installId" to installationIdentity.installId,
-                        "userId" to session.userId,
-                        "phoneMasked" to session.phoneMasked
+                if (ensureAnalyticsInitialized()) {
+                    openPanelAnalytics?.identify(
+                        session.userId,
+                        mapOf(
+                            "installId" to installationIdentity.installId,
+                            "userId" to session.userId,
+                            "phoneMasked" to session.phoneMasked
+                        )
                     )
-                )
+                }
             }
         }
+    }
+
+    private fun ensureAnalyticsInitialized(): Boolean {
+        if (!consentStore.hasRequiredConsent()) return false
+        if (analyticsInitialized) return true
+        synchronized(this) {
+            if (analyticsInitialized) return true
+            openPanelAnalytics?.setGlobalProperties(
+                mapOf(
+                    "platform" to "phone",
+                    "packageName" to context.packageName,
+                    "appVersionName" to BuildConfig.VERSION_NAME,
+                    "appVersionCode" to BuildConfig.VERSION_CODE,
+                    "deviceModel" to "${Build.MANUFACTURER} ${Build.MODEL}",
+                    "sdk" to Build.VERSION.SDK_INT,
+                    "firstInstalledAt" to installationIdentity.firstInstalledAtMillis
+                )
+            )
+            val session = accountRepository.session.value
+            openPanelAnalytics?.identify(
+                session?.userId ?: installationIdentity.installId,
+                buildMap {
+                    put("installId", installationIdentity.installId)
+                    session?.let {
+                        put("userId", it.userId)
+                        put("phoneMasked", it.phoneMasked)
+                    }
+                }
+            )
+            analyticsInitialized = true
+        }
+        return true
     }
 
     fun recordAppLaunch() {
@@ -67,6 +92,7 @@ class PhoneUsageTelemetry(
     }
 
     fun recordScreenOpen(screen: String) {
+        if (!consentStore.hasRequiredConsent()) return
         preferences.edit()
             .putInt("screen_count_$screen", preferences.getInt("screen_count_$screen", 0) + 1)
             .apply()
@@ -74,6 +100,7 @@ class PhoneUsageTelemetry(
     }
 
     fun recordScreenDuration(screen: String, durationMs: Long) {
+        if (!consentStore.hasRequiredConsent()) return
         if (durationMs <= 0L) return
         preferences.edit()
             .putLong("screen_duration_$screen", preferences.getLong("screen_duration_$screen", 0L) + durationMs)
@@ -162,6 +189,7 @@ class PhoneUsageTelemetry(
     }
 
     private fun capture(event: String, properties: Map<String, Any?> = emptyMap()) {
+        if (!ensureAnalyticsInitialized()) return
         openPanelAnalytics?.track(event, properties.filterValues { it != null }.mapValues { it.value!! })
         if (!environment.isTelemetryConfigured) return
         appScope.launch(Dispatchers.IO) {

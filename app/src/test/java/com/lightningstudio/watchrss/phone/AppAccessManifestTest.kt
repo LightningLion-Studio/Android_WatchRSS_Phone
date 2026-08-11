@@ -20,9 +20,25 @@ class AppAccessManifestTest {
     fun `authorization secrets are excluded from backup`() {
         val legacy = File("src/main/res/xml/backup_rules.xml").readText()
         val modern = File("src/main/res/xml/data_extraction_rules.xml").readText()
-        listOf("watchrss_account_session.xml", "watchrss_app_access.xml").forEach { name ->
+        listOf(
+            "watchrss_account_session.xml",
+            "watchrss_app_access.xml",
+            "watchrss_phone_privacy_consent.xml"
+        ).forEach { name ->
             assertTrue(legacy.contains(name))
             assertTrue(modern.contains(name))
+        }
+    }
+
+    @Test
+    fun `oobe and legal pages are internal activities`() {
+        val manifest = File("src/main/AndroidManifest.xml").readText()
+        listOf(".PhoneOobeActivity", ".LegalDocumentActivity").forEach { activity ->
+            assertTrue(
+                manifest.contains(
+                    "android:name=\"$activity\"\n            android:exported=\"false\""
+                )
+            )
         }
     }
 }

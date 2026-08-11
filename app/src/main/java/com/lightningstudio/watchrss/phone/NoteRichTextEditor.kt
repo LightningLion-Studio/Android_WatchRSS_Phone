@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone
 
+import android.graphics.BitmapFactory
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -12,6 +13,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -950,7 +952,12 @@ internal fun markdownTable(rows: Int, columns: Int): String {
 
 internal sealed interface NotePreviewBlock {
     data class RichText(val markup: String, val html: Boolean = false) : NotePreviewBlock
-    data class Image(val path: String, val description: String) : NotePreviewBlock
+    data class Image(
+        val path: String,
+        val description: String,
+        val widthSp: Float? = null,
+        val heightSp: Float? = null
+    ) : NotePreviewBlock
     data class Table(val table: NotePreviewTable) : NotePreviewBlock
 }
 
@@ -989,7 +996,12 @@ private fun parseHtmlNotePreviewBlocks(markup: String): List<NotePreviewBlock> {
         if (before.isNotBlank()) result += NotePreviewBlock.RichText(before, html = true)
         val payload = imageMatch.value.toImagePayload()
         if (payload != null) {
-            result += NotePreviewBlock.Image(payload.path, payload.description)
+            result += NotePreviewBlock.Image(
+                path = payload.path,
+                description = payload.description,
+                widthSp = imageMatch.value.htmlAttribute("width")?.toFloatOrNull(),
+                heightSp = imageMatch.value.htmlAttribute("height")?.toFloatOrNull()
+            )
         } else {
             result += NotePreviewBlock.RichText(imageMatch.value, html = true)
         }
@@ -1306,20 +1318,42 @@ private fun NoteImagePreviewBlock(
         )
         return
     }
+    val context = LocalContext.current
+    val aspectRatio = remember(image.path, image.widthSp, image.heightSp) {
+        noteImageAspectRatio(
+            storedWidth = image.widthSp,
+            storedHeight = image.heightSp,
+            file = image.path
+                .takeIf { it.startsWith("assets/") }
+                ?.let { File(context.filesDir, "notes/$it") }
+        )
+    }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        androidx.compose.foundation.Image(
-            painter = data.painter,
-            contentDescription = data.contentDescription ?: image.description,
-            alignment = data.alignment,
-            contentScale = data.contentScale,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 640.dp)
-                .clickable(
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            val stableImageModifier = if (aspectRatio != null) {
+                val imageWidth = minOf(maxWidth, 640.dp * aspectRatio)
+                Modifier
+                    .width(imageWidth)
+                    .aspectRatio(aspectRatio)
+            } else {
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 640.dp)
+            }
+            androidx.compose.foundation.Image(
+                painter = data.painter,
+                contentDescription = data.contentDescription ?: image.description,
+                alignment = data.alignment,
+                contentScale = data.contentScale,
+                modifier = stableImageModifier.clickable(
                     onClickLabel = "查看图片",
                     onClick = onClick
                 )
-        )
+            )
+        }
         if (image.description.isNotBlank()) {
             Text(
                 text = image.description,
@@ -1327,6 +1361,24 @@ private fun NoteImagePreviewBlock(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+}
+
+private fun noteImageAspectRatio(
+    storedWidth: Float?,
+    storedHeight: Float?,
+    file: File?
+): Float? {
+    if (storedWidth != null && storedHeight != null && storedWidth > 0f && storedHeight > 0f) {
+        return (storedWidth / storedHeight).takeIf { it.isFinite() && it > 0f }
+    }
+    if (file?.isFile != true) return null
+    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(file.absolutePath, options)
+    return if (options.outWidth > 0 && options.outHeight > 0) {
+        options.outWidth.toFloat() / options.outHeight.toFloat()
+    } else {
+        null
     }
 }
 

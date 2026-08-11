@@ -66,6 +66,24 @@ internal fun accountLoginErrorMessage(
     }
 }
 
+internal fun accountSecurityErrorMessage(
+    throwable: Throwable,
+    fallback: String
+): String {
+    val httpError = throwable.findAccountHttpException()
+    if (httpError == null) {
+        return if (throwable.hasIoCause()) "网络连接失败，请检查网络后重试" else fallback
+    }
+    val code = parseErrorResponse(httpError.responseBody).code.lowercase()
+    return when (code) {
+        "two_factor_method_required" -> "两步验证至少需要两种不同的验证方式，请先添加另一种方式"
+        "security_verification_required" -> "请先重新验证身份"
+        "invalid_security_verification" -> "身份验证已过期，请重新验证"
+        "mfa_login_required" -> "登录状态已更新，请重新登录"
+        else -> if (httpError.statusCode >= 500) "账号服务暂时不可用，请稍后重试" else fallback
+    }
+}
+
 private data class AccountErrorResponse(val code: String)
 
 private fun parseErrorResponse(raw: String): AccountErrorResponse {

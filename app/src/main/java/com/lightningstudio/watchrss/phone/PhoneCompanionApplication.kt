@@ -17,16 +17,21 @@ import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncWorker
 import com.lightningstudio.watchrss.phone.connection.ble.WatchBleBandwidthServer
 import com.lightningstudio.watchrss.phone.connection.ip.WatchIpSyncService
 import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
+import com.lightningstudio.watchrss.phone.privacy.PhonePrivacyConsentStore
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicBoolean
 
 class PhoneCompanionApplication : Application() {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastForegroundSyncAt = 0L
     @Volatile private var resumedActivity: Activity? = null
+    private val accountInitialization = CompletableDeferred<Unit>()
+    private val consentServicesStarted = AtomicBoolean(false)
     private val ipSyncService: WatchIpSyncService by lazy {
         WatchIpSyncService(this, PhoneDeviceIdentity(this).deviceId)
     }
@@ -40,6 +45,21 @@ class PhoneCompanionApplication : Application() {
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
                 resumedActivity = activity
+                if (!PhonePrivacyConsentStore(this@PhoneCompanionApplication).hasRequiredConsent()) {
+                    PhoneCloudSyncWorker.cancel(this@PhoneCompanionApplication)
+                    stopWatchBaseStation()
+                    if (activity !is MainActivity && activity !is PhoneOobeActivity &&
+                        activity !is LegalDocumentActivity && activity !is ContactDeveloperActivity
+                    ) {
+                        activity.startActivity(
+                            Intent(activity, MainActivity::class.java)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                        )
+                        activity.finish()
+                    }
+                    return
+                }
+                startConsentDependentServices()
                 appScope.launch {
                     container.appAccessCoordinator.reconcile()
                     if (container.appAccessCoordinator.isAuthorized) {
@@ -87,10 +107,28 @@ class PhoneCompanionApplication : Application() {
         })
         appScope.launch {
             container.accountRepository.initialize()
+            accountInitialization.complete(Unit)
+            if (PhonePrivacyConsentStore(this@PhoneCompanionApplication).hasRequiredConsent()) {
+                startConsentDependentServices()
+            }
+        }
+    }
+
+    fun onPrivacyConsentGranted() {
+        startConsentDependentServices()
+    }
+
+    private fun startConsentDependentServices() {
+        if (!PhonePrivacyConsentStore(this).hasRequiredConsent()) return
+        if (!consentServicesStarted.compareAndSet(false, true)) return
+        appScope.launch {
+            accountInitialization.await()
             container.appAccessCoordinator.initialize()
             container.usageTelemetry.recordAppLaunch()
             container.repository.recordFirstUseIfAbsent(container.firstInstalledAtMillis)
-            if (container.accountRepository.hasUsableSession && container.appAccessCoordinator.isAuthorized) {
+            if (container.accountRepository.hasUsableSession &&
+                container.appAccessCoordinator.isAuthorized
+            ) {
                 runCatching { container.cloudSyncService.syncNow() }
             }
         }

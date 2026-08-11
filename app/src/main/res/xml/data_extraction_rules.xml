@@ -6,6 +6,7 @@
         <exclude domain="sharedpref" path="watchrss_app_access.xml" />
         <exclude domain="sharedpref" path="watchrss_app_access_test.xml" />
         <exclude domain="sharedpref" path="watchrss_installation_identity.xml" />
+        <exclude domain="sharedpref" path="watchrss_phone_privacy_consent.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="watchrss_account_session.xml" />
@@ -13,5 +14,6 @@
         <exclude domain="sharedpref" path="watchrss_app_access.xml" />
         <exclude domain="sharedpref" path="watchrss_app_access_test.xml" />
         <exclude domain="sharedpref" path="watchrss_installation_identity.xml" />
+        <exclude domain="sharedpref" path="watchrss_phone_privacy_consent.xml" />
     </device-transfer>
 </data-extraction-rules>

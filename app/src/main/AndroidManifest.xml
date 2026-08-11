@@ -93,6 +93,14 @@
             android:launchMode="singleTask"
             android:theme="@style/Theme.WatchRSS" />
         <activity
+            android:name=".PhoneOobeActivity"
+            android:exported="false"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
+            android:name=".LegalDocumentActivity"
+            android:exported="false"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
             android:name=".ArticleReaderActivity"
             android:exported="false"
             android:theme="@style/Theme.WatchRSS.Reader" />

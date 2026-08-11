@@ -60,8 +60,16 @@ data class LoginProgress(
     val requiredFactorCount: Int,
     val completedFactors: List<String>,
     val complete: Boolean,
-    val session: PhoneAccountSession?
+    val session: PhoneAccountSession?,
+    val verificationToken: String? = null
 )
+
+data class AccountSecurityStatus(
+    val twoFactorEnabled: Boolean,
+    val availableMethods: Set<String>
+) {
+    val availableMethodCount: Int get() = availableMethods.size
+}
 
 data class PendingPasswordLogin(
     val session: PhoneAccountSession,

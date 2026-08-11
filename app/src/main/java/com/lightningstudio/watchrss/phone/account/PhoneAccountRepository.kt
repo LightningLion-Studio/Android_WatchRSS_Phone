@@ -83,22 +83,35 @@ class PhoneAccountRepository(
     suspend fun beginTotpEnrollment(): TotpEnrollment =
         accountClient.beginTotpEnrollment(requireSession())
 
-    suspend fun confirmTotpEnrollmentAndInvalidateSession(
+    suspend fun confirmTotpEnrollment(
         enrollment: TotpEnrollment,
         code: String
     ) {
-        val current = requireSession()
-        completeTotpEnrollmentTransition(
-            confirmEnrollment = {
-                accountClient.confirmTotpEnrollment(current, enrollment, code)
-            },
-            invalidateSession = sessionStore::clear
-        )
+        accountClient.confirmTotpEnrollment(requireSession(), enrollment, code)
     }
 
     suspend fun disableTotp(factor: TotpFactor, code: String) {
         accountClient.disableTotp(requireSession(), factor, code)
     }
+
+    suspend fun securityStatus(): AccountSecurityStatus =
+        accountClient.securityStatus(requireSession())
+
+    suspend fun setTwoFactorEnabled(
+        enabled: Boolean,
+        verificationToken: String? = null
+    ): AccountSecurityStatus {
+        val status = accountClient.setTwoFactorEnabled(
+            requireSession(),
+            enabled,
+            verificationToken
+        )
+        if (enabled) sessionStore.clear()
+        return status
+    }
+
+    suspend fun startSecurityVerification(): LoginProgress =
+        accountClient.startSecurityVerification(requireSession())
 
     suspend fun startPasskeyRegistration(): PasskeyOptions {
         val session = session.value ?: error("请先使用手机号验证码登录")
@@ -234,12 +247,4 @@ class PhoneAccountRepository(
             })
         }
     }
-}
-
-internal suspend fun completeTotpEnrollmentTransition(
-    confirmEnrollment: suspend () -> Unit,
-    invalidateSession: suspend () -> Unit
-) {
-    confirmEnrollment()
-    invalidateSession()
 }

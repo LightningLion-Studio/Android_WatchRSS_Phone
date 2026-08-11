@@ -131,8 +131,12 @@ data class PhoneBluetoothWatchDevice(
     val name: String,
     val address: String,
     val uuidCount: Int,
-    val remoteDeviceId: String = ""
-)
+    val remoteDeviceId: String = "",
+    val bluetoothAddress: String = address
+) {
+    val readerPreviewAddress: String
+        get() = bluetoothAddress.ifBlank { address }
+}
 
 data class PhoneBluetoothWatchProbeResult(
     val device: PhoneBluetoothWatchDevice,
@@ -1105,7 +1109,8 @@ class PhoneBluetoothSyncClient(
                             name = "${device.name.orEmpty()} (${session.routeKind.wireName})",
                             address = PhoneIpSyncSessionRegistry.IP_DEVICE_PREFIX + identity.deviceId,
                             uuidCount = device.uuids?.size ?: 0,
-                            remoteDeviceId = identity.deviceId
+                            remoteDeviceId = identity.deviceId,
+                            bluetoothAddress = device.address
                         )
                     } ?: device.toWatchDevice(identity.deviceId),
                     reachable = true,

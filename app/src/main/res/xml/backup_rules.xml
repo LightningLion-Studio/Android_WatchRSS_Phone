@@ -5,4 +5,5 @@
     <exclude domain="sharedpref" path="watchrss_app_access.xml" />
     <exclude domain="sharedpref" path="watchrss_app_access_test.xml" />
     <exclude domain="sharedpref" path="watchrss_installation_identity.xml" />
+    <exclude domain="sharedpref" path="watchrss_phone_privacy_consent.xml" />
 </full-backup-content>

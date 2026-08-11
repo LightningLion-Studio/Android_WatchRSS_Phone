@@ -59,6 +59,37 @@ class PhoneAccountClient(
     suspend fun verifyTotpFactor(transactionId: String, code: String): LoginProgress =
         verifyLoginCode("/functions/v1/account/login/mfa/totp/verify", transactionId, code)
 
+    suspend fun securityStatus(session: PhoneAccountSession): AccountSecurityStatus =
+        withContext(Dispatchers.IO) {
+            get("/functions/v1/account/security", session.accessToken).use {
+                parseAccountSecurityStatus(it.jsonBody())
+            }
+        }
+
+    suspend fun setTwoFactorEnabled(
+        session: PhoneAccountSession,
+        enabled: Boolean,
+        verificationToken: String? = null
+    ): AccountSecurityStatus = withContext(Dispatchers.IO) {
+        backendPut(
+            path = "/functions/v1/account/two-factor",
+            body = JSONObject().apply {
+                put("enabled", enabled)
+                verificationToken?.let { put("verificationToken", it) }
+            },
+            bearerToken = session.accessToken
+        ).use { parseAccountSecurityStatus(it.jsonBody()) }
+    }
+
+    suspend fun startSecurityVerification(session: PhoneAccountSession): LoginProgress =
+        withContext(Dispatchers.IO) {
+            post(
+                path = "/functions/v1/account/security-verification/start",
+                body = JSONObject(),
+                bearerToken = session.accessToken
+            ).use { parseLoginProgress(it.jsonBody()) }
+        }
+
     suspend fun loginWithPassword(phone: String, password: String): PasswordLoginResult = withContext(Dispatchers.IO) {
         requireConfigured()
         require(password.length in 10..128) { "密码长度必须为 10–128 位" }
@@ -571,13 +602,15 @@ class PhoneAccountClient(
         val complete = json.optBoolean("complete", false)
         val sessionJson = json.optJSONObject("session")
         val session = sessionJson?.let(::parsePasskeySession)
-        require(!complete || session != null) { "登录响应缺少账号信息" }
+        val verificationToken = json.optString("verificationToken").trim().ifBlank { null }
+        require(!complete || session != null || verificationToken != null) { "验证响应缺少完成信息" }
         return LoginProgress(
             transactionId = transactionId,
             requiredFactorCount = json.optInt("requiredFactorCount", 1),
             completedFactors = json.optJSONArray("completedFactors").toStringList(),
             complete = complete,
-            session = session
+            session = session,
+            verificationToken = verificationToken
         )
     }
 
@@ -673,6 +706,21 @@ class PhoneAccountClient(
                 .readTimeout(20, TimeUnit.SECONDS)
                 .writeTimeout(20, TimeUnit.SECONDS)
                 .build()
+    }
+}
+
+internal fun parseAccountSecurityStatus(json: JSONObject): AccountSecurityStatus =
+    AccountSecurityStatus(
+        twoFactorEnabled = json.optBoolean("twoFactorEnabled", false),
+        availableMethods = json.optJSONArray("availableMethods").toStringSet()
+    )
+
+private fun JSONArray?.toStringSet(): Set<String> {
+    if (this == null) return emptySet()
+    return buildSet {
+        for (index in 0 until length()) {
+            optString(index).trim().takeIf { it.isNotBlank() }?.let(::add)
+        }
     }
 }
 

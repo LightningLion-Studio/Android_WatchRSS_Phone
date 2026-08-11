@@ -54,7 +54,8 @@ class AppAccessCoordinator(
         }
 
         if (!cachedValid) {
-            store.loadPendingOrder()?.let { order ->
+            val sessionUserId = accountRepository.session.value?.userId.orEmpty()
+            store.loadPendingOrder(sessionUserId)?.let { order ->
                 if (order.status == "pending") {
                     _state.value = AppAccessState.PaymentPending(order)
                     refreshPaymentLocked(order.orderId)
@@ -119,9 +120,10 @@ class AppAccessCoordinator(
     }
 
     suspend fun startPayment(): AppPaymentOrder = operationMutex.withLock {
+        val userId = accountRepository.session.value?.userId ?: error("请先登录账号")
         val order = accountRepository.createPaymentOrder(store.orderIdempotencyKey())
         store.clearOrderIdempotencyKey()
-        store.savePendingOrder(order)
+        store.savePendingOrder(order, userId)
         _state.value = AppAccessState.PaymentPending(order)
         return order
     }
@@ -134,15 +136,17 @@ class AppAccessCoordinator(
         runCatching { accountRepository.paymentOrder(orderId) }.onSuccess { order ->
             when (order.status) {
                 "paid" -> {
-                    store.savePendingOrder(null)
+                    store.clearPendingOrder()
                     claimLocked()
                 }
                 "pending" -> {
-                    store.savePendingOrder(order)
+                    accountRepository.session.value?.userId?.let { userId ->
+                        store.savePendingOrder(order, userId)
+                    }
                     _state.value = AppAccessState.PaymentPending(order)
                 }
                 else -> {
-                    store.savePendingOrder(null)
+                    store.clearPendingOrder()
                     loadServerStatusLocked()
                 }
             }
@@ -157,6 +161,8 @@ class AppAccessCoordinator(
             PendingReleaseWorker.schedule(context)
         }
         store.clear()
+        store.clearPendingOrder()
+        store.clearOrderIdempotencyKey()
         accountRepository.logout()
         _state.value = AppAccessState.LoggedOut
         return released
@@ -168,6 +174,8 @@ class AppAccessCoordinator(
      * session so AccountActivity presents the real login flow.
      */
     suspend fun beginReauthentication() = operationMutex.withLock {
+        store.clearPendingOrder()
+        store.clearOrderIdempotencyKey()
         accountRepository.logout()
         _state.value = AppAccessState.LoggedOut
     }

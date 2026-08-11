@@ -67,18 +67,22 @@ class AppAccessStore(context: Context, suffix: String = "") {
 
     fun clearOrderIdempotencyKey() { prefs.edit().remove(KEY_ORDER_CREATE).apply() }
 
-    fun savePendingOrder(order: AppPaymentOrder?) {
-        prefs.edit().apply {
-            if (order == null) remove(KEY_ORDER) else putString(KEY_ORDER, JSONObject().apply {
-                put("orderId", order.orderId); put("merchantOrderId", order.merchantOrderId)
-                put("amountFen", order.amountFen); put("status", order.status); put("paymentUrl", order.paymentUrl)
-            }.toString())
-        }.apply()
+    fun savePendingOrder(order: AppPaymentOrder, userId: String) {
+        require(userId.isNotBlank()) { "待支付订单必须绑定账号" }
+        prefs.edit().putString(KEY_ORDER, JSONObject().apply {
+            put("userId", userId)
+            put("orderId", order.orderId); put("merchantOrderId", order.merchantOrderId)
+            put("amountFen", order.amountFen); put("status", order.status); put("paymentUrl", order.paymentUrl)
+        }.toString()).apply()
     }
 
-    fun loadPendingOrder(): AppPaymentOrder? = prefs.getString(KEY_ORDER, null)?.let { raw ->
-        runCatching { JSONObject(raw).toPaymentOrder() }.getOrNull()
+    fun loadPendingOrder(userId: String): AppPaymentOrder? = prefs.getString(KEY_ORDER, null)?.let { raw ->
+        runCatching { JSONObject(raw).toPaymentOrderForUser(userId) }.getOrNull().also { order ->
+            if (order == null) clearPendingOrder()
+        }
     }
+
+    fun clearPendingOrder() { prefs.edit().remove(KEY_ORDER).apply() }
 
     private companion object { const val KEY_AUTHORIZATION = "authorization"; const val KEY_ORDER = "pending_order"; const val KEY_RELEASE = "pending_release"; const val KEY_CLAIM = "claim_idempotency"; const val KEY_ORDER_CREATE = "order_idempotency" }
 }
@@ -97,3 +101,7 @@ internal fun JSONObject.toPaymentOrder() = AppPaymentOrder(
     orderId = getString("orderId"), merchantOrderId = optString("merchantOrderId"), amountFen = optInt("amountFen"),
     status = optString("status"), paymentUrl = optString("paymentUrl").takeIf { it.isNotBlank() }
 )
+
+internal fun JSONObject.toPaymentOrderForUser(userId: String): AppPaymentOrder? =
+    takeIf { optString("userId").isNotBlank() && optString("userId") == userId }
+        ?.toPaymentOrder()

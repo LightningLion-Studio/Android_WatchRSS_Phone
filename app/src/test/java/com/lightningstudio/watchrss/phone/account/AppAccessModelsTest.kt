@@ -2,6 +2,7 @@ package com.lightningstudio.watchrss.phone.account
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class AppAccessModelsTest {
@@ -24,5 +25,24 @@ class AppAccessModelsTest {
         ).toPaymentOrder()
         assertEquals(600, order.amountFen)
         assertEquals("pending", order.status)
+    }
+
+    @Test
+    fun `pending payment order is restored only for its owner`() {
+        val json = JSONObject(
+            """{"userId":"user-a","orderId":"id","merchantOrderId":"merchant","amountFen":600,"status":"pending"}"""
+        )
+
+        assertEquals("id", json.toPaymentOrderForUser("user-a")?.orderId)
+        assertNull(json.toPaymentOrderForUser("user-b"))
+    }
+
+    @Test
+    fun `legacy pending payment order without owner is discarded`() {
+        val json = JSONObject(
+            """{"orderId":"id","merchantOrderId":"merchant","amountFen":600,"status":"pending"}"""
+        )
+
+        assertNull(json.toPaymentOrderForUser("user-a"))
     }
 }

@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.lightningstudio.watchrss.phone">
-
-    <application />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity
+            android:name=".BleBandwidthTestActivity"
+            android:configChanges="keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize"
+            android:exported="false"
+            android:theme="@style/Theme.WatchRSS" />
+    </application>
 </manifest>

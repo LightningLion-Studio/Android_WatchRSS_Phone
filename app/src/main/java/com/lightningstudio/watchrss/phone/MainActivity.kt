@@ -174,8 +174,9 @@ class MainActivity : ComponentActivity() {
                 AppAccessState.Loading -> CircularProgressIndicator(Modifier.padding(24.dp))
                 AppAccessState.LoggedOut -> GateMessage("首次使用请登录", null) { openAccount() }
                 is AppAccessState.PurchaseRequired -> GateMessage(
-                    "¥6 永久开通，可授权 3 台手机",
-                    "已购买 ${state.summary.purchaseCount} 次 · 容量 ${state.summary.capacity} 台"
+                    title = "当前账号没有可授权额度",
+                    detail = "购买手机版永久授权后即可继续。¥6 可授权 3 台手机；当前已购买 ${state.summary.purchaseCount} 次，剩余 0 台。",
+                    actionLabel = "前往网页支付"
                 ) { startPayment() }
                 is AppAccessState.PaymentPending -> GateMessage("等待支付确认", "订单 ${state.order.merchantOrderId}") {
                     state.order.paymentUrl?.let { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it))) }
@@ -207,12 +208,17 @@ class MainActivity : ComponentActivity() {
     }
 
     @androidx.compose.runtime.Composable
-    private fun GateMessage(title: String, detail: String?, action: () -> Unit) {
+    private fun GateMessage(
+        title: String,
+        detail: String?,
+        actionLabel: String = "继续",
+        action: () -> Unit
+    ) {
         Text(title, Modifier.padding(top = 24.dp), style = MaterialTheme.typography.titleLarge)
         detail?.let {
             Text(it, Modifier.padding(vertical = 12.dp), style = MaterialTheme.typography.bodyMedium)
         }
-        Button(onClick = action) { Text(if (title.contains("¥6") || title.contains("支付")) "去支付" else "继续") }
+        Button(onClick = action) { Text(actionLabel) }
     }
 
     private fun openAccount() = startActivity(AccountActivity.createIntent(this, finishAfterLogin = true))

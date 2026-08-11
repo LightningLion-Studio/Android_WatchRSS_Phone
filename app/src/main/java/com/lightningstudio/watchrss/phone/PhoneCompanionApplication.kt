@@ -18,6 +18,7 @@ import com.lightningstudio.watchrss.phone.connection.ble.WatchBleBandwidthServer
 import com.lightningstudio.watchrss.phone.connection.ip.WatchIpSyncService
 import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
 import com.lightningstudio.watchrss.phone.privacy.PhonePrivacyConsentStore
+import com.lightningstudio.watchrss.phone.privacy.shouldEnforceAppAccess
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,7 +46,9 @@ class PhoneCompanionApplication : Application() {
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
                 resumedActivity = activity
-                if (!PhonePrivacyConsentStore(this@PhoneCompanionApplication).hasRequiredConsent()) {
+                val privacyConsent = PhonePrivacyConsentStore(this@PhoneCompanionApplication)
+                val hasRequiredConsent = privacyConsent.hasRequiredConsent()
+                if (!hasRequiredConsent) {
                     PhoneCloudSyncWorker.cancel(this@PhoneCompanionApplication)
                     stopWatchBaseStation()
                     if (activity !is MainActivity && activity !is PhoneOobeActivity &&
@@ -60,6 +63,25 @@ class PhoneCompanionApplication : Application() {
                     return
                 }
                 startConsentDependentServices()
+                if (!shouldEnforceAppAccess(
+                        hasRequiredConsent = hasRequiredConsent,
+                        isOobeComplete = privacyConsent.isOobeComplete()
+                    )
+                ) {
+                    PhoneCloudSyncWorker.cancel(this@PhoneCompanionApplication)
+                    stopWatchBaseStation()
+                    if (activity !is MainActivity && activity !is PhoneOobeActivity &&
+                        activity !is LegalDocumentActivity && activity !is AccountActivity &&
+                        activity !is ContactDeveloperActivity
+                    ) {
+                        activity.startActivity(
+                            Intent(activity, MainActivity::class.java)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                        )
+                        activity.finish()
+                    }
+                    return
+                }
                 appScope.launch {
                     container.appAccessCoordinator.reconcile()
                     if (container.appAccessCoordinator.isAuthorized) {

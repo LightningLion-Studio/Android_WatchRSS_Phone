@@ -58,3 +58,8 @@ internal fun phoneOobeStage(
     page <= 0 -> PhoneOobeStage.WELCOME
     else -> PhoneOobeStage.AGREEMENT
 }
+
+internal fun shouldEnforceAppAccess(
+    hasRequiredConsent: Boolean,
+    isOobeComplete: Boolean
+): Boolean = hasRequiredConsent && isOobeComplete

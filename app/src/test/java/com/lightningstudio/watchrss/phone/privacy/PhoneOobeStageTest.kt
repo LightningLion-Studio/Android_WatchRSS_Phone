@@ -31,4 +31,11 @@ class PhoneOobeStageTest {
             phoneOobeStage(page = 1, hasConsent = true, hasUsableSession = true)
         )
     }
+
+    @Test
+    fun `app access is not enforced while oobe is still active`() {
+        assertEquals(false, shouldEnforceAppAccess(hasRequiredConsent = false, isOobeComplete = false))
+        assertEquals(false, shouldEnforceAppAccess(hasRequiredConsent = true, isOobeComplete = false))
+        assertEquals(true, shouldEnforceAppAccess(hasRequiredConsent = true, isOobeComplete = true))
+    }
 }

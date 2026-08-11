@@ -19,7 +19,11 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -101,9 +105,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -111,6 +120,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -3784,6 +3794,7 @@ private fun ChoiceRow(
 @Composable
 private fun ColorField(label: String, color: Long, onColor: (Long) -> Unit) {
     var raw by remember(color) { mutableStateOf("#%08X".format(color)) }
+    var pickerOpen by remember { mutableStateOf(false) }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(
             Modifier
@@ -3791,6 +3802,14 @@ private fun ColorField(label: String, color: Long, onColor: (Long) -> Unit) {
                 .height(40.dp)
                 .weight(0.2f)
                 .background(Color(color), RoundedCornerShape(8.dp))
+                .border(
+                    width = 1.dp,
+                    color = MaterialTheme.colorScheme.outline,
+                    shape = RoundedCornerShape(8.dp)
+                )
+                .clip(RoundedCornerShape(8.dp))
+                .semantics { contentDescription = "打开${label}调色盘" }
+                .clickable { pickerOpen = true }
         )
         OutlinedTextField(
             value = raw,
@@ -3802,6 +3821,316 @@ private fun ColorField(label: String, color: Long, onColor: (Long) -> Unit) {
             singleLine = true,
             modifier = Modifier.weight(0.8f)
         )
+    }
+    if (pickerOpen) {
+        ColorPickerDialog(
+            label = label,
+            initialColor = color,
+            onDismiss = { pickerOpen = false },
+            onConfirm = {
+                pickerOpen = false
+                onColor(it)
+            }
+        )
+    }
+}
+
+@Composable
+private fun ColorPickerDialog(
+    label: String,
+    initialColor: Long,
+    onDismiss: () -> Unit,
+    onConfirm: (Long) -> Unit
+) {
+    val initialArgb = initialColor.toInt()
+    val initialHsv = remember(initialColor) {
+        FloatArray(3).also { android.graphics.Color.colorToHSV(initialArgb, it) }
+    }
+    var hue by remember(initialColor) { mutableFloatStateOf(initialHsv[0]) }
+    var saturation by remember(initialColor) { mutableFloatStateOf(initialHsv[1]) }
+    var brightness by remember(initialColor) { mutableFloatStateOf(initialHsv[2]) }
+    var alpha by remember(initialColor) {
+        mutableFloatStateOf(android.graphics.Color.alpha(initialArgb) / 255f)
+    }
+    val selectedArgb = remember(hue, saturation, brightness, alpha) {
+        android.graphics.Color.HSVToColor(
+            (alpha * 255f).roundToInt().coerceIn(0, 255),
+            floatArrayOf(hue, saturation, brightness)
+        ).toLong() and 0xFFFFFFFFL
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("$label · 调色盘") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                SaturationBrightnessPalette(
+                    hue = hue,
+                    saturation = saturation,
+                    brightness = brightness,
+                    onChanged = { nextSaturation, nextBrightness ->
+                        saturation = nextSaturation
+                        brightness = nextBrightness
+                    }
+                )
+                RainbowHueSlider(
+                    value = hue,
+                    onValueChange = { hue = it }
+                )
+                ColorGradientSlider(
+                    label = "饱和度",
+                    value = saturation,
+                    valueText = "${(saturation * 100).roundToInt()}%",
+                    colors = listOf(
+                        Color.hsv(hue, 0f, brightness),
+                        Color.hsv(hue, 1f, brightness)
+                    ),
+                    thumbColor = Color.hsv(hue, saturation, brightness),
+                    onValueChange = { saturation = it }
+                )
+                ColorGradientSlider(
+                    label = "明度",
+                    value = brightness,
+                    valueText = "${(brightness * 100).roundToInt()}%",
+                    colors = listOf(
+                        Color.Black,
+                        Color.hsv(hue, saturation, 1f)
+                    ),
+                    thumbColor = Color.hsv(hue, saturation, brightness),
+                    onValueChange = { brightness = it }
+                )
+                ColorComponentSlider(
+                    label = "透明度",
+                    value = alpha,
+                    range = 0f..1f,
+                    valueText = "${(alpha * 100).roundToInt()}%",
+                    onValueChange = { alpha = it }
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Box(
+                        Modifier
+                            .width(52.dp)
+                            .height(36.dp)
+                            .background(Color(selectedArgb), RoundedCornerShape(8.dp))
+                            .border(
+                                1.dp,
+                                MaterialTheme.colorScheme.outline,
+                                RoundedCornerShape(8.dp)
+                            )
+                    )
+                    Text(
+                        "#%08X".format(selectedArgb),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(selectedArgb) }) { Text("确定") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
+@Composable
+private fun RainbowHueSlider(
+    value: Float,
+    onValueChange: (Float) -> Unit
+) {
+    var sliderSize by remember { mutableStateOf(IntSize.Zero) }
+    fun updateFromPosition(position: Offset) {
+        if (sliderSize.width == 0) return
+        onValueChange((position.x / sliderSize.width * 360f).coerceIn(0f, 360f))
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("色相", style = MaterialTheme.typography.bodySmall)
+            Text("${value.roundToInt()}°", style = MaterialTheme.typography.bodySmall)
+        }
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(32.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(
+                            Color.Red,
+                            Color.Yellow,
+                            Color.Green,
+                            Color.Cyan,
+                            Color.Blue,
+                            Color.Magenta,
+                            Color.Red
+                        )
+                    )
+                )
+                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(16.dp))
+                .onSizeChanged { sliderSize = it }
+                .semantics { contentDescription = "色相彩虹拉杆" }
+                .pointerInput(sliderSize) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown()
+                        updateFromPosition(down.position)
+                        down.consume()
+                        do {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull() ?: break
+                            updateFromPosition(change.position)
+                            change.consume()
+                        } while (change.pressed)
+                    }
+                }
+        ) {
+            Canvas(Modifier.fillMaxSize()) {
+                val center = Offset(value / 360f * size.width, size.height / 2f)
+                drawCircle(
+                    color = Color.Black.copy(alpha = 0.5f),
+                    radius = 11.dp.toPx(),
+                    center = center
+                )
+                drawCircle(color = Color.White, radius = 9.dp.toPx(), center = center)
+                drawCircle(
+                    color = Color.hsv(value, 1f, 1f),
+                    radius = 6.dp.toPx(),
+                    center = center
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ColorGradientSlider(
+    label: String,
+    value: Float,
+    valueText: String,
+    colors: List<Color>,
+    thumbColor: Color,
+    onValueChange: (Float) -> Unit
+) {
+    var sliderSize by remember { mutableStateOf(IntSize.Zero) }
+    fun updateFromPosition(position: Offset) {
+        if (sliderSize.width == 0) return
+        onValueChange((position.x / sliderSize.width).coerceIn(0f, 1f))
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(label, style = MaterialTheme.typography.bodySmall)
+            Text(valueText, style = MaterialTheme.typography.bodySmall)
+        }
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(32.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(Brush.horizontalGradient(colors))
+                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(16.dp))
+                .onSizeChanged { sliderSize = it }
+                .semantics { contentDescription = "$label 色彩拉杆" }
+                .pointerInput(sliderSize) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown()
+                        updateFromPosition(down.position)
+                        down.consume()
+                        do {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull() ?: break
+                            updateFromPosition(change.position)
+                            change.consume()
+                        } while (change.pressed)
+                    }
+                }
+        ) {
+            Canvas(Modifier.fillMaxSize()) {
+                val center = Offset(value * size.width, size.height / 2f)
+                drawCircle(
+                    color = Color.Black.copy(alpha = 0.5f),
+                    radius = 11.dp.toPx(),
+                    center = center
+                )
+                drawCircle(color = Color.White, radius = 9.dp.toPx(), center = center)
+                drawCircle(color = thumbColor, radius = 6.dp.toPx(), center = center)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SaturationBrightnessPalette(
+    hue: Float,
+    saturation: Float,
+    brightness: Float,
+    onChanged: (saturation: Float, brightness: Float) -> Unit
+) {
+    var paletteSize by remember { mutableStateOf(IntSize.Zero) }
+    fun updateFromPosition(position: Offset) {
+        if (paletteSize.width == 0 || paletteSize.height == 0) return
+        onChanged(
+            (position.x / paletteSize.width).coerceIn(0f, 1f),
+            (1f - position.y / paletteSize.height).coerceIn(0f, 1f)
+        )
+    }
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(180.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color.hsv(hue, 1f, 1f))
+            .background(
+                Brush.horizontalGradient(listOf(Color.White, Color.Transparent))
+            )
+            .background(
+                Brush.verticalGradient(listOf(Color.Transparent, Color.Black))
+            )
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
+            .onSizeChanged { paletteSize = it }
+            .pointerInput(paletteSize) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    updateFromPosition(down.position)
+                    down.consume()
+                    do {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull() ?: break
+                        updateFromPosition(change.position)
+                        change.consume()
+                    } while (change.pressed)
+                }
+            }
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val center = Offset(saturation * size.width, (1f - brightness) * size.height)
+            drawCircle(Color.Black.copy(alpha = 0.55f), radius = 8.dp.toPx(), center = center)
+            drawCircle(Color.White, radius = 6.dp.toPx(), center = center)
+            drawCircle(
+                Color.hsv(hue, saturation, brightness),
+                radius = 4.dp.toPx(),
+                center = center
+            )
+        }
+    }
+}
+
+@Composable
+private fun ColorComponentSlider(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    valueText: String,
+    onValueChange: (Float) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(label, style = MaterialTheme.typography.bodySmall)
+            Text(valueText, style = MaterialTheme.typography.bodySmall)
+        }
+        Slider(value = value, onValueChange = onValueChange, valueRange = range)
     }
 }
 

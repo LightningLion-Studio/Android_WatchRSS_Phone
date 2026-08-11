@@ -15,6 +15,7 @@ keystore.properties
 *.jks
 *.keystore
 /app/build
+/review/
 
 # Shot screenshot testing
 # 基线截图需要提交，用于 CI 回归比对。

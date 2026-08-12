@@ -70,13 +70,3 @@ data class AccountSecurityStatus(
 ) {
     val availableMethodCount: Int get() = availableMethods.size
 }
-
-data class PendingPasswordLogin(
-    val session: PhoneAccountSession,
-    val factorId: String
-)
-
-sealed interface PasswordLoginResult {
-    data class Complete(val session: PhoneAccountSession) : PasswordLoginResult
-    data class TotpRequired(val pending: PendingPasswordLogin) : PasswordLoginResult
-}

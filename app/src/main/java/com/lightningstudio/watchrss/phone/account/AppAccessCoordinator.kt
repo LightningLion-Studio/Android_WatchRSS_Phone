@@ -36,11 +36,14 @@ class AppAccessCoordinator(
 
     private suspend fun reconcileLocked() {
         val cached = store.load()
-        val cachedValid = cached != null && LeaseVerifier.verify(
+        val trustedNow = store.trustedNowMillis()
+        val cachedValid = cached != null && trustedNow != null && LeaseVerifier.verify(
             compact = cached.lease,
             expectedDeviceId = identity.deviceId,
-            publicKeyPem = environment.appAccessPublicKey
+            publicKeyPem = environment.appAccessPublicKey,
+            nowSeconds = trustedNow / 1000
         )
+        if (cachedValid) store.recordTrustedTime(trustedNow!!)
         if (cached != null && !cachedValid) store.clear()
         val hasUsableSession = accountRepository.hasUsableSession
         initialAppAccessState(
@@ -100,10 +103,12 @@ class AppAccessCoordinator(
             _state.value = AppAccessState.Authorized(authorization.access, false)
         } catch (error: Throwable) {
             val cached = store.load()?.takeIf {
+                val trustedNow = store.trustedNowMillis() ?: return@takeIf false
                 LeaseVerifier.verify(
                     compact = it.lease,
                     expectedDeviceId = identity.deviceId,
-                    publicKeyPem = environment.appAccessPublicKey
+                    publicKeyPem = environment.appAccessPublicKey,
+                    nowSeconds = trustedNow / 1000
                 )
             }
             if (cached != null) {

@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.account
 import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import android.os.SystemClock
 import org.json.JSONObject
 
 class AppAccessStore(context: Context, suffix: String = "") {
@@ -23,7 +24,8 @@ class AppAccessStore(context: Context, suffix: String = "") {
                 lease = json.getString("lease"),
                 leaseExpiresAt = json.getLong("leaseExpiresAt"),
                 releaseGrant = json.optString("releaseGrant"),
-                access = json.getJSONObject("access").toAccessSummary()
+                access = json.getJSONObject("access").toAccessSummary(),
+                serverTimeMillis = json.optLong("serverTimeMillis")
             )
         }.getOrNull()
     }
@@ -36,7 +38,9 @@ class AppAccessStore(context: Context, suffix: String = "") {
             put("leaseExpiresAt", value.leaseExpiresAt)
             put("releaseGrant", value.releaseGrant)
             put("access", value.access.toJson())
+            put("serverTimeMillis", value.serverTimeMillis)
         }.toString()).apply()
+        if (value.serverTimeMillis > 0L) recordTrustedTime(value.serverTimeMillis)
     }
 
     fun clear() { prefs.edit().remove(KEY_AUTHORIZATION).apply() }
@@ -84,7 +88,55 @@ class AppAccessStore(context: Context, suffix: String = "") {
 
     fun clearPendingOrder() { prefs.edit().remove(KEY_ORDER).apply() }
 
-    private companion object { const val KEY_AUTHORIZATION = "authorization"; const val KEY_ORDER = "pending_order"; const val KEY_RELEASE = "pending_release"; const val KEY_CLAIM = "claim_idempotency"; const val KEY_ORDER_CREATE = "order_idempotency" }
+    /**
+     * Returns a wall-clock estimate anchored to a server response and elapsed realtime. A clock
+     * rollback larger than the tolerance fails closed instead of extending an offline lease.
+     */
+    fun trustedNowMillis(): Long? {
+        val anchor = prefs.getLong(KEY_TRUSTED_TIME, 0L)
+        val anchorElapsed = prefs.getLong(KEY_TRUSTED_ELAPSED, -1L)
+        val wall = System.currentTimeMillis()
+        if (anchor <= 0L || anchorElapsed < 0L) return wall
+        val elapsed = SystemClock.elapsedRealtime()
+        return trustedTimeDecision(anchor, anchorElapsed, wall, elapsed)
+    }
+
+    fun recordTrustedTime(value: Long) {
+        if (value <= 0L) return
+        val hasAnchor = prefs.getLong(KEY_TRUSTED_TIME, 0L) > 0L
+        val previous = if (hasAnchor) trustedNowMillis() ?: return else value
+        prefs.edit()
+            .putLong(KEY_TRUSTED_TIME, maxOf(value, previous))
+            .putLong(KEY_TRUSTED_ELAPSED, SystemClock.elapsedRealtime())
+            .apply()
+    }
+
+    private companion object {
+        const val KEY_AUTHORIZATION = "authorization"
+        const val KEY_ORDER = "pending_order"
+        const val KEY_RELEASE = "pending_release"
+        const val KEY_CLAIM = "claim_idempotency"
+        const val KEY_ORDER_CREATE = "order_idempotency"
+        const val KEY_TRUSTED_TIME = "trusted_time"
+        const val KEY_TRUSTED_ELAPSED = "trusted_elapsed"
+        const val CLOCK_ROLLBACK_TOLERANCE_MILLIS = 5 * 60 * 1000L
+    }
+}
+
+internal fun trustedTimeDecision(
+    anchorMillis: Long,
+    anchorElapsedMillis: Long,
+    wallMillis: Long,
+    elapsedMillis: Long,
+    rollbackToleranceMillis: Long = 5 * 60 * 1000L
+): Long? {
+    val estimated = if (elapsedMillis >= anchorElapsedMillis) {
+        anchorMillis + (elapsedMillis - anchorElapsedMillis)
+    } else {
+        anchorMillis
+    }
+    if (wallMillis + rollbackToleranceMillis < estimated) return null
+    return maxOf(wallMillis, estimated)
 }
 
 internal fun JSONObject.toAccessSummary() = AppAccessSummary(

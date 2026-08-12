@@ -23,10 +23,6 @@ class PhoneAccountRepository(
         sessionStore.load()
     }
 
-    suspend fun requestPhoneOtp(phone: String) {
-        accountClient.requestPhoneOtp(phone)
-    }
-
     suspend fun startLogin(phone: String): LoginProgress = accountClient.startLogin(phone)
 
     suspend fun loginWithPasswordFactor(transactionId: String, password: String): LoginProgress {
@@ -54,27 +50,15 @@ class PhoneAccountRepository(
         }
     }
 
-    suspend fun verifyPhoneOtp(phone: String, otp: String): PhoneAccountSession {
-        return accountClient.verifyPhoneOtp(phone, otp).also { session ->
-            sessionStore.save(session)
+    suspend fun updatePassword(password: String, verificationToken: String) {
+        val current = requireSession()
+        try {
+            accountClient.updatePassword(current, password, verificationToken)
+        } finally {
+            // The backend revokes all opaque sessions before attempting the
+            // upstream credential update, including on an upstream failure.
+            sessionStore.clear()
         }
-    }
-
-    suspend fun loginWithPassword(phone: String, password: String): PasswordLoginResult {
-        return when (val result = accountClient.loginWithPassword(phone, password)) {
-            is PasswordLoginResult.Complete -> result.also { sessionStore.save(it.session) }
-            is PasswordLoginResult.TotpRequired -> result
-        }
-    }
-
-    suspend fun completePasswordTotp(
-        pending: PendingPasswordLogin,
-        code: String
-    ): PhoneAccountSession = accountClient.completePasswordTotp(pending, code)
-        .also { sessionStore.save(it) }
-
-    suspend fun updatePassword(password: String) {
-        accountClient.updatePassword(requireSession(), password)
     }
 
     suspend fun listTotpFactors(): List<TotpFactor> =
@@ -112,6 +96,9 @@ class PhoneAccountRepository(
 
     suspend fun startSecurityVerification(): LoginProgress =
         accountClient.startSecurityVerification(requireSession())
+
+    suspend fun startPasswordSecurityVerification(): LoginProgress =
+        accountClient.startPasswordSecurityVerification(requireSession())
 
     suspend fun startPasskeyRegistration(): PasskeyOptions {
         val session = session.value ?: error("请先使用手机号验证码登录")
@@ -165,6 +152,19 @@ class PhoneAccountRepository(
     }
 
     suspend fun logout() {
+        val current = session.value
+        if (current != null && !current.isExpired) {
+            val queued = runCatching { sessionStore.queueRevocation(current) }.isSuccess
+            val revoked = runCatching { accountClient.logout(current) }.isSuccess
+            check(revoked || queued) { "无法安全退出，请检查网络后重试" }
+            if (revoked) {
+                if (queued) {
+                    sessionStore.clearPendingRevocation()
+                }
+            } else {
+                sessionStore.schedulePendingRevocation()
+            }
+        }
         sessionStore.clear()
     }
 

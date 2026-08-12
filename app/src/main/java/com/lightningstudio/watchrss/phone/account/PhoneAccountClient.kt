@@ -90,40 +90,36 @@ class PhoneAccountClient(
             ).use { parseLoginProgress(it.jsonBody()) }
         }
 
-    suspend fun loginWithPassword(phone: String, password: String): PasswordLoginResult = withContext(Dispatchers.IO) {
-        requireConfigured()
-        require(password.length in 10..128) { "密码长度必须为 10–128 位" }
-        val normalizedPhone = normalizeAccountPhone(phone)
-        val url = authUrl("token").newBuilder().addQueryParameter("grant_type", "password").build()
-        val response = authRequest(url, bearerToken = null)
-            .post(JSONObject().apply {
-                put("phone", normalizedPhone)
-                put("password", password)
-            }.toString().toRequestBody(JSON_MEDIA_TYPE))
-            .build()
-            .let(::execute)
-        val session = response.use { parseSupabaseSession(it.jsonBody(), normalizedPhone) }
-        val factor = listTotpFactors(session).firstOrNull { it.verified }
-        if (factor == null) {
-            PasswordLoginResult.Complete(activatePasswordSession(session))
-        } else {
-            PasswordLoginResult.TotpRequired(PendingPasswordLogin(session, factor.id))
+    suspend fun startPasswordSecurityVerification(session: PhoneAccountSession): LoginProgress =
+        withContext(Dispatchers.IO) {
+            post(
+                path = "/functions/v1/account/security/password/start",
+                body = JSONObject(),
+                bearerToken = session.accessToken
+            ).use { parseLoginProgress(it.jsonBody()) }
         }
+
+    suspend fun logout(session: PhoneAccountSession) = withContext(Dispatchers.IO) {
+        post(
+            path = "/functions/v1/account/logout",
+            body = JSONObject(),
+            bearerToken = session.accessToken
+        ).close()
     }
 
-    suspend fun completePasswordTotp(
-        pending: PendingPasswordLogin,
-        code: String
-    ): PhoneAccountSession = withContext(Dispatchers.IO) {
-        val upgraded = verifyTotp(pending.session, pending.factorId, code)
-        activatePasswordSession(upgraded)
-    }
-
-    suspend fun updatePassword(session: PhoneAccountSession, password: String) = withContext(Dispatchers.IO) {
+    suspend fun updatePassword(
+        session: PhoneAccountSession,
+        password: String,
+        verificationToken: String
+    ) = withContext(Dispatchers.IO) {
         require(password.length in 10..128) { "密码长度必须为 10–128 位" }
+        require(verificationToken.isNotBlank()) { "请先重新验证身份" }
         backendPut(
             path = "/functions/v1/account/password",
-            body = JSONObject().apply { put("password", password) },
+            body = JSONObject().apply {
+                put("password", password)
+                put("verificationToken", verificationToken)
+            },
             bearerToken = session.accessToken
         ).close()
     }
@@ -168,51 +164,6 @@ class PhoneAccountClient(
             session.accessToken
         ).close()
     }
-    suspend fun requestPhoneOtp(phone: String) = withContext(Dispatchers.IO) {
-        requireConfigured()
-        val body = JSONObject().apply {
-            put("phone", normalizeAccountPhone(phone))
-            put("create_user", true)
-        }
-        post(
-            path = "/functions/v1/account/login/phone/request",
-            body = body,
-            bearerToken = null
-        ).close()
-    }
-
-    suspend fun verifyPhoneOtp(phone: String, otp: String): PhoneAccountSession = withContext(Dispatchers.IO) {
-        requireConfigured()
-        val normalizedPhone = normalizeAccountPhone(phone)
-        val body = JSONObject().apply {
-            put("phone", normalizedPhone)
-            put("otp", otp.trim())
-            put("licenseDeviceId", licenseIdentity.deviceId)
-            put("devicePublicKey", licenseIdentity.publicKeyPem)
-        }
-        post(
-            path = "/functions/v1/account/login/phone/verify",
-            body = body,
-            bearerToken = null
-        ).use { response ->
-            val json = response.jsonBody()
-            val accessToken = json.optString("access_token").trim()
-            val refreshToken = json.optString("refresh_token").trim()
-            val expiresInSeconds = json.optLong("expires_in", 3600L)
-            val user = json.optJSONObject("user") ?: JSONObject()
-            val userId = user.optString("id").trim()
-            require(accessToken.isNotBlank() && userId.isNotBlank()) { "登录响应缺少账号信息" }
-            PhoneAccountSession(
-                userId = userId,
-                phoneMasked = maskPhone(user.optString("phone").ifBlank { normalizedPhone }),
-                accessToken = accessToken,
-                refreshToken = refreshToken,
-                expiresAtMillis = System.currentTimeMillis() + expiresInSeconds * 1000L,
-                activationProof = json.optString("activationProof")
-            )
-        }
-    }
-
     suspend fun startPasskeyRegistration(
         session: PhoneAccountSession
     ): PasskeyOptions = withContext(Dispatchers.IO) {
@@ -401,62 +352,6 @@ class PhoneAccountClient(
         return execute(request)
     }
 
-    private fun authUrl(path: String): HttpUrl = environment.backendBaseUrl.toHttpUrl().newBuilder()
-        .addPathSegments("auth/v1")
-        .addPathSegments(path)
-        .build()
-
-    private fun authRequest(url: HttpUrl, bearerToken: String?): Request.Builder = Request.Builder()
-        .url(url)
-        .addHeader("apikey", environment.supabaseAnonKey)
-        .addHeader("content-type", JSON_MEDIA_TYPE.toString())
-        .apply { if (!bearerToken.isNullOrBlank()) addHeader("authorization", "Bearer $bearerToken") }
-
-    private fun verifyTotp(
-        session: PhoneAccountSession,
-        factorId: String,
-        code: String
-    ): PhoneAccountSession {
-        require(code.matches(Regex("\\d{6}"))) { "请输入 6 位动态验证码" }
-        val factorUrl = authUrl("factors").newBuilder().addPathSegment(factorId).build()
-        val challengeId = authRequest(factorUrl.newBuilder().addPathSegment("challenge").build(), session.accessToken)
-            .post("{}".toRequestBody(JSON_MEDIA_TYPE)).build().let(::execute).use {
-                it.jsonBody().getString("id")
-            }
-        return authRequest(factorUrl.newBuilder().addPathSegment("verify").build(), session.accessToken)
-            .post(JSONObject().apply {
-                put("challenge_id", challengeId)
-                put("code", code)
-            }.toString().toRequestBody(JSON_MEDIA_TYPE))
-            .build().let(::execute).use { parseSupabaseSession(it.jsonBody(), session.phoneMasked) }
-    }
-
-    private fun activatePasswordSession(session: PhoneAccountSession): PhoneAccountSession {
-        val proof = post(
-            path = "/functions/v1/account/login/password/activate",
-            body = JSONObject().apply {
-                put("licenseDeviceId", licenseIdentity.deviceId)
-                put("devicePublicKey", licenseIdentity.publicKeyPem)
-            },
-            bearerToken = session.accessToken
-        ).use { it.jsonBody().getString("activationProof") }
-        return session.copy(activationProof = proof, updatedAtMillis = System.currentTimeMillis())
-    }
-
-    private fun parseSupabaseSession(json: JSONObject, fallbackPhone: String): PhoneAccountSession {
-        val user = json.optJSONObject("user") ?: JSONObject()
-        val userId = user.optString("id").trim()
-        val accessToken = json.optString("access_token").trim()
-        require(userId.isNotBlank() && accessToken.isNotBlank()) { "登录响应缺少账号信息" }
-        return PhoneAccountSession(
-            userId = userId,
-            phoneMasked = maskPhone(user.optString("phone").ifBlank { fallbackPhone }),
-            accessToken = accessToken,
-            refreshToken = json.optString("refresh_token"),
-            expiresAtMillis = System.currentTimeMillis() + json.optLong("expires_in", 3600L) * 1000L
-        )
-    }
-
     private fun get(path: String, bearerToken: String?): okhttp3.Response {
         val request = Request.Builder()
             .url(environment.backendBaseUrl + path)
@@ -623,6 +518,17 @@ class PhoneAccountClient(
 
     suspend fun claimAppAccess(session: PhoneAccountSession, idempotencyKey: String): AppAuthorization = withContext(Dispatchers.IO) {
         require(session.activationProof.isNotBlank()) { "请重新完成短信或 Passkey 登录" }
+        val requestHash = devicePossessionRequestHash(
+            session.activationProof,
+            licenseIdentity.deviceId,
+            licenseIdentity.publicKeyPem,
+            idempotencyKey.trim()
+        )
+        val possession = possessionProof(
+            purpose = "claim",
+            requestHash = requestHash,
+            bearerToken = session.accessToken
+        )
         post(
             path = "/functions/v1/account/phone-authorizations/claim",
             body = JSONObject().apply {
@@ -630,28 +536,78 @@ class PhoneAccountClient(
                 put("licenseDeviceId", licenseIdentity.deviceId)
                 put("devicePublicKey", licenseIdentity.publicKeyPem)
                 put("idempotencyKey", idempotencyKey)
+                put("possession", possession.toJson())
             },
             bearerToken = session.accessToken
         ).use { parseAuthorization(it.jsonBody()) }
     }
 
     suspend fun refreshAppAccess(session: PhoneAccountSession, current: AppAuthorization): AppAuthorization = withContext(Dispatchers.IO) {
+        val possession = possessionProof(
+            "refresh",
+            devicePossessionRequestHash(
+                licenseIdentity.deviceId,
+                "",
+                sha256Hex(current.deviceAccessToken)
+            ),
+            bearerToken = session.accessToken,
+            deviceToken = current.deviceAccessToken
+        )
         postWithDeviceToken(
             path = "/functions/v1/account/app-access/refresh",
-            body = JSONObject().apply { put("licenseDeviceId", licenseIdentity.deviceId) },
+            body = JSONObject().apply {
+                put("licenseDeviceId", licenseIdentity.deviceId)
+                put("possession", possession.toJson())
+            },
             bearerToken = session.accessToken,
             deviceToken = current.deviceAccessToken
         ).use { parseAuthorization(it.jsonBody()) }
     }
 
     suspend fun releaseAppAccess(session: PhoneAccountSession, current: AppAuthorization): Boolean = withContext(Dispatchers.IO) {
+        val possession = possessionProof(
+            "release",
+            devicePossessionRequestHash(
+                licenseIdentity.deviceId,
+                "",
+                sha256Hex(current.deviceAccessToken)
+            ),
+            bearerToken = session.accessToken,
+            deviceToken = current.deviceAccessToken
+        )
         postWithDeviceToken(
             path = "/functions/v1/account/phone-authorizations/release",
-            body = JSONObject().apply { put("licenseDeviceId", licenseIdentity.deviceId) },
+            body = JSONObject().apply {
+                put("licenseDeviceId", licenseIdentity.deviceId)
+                put("possession", possession.toJson())
+            },
             bearerToken = session.accessToken,
             deviceToken = current.deviceAccessToken
         ).use { it.jsonBody().optBoolean("released") }
     }
+
+    suspend fun releasePendingAppAccess(deviceId: String, releaseGrant: String): Boolean =
+        withContext(Dispatchers.IO) {
+            require(deviceId == licenseIdentity.deviceId) { "待释放设备与本机身份不一致" }
+            val possession = possessionProof(
+                "release",
+                devicePossessionRequestHash(
+                    deviceId,
+                    releaseGrant,
+                    sha256Hex(releaseGrant)
+                ),
+                releaseGrant = releaseGrant
+            )
+            post(
+                path = "/functions/v1/account/phone-authorizations/release",
+                body = JSONObject().apply {
+                    put("licenseDeviceId", deviceId)
+                    put("releaseGrant", releaseGrant)
+                    put("possession", possession.toJson())
+                },
+                bearerToken = null
+            ).use { it.jsonBody().optBoolean("released") }
+        }
 
     suspend fun createPaymentOrder(session: PhoneAccountSession, idempotencyKey: String): AppPaymentOrder = withContext(Dispatchers.IO) {
         post(
@@ -679,8 +635,48 @@ class PhoneAccountClient(
         deviceAccessToken = json.getString("deviceAccessToken"),
         deviceAccessTokenExpiresAt = json.getLong("deviceAccessTokenExpiresAt"),
         lease = json.getString("lease"), leaseExpiresAt = json.getLong("leaseExpiresAt"),
-        releaseGrant = json.optString("releaseGrant"), access = json.getJSONObject("access").toAccessSummary()
+        releaseGrant = json.optString("releaseGrant"), access = json.getJSONObject("access").toAccessSummary(),
+        serverTimeMillis = json.getLong("serverTime")
     )
+
+    private fun possessionProof(
+        purpose: String,
+        requestHash: String,
+        bearerToken: String? = null,
+        deviceToken: String? = null,
+        releaseGrant: String = ""
+    ): DevicePossessionProof {
+        val body = JSONObject().apply {
+            put("purpose", purpose)
+            put("licenseDeviceId", licenseIdentity.deviceId)
+            if (releaseGrant.isNotBlank()) put("releaseGrant", releaseGrant)
+        }
+        val response = if (deviceToken != null) {
+            require(!bearerToken.isNullOrBlank()) { "设备 challenge 缺少账号会话" }
+            postWithDeviceToken(
+                path = "/functions/v1/account/phone-authorizations/challenge",
+                body = body,
+                bearerToken = bearerToken,
+                deviceToken = deviceToken
+            )
+        } else {
+            post(
+                path = "/functions/v1/account/phone-authorizations/challenge",
+                body = body,
+                bearerToken = bearerToken
+            )
+        }
+        val challenge = response.use { response ->
+            val json = response.jsonBody()
+            DevicePossessionChallenge(
+                challengeId = json.getString("challengeId"),
+                nonce = json.getString("nonce"),
+                expiresAtMillis = json.getLong("expiresAt")
+            )
+        }
+        require(challenge.expiresAtMillis > System.currentTimeMillis()) { "设备签名挑战已过期" }
+        return licenseIdentity.possessionProof(purpose, challenge, requestHash)
+    }
 
     private fun JSONArray?.toStringList(): List<String> {
         if (this == null) return emptyList()
@@ -714,6 +710,12 @@ internal fun parseAccountSecurityStatus(json: JSONObject): AccountSecurityStatus
         twoFactorEnabled = json.optBoolean("twoFactorEnabled", false),
         availableMethods = json.optJSONArray("availableMethods").toStringSet()
     )
+
+private fun DevicePossessionProof.toJson() = JSONObject().apply {
+    put("challengeId", challengeId)
+    put("nonce", nonce)
+    put("signature", signature)
+}
 
 private fun JSONArray?.toStringSet(): Set<String> {
     if (this == null) return emptySet()

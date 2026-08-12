@@ -11,6 +11,8 @@ import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.Signature
 import java.security.spec.ECGenParameterSpec
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
 
 class LicenseDeviceIdentity(context: Context) {
     private val appContext = context.applicationContext
@@ -45,6 +47,25 @@ class LicenseDeviceIdentity(context: Context) {
         return Base64.encodeToString(signature.sign(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
     }
 
+    internal fun possessionProof(
+        purpose: String,
+        challenge: DevicePossessionChallenge,
+        requestHash: String
+    ): DevicePossessionProof {
+        val message = devicePossessionMessage(
+            purpose = purpose,
+            challengeId = challenge.challengeId,
+            nonce = challenge.nonce,
+            licenseDeviceId = deviceId,
+            requestHash = requestHash
+        )
+        return DevicePossessionProof(
+            challengeId = challenge.challengeId,
+            nonce = challenge.nonce,
+            signature = sign(message.toByteArray(StandardCharsets.UTF_8))
+        )
+    }
+
     private fun keyPair(): java.security.KeyPair {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         val certificate = keyStore.getCertificate(KEY_ALIAS)
@@ -66,3 +87,38 @@ class LicenseDeviceIdentity(context: Context) {
 
     private companion object { const val KEY_ALIAS = "watchrss_phone_license_device_v1" }
 }
+
+internal data class DevicePossessionChallenge(
+    val challengeId: String,
+    val nonce: String,
+    val expiresAtMillis: Long
+)
+
+internal data class DevicePossessionProof(
+    val challengeId: String,
+    val nonce: String,
+    val signature: String
+)
+
+internal fun devicePossessionMessage(
+    purpose: String,
+    challengeId: String,
+    nonce: String,
+    licenseDeviceId: String,
+    requestHash: String
+): String = "watchrss-device-possession-v1\n$purpose\n$challengeId\n$nonce\n$licenseDeviceId\n$requestHash"
+
+internal fun devicePossessionRequestHash(vararg fields: String): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    fields.forEach { field ->
+        val bytes = field.toByteArray(StandardCharsets.UTF_8)
+        digest.update(ByteBuffer.allocate(Long.SIZE_BYTES).putLong(bytes.size.toLong()).array())
+        digest.update(bytes)
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+}
+
+internal fun sha256Hex(value: String): String =
+    MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(StandardCharsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }

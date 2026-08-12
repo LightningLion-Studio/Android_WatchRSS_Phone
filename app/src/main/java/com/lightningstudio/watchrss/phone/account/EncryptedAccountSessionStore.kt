@@ -47,6 +47,30 @@ class EncryptedAccountSessionStore(
         _session.value = null
     }
 
+    suspend fun queueRevocation(session: PhoneAccountSession) = withContext(Dispatchers.IO) {
+        withPrefs { prefs ->
+            val existing = prefs.getString(KEY_PENDING_REVOCATION, null)?.let(::decodeSession)
+            check(existing == null || existing.accessToken == session.accessToken) {
+                "已有待撤销会话"
+            }
+            prefs.edit().putString(KEY_PENDING_REVOCATION, encodeSession(session)).commit()
+        }.also { saved -> check(saved) { "退出登录撤销任务保存失败" } }
+    }
+
+    suspend fun pendingRevocation(): PhoneAccountSession? = withContext(Dispatchers.IO) {
+        withPrefs { prefs ->
+            prefs.getString(KEY_PENDING_REVOCATION, null)?.let(::decodeSession)
+        }
+    }
+
+    suspend fun clearPendingRevocation() = withContext(Dispatchers.IO) {
+        withPrefs { prefs -> prefs.edit().remove(KEY_PENDING_REVOCATION).apply() }
+    }
+
+    fun schedulePendingRevocation() {
+        SessionRevocationWorker.schedule(appContext)
+    }
+
     private suspend fun <T> withPrefs(block: (SharedPreferences) -> T): T {
         return mutex.withLock {
             try {
@@ -133,6 +157,7 @@ class EncryptedAccountSessionStore(
     private companion object {
         private const val TAG = "WatchRSSAccountStore"
         private const val KEY_SESSION = "session_json"
+        private const val KEY_PENDING_REVOCATION = "pending_revocation_json"
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
     }
 }

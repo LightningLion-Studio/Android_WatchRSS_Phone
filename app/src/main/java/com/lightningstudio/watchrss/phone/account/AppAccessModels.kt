@@ -14,7 +14,8 @@ data class AppAuthorization(
     val lease: String,
     val leaseExpiresAt: Long,
     val releaseGrant: String,
-    val access: AppAccessSummary
+    val access: AppAccessSummary,
+    val serverTimeMillis: Long = 0L
 )
 
 data class AppPaymentOrder(

@@ -200,6 +200,11 @@ private enum class LoginMethod(val label: String, val supportingText: String, va
     PASSKEY("通行密钥", "使用指纹、人脸或设备屏幕锁。", "passkey")
 }
 
+private enum class SecurityVerificationPurpose {
+    DISABLE_TWO_FACTOR,
+    UPDATE_PASSWORD
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun AccountScreen(
@@ -270,6 +275,8 @@ internal fun AccountScreen(
     var securityVerificationProgress by remember { mutableStateOf<LoginProgress?>(null) }
     var securityVerificationInput by remember { mutableStateOf("") }
     var securityVerificationError by remember { mutableStateOf<String?>(null) }
+    var securityVerificationPurpose by remember { mutableStateOf<SecurityVerificationPurpose?>(null) }
+    var passwordVerificationToken by remember { mutableStateOf<String?>(null) }
     val canManageTotp = session != null
 
     LaunchedEffect(session?.userId) {
@@ -348,14 +355,36 @@ internal fun AccountScreen(
         message = "两步验证已开启，请重新登录"
     }
 
-    suspend fun finishDisableTwoFactor(progress: LoginProgress) {
-        val token = progress.verificationToken ?: error("安全验证未完成")
-        securityStatus = accountRepository.setTwoFactorEnabled(false, token)
+    suspend fun finishSecurityVerification(progress: LoginProgress) {
+        val token = progress.verificationToken
+        if (token == null) {
+            securityVerificationProgress = progress
+            securityVerificationMethod = null
+            securityVerificationInput = ""
+            showDisableMethodDialog = true
+            message = "还需要一种不同的验证方式"
+            return
+        }
+        when (securityVerificationPurpose) {
+            SecurityVerificationPurpose.DISABLE_TWO_FACTOR -> {
+                securityStatus = accountRepository.setTwoFactorEnabled(false, token)
+                message = "两步验证已关闭"
+            }
+            SecurityVerificationPurpose.UPDATE_PASSWORD -> {
+                passwordVerificationToken = token
+                newPassword = ""
+                confirmPassword = ""
+                newPasswordVisible = false
+                confirmPasswordVisible = false
+                passwordDialogError = null
+                showPasswordDialog = true
+            }
+            null -> error("安全验证用途缺失")
+        }
         showDisableMethodDialog = false
         securityVerificationMethod = null
         securityVerificationProgress = null
         securityVerificationInput = ""
-        message = "两步验证已关闭"
     }
 
     val accountControls: @Composable ColumnScope.(() -> Unit) -> Unit = { onCloudSyncClick ->
@@ -676,12 +705,12 @@ internal fun AccountScreen(
             Text("密码与账号安全", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
             OutlinedButton(
                 onClick = {
-                    newPassword = ""
-                    confirmPassword = ""
-                    newPasswordVisible = false
-                    confirmPasswordVisible = false
-                    passwordDialogError = null
-                    showPasswordDialog = true
+                    securityVerificationPurpose = SecurityVerificationPurpose.UPDATE_PASSWORD
+                    securityVerificationProgress = null
+                    securityVerificationMethod = null
+                    securityVerificationError = null
+                    passwordVerificationToken = null
+                    showDisableMethodDialog = true
                 },
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth()
@@ -717,6 +746,9 @@ internal fun AccountScreen(
                                 busy = false
                             }
                         } else {
+                            securityVerificationPurpose = SecurityVerificationPurpose.DISABLE_TWO_FACTOR
+                            securityVerificationProgress = null
+                            securityVerificationMethod = null
                             showDisableMethodDialog = true
                             securityVerificationError = null
                         }
@@ -863,10 +895,12 @@ internal fun AccountScreen(
                                 showAddMethodDialog = false
                                 when (method) {
                                     LoginMethod.PASSWORD -> {
-                                        newPassword = ""
-                                        confirmPassword = ""
-                                        passwordDialogError = null
-                                        showPasswordDialog = true
+                                        securityVerificationPurpose = SecurityVerificationPurpose.UPDATE_PASSWORD
+                                        securityVerificationProgress = null
+                                        securityVerificationMethod = null
+                                        securityVerificationError = null
+                                        passwordVerificationToken = null
+                                        showDisableMethodDialog = true
                                     }
                                     LoginMethod.TOTP -> runAction {
                                         busy = true
@@ -914,15 +948,32 @@ internal fun AccountScreen(
     }
 
     if (showDisableMethodDialog) {
+        val purpose = securityVerificationPurpose
+        val completedFactors = securityVerificationProgress?.completedFactors.orEmpty()
         val methods = LoginMethod.entries.filter {
-            it.factorName in (securityStatus?.availableMethods ?: emptySet())
+            it.factorName in (securityStatus?.availableMethods ?: emptySet()) &&
+                it.factorName !in completedFactors
         }
         AlertDialog(
             onDismissRequest = { if (!busy) showDisableMethodDialog = false },
-            title = { Text("关闭两步验证") },
+            title = {
+                Text(
+                    if (purpose == SecurityVerificationPurpose.UPDATE_PASSWORD) {
+                        "修改密码前验证身份"
+                    } else {
+                        "关闭两步验证"
+                    }
+                )
+            },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("请选择一种方式重新验证身份。")
+                    Text(
+                        if (completedFactors.isEmpty()) {
+                            "请选择一种方式重新验证身份。"
+                        } else {
+                            "账号启用了两步验证，请再使用一种不同的方式。"
+                        }
+                    )
                     methods.forEach { method ->
                         OutlinedButton(
                             onClick = {
@@ -930,9 +981,15 @@ internal fun AccountScreen(
                                     busy = true
                                     securityVerificationError = null
                                     runCatching {
-                                        val progress = accountRepository.startSecurityVerification()
+                                        val progress = securityVerificationProgress ?: when (purpose) {
+                                            SecurityVerificationPurpose.UPDATE_PASSWORD ->
+                                                accountRepository.startPasswordSecurityVerification()
+                                            SecurityVerificationPurpose.DISABLE_TWO_FACTOR ->
+                                                accountRepository.startSecurityVerification()
+                                            null -> error("安全验证用途缺失")
+                                        }
                                         if (method == LoginMethod.PASSKEY) {
-                                            finishDisableTwoFactor(
+                                            finishSecurityVerification(
                                                 loginWithPasskey("", progress.transactionId)
                                             )
                                         } else {
@@ -1033,7 +1090,7 @@ internal fun AccountScreen(
                                     )
                                     LoginMethod.PASSKEY -> error("Passkey 使用系统验证")
                                 }
-                                finishDisableTwoFactor(completed)
+                                finishSecurityVerification(completed)
                             }.onFailure {
                                 securityVerificationError = accountSecurityErrorMessage(
                                     it,
@@ -1048,7 +1105,15 @@ internal fun AccountScreen(
                     } else {
                         securityVerificationInput.length >= 10
                     }
-                ) { Text("验证并关闭") }
+                ) {
+                    Text(
+                        if (securityVerificationPurpose == SecurityVerificationPurpose.UPDATE_PASSWORD) {
+                            "继续"
+                        } else {
+                            "验证并关闭"
+                        }
+                    )
+                }
             },
             dismissButton = {
                 TextButton(
@@ -1128,10 +1193,13 @@ internal fun AccountScreen(
                             busy = true
                             passwordDialogError = null
                             runCatching {
-                                accountRepository.updatePassword(newPassword)
+                                val verificationToken = passwordVerificationToken
+                                    ?: error("请先重新验证身份")
+                                accountRepository.updatePassword(newPassword, verificationToken)
+                                passwordVerificationToken = null
                                 showPasswordDialog = false
-                                message = "密码已更新"
-                                refreshSecurityAndMaybeEnable()
+                                pendingAutoEnableTwoFactor = false
+                                message = "密码已更新，所有设备需要重新登录"
                             }
                                 .onFailure { passwordDialogError = it.message ?: "密码更新失败" }
                             busy = false

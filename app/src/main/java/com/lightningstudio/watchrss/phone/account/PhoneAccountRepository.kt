@@ -100,6 +100,9 @@ class PhoneAccountRepository(
     suspend fun startPasswordSecurityVerification(): LoginProgress =
         accountClient.startPasswordSecurityVerification(requireSession())
 
+    suspend fun startActionSecurityVerification(action: String): LoginProgress =
+        accountClient.startActionSecurityVerification(requireSession(), action)
+
     suspend fun startPasskeyRegistration(): PasskeyOptions {
         val session = session.value ?: error("请先使用手机号验证码登录")
         require(!session.isExpired) { "登录已过期，请重新登录" }
@@ -196,6 +199,26 @@ class PhoneAccountRepository(
 
     suspend fun paymentOrder(orderId: String): AppPaymentOrder =
         accountClient.paymentOrder(requireSession(), orderId)
+
+    suspend fun paymentOrders(): List<AppPaymentOrder> =
+        accountClient.paymentOrders(requireSession())
+
+    suspend fun refundPaymentOrder(
+        orderId: String,
+        verificationToken: String,
+        idempotencyKey: String
+    ): AppPaymentOrder = accountClient.refundPaymentOrder(
+        requireSession(),
+        orderId,
+        verificationToken,
+        idempotencyKey
+    )
+
+    suspend fun deleteAccount(verificationToken: String): AccountDeletionResult {
+        val result = accountClient.deleteAccount(requireSession(), verificationToken)
+        sessionStore.clear()
+        return result
+    }
 
     private fun requireSession(): PhoneAccountSession {
         val current = session.value ?: error("请先登录")

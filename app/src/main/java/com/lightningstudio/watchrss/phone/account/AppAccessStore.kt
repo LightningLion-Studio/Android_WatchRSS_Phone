@@ -151,7 +151,11 @@ internal fun AppAccessSummary.toJson() = JSONObject().apply {
 
 internal fun JSONObject.toPaymentOrder() = AppPaymentOrder(
     orderId = getString("orderId"), merchantOrderId = optString("merchantOrderId"), amountFen = optInt("amountFen"),
-    status = optString("status"), paymentUrl = optString("paymentUrl").takeIf { it.isNotBlank() }
+    status = optString("status"), paymentUrl = optString("paymentUrl").takeIf { it.isNotBlank() },
+    paidAtMillis = optLong("paidAt").takeIf { it > 0L },
+    refundedAtMillis = optLong("refundedAt").takeIf { it > 0L },
+    refundEligibleUntilMillis = optLong("refundEligibleUntil").takeIf { it > 0L },
+    refundable = optBoolean("refundable", false)
 )
 
 internal fun JSONObject.toPaymentOrderForUser(userId: String): AppPaymentOrder? =

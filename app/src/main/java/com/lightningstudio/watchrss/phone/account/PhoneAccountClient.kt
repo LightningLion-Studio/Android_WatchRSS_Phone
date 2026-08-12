@@ -100,6 +100,18 @@ class PhoneAccountClient(
             ).use { parseLoginProgress(it.jsonBody()) }
         }
 
+    suspend fun startActionSecurityVerification(
+        session: PhoneAccountSession,
+        action: String
+    ): LoginProgress = withContext(Dispatchers.IO) {
+        require(action in setOf("refund-order", "delete-account")) { "不支持的安全验证用途" }
+        post(
+            path = "/functions/v1/account/security-verification/$action/start",
+            body = JSONObject(),
+            bearerToken = session.accessToken
+        ).use { parseLoginProgress(it.jsonBody()) }
+    }
+
     suspend fun logout(session: PhoneAccountSession) = withContext(Dispatchers.IO) {
         post(
             path = "/functions/v1/account/logout",
@@ -614,13 +626,65 @@ class PhoneAccountClient(
     suspend fun createPaymentOrder(session: PhoneAccountSession, idempotencyKey: String): AppPaymentOrder = withContext(Dispatchers.IO) {
         post(
             path = "/functions/v1/payments/xunhupay/orders",
-            body = JSONObject().apply { put("idempotencyKey", idempotencyKey) },
+            body = JSONObject().apply {
+                put("idempotencyKey", idempotencyKey)
+                put("agreementVersion", 1)
+            },
             bearerToken = session.accessToken
         ).use { it.jsonBody().toPaymentOrder() }
     }
 
     suspend fun paymentOrder(session: PhoneAccountSession, orderId: String): AppPaymentOrder = withContext(Dispatchers.IO) {
         get("/functions/v1/payments/orders/$orderId", session.accessToken).use { it.jsonBody().toPaymentOrder() }
+    }
+
+    suspend fun paymentOrders(session: PhoneAccountSession): List<AppPaymentOrder> = withContext(Dispatchers.IO) {
+        get("/functions/v1/payments/orders", session.accessToken).use { response ->
+            val items = response.jsonBody().optJSONArray("orders") ?: JSONArray()
+            buildList {
+                for (index in 0 until items.length()) {
+                    items.optJSONObject(index)?.let { add(it.toPaymentOrder()) }
+                }
+            }
+        }
+    }
+
+    suspend fun refundPaymentOrder(
+        session: PhoneAccountSession,
+        orderId: String,
+        verificationToken: String,
+        idempotencyKey: String
+    ): AppPaymentOrder = withContext(Dispatchers.IO) {
+        post(
+            path = "/functions/v1/payments/orders/$orderId/refund",
+            body = JSONObject().apply {
+                put("verificationToken", verificationToken)
+                put("idempotencyKey", idempotencyKey)
+            },
+            bearerToken = session.accessToken
+        ).use { it.jsonBody().toPaymentOrder() }
+    }
+
+    suspend fun deleteAccount(
+        session: PhoneAccountSession,
+        verificationToken: String
+    ): AccountDeletionResult = withContext(Dispatchers.IO) {
+        post(
+            path = "/functions/v1/account/delete",
+            body = JSONObject().apply {
+                put("verificationToken", verificationToken)
+                put("confirmation", "DELETE")
+            },
+            bearerToken = session.accessToken
+        ).use { response ->
+            val json = response.jsonBody()
+            check(json.optBoolean("deleted")) { "服务端未确认账号删除" }
+            val ids = json.optJSONArray("retainedMerchantOrderIds")
+            AccountDeletionResult(
+                storageCleanupPending = json.optBoolean("storageCleanupPending"),
+                retainedMerchantOrderIds = ids.toStringList()
+            )
+        }
     }
 
     private fun postWithDeviceToken(path: String, body: JSONObject, bearerToken: String, deviceToken: String): okhttp3.Response {

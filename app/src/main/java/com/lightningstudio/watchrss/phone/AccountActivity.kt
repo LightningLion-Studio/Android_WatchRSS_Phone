@@ -90,8 +90,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.account.AccountLoginAction
+import com.lightningstudio.watchrss.phone.account.AccountDeletionResult
 import com.lightningstudio.watchrss.phone.account.AccountSecurityStatus
 import com.lightningstudio.watchrss.phone.account.AppAccessState
+import com.lightningstudio.watchrss.phone.account.AppPaymentOrder
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.account.PhonePasskeyCoordinator
 import com.lightningstudio.watchrss.phone.account.LoginProgress
@@ -202,7 +204,9 @@ private enum class LoginMethod(val label: String, val supportingText: String, va
 
 private enum class SecurityVerificationPurpose {
     DISABLE_TWO_FACTOR,
-    UPDATE_PASSWORD
+    UPDATE_PASSWORD,
+    REFUND_ORDER,
+    DELETE_ACCOUNT
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -277,6 +281,13 @@ internal fun AccountScreen(
     var securityVerificationError by remember { mutableStateOf<String?>(null) }
     var securityVerificationPurpose by remember { mutableStateOf<SecurityVerificationPurpose?>(null) }
     var passwordVerificationToken by remember { mutableStateOf<String?>(null) }
+    var paymentOrders by remember(session?.userId) { mutableStateOf<List<AppPaymentOrder>>(emptyList()) }
+    var paymentOrdersLoading by remember(session?.userId) { mutableStateOf(session != null) }
+    var showPaymentAgreement by remember { mutableStateOf(false) }
+    var pendingRefundOrder by remember { mutableStateOf<AppPaymentOrder?>(null) }
+    var refundVerificationToken by remember { mutableStateOf<String?>(null) }
+    var deleteVerificationToken by remember { mutableStateOf<String?>(null) }
+    var accountDeletionResult by remember { mutableStateOf<AccountDeletionResult?>(null) }
     val canManageTotp = session != null
 
     LaunchedEffect(session?.userId) {
@@ -290,6 +301,40 @@ internal fun AccountScreen(
         result.onSuccess { registeredPasskeys = it }
             .onFailure { error = it.message ?: "已有 Passkey 加载失败" }
         passkeysLoading = false
+    }
+
+    LaunchedEffect(session?.userId) {
+        if (session == null) {
+            paymentOrders = emptyList()
+            paymentOrdersLoading = false
+            return@LaunchedEffect
+        }
+        paymentOrdersLoading = true
+        runCatching { accountRepository.paymentOrders() }
+            .onSuccess { paymentOrders = it }
+            .onFailure { error = it.message ?: "订单加载失败" }
+        paymentOrdersLoading = false
+    }
+
+    LaunchedEffect(session?.userId, paymentOrders.map { it.orderId to it.status }) {
+        if (session == null || paymentOrders.none { it.status == "refund_pending" }) {
+            return@LaunchedEffect
+        }
+        repeat(120) {
+            delay(5_000)
+            val refreshed = paymentOrders.map { order ->
+                if (order.status == "refund_pending") {
+                    runCatching { accountRepository.paymentOrder(order.orderId) }.getOrDefault(order)
+                } else {
+                    order
+                }
+            }
+            paymentOrders = refreshed
+            if (refreshed.none { it.status == "refund_pending" }) {
+                accessCoordinator.reconcile()
+                return@LaunchedEffect
+            }
+        }
     }
 
     LaunchedEffect(session?.userId, canManageTotp) {
@@ -378,6 +423,12 @@ internal fun AccountScreen(
                 confirmPasswordVisible = false
                 passwordDialogError = null
                 showPasswordDialog = true
+            }
+            SecurityVerificationPurpose.REFUND_ORDER -> {
+                refundVerificationToken = token
+            }
+            SecurityVerificationPurpose.DELETE_ACCOUNT -> {
+                deleteVerificationToken = token
             }
             null -> error("安全验证用途缺失")
         }
@@ -828,6 +879,23 @@ internal fun AccountScreen(
             ) {
                 Text("退出登录")
             }
+            OutlinedButton(
+                onClick = {
+                    securityVerificationPurpose = SecurityVerificationPurpose.DELETE_ACCOUNT
+                    securityVerificationProgress = null
+                    securityVerificationMethod = null
+                    securityVerificationError = null
+                    deleteVerificationToken = null
+                    showDisableMethodDialog = true
+                },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                Text("注销账号")
+            }
         }
     }
 
@@ -958,10 +1026,12 @@ internal fun AccountScreen(
             onDismissRequest = { if (!busy) showDisableMethodDialog = false },
             title = {
                 Text(
-                    if (purpose == SecurityVerificationPurpose.UPDATE_PASSWORD) {
-                        "修改密码前验证身份"
-                    } else {
-                        "关闭两步验证"
+                    when (purpose) {
+                        SecurityVerificationPurpose.UPDATE_PASSWORD -> "修改密码前验证身份"
+                        SecurityVerificationPurpose.DISABLE_TWO_FACTOR -> "关闭两步验证"
+                        SecurityVerificationPurpose.REFUND_ORDER -> "退款前验证身份"
+                        SecurityVerificationPurpose.DELETE_ACCOUNT -> "注销账号前验证身份"
+                        null -> "验证身份"
                     }
                 )
             },
@@ -986,6 +1056,10 @@ internal fun AccountScreen(
                                                 accountRepository.startPasswordSecurityVerification()
                                             SecurityVerificationPurpose.DISABLE_TWO_FACTOR ->
                                                 accountRepository.startSecurityVerification()
+                                            SecurityVerificationPurpose.REFUND_ORDER ->
+                                                accountRepository.startActionSecurityVerification("refund-order")
+                                            SecurityVerificationPurpose.DELETE_ACCOUNT ->
+                                                accountRepository.startActionSecurityVerification("delete-account")
                                             null -> error("安全验证用途缺失")
                                         }
                                         if (method == LoginMethod.PASSKEY) {
@@ -1107,10 +1181,9 @@ internal fun AccountScreen(
                     }
                 ) {
                     Text(
-                        if (securityVerificationPurpose == SecurityVerificationPurpose.UPDATE_PASSWORD) {
-                            "继续"
-                        } else {
-                            "验证并关闭"
+                        when (securityVerificationPurpose) {
+                            SecurityVerificationPurpose.DISABLE_TWO_FACTOR -> "验证并关闭"
+                            else -> "继续"
                         }
                     )
                 }
@@ -1462,6 +1535,168 @@ internal fun AccountScreen(
         )
     }
 
+    if (showPaymentAgreement) {
+        PaidServiceAgreementDialog(
+            onOpenAgreement = {
+                context.startActivity(
+                    LegalDocumentActivity.createIntent(
+                        context,
+                        LegalDocument.PAID_SERVICE_AGREEMENT
+                    )
+                )
+            },
+            onConfirm = {
+                showPaymentAgreement = false
+                runAction {
+                    busy = true
+                    runCatching { accessCoordinator.startPayment(agreementAccepted = true) }
+                        .onSuccess { order ->
+                            order.paymentUrl?.let {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it)))
+                            }
+                        }
+                        .onFailure { error = it.message ?: "订单创建失败" }
+                    busy = false
+                }
+            },
+            onDismiss = { showPaymentAgreement = false }
+        )
+    }
+
+    val refundOrder = pendingRefundOrder
+    val refundToken = refundVerificationToken
+    if (refundOrder != null && refundToken != null) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!busy) {
+                    pendingRefundOrder = null
+                    refundVerificationToken = null
+                }
+            },
+            title = { Text("确认七天无理由退款？") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("订单 ${refundOrder.merchantOrderId} 将全额原路退回 ¥${refundOrder.amountFen / 100}。")
+                    Text("退款成功后立即减少 3 台手机容量；若设备超额，系统会自动撤销最早激活的设备。该操作不可撤销。")
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        runAction {
+                            busy = true
+                            runCatching {
+                                accountRepository.refundPaymentOrder(
+                                    refundOrder.orderId,
+                                    refundToken,
+                                    "refund-${refundOrder.orderId}"
+                                )
+                            }.onSuccess { updated ->
+                                paymentOrders = accountRepository.paymentOrders()
+                                accessCoordinator.reconcile()
+                                message = when (updated.status) {
+                                    "refunded" -> "退款成功，授权容量已回收"
+                                    "refund_pending" -> "退款申请已提交，正在等待支付渠道处理"
+                                    else -> "退款未完成，请稍后重试"
+                                }
+                                pendingRefundOrder = null
+                                refundVerificationToken = null
+                            }.onFailure { error = it.message ?: "退款失败" }
+                            busy = false
+                        }
+                    },
+                    enabled = !busy,
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    )
+                ) { Text("确认退款") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        pendingRefundOrder = null
+                        refundVerificationToken = null
+                    },
+                    enabled = !busy
+                ) { Text("取消") }
+            }
+        )
+    }
+
+    deleteVerificationToken?.let { verificationToken ->
+        val merchantIds = paymentOrders.map { it.merchantOrderId }.filter(String::isNotBlank)
+        AlertDialog(
+            onDismissRequest = { if (!busy) deleteVerificationToken = null },
+            title = { Text("永久注销账号？") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("账号、登录凭据、设备授权和云同步数据将永久删除，无法恢复。")
+                    if (merchantIds.isNotEmpty()) {
+                        Text("注销后不能在 App 内自助退款，只能凭以下商户订单号加入 QQ 群 1083518433 联系支持。请先保存：")
+                        SelectionContainer { Text(merchantIds.joinToString("\n")) }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        runAction {
+                            busy = true
+                            runCatching { accessCoordinator.deleteAccount(verificationToken) }
+                                .onSuccess { result ->
+                                    deleteVerificationToken = null
+                                    accountDeletionResult = result
+                                }
+                                .onFailure { error = it.message ?: "账号注销失败" }
+                            busy = false
+                        }
+                    },
+                    enabled = !busy,
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    )
+                ) { Text("永久注销") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteVerificationToken = null }, enabled = !busy) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    accountDeletionResult?.let { result ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("账号已注销") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("账号、登录凭据、设备授权和云同步资料已删除。")
+                    if (result.retainedMerchantOrderIds.isNotEmpty()) {
+                        Text("如需退款，请保存以下商户订单号，并加入 QQ 群 1083518433 联系支持：")
+                        SelectionContainer {
+                            Text(result.retainedMerchantOrderIds.joinToString("\n"))
+                        }
+                    }
+                    if (result.storageCleanupPending) {
+                        Text("部分云端文件正在后台继续清理。")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        context.startActivity(
+                            Intent(context, MainActivity::class.java).addFlags(
+                                Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+                            )
+                        )
+                    }
+                ) { Text("我已保存，返回登录") }
+            }
+        )
+    }
+
     AdaptiveWindowScope(modifier = Modifier.fillMaxSize()) { windowInfo ->
         val rootPane: @Composable () -> Unit = {
             AccountPageScaffold(title = "账号", onBack = onBack) {
@@ -1478,13 +1713,49 @@ internal fun AccountScreen(
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("手机版永久授权", fontWeight = FontWeight.SemiBold)
                             Text("已购买 ${accessSummary.purchaseCount} 次 · 容量 ${accessSummary.capacity} 台 · 已占用 ${accessSummary.occupied} 台")
-                            Button(onClick = {
-                                coroutineScope.launch {
-                                    runCatching { accessCoordinator.startPayment() }.onSuccess { order ->
-                                        order.paymentUrl?.let { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it))) }
-                                    }.onFailure { error = it.message ?: "订单创建失败" }
+                            Button(onClick = { showPaymentAgreement = true }) {
+                                Text("再付 ¥6 增加 3 台")
+                            }
+                        }
+                    }
+                }
+                if (session != null) {
+                    ElevatedCard(Modifier.fillMaxWidth()) {
+                        Column(
+                            Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text("订单与退款", fontWeight = FontWeight.SemiBold)
+                            when {
+                                paymentOrdersLoading -> Text("正在加载订单…")
+                                paymentOrders.isEmpty() -> Text("暂无订单")
+                                else -> paymentOrders.forEach { order ->
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text("订单 ${order.merchantOrderId}")
+                                        Text(
+                                            paymentOrderStatusText(order),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        if (order.refundable) {
+                                            TextButton(
+                                                onClick = {
+                                                    pendingRefundOrder = order
+                                                    refundVerificationToken = null
+                                                    securityVerificationPurpose =
+                                                        SecurityVerificationPurpose.REFUND_ORDER
+                                                    securityVerificationProgress = null
+                                                    securityVerificationMethod = null
+                                                    securityVerificationError = null
+                                                    showDisableMethodDialog = true
+                                                },
+                                                enabled = !busy
+                                            ) { Text("申请七天无理由退款") }
+                                        }
+                                    }
+                                    HorizontalDivider()
                                 }
-                            }) { Text("再付 ¥6 增加 3 台") }
+                            }
                         }
                     }
                 }
@@ -1819,5 +2090,28 @@ private fun formatPasskeyDate(timestampMillis: Long): String {
 
 private val PASSKEY_DATE_FORMATTER: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd")
+
+private fun paymentOrderStatusText(order: AppPaymentOrder): String {
+    val amount = "¥${order.amountFen / 100}"
+    val status = when (order.status) {
+        "pending" -> "等待支付"
+        "paid" -> "支付成功"
+        "refund_pending" -> "退款处理中"
+        "refunded" -> "已退款"
+        "refund_failed" -> "退款失败，可重新申请"
+        "closed" -> "订单已关闭"
+        else -> order.status
+    }
+    val deadline = order.refundEligibleUntilMillis?.let { millis ->
+        runCatching {
+            Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault())
+                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+        }.getOrNull()
+    }
+    return buildString {
+        append(amount).append(" · ").append(status)
+        if (order.refundable && deadline != null) append(" · 可退款至 ").append(deadline)
+    }
+}
 
 private const val MAX_PASSKEY_DISPLAY_NAME_CHARS = 64

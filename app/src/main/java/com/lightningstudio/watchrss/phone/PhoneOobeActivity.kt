@@ -82,6 +82,7 @@ class PhoneOobeActivity : ComponentActivity() {
                         hasConsent = true
                         (application as PhoneCompanionApplication).onPrivacyConsentGranted()
                     },
+                    onRejectPolicies = { finishAffinity() },
                     onLogin = {
                         startActivity(AccountActivity.createIntent(this, finishAfterLogin = true))
                     },
@@ -112,6 +113,7 @@ private fun PhoneOobeScreen(
     onOpenAgreement: () -> Unit,
     onOpenPrivacy: () -> Unit,
     onAcceptPolicies: () -> Unit,
+    onRejectPolicies: () -> Unit,
     onLogin: () -> Unit,
     onFinish: () -> Unit
 ) {
@@ -134,7 +136,8 @@ private fun PhoneOobeScreen(
                         PhoneOobeStage.AGREEMENT -> AgreementStep(
                             onOpenAgreement,
                             onOpenPrivacy,
-                            onAcceptPolicies
+                            onAcceptPolicies,
+                            onRejectPolicies
                         )
                         PhoneOobeStage.ACCOUNT -> AccountStep(onLogin)
                         PhoneOobeStage.COMPLETE -> CompleteStep(phoneLabel, onFinish)
@@ -191,7 +194,8 @@ private fun WelcomeStep(onContinue: () -> Unit) {
 private fun AgreementStep(
     onOpenAgreement: () -> Unit,
     onOpenPrivacy: () -> Unit,
-    onAccept: () -> Unit
+    onAccept: () -> Unit,
+    onReject: () -> Unit
 ) {
     var checked by rememberSaveable { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
@@ -216,12 +220,17 @@ private fun AgreementStep(
             Text("我已阅读并同意《用户协议》和《隐私政策》")
         }
     }
-    Button(
-        onClick = onAccept,
-        enabled = checked,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Text("同意并继续")
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(
+            onClick = onAccept,
+            enabled = checked,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("同意并继续")
+        }
+        TextButton(onClick = onReject, modifier = Modifier.fillMaxWidth()) {
+            Text("不同意并退出")
+        }
     }
 }
 

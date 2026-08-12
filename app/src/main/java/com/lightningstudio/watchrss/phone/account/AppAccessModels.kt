@@ -23,7 +23,16 @@ data class AppPaymentOrder(
     val merchantOrderId: String,
     val amountFen: Int,
     val status: String,
-    val paymentUrl: String?
+    val paymentUrl: String?,
+    val paidAtMillis: Long? = null,
+    val refundedAtMillis: Long? = null,
+    val refundEligibleUntilMillis: Long? = null,
+    val refundable: Boolean = false
+)
+
+data class AccountDeletionResult(
+    val storageCleanupPending: Boolean,
+    val retainedMerchantOrderIds: List<String>
 )
 
 sealed interface AppAccessState {

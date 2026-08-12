@@ -198,7 +198,9 @@ class PhoneCloudSyncService(
     }
 
     suspend fun deleteSnapshot(snapshotId: String) {
-        client.deleteSnapshot(requireSession(), snapshotId)
+        val session = requireSession()
+        client.deleteSnapshot(session, snapshotId)
+        cache.deleteSnapshot(session.userId, snapshotId)
     }
 
     suspend fun resetCloudLibrary(confirmationPhrase: String): CloudLibraryResetResult =
@@ -389,6 +391,7 @@ class PhoneCloudSyncService(
                 update(CloudSyncPhase.CHECKING, "正在检查云端")
                 require(networkGate.isConnected()) { "当前没有可用网络" }
                 val session = requireSession()
+                cache.prune(session.userId)
                 var bootstrap = client.bootstrap(session)
                 if (!keyManager.hasAccountKey(session.userId)) {
                     update(
@@ -495,6 +498,7 @@ class PhoneCloudSyncService(
                         System.currentTimeMillis()
                     )
                 }
+                cache.prune(session.userId)
                 PhoneCloudSyncResult(
                     uploadedBytes = uploadedBytes,
                     downloadedBytes = downloadedBytes,
@@ -551,6 +555,11 @@ class PhoneCloudSyncService(
             0L
         }
         val manifest = codec.decryptManifest(accountKey, head.id, encryptedManifest)
+        cache.recordManifestReferences(
+            session.userId,
+            head.id,
+            manifest.allChunks.map(CloudChunkDescriptor::ciphertextSha256)
+        )
         val selectedObjects = manifest.objects.filter { descriptor ->
             fullTransfer || descriptor.name == RSS_STATE_OBJECT || descriptor.name == NOTES_STATE_OBJECT || descriptor.name == NOTES_ARCHIVE_OBJECT
         }
@@ -631,6 +640,11 @@ class PhoneCloudSyncService(
         val accountKey = keyManager.getAccountKey(session.userId, download.head.keyVersion)
             ?: error("缺少第${download.head.keyVersion}版账号密钥")
         val manifest = codec.decryptManifest(accountKey, snapshotId, encryptedManifest)
+        cache.recordManifestReferences(
+            session.userId,
+            snapshotId,
+            manifest.allChunks.map(CloudChunkDescriptor::ciphertextSha256)
+        )
         val remoteChunks = download.chunks.associateBy(CloudDownloadObject::sha256)
         manifest.allChunks.forEach { descriptor ->
             if (cache.loadChunk(session.userId, descriptor.ciphertextSha256) == null) {
@@ -736,6 +750,12 @@ class PhoneCloudSyncService(
             encrypted.encryptedManifest,
             markAsLocalHead = true
         )
+        cache.recordManifestReferences(
+            session.userId,
+            encrypted.manifest.snapshotId,
+            encrypted.manifest.allChunks.map(CloudChunkDescriptor::ciphertextSha256)
+        )
+        cache.prune(session.userId)
         settings.markApplied(deviceId, encrypted.manifest.deviceSequence, full = fullTransfer)
         settings.markApplied(deviceId, encrypted.manifest.deviceSequence, full = false)
         settings.markUploaded(contentHash, parentHeads, full = fullTransfer)

@@ -187,8 +187,16 @@ class WatchRssBackupService(
 
     suspend fun createSafetySnapshot(): File = withContext(Dispatchers.IO) {
         val directory = File(appContext.filesDir, "cloud-safety").apply { mkdirs() }
+        SafetySnapshotRetention.prune(directory)
         val outputFile = File(directory, "before-restore-${System.currentTimeMillis()}.wrss")
-        outputFile.outputStream().use { exportTo(it) }
+        val temporary = File(directory, "${outputFile.name}.part")
+        try {
+            temporary.outputStream().use { exportTo(it) }
+            SafetySnapshotRetention.commit(temporary, outputFile)
+        } finally {
+            temporary.delete()
+        }
+        SafetySnapshotRetention.prune(directory)
         outputFile
     }
 

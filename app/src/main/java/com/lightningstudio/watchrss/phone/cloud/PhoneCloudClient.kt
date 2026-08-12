@@ -4,6 +4,7 @@ import com.lightningstudio.watchrss.phone.account.AccountEnvironment
 import com.lightningstudio.watchrss.phone.account.PhoneAccountSession
 import com.lightningstudio.watchrss.phone.data.importer.ImportedRssItem
 import com.lightningstudio.watchrss.phone.data.importer.ImportedRssSource
+import com.lightningstudio.watchrss.phone.network.withWatchRssAppVersionHeader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -335,6 +336,7 @@ class PhoneCloudClient(
         require(environment.backendBaseUrl.isNotBlank()) { "云服务地址未配置" }
         require(!session.isExpired) { "登录已过期，请重新登录" }
         val request = builder
+            .withWatchRssAppVersionHeader()
             .header("authorization", "Bearer ${session.accessToken}")
             .apply {
                 deviceAccessToken()?.takeIf { it.isNotBlank() }?.let {

@@ -44,6 +44,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.CacheControl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import com.lightningstudio.watchrss.phone.network.withWatchRssAppVersionHeader
 
 class LegalDocumentActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -106,6 +107,7 @@ internal class LegalDocumentRepository(
         if (baseUrl.isBlank()) throw IOException("legal document service unavailable")
         val request = Request.Builder()
             .url(baseUrl + document.path)
+            .withWatchRssAppVersionHeader()
             .cacheControl(CacheControl.Builder().noCache().noStore().build())
             .get()
             .build()

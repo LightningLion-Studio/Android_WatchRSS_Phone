@@ -2,6 +2,7 @@ package com.lightningstudio.watchrss.phone.account
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.lightningstudio.watchrss.phone.network.withWatchRssAppVersionHeader
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -321,8 +322,7 @@ class PhoneAccountClient(
             }
             .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
-        val response = httpClient.newCall(request).execute()
-        return checkResponse(response)
+        return execute(request)
     }
 
     private suspend fun verifyLoginCode(
@@ -363,8 +363,7 @@ class PhoneAccountClient(
             }
             .get()
             .build()
-        val response = httpClient.newCall(request).execute()
-        return checkResponse(response)
+        return execute(request)
     }
 
     private fun patch(
@@ -416,7 +415,10 @@ class PhoneAccountClient(
     }
 
     private fun execute(request: Request): okhttp3.Response {
-        return checkResponse(httpClient.newCall(request).execute())
+        val versionedRequest = request.newBuilder()
+            .withWatchRssAppVersionHeader()
+            .build()
+        return checkResponse(httpClient.newCall(versionedRequest).execute())
     }
 
     private fun checkResponse(response: okhttp3.Response): okhttp3.Response {

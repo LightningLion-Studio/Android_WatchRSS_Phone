@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.core.content.edit
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
+import com.lightningstudio.watchrss.phone.network.withWatchRssAppVersionHeader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -33,6 +34,7 @@ class PhoneAnnouncementRepository(private val context: Context) {
             client.newCall(
                 Request.Builder()
                     .url("$baseUrl/functions/v1/announcement?client=android_phone")
+                    .withWatchRssAppVersionHeader()
                     .get()
                     .build()
             ).execute().use { response ->

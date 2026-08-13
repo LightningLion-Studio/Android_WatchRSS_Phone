@@ -21,12 +21,16 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -34,13 +38,17 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FloatingActionButton
@@ -68,6 +76,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lightningstudio.watchrss.phone.data.note.NoteEntity
 import com.lightningstudio.watchrss.phone.data.note.NoteConflictEntity
+import com.lightningstudio.watchrss.phone.data.note.NoteFolderEntity
 import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
 import com.lightningstudio.watchrss.phone.ui.AdaptiveReadingPane
@@ -119,10 +128,13 @@ private fun NotesScreen(
     syncCloud: suspend () -> Unit
 ) {
     val notes by repository.observeNotes().collectAsStateWithLifecycle(emptyList())
+    val folders by repository.observeFolders().collectAsStateWithLifecycle(emptyList())
     val conflicts by repository.observeConflicts().collectAsStateWithLifecycle(emptyList())
     var selected by remember { mutableStateOf<NoteEntity?>(null) }
     var creating by remember { mutableStateOf(false) }
     var selectedConflict by remember { mutableStateOf<NoteConflictEntity?>(null) }
+    var movingNote by remember { mutableStateOf<NoteEntity?>(null) }
+    var deletingNote by remember { mutableStateOf<NoteEntity?>(null) }
     var editorFullscreen by remember { mutableStateOf(false) }
     var detailProgress by remember { mutableFloatStateOf(1f) }
     var detailTransitioning by remember { mutableStateOf(false) }
@@ -316,9 +328,18 @@ private fun NotesScreen(
         val listPane: @Composable () -> Unit = {
             NoteListPage(
                 notes = notes,
+                folders = folders,
                 conflicts = conflicts,
                 onBack = onBack,
                 onOpen = openNote,
+                onTogglePinned = { note ->
+                    scope.launch {
+                        repository.setPinned(note.noteId, !note.pinned)
+                        runCatching { syncCloud() }
+                    }
+                },
+                onMove = { movingNote = it },
+                onDelete = { deletingNote = it },
                 onNew = openNewNote,
                 onOpenConflict = { selectedConflict = conflicts.firstOrNull() },
                 onImportDirectory = { directoryImport.launch(null) },
@@ -401,6 +422,39 @@ private fun NotesScreen(
                 }
             },
             onDismiss = { selectedConflict = null }
+        )
+    }
+    movingNote?.let { note ->
+        NoteMoveDialog(
+            folders = folders,
+            currentFolderId = note.folderId,
+            onMove = { folderId ->
+                movingNote = null
+                scope.launch {
+                    repository.move(note.noteId, folderId)
+                    runCatching { syncCloud() }
+                }
+            },
+            onDismiss = { movingNote = null }
+        )
+    }
+    deletingNote?.let { note ->
+        AlertDialog(
+            onDismissRequest = { deletingNote = null },
+            title = { Text("删除笔记？") },
+            text = { Text("“${note.title}”会从手机和手表同步删除。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    deletingNote = null
+                    scope.launch {
+                        repository.delete(note.noteId)
+                        runCatching { syncCloud() }
+                    }
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deletingNote = null }) { Text("取消") }
+            }
         )
     }
 }
@@ -512,9 +566,13 @@ private fun lerpNotePaneDp(start: androidx.compose.ui.unit.Dp, end: androidx.com
 @Composable
 private fun NoteListPage(
     notes: List<NoteEntity>,
+    folders: List<NoteFolderEntity>,
     conflicts: List<NoteConflictEntity>,
     onBack: () -> Unit,
     onOpen: (NoteEntity) -> Unit,
+    onTogglePinned: (NoteEntity) -> Unit,
+    onMove: (NoteEntity) -> Unit,
+    onDelete: (NoteEntity) -> Unit,
     onNew: () -> Unit,
     onOpenConflict: () -> Unit,
     onImportDirectory: () -> Unit,
@@ -556,7 +614,15 @@ private fun NoteListPage(
             }
         }
     ) { padding ->
-        NoteList(notes, onOpen, Modifier.padding(padding))
+        NoteList(
+            notes = notes,
+            folders = folders,
+            onOpen = onOpen,
+            onTogglePinned = onTogglePinned,
+            onMove = onMove,
+            onDelete = onDelete,
+            modifier = Modifier.padding(padding)
+        )
     }
 }
 
@@ -606,10 +672,15 @@ private fun NoteEditorPage(
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun NoteList(
     notes: List<NoteEntity>,
+    folders: List<NoteFolderEntity>,
     onOpen: (NoteEntity) -> Unit,
+    onTogglePinned: (NoteEntity) -> Unit,
+    onMove: (NoteEntity) -> Unit,
+    onDelete: (NoteEntity) -> Unit,
     modifier: Modifier = Modifier
 ) = LazyColumn(
     modifier = modifier
@@ -618,10 +689,15 @@ private fun NoteList(
     verticalArrangement = Arrangement.spacedBy(12.dp)
 ) {
     items(notes, key = { it.noteId }) { note ->
+        var menuExpanded by remember(note.noteId) { mutableStateOf(false) }
         val cardColors = CardDefaults.elevatedCardColors()
         ElevatedCard(
-            onClick = { onOpen(note) },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = { onOpen(note) },
+                    onLongClick = { menuExpanded = true }
+                ),
             colors = cardColors
         ) {
             ListItem(
@@ -636,16 +712,100 @@ private fun NoteList(
                     )
                 },
                 supportingContent = {
-                    Text(
-                        text = note.plainText.take(100),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Column {
+                        Text(
+                            text = note.plainText.take(100),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        val folderName = folders.firstOrNull { it.folderId == note.folderId }?.name
+                        if (note.pinned || folderName != null) {
+                            Text(
+                                text = listOfNotNull(
+                                    "已置顶".takeIf { note.pinned },
+                                    folderName
+                                ).joinToString(" · "),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
                 },
                 leadingContent = {
                     Icon(Icons.Default.Description, contentDescription = null)
+                },
+                trailingContent = {
+                    Box {
+                        IconButton(onClick = { menuExpanded = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "笔记操作")
+                        }
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(if (note.pinned) "取消置顶" else "置顶") },
+                                onClick = {
+                                    menuExpanded = false
+                                    onTogglePinned(note)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("移动到…") },
+                                leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onMove(note)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("删除") },
+                                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onDelete(note)
+                                }
+                            )
+                        }
+                    }
                 }
             )
         }
     }
+}
+
+@Composable
+private fun NoteMoveDialog(
+    folders: List<NoteFolderEntity>,
+    currentFolderId: String?,
+    onMove: (String?) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("移动笔记") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                TextButton(
+                    enabled = currentFolderId != null,
+                    onClick = { onMove(null) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(if (currentFolderId == null) "未分类（当前位置）" else "未分类") }
+                folders.forEach { folder ->
+                    TextButton(
+                        enabled = folder.folderId != currentFolderId,
+                        onClick = { onMove(folder.folderId) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (folder.folderId == currentFolderId) "${folder.name}（当前位置）" else folder.name)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }

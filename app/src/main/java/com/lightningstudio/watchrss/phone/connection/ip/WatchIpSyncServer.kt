@@ -83,15 +83,8 @@ internal class WatchIpSyncServer(
             require(hello.watchDeviceId.isNotBlank() && hello.clientNonce.isNotBlank()) {
                 "HELLO 身份字段缺失"
             }
-            val descriptor = descriptorProvider.descriptor()
-            require(descriptor.verify()) { "端点描述已失效" }
-            require(hello.endpointEpoch == descriptor.epoch) { "端点地址已变化，请重新发现" }
-            require(
-                IpSyncProtocol.constantTimeEquals(
-                    IpSyncProtocol.hmac(descriptor.authToken, hello.canonicalPayload()),
-                    hello.hmac
-                )
-            ) { "HELLO 认证失败" }
+            val descriptor = descriptorProvider.consumeChallenge(hello)
+                ?: error("HELLO challenge 无效、过期或已使用")
 
             val routeKind = routeKindForRemote(
                 handshakeRequest.remoteIpAddress,
@@ -108,7 +101,10 @@ internal class WatchIpSyncServer(
                 hmac = ""
             )
             val ack = unsignedAck.copy(
-                hmac = IpSyncProtocol.hmac(descriptor.authToken, unsignedAck.canonicalPayload())
+                hmac = IpSyncProtocol.hmac(
+                    descriptor.challengeSecret,
+                    unsignedAck.canonicalPayload()
+                )
             )
             val session = PhoneIpSyncSession(
                 watchDeviceId = hello.watchDeviceId,

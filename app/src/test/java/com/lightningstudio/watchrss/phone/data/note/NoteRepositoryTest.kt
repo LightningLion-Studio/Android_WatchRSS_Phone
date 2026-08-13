@@ -46,6 +46,28 @@ class NoteRepositoryTest {
         assertEquals(listOf(canonical), dao.assets.values.toList())
     }
 
+    @Test fun `management updates preserve content and create sync tombstone`() = runBlocking {
+        var instant = 100L
+        val dao = FakeNoteDao()
+        val repository = NoteRepository(dao, deviceId = "phone", now = { instant })
+        val original = repository.save(title = "标题", markdown = "正文")
+
+        instant = 200L
+        val moved = repository.move(original.noteId, "folder-1")
+        instant = 300L
+        val pinned = repository.setPinned(original.noteId, true)
+        instant = 400L
+        val deleted = repository.delete(original.noteId)
+
+        assertEquals("folder-1", moved.folderId)
+        assertEquals(original.markdown, moved.markdown)
+        assertEquals(original.baseMarkdown, moved.baseMarkdown)
+        assertEquals(true, pinned.pinned)
+        assertEquals(true, deleted.deleted)
+        assertEquals(400L, deleted.deletedAt)
+        assertEquals("phone", deleted.modifiedBy)
+    }
+
     private fun noteAsset(id: String, key: String) = NoteAssetEntity(
         assetId = id,
         noteId = "note",

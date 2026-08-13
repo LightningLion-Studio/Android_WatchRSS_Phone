@@ -2040,7 +2040,10 @@ class PhoneBluetoothSyncClient(
         private const val MAX_DEVICE_PROBE_CANDIDATES = 3
         private const val DEFAULT_DEVICE_PROBE_TIMEOUT_MS = 2_000L
         private const val DIRECT_PROBE_TIMEOUT_MS = 4_000L
-        private const val IP_UPGRADE_WAIT_MS = 5_000L
+        // The paired RFCOMM probe has already proved reachability. Do not hold the user in the
+        // discovery UI while a same-LAN route is unavailable; late IP routes are discarded by
+        // the watch once the RFCOMM transfer begins.
+        private const val IP_UPGRADE_WAIT_MS = 1_000L
         private const val IP_UPGRADE_POLL_INTERVAL_MS = 50L
         private const val FIELD_IP_ENDPOINT_DESCRIPTOR = "ipEndpointDescriptor"
         private const val FIELD_IP_UPGRADE_ACCEPTED = "ipUpgradeAccepted"

@@ -28,8 +28,10 @@ internal class WatchIpSyncService(
     }
 
     @Synchronized
-    fun currentEndpointDescriptorJson(): JSONObject? =
-        if (server?.isAlive == true && port > 0) endpointProvider.descriptor().toJson() else null
+    fun currentEndpointDescriptorJson(expectedWatchDeviceId: String? = null): JSONObject? =
+        if (server?.isAlive == true && port > 0) {
+            endpointProvider.issueDescriptor(expectedWatchDeviceId).toJson()
+        } else null
 
     @Synchronized
     override fun close() {

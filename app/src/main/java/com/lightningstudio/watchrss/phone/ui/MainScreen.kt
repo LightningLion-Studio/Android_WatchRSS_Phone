@@ -2805,6 +2805,7 @@ private fun DashboardPage(
                         ) {
                             Box(modifier = Modifier.weight(1f)) {
                                 SyncStatusCard(
+                                    transportLabel = uiState.syncTransportLabel,
                                     message = uiState.syncStatusMessage,
                                     error = uiState.syncStatusError,
                                     syncProgress = uiState.syncProgress,
@@ -2837,6 +2838,7 @@ private fun DashboardPage(
                 } else {
                     item {
                         SyncStatusCard(
+                            transportLabel = uiState.syncTransportLabel,
                             message = uiState.syncStatusMessage,
                             error = uiState.syncStatusError,
                             syncProgress = uiState.syncProgress,
@@ -2969,6 +2971,7 @@ private fun TokenUsageCard(
 
 @Composable
 private fun SyncStatusCard(
+    transportLabel: String,
     message: String?,
     error: String?,
     syncProgress: MainSyncProgressUi?,
@@ -2994,12 +2997,12 @@ private fun SyncStatusCard(
                 Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "蓝牙同步",
+                        text = "手表同步",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "已配对手表 · RFCOMM",
+                        text = "已配对手表 · $transportLabel",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f)
                     )

@@ -171,7 +171,7 @@ class PhoneCompanionApplication : Application() {
             ipSyncService.start()
             WatchBleBandwidthServer.processInstance(this).apply {
                 setEndpointDescriptorProvider {
-                    ipSyncService.endpointProvider.descriptor().toBleJson().toString()
+                    ipSyncService.endpointProvider.issueDescriptor().toBleJson().toString()
                         .toByteArray(Charsets.UTF_8)
                 }
                 start()
@@ -182,8 +182,8 @@ class PhoneCompanionApplication : Application() {
         }.getOrDefault(false)
     }
 
-    fun currentIpEndpointDescriptorForSync(): JSONObject? =
-        ipSyncService.currentEndpointDescriptorJson()
+    fun currentIpEndpointDescriptorForSync(expectedWatchDeviceId: String? = null): JSONObject? =
+        ipSyncService.currentEndpointDescriptorJson(expectedWatchDeviceId)
 
     private fun stopWatchBaseStation() {
         runCatching { ipSyncService.close() }

@@ -9,6 +9,8 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.Locale
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 internal data class LocalInterfaceAddress(
     val interfaceName: String,
@@ -24,15 +26,16 @@ internal object IpEndpointClassifier {
     fun classify(value: LocalInterfaceAddress): IpTransportKind? {
         val name = value.interfaceName.lowercase(Locale.US)
         if (excludedPrefixes.any(name::startsWith)) return null
-        if (value.wifiNetwork) return IpTransportKind.WIFI_LAN
         if (name.contains("bnep") || name.contains("bt-pan") || name.startsWith("pan")) {
             return IpTransportKind.BLUETOOTH_BRIDGE
         }
         if (
-            name.contains("softap") || name.contains("swlan") || name.startsWith("ap") ||
-            name.startsWith("wlan") || name.startsWith("wifi")
+            name.contains("softap") || name.contains("swlan") || name.startsWith("ap")
         ) {
             return IpTransportKind.PHONE_HOTSPOT
+        }
+        if (value.wifiNetwork || name.startsWith("wlan") || name.startsWith("wifi")) {
+            return IpTransportKind.WIFI_LAN
         }
         return IpTransportKind.UNKNOWN_LOCAL
     }
@@ -68,32 +71,49 @@ internal class IpEndpointProvider(
     private val appContext = context.applicationContext
     private val connectivityManager = appContext.getSystemService(ConnectivityManager::class.java)
     private val random = SecureRandom()
-    private val authToken = randomBytes(32)
-    private val nonce = randomBytes(16)
+    private val challengeStore = IpChallengeStore()
 
     private var epoch = 1L
     private var lastCandidateSignature = ""
 
     @Synchronized
-    fun descriptor(nowMillis: Long = System.currentTimeMillis()): IpEndpointDescriptor {
+    fun issueDescriptor(
+        expectedWatchDeviceId: String? = null,
+        nowMillis: Long = System.currentTimeMillis()
+    ): IpEndpointDescriptor {
         val endpoints = IpEndpointClassifier.candidates(snapshotAddresses())
         val signature = endpoints.joinToString("|") {
             "${it.address},${it.transportKind.wireName},${it.priority}"
         }
         if (lastCandidateSignature.isNotEmpty() && signature != lastCandidateSignature) epoch += 1
         lastCandidateSignature = signature
+        val challengeId = UUID.randomUUID().toString()
+        val challengeSecret = randomBytes(32)
+        val expiresAt = nowMillis + IpSyncProtocol.CHALLENGE_TTL_MS
         val unsigned = IpEndpointDescriptor(
             version = IpSyncProtocol.VERSION,
             serverDeviceId = serverDeviceId,
             epoch = epoch,
-            expiresAt = nowMillis + IpSyncProtocol.DESCRIPTOR_TTL_MS,
+            expiresAt = expiresAt,
             port = portProvider(),
             endpoints = endpoints,
-            nonce = nonce,
-            authToken = authToken,
+            challengeId = challengeId,
+            challengeSecret = challengeSecret,
             hmac = ""
         )
-        return unsigned.copy(hmac = IpSyncProtocol.hmac(authToken, unsigned.canonicalPayload()))
+        val descriptor = unsigned.copy(
+            hmac = IpSyncProtocol.hmac(challengeSecret, unsigned.canonicalPayload())
+        )
+        challengeStore.register(PendingIpChallenge(
+            descriptor = descriptor,
+            expectedWatchDeviceId = expectedWatchDeviceId?.takeIf(String::isNotBlank),
+            expiresAt = expiresAt
+        ), nowMillis)
+        return descriptor
+    }
+
+    fun consumeChallenge(hello: IpHello, nowMillis: Long = System.currentTimeMillis()): IpEndpointDescriptor? {
+        return challengeStore.consume(hello, nowMillis)
     }
 
     fun deviceIdHash(): String {
@@ -141,5 +161,33 @@ internal class IpEndpointProvider(
 
     private fun randomBytes(size: Int): String = ByteArray(size).also(random::nextBytes).let {
         Base64.getUrlEncoder().encodeToString(it)
+    }
+}
+
+internal data class PendingIpChallenge(
+    val descriptor: IpEndpointDescriptor,
+    val expectedWatchDeviceId: String?,
+    val expiresAt: Long
+)
+
+internal class IpChallengeStore {
+    private val challenges = ConcurrentHashMap<String, PendingIpChallenge>()
+
+    fun register(challenge: PendingIpChallenge, nowMillis: Long = System.currentTimeMillis()) {
+        challenges.entries.removeIf { it.value.expiresAt < nowMillis }
+        challenges[challenge.descriptor.challengeId] = challenge
+    }
+
+    fun consume(hello: IpHello, nowMillis: Long = System.currentTimeMillis()): IpEndpointDescriptor? {
+        val pending = challenges[hello.challengeId] ?: return null
+        if (pending.expiresAt < nowMillis ||
+            pending.expectedWatchDeviceId?.let { it != hello.watchDeviceId } == true ||
+            hello.endpointEpoch != pending.descriptor.epoch ||
+            !IpSyncProtocol.constantTimeEquals(
+                IpSyncProtocol.hmac(pending.descriptor.challengeSecret, hello.canonicalPayload()),
+                hello.hmac
+            )
+        ) return null
+        return if (challenges.remove(hello.challengeId, pending)) pending.descriptor else null
     }
 }

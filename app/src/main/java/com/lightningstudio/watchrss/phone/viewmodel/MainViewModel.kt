@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncProgress
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothWatchDevice
+import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSessionRegistry
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncDeleteConflict
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
@@ -44,6 +45,7 @@ data class MainUiState(
     val message: String? = null,
     val syncStatusMessage: String? = null,
     val syncStatusError: String? = null,
+    val syncTransportLabel: String = "RFCOMM（Wi-Fi 优先探测）",
     val error: String? = null,
     val syncProgress: MainSyncProgressUi? = null,
     val rssSources: List<PhoneRssSourceEntity> = emptyList(),
@@ -83,7 +85,8 @@ data class MainBluetoothDevicePromptUi(
 data class MainBluetoothDeviceUi(
     val name: String,
     val address: String,
-    val remoteDeviceId: String = ""
+    val remoteDeviceId: String = "",
+    val transportLabel: String = "RFCOMM"
 )
 
 enum class MainBluetoothDevicePromptPurpose {
@@ -825,8 +828,12 @@ class MainViewModel(
                     _toastEvent.tryEmit("未找到已打开 WatchRSS 的已配对手表，请在手表端打开应用并保持亮屏后重试")
                 }
                 1 -> {
+                    val device = reachableDevices.single()
+                    sessionState.value = sessionState.value.copy(
+                        syncTransportLabel = transportLabel(device.address)
+                    )
                     delay(400L)
-                    runLibrarySync(reachableDevices.single().address)
+                    runLibrarySync(device.address)
                 }
                 else -> {
                     clearSmoothedSyncProgress()
@@ -892,8 +899,12 @@ class MainViewModel(
                     _toastEvent.tryEmit("未找到已打开 WatchRSS 的已配对手表，请在手表端打开应用并保持亮屏后重试")
                 }
                 1 -> {
+                    val device = reachableDevices.single()
+                    sessionState.value = sessionState.value.copy(
+                        syncTransportLabel = transportLabel(device.address)
+                    )
                     delay(400L)
-                    runAccountSync(reachableDevices.single().toUi())
+                    runAccountSync(device.toUi())
                 }
                 else -> {
                     clearSmoothedSyncProgress()
@@ -917,7 +928,10 @@ class MainViewModel(
     fun chooseBluetoothDeviceForSync(device: MainBluetoothDeviceUi) {
         viewModelScope.launch {
             val purpose = sessionState.value.bluetoothDevicePrompt?.purpose
-            sessionState.value = sessionState.value.copy(bluetoothDevicePrompt = null)
+            sessionState.value = sessionState.value.copy(
+                bluetoothDevicePrompt = null,
+                syncTransportLabel = device.transportLabel
+            )
             if (purpose == MainBluetoothDevicePromptPurpose.ACCOUNT) {
                 runAccountSync(device)
             } else {
@@ -978,6 +992,7 @@ class MainViewModel(
                 message = message,
                 syncStatusMessage = message,
                 syncStatusError = null,
+                syncTransportLabel = transportLabel(result.deviceAddress),
                 error = null,
                 syncProgress = null
             )
@@ -1246,8 +1261,14 @@ class MainViewModel(
         MainBluetoothDeviceUi(
             name = name.ifBlank { "未知手表" },
             address = address,
-            remoteDeviceId = remoteDeviceId
+            remoteDeviceId = remoteDeviceId,
+            transportLabel = transportLabel(address)
         )
+
+    private fun transportLabel(address: String): String =
+        PhoneIpSyncSessionRegistry.session(address)?.let { session ->
+            "${if (session.routeKind.wireName == "wifiLan") "Wi-Fi IP" else "IP"} · ${session.remoteAddress}"
+        } ?: "RFCOMM（IP 不可用时回退）"
 
     private fun beginSmoothedSyncProgress(progress: MainSyncProgressUi) {
         smoothedSyncProgressJob?.cancel()

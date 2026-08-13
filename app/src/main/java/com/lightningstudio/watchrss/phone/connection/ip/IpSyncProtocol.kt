@@ -56,8 +56,8 @@ internal data class IpEndpointDescriptor(
     val expiresAt: Long,
     val port: Int,
     val endpoints: List<IpEndpointCandidate>,
-    val nonce: String,
-    val authToken: String,
+    val challengeId: String,
+    val challengeSecret: String,
     val hmac: String
 ) {
     fun toJson(includeHmac: Boolean = true): JSONObject = JSONObject().apply {
@@ -67,8 +67,8 @@ internal data class IpEndpointDescriptor(
         put("expiresAt", expiresAt)
         put("port", port)
         put("endpoints", JSONArray().also { array -> endpoints.forEach { array.put(it.toJson()) } })
-        put("nonce", nonce)
-        put("authToken", authToken)
+        put("challengeId", challengeId)
+        put("challengeSecret", challengeSecret)
         if (includeHmac) put("hmac", hmac)
     }
 
@@ -89,8 +89,8 @@ internal data class IpEndpointDescriptor(
                 )
             }
         })
-        put("n", nonce)
-        put("k", authToken)
+        put("c", challengeId)
+        put("k", challengeSecret)
         put("h", hmac)
     }
 
@@ -110,14 +110,14 @@ internal data class IpEndpointDescriptor(
             append(endpoint.transportKind.wireName).append(',')
             append(endpoint.priority).append(';')
         }
-        append('|').append(nonce).append('|').append(authToken)
+        append('|').append(challengeId).append('|').append(challengeSecret)
     }
 
     fun verify(nowMillis: Long = System.currentTimeMillis()): Boolean {
         if (version != IpSyncProtocol.VERSION || expiresAt < nowMillis || endpoints.isEmpty()) {
             return false
         }
-        val expected = IpSyncProtocol.hmac(authToken, canonicalPayload())
+        val expected = IpSyncProtocol.hmac(challengeSecret, canonicalPayload())
         return IpSyncProtocol.constantTimeEquals(expected, hmac)
     }
 
@@ -150,8 +150,8 @@ internal data class IpEndpointDescriptor(
                 expiresAt = json.optLong("expiresAt", json.optLong("x")),
                 port = json.optInt("port", json.optInt("p")),
                 endpoints = endpoints,
-                nonce = json.optString("nonce", json.optString("n")),
-                authToken = json.optString("authToken", json.optString("k")),
+                challengeId = json.optString("challengeId", json.optString("c")),
+                challengeSecret = json.optString("challengeSecret", json.optString("k")),
                 hmac = json.optString("hmac", json.optString("h"))
             )
         }
@@ -160,6 +160,7 @@ internal data class IpEndpointDescriptor(
 
 internal data class IpHello(
     val watchDeviceId: String,
+    val challengeId: String,
     val endpointEpoch: Long,
     val clientNonce: String,
     val resumeSessionId: String?,
@@ -169,6 +170,7 @@ internal data class IpHello(
     fun canonicalPayload(): String = listOf(
         IpSyncProtocol.VERSION.toString(),
         watchDeviceId,
+        challengeId,
         endpointEpoch.toString(),
         clientNonce,
         resumeSessionId.orEmpty(),
@@ -179,6 +181,7 @@ internal data class IpHello(
         put("type", IpSyncProtocol.TYPE_HELLO)
         put("version", IpSyncProtocol.VERSION)
         put("watchDeviceId", watchDeviceId)
+        put("challengeId", challengeId)
         put("endpointEpoch", endpointEpoch)
         put("clientNonce", clientNonce)
         resumeSessionId?.let { put("resumeSessionId", it) }
@@ -189,6 +192,7 @@ internal data class IpHello(
     companion object {
         fun fromJson(json: JSONObject): IpHello = IpHello(
             watchDeviceId = json.optString("watchDeviceId"),
+            challengeId = json.optString("challengeId"),
             endpointEpoch = json.optLong("endpointEpoch"),
             clientNonce = json.optString("clientNonce"),
             resumeSessionId = json.optString("resumeSessionId").takeIf { it.isNotBlank() },
@@ -228,7 +232,7 @@ internal data class IpHelloAck(
 }
 
 internal object IpSyncProtocol {
-    const val VERSION = 1
+    const val VERSION = 2
     const val TYPE_HELLO = "hello"
     const val TYPE_HELLO_ACK = "helloAck"
     const val TYPE_ERROR = "error"
@@ -236,7 +240,7 @@ internal object IpSyncProtocol {
     const val CONNECT_TIMEOUT_MS = 2_000L
     const val HANDSHAKE_TIMEOUT_MS = 2_000L
     const val FAILED_ENDPOINT_COOLDOWN_MS = 10_000L
-    const val DESCRIPTOR_TTL_MS = 120_000L
+    const val CHALLENGE_TTL_MS = 30_000L
     val BLE_DISCOVERY_SERVICE_UUID: UUID =
         UUID.fromString("7e57d001-1f7d-4f0b-9f3d-2d7d3a65d001")
     val BLE_ENDPOINT_CHARACTERISTIC_UUID: UUID =

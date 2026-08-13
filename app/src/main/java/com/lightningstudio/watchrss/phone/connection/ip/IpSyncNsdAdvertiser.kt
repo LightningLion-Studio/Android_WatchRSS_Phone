@@ -30,7 +30,7 @@ internal class IpSyncNsdAdvertiser(
                 Log.w(TAG, "mDNS unregistration failed code=$errorCode")
             }
         }
-        val descriptor = descriptorProvider.descriptor()
+        val descriptor = descriptorProvider.issueDescriptor()
         val serviceInfo = NsdServiceInfo().apply {
             serviceName = "WatchRSS-${descriptorProvider.deviceIdHash()}"
             serviceType = IpSyncProtocol.SERVICE_TYPE

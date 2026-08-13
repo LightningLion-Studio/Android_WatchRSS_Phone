@@ -53,6 +53,33 @@ class NoteRepository(
         return saved
     }
 
+    suspend fun move(noteId: String, folderId: String?): NoteEntity =
+        updateMetadata(noteId) { it.copy(folderId = folderId) }
+
+    suspend fun setPinned(noteId: String, pinned: Boolean): NoteEntity =
+        updateMetadata(noteId) { it.copy(pinned = pinned) }
+
+    suspend fun delete(noteId: String): NoteEntity {
+        val instant = now()
+        return updateMetadata(noteId, instant) {
+            it.copy(deleted = true, deletedAt = instant)
+        }
+    }
+
+    private suspend fun updateMetadata(
+        noteId: String,
+        instant: Long = now(),
+        transform: (NoteEntity) -> NoteEntity
+    ): NoteEntity {
+        val local = dao.note(noteId) ?: error("笔记不存在")
+        val updated = transform(local).copy(
+            updatedAt = instant,
+            modifiedBy = deviceId
+        )
+        dao.upsertNotes(listOf(updated))
+        return updated
+    }
+
     suspend fun importMarkdown(markdownFile: String, fallbackTitle: String? = null): NoteEntity {
         val imported = MarkdownNoteCodec.parse(markdownFile)
         return save(

@@ -19,7 +19,7 @@ class IpSyncProtocolTest {
     fun descriptor_roundTripsCompactBlePayloadAndRejectsTampering() {
         val unsigned = descriptor(hmac = "")
         val signed = unsigned.copy(
-            hmac = IpSyncProtocol.hmac(unsigned.authToken, unsigned.canonicalPayload())
+            hmac = IpSyncProtocol.hmac(unsigned.challengeSecret, unsigned.canonicalPayload())
         )
         val encoded = signed.toBleJson().toString().toByteArray(Charsets.UTF_8)
         val decoded = IpEndpointDescriptor.fromJson(signed.toBleJson())
@@ -42,7 +42,7 @@ class IpSyncProtocolTest {
             listOf(
                 LocalInterfaceAddress("bnep0", "192.168.7.1", wifiNetwork = false),
                 LocalInterfaceAddress("wlan0", "192.168.1.10", wifiNetwork = true),
-                LocalInterfaceAddress("ap0", "10.42.0.1", wifiNetwork = false),
+                LocalInterfaceAddress("swlan0", "10.42.0.1", wifiNetwork = true),
                 LocalInterfaceAddress("mystery0", "172.16.0.1", wifiNetwork = false),
                 LocalInterfaceAddress("wlan1", "192.168.1.10", wifiNetwork = true)
             )
@@ -95,8 +95,8 @@ class IpSyncProtocolTest {
                 transportKind = IpTransportKind.BLUETOOTH_BRIDGE
             )
         ),
-        nonce = "descriptor-nonce",
-        authToken = Base64.getUrlEncoder().encodeToString(ByteArray(32) { it.toByte() }),
+        challengeId = "challenge-1",
+        challengeSecret = Base64.getUrlEncoder().encodeToString(ByteArray(32) { it.toByte() }),
         hmac = hmac
     )
 }

@@ -2,7 +2,9 @@ package com.lightningstudio.watchrss.phone.account
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppAccessModelsTest {
@@ -25,6 +27,28 @@ class AppAccessModelsTest {
         ).toPaymentOrder()
         assertEquals(600, order.amountFen)
         assertEquals("pending", order.status)
+    }
+
+    @Test
+    fun `payment order preserves refund window and eligibility`() {
+        val order = JSONObject(
+            """{"orderId":"id","merchantOrderId":"merchant","amountFen":600,"status":"paid","paidAt":1760000000000,"refundEligibleUntil":1760604800000,"refundable":true}"""
+        ).toPaymentOrder()
+
+        assertEquals(1760000000000L, order.paidAtMillis)
+        assertEquals(1760604800000L, order.refundEligibleUntilMillis)
+        assertTrue(order.refundable)
+        assertNull(order.refundedAtMillis)
+    }
+
+    @Test
+    fun `legacy payment response fails closed for refund eligibility`() {
+        val order = JSONObject(
+            """{"orderId":"id","merchantOrderId":"merchant","amountFen":600,"status":"paid"}"""
+        ).toPaymentOrder()
+
+        assertFalse(order.refundable)
+        assertNull(order.refundEligibleUntilMillis)
     }
 
     @Test

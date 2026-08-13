@@ -88,7 +88,11 @@ enum class LegalDocument(
     val path: String
 ) {
     USER_AGREEMENT("用户协议", "/functions/v1/legal/phone/user-agreement"),
-    PRIVACY_POLICY("隐私政策", "/functions/v1/legal/phone/privacy-policy");
+    PRIVACY_POLICY("隐私政策", "/functions/v1/legal/phone/privacy-policy"),
+    PAID_SERVICE_AGREEMENT(
+        "付费服务协议",
+        "/functions/v1/legal/phone/paid-service-agreement"
+    );
 
     companion object {
         fun fromName(value: String?): LegalDocument =

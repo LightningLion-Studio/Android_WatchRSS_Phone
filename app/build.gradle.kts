@@ -53,7 +53,7 @@ android {
         minSdk = 30
         targetSdk = 36
         versionCode = 30
-        versionName = "1.2.1-10"
+        versionName = "1.2.2-1"
         buildConfigField(
             "String",
             "WATCHRSS_PRODUCTION_BACKEND_BASE_URL",

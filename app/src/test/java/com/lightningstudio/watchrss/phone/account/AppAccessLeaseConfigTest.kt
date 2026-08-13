@@ -20,11 +20,15 @@ class AppAccessLeaseConfigTest {
     }
 
     @Test
-    fun `testing lease public key is bundled and parseable`() {
-        assertPublicKey(
-            pem = BuildConfig.WATCHRSS_TEST_APP_ACCESS_PUBLIC_KEY,
-            expectedFingerprint = "49ec974028828965e0943210bf95d0d4526920800d812d5e628efb5a5a1d5a61"
-        )
+    fun `testing lease public key is debug only`() {
+        if (BuildConfig.DEBUG) {
+            assertPublicKey(
+                pem = BuildConfig.WATCHRSS_TEST_APP_ACCESS_PUBLIC_KEY,
+                expectedFingerprint = "49ec974028828965e0943210bf95d0d4526920800d812d5e628efb5a5a1d5a61"
+            )
+        } else {
+            assertTrue(BuildConfig.WATCHRSS_TEST_APP_ACCESS_PUBLIC_KEY.isBlank())
+        }
     }
 
     private fun assertPublicKey(pem: String, expectedFingerprint: String) {

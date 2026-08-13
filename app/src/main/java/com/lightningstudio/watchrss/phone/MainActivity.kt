@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
@@ -21,6 +22,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -164,6 +167,24 @@ class MainActivity : ComponentActivity() {
 
     @androidx.compose.runtime.Composable
     private fun AccessGate(state: AppAccessState) {
+        var showPaymentAgreement by remember { mutableStateOf(false) }
+        if (showPaymentAgreement) {
+            PaidServiceAgreementDialog(
+                onOpenAgreement = {
+                    startActivity(
+                        LegalDocumentActivity.createIntent(
+                            this@MainActivity,
+                            LegalDocument.PAID_SERVICE_AGREEMENT
+                        )
+                    )
+                },
+                onConfirm = {
+                    showPaymentAgreement = false
+                    startPaymentAfterAgreement()
+                },
+                onDismiss = { showPaymentAgreement = false }
+            )
+        }
         Column(
             Modifier.fillMaxSize().padding(28.dp),
             verticalArrangement = Arrangement.Center,
@@ -177,7 +198,7 @@ class MainActivity : ComponentActivity() {
                     title = "当前账号没有可授权额度",
                     detail = "购买手机版永久授权后即可继续。¥6 可授权 3 台手机；当前已购买 ${state.summary.purchaseCount} 次，剩余 0 台。",
                     actionLabel = "前往网页支付"
-                ) { startPayment() }
+                ) { showPaymentAgreement = true }
                 is AppAccessState.PaymentPending -> GateMessage("等待支付确认", "订单 ${state.order.merchantOrderId}") {
                     state.order.paymentUrl?.let { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it))) }
                 }
@@ -234,7 +255,24 @@ class MainActivity : ComponentActivity() {
             (application as PhoneCompanionApplication).restartAfterRemoteEnvironmentChange()
         }
     }
-    private fun startPayment() { lifecycleScope.launch { coordinator.startPayment().paymentUrl?.let { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it))) }; startPaymentPolling() } }
+    private fun startPaymentAfterAgreement() {
+        lifecycleScope.launch {
+            runCatching { coordinator.startPayment(agreementAccepted = true) }
+                .onSuccess { order ->
+                    order.paymentUrl?.let {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it)))
+                    }
+                    startPaymentPolling()
+                }
+                .onFailure {
+                    Toast.makeText(
+                        this@MainActivity,
+                        it.message ?: "订单创建失败",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+        }
+    }
 
     private companion object { const val KEY_PENDING_INTENT = "pending_inbound_intent" }
 }

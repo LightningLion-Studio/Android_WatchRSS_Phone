@@ -124,7 +124,8 @@ class AppAccessCoordinator(
         }
     }
 
-    suspend fun startPayment(): AppPaymentOrder = operationMutex.withLock {
+    suspend fun startPayment(agreementAccepted: Boolean): AppPaymentOrder = operationMutex.withLock {
+        require(agreementAccepted) { "请先阅读并同意《腕上RSS手机版付费服务协议》" }
         val userId = accountRepository.session.value?.userId ?: error("请先登录账号")
         val order = accountRepository.createPaymentOrder(store.orderIdempotencyKey())
         store.clearOrderIdempotencyKey()
@@ -172,6 +173,17 @@ class AppAccessCoordinator(
         _state.value = AppAccessState.LoggedOut
         return released
     }
+
+    suspend fun deleteAccount(verificationToken: String): AccountDeletionResult =
+        operationMutex.withLock {
+            val result = accountRepository.deleteAccount(verificationToken)
+            store.clear()
+            store.clearPendingOrder()
+            store.clearOrderIdempotencyKey()
+            store.clearClaimIdempotencyKey()
+            _state.value = AppAccessState.LoggedOut
+            result
+        }
 
     /**
      * A revoked device must produce a new SMS/Passkey activation proof before claiming again.

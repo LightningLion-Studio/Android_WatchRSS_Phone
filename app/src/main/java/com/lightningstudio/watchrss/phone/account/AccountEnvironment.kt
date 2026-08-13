@@ -7,18 +7,13 @@ data class AccountEnvironment(
     val remoteEnvironment: RemoteEnvironment = RemoteEnvironment.PRODUCTION,
     val backendBaseUrl: String = BuildConfig.WATCHRSS_PRODUCTION_BACKEND_BASE_URL.trimEnd('/'),
     val supabaseAnonKey: String = BuildConfig.WATCHRSS_PRODUCTION_SUPABASE_ANON_KEY,
-    val appAccessPublicKey: String = BuildConfig.WATCHRSS_APP_ACCESS_PUBLIC_KEY,
-    val posthogHost: String = BuildConfig.WATCHRSS_POSTHOG_HOST.trimEnd('/'),
-    val posthogApiKey: String = BuildConfig.WATCHRSS_POSTHOG_API_KEY
+    val appAccessPublicKey: String = BuildConfig.WATCHRSS_APP_ACCESS_PUBLIC_KEY
 ) {
     val storageSuffix: String
         get() = remoteEnvironment.storageSuffix
 
     val isAuthConfigured: Boolean
         get() = backendBaseUrl.isNotBlank() && supabaseAnonKey.isNotBlank()
-
-    val isTelemetryConfigured: Boolean
-        get() = posthogHost.isNotBlank() && posthogApiKey.isNotBlank()
 
     companion object {
         fun active(context: Context): AccountEnvironment =

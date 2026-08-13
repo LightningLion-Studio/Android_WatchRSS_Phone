@@ -27,7 +27,6 @@ import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetTransferService
-import com.lightningstudio.watchrss.phone.data.telemetry.OpenPanelAnalytics
 import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -109,18 +108,14 @@ class PhoneCompanionContainer(context: Context) {
         AppAccessCoordinator(appContext, accountRepository, licenseDeviceIdentity, appScope)
     }
 
-    val openPanelAnalytics: OpenPanelAnalytics by lazy {
-        OpenPanelAnalytics(appContext, appScope)
-    }
-
     val usageTelemetry: PhoneUsageTelemetry by lazy {
         PhoneUsageTelemetry(
             context = appContext,
             environment = accountEnvironment,
             installationIdentity = installationIdentity,
+            deviceId = deviceIdentity.deviceId,
             accountRepository = accountRepository,
-            appScope = appScope,
-            openPanelAnalytics = openPanelAnalytics
+            appScope = appScope
         )
     }
 

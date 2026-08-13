@@ -65,11 +65,6 @@ android {
             productionSetting("WATCHRSS_SUPABASE_ANON_KEY").asBuildConfigString()
         )
         buildConfigField("String", "WATCHRSS_TEST_SUPABASE_ANON_KEY", "\"\"")
-        buildConfigField("String", "WATCHRSS_OPENPANEL_CLIENT_ID", "\"3b151c92-b189-48a3-ae77-148db3235ca1\"")
-        buildConfigField("String", "WATCHRSS_OPENPANEL_CLIENT_SECRET", "\"\"")
-        buildConfigField("String", "WATCHRSS_OPENPANEL_API_URL", "\"http://10.0.2.2:3001\"")
-        buildConfigField("String", "WATCHRSS_POSTHOG_HOST", "\"\"")
-        buildConfigField("String", "WATCHRSS_POSTHOG_API_KEY", "\"\"")
         buildConfigField(
             "String",
             "WATCHRSS_APP_ACCESS_PUBLIC_KEY",
@@ -147,7 +142,6 @@ android {
 }
 
 dependencies {
-    implementation(project(":openpanel"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.lifecycle.runtime.ktx)

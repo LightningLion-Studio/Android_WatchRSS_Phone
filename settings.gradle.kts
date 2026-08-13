@@ -23,4 +23,3 @@ dependencyResolutionManagement {
 
 rootProject.name = "WatchRSS Phone"
 include(":app")
-include(":openpanel")

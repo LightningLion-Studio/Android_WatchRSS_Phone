@@ -254,8 +254,8 @@ class PhoneAccountRepository(
                 put("watchRefreshToken", token.refreshToken)
                 put("refreshTokenExpiresAt", token.refreshTokenExpiresAtMillis)
                 put("backendBaseUrl", environment.backendBaseUrl)
-                put("posthogHost", environment.posthogHost)
-                put("posthogProjectApiKey", environment.posthogApiKey)
+                put("posthogHost", "")
+                put("posthogProjectApiKey", "")
             })
             put("entitlement", JSONObject().apply {
                 put("plan", token.entitlement.plan)

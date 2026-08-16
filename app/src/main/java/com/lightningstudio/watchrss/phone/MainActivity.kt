@@ -31,6 +31,8 @@ import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.account.AppAccessState
 import com.lightningstudio.watchrss.phone.account.RemoteEnvironment
 import com.lightningstudio.watchrss.phone.account.RemoteEnvironmentStore
+import com.lightningstudio.watchrss.phone.onboarding.OnboardingProfileBuilder
+import com.lightningstudio.watchrss.phone.onboarding.OnboardingProfileStore
 import com.lightningstudio.watchrss.phone.privacy.PhonePrivacyConsentStore
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.Job
@@ -194,11 +196,17 @@ class MainActivity : ComponentActivity() {
             when (state) {
                 AppAccessState.Loading -> CircularProgressIndicator(Modifier.padding(24.dp))
                 AppAccessState.LoggedOut -> GateMessage("首次使用请登录", null) { openAccount() }
-                is AppAccessState.PurchaseRequired -> GateMessage(
-                    title = "当前账号没有可授权额度",
-                    detail = "购买手机版永久授权后即可继续。¥6 可授权 3 台手机；当前已购买 ${state.summary.purchaseCount} 次，剩余 0 台。",
-                    actionLabel = "前往网页支付"
-                ) { showPaymentAgreement = true }
+                is AppAccessState.PurchaseRequired -> {
+                    val copy = OnboardingProfileBuilder.paywallCopyFor(
+                        state.summary,
+                        OnboardingProfileStore(this@MainActivity).load()
+                    )
+                    GateMessage(
+                        title = copy.title,
+                        detail = copy.detail,
+                        actionLabel = copy.actionLabel
+                    ) { showPaymentAgreement = true }
+                }
                 is AppAccessState.PaymentPending -> GateMessage("等待支付确认", "订单 ${state.order.merchantOrderId}") {
                     state.order.paymentUrl?.let { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it))) }
                 }

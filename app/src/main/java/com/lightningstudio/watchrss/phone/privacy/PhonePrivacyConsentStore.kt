@@ -41,24 +41,6 @@ class PhonePrivacyConsentStore(context: Context) {
     }
 }
 
-internal enum class PhoneOobeStage {
-    WELCOME,
-    AGREEMENT,
-    ACCOUNT,
-    COMPLETE
-}
-
-internal fun phoneOobeStage(
-    page: Int,
-    hasConsent: Boolean,
-    hasUsableSession: Boolean
-): PhoneOobeStage = when {
-    hasConsent && hasUsableSession -> PhoneOobeStage.COMPLETE
-    hasConsent -> PhoneOobeStage.ACCOUNT
-    page <= 0 -> PhoneOobeStage.WELCOME
-    else -> PhoneOobeStage.AGREEMENT
-}
-
 internal fun shouldEnforceAppAccess(
     hasRequiredConsent: Boolean,
     isOobeComplete: Boolean

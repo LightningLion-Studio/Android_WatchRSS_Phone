@@ -28,7 +28,10 @@ import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetTransferService
 import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
+import com.lightningstudio.watchrss.phone.onboarding.OnboardingDraftStore
+import com.lightningstudio.watchrss.phone.onboarding.OnboardingProfileStore
 import com.lightningstudio.watchrss.phone.push.OppoPushCoordinator
+import com.lightningstudio.watchrss.phone.push.PhonePushRegistrationUploader
 import com.lightningstudio.watchrss.phone.push.PushRegistrationStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -73,8 +76,18 @@ class PhoneCompanionContainer(context: Context) {
         PushRegistrationStore(appContext)
     }
 
+    val pushRegistrationUploader: PhonePushRegistrationUploader by lazy {
+        PhonePushRegistrationUploader(
+            environment = accountEnvironment,
+            accountRepository = accountRepository,
+            deviceAccessTokenProvider = { appAccessCoordinator.deviceAccessToken },
+            installId = installationIdentity.installId,
+            deviceId = deviceIdentity.deviceId
+        )
+    }
+
     val oppoPushCoordinator: OppoPushCoordinator by lazy {
-        OppoPushCoordinator(appContext, pushRegistrationStore)
+        OppoPushCoordinator(appContext, pushRegistrationStore, pushRegistrationUploader)
     }
 
     /** Stable peer id shared by RFCOMM and the RTOS BLE note transports. */
@@ -131,6 +144,14 @@ class PhoneCompanionContainer(context: Context) {
 
     val bluetoothDebugLog: BluetoothDebugLog by lazy {
         BluetoothDebugLog(appContext)
+    }
+
+    val onboardingDraftStore: OnboardingDraftStore by lazy {
+        OnboardingDraftStore(appContext)
+    }
+
+    val onboardingProfileStore: OnboardingProfileStore by lazy {
+        OnboardingProfileStore(appContext)
     }
 
     val readerPresetRepository: ReaderPresetRepository by lazy {

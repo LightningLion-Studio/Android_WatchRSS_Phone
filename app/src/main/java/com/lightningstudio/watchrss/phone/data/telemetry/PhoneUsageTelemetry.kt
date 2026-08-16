@@ -80,6 +80,23 @@ class PhoneUsageTelemetry(
 
     fun recordAccountSignedIn(userId: String) = capture("account_signed_in")
 
+    /**
+     * 引导漏斗计数器事件。仅上报事件名计数，不含任何答案内容——引导中收集的自由文本
+     * 永远不会离开本机。注意：capture() 在隐私同意前静默丢弃（步骤 1-2 不计数）。
+     * 事件名集中在 companion 常量中，供 JVM 单测校验"事件名不含任何答案键/答案值"。
+     */
+    fun recordOnboardingStepCompleted() = capture(EVENT_ONBOARDING_STEP_COMPLETED)
+
+    fun recordOnboardingStepSkipped() = capture(EVENT_ONBOARDING_STEP_SKIPPED)
+
+    fun recordOnboardingImportSucceeded() = capture(EVENT_ONBOARDING_IMPORT_SUCCEEDED)
+
+    fun recordOnboardingImportFailed() = capture(EVENT_ONBOARDING_IMPORT_FAILED)
+
+    fun recordOnboardingCompleted() = capture(EVENT_ONBOARDING_COMPLETED)
+
+    fun recordOnboardingDropped() = capture(EVENT_ONBOARDING_DROPPED)
+
     private fun capture(event: String, properties: Map<String, Any?> = emptyMap()) {
         if (!consentStore.hasRequiredConsent()) return
         store.record(event, properties)
@@ -130,6 +147,13 @@ class PhoneUsageTelemetry(
     }
 
     companion object {
+        const val EVENT_ONBOARDING_STEP_COMPLETED = "onboarding_step_completed"
+        const val EVENT_ONBOARDING_STEP_SKIPPED = "onboarding_step_skipped"
+        const val EVENT_ONBOARDING_IMPORT_SUCCEEDED = "onboarding_import_succeeded"
+        const val EVENT_ONBOARDING_IMPORT_FAILED = "onboarding_import_failed"
+        const val EVENT_ONBOARDING_COMPLETED = "onboarding_completed"
+        const val EVENT_ONBOARDING_DROPPED = "onboarding_dropped"
+
         private const val UPLOAD_DEBOUNCE_MS = 750L
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 

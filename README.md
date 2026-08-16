@@ -76,6 +76,7 @@ cd Android_腕上RSS_Phone
   - OkHttp + Jsoup - 网页抓取与正文提取
   - Coil - 图片加载
   - ZXing Core - 联系方式二维码生成
+  - OPPO Push SDK (com.heytap.msp 3.7.1) - OPPO 系统推送通知
 
 ## 📂 项目结构
 
@@ -103,12 +104,27 @@ app/src/main/java/com/lightningstudio/watchrss/phone/
 ## 🔐 安全说明
 
 - 应用使用系统已配对蓝牙连接，不依赖互联网或本地 WiFi
-- 不引入厂商闭源 SDK，仅使用 Android 公开蓝牙 API
+- 蓝牙同步通道仅使用 Android 公开 RFCOMM API;系统推送采用 OPPO 官方 Push SDK(详见「开源许可证」章节)
 - 蓝牙消息限制最大帧大小，避免异常大载荷
 
-## 📄 许可证
+## 📄 开源许可证
 
-本项目采用开源许可证（请根据实际情况添加具体许可证信息）
+本项目本体采用 [MIT License](LICENSE)(Copyright © 2026 LightningLion-Studio):可自由使用、修改与分发,但需保留版权声明与许可文本。
+
+此外,OPPO 推送能力使用 **OPPO Push SDK(com.heytap.msp 3.7.1)**,其为 OPPO 官方提供的闭源专有组件,以 aar 形式随仓库分发(`app/libs/`),仅按 OPPO 开放平台协议用于推送通知。
+
+应用依赖的第三方开源组件遵循其各自的许可证,主要包括:
+
+| 组件 | 许可证 |
+|------|--------|
+| AndroidX / Jetpack Compose / Room / Media3 | Apache-2.0 |
+| Kotlin 与 kotlinx.coroutines | Apache-2.0 |
+| OkHttp | Apache-2.0 |
+| Coil | Apache-2.0 |
+| Jsoup | MIT |
+| ZXing Core | Apache-2.0 |
+| NanoHTTPD | BSD-3-Clause |
+| WorkManager | Apache-2.0 |
 
 ## 👨‍💻 开发团队
 

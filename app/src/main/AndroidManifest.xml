@@ -51,9 +51,8 @@
         <meta-data
             android:name="asset_statements"
             android:resource="@string/asset_statements" />
-        <!-- OPPO Push callback services. Required because the 3.0.0 maven artifact ships an
-             empty manifest; if the console 3.7.1 aar declares these itself and the manifest
-             merge conflicts, remove this block. -->
+        <!-- OPPO Push callback services. Required because the SDK aar (3.7.1, committed
+             under app/libs/) ships an empty manifest — these declarations are mandatory. -->
         <service
             android:name="com.heytap.msp.push.service.CompatibleDataMessageCallbackService"
             android:exported="true"

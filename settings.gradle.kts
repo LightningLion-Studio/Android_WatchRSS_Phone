@@ -18,13 +18,6 @@ dependencyResolutionManagement {
         maven("https://maven.aliyun.com/repository/google")
         google()
         mavenCentral()
-        // OPPO Push SDK public release repo (credentials are the documented public nexus account).
-        maven("https://maven.columbus.heytapmobi.com/repository/releases/") {
-            credentials {
-                username = "nexus"
-                password = "c0b08da17e3ec36c3870fed674a0bcb36abc2e23"
-            }
-        }
     }
 }
 

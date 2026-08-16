@@ -12,9 +12,9 @@ import com.lightningstudio.watchrss.phone.BuildConfig
  * channel; no user data moves). register() runs only when the device supports OPPO push
  * and the user has not disabled "接收推送通知". No regId is ever uploaded anywhere.
  *
- * API surface verified against com.heytap.msp:push:3.0.0 (javap). The 3.7.1 aar may
- * change pausePush()/resumePush()/requestNotificationPermission() to take a Context —
- * re-verify with javap after dropping the aar into app/libs/ and adapt only this class.
+ * API surface verified against com.heytap.msp_V3.7.1.aar (javap): HeytapPushManager
+ * init/isSupportPush/register/pausePush/resumePush/requestNotificationPermission all
+ * match the calls below; ICallBackResultService carries extra string params in 3.7.x.
  */
 class OppoPushCoordinator(
     private val context: Context,
@@ -66,19 +66,25 @@ class OppoPushCoordinator(
     }
 
     private val callback = object : ICallBackResultService {
-        override fun onRegister(responseCode: Int, registerID: String) {
+        override fun onRegister(
+            responseCode: Int,
+            registerID: String,
+            arg2: String,
+            arg3: String
+        ) {
             store.lastRegisterCode = responseCode
             store.regId = registerID.takeIf { responseCode == 0 }
-            Log.i(TAG, "onRegister code=$responseCode regId=${store.regId ?: "none"}")
+            Log.i(TAG, "onRegister code=$responseCode regId=${store.regId ?: "none"} " +
+                "(extra: $arg2 / $arg3)")
             if (responseCode != 0) Log.w(TAG, "register failed; 16 = signature mismatch")
         }
 
-        override fun onUnRegister(responseCode: Int) = Unit
+        override fun onUnRegister(responseCode: Int, arg2: String, arg3: String) = Unit
         override fun onSetPushTime(responseCode: Int, pushTime: String) = Unit
         override fun onGetPushStatus(responseCode: Int, status: Int) = Unit
         override fun onGetNotificationStatus(responseCode: Int, status: Int) = Unit
-        override fun onError(code: Int, msg: String) {
-            Log.w(TAG, "push callback error code=$code msg=$msg")
+        override fun onError(code: Int, msg: String, arg3: String, arg4: String) {
+            Log.w(TAG, "push callback error code=$code msg=$msg ($arg3 / $arg4)")
         }
     }
 

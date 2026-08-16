@@ -21,7 +21,7 @@ Do not reintroduce QR scanning, manual IP/port WiFi connection, acoustic-guided 
   - OkHttp + Jsoup for webpage import and readable article extraction
   - Coil for image loading
   - ZXing Core for contact QR code generation
-  - OPPO Push SDK (com.heytap.msp; console-downloaded aar in app/libs, maven 3.0.0 fallback) for OPPO system push
+  - OPPO Push SDK (com.heytap.msp 3.7.1; committed aar at app/libs/com.heytap.msp_V3.7.1.aar) for OPPO system push
 
 ## Build Commands
 

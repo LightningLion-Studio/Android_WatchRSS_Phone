@@ -117,6 +117,8 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageDailyPojo
+import com.lightningstudio.watchrss.phone.tips.TipIds
+import com.lightningstudio.watchrss.phone.tips.ui.tipAnchor
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageStatisticsPojo
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -2721,7 +2723,9 @@ private fun MainFloatingActionButton(
                     onClick = onSyncLibrary,
                     icon = { Icon(Icons.Default.Sync, contentDescription = null) },
                     text = { Text("同步手表") },
-                    modifier = Modifier.testTag("fab_sync_watch")
+                    modifier = Modifier
+                        .testTag("fab_sync_watch")
+                        .tipAnchor(TipIds.SYNC_MANUAL)
                 )
             }
         }
@@ -2869,7 +2873,8 @@ private fun DashboardPage(
                     item {
                         TokenUsageCard(
                             stats = uiState.llmTokenUsageStats,
-                            daily = uiState.llmTokenUsageDaily
+                            daily = uiState.llmTokenUsageDaily,
+                            modifier = Modifier.tipAnchor(TipIds.TOKEN_USAGE)
                         )
                     }
                 }
@@ -2881,9 +2886,10 @@ private fun DashboardPage(
 @Composable
 private fun TokenUsageCard(
     stats: PhoneLlmTokenUsageStatisticsPojo?,
-    daily: List<PhoneLlmTokenUsageDailyPojo>
+    daily: List<PhoneLlmTokenUsageDailyPojo>,
+    modifier: Modifier = Modifier
 ) {
-    ElevatedCard {
+    ElevatedCard(modifier = modifier) {
         Column(
             modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -3147,6 +3153,7 @@ private fun LibrarySummaryCard(
                     modifier = Modifier
                         .weight(1f)
                         .testTag("tile_favorites")
+                        .tipAnchor(TipIds.FAVORITES_VS_WATCH_LATER)
                 )
             }
             SummaryRow {

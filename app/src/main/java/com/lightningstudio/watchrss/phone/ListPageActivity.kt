@@ -108,7 +108,8 @@ class ListPageActivity : ComponentActivity() {
             (application as PhoneCompanionApplication).container.bluetoothSyncManager,
             (application as PhoneCompanionApplication).container.llmTokenUsageRepository,
             (application as PhoneCompanionApplication).container.usageTelemetry,
-            (application as PhoneCompanionApplication).container.backupService
+            (application as PhoneCompanionApplication).container.backupService,
+            (application as PhoneCompanionApplication).container.tipManager
         )
     }
     private val noteImportService by lazy {

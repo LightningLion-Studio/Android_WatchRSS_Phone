@@ -42,7 +42,7 @@ data class TipState(
 )
 
 /** 界面状态快照，由各宿主在组合时构建并传入 [TipManager.evaluateEligibleTip]。键缺失视为不满足规则。 */
-class TipParameterValues private constructor(private val values: Map<String, Any>) {
+data class TipParameterValues private constructor(private val values: Map<String, Any>) {
 
     fun contains(key: String): Boolean = values.containsKey(key)
 

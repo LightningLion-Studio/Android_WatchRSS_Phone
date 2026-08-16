@@ -35,11 +35,15 @@ import com.lightningstudio.watchrss.phone.data.importer.LocalFileImportTarget
 import com.lightningstudio.watchrss.phone.data.importer.classifyLocalFileImport
 import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
 import com.lightningstudio.watchrss.phone.ui.MainScreen
+import com.lightningstudio.watchrss.phone.tips.TipParameters
+import com.lightningstudio.watchrss.phone.tips.TipParameterValues
+import com.lightningstudio.watchrss.phone.tips.ui.TipOverlayHost
 import com.lightningstudio.watchrss.phone.ui.TxtUpdateDialog
 import com.lightningstudio.watchrss.phone.ui.TxtChapterImportDialog
 import com.lightningstudio.watchrss.phone.ui.reader.ProvideReaderPreset
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
+import com.lightningstudio.watchrss.phone.viewmodel.MainUiState
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModel
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModelFactory
 import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptUi
@@ -76,7 +80,8 @@ class HomeActivity : ComponentActivity() {
             container.bluetoothSyncManager,
             container.llmTokenUsageRepository,
             container.usageTelemetry,
-            container.backupService
+            container.backupService,
+            container.tipManager
         )
     }
 
@@ -198,8 +203,12 @@ class HomeActivity : ComponentActivity() {
                         }
                     }
 
-                    MainScreen(
-                    uiState = state,
+                    TipOverlayHost(
+                        tipManager = container.tipManager,
+                        parameters = rememberMainTipParameters(state)
+                    ) {
+                        MainScreen(
+                        uiState = state,
                     showAccountFeatures = BuildConfig.DEBUG,
                     onUrlChange = viewModel::updateUrlInput,
                     onImportArticle = viewModel::importIndependentArticle,
@@ -267,6 +276,7 @@ class HomeActivity : ComponentActivity() {
                     onDismissMessage = viewModel::clearMessage,
                         onImportFile = ::selectLocalFile
                     )
+                    }
                     state.txtChapterPrompt?.let { prompt ->
                         TxtChapterImportDialog(
                             prompt = prompt,
@@ -688,3 +698,27 @@ private data class InboundLocalFile(
     val uriString: String,
     val importTarget: LocalFileImportTarget
 )
+
+/** 首页 Tip 参数快照：从 MainUiState 提取规则所需的状态。 */
+@androidx.compose.runtime.Composable
+private fun rememberMainTipParameters(state: MainUiState): TipParameterValues {
+    return androidx.compose.runtime.remember(
+        state.llmTokenUsageStats,
+        state.rssArticles,
+        state.independentArticles,
+        state.importedContentArticles
+    ) {
+        TipParameterValues.Builder()
+            .put(
+                TipParameters.TOKEN_STATS_EMPTY,
+                state.llmTokenUsageStats == null || (state.llmTokenUsageStats.totalTokens ?: 0L) == 0L
+            )
+            .put(
+                TipParameters.HAS_ANY_ARTICLE,
+                state.rssArticles.isNotEmpty() ||
+                    state.independentArticles.isNotEmpty() ||
+                    state.importedContentArticles.isNotEmpty()
+            )
+            .build()
+    }
+}

@@ -34,6 +34,8 @@ import kotlinx.coroutines.flow.combine
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageDailyPojo
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageRepository
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageStatisticsPojo
+import com.lightningstudio.watchrss.phone.tips.TipEvents
+import com.lightningstudio.watchrss.phone.tips.TipManager
 
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -147,7 +149,8 @@ class MainViewModel(
     private val bluetoothSyncManager: PhoneBluetoothSyncManager,
     private val llmTokenUsageRepository: PhoneLlmTokenUsageRepository,
     private val usageTelemetry: PhoneUsageTelemetry,
-    private val backupService: WatchRssBackupService
+    private val backupService: WatchRssBackupService,
+    private val tipManager: TipManager
 ) : ViewModel() {
     private var pendingLocalContentInspection: PhoneLocalContentImportInspection? = null
     private val _toastEvent = MutableSharedFlow<String>(extraBufferCapacity = 1)
@@ -1015,6 +1018,7 @@ class MainViewModel(
                 }
             )
             usageTelemetry.recordSyncResult(true, "library")
+            tipManager.recordEvent(TipEvents.SYNC_COMPLETED)
         }.onFailure { throwable ->
             clearSmoothedSyncProgress()
             sessionState.value = sessionState.value.copy(
@@ -1155,6 +1159,12 @@ class MainViewModel(
     private fun toggleSaved(article: PhoneArticleEntity, type: PhoneSavedItemType) {
         viewModelScope.launch {
             val updated = repository.toggleSaved(article, type)
+            tipManager.recordEvent(
+                when (type) {
+                    PhoneSavedItemType.FAVORITE -> TipEvents.FAVORITE_TOGGLED
+                    PhoneSavedItemType.WATCH_LATER -> TipEvents.WATCH_LATER_TOGGLED
+                }
+            )
             val saved = when (type) {
                 PhoneSavedItemType.FAVORITE -> updated.favoriteSaved
                 PhoneSavedItemType.WATCH_LATER -> updated.watchLaterSaved

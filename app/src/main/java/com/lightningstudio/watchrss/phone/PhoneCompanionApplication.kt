@@ -19,6 +19,7 @@ import com.lightningstudio.watchrss.phone.connection.ip.WatchIpSyncService
 import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
 import com.lightningstudio.watchrss.phone.privacy.PhonePrivacyConsentStore
 import com.lightningstudio.watchrss.phone.privacy.shouldEnforceAppAccess
+import com.lightningstudio.watchrss.phone.tips.TipEvents
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -157,6 +158,7 @@ class PhoneCompanionApplication : Application() {
             accountInitialization.await()
             container.appAccessCoordinator.initialize()
             container.usageTelemetry.recordAppLaunch()
+            container.tipManager.recordEvent(TipEvents.APP_LAUNCH)
             container.repository.recordFirstUseIfAbsent(container.firstInstalledAtMillis)
             if (container.accountRepository.hasUsableSession &&
                 container.appAccessCoordinator.isAuthorized

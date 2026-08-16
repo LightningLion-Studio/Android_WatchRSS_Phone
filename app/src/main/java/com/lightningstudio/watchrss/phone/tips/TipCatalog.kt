@@ -68,6 +68,19 @@ object TipCatalog {
             displayFrequency = TipDisplayFrequency.WEEKLY,
             maxShows = 2
         ),
+        TipDefinition(
+            id = TipIds.AI_SUMMARY,
+            title = "AI 总结",
+            message = "一键总结全文要点；词元消耗显示在下方，可同步到手表查看。",
+            priority = 5,
+            rule = TipRules.allOf(
+                TipRules.eventAtLeast(TipEvents.ARTICLE_OPENED, 2),
+                TipRules.eventNever(TipEvents.AI_SUMMARY_COMPLETED)
+            ),
+            displayFrequency = TipDisplayFrequency.DAILY,
+            maxShows = 1,
+            invalidateOnEvents = setOf(TipEvents.AI_SUMMARY_COMPLETED)
+        ),
         // ── 内容管理 ─────────────────────────────────────────────
         TipDefinition(
             id = TipIds.FAVORITES_VS_WATCH_LATER,

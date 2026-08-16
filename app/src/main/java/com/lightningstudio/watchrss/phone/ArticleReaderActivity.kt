@@ -147,6 +147,10 @@ import com.lightningstudio.watchrss.phone.ui.reader.LocalReaderPresetRuntime
 import com.lightningstudio.watchrss.phone.ui.reader.ReaderBackgroundSurface
 import com.lightningstudio.watchrss.phone.ui.reader.ReaderTextRole
 import com.lightningstudio.watchrss.phone.ui.reader.readerTextStyle
+import com.lightningstudio.watchrss.phone.tips.TipEvents
+import com.lightningstudio.watchrss.phone.tips.TipIds
+import com.lightningstudio.watchrss.phone.tips.ui.TipOverlayHost
+import com.lightningstudio.watchrss.phone.tips.ui.tipAnchor
 import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWidthClass
@@ -208,6 +212,9 @@ class ArticleReaderActivity : ComponentActivity() {
                     ) {
                         value = repository.getImportedTextReader(articleId)
                     }
+                    TipOverlayHost(
+                        tipManager = (application as PhoneCompanionApplication).container.tipManager
+                    ) {
                     ArticleReaderScreen(
                         article = article,
                         importedTextReader = importedTextReader,
@@ -229,6 +236,7 @@ class ArticleReaderActivity : ComponentActivity() {
                             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                         }
                     )
+                    }
                 }
             }
         }
@@ -531,6 +539,9 @@ internal fun ArticleReaderScreen(
                     }
                 )
                 aiLoading = false
+                if (aiResult != null) {
+                    appContainer.tipManager.recordEvent(TipEvents.AI_SUMMARY_COMPLETED)
+                }
             }
         }
 
@@ -542,6 +553,10 @@ internal fun ArticleReaderScreen(
         }
         DisposableEffect(safeArticle.articleId) {
             onDispose { aiJob?.cancel() }
+        }
+
+        LaunchedEffect(safeArticle.articleId) {
+            appContainer.tipManager.recordEvent(TipEvents.ARTICLE_OPENED)
         }
 
         LaunchedEffect(safeArticle.articleId, hasRestoredPosition) {
@@ -1082,10 +1097,13 @@ internal fun ArticleReaderScreen(
                                 }
                             }
                             if (aiConfig.enabled) {
-                                GlassButton(onClick = {
-                                    if (aiResult == null && !aiLoading) startAiSummary()
-                                    else showAiSummary = true
-                                }) {
+                                GlassButton(
+                                    onClick = {
+                                        if (aiResult == null && !aiLoading) startAiSummary()
+                                        else showAiSummary = true
+                                    },
+                                    modifier = Modifier.tipAnchor(TipIds.AI_SUMMARY)
+                                ) {
                                     Icon(Icons.Default.AutoAwesome, contentDescription = null)
                                     Text("AI总结")
                                 }

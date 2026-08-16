@@ -28,10 +28,18 @@ class PushRegistrationStore(context: Context) {
             preferences.edit().putInt(KEY_LAST_CODE, value).apply()
         }
 
+    /** The regId that was successfully uploaded to the backend (null = pending retry). */
+    var uploadedRegId: String?
+        get() = preferences.getString(KEY_UPLOADED_REG_ID, null)
+        set(value) {
+            preferences.edit().putString(KEY_UPLOADED_REG_ID, value).apply()
+        }
+
     companion object {
         const val PREFERENCES_NAME = "phone_push_registration"
         const val KEY_ENABLED = "push_notifications"
         private const val KEY_REG_ID = "register_id"
         private const val KEY_LAST_CODE = "last_register_code"
+        private const val KEY_UPLOADED_REG_ID = "uploaded_register_id"
     }
 }

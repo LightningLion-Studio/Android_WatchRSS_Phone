@@ -8,9 +8,10 @@ import com.heytap.msp.push.callback.ICallBackResultService
 import com.lightningstudio.watchrss.phone.BuildConfig
 
 /**
- * Client-only OPPO push registration. init() is unconditional (OS-level notification
- * channel; no user data moves). register() runs only when the device supports OPPO push
- * and the user has not disabled "接收推送通知". No regId is ever uploaded anywhere.
+ * OPPO push registration. init() is unconditional (OS-level notification channel; no
+ * user data moves). register() runs only when the device supports OPPO push and the
+ * user has not disabled "接收推送通知". A successful regId is uploaded to the backend
+ * (account session + device possession required); failures retry on the next cold start.
  *
  * API surface verified against com.heytap.msp_V3.7.1.aar (javap): HeytapPushManager
  * init/isSupportPush/register/pausePush/resumePush/requestNotificationPermission all
@@ -18,7 +19,8 @@ import com.lightningstudio.watchrss.phone.BuildConfig
  */
 class OppoPushCoordinator(
     private val context: Context,
-    private val store: PushRegistrationStore = PushRegistrationStore(context)
+    private val store: PushRegistrationStore = PushRegistrationStore(context),
+    private val uploader: PhonePushRegistrationUploader? = null
 ) {
     /** No-op-safe SDK init; must run before any register()/pause()/resume(). */
     fun init() {
@@ -48,6 +50,7 @@ class OppoPushCoordinator(
         }
         if (store.regId != null && store.lastRegisterCode == 0) {
             runCatching { HeytapPushManager.resumePush() }
+            store.regId?.let { uploadIfNeeded(it) } // retries failed uploads on every cold start
             return // already registered; no re-register on every launch
         }
         register()
@@ -72,11 +75,17 @@ class OppoPushCoordinator(
             arg2: String,
             arg3: String
         ) {
+            val previous = store.regId
             store.lastRegisterCode = responseCode
             store.regId = registerID.takeIf { responseCode == 0 }
+            if (responseCode == 0 && store.regId != previous) store.uploadedRegId = null
             Log.i(TAG, "onRegister code=$responseCode regId=${store.regId ?: "none"} " +
                 "(extra: $arg2 / $arg3)")
-            if (responseCode != 0) Log.w(TAG, "register failed; 16 = signature mismatch")
+            if (responseCode != 0) {
+                Log.w(TAG, "register failed; 16 = signature mismatch")
+            } else {
+                store.regId?.let { uploadIfNeeded(it) }
+            }
         }
 
         override fun onUnRegister(responseCode: Int, arg2: String, arg3: String) = Unit
@@ -103,6 +112,16 @@ class OppoPushCoordinator(
     fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             runCatching { HeytapPushManager.requestNotificationPermission() }
+        }
+    }
+
+    private fun uploadIfNeeded(regId: String) {
+        if (store.uploadedRegId == regId) return
+        if (uploader?.upload(regId) == true) {
+            store.uploadedRegId = regId
+        } else {
+            Log.i(TAG, "regId upload deferred (no session / no device access / network); " +
+                "retry on next cold start")
         }
     }
 

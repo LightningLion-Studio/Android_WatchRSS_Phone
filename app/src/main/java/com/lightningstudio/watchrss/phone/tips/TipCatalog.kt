@@ -49,6 +49,15 @@ object TipCatalog {
             maxShows = 2,
             invalidateOnEvents = setOf(TipEvents.SYNC_COMPLETED)
         ),
+        TipDefinition(
+            id = TipIds.SYNC_STATUS_CARD,
+            title = "同步状态",
+            message = "RFCOMM 是蓝牙传输通道，不是手表型号——这里显示同步进度与结果，异常时可导出蓝牙日志排查。",
+            priority = 8,
+            rule = TipRules.eventAtLeast(TipEvents.SYNC_COMPLETED, 1),
+            displayFrequency = TipDisplayFrequency.WEEKLY,
+            maxShows = 2
+        ),
         // ── AI 总结与词元 ────────────────────────────────────────
         TipDefinition(
             id = TipIds.TOKEN_USAGE,
@@ -73,6 +82,36 @@ object TipCatalog {
             displayFrequency = TipDisplayFrequency.ALWAYS,
             maxShows = 1,
             invalidateOnEvents = setOf(TipEvents.FAVORITE_TOGGLED, TipEvents.WATCH_LATER_TOGGLED)
+        ),
+        TipDefinition(
+            id = TipIds.IMPORTS_THREE_WAYS,
+            title = "三种导入",
+            message = "RSS 订阅频道、网页导入独立文章、文件导入 TXT/EPUB，按需选择。",
+            priority = 8,
+            rule = TipRules.allOf(
+                TipRules.param(TipParameters.HAS_NO_IMPORTS),
+                TipRules.eventAtLeast(TipEvents.APP_LAUNCH, 1)
+            ),
+            displayFrequency = TipDisplayFrequency.ALWAYS,
+            maxShows = 1,
+            invalidateOnEvents = setOf(
+                TipEvents.RSS_SOURCE_ADDED,
+                TipEvents.ARTICLE_IMPORTED,
+                TipEvents.LOCAL_CONTENT_IMPORTED
+            )
+        ),
+        TipDefinition(
+            id = TipIds.RSS_FAB,
+            title = "添加 RSS 源",
+            message = "粘贴频道地址即可订阅，文章会按频道自动分组。",
+            priority = 8,
+            rule = TipRules.allOf(
+                TipRules.eventAtLeast(TipEvents.APP_LAUNCH, 2),
+                TipRules.eventNever(TipEvents.RSS_SOURCE_ADDED)
+            ),
+            displayFrequency = TipDisplayFrequency.WEEKLY,
+            maxShows = 2,
+            invalidateOnEvents = setOf(TipEvents.RSS_SOURCE_ADDED)
         )
     )
 

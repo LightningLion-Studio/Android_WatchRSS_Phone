@@ -16,6 +16,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
@@ -38,6 +39,7 @@ import com.lightningstudio.watchrss.phone.ui.MainScreen
 import com.lightningstudio.watchrss.phone.tips.TipParameters
 import com.lightningstudio.watchrss.phone.tips.TipParameterValues
 import com.lightningstudio.watchrss.phone.tips.ui.TipOverlayHost
+import com.lightningstudio.watchrss.phone.tips.ui.TipSuppressionState
 import com.lightningstudio.watchrss.phone.ui.TxtUpdateDialog
 import com.lightningstudio.watchrss.phone.ui.TxtChapterImportDialog
 import com.lightningstudio.watchrss.phone.ui.reader.ProvideReaderPreset
@@ -196,6 +198,7 @@ class HomeActivity : ComponentActivity() {
                 ProvideReaderPreset(container.readerPresetRepository) {
                     val state by viewModel.uiState.collectAsState()
                     val updateState by appUpdateDownloader.state.collectAsState()
+                    val tipSuppression = remember { TipSuppressionState() }
 
                     LaunchedEffect(Unit) {
                         viewModel.toastEvent.collect { msg ->
@@ -205,7 +208,7 @@ class HomeActivity : ComponentActivity() {
 
                     TipOverlayHost(
                         tipManager = container.tipManager,
-                        parameters = rememberMainTipParameters(state)
+                        parameters = rememberMainTipParameters(state, tipSuppression)
                     ) {
                         MainScreen(
                         uiState = state,
@@ -274,7 +277,8 @@ class HomeActivity : ComponentActivity() {
                     onChooseConflictResolution = viewModel::chooseConflictResolution,
                     onShowManualConflictOptions = viewModel::showManualConflictOptions,
                     onDismissMessage = viewModel::clearMessage,
-                        onImportFile = ::selectLocalFile
+                        onImportFile = ::selectLocalFile,
+                        tipSuppression = tipSuppression
                     )
                     }
                     state.txtChapterPrompt?.let { prompt ->
@@ -699,14 +703,19 @@ private data class InboundLocalFile(
     val importTarget: LocalFileImportTarget
 )
 
-/** 首页 Tip 参数快照：从 MainUiState 提取规则所需的状态。 */
+/** 首页 Tip 参数快照：从 MainUiState 与转场状态提取规则所需的状态。 */
 @androidx.compose.runtime.Composable
-private fun rememberMainTipParameters(state: MainUiState): TipParameterValues {
+private fun rememberMainTipParameters(
+    state: MainUiState,
+    tipSuppression: TipSuppressionState
+): TipParameterValues {
     return androidx.compose.runtime.remember(
         state.llmTokenUsageStats,
+        state.rssSources,
         state.rssArticles,
         state.independentArticles,
-        state.importedContentArticles
+        state.importedContentArticles,
+        tipSuppression.active
     ) {
         TipParameterValues.Builder()
             .put(
@@ -719,6 +728,13 @@ private fun rememberMainTipParameters(state: MainUiState): TipParameterValues {
                     state.independentArticles.isNotEmpty() ||
                     state.importedContentArticles.isNotEmpty()
             )
+            .put(
+                TipParameters.HAS_NO_IMPORTS,
+                state.rssSources.isEmpty() &&
+                    state.independentArticles.isEmpty() &&
+                    state.importedContentArticles.isEmpty()
+            )
+            .put(TipParameters.SUPPRESS_TIPS, tipSuppression.active)
             .build()
     }
 }

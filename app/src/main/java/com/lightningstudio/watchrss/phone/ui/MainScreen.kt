@@ -117,7 +117,10 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageDailyPojo
+import com.lightningstudio.watchrss.phone.tips.TipEvents
 import com.lightningstudio.watchrss.phone.tips.TipIds
+import com.lightningstudio.watchrss.phone.tips.ui.LocalTipManager
+import com.lightningstudio.watchrss.phone.tips.ui.TipSuppressionState
 import com.lightningstudio.watchrss.phone.tips.ui.tipAnchor
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageStatisticsPojo
 import androidx.compose.ui.graphics.Color
@@ -346,7 +349,8 @@ fun MainScreen(
     onDismissBackupImport: () -> Unit,
     onChooseConflictResolution: (PhoneSyncConflictResolution) -> Unit,
     onShowManualConflictOptions: () -> Unit,
-    onDismissMessage: () -> Unit
+    onDismissMessage: () -> Unit,
+    tipSuppression: TipSuppressionState? = null
 ) {
     var selectedContentChannelKey by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedReaderArticleId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -370,6 +374,12 @@ fun MainScreen(
     var isMediumOrExpandedLayout by remember { mutableStateOf(false) }
     var topLevelNavigationTargetName by remember { mutableStateOf<String?>(null) }
     var channelTabSwitchProgress by remember { mutableFloatStateOf(0f) }
+
+    // 转场期间抑制情境提示，避免气泡锚定到渐隐的页面副本
+    LaunchedEffect(tabBackActive, channelTabSwitchDestinationName, topLevelNavigationTargetName) {
+        tipSuppression?.active =
+            tabBackActive || channelTabSwitchDestinationName != null || topLevelNavigationTargetName != null
+    }
     var channelTabSwitchDirection by remember { mutableFloatStateOf(1f) }
     var suppressNextChannelExit by remember { mutableStateOf(false) }
     var urlDialogMode by remember { mutableStateOf<UrlDialogMode?>(null) }
@@ -709,9 +719,13 @@ fun MainScreen(
             isMediumOrExpandedLayout = windowInfo.isMediumOrExpanded
         }
 
+        val tipManager = LocalTipManager.current
         LaunchedEffect(windowInfo.isMediumOrExpanded, pagerTopLevelPage) {
             if (!windowInfo.isMediumOrExpanded) {
                 currentTopLevelPageName = pagerTopLevelPage.name
+            }
+            if (pagerTopLevelPage == MainPage.IMPORTS) {
+                tipManager?.recordEvent(TipEvents.IMPORTS_PAGE_OPENED)
             }
         }
         LaunchedEffect(currentTopLevelPage, suppressNextTopLevelTransition) {
@@ -2733,7 +2747,9 @@ private fun MainFloatingActionButton(
             onClick = onAddRssSource,
             icon = { Icon(Icons.Default.Add, contentDescription = null) },
             text = { Text("添加 RSS") },
-            modifier = Modifier.testTag("fab_add_rss")
+            modifier = Modifier
+                .testTag("fab_add_rss")
+                .tipAnchor(TipIds.RSS_FAB)
         )
         MainPage.CHANNEL -> {
             if (selectedSource != null && canRefreshSelectedSource && !selectedSourceRefreshing && !isBusy) {
@@ -2989,7 +3005,9 @@ private fun SyncStatusCard(
     onDismissMessage: () -> Unit
 ) {
     ElevatedCard(
-        modifier = Modifier.testTag("dashboard_sync_card"),
+        modifier = Modifier
+            .testTag("dashboard_sync_card")
+            .tipAnchor(TipIds.SYNC_STATUS_CARD),
         colors = CardDefaults.elevatedCardColors(
             containerColor = MaterialTheme.colorScheme.primaryContainer
         )
@@ -4826,6 +4844,7 @@ private fun ImportActionsCard(
     }
 
     ElevatedCard(
+        modifier = Modifier.tipAnchor(TipIds.IMPORTS_THREE_WAYS),
         colors = CardDefaults.elevatedCardColors(
             containerColor = MaterialTheme.colorScheme.primaryContainer
         )

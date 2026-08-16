@@ -440,6 +440,7 @@ class MainViewModel(
             title = result.source.title,
             articleCount = result.articleCount
         )
+        tipManager.recordEvent(TipEvents.LOCAL_CONTENT_IMPORTED)
         sessionState.value = sessionState.value.copy(
             message = when (result.kind) {
                 LocalContentImportKind.TXT -> "已导入 TXT 到导入内容，文章 ${result.articleCount} 篇"
@@ -585,6 +586,7 @@ class MainViewModel(
                     title = result.source.title,
                     articleCount = result.articleCount
                 )
+                tipManager.recordEvent(TipEvents.RSS_SOURCE_ADDED)
                 sessionState.value = sessionState.value.copy(
                     message = "已添加 RSS 源：${result.source.title}，导入 ${result.articleCount} 篇",
                     error = null,
@@ -1147,6 +1149,7 @@ class MainViewModel(
                     url = article.url,
                     title = article.title
                 )
+                tipManager.recordEvent(TipEvents.ARTICLE_IMPORTED)
                 sessionState.value = sessionState.value.copy(
                     message = "已导入到独立文章：${article.title}",
                     error = null,

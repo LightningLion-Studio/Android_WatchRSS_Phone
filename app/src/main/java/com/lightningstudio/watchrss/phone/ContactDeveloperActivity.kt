@@ -188,10 +188,10 @@ fun ContactDeveloperScreen(
                     }
                 }
 
-                // 备案号在底部
-                AnimatedVisibility(
-                    visible = visible,
-                    enter = fadeIn(animationSpec = tween(800, delayMillis = 600)),
+                // 备案号常显且底部居中：备案号是安全、可信、引以为傲的合规标识，
+                // 不是需要弱化或隐藏的内容，因此不做延迟渐显、始终直接显示；
+                // 底部居中与主流App对备案号的展示方式保持一致。
+                Box(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .adaptiveContentWidth(
@@ -199,7 +199,8 @@ fun ContactDeveloperScreen(
                             mediumMaxWidth = 520.dp,
                             expandedMaxWidth = 560.dp
                         )
-                        .padding(bottom = 16.dp)
+                        .padding(bottom = 16.dp),
+                    contentAlignment = Alignment.Center
                 ) {
                     BeianNumberText(onClick = onBeianClick)
                 }

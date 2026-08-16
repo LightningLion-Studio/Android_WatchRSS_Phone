@@ -107,4 +107,5 @@ The app registers `application/octet-stream` in its intent-filters so that the s
 - This is a phone companion app; the watch app runs separately on OPPO Watch.
 - Communication uses already paired Bluetooth and a short-lived watch-side RFCOMM listener.
 - Required runtime permission on Android 12+ is `BLUETOOTH_CONNECT`.
-- Do not add OPPO/HeyTap closed SDK dependencies; this is a GPLv3-compatible public-API implementation.
+- The app is MIT-licensed. The official closed-source OPPO Push SDK (com.heytap.msp) is an approved exception for push notifications; do not add other closed-source dependencies without approval.
+- Push credentials are wired via the `productionSetting()` mechanism (local.properties / gradle property / env var under `WATCHRSS_OPPO_PUSH_APP_KEY` and `WATCHRSS_OPPO_PUSH_APP_SECRET`); never hard-code them.

@@ -20,3 +20,6 @@ keystore.properties
 # Shot screenshot testing
 # 基线截图需要提交，用于 CI 回归比对。
 # 若本地执行产生了临时差异图，可手动清理 app/screenshots/debug/ 下非 _baseline.png 结尾的文件。
+
+# OPPO Push aar is a console-gated download; builds use the maven fallback when absent.
+/app/libs/

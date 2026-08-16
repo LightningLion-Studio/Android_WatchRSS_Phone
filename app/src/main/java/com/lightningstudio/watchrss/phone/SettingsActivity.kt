@@ -3299,6 +3299,24 @@ private fun AppFeatureSettings(modifier: Modifier) {
         aiStore.saveApiKey(apiKey)
     }
     SettingsColumn(modifier) {
+        SectionTitle("推送")
+        val pushStore = container.pushRegistrationStore
+        var pushEnabled by remember { mutableStateOf(pushStore.isEnabled) }
+        ToggleRow("接收推送通知", pushEnabled) {
+            pushEnabled = it
+            container.oppoPushCoordinator.setEnabled(it)
+        }
+        if (BuildConfig.DEBUG) {
+            Text(
+                "RegId: ${pushStore.regId ?: "未注册"}",
+                style = MaterialTheme.typography.bodySmall
+            )
+            val pushCode = pushStore.lastRegisterCode
+            Text(
+                "注册状态码: $pushCode${if (pushCode == 0) "（已注册）" else ""}",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
         SectionTitle("缓存与分享")
         ToggleRow("媒体预取", mediaPrefetch) {
             mediaPrefetch = it

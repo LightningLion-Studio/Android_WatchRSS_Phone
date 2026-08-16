@@ -21,6 +21,8 @@ reorderable = "3.1.0"
 work = "2.10.1"
 media3 = "1.5.1"
 credentials = "1.5.0"
+gson = "2.10.1"
+oppoPush = "3.0.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -57,6 +59,8 @@ androidx-media3-ui = { group = "androidx.media3", name = "media3-ui", version.re
 androidx-media3-transformer = { group = "androidx.media3", name = "media3-transformer", version.ref = "media3" }
 androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
 androidx-credentials-play-services-auth = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
+gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
+oppo-push = { group = "com.heytap.msp", name = "push", version.ref = "oppoPush" }
 
 shot-android = { group = "com.karumi", name = "shot-android", version.ref = "shot" }
 androidx-test-runner = { group = "androidx.test", name = "runner", version = "1.7.0" }

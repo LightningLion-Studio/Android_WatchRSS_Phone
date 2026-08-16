@@ -14,13 +14,14 @@ Do not reintroduce QR scanning, manual IP/port WiFi connection, acoustic-guided 
 - **UI Framework**: Jetpack Compose with Material3
 - **Build System**: Gradle 8.13 with Kotlin DSL
 - **Min SDK**: 30 (Android 11)
-- **Target SDK**: 34 (Android 14)
+- **Target SDK**: 36 (Android 16)
 - **Key Libraries**:
   - Android Bluetooth RFCOMM APIs for the phone-watch sync channel
   - Room for local article, favorites, and watch-later storage
   - OkHttp + Jsoup for webpage import and readable article extraction
   - Coil for image loading
   - ZXing Core for contact QR code generation
+  - OPPO Push SDK (com.heytap.msp; console-downloaded aar in app/libs, maven 3.0.0 fallback) for OPPO system push
 
 ## Build Commands
 
@@ -83,4 +84,5 @@ Do not reintroduce QR scanning, manual IP/port WiFi connection, acoustic-guided 
 - This is a phone companion app; the watch app runs separately on OPPO Watch.
 - Communication uses already paired Bluetooth and a short-lived watch-side RFCOMM listener.
 - Required runtime permission on Android 12+ is `BLUETOOTH_CONNECT`.
-- Do not add OPPO/HeyTap closed SDK dependencies; this is a GPLv3-compatible public-API implementation.
+- The app is MIT-licensed. The official closed-source OPPO Push SDK (com.heytap.msp) is an approved exception for push notifications; do not add other closed-source dependencies without approval.
+- Push credentials are wired via the `productionSetting()` mechanism (local.properties / gradle property / env var under `WATCHRSS_OPPO_PUSH_APP_KEY` and `WATCHRSS_OPPO_PUSH_APP_SECRET`); never hard-code them.

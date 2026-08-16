@@ -71,6 +71,16 @@ android {
             productionSetting("WATCHRSS_APP_ACCESS_PUBLIC_KEY").asBuildConfigString()
         )
         buildConfigField("String", "WATCHRSS_TEST_APP_ACCESS_PUBLIC_KEY", "\"\"")
+        buildConfigField(
+            "String",
+            "WATCHRSS_OPPO_PUSH_APP_KEY",
+            productionSetting("WATCHRSS_OPPO_PUSH_APP_KEY").asBuildConfigString()
+        )
+        buildConfigField(
+            "String",
+            "WATCHRSS_OPPO_PUSH_APP_SECRET",
+            productionSetting("WATCHRSS_OPPO_PUSH_APP_SECRET").asBuildConfigString()
+        )
 
         testInstrumentationRunner = "com.karumi.shot.ShotTestRunner"
 
@@ -176,6 +186,15 @@ dependencies {
     implementation(libs.androidx.credentials)
     implementation(libs.androidx.credentials.play.services.auth)
     implementation("androidx.documentfile:documentfile:1.0.1")
+    // OPPO Push SDK: prefer the console-downloaded aar; fall back to the public maven 3.0.0
+    // artifact when the aar is absent (fresh checkout / CI). app/libs/ is gitignored.
+    val oppoPushAar = file("libs/com.heytap.msp_V3.7.1.aar")
+    if (oppoPushAar.isFile) {
+        implementation(files(oppoPushAar))
+    } else {
+        implementation(libs.oppo.push)
+    }
+    implementation(libs.gson)
     ksp(libs.androidx.room.compiler)
     // Backdrop source copied locally — see app/src/main/java/com/kyant/backdrop
 

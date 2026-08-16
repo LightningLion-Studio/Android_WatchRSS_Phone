@@ -43,6 +43,8 @@ class PhoneCompanionApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        container.oppoPushCoordinator.init()
+        appScope.launch { container.oppoPushCoordinator.ensurePushState() }
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
                 resumedActivity = activity

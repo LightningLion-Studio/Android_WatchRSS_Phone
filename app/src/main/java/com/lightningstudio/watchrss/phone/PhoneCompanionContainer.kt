@@ -28,6 +28,8 @@ import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetTransferService
 import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
+import com.lightningstudio.watchrss.phone.push.OppoPushCoordinator
+import com.lightningstudio.watchrss.phone.push.PushRegistrationStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -65,6 +67,14 @@ class PhoneCompanionContainer(context: Context) {
 
     private val deviceIdentity: PhoneDeviceIdentity by lazy {
         PhoneDeviceIdentity(appContext)
+    }
+
+    val pushRegistrationStore: PushRegistrationStore by lazy {
+        PushRegistrationStore(appContext)
+    }
+
+    val oppoPushCoordinator: OppoPushCoordinator by lazy {
+        OppoPushCoordinator(appContext, pushRegistrationStore)
     }
 
     /** Stable peer id shared by RFCOMM and the RTOS BLE note transports. */

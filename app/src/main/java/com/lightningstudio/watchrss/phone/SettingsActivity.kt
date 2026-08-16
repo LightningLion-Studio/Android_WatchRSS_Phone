@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -3415,6 +3416,13 @@ private fun AppFeatureSettings(modifier: Modifier) {
         if (BuildConfig.DEBUG) {
             SettingsEntry("新手引导", "重新查看手机操作引导", Icons.Default.Edit) {
                 context.startActivity(Intent(context, GuideActivity::class.java))
+            }
+            ToggleRow("调试：始终显示新手提示", container.tipManager.debugShowAll) {
+                container.tipManager.debugShowAll = it
+            }
+            SettingsEntry("重置新手提示", "清除所有提示的显示与关闭记录", Icons.Default.Sync) {
+                container.tipManager.resetTips()
+                Toast.makeText(context, "新手提示已重置", Toast.LENGTH_SHORT).show()
             }
         }
         SettingsEntry("备案信息", "在关于页面查看", Icons.Default.Settings) {

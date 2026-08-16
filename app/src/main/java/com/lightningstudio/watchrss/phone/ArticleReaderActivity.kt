@@ -1195,7 +1195,7 @@ internal fun ArticleReaderScreen(
                                 }
                                 if (aiConfig.showTokenUsage) {
                                     Text(
-                                        "Token：输入 ${aiResult!!.promptTokens ?: 0} · 输出 ${aiResult!!.completionTokens ?: 0} · 合计 ${aiResult!!.totalTokens ?: 0}",
+                                        "词元：输入 ${aiResult!!.promptTokens ?: 0} · 输出 ${aiResult!!.completionTokens ?: 0} · 合计 ${aiResult!!.totalTokens ?: 0}",
                                         style = MaterialTheme.typography.bodySmall
                                     )
                                 }

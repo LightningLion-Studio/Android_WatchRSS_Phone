@@ -2893,7 +2893,7 @@ private fun TokenUsageCard(
                 Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "手表 Token 消耗概览",
+                        text = "手表词元消耗概览",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -2905,7 +2905,7 @@ private fun TokenUsageCard(
                 }
             }
             Text(
-                text = "累计 ${stats?.totalCalls ?: 0} 次 · ${stats?.totalTokens ?: 0} tokens",
+                text = "累计 ${stats?.totalCalls ?: 0} 次 · ${stats?.totalTokens ?: 0} 词元",
                 style = MaterialTheme.typography.bodyMedium
             )
             if (daily.size > 1) {

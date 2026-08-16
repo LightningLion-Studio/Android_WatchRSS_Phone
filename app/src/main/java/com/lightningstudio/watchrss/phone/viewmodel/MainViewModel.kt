@@ -986,7 +986,7 @@ class MainViewModel(
                     )
                 )
             }.onFailure { tokenError ->
-                _toastEvent.tryEmit("Token 用量同步失败：${tokenError.message}")
+                _toastEvent.tryEmit("词元用量同步失败：${tokenError.message}")
             }
             sessionState.value = sessionState.value.copy(
                 message = message,

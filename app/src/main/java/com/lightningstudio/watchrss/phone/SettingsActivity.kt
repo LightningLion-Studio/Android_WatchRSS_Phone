@@ -3354,7 +3354,7 @@ private fun AppFeatureSettings(modifier: Modifier) {
                 autoSummary = it
                 saveAiConfig()
             }
-            ToggleRow("显示 Token 用量", tokenUsage) {
+            ToggleRow("显示词元用量", tokenUsage) {
                 tokenUsage = it
                 saveAiConfig()
             }

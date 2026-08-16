@@ -504,7 +504,7 @@ private fun ProfileNavigation(
                 onClick = onAboutClick
             )
             ProfileEntry(
-                title = "联系开发者",
+                title = "帮助与客服",
                 supportingText = "加入用户群，反馈问题或提出建议",
                 icon = Icons.Default.SupportAgent,
                 onClick = onContactDeveloperClick

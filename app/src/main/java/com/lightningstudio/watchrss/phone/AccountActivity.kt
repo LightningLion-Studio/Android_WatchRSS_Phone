@@ -598,6 +598,11 @@ internal fun AccountScreen(
                             .fillMaxWidth()
                             .semantics { contentType = ContentType.SmsOtpCode }
                     )
+                    Text(
+                        "发送验证码，请输入来自杭州绳匠科技有限公司的短信验证码。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     loginHint()
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         loginMethodPicker(Modifier.weight(1f))
@@ -1136,6 +1141,13 @@ internal fun AccountScreen(
                             else -> Modifier
                         }
                     )
+                    if (method == LoginMethod.OTP) {
+                        Text(
+                            "发送验证码，请输入来自杭州绳匠科技有限公司的短信验证码。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     securityVerificationError?.let {
                         Text(it, color = MaterialTheme.colorScheme.error)
                     }

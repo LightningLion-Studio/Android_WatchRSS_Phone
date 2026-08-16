@@ -37,6 +37,9 @@ import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
 import com.lightningstudio.watchrss.phone.ui.adaptiveContentWidth
 import com.lightningstudio.watchrss.phone.ui.theme.roundedCombinedClickable
 
+private const val WATCH_RSS_QQ_GROUP_NUMBER = "1083518433"
+private const val WATCH_RSS_QQ_GROUP_URL = "https://qm.qq.com/q/cJNTQuxfoW"
+
 class ContactDeveloperActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,6 +78,7 @@ fun ContactDeveloperScreen(
     onJoinQQ: () -> Unit,
     onBeianClick: () -> Unit
 ) {
+    val context = LocalContext.current
     var visible by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
@@ -88,7 +92,7 @@ fun ContactDeveloperScreen(
                     title = {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Icon(Icons.Default.QrCode, contentDescription = null)
-                            Text("联系开发者")
+                            Text("帮助与客服")
                         }
                     },
                     navigationIcon = {
@@ -124,7 +128,7 @@ fun ContactDeveloperScreen(
                                     )
                         ) {
                             val qrBitmap = remember {
-                                generateQRCode("https://qm.qq.com/q/cJNTQuxfoW", 512)
+                                generateQRCode(WATCH_RSS_QQ_GROUP_URL, 512)
                             }
                             Column(
                                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -140,7 +144,7 @@ fun ContactDeveloperScreen(
                                 Spacer(modifier = Modifier.height(16.dp))
 
                                 Text(
-                                    text = "群号：1083518433",
+                                    text = "群号：$WATCH_RSS_QQ_GROUP_NUMBER",
                                     fontSize = 18.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -152,6 +156,32 @@ fun ContactDeveloperScreen(
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Text("一键加群", fontSize = 16.sp)
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                            clipboard.setPrimaryClip(ClipData.newPlainText("QQ群号", WATCH_RSS_QQ_GROUP_NUMBER))
+                                            Toast.makeText(context, "群号已复制", Toast.LENGTH_SHORT).show()
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("复制群号", fontSize = 14.sp)
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                            clipboard.setPrimaryClip(ClipData.newPlainText("QQ群链接", WATCH_RSS_QQ_GROUP_URL))
+                                            Toast.makeText(context, "加群链接已复制", Toast.LENGTH_SHORT).show()
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("复制加群链接", fontSize = 14.sp)
+                                    }
                                 }
                             }
                         }

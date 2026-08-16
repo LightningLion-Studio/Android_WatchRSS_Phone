@@ -1,9 +1,12 @@
 package com.lightningstudio.watchrss.phone
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.setContent
@@ -13,7 +16,9 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -51,13 +56,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
 import com.lightningstudio.watchrss.phone.ui.AdaptiveTwoPane
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowInfo
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
+import com.lightningstudio.watchrss.phone.ui.adaptiveContentWidth
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import com.lightningstudio.watchrss.phone.ui.theme.roundedCombinedClickable
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import com.lightningstudio.watchrss.phone.account.PhonePasskeyCoordinator
@@ -101,6 +110,14 @@ class ProfileActivity : ComponentActivity() {
                             Intent(
                                 this@ProfileActivity,
                                 ContactDeveloperActivity::class.java
+                            )
+                        )
+                    },
+                    onBeianClick = {
+                        startActivity(
+                            Intent(
+                                Intent.ACTION_VIEW,
+                                Uri.parse("https://beian.miit.gov.cn/")
                             )
                         )
                     },
@@ -235,6 +252,7 @@ private fun ProfileScreen(
     onManageDataClick: () -> Unit,
     onAboutClick: () -> Unit,
     onContactDeveloperClick: () -> Unit,
+    onBeianClick: () -> Unit,
     accountContent: @Composable (
         leadingPane: @Composable () -> Unit,
         onClose: () -> Unit
@@ -265,7 +283,8 @@ private fun ProfileScreen(
                     onAboutClick = { onDetailSelected(ProfileDetailPage.ABOUT) },
                     onContactDeveloperClick = {
                         onDetailSelected(ProfileDetailPage.CONTACT)
-                    }
+                    },
+                    onBeianClick = onBeianClick
                 )
             }
             when (selectedDetail) {
@@ -313,7 +332,8 @@ private fun ProfileScreen(
                 onSettingsClick = onSettingsClick,
                 onManageDataClick = onManageDataClick,
                 onAboutClick = onAboutClick,
-                onContactDeveloperClick = onContactDeveloperClick
+                onContactDeveloperClick = onContactDeveloperClick,
+                onBeianClick = onBeianClick
             )
         }
     }
@@ -329,7 +349,8 @@ private fun ProfileMasterPane(
     onSettingsClick: () -> Unit,
     onManageDataClick: () -> Unit,
     onAboutClick: () -> Unit,
-    onContactDeveloperClick: () -> Unit
+    onContactDeveloperClick: () -> Unit,
+    onBeianClick: () -> Unit
 ) {
     Scaffold(
         topBar = {
@@ -346,34 +367,79 @@ private fun ProfileMasterPane(
             )
         }
     ) { padding ->
-        AdaptiveContentFrame(
-            windowInfo = windowInfo,
-            modifier = Modifier.padding(padding),
-            mediumMaxWidth = 720.dp,
-            expandedMaxWidth = 840.dp
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 20.dp, vertical = 20.dp),
-                verticalArrangement = Arrangement.spacedBy(24.dp)
+            AdaptiveContentFrame(
+                windowInfo = windowInfo,
+                mediumMaxWidth = 720.dp,
+                expandedMaxWidth = 840.dp
             ) {
-                ProfileIdentityCard(
-                    accountSummary = accountSummary,
-                    onClick = onAccountClick
-                )
-                ProfileNavigation(
-                    windowInfo = windowInfo,
-                    onSettingsClick = onSettingsClick,
-                    onManageDataClick = onManageDataClick,
-                    onAboutClick = onAboutClick,
-                    onContactDeveloperClick = onContactDeveloperClick
-                )
-                Spacer(Modifier.height(8.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 20.dp, vertical = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(24.dp)
+                ) {
+                    ProfileIdentityCard(
+                        accountSummary = accountSummary,
+                        onClick = onAccountClick
+                    )
+                    ProfileNavigation(
+                        windowInfo = windowInfo,
+                        onSettingsClick = onSettingsClick,
+                        onManageDataClick = onManageDataClick,
+                        onAboutClick = onAboutClick,
+                        onContactDeveloperClick = onContactDeveloperClick
+                    )
+                    Spacer(Modifier.height(48.dp))
+                }
+            }
+
+            // 备案号常显且底部居中：备案号是安全、可信、引以为傲的合规标识，
+            // 不是需要弱化或隐藏的内容，因此不做延迟渐显、始终直接显示；
+            // 底部居中与主流App对备案号的展示方式保持一致。
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .adaptiveContentWidth(
+                        windowInfo = windowInfo,
+                        mediumMaxWidth = 720.dp,
+                        expandedMaxWidth = 840.dp
+                    )
+                    .padding(bottom = 16.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                BeianNumberText(onClick = onBeianClick)
             }
         }
     }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun BeianNumberText(onClick: () -> Unit) {
+    val context = LocalContext.current
+    val beianText = "浙ICP备2024111886号-5A"
+
+    Text(
+        text = beianText,
+        fontSize = 12.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.roundedCombinedClickable(
+            shape = RoundedCornerShape(8.dp),
+            onClick = onClick,
+            onLongClick = {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val clip = ClipData.newPlainText("备案号", beianText)
+                clipboard.setPrimaryClip(clip)
+                Toast.makeText(context, "备案号已复制", Toast.LENGTH_SHORT).show()
+            }
+        )
+    )
 }
 
 @Composable

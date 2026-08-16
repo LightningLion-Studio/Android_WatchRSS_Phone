@@ -103,6 +103,11 @@ import com.lightningstudio.watchrss.phone.account.TotpFactor
 import com.lightningstudio.watchrss.phone.account.accountLoginErrorMessage
 import com.lightningstudio.watchrss.phone.account.accountSecurityErrorMessage
 import com.lightningstudio.watchrss.phone.cloud.CloudAccountPanel
+import com.lightningstudio.watchrss.phone.tips.TipEvents
+import com.lightningstudio.watchrss.phone.tips.TipIds
+import com.lightningstudio.watchrss.phone.tips.ui.LocalTipManager
+import com.lightningstudio.watchrss.phone.tips.ui.TipOverlayHost
+import com.lightningstudio.watchrss.phone.tips.ui.tipAnchor
 import com.lightningstudio.watchrss.phone.cloud.CloudMemberState
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncService
 import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
@@ -132,6 +137,9 @@ class AccountActivity : ComponentActivity() {
             WatchRssPhoneTheme {
                 val rssSources by container.repository.observeRssSources()
                     .collectAsState(initial = emptyList())
+                TipOverlayHost(
+                    tipManager = container.tipManager
+                ) {
                 AccountScreen(
                     accountRepository = accountRepository,
                     cloudSyncService = container.cloudSyncService,
@@ -152,6 +160,7 @@ class AccountActivity : ComponentActivity() {
                         lifecycleScope.launch { action() }
                     }
                 )
+                }
             }
         }
     }
@@ -225,6 +234,7 @@ internal fun AccountScreen(
 ) {
     val session by accountRepository.session.collectAsState()
     val context = LocalContext.current
+    val tipManager = LocalTipManager.current
     val accessCoordinator = (context.applicationContext as PhoneCompanionApplication).container.appAccessCoordinator
     val appAccessState by accessCoordinator.state.collectAsState()
     val cloudSyncState by cloudSyncService.state.collectAsState()
@@ -472,6 +482,7 @@ internal fun AccountScreen(
                 progress.session?.let { signedIn ->
                     message = "登录成功"
                     usageTelemetry.recordAccountSignedIn(signedIn.userId)
+                    tipManager?.recordEvent(TipEvents.ACCOUNT_SIGNED_IN)
                     onLoginComplete()
                 } ?: run {
                     message = "已完成一种验证方式，请再选择另一种不同方式。"
@@ -482,7 +493,9 @@ internal fun AccountScreen(
                     OutlinedButton(
                         onClick = { loginMethodMenuExpanded = true },
                         enabled = !busy,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .tipAnchor(TipIds.PASSKEY_LOGIN)
                     ) {
                         Text("${loginMethod.label}登录", modifier = Modifier.weight(1f))
                         Icon(Icons.Filled.ArrowDropDown, contentDescription = "切换登录方式")
@@ -1797,6 +1810,9 @@ internal fun AccountScreen(
                         onMessage = {
                             message = it
                             error = null
+                            if (it == "加密云备份已启用") {
+                                tipManager?.recordEvent(TipEvents.CLOUD_ENCRYPTION_ENABLED)
+                            }
                         },
                         onError = {
                             error = it

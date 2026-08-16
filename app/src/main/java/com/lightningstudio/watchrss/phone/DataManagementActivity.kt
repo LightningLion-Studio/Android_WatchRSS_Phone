@@ -64,6 +64,10 @@ import com.lightningstudio.watchrss.phone.data.backup.GITHUB_RELEASES_URL
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_EXTENSION
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_MIME_TYPE
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_HUMAN_READABLE_EXTENSION
+import com.lightningstudio.watchrss.phone.tips.TipEvents
+import com.lightningstudio.watchrss.phone.tips.TipIds
+import com.lightningstudio.watchrss.phone.tips.ui.TipOverlayHost
+import com.lightningstudio.watchrss.phone.tips.ui.tipAnchor
 import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
@@ -91,7 +95,11 @@ class DataManagementActivity : ComponentActivity() {
             if (uri == null) return@registerForActivityResult
             lifecycleScope.launch {
                 runCatching { backupService.exportTo(uri.toString()) }
-                    .onSuccess { showToast("已导出 WRSS：${it.articleCount} 篇文章，${it.sourceCount} 个 RSS 源") }
+                    .onSuccess {
+                        showToast("已导出 WRSS：${it.articleCount} 篇文章，${it.sourceCount} 个 RSS 源")
+                        (application as PhoneCompanionApplication).container.tipManager
+                            .recordEvent(TipEvents.BACKUP_EXPORTED)
+                    }
                     .onFailure { showToast("导出失败：${it.message ?: "未知错误"}") }
             }
         }
@@ -101,7 +109,11 @@ class DataManagementActivity : ComponentActivity() {
             if (uri == null) return@registerForActivityResult
             lifecycleScope.launch {
                 runCatching { backupService.exportHumanReadable(uri.toString()) }
-                    .onSuccess { showToast("已导出 JSON：${it.articleCount} 篇文章，${it.sourceCount} 个 RSS 源") }
+                    .onSuccess {
+                        showToast("已导出 JSON：${it.articleCount} 篇文章，${it.sourceCount} 个 RSS 源")
+                        (application as PhoneCompanionApplication).container.tipManager
+                            .recordEvent(TipEvents.BACKUP_EXPORTED)
+                    }
                     .onFailure { showToast("导出失败：${it.message ?: "未知错误"}") }
             }
         }
@@ -160,6 +172,8 @@ class DataManagementActivity : ComponentActivity() {
                 .onSuccess { result ->
                     val action = if (mode == BackupImportMode.REPLACE) "覆盖" else "合并"
                     showToast("已${action}备份：${result.articleCount} 篇文章，${result.sourceCount} 个 RSS 源")
+                    (application as PhoneCompanionApplication).container.tipManager
+                        .recordEvent(TipEvents.BACKUP_IMPORTED)
                 }
                 .onFailure { throwable ->
                     if (throwable is BackupVersionTooHighException) {
@@ -179,6 +193,9 @@ class DataManagementActivity : ComponentActivity() {
             WatchRssPhoneTheme {
                 val onBack = { finish() }
                 PredictiveBackSurface(onBack = onBack) {
+                    TipOverlayHost(
+                        tipManager = (application as PhoneCompanionApplication).container.tipManager
+                    ) {
                     DataManagementScreen(
                         onBackClick = onBack,
                         onExportWrss = ::exportWrssBackup,
@@ -193,6 +210,7 @@ class DataManagementActivity : ComponentActivity() {
                         toastMessage = toastMessage,
                         onConsumeToast = { toastMessage = null }
                     )
+                    }
                 }
             }
         }
@@ -200,6 +218,8 @@ class DataManagementActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        (application as PhoneCompanionApplication).container.tipManager
+            .recordEvent(TipEvents.DATA_MANAGEMENT_OPENED)
         toastMessage?.let {
             Toast.makeText(this, it, Toast.LENGTH_SHORT).show()
             toastMessage = null
@@ -276,7 +296,8 @@ fun DataManagementScreen(
                             icon = { Icon(Icons.Default.Archive, contentDescription = null) },
                             title = "专有格式备份",
                             subtitle = "完整备份所有数据（.wrss），包含首次使用日期等元数据",
-                            onClick = onExportWrss
+                            onClick = onExportWrss,
+                            modifier = Modifier.tipAnchor(TipIds.BACKUP_FORMATS)
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         ExportOptionItem(
@@ -296,7 +317,8 @@ fun DataManagementScreen(
                             icon = { Icon(Icons.Default.FileUpload, contentDescription = null) },
                             title = "导入备份文件",
                             subtitle = "选择 .wrss 文件恢复数据",
-                            onClick = onImportBackup
+                            onClick = onImportBackup,
+                            modifier = Modifier.tipAnchor(TipIds.BACKUP_MERGE)
                         )
                     }
 
@@ -367,10 +389,11 @@ private fun ExportOptionItem(
     icon: @Composable () -> Unit,
     title: String,
     subtitle: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surface,
         tonalElevation = 1.dp,

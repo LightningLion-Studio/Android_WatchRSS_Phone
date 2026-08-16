@@ -35,17 +35,16 @@ class TipAnchorRegistry internal constructor() {
     }
 }
 
-val LocalTipAnchorRegistry = staticCompositionLocalOf<TipAnchorRegistry> {
-    error("LocalTipAnchorRegistry 未提供——请用 TipOverlayHost 包裹屏幕")
-}
+/** 由 TipOverlayHost 提供；宿主之外的组合（如嵌入 AccountScreen 的其他页面）为 null，锚点静默不注册。 */
+val LocalTipAnchorRegistry = staticCompositionLocalOf<TipAnchorRegistry?> { null }
 
 /**
- * 把该控件注册为指定 Tip 的锚点。enabled=false 时不注册，
+ * 把该控件注册为指定 Tip 的锚点。enabled=false 或未处于宿主内时不注册，
  * 因此锚点只会存在于真实可见的控件上（如 release 构建中隐藏的按钮）。
  */
 fun Modifier.tipAnchor(tipId: TipId, enabled: Boolean = true): Modifier = composed {
-    if (enabled) {
-        val registry = LocalTipAnchorRegistry.current
+    val registry = LocalTipAnchorRegistry.current
+    if (enabled && registry != null) {
         DisposableEffect(tipId) {
             onDispose { registry.remove(tipId) }
         }

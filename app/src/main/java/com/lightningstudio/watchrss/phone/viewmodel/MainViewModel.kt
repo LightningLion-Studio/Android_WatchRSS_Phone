@@ -511,6 +511,7 @@ class MainViewModel(
                     articleCount = result.articleCount,
                     sourceCount = result.sourceCount
                 )
+                tipManager.recordEvent(TipEvents.BACKUP_EXPORTED)
                 sessionState.value = sessionState.value.copy(
                     message = "已导出 WRSS：${result.articleCount} 篇文章，${result.sourceCount} 个 RSS 源",
                     error = null
@@ -561,6 +562,7 @@ class MainViewModel(
                     articleCount = result.articleCount,
                     sourceCount = result.sourceCount
                 )
+                tipManager.recordEvent(TipEvents.BACKUP_IMPORTED)
                 sessionState.value = sessionState.value.copy(
                     message = "已${action} WRSS：${result.articleCount} 篇文章，${result.sourceCount} 个 RSS 源",
                     error = null

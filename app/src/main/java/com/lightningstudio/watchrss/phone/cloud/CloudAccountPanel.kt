@@ -30,6 +30,8 @@ import androidx.compose.ui.unit.dp
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
+import com.lightningstudio.watchrss.phone.tips.TipIds
+import com.lightningstudio.watchrss.phone.tips.ui.tipAnchor
 
 @Composable
 fun CloudAccountPanel(
@@ -112,7 +114,9 @@ fun CloudAccountPanel(
                             }
                         },
                         enabled = !busy,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .tipAnchor(TipIds.CLOUD_E2EE)
                     ) { Text("启用端到端加密云备份") }
                 } else {
                     Card(modifier = Modifier.fillMaxWidth()) {

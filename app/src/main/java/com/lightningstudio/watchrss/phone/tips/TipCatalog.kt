@@ -125,6 +125,63 @@ object TipCatalog {
             displayFrequency = TipDisplayFrequency.WEEKLY,
             maxShows = 2,
             invalidateOnEvents = setOf(TipEvents.RSS_SOURCE_ADDED)
+        ),
+        // ── 账号与数据 ─────────────────────────────────────────────
+        TipDefinition(
+            id = TipIds.PASSKEY_LOGIN,
+            title = "通行密钥",
+            message = "用指纹、人脸或设备屏幕锁登录，无需短信验证码。",
+            priority = 8,
+            rule = TipRules.eventNever(TipEvents.ACCOUNT_SIGNED_IN),
+            displayFrequency = TipDisplayFrequency.ALWAYS,
+            maxShows = 1,
+            invalidateOnEvents = setOf(TipEvents.ACCOUNT_SIGNED_IN)
+        ),
+        TipDefinition(
+            id = TipIds.BACKUP_FORMATS,
+            title = "备份格式",
+            message = ".wrss 专有格式可完整恢复；JSON 便于在其他平台查看。",
+            priority = 10,
+            rule = TipRules.eventAtLeast(TipEvents.DATA_MANAGEMENT_OPENED, 1),
+            displayFrequency = TipDisplayFrequency.ALWAYS,
+            maxShows = 1,
+            invalidateOnEvents = setOf(TipEvents.BACKUP_EXPORTED)
+        ),
+        TipDefinition(
+            id = TipIds.BACKUP_MERGE,
+            title = "覆盖还是合并",
+            message = "覆盖会清空现有数据；合并保留本地更新的内容。",
+            priority = 9,
+            rule = TipRules.allOf(
+                TipRules.eventAtLeast(TipEvents.DATA_MANAGEMENT_OPENED, 2),
+                TipRules.eventNever(TipEvents.BACKUP_IMPORTED)
+            ),
+            displayFrequency = TipDisplayFrequency.ALWAYS,
+            maxShows = 1,
+            invalidateOnEvents = setOf(TipEvents.BACKUP_IMPORTED)
+        ),
+        TipDefinition(
+            id = TipIds.CLOUD_E2EE,
+            title = "端到端加密",
+            message = "云备份采用端到端加密；24 个恢复词请离线抄写妥善保管。",
+            priority = 8,
+            rule = TipRules.eventNever(TipEvents.CLOUD_ENCRYPTION_ENABLED),
+            displayFrequency = TipDisplayFrequency.ALWAYS,
+            maxShows = 1,
+            invalidateOnEvents = setOf(TipEvents.CLOUD_ENCRYPTION_ENABLED)
+        ),
+        TipDefinition(
+            id = TipIds.PROFILE_DATA,
+            title = "数据管理",
+            message = "备份、恢复或删除本机资料库都在这里。",
+            priority = 5,
+            rule = TipRules.allOf(
+                TipRules.eventAtLeast(TipEvents.PROFILE_OPENED, 1),
+                TipRules.eventNever(TipEvents.DATA_MANAGEMENT_OPENED)
+            ),
+            displayFrequency = TipDisplayFrequency.WEEKLY,
+            maxShows = 1,
+            invalidateOnEvents = setOf(TipEvents.DATA_MANAGEMENT_OPENED)
         )
     )
 

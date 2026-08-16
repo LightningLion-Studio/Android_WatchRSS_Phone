@@ -60,6 +60,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lightningstudio.watchrss.phone.tips.TipEvents
+import com.lightningstudio.watchrss.phone.tips.TipIds
+import com.lightningstudio.watchrss.phone.tips.ui.TipOverlayHost
+import com.lightningstudio.watchrss.phone.tips.ui.tipAnchor
 import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
 import com.lightningstudio.watchrss.phone.ui.AdaptiveTwoPane
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowInfo
@@ -88,6 +92,7 @@ class ProfileActivity : ComponentActivity() {
                     mutableStateOf<ProfileDetailPage?>(null)
                 }
 
+                TipOverlayHost(tipManager = container.tipManager) {
                 ProfileScreen(
                     accountSummary = session?.phoneMasked ?: "未登录",
                     selectedDetail = selectedDetail,
@@ -223,8 +228,15 @@ class ProfileActivity : ComponentActivity() {
                         }
                     }
                 )
+                }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        (application as PhoneCompanionApplication).container.tipManager
+            .recordEvent(TipEvents.PROFILE_OPENED)
     }
 
     companion object {
@@ -559,7 +571,8 @@ private fun ProfileNavigation(
             title = "管理资料",
             supportingText = "导出、恢复或删除本机资料库",
             icon = Icons.Default.Storage,
-            onClick = onManageDataClick
+            onClick = onManageDataClick,
+            modifier = Modifier.tipAnchor(TipIds.PROFILE_DATA)
         )
         ProfileGroupTitle("支持与信息")
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -594,11 +607,12 @@ private fun ProfileEntry(
     title: String,
     icon: ImageVector,
     onClick: () -> Unit,
-    supportingText: String? = null
+    supportingText: String? = null,
+    modifier: Modifier = Modifier
 ) {
     ElevatedCard(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth()
+        modifier = modifier.fillMaxWidth()
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp),

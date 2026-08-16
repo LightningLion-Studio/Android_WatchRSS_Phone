@@ -97,6 +97,11 @@ class PhoneUsageTelemetry(
 
     fun recordOnboardingDropped() = capture(EVENT_ONBOARDING_DROPPED)
 
+    /** 情境提示计数器。仅上报事件名计数，Tip 内容与 id 永远不离开本机。 */
+    fun recordTipShown() = capture(EVENT_TIP_SHOWN)
+
+    fun recordTipDismissed() = capture(EVENT_TIP_DISMISSED)
+
     private fun capture(event: String, properties: Map<String, Any?> = emptyMap()) {
         if (!consentStore.hasRequiredConsent()) return
         store.record(event, properties)
@@ -153,6 +158,8 @@ class PhoneUsageTelemetry(
         const val EVENT_ONBOARDING_IMPORT_FAILED = "onboarding_import_failed"
         const val EVENT_ONBOARDING_COMPLETED = "onboarding_completed"
         const val EVENT_ONBOARDING_DROPPED = "onboarding_dropped"
+        const val EVENT_TIP_SHOWN = "tip_shown"
+        const val EVENT_TIP_DISMISSED = "tip_dismissed"
 
         private const val UPLOAD_DEBOUNCE_MS = 750L
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()

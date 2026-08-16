@@ -35,6 +35,10 @@ import com.lightningstudio.watchrss.phone.push.PhonePushRegistrationUploader
 import com.lightningstudio.watchrss.phone.push.PushRegistrationStore
 import com.lightningstudio.watchrss.phone.review.OppoReviewCoordinator
 import com.lightningstudio.watchrss.phone.review.ReviewGateStore
+import com.lightningstudio.watchrss.phone.tips.TipCatalog
+import com.lightningstudio.watchrss.phone.tips.TipEventStore
+import com.lightningstudio.watchrss.phone.tips.TipManager
+import com.lightningstudio.watchrss.phone.tips.TipStateStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -150,6 +154,17 @@ class PhoneCompanionContainer(context: Context) {
             accountRepository = accountRepository,
             appScope = appScope
         )
+    }
+
+    val tipManager: TipManager by lazy {
+        TipManager(
+            catalog = TipCatalog.all,
+            stateBackend = TipStateStore(appContext),
+            eventBackend = TipEventStore(appContext)
+        ).also { manager ->
+            manager.onTipShown = { usageTelemetry.recordTipShown() }
+            manager.onTipDismissed = { usageTelemetry.recordTipDismissed() }
+        }
     }
 
     val bluetoothDebugLog: BluetoothDebugLog by lazy {

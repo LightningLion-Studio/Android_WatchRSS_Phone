@@ -67,6 +67,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StrikethroughS
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog

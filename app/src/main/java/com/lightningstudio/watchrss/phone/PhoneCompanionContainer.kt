@@ -33,6 +33,8 @@ import com.lightningstudio.watchrss.phone.onboarding.OnboardingProfileStore
 import com.lightningstudio.watchrss.phone.push.OppoPushCoordinator
 import com.lightningstudio.watchrss.phone.push.PhonePushRegistrationUploader
 import com.lightningstudio.watchrss.phone.push.PushRegistrationStore
+import com.lightningstudio.watchrss.phone.review.OppoReviewCoordinator
+import com.lightningstudio.watchrss.phone.review.ReviewGateStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -88,6 +90,14 @@ class PhoneCompanionContainer(context: Context) {
 
     val oppoPushCoordinator: OppoPushCoordinator by lazy {
         OppoPushCoordinator(appContext, pushRegistrationStore, pushRegistrationUploader)
+    }
+
+    val reviewGateStore: ReviewGateStore by lazy {
+        ReviewGateStore(appContext)
+    }
+
+    val oppoReviewCoordinator: OppoReviewCoordinator by lazy {
+        OppoReviewCoordinator(appContext, reviewGateStore)
     }
 
     /** Stable peer id shared by RFCOMM and the RTOS BLE note transports. */
@@ -289,6 +299,7 @@ class PhoneCompanionContainer(context: Context) {
                 if (accountRepository.hasUsableSession) {
                     runCatching { cloudSyncService.syncNow() }
                 }
+                oppoReviewCoordinator.onSyncSucceeded()
             }
         )
     }

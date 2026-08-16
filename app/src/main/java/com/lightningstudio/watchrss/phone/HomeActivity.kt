@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_EXTENSION
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_MIME_TYPE
 import com.lightningstudio.watchrss.phone.data.importer.LocalFileImportTarget
@@ -46,6 +47,9 @@ import com.lightningstudio.watchrss.phone.update.AppUpdateDownloader
 import com.lightningstudio.watchrss.phone.update.AppUpdateState
 import com.lightningstudio.watchrss.phone.update.PhoneAnnouncement
 import com.lightningstudio.watchrss.phone.update.PhoneAnnouncementRepository
+import com.lightningstudio.watchrss.phone.update.PhoneStoreVersionRepository
+import com.lightningstudio.watchrss.phone.update.OppoMarketLauncher
+import com.lightningstudio.watchrss.phone.review.ReviewMoment
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -86,6 +90,12 @@ class HomeActivity : ComponentActivity() {
         )
     }
     private val pendingAnnouncement = mutableStateOf<PhoneAnnouncement?>(null)
+    private val reviewCoordinator by lazy {
+        (application as PhoneCompanionApplication).container.oppoReviewCoordinator
+    }
+    private val pendingReviewPrompt = mutableStateOf<ReviewMoment?>(null)
+    private val storeVersionRepository by lazy { PhoneStoreVersionRepository(this) }
+    private val pendingStoreUpdate = mutableStateOf<Int?>(null)
     private var homeScreenStartedAt: Long = 0L
 
     private val bluetoothPermissionsLauncher =
@@ -328,6 +338,46 @@ class HomeActivity : ComponentActivity() {
                             }
                         )
                     }
+                    pendingStoreUpdate.value?.let { versionCode ->
+                        AlertDialog(
+                            onDismissRequest = { pendingStoreUpdate.value = null },
+                            title = { Text("发现新版本") },
+                            text = {
+                                Text("新版本已上架 OPPO 软件商店，前往商店完成更新。")
+                            },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    pendingStoreUpdate.value = null
+                                    OppoMarketLauncher.launchUpdate(this@HomeActivity, versionCode)
+                                }) { Text("立即更新") }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { pendingStoreUpdate.value = null }) {
+                                    Text("稍后")
+                                }
+                            }
+                        )
+                    }
+                    pendingReviewPrompt.value?.let { moment ->
+                        AlertDialog(
+                            onDismissRequest = { reviewCoordinator.onPromptDeclined(moment) },
+                            title = { Text("喜欢「腕上RSS」吗？") },
+                            text = {
+                                Text("在 OPPO 软件商店给我们一个好评，帮助更多用户发现这款应用。")
+                            },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    reviewCoordinator.onPromptShown(moment)
+                                    reviewCoordinator.launchComment(this@HomeActivity)
+                                }) { Text("去评分") }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = {
+                                    reviewCoordinator.onPromptDeclined(moment)
+                                }) { Text("下次再说") }
+                            }
+                        )
+                    }
                     state.txtUpdatePrompt?.let { prompt ->
                         TxtUpdateDialog(
                             prompt = prompt,
@@ -341,7 +391,18 @@ class HomeActivity : ComponentActivity() {
         }
         handleInboundIntent(intent)
         lifecycleScope.launch {
-            pendingAnnouncement.value = announcementRepository.check()
+            // 优先走 OPPO 自更新：商店有新全量版本时跳商店详情页；否则退回公告下载流程。
+            val storeVersion = storeVersionRepository.check()
+            if (storeVersion != null && storeVersion > BuildConfig.VERSION_CODE) {
+                pendingStoreUpdate.value = storeVersion
+            } else {
+                pendingAnnouncement.value = announcementRepository.check()
+            }
+        }
+        lifecycleScope.launch {
+            reviewCoordinator.pendingPrompt.collect { moment ->
+                pendingReviewPrompt.value = moment
+            }
         }
         ensureBluetoothPermissions {
             (application as PhoneCompanionApplication).startWatchBaseStationIfPermitted()

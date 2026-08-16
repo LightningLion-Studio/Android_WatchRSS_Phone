@@ -31,6 +31,7 @@ class PhoneCompanionApplication : Application() {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastForegroundSyncAt = 0L
     @Volatile private var resumedActivity: Activity? = null
+    private var resumedAtMillis = 0L
     private val accountInitialization = CompletableDeferred<Unit>()
     private val consentServicesStarted = AtomicBoolean(false)
     private val ipSyncService: WatchIpSyncService by lazy {
@@ -48,6 +49,7 @@ class PhoneCompanionApplication : Application() {
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
                 resumedActivity = activity
+                resumedAtMillis = SystemClock.elapsedRealtime()
                 val privacyConsent = PhonePrivacyConsentStore(this@PhoneCompanionApplication)
                 val hasRequiredConsent = privacyConsent.hasRequiredConsent()
                 if (!hasRequiredConsent) {
@@ -65,6 +67,7 @@ class PhoneCompanionApplication : Application() {
                     return
                 }
                 startConsentDependentServices()
+                container.oppoReviewCoordinator.onAppEntry()
                 if (!shouldEnforceAppAccess(
                         hasRequiredConsent = hasRequiredConsent,
                         isOobeComplete = privacyConsent.isOobeComplete()
@@ -123,6 +126,11 @@ class PhoneCompanionApplication : Application() {
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
             override fun onActivityStarted(activity: Activity) = Unit
             override fun onActivityPaused(activity: Activity) {
+                if (resumedAtMillis > 0) {
+                    val elapsed = SystemClock.elapsedRealtime() - resumedAtMillis
+                    if (elapsed > 0) container.oppoReviewCoordinator.recordForeground(elapsed)
+                    resumedAtMillis = 0L
+                }
                 if (resumedActivity === activity) resumedActivity = null
             }
             override fun onActivityStopped(activity: Activity) = Unit

@@ -3419,6 +3419,11 @@ private fun AppFeatureSettings(modifier: Modifier) {
         SettingsEntry("备案信息", "在关于页面查看", Icons.Default.Settings) {
             context.startActivity(Intent(context, AboutActivity::class.java))
         }
+        SettingsEntry("去商店评分", "跳转 OPPO 软件商店评论页", Icons.Default.Star) {
+            (context as? android.app.Activity)?.let { activity ->
+                container.oppoReviewCoordinator.launchComment(activity)
+            }
+        }
         if (BuildConfig.DEBUG) {
             SectionTitle("远端环境")
             ToggleRow(

@@ -52,8 +52,11 @@ object OnboardingProfileBuilder {
         else -> ProfileTier.PARTIAL
     }
 
-    fun paywallCopyFor(summary: AppAccessSummary, profile: OnboardingProfile?): PaywallCopy {
-        val price = priceSentence(summary)
+    fun paywallCopyFor(
+        @Suppress("UNUSED_PARAMETER") summary: AppAccessSummary,
+        profile: OnboardingProfile?
+    ): PaywallCopy {
+        val price = priceSentence()
         return when (onboardingTier(profile)) {
             ProfileTier.FULL -> {
                 val p = profile!!
@@ -71,17 +74,14 @@ object OnboardingProfileBuilder {
                 detail = "${profile!!.answeredCount} 个定制项已保存，补齐后可在手机与手表上继续阅读。${price}继续。"
             )
             ProfileTier.NONE -> PaywallCopy(
-                title = "当前账号没有可授权额度",
-                detail = "未定制的阅读计划将无法在手机上继续。${price}定制并继续。"
+                title = "解锁手机与手表完整体验",
+                detail = "${price}管理订阅、同步资料并继续阅读。"
             )
         }
     }
 
-    private fun priceSentence(summary: AppAccessSummary): String {
-        val remaining = (summary.capacity - summary.occupied).coerceAtLeast(0)
-        return "购买手机版永久授权（¥6 可授权 3 台手机；当前已购买 ${summary.purchaseCount} 次，" +
-            "剩余 $remaining 台）后即可"
-    }
+    private fun priceSentence(): String =
+        "一次购买手机版永久授权（¥6，可授权 3 台手机）后即可"
 
     private fun sanitizedFirst(answers: Map<String, List<String>>, key: String): String =
         sanitizedList(answers, key).firstOrNull().orEmpty()

@@ -11,9 +11,15 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -26,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.account.AppAccessState
@@ -157,7 +164,10 @@ class MainActivity : ComponentActivity() {
     @androidx.compose.runtime.Composable
     private fun OobeLoadingGate() {
         Column(
-            Modifier.fillMaxSize().padding(28.dp),
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(28.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -197,6 +207,7 @@ class MainActivity : ComponentActivity() {
                 AppAccessState.Loading -> CircularProgressIndicator(Modifier.padding(24.dp))
                 AppAccessState.LoggedOut -> GateMessage("首次使用请登录", null) { openAccount() }
                 is AppAccessState.PurchaseRequired -> {
+                    PhoneValuePreview()
                     val copy = OnboardingProfileBuilder.paywallCopyFor(
                         state.summary,
                         OnboardingProfileStore(this@MainActivity).load()
@@ -233,6 +244,54 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.padding(top = 20.dp)
                 ) { Text("联系客服") }
             }
+        }
+    }
+
+    @androidx.compose.runtime.Composable
+    private fun PhoneValuePreview() {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 24.dp, bottom = 8.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainer
+            )
+        ) {
+            Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
+                Text(
+                    text = "你的手机阅读中枢",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "首页概览、RSS 与小说集中管理，阅读状态与手表保持同步。",
+                    modifier = Modifier.padding(top = 6.dp, bottom = 14.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                ValuePreviewRow("多端资料库", "收藏、稍后读与文章双向同步")
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                ValuePreviewRow("沉浸阅读器", "字体、背景、自动滚动与 AI 总结")
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                ValuePreviewRow("手机端管理", "订阅整理、网页导入与账号安全")
+            }
+        }
+    }
+
+    @androidx.compose.runtime.Composable
+    private fun ValuePreviewRow(title: String, detail: String) {
+        Column(Modifier.fillMaxWidth()) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = detail,
+                modifier = Modifier.padding(top = 2.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 

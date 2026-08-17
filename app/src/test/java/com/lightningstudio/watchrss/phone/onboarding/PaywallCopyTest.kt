@@ -31,8 +31,9 @@ class PaywallCopyTest {
         assertTrue(copy.detail.contains("每天 3 篇"))
         assertTrue(copy.detail.contains("坚持 30 天"))
         assertTrue(copy.detail.contains("《论持久战》"))
-        assertTrue(copy.detail.contains("已购买 2 次"))
-        assertTrue(copy.detail.contains("剩余 0 台"))
+        assertTrue(copy.detail.contains("一次购买手机版永久授权"))
+        assertFalse(copy.detail.contains("已购买"))
+        assertFalse(copy.detail.contains("剩余"))
         assertEquals("前往网页支付", copy.actionLabel)
     }
 
@@ -61,9 +62,10 @@ class PaywallCopyTest {
     @Test
     fun `none tier applies loss framing and leaks no user content`() {
         val copy = OnboardingProfileBuilder.paywallCopyFor(summary, null)
-        assertEquals("当前账号没有可授权额度", copy.title)
-        assertTrue(copy.detail.contains("未定制的阅读计划将无法在手机上继续"))
-        assertTrue(copy.detail.contains("定制并继续"))
+        assertEquals("解锁手机与手表完整体验", copy.title)
+        assertTrue(copy.detail.contains("管理订阅、同步资料并继续阅读"))
+        assertFalse(copy.detail.contains("已购买"))
+        assertFalse(copy.detail.contains("剩余"))
 
         val emptyProfile = OnboardingProfile(answeredCount = 0)
         val emptyCopy = OnboardingProfileBuilder.paywallCopyFor(summary, emptyProfile)
@@ -72,13 +74,14 @@ class PaywallCopyTest {
     }
 
     @Test
-    fun `remaining slots are computed from capacity and occupied`() {
+    fun `purchase copy does not expose account counters`() {
         val roomy = summary.copy(occupied = 1)
         val copy = OnboardingProfileBuilder.paywallCopyFor(roomy, null)
-        assertTrue(copy.detail.contains("剩余 2 台"))
+        assertFalse(copy.detail.contains("已购买"))
+        assertFalse(copy.detail.contains("剩余"))
 
         val over = summary.copy(occupied = 9)
         val overCopy = OnboardingProfileBuilder.paywallCopyFor(over, null)
-        assertTrue(overCopy.detail.contains("剩余 0 台"))
+        assertEquals(copy, overCopy)
     }
 }

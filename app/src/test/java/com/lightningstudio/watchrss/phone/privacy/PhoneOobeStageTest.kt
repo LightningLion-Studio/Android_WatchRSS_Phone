@@ -1,0 +1,46 @@
+package com.lightningstudio.watchrss.phone.privacy
+
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+class PhoneOobeStageTest {
+    @Test
+    fun `debug replay starts before consent without clearing persisted consent`() {
+        assertEquals(
+            false,
+            initialPhoneOobeConsentState(hasRequiredConsent = true, replayFromStart = true)
+        )
+        assertEquals(
+            true,
+            initialPhoneOobeConsentState(hasRequiredConsent = true, replayFromStart = false)
+        )
+    }
+
+    @Test
+    fun `new user sees welcome before agreement`() {
+        assertEquals(
+            PhoneOobeStage.WELCOME,
+            phoneOobeStage(page = 0, hasConsent = false, hasUsableSession = false)
+        )
+        assertEquals(
+            PhoneOobeStage.AGREEMENT,
+            phoneOobeStage(page = 1, hasConsent = false, hasUsableSession = false)
+        )
+    }
+
+    @Test
+    fun `consent is followed by mandatory login`() {
+        assertEquals(
+            PhoneOobeStage.ACCOUNT,
+            phoneOobeStage(page = 1, hasConsent = true, hasUsableSession = false)
+        )
+    }
+
+    @Test
+    fun `only consent plus usable session completes onboarding`() {
+        assertEquals(
+            PhoneOobeStage.COMPLETE,
+            phoneOobeStage(page = 1, hasConsent = true, hasUsableSession = true)
+        )
+    }
+}

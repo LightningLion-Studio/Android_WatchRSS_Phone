@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone
 import com.lightningstudio.watchrss.phone.onboarding.OnboardingDraftStore
 import com.lightningstudio.watchrss.phone.onboarding.OnboardingProfileStore
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -17,6 +18,15 @@ class AppAccessManifestTest {
         assertEquals(listOf(".MainActivity"), exported)
         assertTrue(manifest.contains("android:name=\".HomeActivity\"\n            android:exported=\"false\""))
         assertTrue(manifest.contains("android:scheme=\"watchrss\" android:host=\"payment-return\""))
+    }
+
+    @Test
+    fun `app does not claim generic web links`() {
+        val manifest = File("src/main/AndroidManifest.xml").readText()
+
+        assertFalse(manifest.contains("<data android:scheme=\"http\" />"))
+        assertFalse(manifest.contains("<data android:scheme=\"https\" />"))
+        assertTrue(manifest.contains("<action android:name=\"android.intent.action.SEND\" />"))
     }
 
     @Test

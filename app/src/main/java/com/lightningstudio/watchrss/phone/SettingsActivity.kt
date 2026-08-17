@@ -3414,8 +3414,8 @@ private fun AppFeatureSettings(modifier: Modifier) {
             context.startActivity(DataManagementActivity.createIntent(context))
         }
         if (BuildConfig.DEBUG) {
-            SettingsEntry("新手引导", "重新查看手机操作引导", Icons.Default.Edit) {
-                context.startActivity(Intent(context, GuideActivity::class.java))
+            SettingsEntry("新手引导", "重新查看首次使用引导", Icons.Default.Edit) {
+                context.startActivity(PhoneOobeActivity.createIntent(context, replayFromStart = true))
             }
             ToggleRow("调试：始终显示新手提示", container.tipManager.debugShowAll) {
                 container.tipManager.debugShowAll = it

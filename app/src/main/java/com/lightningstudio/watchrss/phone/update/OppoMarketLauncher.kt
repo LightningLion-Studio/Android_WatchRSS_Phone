@@ -18,13 +18,15 @@ object OppoMarketLauncher {
     private const val MARKET_PACKAGE_HEYTAP = "com.heytap.market"
     private const val MARKET_PACKAGE_OPPO = "com.oppo.market"
 
+    fun isAvailable(context: Context): Boolean {
+        val marketPackage = marketPackage(context) ?: return false
+        return buildMarketIntent(context, marketPackage, versionCode = 0)
+            .resolveActivity(context.packageManager) != null
+    }
+
     fun launchUpdate(activity: Activity, versionCode: Int): Boolean {
         val marketPackage = marketPackage(activity) ?: return false
-        val url = "market://details?id=${activity.packageName}" +
-            "&caller=${activity.packageName}&v_code=$versionCode&m=app_update"
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-            setPackage(marketPackage)
-        }
+        val intent = buildMarketIntent(activity, marketPackage, versionCode)
         if (intent.resolveActivity(activity.packageManager) == null) return false
         return runCatching {
             activity.startActivityForResult(intent, REQUEST_CODE)
@@ -32,6 +34,14 @@ object OppoMarketLauncher {
             true
         }.onFailure { Log.w(TAG, "failed to launch store detail page", it) }
             .getOrDefault(false)
+    }
+
+    private fun buildMarketIntent(context: Context, marketPackage: String, versionCode: Int): Intent {
+        val url = "market://details?id=${context.packageName}" +
+            "&caller=${context.packageName}&v_code=$versionCode&m=app_update"
+        return Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+            setPackage(marketPackage)
+        }
     }
 
     private fun marketPackage(context: Context): String? {

@@ -26,6 +26,23 @@ data class OnboardingUiState(
         get() = if (loginInProgress) OnboardingCatalogIndices.LOGIN_GUIDE_INDEX + 1 else stepIndex
 }
 
+internal data class OnboardingBackNavigation(
+    val targetStepIndex: Int?,
+    val shouldRecordDropped: Boolean
+)
+
+internal fun resolveOnboardingBackNavigation(currentStepIndex: Int): OnboardingBackNavigation {
+    var previous = currentStepIndex - 1
+    while (previous >= 0 && ONBOARDING_CATALOG[previous].type == StepType.LOGIN_VIRTUAL) {
+        previous--
+    }
+    return if (previous >= 0) {
+        OnboardingBackNavigation(targetStepIndex = previous, shouldRecordDropped = false)
+    } else {
+        OnboardingBackNavigation(targetStepIndex = null, shouldRecordDropped = true)
+    }
+}
+
 class OnboardingViewModel(
     private val repository: PhoneCompanionRepository,
     private val accountRepository: PhoneAccountRepository,
@@ -91,12 +108,13 @@ class OnboardingViewModel(
 
     /** 返回上一步；已在第 1 步则记一次 dropped（由 Activity 退出）。 */
     fun backOrDrop(): Boolean {
-        val current = _state.value.stepIndex
-        if (current <= 0) {
+        val navigation = resolveOnboardingBackNavigation(_state.value.stepIndex)
+        val target = navigation.targetStepIndex
+        if (navigation.shouldRecordDropped || target == null) {
             usageTelemetry.recordOnboardingDropped()
             return false
         }
-        mutateDraft { it.copy(stepIndex = current - 1, updatedAtMillis = System.currentTimeMillis()) }
+        mutateDraft { it.copy(stepIndex = target, updatedAtMillis = System.currentTimeMillis()) }
         return true
     }
 

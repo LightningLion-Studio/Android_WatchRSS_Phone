@@ -6,12 +6,13 @@ import android.util.Log
 import com.heytap.msp.push.HeytapPushManager
 import com.heytap.msp.push.callback.ICallBackResultService
 import com.lightningstudio.watchrss.phone.BuildConfig
+import com.lightningstudio.watchrss.phone.privacy.PhonePrivacyConsentStore
 
 /**
- * OPPO push registration. init() is unconditional (OS-level notification channel; no
- * user data moves). register() runs only when the device supports OPPO push and the
- * user has not disabled "接收推送通知". A successful regId is uploaded to the backend
- * (account session + device possession required); failures retry on the next cold start.
+ * OPPO push registration. Every SDK call and regId upload is gated on the required
+ * privacy consent. register() runs only when the device supports OPPO push and the user
+ * has not disabled "接收推送通知". A successful regId is uploaded to the backend (account
+ * session + device possession required); failures retry on the next cold start.
  *
  * API surface verified against com.heytap.msp_V3.7.1.aar (javap): HeytapPushManager
  * init/isSupportPush/register/pausePush/resumePush/requestNotificationPermission all
@@ -22,15 +23,27 @@ class OppoPushCoordinator(
     private val store: PushRegistrationStore = PushRegistrationStore(context),
     private val uploader: PhonePushRegistrationUploader? = null
 ) {
-    /** No-op-safe SDK init; must run before any register()/pause()/resume(). */
+    private val consentGate = OppoPushConsentGate {
+        PhonePrivacyConsentStore(context).hasRequiredConsent()
+    }
+    private val pendingUploadRetry = PendingPushUploadRetry(
+        hasRequiredConsent = consentGate::isGranted,
+        upload = { regId -> uploader?.upload(regId) == true },
+        markUploaded = { regId -> store.uploadedRegId = regId }
+    )
+
+    /** No-op-safe SDK init; must run after consent and before register()/pause()/resume(). */
     fun init() {
-        runCatching {
-            HeytapPushManager.init(context.applicationContext, BuildConfig.DEBUG)
-        }.onFailure { Log.e(TAG, "HeytapPushManager.init failed", it) }
+        consentGate.runIfGranted {
+            runCatching {
+                HeytapPushManager.init(context.applicationContext, BuildConfig.DEBUG)
+            }.onFailure { Log.e(TAG, "HeytapPushManager.init failed", it) }
+        }
     }
 
     /** Idempotent reconciliation; call on cold start. */
     fun ensurePushState() {
+        if (!consentGate.isGranted()) return
         if (BuildConfig.WATCHRSS_OPPO_PUSH_APP_KEY.isBlank() ||
             BuildConfig.WATCHRSS_OPPO_PUSH_APP_SECRET.isBlank()
         ) {
@@ -100,6 +113,7 @@ class OppoPushCoordinator(
     /** Settings toggle handler. */
     fun setEnabled(enabled: Boolean) {
         store.isEnabled = enabled
+        if (!consentGate.isGranted()) return
         if (enabled) {
             ensurePushState()
             requestNotificationPermission()
@@ -110,18 +124,30 @@ class OppoPushCoordinator(
 
     /** POST_NOTIFICATIONS on Android 13+; the system dialog is suppressed after a permanent denial. */
     fun requestNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            runCatching { HeytapPushManager.requestNotificationPermission() }
+        consentGate.runIfGranted {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                runCatching { HeytapPushManager.requestNotificationPermission() }
+            }
         }
     }
 
-    private fun uploadIfNeeded(regId: String) {
-        if (store.uploadedRegId == regId) return
-        if (uploader?.upload(regId) == true) {
-            store.uploadedRegId = regId
-        } else {
-            Log.i(TAG, "regId upload deferred (no session / no device access / network); " +
-                "retry on next cold start")
+    /**
+     * Retries only the persisted, pending regId. App-access authorization invokes this
+     * after a usable session and device token are available; successful uploads remain
+     * idempotent through [PushRegistrationStore.uploadedRegId].
+     */
+    fun retryPendingUpload() {
+        uploadIfNeeded(store.regId)
+    }
+
+    private fun uploadIfNeeded(regId: String?) {
+        when (pendingUploadRetry.retry(regId, store.uploadedRegId, store.isEnabled)) {
+            PendingPushUploadResult.DEFERRED -> Log.i(
+                TAG,
+                "regId upload deferred (no session / no device access / network); " +
+                    "retry after authorization or next cold start"
+            )
+            else -> Unit
         }
     }
 
@@ -131,5 +157,45 @@ class OppoPushCoordinator(
 
     companion object {
         const val TAG = "WatchRSS_OppoPush"
+    }
+}
+
+internal enum class PendingPushUploadResult {
+    SKIPPED,
+    DEFERRED,
+    UPLOADED
+}
+
+internal class PendingPushUploadRetry(
+    private val hasRequiredConsent: () -> Boolean,
+    private val upload: (String) -> Boolean,
+    private val markUploaded: (String) -> Unit
+) {
+    @Synchronized
+    fun retry(
+        regId: String?,
+        uploadedRegId: String?,
+        enabled: Boolean
+    ): PendingPushUploadResult {
+        if (!hasRequiredConsent() || !enabled || regId == null || uploadedRegId == regId) {
+            return PendingPushUploadResult.SKIPPED
+        }
+        if (!runCatching { upload(regId) }.getOrDefault(false)) {
+            return PendingPushUploadResult.DEFERRED
+        }
+        markUploaded(regId)
+        return PendingPushUploadResult.UPLOADED
+    }
+}
+
+internal class OppoPushConsentGate(
+    private val hasRequiredConsent: () -> Boolean
+) {
+    fun isGranted(): Boolean = hasRequiredConsent()
+
+    fun runIfGranted(action: () -> Unit): Boolean {
+        if (!isGranted()) return false
+        action()
+        return true
     }
 }

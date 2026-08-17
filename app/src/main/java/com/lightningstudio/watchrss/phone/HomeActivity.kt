@@ -55,6 +55,7 @@ import com.lightningstudio.watchrss.phone.update.PhoneAnnouncement
 import com.lightningstudio.watchrss.phone.update.PhoneAnnouncementRepository
 import com.lightningstudio.watchrss.phone.update.PhoneStoreVersionRepository
 import com.lightningstudio.watchrss.phone.update.OppoMarketLauncher
+import com.lightningstudio.watchrss.phone.update.shouldOfferStoreUpdate
 import com.lightningstudio.watchrss.phone.review.ReviewMoment
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -362,7 +363,7 @@ class HomeActivity : ComponentActivity() {
                             confirmButton = {
                                 TextButton(onClick = {
                                     pendingStoreUpdate.value = null
-                                    OppoMarketLauncher.launchUpdate(this@HomeActivity, versionCode)
+                                    launchStoreUpdateOrFallback(versionCode)
                                 }) { Text("立即更新") }
                             },
                             dismissButton = {
@@ -405,9 +406,9 @@ class HomeActivity : ComponentActivity() {
         }
         handleInboundIntent(intent)
         lifecycleScope.launch {
-            // 优先走 OPPO 自更新：商店有新全量版本时跳商店详情页；否则退回公告下载流程。
-            val storeVersion = storeVersionRepository.check()
-            if (storeVersion != null && storeVersion > BuildConfig.VERSION_CODE) {
+            val marketAvailable = OppoMarketLauncher.isAvailable(this@HomeActivity)
+            val storeVersion = if (marketAvailable) storeVersionRepository.check() else null
+            if (shouldOfferStoreUpdate(marketAvailable, storeVersion, BuildConfig.VERSION_CODE)) {
                 pendingStoreUpdate.value = storeVersion
             } else {
                 pendingAnnouncement.value = announcementRepository.check()
@@ -420,6 +421,25 @@ class HomeActivity : ComponentActivity() {
         }
         ensureBluetoothPermissions {
             (application as PhoneCompanionApplication).startWatchBaseStationIfPermitted()
+        }
+    }
+
+    private fun launchStoreUpdateOrFallback(versionCode: Int) {
+        if (OppoMarketLauncher.launchUpdate(this, versionCode)) return
+
+        Toast.makeText(this, "无法打开 OPPO 软件商店，正在检查 APK 更新", Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch {
+            // The user explicitly requested this update, so a prior "later" dismissal
+            // must not hide an otherwise usable APK fallback.
+            val announcement = announcementRepository.check(includeDismissed = true)
+            pendingAnnouncement.value = announcement
+            if (announcement == null) {
+                Toast.makeText(
+                    this@HomeActivity,
+                    "软件商店不可用，未能获取可用的 APK 更新",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
         }
     }
 

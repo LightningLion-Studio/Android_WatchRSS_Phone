@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
  * Uploads the OPPO regId to the backend so the server can target this device.
  * The backend requires both the account Bearer token and the device-possession
  * authorization header; without a usable session or device access the upload is
- * deferred and retried on the next cold start.
+ * deferred and retried when device authorization becomes available or on the next cold start.
  */
 class PhonePushRegistrationUploader(
     private val environment: AccountEnvironment,

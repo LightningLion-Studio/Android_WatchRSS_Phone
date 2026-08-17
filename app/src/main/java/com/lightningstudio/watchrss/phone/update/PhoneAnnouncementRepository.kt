@@ -27,7 +27,7 @@ class PhoneAnnouncementRepository(private val context: Context) {
         .readTimeout(5, TimeUnit.SECONDS)
         .build()
 
-    suspend fun check(): PhoneAnnouncement? = withContext(Dispatchers.IO) {
+    suspend fun check(includeDismissed: Boolean = false): PhoneAnnouncement? = withContext(Dispatchers.IO) {
         val baseUrl = AccountEnvironment.active(context).backendBaseUrl
         if (baseUrl.isBlank()) return@withContext null
         runCatching {
@@ -42,7 +42,8 @@ class PhoneAnnouncementRepository(private val context: Context) {
                 val body = response.body?.string() ?: return@use null
                 val announcement = parse(JSONObject(body)) ?: return@use null
                 if (compareVersions(announcement.version, BuildConfig.VERSION_NAME) <= 0) return@use null
-                if (!announcement.forceUpdate &&
+                if (!includeDismissed &&
+                    !announcement.forceUpdate &&
                     prefs.getString("dismissed_version", null) == announcement.version
                 ) return@use null
                 announcement

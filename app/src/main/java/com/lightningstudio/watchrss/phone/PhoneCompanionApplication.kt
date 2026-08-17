@@ -45,8 +45,6 @@ class PhoneCompanionApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        container.oppoPushCoordinator.init()
-        appScope.launch { container.oppoPushCoordinator.ensurePushState() }
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
                 resumedActivity = activity
@@ -154,8 +152,10 @@ class PhoneCompanionApplication : Application() {
     private fun startConsentDependentServices() {
         if (!PhonePrivacyConsentStore(this).hasRequiredConsent()) return
         if (!consentServicesStarted.compareAndSet(false, true)) return
+        container.oppoPushCoordinator.init()
         appScope.launch {
             accountInitialization.await()
+            container.oppoPushCoordinator.ensurePushState()
             container.appAccessCoordinator.initialize()
             container.usageTelemetry.recordAppLaunch()
             container.tipManager.recordEvent(TipEvents.APP_LAUNCH)

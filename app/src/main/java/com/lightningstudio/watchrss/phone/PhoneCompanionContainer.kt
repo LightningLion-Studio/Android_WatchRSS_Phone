@@ -142,7 +142,15 @@ class PhoneCompanionContainer(context: Context) {
     }
 
     val appAccessCoordinator: AppAccessCoordinator by lazy {
-        AppAccessCoordinator(appContext, accountRepository, licenseDeviceIdentity, appScope)
+        AppAccessCoordinator(
+            appContext,
+            accountRepository,
+            licenseDeviceIdentity,
+            appScope,
+            onAuthorized = {
+                appScope.launch { oppoPushCoordinator.retryPendingUpload() }
+            }
+        )
     }
 
     val usageTelemetry: PhoneUsageTelemetry by lazy {

@@ -1,9 +1,12 @@
 package com.lightningstudio.watchrss.phone
 
+import com.lightningstudio.watchrss.phone.onboarding.OnboardingDraftStore
+import com.lightningstudio.watchrss.phone.onboarding.OnboardingProfileStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import javax.xml.parsers.DocumentBuilderFactory
 
 class AppAccessManifestTest {
     @Test
@@ -31,6 +34,27 @@ class AppAccessManifestTest {
     }
 
     @Test
+    fun `onboarding answers are excluded from every Android backup path`() {
+        val onboardingPreferences = setOf(
+            "${OnboardingProfileStore.PREFERENCES_NAME}.xml",
+            "${OnboardingDraftStore.PREFERENCES_NAME}.xml"
+        )
+
+        assertTrue(
+            excludedSharedPreferences(File("src/main/res/xml/backup_rules.xml"))
+                .containsAll(onboardingPreferences)
+        )
+
+        val modernRules = File("src/main/res/xml/data_extraction_rules.xml")
+        listOf("cloud-backup", "device-transfer").forEach { section ->
+            assertTrue(
+                "$section must exclude the onboarding profile and draft",
+                excludedSharedPreferences(modernRules, section).containsAll(onboardingPreferences)
+            )
+        }
+    }
+
+    @Test
     fun `oobe and legal pages are internal activities`() {
         val manifest = File("src/main/AndroidManifest.xml").readText()
         listOf(".PhoneOobeActivity", ".LegalDocumentActivity").forEach { activity ->
@@ -40,5 +64,20 @@ class AppAccessManifestTest {
                 )
             )
         }
+    }
+
+    private fun excludedSharedPreferences(file: File, section: String? = null): Set<String> {
+        val document = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(file)
+        val root = section?.let { name ->
+            document.getElementsByTagName(name).item(0)
+                ?: error("Missing <$name> in ${file.path}")
+        } ?: document.documentElement
+
+        return (0 until root.childNodes.length).asSequence()
+            .map { index -> root.childNodes.item(index) }
+            .filter { it.nodeName == "exclude" }
+            .filter { it.attributes.getNamedItem("domain")?.nodeValue == "sharedpref" }
+            .mapNotNull { it.attributes.getNamedItem("path")?.nodeValue }
+            .toSet()
     }
 }

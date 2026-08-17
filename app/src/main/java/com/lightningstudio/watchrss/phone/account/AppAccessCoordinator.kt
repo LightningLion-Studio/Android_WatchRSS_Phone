@@ -20,9 +20,11 @@ class AppAccessCoordinator(
     private val accountRepository: PhoneAccountRepository,
     private val identity: LicenseDeviceIdentity,
     private val scope: CoroutineScope,
-    private val store: AppAccessStore = AppAccessStore(context, AccountEnvironment.active(context).storageSuffix)
+    private val store: AppAccessStore = AppAccessStore(context, AccountEnvironment.active(context).storageSuffix),
+    private val onAuthorized: () -> Unit = {}
 ) {
     private val operationMutex = Mutex()
+    private val authorizationNotifier = AuthorizationReadyNotifier(onAuthorized)
     private val environment = AccountEnvironment.active(context)
     private val _state = MutableStateFlow<AppAccessState>(AppAccessState.Loading)
     val state: StateFlow<AppAccessState> = _state.asStateFlow()
@@ -32,7 +34,10 @@ class AppAccessCoordinator(
 
     fun initialize() { scope.launch(Dispatchers.IO) { reconcile() } }
 
-    suspend fun reconcile() = operationMutex.withLock { reconcileLocked() }
+    suspend fun reconcile() {
+        operationMutex.withLock { reconcileLocked() }
+        authorizationNotifier.afterReconcile(isAuthorized)
+    }
 
     private suspend fun reconcileLocked() {
         val cached = store.load()
@@ -91,7 +96,11 @@ class AppAccessCoordinator(
         _state.value = decision.state
     }
 
-    suspend fun claim() = operationMutex.withLock { claimLocked() }
+    suspend fun claim() {
+        val wasAuthorized = isAuthorized
+        operationMutex.withLock { claimLocked() }
+        notifyIfNewlyAuthorized(wasAuthorized)
+    }
 
     private suspend fun claimLocked() {
         val activationProof = accountRepository.session.value?.activationProof.orEmpty()
@@ -134,8 +143,14 @@ class AppAccessCoordinator(
         return order
     }
 
-    suspend fun refreshPayment(orderId: String) = operationMutex.withLock {
-        refreshPaymentLocked(orderId)
+    suspend fun refreshPayment(orderId: String) {
+        val wasAuthorized = isAuthorized
+        operationMutex.withLock { refreshPaymentLocked(orderId) }
+        notifyIfNewlyAuthorized(wasAuthorized)
+    }
+
+    private fun notifyIfNewlyAuthorized(wasAuthorized: Boolean) {
+        authorizationNotifier.afterPotentialTransition(wasAuthorized, isAuthorized)
     }
 
     private suspend fun refreshPaymentLocked(orderId: String) {
@@ -210,6 +225,24 @@ class AppAccessCoordinator(
                 else -> AppAccessState.PurchaseRequired(summary)
             }
         }.onFailure { _state.value = AppAccessState.ValidationError(it.message ?: "授权状态获取失败") }
+    }
+}
+
+/**
+ * Reconciliation is also a readiness boundary: an already-authorized cached lease may
+ * gain a usable account session without changing [AppAccessState]. Consumers waiting on
+ * both authorization and session readiness must therefore be notified after every
+ * authorized reconciliation. Their own idempotency guards decide whether work is needed.
+ */
+internal class AuthorizationReadyNotifier(
+    private val onAuthorized: () -> Unit
+) {
+    fun afterReconcile(isAuthorized: Boolean) {
+        if (isAuthorized) runCatching(onAuthorized)
+    }
+
+    fun afterPotentialTransition(wasAuthorized: Boolean, isAuthorized: Boolean) {
+        if (!wasAuthorized && isAuthorized) runCatching(onAuthorized)
     }
 }
 

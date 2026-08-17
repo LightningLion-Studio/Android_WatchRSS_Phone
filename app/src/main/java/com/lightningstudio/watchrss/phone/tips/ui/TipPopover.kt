@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.tips.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -56,6 +57,13 @@ private val WindowMargin = 8.dp
 private val ArrowWidth = 22.dp
 private val ArrowHeight = 10.dp
 
+internal val TipPopoverPopupProperties = PopupProperties(
+    focusable = false,
+    dismissOnBackPress = false,
+    dismissOnClickOutside = false,
+    usePlatformDefaultWidth = false
+)
+
 /** Popup 定位交给内部 SubcomposeLayout 全权处理，位置提供器固定为原点。 */
 private val TopStartPositionProvider = object : PopupPositionProvider {
     override fun calculatePosition(
@@ -103,15 +111,14 @@ fun TipPopover(
     val arrowHeightPx = with(density) { ArrowHeight.toPx() }.roundToInt()
     val maxCardWidth = minOf(cardMaxWidthPx, windowSize.width - 2 * marginPx).roundToInt().coerceAtLeast(1)
 
+    // A non-focusable Popup cannot receive platform back events. Register at the
+    // Activity dispatcher so back dismisses the tip before the underlying screen.
+    BackHandler(onBack = onDismiss)
+
     Popup(
         popupPositionProvider = TopStartPositionProvider,
         onDismissRequest = onDismiss,
-        properties = PopupProperties(
-            focusable = false,
-            dismissOnBackPress = true,
-            dismissOnClickOutside = false,
-            usePlatformDefaultWidth = false
-        )
+        properties = TipPopoverPopupProperties
     ) {
         SubcomposeLayout(
             modifier = Modifier

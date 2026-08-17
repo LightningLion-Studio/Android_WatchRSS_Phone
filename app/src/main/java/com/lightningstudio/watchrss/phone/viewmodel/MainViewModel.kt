@@ -47,7 +47,7 @@ data class MainUiState(
     val message: String? = null,
     val syncStatusMessage: String? = null,
     val syncStatusError: String? = null,
-    val syncTransportLabel: String = "RFCOMM（Wi-Fi 优先探测）",
+    val syncTransportLabel: String = "两设备连接到同一个wifi以获得更快的同步速度",
     val error: String? = null,
     val syncProgress: MainSyncProgressUi? = null,
     val rssSources: List<PhoneRssSourceEntity> = emptyList(),

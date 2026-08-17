@@ -240,7 +240,6 @@ class PhoneBluetoothSyncClient(
         }
 
         val results = mutableListOf<PhoneBluetoothWatchProbeResult>()
-        val cachedAddress = cachedDeviceAddress()
         candidates.forEachIndexed { index, device ->
             val result = probeLibrarySyncDevice(
                 device = device,
@@ -250,28 +249,6 @@ class PhoneBluetoothSyncClient(
             )
             results += result
             onProbe(index + 1, candidates.size, result)
-            if (
-                result.reachable &&
-                cachedAddress != null &&
-                device.address.equals(cachedAddress, ignoreCase = true)
-            ) {
-                debugLog.appendEvent(
-                    event = "bt.library.probe.cached.hit",
-                    sessionId = sessionId,
-                    fields = deviceFields(device) + mapOf("elapsedMs" to elapsedSince(startedAt))
-                )
-                debugLog.appendEvent(
-                    event = "bt.library.probe.complete",
-                    sessionId = sessionId,
-                    fields = mapOf(
-                        "candidates" to candidates.size,
-                        "reachable" to results.count { it.reachable },
-                        "elapsedMs" to elapsedSince(startedAt),
-                        "shortCircuited" to true
-                    )
-                )
-                return results
-            }
         }
         debugLog.appendEvent(
             event = "bt.library.probe.complete",
@@ -2037,7 +2014,7 @@ class PhoneBluetoothSyncClient(
         private const val PREVIEW_MIN_FRAME_INTERVAL_MS = 32L
         private const val TAG = "WatchRSS_BtSyncClient"
         private const val PHASE_COMPLETE = "complete"
-        private const val MAX_DEVICE_PROBE_CANDIDATES = 3
+        private const val MAX_DEVICE_PROBE_CANDIDATES = 9
         private const val DEFAULT_DEVICE_PROBE_TIMEOUT_MS = 2_000L
         private const val DIRECT_PROBE_TIMEOUT_MS = 4_000L
         // The paired RFCOMM probe has already proved reachability. Do not hold the user in the

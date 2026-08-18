@@ -325,7 +325,15 @@ class PhoneCompanionContainer(context: Context) {
             llmTokenUsageRepository = llmTokenUsageRepository,
             deviceId = deviceIdentity.deviceId,
             debugLog = bluetoothDebugLog,
-            buildAccountSyncRequest = accountRepository::buildAccountSyncRequest,
+            buildAccountSyncRequest = { watchDeviceId, watchInstallId, watchDisplayName ->
+                appAccessCoordinator.reconcile()
+                accountRepository.buildAccountSyncRequest(
+                    watchDeviceId,
+                    watchInstallId,
+                    watchDisplayName
+                )
+            },
+            canSyncAccount = { accountRepository.hasUsableSession },
             onLibrarySyncCompleted = {
                 if (accountRepository.hasUsableSession) {
                     runCatching { cloudSyncService.syncNow() }

@@ -2,6 +2,7 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import android.annotation.SuppressLint
 import android.content.Context
+import com.lightningstudio.watchrss.phone.account.accountHttpErrorCode
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageRepository
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
@@ -37,6 +38,7 @@ data class PhoneBluetoothSyncResult(
     val libraryStats: LibrarySyncStats? = null,
     val noteStats: NoteSyncStats? = null,
     val accountSync: AccountSyncResult? = null,
+    val accountSyncWarning: String? = null,
     val readerSyncWarning: String? = null
 )
 
@@ -49,6 +51,7 @@ data class NoteSyncStats(
 
 enum class PhoneBluetoothSyncStage(val displayName: String) {
     CONNECTING("建立连接中"),
+    SYNCING_ACCOUNT("账号授权同步中"),
     TRANSFERRING("信息传输中"),
     SYNCING_READER_RESOURCES("阅读器资源同步中"),
     SYNCING_NOTES("备忘录同步中"),
@@ -95,6 +98,7 @@ class PhoneBluetoothSyncManager(
     private val debugLog: BluetoothDebugLog,
     private val buildAccountSyncRequest: suspend (watchDeviceId: String, watchInstallId: String?, watchDisplayName: String?) -> JSONObject =
         { _, _, _ -> error("账号同步未配置") },
+    private val canSyncAccount: () -> Boolean = { false },
     private val onLibrarySyncCompleted: suspend () -> Unit = {}
 ) {
     private val appContext = context.applicationContext
@@ -229,6 +233,32 @@ class PhoneBluetoothSyncManager(
                 throwable = throwable
             )
         }.getOrThrow()
+    }
+
+    suspend fun syncAll(
+        device: PhoneBluetoothWatchDevice,
+        onProgress: (PhoneBluetoothSyncProgress) -> Unit = {},
+        resolveDeleteConflicts: suspend (List<PhoneSyncDeleteConflict>) -> Map<String, PhoneSyncConflictResolution> = {
+            emptyMap()
+        }
+    ): PhoneBluetoothSyncResult {
+        var accountSync: AccountSyncResult? = null
+        var accountSyncWarning: String? = null
+        if (canSyncAccount()) {
+            reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_ACCOUNT, 0)
+            runCatching { syncAccount(device) }
+                .onSuccess { accountSync = it.accountSync }
+                .onFailure { accountSyncWarning = it.message ?: "账号授权同步失败" }
+            reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_ACCOUNT, 100)
+        }
+        return syncLibrary(
+            deviceAddress = device.address,
+            onProgress = onProgress,
+            resolveDeleteConflicts = resolveDeleteConflicts
+        ).copy(
+            accountSync = accountSync,
+            accountSyncWarning = accountSyncWarning
+        )
     }
 
     suspend fun syncSavedItems(type: PhoneSavedItemType): PhoneBluetoothSyncResult {
@@ -1182,7 +1212,8 @@ class PhoneBluetoothSyncManager(
     private fun failureFields(throwable: Throwable): Map<String, Any?> {
         return mapOf(
             "errorClass" to throwable::class.java.name,
-            "message" to throwable.message.orEmpty()
+            "message" to throwable.message.orEmpty(),
+            "errorCode" to throwable.accountHttpErrorCode()
         )
     }
 

@@ -121,6 +121,12 @@ private fun parseErrorResponse(raw: String): AccountErrorResponse {
     return AccountErrorResponse(code = code)
 }
 
+internal fun Throwable.accountHttpErrorCode(): String =
+    findAccountHttpException()
+        ?.let { parseErrorResponse(it.responseBody).code }
+        .orEmpty()
+        .trim()
+
 internal fun Throwable.findAccountHttpException(): PhoneAccountHttpException? {
     var current: Throwable? = this
     while (current != null) {

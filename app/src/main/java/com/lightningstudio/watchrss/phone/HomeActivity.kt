@@ -213,7 +213,6 @@ class HomeActivity : ComponentActivity() {
                     ) {
                         MainScreen(
                         uiState = state,
-                    showAccountFeatures = BuildConfig.DEBUG,
                     onUrlChange = viewModel::updateUrlInput,
                     onImportArticle = viewModel::importIndependentArticle,
                     onAddRssSource = viewModel::addRssSource,
@@ -222,7 +221,6 @@ class HomeActivity : ComponentActivity() {
                     onConfirmSharedFileImport = ::importSharedFile,
                     onDismissSharedImport = viewModel::dismissSharedImportPrompt,
                     onSyncLibrary = { ensureBluetoothPermissions(viewModel::syncLibraryByBluetooth) },
-                    onSyncAccount = { ensureBluetoothPermissions(viewModel::syncAccountByBluetooth) },
                     onOpenProfile = {
                         startActivity(ProfileActivity.createIntent(this@HomeActivity))
                     },

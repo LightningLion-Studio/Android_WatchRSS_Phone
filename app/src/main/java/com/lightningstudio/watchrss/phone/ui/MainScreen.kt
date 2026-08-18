@@ -307,7 +307,6 @@ private sealed interface RecentImportEntry {
 @Composable
 fun MainScreen(
     uiState: MainUiState,
-    showAccountFeatures: Boolean = true,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
     onImportFile: () -> Unit,
@@ -317,7 +316,6 @@ fun MainScreen(
     onConfirmSharedFileImport: (SharedImportPromptUi) -> Unit,
     onDismissSharedImport: () -> Unit,
     onSyncLibrary: () -> Unit,
-    onSyncAccount: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenNotes: () -> Unit,
     onChooseBluetoothDevice: (MainBluetoothDeviceUi) -> Unit,
@@ -1209,10 +1207,8 @@ fun MainScreen(
                                     contentPadding = contentPadding,
                                     windowInfo = windowInfo,
                                     onSyncLibrary = onSyncLibrary,
-                                    onSyncAccount = onSyncAccount,
                                     onOpenProfile = onOpenProfile,
                                     onOpenNotes = onOpenNotes,
-                                    showAccountActions = showAccountFeatures,
                                     onExportBluetoothLog = onExportBluetoothLog,
                                     onOpenRss = {
                                         navigateToTopLevelPage(
@@ -1306,10 +1302,8 @@ fun MainScreen(
                                 contentPadding = contentPadding,
                                 windowInfo = windowInfo,
                                 onSyncLibrary = onSyncLibrary,
-                                onSyncAccount = onSyncAccount,
                                     onOpenProfile = onOpenProfile,
                                     onOpenNotes = onOpenNotes,
-                                showAccountActions = showAccountFeatures,
                                 onExportBluetoothLog = onExportBluetoothLog,
                                 onOpenRss = {
                                     navigateToTopLevelPage(
@@ -1358,10 +1352,8 @@ fun MainScreen(
                                 contentPadding = contentPadding,
                                 windowInfo = windowInfo,
                                 onSyncLibrary = onSyncLibrary,
-                                onSyncAccount = onSyncAccount,
                                 onOpenProfile = onOpenProfile,
                                 onOpenNotes = onOpenNotes,
-                                showAccountActions = showAccountFeatures,
                                 onExportBluetoothLog = onExportBluetoothLog,
                                 onOpenRss = {
                                     navigateToTopLevelPage(
@@ -2772,10 +2764,8 @@ private fun DashboardPage(
     contentPadding: PaddingValues,
     windowInfo: AdaptiveWindowInfo,
     onSyncLibrary: () -> Unit,
-    onSyncAccount: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenNotes: () -> Unit,
-    showAccountActions: Boolean,
     onExportBluetoothLog: () -> Unit,
     onOpenRss: () -> Unit,
     onOpenFavorites: () -> Unit,
@@ -2831,8 +2821,6 @@ private fun DashboardPage(
                                     syncProgress = uiState.syncProgress,
                                     isBusy = uiState.isBusy,
                                     onSyncLibrary = onSyncLibrary,
-                                    onSyncAccount = onSyncAccount,
-                                    showAccountAction = showAccountActions,
                                     onExportBluetoothLog = onExportBluetoothLog,
                                     onDismissMessage = onDismissMessage
                                 )
@@ -2864,8 +2852,6 @@ private fun DashboardPage(
                             syncProgress = uiState.syncProgress,
                             isBusy = uiState.isBusy,
                             onSyncLibrary = onSyncLibrary,
-                            onSyncAccount = onSyncAccount,
-                            showAccountAction = showAccountActions,
                             onExportBluetoothLog = onExportBluetoothLog,
                             onDismissMessage = onDismissMessage
                         )
@@ -2999,8 +2985,6 @@ private fun SyncStatusCard(
     syncProgress: MainSyncProgressUi?,
     isBusy: Boolean,
     onSyncLibrary: () -> Unit,
-    onSyncAccount: () -> Unit,
-    showAccountAction: Boolean,
     onExportBluetoothLog: () -> Unit,
     onDismissMessage: () -> Unit
 ) {
@@ -3092,19 +3076,6 @@ private fun SyncStatusCard(
                     Icon(Icons.Default.Sync, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("同步")
-                }
-                if (showAccountAction) {
-                    OutlinedButton(
-                        onClick = onSyncAccount,
-                        enabled = !isBusy,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("dashboard_sync_account")
-                    ) {
-                        Icon(Icons.Default.AccountCircle, contentDescription = null)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("账号")
-                    }
                 }
                 OutlinedButton(
                     onClick = onExportBluetoothLog,

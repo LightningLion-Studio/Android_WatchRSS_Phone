@@ -840,7 +840,7 @@ class MainViewModel(
                         syncTransportLabel = transportLabel(device.address)
                     )
                     delay(400L)
-                    runLibrarySync(device.address)
+                    runLibrarySync(device.toUi())
                 }
                 else -> {
                     clearSmoothedSyncProgress()
@@ -942,7 +942,7 @@ class MainViewModel(
             if (purpose == MainBluetoothDevicePromptPurpose.ACCOUNT) {
                 runAccountSync(device)
             } else {
-                runLibrarySync(device.address)
+                runLibrarySync(device)
             }
         }
     }
@@ -957,7 +957,7 @@ class MainViewModel(
         )
     }
 
-    private suspend fun runLibrarySync(deviceAddress: String?) {
+    private suspend fun runLibrarySync(device: MainBluetoothDeviceUi) {
         beginSmoothedSyncProgress(MainSyncProgressUi(phase = "建立连接中", percent = 0))
         sessionState.value = sessionState.value.copy(
             isBusy = true,
@@ -968,8 +968,13 @@ class MainViewModel(
             bluetoothDevicePrompt = null
         )
         runCatching {
-            val result = bluetoothSyncManager.syncLibrary(
-                deviceAddress = deviceAddress,
+            val result = bluetoothSyncManager.syncAll(
+                device = PhoneBluetoothWatchDevice(
+                    name = device.name,
+                    address = device.address,
+                    uuidCount = 0,
+                    remoteDeviceId = device.remoteDeviceId
+                ),
                 onProgress = ::updateLibrarySyncProgress,
                 resolveDeleteConflicts = ::resolveDeleteConflicts
             )
@@ -977,11 +982,12 @@ class MainViewModel(
             val noteStats = result.noteStats
             val deviceName = result.deviceName.ifBlank { "手表" }
             val readerWarning = result.readerSyncWarning
+            val accountWarning = result.accountSyncWarning
             completeSmoothedSyncProgress()
-            val message = if (readerWarning == null) {
+            val message = if (readerWarning == null && accountWarning == null) {
                 "已与 $deviceName 同步完成"
             } else {
-                "已与 $deviceName 完成资料库和备忘录同步；阅读器资源同步失败"
+                "已与 $deviceName 完成资料库和备忘录同步"
             }
             runCatching {
                 bluetoothSyncManager.syncLlmTokenUsage(
@@ -1004,8 +1010,12 @@ class MainViewModel(
                 syncProgress = null
             )
             _toastEvent.tryEmit(
-                if (readerWarning != null) {
-                    "$message：$readerWarning"
+                if (accountWarning != null || readerWarning != null) {
+                    buildString {
+                        append(message)
+                        accountWarning?.let { append("；账号授权同步失败：$it") }
+                        readerWarning?.let { append("；阅读器资源同步失败：$it") }
+                    }
                 } else if (stats != null) {
                     buildString {
                         append("已与 $deviceName 同步：文章发送 ${stats.sent}，收到 ${stats.received}，合并 ${stats.merged}")

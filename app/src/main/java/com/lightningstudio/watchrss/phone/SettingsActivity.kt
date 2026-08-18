@@ -96,6 +96,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -125,6 +126,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
 import com.lightningstudio.watchrss.phone.account.RemoteEnvironment
@@ -3827,61 +3830,90 @@ private fun ChoiceRow(
 private fun ColorField(label: String, color: Long, onColor: (Long) -> Unit) {
     var raw by remember(color) { mutableStateOf("#%08X".format(color)) }
     var pickerOpen by remember { mutableStateOf(false) }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            Modifier
-                .padding(end = 10.dp)
-                .height(40.dp)
-                .weight(0.2f)
-                .background(Color(color), RoundedCornerShape(8.dp))
-                .border(
-                    width = 1.dp,
-                    color = MaterialTheme.colorScheme.outline,
-                    shape = RoundedCornerShape(8.dp)
+    var colorBeforePicker by remember { mutableLongStateOf(color) }
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val pickerWidth = (maxWidth * 0.92f).coerceAtMost(420.dp)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier
+                    .padding(end = 10.dp)
+                    .height(40.dp)
+                    .weight(0.2f)
+                    .background(Color(color), RoundedCornerShape(8.dp))
+                    .border(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.outline,
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    .clip(RoundedCornerShape(8.dp))
+                    .semantics { contentDescription = "打开${label}调色盘" }
+                    .clickable {
+                        if (pickerOpen) {
+                            pickerOpen = false
+                        } else {
+                            colorBeforePicker = color
+                            pickerOpen = true
+                        }
+                    }
+            )
+            OutlinedTextField(
+                value = raw,
+                onValueChange = { value ->
+                    raw = value
+                    parseArgb(value)?.let(onColor)
+                },
+                label = { Text(label) },
+                singleLine = true,
+                modifier = Modifier.weight(0.8f)
+            )
+        }
+        if (pickerOpen) {
+            Popup(
+                alignment = Alignment.Center,
+                onDismissRequest = { pickerOpen = false },
+                properties = PopupProperties(
+                    focusable = true,
+                    dismissOnBackPress = true,
+                    dismissOnClickOutside = true,
+                    clippingEnabled = true
                 )
-                .clip(RoundedCornerShape(8.dp))
-                .semantics { contentDescription = "打开${label}调色盘" }
-                .clickable { pickerOpen = true }
-        )
-        OutlinedTextField(
-            value = raw,
-            onValueChange = { value ->
-                raw = value
-                parseArgb(value)?.let(onColor)
-            },
-            label = { Text(label) },
-            singleLine = true,
-            modifier = Modifier.weight(0.8f)
-        )
-    }
-    if (pickerOpen) {
-        ColorPickerDialog(
-            label = label,
-            initialColor = color,
-            onDismiss = { pickerOpen = false },
-            onConfirm = {
-                pickerOpen = false
-                onColor(it)
+            ) {
+                ColorPickerPanel(
+                    label = label,
+                    initialColor = color,
+                    modifier = Modifier.width(pickerWidth),
+                    onColorChanged = onColor,
+                    onCancel = {
+                        pickerOpen = false
+                        onColor(colorBeforePicker)
+                    },
+                    onDone = { pickerOpen = false }
+                )
             }
-        )
+        }
     }
 }
 
 @Composable
-private fun ColorPickerDialog(
+private fun ColorPickerPanel(
     label: String,
     initialColor: Long,
-    onDismiss: () -> Unit,
-    onConfirm: (Long) -> Unit
+    modifier: Modifier = Modifier,
+    onColorChanged: (Long) -> Unit,
+    onCancel: () -> Unit,
+    onDone: () -> Unit
 ) {
     val initialArgb = initialColor.toInt()
-    val initialHsv = remember(initialColor) {
+    val initialHsv = remember {
         FloatArray(3).also { android.graphics.Color.colorToHSV(initialArgb, it) }
     }
-    var hue by remember(initialColor) { mutableFloatStateOf(initialHsv[0]) }
-    var saturation by remember(initialColor) { mutableFloatStateOf(initialHsv[1]) }
-    var brightness by remember(initialColor) { mutableFloatStateOf(initialHsv[2]) }
-    var alpha by remember(initialColor) {
+    var hue by remember { mutableFloatStateOf(initialHsv[0]) }
+    var saturation by remember { mutableFloatStateOf(initialHsv[1]) }
+    var brightness by remember { mutableFloatStateOf(initialHsv[2]) }
+    var alpha by remember {
         mutableFloatStateOf(android.graphics.Color.alpha(initialArgb) / 255f)
     }
     val selectedArgb = remember(hue, saturation, brightness, alpha) {
@@ -3891,83 +3923,114 @@ private fun ColorPickerDialog(
         ).toLong() and 0xFFFFFFFFL
     }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("$label · 调色盘") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                SaturationBrightnessPalette(
-                    hue = hue,
-                    saturation = saturation,
-                    brightness = brightness,
-                    onChanged = { nextSaturation, nextBrightness ->
-                        saturation = nextSaturation
-                        brightness = nextBrightness
-                    }
-                )
-                RainbowHueSlider(
-                    value = hue,
-                    onValueChange = { hue = it }
-                )
-                ColorGradientSlider(
-                    label = "饱和度",
-                    value = saturation,
-                    valueText = "${(saturation * 100).roundToInt()}%",
-                    colors = listOf(
-                        Color.hsv(hue, 0f, brightness),
-                        Color.hsv(hue, 1f, brightness)
-                    ),
-                    thumbColor = Color.hsv(hue, saturation, brightness),
-                    onValueChange = { saturation = it }
-                )
-                ColorGradientSlider(
-                    label = "明度",
-                    value = brightness,
-                    valueText = "${(brightness * 100).roundToInt()}%",
-                    colors = listOf(
-                        Color.Black,
-                        Color.hsv(hue, saturation, 1f)
-                    ),
-                    thumbColor = Color.hsv(hue, saturation, brightness),
-                    onValueChange = { brightness = it }
-                )
-                ColorComponentSlider(
-                    label = "透明度",
-                    value = alpha,
-                    range = 0f..1f,
-                    valueText = "${(alpha * 100).roundToInt()}%",
-                    onValueChange = { alpha = it }
-                )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Box(
-                        Modifier
-                            .width(52.dp)
-                            .height(36.dp)
-                            .background(Color(selectedArgb), RoundedCornerShape(8.dp))
-                            .border(
-                                1.dp,
-                                MaterialTheme.colorScheme.outline,
-                                RoundedCornerShape(8.dp)
-                            )
-                    )
-                    Text(
-                        "#%08X".format(selectedArgb),
-                        style = MaterialTheme.typography.bodyMedium
+    ElevatedCard(modifier = modifier) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                "$label · 调色盘",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            SaturationBrightnessPalette(
+                hue = hue,
+                saturation = saturation,
+                brightness = brightness,
+                onChanged = { nextSaturation, nextBrightness ->
+                    saturation = nextSaturation
+                    brightness = nextBrightness
+                    onColorChanged(
+                        hsvToArgb(hue, nextSaturation, nextBrightness, alpha)
                     )
                 }
+            )
+            RainbowHueSlider(
+                value = hue,
+                onValueChange = {
+                    hue = it
+                    onColorChanged(hsvToArgb(it, saturation, brightness, alpha))
+                }
+            )
+            ColorGradientSlider(
+                label = "饱和度",
+                value = saturation,
+                valueText = "${(saturation * 100).roundToInt()}%",
+                colors = listOf(
+                    Color.hsv(hue, 0f, brightness),
+                    Color.hsv(hue, 1f, brightness)
+                ),
+                thumbColor = Color.hsv(hue, saturation, brightness),
+                onValueChange = {
+                    saturation = it
+                    onColorChanged(hsvToArgb(hue, it, brightness, alpha))
+                }
+            )
+            ColorGradientSlider(
+                label = "明度",
+                value = brightness,
+                valueText = "${(brightness * 100).roundToInt()}%",
+                colors = listOf(
+                    Color.Black,
+                    Color.hsv(hue, saturation, 1f)
+                ),
+                thumbColor = Color.hsv(hue, saturation, brightness),
+                onValueChange = {
+                    brightness = it
+                    onColorChanged(hsvToArgb(hue, saturation, it, alpha))
+                }
+            )
+            ColorComponentSlider(
+                label = "透明度",
+                value = alpha,
+                range = 0f..1f,
+                valueText = "${(alpha * 100).roundToInt()}%",
+                onValueChange = {
+                    alpha = it
+                    onColorChanged(hsvToArgb(hue, saturation, brightness, it))
+                }
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(
+                    Modifier
+                        .width(52.dp)
+                        .height(36.dp)
+                        .background(Color(selectedArgb), RoundedCornerShape(8.dp))
+                        .border(
+                            1.dp,
+                            MaterialTheme.colorScheme.outline,
+                            RoundedCornerShape(8.dp)
+                        )
+                )
+                Text(
+                    "#%08X".format(selectedArgb),
+                    style = MaterialTheme.typography.bodyMedium
+                )
             }
-        },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(selectedArgb) }) { Text("确定") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = onCancel) { Text("取消") }
+                TextButton(onClick = onDone) { Text("完成") }
+            }
         }
-    )
+    }
 }
+
+private fun hsvToArgb(
+    hue: Float,
+    saturation: Float,
+    brightness: Float,
+    alpha: Float
+): Long = android.graphics.Color.HSVToColor(
+    (alpha * 255f).roundToInt().coerceIn(0, 255),
+    floatArrayOf(hue, saturation, brightness)
+).toLong() and 0xFFFFFFFFL
 
 @Composable
 private fun RainbowHueSlider(

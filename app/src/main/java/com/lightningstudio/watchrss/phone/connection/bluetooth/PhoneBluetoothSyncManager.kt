@@ -1241,7 +1241,8 @@ class PhoneBluetoothSyncManager(
     }
 
     companion object {
-        private const val LIBRARY_PROBE_TIMEOUT_MS = 45_000L
+        // Nine sequential ColorOS SDP probes can each consume a full PAGE timeout.
+        private const val LIBRARY_PROBE_TIMEOUT_MS = 90_000L
         private const val QUICK_EXCHANGE_TIMEOUT_MS = 30_000L
         private const val LIBRARY_SYNC_TIMEOUT_MS = 900_000L
         private const val READER_EXCHANGE_TIMEOUT_MS = 90_000L

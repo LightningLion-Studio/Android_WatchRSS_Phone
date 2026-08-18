@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.content.pm.PackageManager
@@ -21,19 +22,25 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import kotlin.coroutines.resume
 
 data class BluetoothSyncExchange(
     val deviceName: String,
@@ -207,18 +214,31 @@ class PhoneBluetoothSyncClient(
             PhoneIpSyncSessionRegistry.closeAll()
         }
         requireBluetoothConnectPermission()
-        val adapter = context.getSystemService(BluetoothManager::class.java)
-            ?.adapter
+        val bluetoothManager = context.getSystemService(BluetoothManager::class.java)
             ?: error("此设备没有蓝牙适配器")
+        val adapter = bluetoothManager.adapter ?: error("此设备没有蓝牙适配器")
         require(adapter.isEnabled) { "蓝牙未开启" }
 
         val bondedDevices = adapter.bondedDevices.orEmpty()
         logAdapterSnapshot(sessionId, adapter, bondedDevices)
-        val allCandidates = probeCandidateWatchDevices(bondedDevices)
+        val activeWatchAddresses = activeWatchDeviceAddresses(
+            bluetoothManager = bluetoothManager,
+            adapter = adapter,
+            bondedDevices = bondedDevices,
+            sessionId = sessionId
+        )
+        val allCandidates = probeCandidateWatchDevices(
+            devices = bondedDevices,
+            activeWatchAddresses = activeWatchAddresses
+        )
+        val activeCandidates = allCandidates.filter { device ->
+            device.address.uppercase() in activeWatchAddresses
+        }
         val probeWindow = rotatingProbeCandidateWindow(
             candidates = allCandidates,
             maxCandidates = MAX_DEVICE_PROBE_CANDIDATES,
-            startOffset = probeCandidateOffset()
+            startOffset = probeCandidateOffset(),
+            prioritizedCandidates = activeCandidates
         )
         rememberProbeCandidateOffset(probeWindow.nextOffset)
         val candidates = probeWindow.candidates
@@ -231,7 +251,10 @@ class PhoneBluetoothSyncClient(
                 "skippedCandidates" to (allCandidates.size - candidates.size).coerceAtLeast(0),
                 "startOffset" to probeWindow.startOffset,
                 "nextOffset" to probeWindow.nextOffset,
-                "cachedAddress" to cachedDeviceAddress().orEmpty()
+                "cachedAddress" to cachedDeviceAddress().orEmpty(),
+                "activeCandidates" to activeCandidates.size,
+                "activeAddresses" to activeCandidates.joinToString(",") { it.address },
+                "probeOrder" to candidates.joinToString(",") { it.address }
             )
         )
         if (candidates.isEmpty()) {
@@ -1136,33 +1159,7 @@ class PhoneBluetoothSyncClient(
         sessionId: String,
         fallbackTimeoutMs: Long
     ): ProbeIdentity {
-        val probeResult = runCatching {
-            withTimeout(DIRECT_PROBE_TIMEOUT_MS) {
-                exchange(
-                    request = LibrarySyncPayload.buildProbeRequest(deviceId).apply {
-                        (context.applicationContext as? PhoneCompanionApplication)
-                            ?.currentIpEndpointDescriptorForSync()
-                            ?.let { put(FIELD_IP_ENDPOINT_DESCRIPTOR, it) }
-                    },
-                    deviceAddress = device.address,
-                    sessionId = "$sessionId-direct",
-                    rememberDeviceOnSuccess = false
-                )
-            }
-        }
-        val exchange = probeResult.getOrElse { throwable ->
-            debugLog.appendEvent(
-                event = "bt.library.probe.direct.failed",
-                sessionId = sessionId,
-                fields = failureFields(throwable),
-                throwable = throwable
-            )
-            // ColorOS can keep the SDP transaction busy briefly after a failed or cancelled
-            // RFCOMM connect. Starting the next candidate immediately makes every later SDP
-            // request fail with BUSY even when that watch is listening.
-            delay(PROBE_FAILURE_COOLDOWN_MS)
-            throw throwable
-        }
+        val exchange = probeDirectWithSdpRecovery(device, deviceId, sessionId)
         if (exchange != null && LibrarySyncPayload.isProbeResponse(exchange.response)) {
             requireSupportedLibraryProtocol(exchange.response)
             debugLog.appendEvent(
@@ -1213,6 +1210,66 @@ class PhoneBluetoothSyncClient(
                     it.optBoolean(FIELD_IP_UPGRADE_ACCEPTED, false)
                 )
             }
+        }
+    }
+
+    private suspend fun probeDirectWithSdpRecovery(
+        device: BluetoothDevice,
+        deviceId: String,
+        sessionId: String
+    ): BluetoothSyncExchange {
+        var fastFailureRetries = 0
+        while (true) {
+            val attempt = fastFailureRetries + 1
+            val attemptStartedAt = SystemClock.elapsedRealtime()
+            val attemptSessionId = if (attempt == 1) {
+                "$sessionId-direct"
+            } else {
+                "$sessionId-direct-retry${attempt - 1}"
+            }
+            val result = runCatching {
+                withTimeout(DIRECT_PROBE_TIMEOUT_MS) {
+                    exchange(
+                        request = LibrarySyncPayload.buildProbeRequest(deviceId).apply {
+                            (context.applicationContext as? PhoneCompanionApplication)
+                                ?.currentIpEndpointDescriptorForSync()
+                                ?.let { put(FIELD_IP_ENDPOINT_DESCRIPTOR, it) }
+                        },
+                        deviceAddress = device.address,
+                        sessionId = attemptSessionId,
+                        rememberDeviceOnSuccess = false
+                    )
+                }
+            }
+            if (result.isSuccess) return result.getOrThrow()
+
+            val throwable = result.exceptionOrNull() ?: error("蓝牙探测失败但没有异常")
+            if (throwable is CancellationException) {
+                currentCoroutineContext().ensureActive()
+            }
+            val elapsedMs = elapsedSince(attemptStartedAt)
+            val recovery = sdpProbeFailureRecovery(
+                elapsedMs = elapsedMs,
+                timedOut = throwable is TimeoutCancellationException,
+                completedFastFailureRetries = fastFailureRetries
+            )
+            debugLog.appendEvent(
+                event = "bt.library.probe.direct.failed",
+                sessionId = sessionId,
+                fields = failureFields(throwable) + mapOf(
+                    "attempt" to attempt,
+                    "elapsedMs" to elapsedMs,
+                    "recoveryDelayMs" to recovery.delayMs,
+                    "retrySameCandidate" to recovery.retrySameCandidate
+                ),
+                throwable = throwable
+            )
+            delay(recovery.delayMs)
+            if (recovery.retrySameCandidate) {
+                fastFailureRetries += 1
+                continue
+            }
+            throw throwable
         }
     }
 
@@ -1431,7 +1488,10 @@ class PhoneBluetoothSyncClient(
             .filter(::looksLikeWatchDevice)
 
     @SuppressLint("MissingPermission")
-    private fun probeCandidateWatchDevices(devices: Set<BluetoothDevice>): List<BluetoothDevice> {
+    private fun probeCandidateWatchDevices(
+        devices: Set<BluetoothDevice>,
+        activeWatchAddresses: Set<String>
+    ): List<BluetoothDevice> {
         val cachedAddress = cachedDeviceAddress()
         val watchDevices = sortedWatchDevices(devices).toMutableList()
         if (!cachedAddress.isNullOrBlank()) {
@@ -1443,9 +1503,124 @@ class PhoneBluetoothSyncClient(
         return watchDevices
             .distinctBy { it.address.uppercase() }
             .sortedBy { device ->
-                if (cachedAddress != null && device.address.equals(cachedAddress, ignoreCase = true)) 0 else 1
+                when {
+                    device.address.uppercase() in activeWatchAddresses -> 0
+                    cachedAddress != null && device.address.equals(cachedAddress, ignoreCase = true) -> 1
+                    else -> 2
+                }
             }
     }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun activeWatchDeviceAddresses(
+        bluetoothManager: BluetoothManager,
+        adapter: BluetoothAdapter,
+        bondedDevices: Set<BluetoothDevice>,
+        sessionId: String
+    ): Set<String> {
+        val watchAddresses = sortedWatchDevices(bondedDevices)
+            .mapTo(mutableSetOf()) { it.address.uppercase() }
+        if (watchAddresses.isEmpty()) return emptySet()
+
+        val gattDevices = listOf(BluetoothProfile.GATT_SERVER, BluetoothProfile.GATT)
+            .flatMap { profile ->
+                runCatching { bluetoothManager.getConnectedDevices(profile) }
+                    .onFailure { throwable ->
+                        logActiveProfileFailure(sessionId, profile, throwable)
+                    }
+                    .getOrDefault(emptyList())
+            }
+        val profileDevices = coroutineScope {
+            ACTIVE_WATCH_PROFILE_IDS
+                .map { profile ->
+                    async { connectedProfileDevices(adapter, profile, sessionId) }
+                }
+                .awaitAll()
+                .flatten()
+        }
+        val activeAddresses = (gattDevices + profileDevices)
+            .map { it.address.uppercase() }
+            .filterTo(linkedSetOf()) { it in watchAddresses }
+        debugLog.appendEvent(
+            event = "bt.library.probe.active-devices",
+            sessionId = sessionId,
+            fields = mapOf(
+                "activeCandidates" to activeAddresses.size,
+                "activeAddresses" to activeAddresses.joinToString(",")
+            )
+        )
+        return activeAddresses
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun connectedProfileDevices(
+        adapter: BluetoothAdapter,
+        profile: Int,
+        sessionId: String
+    ): List<BluetoothDevice> {
+        val devices = withTimeoutOrNull(ACTIVE_WATCH_PROFILE_QUERY_TIMEOUT_MS) {
+            suspendCancellableCoroutine { continuation ->
+                val listener = object : BluetoothProfile.ServiceListener {
+                    override fun onServiceConnected(
+                        connectedProfile: Int,
+                        proxy: BluetoothProfile
+                    ) {
+                        val connectedDevices = runCatching { proxy.connectedDevices }
+                            .onFailure { throwable ->
+                                logActiveProfileFailure(sessionId, connectedProfile, throwable)
+                            }
+                            .getOrDefault(emptyList())
+                        runCatching { adapter.closeProfileProxy(connectedProfile, proxy) }
+                        if (continuation.isActive) continuation.resume(connectedDevices)
+                    }
+
+                    override fun onServiceDisconnected(disconnectedProfile: Int) {
+                        if (continuation.isActive) continuation.resume(emptyList())
+                    }
+                }
+                val requested = runCatching {
+                    adapter.getProfileProxy(context.applicationContext, listener, profile)
+                }.onFailure { throwable ->
+                    logActiveProfileFailure(sessionId, profile, throwable)
+                }.getOrDefault(false)
+                if (!requested && continuation.isActive) continuation.resume(emptyList())
+            }
+        }
+        if (devices == null) {
+            debugLog.appendEvent(
+                event = "bt.library.probe.active-profile-timeout",
+                sessionId = sessionId,
+                fields = mapOf("profile" to bluetoothProfileName(profile))
+            )
+        }
+        return devices.orEmpty()
+    }
+
+    private fun logActiveProfileFailure(
+        sessionId: String,
+        profile: Int,
+        throwable: Throwable
+    ) {
+        debugLog.appendEvent(
+            event = "bt.library.probe.active-profile-failed",
+            sessionId = sessionId,
+            fields = mapOf(
+                "profile" to bluetoothProfileName(profile),
+                "errorClass" to throwable::class.java.name,
+                "message" to throwable.message.orEmpty()
+            ),
+            throwable = throwable
+        )
+    }
+
+    private fun bluetoothProfileName(profile: Int): String =
+        when (profile) {
+            BluetoothProfile.GATT_SERVER -> "GATT_SERVER"
+            BluetoothProfile.GATT -> "GATT"
+            BluetoothProfile.A2DP -> "A2DP"
+            BluetoothProfile.HEADSET -> "HEADSET"
+            else -> profile.toString()
+        }
 
     @SuppressLint("MissingPermission")
     private fun looksLikeWatchDevice(device: BluetoothDevice): Boolean {
@@ -2044,10 +2219,14 @@ class PhoneBluetoothSyncClient(
         private const val PHASE_COMPLETE = "complete"
         private const val MAX_DEVICE_PROBE_CANDIDATES = 9
         private const val DEFAULT_DEVICE_PROBE_TIMEOUT_MS = 2_000L
-        // ColorOS can keep an RFCOMM SDP lookup alive for almost four seconds. Cancelling at the
-        // shorter compatibility-fallback budget leaves SDP busy and makes every later watch fail.
-        private const val DIRECT_PROBE_TIMEOUT_MS = 4_000L
+        private const val ACTIVE_WATCH_PROFILE_QUERY_TIMEOUT_MS = 750L
+        // ColorOS reports PAGE_TIMEOUT after roughly 5.2 seconds. Closing the socket before that
+        // leaves the global SDP slot busy and makes later watch probes fail without starting.
+        private const val DIRECT_PROBE_TIMEOUT_MS = 7_000L
         private const val PROBE_FAILURE_COOLDOWN_MS = 250L
+        private const val SDP_BUSY_FAST_FAILURE_THRESHOLD_MS = 1_000L
+        private const val SDP_STACK_DRAIN_DELAY_MS = 1_500L
+        private const val MAX_FAST_SDP_FAILURE_RETRIES = 1
         // The paired RFCOMM probe has already proved reachability. Do not hold the user in the
         // discovery UI while a same-LAN route is unavailable; late IP routes are discarded by
         // the watch once the RFCOMM transfer begins.
@@ -2058,6 +2237,10 @@ class PhoneBluetoothSyncClient(
         private const val PREFS_NAME = "watchrss_bluetooth_sync"
         private const val KEY_LAST_DEVICE_ADDRESS = "last_successful_device_address"
         private const val KEY_PROBE_CANDIDATE_OFFSET = "probe_candidate_offset"
+        private val ACTIVE_WATCH_PROFILE_IDS = listOf(
+            BluetoothProfile.A2DP,
+            BluetoothProfile.HEADSET
+        )
         private val EMPTY_FRAME_STATS = LibraryFrameStats(
             frameCount = 0,
             totalBytes = 0L,
@@ -2065,8 +2248,30 @@ class PhoneBluetoothSyncClient(
             maxFrameBytes = 0,
             articleCount = 0
         )
+
+        internal fun sdpProbeFailureRecovery(
+            elapsedMs: Long,
+            timedOut: Boolean,
+            completedFastFailureRetries: Int
+        ): SdpProbeFailureRecovery {
+            val fastFailure = !timedOut && elapsedMs < SDP_BUSY_FAST_FAILURE_THRESHOLD_MS
+            return SdpProbeFailureRecovery(
+                delayMs = if (timedOut || fastFailure) {
+                    SDP_STACK_DRAIN_DELAY_MS
+                } else {
+                    PROBE_FAILURE_COOLDOWN_MS
+                },
+                retrySameCandidate = fastFailure &&
+                    completedFastFailureRetries < MAX_FAST_SDP_FAILURE_RETRIES
+            )
+        }
     }
 }
+
+internal data class SdpProbeFailureRecovery(
+    val delayMs: Long,
+    val retrySameCandidate: Boolean
+)
 
 internal data class RotatingProbeCandidateWindow<T>(
     val candidates: List<T>,
@@ -2077,23 +2282,37 @@ internal data class RotatingProbeCandidateWindow<T>(
 internal fun <T> rotatingProbeCandidateWindow(
     candidates: List<T>,
     maxCandidates: Int,
-    startOffset: Int
+    startOffset: Int,
+    prioritizedCandidates: List<T> = emptyList()
 ): RotatingProbeCandidateWindow<T> {
     if (candidates.isEmpty() || maxCandidates <= 0) {
         return RotatingProbeCandidateWindow(emptyList(), startOffset = 0, nextOffset = 0)
     }
-    if (candidates.size <= maxCandidates) {
-        return RotatingProbeCandidateWindow(candidates, startOffset = 0, nextOffset = 0)
+    val prioritizedSet = prioritizedCandidates.toSet()
+    val fixedCandidates = candidates
+        .filter { it in prioritizedSet }
+        .take(maxCandidates)
+    val fixedSet = fixedCandidates.toSet()
+    val rotatingCandidates = candidates.filterNot { it in fixedSet }
+    val rotatingCapacity = maxCandidates - fixedCandidates.size
+    if (rotatingCapacity <= 0) {
+        return RotatingProbeCandidateWindow(fixedCandidates, startOffset = 0, nextOffset = 0)
     }
-    val normalizedOffset = Math.floorMod(startOffset, candidates.size)
-    val count = minOf(maxCandidates, candidates.size)
-    val selected = List(count) { index ->
-        candidates[(normalizedOffset + index) % candidates.size]
+    if (rotatingCandidates.size <= rotatingCapacity) {
+        return RotatingProbeCandidateWindow(
+            candidates = fixedCandidates + rotatingCandidates,
+            startOffset = 0,
+            nextOffset = 0
+        )
+    }
+    val normalizedOffset = Math.floorMod(startOffset, rotatingCandidates.size)
+    val selected = List(rotatingCapacity) { index ->
+        rotatingCandidates[(normalizedOffset + index) % rotatingCandidates.size]
     }
     return RotatingProbeCandidateWindow(
-        candidates = selected,
+        candidates = fixedCandidates + selected,
         startOffset = normalizedOffset,
-        nextOffset = (normalizedOffset + count) % candidates.size
+        nextOffset = (normalizedOffset + rotatingCapacity) % rotatingCandidates.size
     )
 }
 

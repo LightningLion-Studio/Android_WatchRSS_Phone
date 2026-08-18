@@ -33,4 +33,42 @@ class RotatingProbeCandidateWindowTest {
         assertEquals(2, window.startOffset)
         assertEquals(5, window.nextOffset)
     }
+
+    @Test
+    fun `prioritized candidates stay first while remaining candidates rotate`() {
+        val candidates = (0 until 11).toList()
+
+        val first = rotatingProbeCandidateWindow(
+            candidates = candidates,
+            maxCandidates = 9,
+            startOffset = 0,
+            prioritizedCandidates = listOf(10)
+        )
+        val second = rotatingProbeCandidateWindow(
+            candidates = candidates,
+            maxCandidates = 9,
+            startOffset = first.nextOffset,
+            prioritizedCandidates = listOf(10)
+        )
+
+        assertEquals(listOf(10, 0, 1, 2, 3, 4, 5, 6, 7), first.candidates)
+        assertEquals(listOf(10, 8, 9, 0, 1, 2, 3, 4, 5), second.candidates)
+        assertEquals(9, first.candidates.size)
+        assertEquals(9, second.candidates.size)
+        assertEquals((0 until 11).toSet(), (first.candidates + second.candidates).toSet())
+    }
+
+    @Test
+    fun `prioritized candidates move ahead below the cap`() {
+        val window = rotatingProbeCandidateWindow(
+            candidates = listOf("a", "b", "c"),
+            maxCandidates = 9,
+            startOffset = 4,
+            prioritizedCandidates = listOf("c")
+        )
+
+        assertEquals(listOf("c", "a", "b"), window.candidates)
+        assertEquals(0, window.startOffset)
+        assertEquals(0, window.nextOffset)
+    }
 }

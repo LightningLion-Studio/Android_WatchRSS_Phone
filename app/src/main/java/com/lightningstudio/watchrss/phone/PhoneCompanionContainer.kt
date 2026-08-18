@@ -203,8 +203,16 @@ class PhoneCompanionContainer(context: Context) {
         ReaderPresetTransferService(appContext, readerPresetRepository)
     }
 
-    val aiSettingsStore: PhoneAiSettingsStore by lazy { PhoneAiSettingsStore(appContext) }
-    val aiSummaryService: PhoneAiSummaryService by lazy { PhoneAiSummaryService(aiSettingsStore) }
+    val aiSettingsStore: PhoneAiSettingsStore by lazy {
+        PhoneAiSettingsStore(appContext).also { it.clearLegacyApiKey() }
+    }
+    val aiSummaryService: PhoneAiSummaryService by lazy {
+        PhoneAiSummaryService(
+            environment = accountEnvironment,
+            accountRepository = accountRepository,
+            deviceAccessToken = { appAccessCoordinator.deviceAccessToken }
+        )
+    }
 
     private val webArticleImporter: AndroidWebArticleImporter by lazy {
         AndroidWebArticleImporter(appContext)

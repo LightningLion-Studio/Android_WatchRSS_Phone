@@ -243,7 +243,8 @@ class PhoneCloudClient(
                         contentHtml = entry.nullableString("contentHtml"),
                         contentText = entry.nullableString("contentText").orEmpty(),
                         imageUrl = entry.nullableString("imageUrl"),
-                        guid = entry.nullableString("guid") ?: entryId
+                        guid = entry.nullableString("guid") ?: entryId,
+                        contentHash = entry.nullableString("contentHash")
                     )
                 }
             )

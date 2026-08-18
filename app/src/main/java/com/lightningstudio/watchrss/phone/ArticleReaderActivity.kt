@@ -501,6 +501,8 @@ internal fun ArticleReaderScreen(
             }
         }
         val aiConfig = remember(safeArticle.articleId) { appContainer.aiSettingsStore.config() }
+        val appAccessState by appContainer.appAccessCoordinator.state.collectAsState()
+        val hasPaidAiAccess = appAccessState is com.lightningstudio.watchrss.phone.account.AppAccessState.Authorized
         val aiScope = rememberCoroutineScope()
         var aiJob by remember(safeArticle.articleId) { mutableStateOf<Job?>(null) }
         var aiResult by remember(safeArticle.articleId) {
@@ -545,11 +547,16 @@ internal fun ArticleReaderScreen(
             }
         }
 
-        LaunchedEffect(safeArticle.articleId, aiConfig.autoSummarize, aiConfig.enabled) {
+        LaunchedEffect(
+            safeArticle.articleId,
+            aiConfig.autoSummarize,
+            aiConfig.enabled,
+            hasPaidAiAccess
+        ) {
             aiJob?.cancel()
             aiResult = null
             aiError = null
-            if (aiConfig.enabled && aiConfig.autoSummarize) startAiSummary()
+            if (hasPaidAiAccess && aiConfig.enabled && aiConfig.autoSummarize) startAiSummary()
         }
         DisposableEffect(safeArticle.articleId) {
             onDispose { aiJob?.cancel() }
@@ -1096,7 +1103,7 @@ internal fun ArticleReaderScreen(
                                     Text("原网页")
                                 }
                             }
-                            if (aiConfig.enabled) {
+                            if (hasPaidAiAccess && aiConfig.enabled) {
                                 GlassButton(
                                     onClick = {
                                         if (aiResult == null && !aiLoading) startAiSummary()

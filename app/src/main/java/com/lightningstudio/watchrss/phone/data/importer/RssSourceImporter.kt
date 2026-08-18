@@ -25,7 +25,8 @@ data class ImportedRssItem(
     val contentHtml: String?,
     val contentText: String,
     val imageUrl: String?,
-    val guid: String?
+    val guid: String?,
+    val contentHash: String? = null
 )
 
 class RssSourceImporter(

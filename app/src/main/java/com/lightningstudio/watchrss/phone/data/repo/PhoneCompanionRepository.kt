@@ -1470,9 +1470,9 @@ class PhoneCompanionRepository(
         val articles = imported.items.mapIndexed { index, item ->
             val timestamp = now - index
             val existingArticle = existingByUrl[item.url]
-                ?: existingByContentHash[
-                    WebArticleImporter.sha256(item.contentHtml ?: item.contentText.ifBlank { item.url })
-                ]
+                ?: existingByContentHash[item.contentHash ?: WebArticleImporter.sha256(
+                    item.contentHtml ?: item.contentText.ifBlank { item.url }
+                )]
             val candidate = PhoneArticleEntity(
                 articleId = WebArticleImporter.stableArticleId(item.url),
                 sourceDeviceId = deviceId,
@@ -1483,7 +1483,9 @@ class PhoneCompanionRepository(
                 contentHtml = item.contentHtml,
                 contentText = item.contentText,
                 imageUrl = item.imageUrl,
-                contentHash = WebArticleImporter.sha256(item.contentHtml ?: item.contentText.ifBlank { item.url }),
+                contentHash = item.contentHash ?: WebArticleImporter.sha256(
+                    item.contentHtml ?: item.contentText.ifBlank { item.url }
+                ),
                 importedAt = timestamp,
                 updatedAt = timestamp,
                 independentSaved = false,

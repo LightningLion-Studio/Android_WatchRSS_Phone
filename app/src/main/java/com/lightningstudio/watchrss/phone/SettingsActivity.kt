@@ -94,6 +94,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -3276,13 +3277,9 @@ private fun AppFeatureSettings(modifier: Modifier) {
     var aiEnabled by remember { mutableStateOf(initialAi.enabled) }
     var autoSummary by remember { mutableStateOf(initialAi.autoSummarize) }
     var tokenUsage by remember { mutableStateOf(initialAi.showTokenUsage) }
-    var provider by remember { mutableStateOf(initialAi.provider) }
-    var model by remember { mutableStateOf(initialAi.model) }
-    var baseUrl by remember { mutableStateOf(initialAi.baseUrl) }
-    var apiKey by remember { mutableStateOf(aiStore.apiKey()) }
     var cookie by remember { mutableStateOf(aiStore.douyinCookie()) }
-    var prompt by remember { mutableStateOf(initialAi.prompt) }
-    var connectionResult by remember { mutableStateOf<String?>(null) }
+    val appAccessState by container.appAccessCoordinator.state.collectAsState()
+    val hasPaidAiAccess = appAccessState is com.lightningstudio.watchrss.phone.account.AppAccessState.Authorized
     val remoteEnvironmentStore = remember { RemoteEnvironmentStore(context) }
     var remoteEnvironment by remember { mutableStateOf(remoteEnvironmentStore.active()) }
     val testEnvironmentConfigured = remember {
@@ -3293,14 +3290,9 @@ private fun AppFeatureSettings(modifier: Modifier) {
             com.lightningstudio.watchrss.phone.data.ai.PhoneAiConfig(
                 enabled = aiEnabled,
                 autoSummarize = autoSummary,
-                showTokenUsage = tokenUsage,
-                provider = provider,
-                model = model,
-                baseUrl = baseUrl,
-                prompt = prompt
+                showTokenUsage = tokenUsage
             )
         )
-        aiStore.saveApiKey(apiKey)
     }
     SettingsColumn(modifier) {
         SectionTitle("推送")
@@ -3362,52 +3354,8 @@ private fun AppFeatureSettings(modifier: Modifier) {
                 tokenUsage = it
                 saveAiConfig()
             }
-            OutlinedTextField(
-                value = provider,
-                onValueChange = { provider = it },
-                label = { Text("供应商") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            OutlinedTextField(
-                value = baseUrl,
-                onValueChange = { baseUrl = it },
-                label = { Text("OpenAI 兼容 Base URL") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            OutlinedTextField(
-                value = model,
-                onValueChange = { model = it },
-                label = { Text("模型") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            OutlinedTextField(
-                value = apiKey,
-                onValueChange = { apiKey = it },
-                label = { Text("API Key（本机加密）") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            OutlinedTextField(
-                value = prompt,
-                onValueChange = { prompt = it },
-                label = { Text("提示词") },
-                minLines = 4,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = ::saveAiConfig) { Text("保存配置") }
-                OutlinedButton(onClick = {
-                    saveAiConfig()
-                    connectionResult = "测试中…"
-                    scope.launch {
-                        connectionResult = runCatching {
-                            container.aiSummaryService.testConnection()
-                        }.getOrElse { it.message ?: "连接失败" }
-                    }
-                }) { Text("连通测试") }
-            }
-            connectionResult?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
             Text(
-                "API Key 与供应商配置使用本机加密存储，不进入预设、蓝牙、备份或云同步。",
+                "摘要由腕上RSS服务统一生成；官方 RSS 会复用已生成的摘要。",
                 style = MaterialTheme.typography.bodySmall
             )
         }

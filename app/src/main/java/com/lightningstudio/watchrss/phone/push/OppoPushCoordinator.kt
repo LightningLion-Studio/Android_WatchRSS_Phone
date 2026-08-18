@@ -81,31 +81,36 @@ class OppoPushCoordinator(
         requestNotificationPermission()
     }
 
+    // The Java SDK exposes platform types but ColorOS may pass null for any string extra.
     private val callback = object : ICallBackResultService {
         override fun onRegister(
             responseCode: Int,
-            registerID: String,
-            arg2: String,
-            arg3: String
+            registerID: String?,
+            arg2: String?,
+            arg3: String?
         ) {
             val previous = store.regId
             store.lastRegisterCode = responseCode
-            store.regId = registerID.takeIf { responseCode == 0 }
+            store.regId = registerID?.takeIf { responseCode == 0 && it.isNotBlank() }
             if (responseCode == 0 && store.regId != previous) store.uploadedRegId = null
             Log.i(TAG, "onRegister code=$responseCode regId=${store.regId ?: "none"} " +
                 "(extra: $arg2 / $arg3)")
-            if (responseCode != 0) {
-                Log.w(TAG, "register failed; 16 = signature mismatch")
+            if (responseCode != 0 || store.regId == null) {
+                Log.w(
+                    TAG,
+                    if (responseCode == 0) "register returned an empty regId" else
+                        "register failed; 16 = signature mismatch"
+                )
             } else {
                 store.regId?.let { uploadIfNeeded(it) }
             }
         }
 
-        override fun onUnRegister(responseCode: Int, arg2: String, arg3: String) = Unit
-        override fun onSetPushTime(responseCode: Int, pushTime: String) = Unit
+        override fun onUnRegister(responseCode: Int, arg2: String?, arg3: String?) = Unit
+        override fun onSetPushTime(responseCode: Int, pushTime: String?) = Unit
         override fun onGetPushStatus(responseCode: Int, status: Int) = Unit
         override fun onGetNotificationStatus(responseCode: Int, status: Int) = Unit
-        override fun onError(code: Int, msg: String, arg3: String, arg4: String) {
+        override fun onError(code: Int, msg: String?, arg3: String?, arg4: String?) {
             Log.w(TAG, "push callback error code=$code msg=$msg ($arg3 / $arg4)")
         }
     }

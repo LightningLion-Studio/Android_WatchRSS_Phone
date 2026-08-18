@@ -738,8 +738,7 @@ internal fun ReaderSettingsHost(
 
     var rootBackProgress by remember { mutableFloatStateOf(0f) }
     PredictiveBackHandler(
-        enabled = paneTransition == null &&
-            (page != SettingsPage.ROOT || leadingPane != null)
+        enabled = page != SettingsPage.ROOT || leadingPane != null
     ) { events ->
         val source = page
         if (source == SettingsPage.ROOT) {

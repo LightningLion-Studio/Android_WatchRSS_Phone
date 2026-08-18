@@ -52,8 +52,8 @@ android {
         applicationId = "com.lightningstudio.watchrss.phone"
         minSdk = 30
         targetSdk = 36
-        versionCode = 38
-        versionName = "1.2.2-8"
+        versionCode = 39
+        versionName = "1.2.2-9"
         buildConfigField(
             "String",
             "WATCHRSS_PRODUCTION_BACKEND_BASE_URL",

@@ -1137,7 +1137,7 @@ class PhoneBluetoothSyncClient(
         fallbackTimeoutMs: Long
     ): ProbeIdentity {
         val probeResult = runCatching {
-            withTimeout(fallbackTimeoutMs) {
+            withTimeout(DIRECT_PROBE_TIMEOUT_MS) {
                 exchange(
                     request = LibrarySyncPayload.buildProbeRequest(deviceId).apply {
                         (context.applicationContext as? PhoneCompanionApplication)
@@ -2044,6 +2044,9 @@ class PhoneBluetoothSyncClient(
         private const val PHASE_COMPLETE = "complete"
         private const val MAX_DEVICE_PROBE_CANDIDATES = 9
         private const val DEFAULT_DEVICE_PROBE_TIMEOUT_MS = 2_000L
+        // ColorOS can keep an RFCOMM SDP lookup alive for almost four seconds. Cancelling at the
+        // shorter compatibility-fallback budget leaves SDP busy and makes every later watch fail.
+        private const val DIRECT_PROBE_TIMEOUT_MS = 4_000L
         private const val PROBE_FAILURE_COOLDOWN_MS = 250L
         // The paired RFCOMM probe has already proved reachability. Do not hold the user in the
         // discovery UI while a same-LAN route is unavailable; late IP routes are discarded by

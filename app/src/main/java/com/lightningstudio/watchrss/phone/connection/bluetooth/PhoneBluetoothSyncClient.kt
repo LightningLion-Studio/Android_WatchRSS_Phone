@@ -271,7 +271,8 @@ class PhoneBluetoothSyncClient(
         }
 
         val results = mutableListOf<PhoneBluetoothWatchProbeResult>()
-        candidates.forEachIndexed { index, device ->
+        var stoppedAfterActiveReachable = false
+        for ((index, device) in candidates.withIndex()) {
             val result = probeLibrarySyncDevice(
                 device = device,
                 deviceId = deviceId,
@@ -280,13 +281,27 @@ class PhoneBluetoothSyncClient(
             )
             results += result
             onProbe(index + 1, candidates.size, result)
+            if (shouldStopAfterActiveWatchProbe(device.address, activeWatchAddresses, result.reachable)) {
+                stoppedAfterActiveReachable = true
+                debugLog.appendEvent(
+                    event = "bt.library.probe.active-reachable-stop",
+                    sessionId = sessionId,
+                    fields = deviceFields(device) + mapOf(
+                        "attemptedCandidates" to results.size,
+                        "skippedCandidates" to (candidates.size - results.size).coerceAtLeast(0)
+                    )
+                )
+                break
+            }
         }
         debugLog.appendEvent(
             event = "bt.library.probe.complete",
             sessionId = sessionId,
             fields = mapOf(
                 "candidates" to candidates.size,
+                "attemptedCandidates" to results.size,
                 "reachable" to results.count { it.reachable },
+                "stoppedAfterActiveReachable" to stoppedAfterActiveReachable,
                 "elapsedMs" to elapsedSince(startedAt)
             )
         )
@@ -2272,6 +2287,12 @@ internal data class SdpProbeFailureRecovery(
     val delayMs: Long,
     val retrySameCandidate: Boolean
 )
+
+internal fun shouldStopAfterActiveWatchProbe(
+    candidateAddress: String,
+    activeWatchAddresses: Set<String>,
+    reachable: Boolean
+): Boolean = reachable && candidateAddress.uppercase() in activeWatchAddresses
 
 internal data class RotatingProbeCandidateWindow<T>(
     val candidates: List<T>,

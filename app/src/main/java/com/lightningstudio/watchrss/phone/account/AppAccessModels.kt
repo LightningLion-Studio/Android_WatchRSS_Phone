@@ -5,7 +5,11 @@ data class AppAccessSummary(
     val capacity: Int = 0,
     val occupied: Int = 0,
     val deviceStatus: String = "unknown",
-    val revokeReason: String? = null
+    val revokeReason: String? = null,
+    val accessMode: String = "none",
+    val trialEligible: Boolean = false,
+    val trialStartedAtMillis: Long? = null,
+    val trialExpiresAtMillis: Long? = null
 )
 
 data class AppAuthorization(

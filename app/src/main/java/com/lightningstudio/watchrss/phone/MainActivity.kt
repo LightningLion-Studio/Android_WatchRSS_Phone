@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -24,6 +25,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -45,6 +47,8 @@ import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.text.DateFormat
+import java.util.Date
 
 /** The only exported router. No protected activity is entered before app access is valid. */
 class MainActivity : ComponentActivity() {
@@ -180,6 +184,8 @@ class MainActivity : ComponentActivity() {
     @androidx.compose.runtime.Composable
     private fun AccessGate(state: AppAccessState) {
         var showPaymentAgreement by remember { mutableStateOf(false) }
+        var showTrialConfirmation by remember { mutableStateOf(false) }
+        var trialStarting by remember { mutableStateOf(false) }
         if (showPaymentAgreement) {
             PaidServiceAgreementDialog(
                 onOpenAgreement = {
@@ -195,6 +201,37 @@ class MainActivity : ComponentActivity() {
                     startPaymentAfterAgreement()
                 },
                 onDismiss = { showPaymentAgreement = false }
+            )
+        }
+        if (showTrialConfirmation) {
+            AlertDialog(
+                onDismissRequest = { if (!trialStarting) showTrialConfirmation = false },
+                title = { Text("开始 3 天免费试用？") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("试用从领取成功起连续 72 小时，仅绑定当前手机，每个账号只能领取一次。")
+                        Text("预计结束时间：${trialEstimatedEndText(System.currentTimeMillis())}")
+                        Text("试用到期后会返回购买页面，本地文章、订阅、收藏和稍后读不会被删除。")
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = !trialStarting,
+                        onClick = {
+                            trialStarting = true
+                            startTrialAfterConfirmation {
+                                trialStarting = false
+                                showTrialConfirmation = false
+                            }
+                        }
+                    ) { Text(if (trialStarting) "正在领取…" else "确认开始") }
+                },
+                dismissButton = {
+                    TextButton(
+                        enabled = !trialStarting,
+                        onClick = { showTrialConfirmation = false }
+                    ) { Text("取消") }
+                }
             )
         }
         Column(
@@ -215,8 +252,14 @@ class MainActivity : ComponentActivity() {
                     GateMessage(
                         title = copy.title,
                         detail = copy.detail,
-                        actionLabel = copy.actionLabel
+                        actionLabel = "立即购买 ¥6"
                     ) { showPaymentAgreement = true }
+                    if (state.summary.trialEligible) {
+                        OutlinedButton(
+                            onClick = { showTrialConfirmation = true },
+                            modifier = Modifier.padding(top = 12.dp)
+                        ) { Text("免费试用 3 天") }
+                    }
                 }
                 is AppAccessState.PaymentPending -> GateMessage("等待支付确认", "订单 ${state.order.merchantOrderId}") {
                     state.order.paymentUrl?.let { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it))) }
@@ -341,8 +384,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun startTrialAfterConfirmation(onComplete: () -> Unit) {
+        lifecycleScope.launch {
+            runCatching { coordinator.startTrial() }
+                .onFailure {
+                    Toast.makeText(
+                        this@MainActivity,
+                        it.message ?: "试用领取失败",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            onComplete()
+        }
+    }
+
     private companion object { const val KEY_PENDING_INTENT = "pending_inbound_intent" }
 }
+
+internal fun trialEstimatedEndText(nowMillis: Long): String = DateFormat
+    .getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+    .format(Date(nowMillis + 72L * 60L * 60L * 1_000L))
 
 internal fun shouldShowProductionEnvironmentSwitch(
     isDebugBuild: Boolean,

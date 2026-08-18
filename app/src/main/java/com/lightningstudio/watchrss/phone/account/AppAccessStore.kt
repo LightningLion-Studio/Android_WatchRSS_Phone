@@ -141,12 +141,18 @@ internal fun trustedTimeDecision(
 
 internal fun JSONObject.toAccessSummary() = AppAccessSummary(
     purchaseCount = optInt("purchaseCount"), capacity = optInt("capacity"), occupied = optInt("occupied"),
-    deviceStatus = optString("deviceStatus", "unknown"), revokeReason = optString("revokeReason").takeIf { it.isNotBlank() }
+    deviceStatus = optString("deviceStatus", "unknown"), revokeReason = optString("revokeReason").takeIf { it.isNotBlank() },
+    accessMode = optString("accessMode", "none"),
+    trialEligible = optBoolean("trialEligible", false),
+    trialStartedAtMillis = optLong("trialStartedAt").takeIf { it > 0L },
+    trialExpiresAtMillis = optLong("trialExpiresAt").takeIf { it > 0L }
 )
 
 internal fun AppAccessSummary.toJson() = JSONObject().apply {
     put("purchaseCount", purchaseCount); put("capacity", capacity); put("occupied", occupied)
     put("deviceStatus", deviceStatus); put("revokeReason", revokeReason)
+    put("accessMode", accessMode); put("trialEligible", trialEligible)
+    put("trialStartedAt", trialStartedAtMillis); put("trialExpiresAt", trialExpiresAtMillis)
 }
 
 internal fun JSONObject.toPaymentOrder() = AppPaymentOrder(

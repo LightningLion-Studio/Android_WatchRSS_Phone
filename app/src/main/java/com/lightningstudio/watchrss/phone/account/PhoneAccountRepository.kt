@@ -188,6 +188,9 @@ class PhoneAccountRepository(
     suspend fun claimAppAccess(idempotencyKey: String): AppAuthorization =
         accountClient.claimAppAccess(requireSession(), idempotencyKey)
 
+    suspend fun startTrialAppAccess(idempotencyKey: String): AppAuthorization =
+        accountClient.startTrialAppAccess(requireSession(), idempotencyKey)
+
     suspend fun refreshAppAccess(current: AppAuthorization): AppAuthorization =
         accountClient.refreshAppAccess(requireSession(), current)
 

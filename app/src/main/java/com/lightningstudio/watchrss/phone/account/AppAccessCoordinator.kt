@@ -7,6 +7,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -31,6 +33,21 @@ class AppAccessCoordinator(
 
     val isAuthorized: Boolean get() = _state.value is AppAccessState.Authorized
     val deviceAccessToken: String? get() = store.load()?.deviceAccessToken
+
+    init {
+        scope.launch(Dispatchers.IO) {
+            state.collectLatest { accessState ->
+                val expiresAt = (accessState as? AppAccessState.Authorized)
+                    ?.summary
+                    ?.takeIf { it.accessMode == "trial" }
+                    ?.trialExpiresAtMillis
+                    ?: return@collectLatest
+                val now = store.trustedNowMillis() ?: System.currentTimeMillis()
+                delay((expiresAt - now).coerceAtLeast(0L))
+                reconcile()
+            }
+        }
+    }
 
     fun initialize() { scope.launch(Dispatchers.IO) { reconcile() } }
 
@@ -61,15 +78,16 @@ class AppAccessCoordinator(
             return
         }
 
-        if (!cachedValid) {
-            val sessionUserId = accountRepository.session.value?.userId.orEmpty()
-            store.loadPendingOrder(sessionUserId)?.let { order ->
-                if (order.status == "pending") {
-                    _state.value = AppAccessState.PaymentPending(order)
-                    refreshPaymentLocked(order.orderId)
-                    return
-                }
+        val sessionUserId = accountRepository.session.value?.userId.orEmpty()
+        store.loadPendingOrder(sessionUserId)?.let { order ->
+            if (order.status == "pending") {
+                _state.value = AppAccessState.PaymentPending(order)
+                refreshPaymentLocked(order.orderId)
+                return
             }
+        }
+
+        if (!cachedValid) {
             loadServerStatusLocked()
             return
         }
@@ -99,6 +117,29 @@ class AppAccessCoordinator(
     suspend fun claim() {
         val wasAuthorized = isAuthorized
         operationMutex.withLock { claimLocked() }
+        notifyIfNewlyAuthorized(wasAuthorized)
+    }
+
+    suspend fun startTrial() {
+        val wasAuthorized = isAuthorized
+        operationMutex.withLock {
+            val activationProof = accountRepository.session.value?.activationProof.orEmpty()
+            try {
+                val authorization = accountRepository.startTrialAppAccess(store.claimIdempotencyKey())
+                store.save(authorization)
+                store.clearClaimIdempotencyKey()
+                accountRepository.consumeActivationProof(activationProof)
+                _state.value = AppAccessState.Authorized(authorization.access, false)
+            } catch (error: Throwable) {
+                val summary = runCatching { accountRepository.appAccessStatus() }
+                    .getOrDefault(AppAccessSummary())
+                _state.value = when (error.findAccountHttpException()?.statusCode) {
+                    402, 409 -> AppAccessState.PurchaseRequired(summary)
+                    else -> AppAccessState.ValidationError(trialAccessErrorMessage(error))
+                }
+                throw IllegalStateException(trialAccessErrorMessage(error), error)
+            }
+        }
         notifyIfNewlyAuthorized(wasAuthorized)
     }
 
@@ -158,7 +199,13 @@ class AppAccessCoordinator(
             when (order.status) {
                 "paid" -> {
                     store.clearPendingOrder()
-                    claimLocked()
+                    val cached = store.load()
+                    if (cached != null) {
+                        val refreshed = accountRepository.refreshAppAccess(cached).also(store::save)
+                        _state.value = AppAccessState.Authorized(refreshed.access, offline = false)
+                    } else {
+                        claimLocked()
+                    }
                 }
                 "pending" -> {
                     accountRepository.session.value?.userId?.let { userId ->
@@ -214,7 +261,7 @@ class AppAccessCoordinator(
 
     private suspend fun loadServerStatusLocked() {
         runCatching { accountRepository.appAccessStatus() }.onSuccess { summary ->
-            if (summary.purchaseCount > 0 && accountRepository.session.value?.activationProof?.isNotBlank() == true) {
+            if (summary.accessMode != "none" && accountRepository.session.value?.activationProof?.isNotBlank() == true) {
                 claimLocked()
                 return@onSuccess
             }

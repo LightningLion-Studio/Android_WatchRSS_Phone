@@ -1736,10 +1736,29 @@ internal fun AccountScreen(
                 if (session != null && accessSummary != null) {
                     ElevatedCard(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("手机版永久授权", fontWeight = FontWeight.SemiBold)
-                            Text("已购买 ${accessSummary.purchaseCount} 次 · 容量 ${accessSummary.capacity} 台 · 已占用 ${accessSummary.occupied} 台")
+                            Text(
+                                if (accessSummary.accessMode == "trial") "手机版试用中" else "手机版永久授权",
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            if (accessSummary.accessMode == "trial") {
+                                Text(
+                                    trialRemainingText(
+                                        accessSummary.trialExpiresAtMillis,
+                                        System.currentTimeMillis()
+                                    )
+                                )
+                                Text("仅限当前手机 · 到期不会删除本地数据")
+                            } else {
+                                Text("已购买 ${accessSummary.purchaseCount} 次 · 容量 ${accessSummary.capacity} 台 · 已占用 ${accessSummary.occupied} 台")
+                            }
                             Button(onClick = { showPaymentAgreement = true }) {
-                                Text("再付 ¥6 增加 3 台")
+                                Text(
+                                    if (accessSummary.accessMode == "trial") {
+                                        "立即购买 ¥6"
+                                    } else {
+                                        "再付 ¥6 增加 3 台"
+                                    }
+                                )
                             }
                         }
                     }
@@ -2139,6 +2158,19 @@ private fun paymentOrderStatusText(order: AppPaymentOrder): String {
     return buildString {
         append(amount).append(" · ").append(status)
         if (order.refundable && deadline != null) append(" · 可退款至 ").append(deadline)
+    }
+}
+
+internal fun trialRemainingText(expiresAtMillis: Long?, nowMillis: Long): String {
+    if (expiresAtMillis == null || expiresAtMillis <= nowMillis) return "试用已到期"
+    val remainingMinutes = ((expiresAtMillis - nowMillis) + 59_999L) / 60_000L
+    val days = remainingMinutes / (24L * 60L)
+    val hours = (remainingMinutes % (24L * 60L)) / 60L
+    val minutes = remainingMinutes % 60L
+    return when {
+        days > 0L -> "试用剩余 ${days} 天 ${hours} 小时"
+        hours > 0L -> "试用剩余 ${hours} 小时 ${minutes} 分钟"
+        else -> "试用剩余 ${minutes} 分钟"
     }
 }
 

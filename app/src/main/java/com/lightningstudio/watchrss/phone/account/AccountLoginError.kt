@@ -84,6 +84,27 @@ internal fun accountSecurityErrorMessage(
     }
 }
 
+internal fun trialAccessErrorMessage(throwable: Throwable): String {
+    val httpError = throwable.findAccountHttpException()
+        ?: return if (throwable.hasIoCause()) {
+            "网络连接失败，请检查网络后重试"
+        } else {
+            "试用领取失败，请稍后重试"
+        }
+    val code = parseErrorResponse(httpError.responseBody).code.lowercase()
+    return when (code) {
+        "trial_device_mismatch" -> "该账号的试用已绑定其他手机"
+        "trial_already_used" -> "该账号已领取过试用"
+        "trial_not_available_for_paid_account" -> "该账号已获得永久授权，无需领取试用"
+        "proof_consumed", "activation_proof_device_mismatch" -> "登录凭证已失效，请重新登录后领取"
+        else -> if (httpError.statusCode >= 500) {
+            "账号服务暂时不可用，请稍后重试"
+        } else {
+            "试用领取失败，请稍后重试"
+        }
+    }
+}
+
 private data class AccountErrorResponse(val code: String)
 
 private fun parseErrorResponse(raw: String): AccountErrorResponse {

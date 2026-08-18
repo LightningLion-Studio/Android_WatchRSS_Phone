@@ -18,6 +18,26 @@ class AppAccessModelsTest {
         assertEquals(5, summary.occupied)
         assertEquals("revoked", summary.deviceStatus)
         assertEquals("capacity_eviction", summary.revokeReason)
+        assertEquals("none", summary.accessMode)
+        assertFalse(summary.trialEligible)
+    }
+
+    @Test
+    fun `access summary preserves server controlled trial fields`() {
+        val summary = JSONObject(
+            """{"purchaseCount":0,"capacity":1,"occupied":1,"deviceStatus":"authorized","accessMode":"trial","trialEligible":false,"trialStartedAt":1760000000000,"trialExpiresAt":1760259200000}"""
+        ).toAccessSummary()
+
+        assertEquals("trial", summary.accessMode)
+        assertFalse(summary.trialEligible)
+        assertEquals(1760000000000L, summary.trialStartedAtMillis)
+        assertEquals(1760259200000L, summary.trialExpiresAtMillis)
+    }
+
+    @Test
+    fun `trial eligibility is explicit and defaults closed`() {
+        assertFalse(JSONObject("{}").toAccessSummary().trialEligible)
+        assertTrue(JSONObject("""{"trialEligible":true}""").toAccessSummary().trialEligible)
     }
 
     @Test

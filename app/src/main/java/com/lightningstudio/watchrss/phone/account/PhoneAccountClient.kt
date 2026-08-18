@@ -531,6 +531,18 @@ class PhoneAccountClient(
     }
 
     suspend fun claimAppAccess(session: PhoneAccountSession, idempotencyKey: String): AppAuthorization = withContext(Dispatchers.IO) {
+        claimAppAccessAtPath(session, idempotencyKey, "/functions/v1/account/phone-authorizations/claim")
+    }
+
+    suspend fun startTrialAppAccess(session: PhoneAccountSession, idempotencyKey: String): AppAuthorization = withContext(Dispatchers.IO) {
+        claimAppAccessAtPath(session, idempotencyKey, "/functions/v1/account/app-access/trial")
+    }
+
+    private fun claimAppAccessAtPath(
+        session: PhoneAccountSession,
+        idempotencyKey: String,
+        path: String
+    ): AppAuthorization {
         require(session.activationProof.isNotBlank()) { "请重新完成短信或 Passkey 登录" }
         val requestHash = devicePossessionRequestHash(
             session.activationProof,
@@ -543,8 +555,8 @@ class PhoneAccountClient(
             requestHash = requestHash,
             bearerToken = session.accessToken
         )
-        post(
-            path = "/functions/v1/account/phone-authorizations/claim",
+        return post(
+            path = path,
             body = JSONObject().apply {
                 put("activationProof", session.activationProof)
                 put("licenseDeviceId", licenseIdentity.deviceId)

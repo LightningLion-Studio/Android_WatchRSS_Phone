@@ -215,7 +215,13 @@ class PhoneBluetoothSyncClient(
         val bondedDevices = adapter.bondedDevices.orEmpty()
         logAdapterSnapshot(sessionId, adapter, bondedDevices)
         val allCandidates = probeCandidateWatchDevices(bondedDevices)
-        val candidates = allCandidates.take(MAX_DEVICE_PROBE_CANDIDATES)
+        val probeWindow = rotatingProbeCandidateWindow(
+            candidates = allCandidates,
+            maxCandidates = MAX_DEVICE_PROBE_CANDIDATES,
+            startOffset = probeCandidateOffset()
+        )
+        rememberProbeCandidateOffset(probeWindow.nextOffset)
+        val candidates = probeWindow.candidates
         debugLog.appendEvent(
             event = "bt.library.probe.candidates",
             sessionId = sessionId,
@@ -223,6 +229,8 @@ class PhoneBluetoothSyncClient(
                 "candidates" to allCandidates.size,
                 "probedCandidates" to candidates.size,
                 "skippedCandidates" to (allCandidates.size - candidates.size).coerceAtLeast(0),
+                "startOffset" to probeWindow.startOffset,
+                "nextOffset" to probeWindow.nextOffset,
                 "cachedAddress" to cachedDeviceAddress().orEmpty()
             )
         )
@@ -1129,7 +1137,7 @@ class PhoneBluetoothSyncClient(
         fallbackTimeoutMs: Long
     ): ProbeIdentity {
         val probeResult = runCatching {
-            withTimeout(DIRECT_PROBE_TIMEOUT_MS) {
+            withTimeout(fallbackTimeoutMs) {
                 exchange(
                     request = LibrarySyncPayload.buildProbeRequest(deviceId).apply {
                         (context.applicationContext as? PhoneCompanionApplication)
@@ -1142,7 +1150,19 @@ class PhoneBluetoothSyncClient(
                 )
             }
         }
-        val exchange = probeResult.getOrNull()
+        val exchange = probeResult.getOrElse { throwable ->
+            debugLog.appendEvent(
+                event = "bt.library.probe.direct.failed",
+                sessionId = sessionId,
+                fields = failureFields(throwable),
+                throwable = throwable
+            )
+            // ColorOS can keep the SDP transaction busy briefly after a failed or cancelled
+            // RFCOMM connect. Starting the next candidate immediately makes every later SDP
+            // request fail with BUSY even when that watch is listening.
+            delay(PROBE_FAILURE_COOLDOWN_MS)
+            throw throwable
+        }
         if (exchange != null && LibrarySyncPayload.isProbeResponse(exchange.response)) {
             requireSupportedLibraryProtocol(exchange.response)
             debugLog.appendEvent(
@@ -1169,14 +1189,11 @@ class PhoneBluetoothSyncClient(
                 exchange.response.optBoolean(FIELD_IP_UPGRADE_ACCEPTED, false)
             )
         }
-        probeResult.exceptionOrNull()?.let { throwable ->
-            debugLog.appendEvent(
-                event = "bt.library.probe.direct.fallback",
-                sessionId = sessionId,
-                fields = failureFields(throwable),
-                throwable = throwable
-            )
-        }
+        debugLog.appendEvent(
+            event = "bt.library.probe.direct.compat.fallback",
+            sessionId = sessionId,
+            fields = payloadFields("probeResponse", exchange.response)
+        )
         return withTimeout(fallbackTimeoutMs) {
             exchangeLibrary(
                 manifestRequest = buildProbeManifestRequest(deviceId),
@@ -1818,6 +1835,17 @@ class PhoneBluetoothSyncClient(
             .getString(KEY_LAST_DEVICE_ADDRESS, null)
             ?.takeIf { it.isNotBlank() }
 
+    private fun probeCandidateOffset(): Int =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_PROBE_CANDIDATE_OFFSET, 0)
+
+    private fun rememberProbeCandidateOffset(offset: Int) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_PROBE_CANDIDATE_OFFSET, offset)
+            .apply()
+    }
+
     private fun buildProbeManifestRequest(deviceId: String): JSONObject =
         LibrarySyncPayload.buildManifestRequestFromEntries(
             deviceId = deviceId,
@@ -2016,7 +2044,7 @@ class PhoneBluetoothSyncClient(
         private const val PHASE_COMPLETE = "complete"
         private const val MAX_DEVICE_PROBE_CANDIDATES = 9
         private const val DEFAULT_DEVICE_PROBE_TIMEOUT_MS = 2_000L
-        private const val DIRECT_PROBE_TIMEOUT_MS = 4_000L
+        private const val PROBE_FAILURE_COOLDOWN_MS = 250L
         // The paired RFCOMM probe has already proved reachability. Do not hold the user in the
         // discovery UI while a same-LAN route is unavailable; late IP routes are discarded by
         // the watch once the RFCOMM transfer begins.
@@ -2026,6 +2054,7 @@ class PhoneBluetoothSyncClient(
         private const val FIELD_IP_UPGRADE_ACCEPTED = "ipUpgradeAccepted"
         private const val PREFS_NAME = "watchrss_bluetooth_sync"
         private const val KEY_LAST_DEVICE_ADDRESS = "last_successful_device_address"
+        private const val KEY_PROBE_CANDIDATE_OFFSET = "probe_candidate_offset"
         private val EMPTY_FRAME_STATS = LibraryFrameStats(
             frameCount = 0,
             totalBytes = 0L,
@@ -2034,6 +2063,35 @@ class PhoneBluetoothSyncClient(
             articleCount = 0
         )
     }
+}
+
+internal data class RotatingProbeCandidateWindow<T>(
+    val candidates: List<T>,
+    val startOffset: Int,
+    val nextOffset: Int
+)
+
+internal fun <T> rotatingProbeCandidateWindow(
+    candidates: List<T>,
+    maxCandidates: Int,
+    startOffset: Int
+): RotatingProbeCandidateWindow<T> {
+    if (candidates.isEmpty() || maxCandidates <= 0) {
+        return RotatingProbeCandidateWindow(emptyList(), startOffset = 0, nextOffset = 0)
+    }
+    if (candidates.size <= maxCandidates) {
+        return RotatingProbeCandidateWindow(candidates, startOffset = 0, nextOffset = 0)
+    }
+    val normalizedOffset = Math.floorMod(startOffset, candidates.size)
+    val count = minOf(maxCandidates, candidates.size)
+    val selected = List(count) { index ->
+        candidates[(normalizedOffset + index) % candidates.size]
+    }
+    return RotatingProbeCandidateWindow(
+        candidates = selected,
+        startOffset = normalizedOffset,
+        nextOffset = (normalizedOffset + count) % candidates.size
+    )
 }
 
 private fun JSONObject.toWatchCapabilities(): PhoneWatchCapabilities {

@@ -41,6 +41,7 @@ internal class PhoneIpSyncSession(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        PhoneIpSyncSessionRegistry.unregister(this)
         runCatching { incomingWriter.close() }
         runCatching { incoming.close() }
         runCatching { closeSocket() }

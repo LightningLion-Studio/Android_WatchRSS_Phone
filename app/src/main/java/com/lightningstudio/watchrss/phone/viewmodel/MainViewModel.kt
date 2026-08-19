@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncProgress
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothWatchDevice
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncSession
 import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSessionRegistry
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncDeleteConflict
@@ -88,7 +89,9 @@ data class MainBluetoothDeviceUi(
     val name: String,
     val address: String,
     val remoteDeviceId: String = "",
-    val transportLabel: String = "RFCOMM"
+    val transportLabel: String = "RFCOMM",
+    val bluetoothAddress: String = address,
+    val supportsPersistentSession: Boolean = false
 )
 
 enum class MainBluetoothDevicePromptPurpose {
@@ -805,7 +808,7 @@ class MainViewModel(
                 bluetoothDevicePrompt = null,
                 conflictPrompt = null
             )
-            val reachableDevices = runCatching {
+            val probeTargets = runCatching {
                 bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress)
             }.getOrElse { throwable ->
                 clearSmoothedSyncProgress()
@@ -821,6 +824,7 @@ class MainViewModel(
                 _toastEvent.tryEmit(throwable.message ?: "操作失败")
                 return@launch
             }
+            val reachableDevices = probeTargets.devices
             when (reachableDevices.size) {
                 0 -> {
                     clearSmoothedSyncProgress()
@@ -839,8 +843,7 @@ class MainViewModel(
                     sessionState.value = sessionState.value.copy(
                         syncTransportLabel = transportLabel(device.address)
                     )
-                    delay(400L)
-                    runLibrarySync(device.toUi())
+                    runLibrarySync(device.toUi(), probeTargets.sessionLease)
                 }
                 else -> {
                     clearSmoothedSyncProgress()
@@ -874,7 +877,7 @@ class MainViewModel(
                 bluetoothDevicePrompt = null,
                 conflictPrompt = null
             )
-            val reachableDevices = runCatching {
+            val probeTargets = runCatching {
                 bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress)
             }.getOrElse { throwable ->
                 clearSmoothedSyncProgress()
@@ -891,6 +894,7 @@ class MainViewModel(
                 _toastEvent.tryEmit(throwable.message ?: "操作失败")
                 return@launch
             }
+            val reachableDevices = probeTargets.devices
             when (reachableDevices.size) {
                 0 -> {
                     clearSmoothedSyncProgress()
@@ -910,8 +914,7 @@ class MainViewModel(
                     sessionState.value = sessionState.value.copy(
                         syncTransportLabel = transportLabel(device.address)
                     )
-                    delay(400L)
-                    runAccountSync(device.toUi())
+                    runAccountSync(device.toUi(), probeTargets.sessionLease)
                 }
                 else -> {
                     clearSmoothedSyncProgress()
@@ -957,7 +960,10 @@ class MainViewModel(
         )
     }
 
-    private suspend fun runLibrarySync(device: MainBluetoothDeviceUi) {
+    private suspend fun runLibrarySync(
+        device: MainBluetoothDeviceUi,
+        reusableSession: PhoneSyncSession? = null
+    ) {
         beginSmoothedSyncProgress(MainSyncProgressUi(phase = "建立连接中", percent = 0))
         sessionState.value = sessionState.value.copy(
             isBusy = true,
@@ -973,8 +979,11 @@ class MainViewModel(
                     name = device.name,
                     address = device.address,
                     uuidCount = 0,
-                    remoteDeviceId = device.remoteDeviceId
+                    remoteDeviceId = device.remoteDeviceId,
+                    bluetoothAddress = device.bluetoothAddress,
+                    supportsPersistentSession = device.supportsPersistentSession
                 ),
+                reusableSession = reusableSession,
                 onProgress = ::updateLibrarySyncProgress,
                 resolveDeleteConflicts = ::resolveDeleteConflicts
             )
@@ -983,23 +992,14 @@ class MainViewModel(
             val deviceName = result.deviceName.ifBlank { "手表" }
             val readerWarning = result.readerSyncWarning
             val accountWarning = result.accountSyncWarning
+            val tokenWarning = result.tokenUsageSyncWarning
             completeSmoothedSyncProgress()
-            val message = if (readerWarning == null && accountWarning == null) {
+            val message = if (
+                readerWarning == null && accountWarning == null && tokenWarning == null
+            ) {
                 "已与 $deviceName 同步完成"
             } else {
                 "已与 $deviceName 完成资料库和备忘录同步"
-            }
-            runCatching {
-                bluetoothSyncManager.syncLlmTokenUsage(
-                    PhoneBluetoothWatchDevice(
-                        name = deviceName,
-                        address = result.deviceAddress,
-                        uuidCount = 0,
-                        remoteDeviceId = ""
-                    )
-                )
-            }.onFailure { tokenError ->
-                _toastEvent.tryEmit("词元用量同步失败：${tokenError.message}")
             }
             sessionState.value = sessionState.value.copy(
                 message = message,
@@ -1010,11 +1010,12 @@ class MainViewModel(
                 syncProgress = null
             )
             _toastEvent.tryEmit(
-                if (accountWarning != null || readerWarning != null) {
+                if (accountWarning != null || readerWarning != null || tokenWarning != null) {
                     buildString {
                         append(message)
                         accountWarning?.let { append("；账号授权同步失败：$it") }
                         readerWarning?.let { append("；阅读器资源同步失败：$it") }
+                        tokenWarning?.let { append("；词元用量同步失败：$it") }
                     }
                 } else if (stats != null) {
                     buildString {
@@ -1049,7 +1050,10 @@ class MainViewModel(
         sessionState.value = sessionState.value.copy(isBusy = false, conflictPrompt = null)
     }
 
-    private suspend fun runAccountSync(device: MainBluetoothDeviceUi) {
+    private suspend fun runAccountSync(
+        device: MainBluetoothDeviceUi,
+        reusableSession: PhoneSyncSession? = null
+    ) {
         beginSmoothedSyncProgress(MainSyncProgressUi(phase = "同步账号中", percent = 20))
         sessionState.value = sessionState.value.copy(
             isBusy = true,
@@ -1065,8 +1069,11 @@ class MainViewModel(
                     name = device.name,
                     address = device.address,
                     uuidCount = 0,
-                    remoteDeviceId = device.remoteDeviceId
-                )
+                    remoteDeviceId = device.remoteDeviceId,
+                    bluetoothAddress = device.bluetoothAddress,
+                    supportsPersistentSession = device.supportsPersistentSession
+                ),
+                reusableSession = reusableSession
             )
             completeSmoothedSyncProgress()
             val deviceName = result.deviceName.ifBlank { device.name.ifBlank { "手表" } }
@@ -1287,13 +1294,15 @@ class MainViewModel(
             name = name.ifBlank { "未知手表" },
             address = address,
             remoteDeviceId = remoteDeviceId,
-            transportLabel = transportLabel(address)
+            transportLabel = transportLabel(address),
+            bluetoothAddress = bluetoothAddress,
+            supportsPersistentSession = supportsPersistentSession
         )
 
     private fun transportLabel(address: String): String =
         PhoneIpSyncSessionRegistry.session(address)?.let { session ->
             "${if (session.routeKind.wireName == "wifiLan") "Wi-Fi IP" else "IP"} · ${session.remoteAddress}"
-        } ?: "RFCOMM（IP 不可用时回退）"
+        } ?: "RFCOMM"
 
     private fun beginSmoothedSyncProgress(progress: MainSyncProgressUi) {
         smoothedSyncProgressJob?.cancel()

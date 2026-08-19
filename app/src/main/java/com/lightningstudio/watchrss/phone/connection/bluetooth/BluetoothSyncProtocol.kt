@@ -21,13 +21,21 @@ object BluetoothSyncProtocol {
     const val ACTION_SYNC_ACCOUNT = "syncAccount"
     const val ACTION_SYNC_LLM_TOKEN_USAGE = "syncLlmTokenUsage"
     const val ACTION_SYNC_NOTE_ASSET = "syncNoteAsset"
+    const val ACTION_SYNC_SESSION = "syncSession"
     const val ACTION_ACK = "ack"
+
+    const val SESSION_PHASE_COMPLETE = "complete"
+    const val SESSION_PHASE_ABORT = "abort"
+    const val FIELD_REQUEST_PERSISTENT_SESSION = "requestPersistentSession"
+    const val FIELD_SUPPORTS_PERSISTENT_SESSION = "supportsPersistentSession"
+    const val FIELD_PERSISTENT_SESSION_ACCEPTED = "persistentSessionAccepted"
 
     const val ACK_PHASE_RECEIVED = "received"
     const val ACK_PHASE_APPLIED = "applied"
 
     const val MAX_FRAME_BYTES = 2 * 1024 * 1024
     const val LENGTH_PREFIX_BYTES = 4
+    const val PERSISTENT_SESSION_IDLE_TIMEOUT_MS = 15 * 60 * 1_000L
 
     fun readFrame(
         input: InputStream,
@@ -72,6 +80,46 @@ object BluetoothSyncProtocol {
 
     fun wireSize(payload: JSONObject): Long =
         encodedSize(payload).toLong() + LENGTH_PREFIX_BYTES.toLong()
+
+    fun withPersistentSessionRequest(payload: JSONObject): JSONObject =
+        JSONObject(payload.toString()).apply {
+            put(FIELD_REQUEST_PERSISTENT_SESSION, true)
+            put(FIELD_SUPPORTS_PERSISTENT_SESSION, true)
+        }
+
+    fun requestsPersistentSession(payload: JSONObject): Boolean =
+        payload.optBoolean(FIELD_REQUEST_PERSISTENT_SESSION, false) &&
+            payload.optBoolean(FIELD_SUPPORTS_PERSISTENT_SESSION, false)
+
+    fun acceptsPersistentSession(payload: JSONObject): Boolean =
+        payload.optBoolean(FIELD_SUPPORTS_PERSISTENT_SESSION, false) &&
+            payload.optBoolean(FIELD_PERSISTENT_SESSION_ACCEPTED, false)
+
+    fun buildSessionControlRequest(version: Int, phase: String): JSONObject =
+        JSONObject().apply {
+            put("version", version)
+            put("action", ACTION_SYNC_SESSION)
+            put("phase", requireValidSessionPhase(phase))
+        }
+
+    fun buildSessionControlResponse(version: Int, phase: String): JSONObject =
+        buildSessionControlRequest(version, phase).apply {
+            put("success", true)
+            put(FIELD_SUPPORTS_PERSISTENT_SESSION, true)
+            put(FIELD_PERSISTENT_SESSION_ACCEPTED, true)
+        }
+
+    fun sessionControlPhase(payload: JSONObject): String? {
+        if (payload.optString("action") != ACTION_SYNC_SESSION) return null
+        return requireValidSessionPhase(payload.optString("phase"))
+    }
+
+    fun requireValidSessionPhase(phase: String): String {
+        require(phase == SESSION_PHASE_COMPLETE || phase == SESSION_PHASE_ABORT) {
+            "未知同步会话结束阶段：$phase"
+        }
+        return phase
+    }
 
     private fun encodeFrame(payload: JSONObject): ByteArray =
         payload.toString().toByteArray(Charsets.UTF_8)

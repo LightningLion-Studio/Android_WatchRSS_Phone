@@ -65,4 +65,4 @@ internal class WatchIpSyncService(
 // the destination port in a short and passes the sign-extended value onward.
 // See docs/bluetooth-proxy-ip-sync.md before changing this back to port 0.
 internal val IP_SYNC_PORT_CANDIDATES: IntRange = 30_000..30_015
-internal const val IP_SYNC_SOCKET_READ_TIMEOUT_MS = 10 * 60 * 1_000
+internal const val IP_SYNC_SOCKET_READ_TIMEOUT_MS = 15 * 60 * 1_000

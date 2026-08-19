@@ -365,10 +365,23 @@ internal fun ReaderSettingsHost(
         scope.launch {
             message = "正在探测手表…"
             message = runCatching {
-                val devices = container.bluetoothSyncManager.probeLibrarySyncTargets()
+                val targets = container.bluetoothSyncManager.probeLibrarySyncTargets()
+                val devices = targets.devices
                 require(devices.isNotEmpty()) { "未找到可同步的手表" }
                 require(devices.size == 1) { "发现多块手表，请在资料库同步页选择目标" }
-                container.bluetoothSyncManager.syncReaderPresets(devices.single().address)
+                val lease = targets.sessionLease
+                try {
+                    container.bluetoothSyncManager.syncReaderPresets(
+                        deviceAddress = devices.single().address,
+                        syncSession = lease
+                    )
+                    lease?.complete("settings-reader-sync-complete")
+                } catch (throwable: Throwable) {
+                    lease?.runCatching { abort("settings-reader-sync-abort") }
+                    throw throwable
+                } finally {
+                    lease?.close()
+                }
                 "预设、整个字体库和引用背景已同步"
             }.getOrElse { it.message ?: "同步失败" }
         }
@@ -400,10 +413,15 @@ internal fun ReaderSettingsHost(
         watchPreviewStatus = "正在连接手表…"
         scope.launch {
             runCatching {
-                val devices = container.bluetoothSyncManager.probeLibrarySyncTargets()
+                val targets = container.bluetoothSyncManager.probeLibrarySyncTargets()
+                val devices = targets.devices
                 require(devices.isNotEmpty()) { "未找到可预览的手表" }
                 require(devices.size == 1) { "发现多块手表，请先只保留目标手表连接" }
                 val device = devices.single()
+                targets.sessionLease?.let { lease ->
+                    runCatching { lease.complete("settings-preview-probe-complete") }
+                    lease.close()
+                }
                 val updates = Channel<ReaderPreset>(Channel.CONFLATED)
                 val firstConnection = CompletableDeferred<String>()
                 watchPreviewStopRequested.set(false)

@@ -37,6 +37,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.Closeable
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -139,7 +140,8 @@ data class PhoneBluetoothWatchDevice(
     val address: String,
     val uuidCount: Int,
     val remoteDeviceId: String = "",
-    val bluetoothAddress: String = address
+    val bluetoothAddress: String = address,
+    val supportsPersistentSession: Boolean = false
 ) {
     val readerPreviewAddress: String
         get() = bluetoothAddress.ifBlank { address }
@@ -150,6 +152,11 @@ data class PhoneBluetoothWatchProbeResult(
     val reachable: Boolean,
     val message: String? = null,
     val capabilities: PhoneWatchCapabilities? = null
+)
+
+internal data class PhoneBluetoothWatchProbeBatch(
+    val results: List<PhoneBluetoothWatchProbeResult>,
+    val sessionLease: PhoneSyncSession? = null
 )
 
 data class PhoneWatchVideoDecoder(
@@ -176,8 +183,117 @@ data class PhoneWatchCapabilities(
 private data class ProbeIdentity(
     val deviceId: String,
     val capabilities: PhoneWatchCapabilities?,
-    val ipUpgradeAccepted: Boolean
+    val ipUpgradeAccepted: Boolean,
+    val supportsPersistentSession: Boolean,
+    val persistentSessionAccepted: Boolean,
+    val session: PhoneSyncSession? = null
 )
+
+private data class ProbedWatch(
+    val result: PhoneBluetoothWatchProbeResult,
+    val sessionLease: PhoneSyncSession? = null
+)
+
+internal class PhoneSyncSession internal constructor(
+    internal val client: PhoneBluetoothSyncClient,
+    device: PhoneBluetoothWatchDevice,
+    internal val localDeviceId: String,
+    internal var transport: Transport?,
+    internal var persistentAccepted: Boolean,
+    internal var negotiationPending: Boolean,
+    internal var ipUpgradeExpected: Boolean
+) : Closeable {
+    var device: PhoneBluetoothWatchDevice = device
+        internal set
+
+    internal class Transport(
+        val inputStream: InputStream,
+        val outputStream: OutputStream,
+        val owner: String,
+        val closeOnLegacyFallback: Boolean,
+        private val closeTransport: () -> Unit
+    ) : Closeable {
+        private var closed = false
+
+        val isClosed: Boolean
+            get() = closed
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            closeTransport()
+        }
+    }
+
+    internal var legacyFallback: Boolean = false
+    internal val recoveryGate = SingleSessionRecoveryGate()
+    private var closed: Boolean = false
+
+    val isPersistent: Boolean
+        get() = persistentAccepted && !closed
+
+    suspend fun exchange(request: JSONObject, sessionId: String): BluetoothSyncExchange =
+        client.exchangeInSession(this, request, sessionId)
+
+    suspend fun exchangeLibrary(
+        cursorRequest: JSONObject,
+        buildManifestRequest: suspend (String, JSONObject?) -> JSONObject,
+        buildArticleRequests: suspend (JSONObject, Boolean) -> List<JSONObject>,
+        sessionId: String,
+        onProgress: (PhoneBluetoothSyncProgress) -> Unit,
+        applyResponse: suspend (BluetoothLibrarySyncExchange) -> Unit
+    ): BluetoothLibrarySyncExchange = client.exchangeLibraryInSession(
+        session = this,
+        cursorRequest = cursorRequest,
+        buildManifestRequest = buildManifestRequest,
+        buildArticleRequests = buildArticleRequests,
+        sessionId = sessionId,
+        onProgress = onProgress,
+        applyResponse = applyResponse
+    )
+
+    suspend fun complete(sessionId: String) {
+        client.finishSession(this, BluetoothSyncProtocol.SESSION_PHASE_COMPLETE, sessionId)
+    }
+
+    suspend fun abort(sessionId: String) {
+        client.finishSession(this, BluetoothSyncProtocol.SESSION_PHASE_ABORT, sessionId)
+    }
+
+    internal fun requestForExchange(request: JSONObject): JSONObject {
+        if (!negotiationPending) return request
+        return BluetoothSyncProtocol.withPersistentSessionRequest(request)
+    }
+
+    internal fun recordNegotiation(response: JSONObject) {
+        if (!negotiationPending) return
+        negotiationPending = false
+        persistentAccepted = BluetoothSyncProtocol.acceptsPersistentSession(response)
+        if (!persistentAccepted) {
+            legacyFallback = true
+            transport?.takeIf { it.closeOnLegacyFallback }?.close()
+            if (transport?.isClosed == true) transport = null
+        }
+    }
+
+    internal fun replaceWith(replacement: PhoneSyncSession) {
+        transport?.close()
+        transport = replacement.transport
+        replacement.transport = null
+        persistentAccepted = replacement.persistentAccepted
+        negotiationPending = replacement.negotiationPending
+        legacyFallback = replacement.legacyFallback
+        ipUpgradeExpected = replacement.ipUpgradeExpected
+        device = replacement.device
+    }
+
+    override fun close() {
+        if (closed) return
+        closed = true
+        transport?.close()
+        transport = null
+    }
+}
 
 class PhoneBluetoothSyncClient(
     private val context: Context,
@@ -189,12 +305,12 @@ class PhoneBluetoothSyncClient(
     fun capabilitiesFor(deviceAddress: String): PhoneWatchCapabilities? =
         synchronized(capabilitiesByAddress) { capabilitiesByAddress[deviceAddress] }
     @SuppressLint("MissingPermission")
-    suspend fun probeLibrarySyncDevices(
+    internal suspend fun probeLibrarySyncDevices(
         deviceId: String,
         sessionId: String = BluetoothDebugLog.newSessionId("bt-library-probe"),
         perDeviceTimeoutMs: Long = DEFAULT_DEVICE_PROBE_TIMEOUT_MS,
         onProbe: (completed: Int, total: Int, result: PhoneBluetoothWatchProbeResult) -> Unit = { _, _, _ -> }
-    ): List<PhoneBluetoothWatchProbeResult> {
+    ): PhoneBluetoothWatchProbeBatch {
         val startedAt = SystemClock.elapsedRealtime()
         debugLog.appendEvent(
             event = "bt.library.probe.start",
@@ -274,19 +390,29 @@ class PhoneBluetoothSyncClient(
                     "elapsedMs" to elapsedSince(startedAt)
                 )
             )
-            return emptyList()
+            return PhoneBluetoothWatchProbeBatch(emptyList())
         }
 
         val results = mutableListOf<PhoneBluetoothWatchProbeResult>()
+        var sessionLease: PhoneSyncSession? = null
         var stoppedAfterPrioritizedReachable = false
         for ((index, device) in candidates.withIndex()) {
-            val result = probeLibrarySyncDevice(
+            val retainSession = shouldRetainProbeSession(
+                candidateCount = candidates.size,
+                candidateAddress = device.address,
+                activeWatchAddresses = activeWatchAddresses,
+                cachedWatchAddress = cachedAddress
+            )
+            val probed = probeLibrarySyncDevice(
                 device = device,
                 deviceId = deviceId,
                 sessionId = "$sessionId-${index + 1}",
-                timeoutMs = perDeviceTimeoutMs
+                timeoutMs = perDeviceTimeoutMs,
+                retainSession = retainSession
             )
+            val result = probed.result
             results += result
+            sessionLease = probed.sessionLease ?: sessionLease
             onProbe(index + 1, candidates.size, result)
             if (
                 shouldStopAfterPrioritizedWatchProbe(
@@ -321,7 +447,14 @@ class PhoneBluetoothSyncClient(
                 "elapsedMs" to elapsedSince(startedAt)
             )
         )
-        return results
+        if (shouldReleaseProbeSession(results.count { it.reachable })) {
+            sessionLease?.runCatching {
+                complete("$sessionId-probe-release")
+            }
+            sessionLease?.close()
+            sessionLease = null
+        }
+        return PhoneBluetoothWatchProbeBatch(results, sessionLease)
     }
 
     @SuppressLint("MissingPermission")
@@ -339,6 +472,274 @@ class PhoneBluetoothSyncClient(
             sessionId = sessionId,
             rememberDeviceOnSuccess = rememberDeviceOnSuccess
         )
+    }
+
+    @SuppressLint("MissingPermission")
+    internal suspend fun openPersistentSession(
+        device: PhoneBluetoothWatchDevice,
+        localDeviceId: String,
+        sessionId: String = BluetoothDebugLog.newSessionId("sync-session-open")
+    ): PhoneSyncSession? {
+        if (!device.supportsPersistentSession) return null
+        requireBluetoothConnectPermission()
+        val adapter = context.getSystemService(BluetoothManager::class.java)
+            ?.adapter
+            ?: error("此设备没有蓝牙适配器")
+        require(adapter.isEnabled) { "蓝牙未开启" }
+        val bluetoothDevice = selectBondedWatchDevice(
+            devices = adapter.bondedDevices.orEmpty(),
+            deviceAddress = device.bluetoothAddress.ifBlank {
+                device.address.takeUnless { it.startsWith(PhoneIpSyncSessionRegistry.IP_DEVICE_PREFIX) }
+            },
+            deviceNameHint = device.name
+        )
+        cancelDiscoveryLogged(adapter, sessionId)
+        val identity = connectionMutex.withLock {
+            probeDirectWithPersistentSessionSdpRecovery(
+                device = bluetoothDevice,
+                deviceId = localDeviceId,
+                sessionId = sessionId
+            )
+        } ?: return null
+        val rfcommSession = identity.session ?: return null
+        val ipSession = identity.takeIf { it.ipUpgradeAccepted && it.deviceId.isNotBlank() }
+            ?.let { awaitIpSession(it.deviceId, IP_UPGRADE_WAIT_MS) }
+        val session = if (ipSession != null) {
+            runCatching { rfcommSession.complete("$sessionId-rfcomm-upgrade") }
+            rfcommSession.close()
+            createIpPhoneSyncSession(bluetoothDevice, localDeviceId, identity, ipSession)
+        } else {
+            rfcommSession
+        }
+        rememberSuccessfulDevice(bluetoothDevice, sessionId)
+        debugLog.appendEvent(
+            event = "sync.session.opened",
+            sessionId = sessionId,
+            fields = mapOf(
+                "deviceAddress" to session.device.address,
+                "bluetoothAddress" to session.device.bluetoothAddress,
+                "persistentAccepted" to session.persistentAccepted,
+                "negotiationPending" to session.negotiationPending
+            )
+        )
+        return session
+    }
+
+    internal suspend fun promoteLateIpSession(
+        session: PhoneSyncSession,
+        sessionId: String
+    ): PhoneSyncSession {
+        val remoteDeviceId = pendingLateIpUpgradeDeviceId(
+            ipUpgradeExpected = session.ipUpgradeExpected,
+            remoteDeviceId = session.device.remoteDeviceId,
+            transportOwner = session.transport?.owner
+        ) ?: return session
+        debugLog.appendEvent(
+            event = "sync.session.ip-upgrade.recheck",
+            sessionId = sessionId,
+            fields = mapOf(
+                "bluetoothAddress" to session.device.bluetoothAddress,
+                "remoteDeviceId" to remoteDeviceId,
+                "waitMs" to LATE_IP_UPGRADE_WAIT_MS
+            )
+        )
+        val ipSession = awaitIpSession(remoteDeviceId, LATE_IP_UPGRADE_WAIT_MS)
+        if (ipSession == null) {
+            debugLog.appendEvent(
+                event = "sync.session.ip-upgrade.recheck-miss",
+                sessionId = sessionId,
+                fields = mapOf(
+                    "bluetoothAddress" to session.device.bluetoothAddress,
+                    "remoteDeviceId" to remoteDeviceId
+                )
+            )
+            return session
+        }
+        debugLog.appendEvent(
+            event = "sync.session.ip-upgrade.late-takeover",
+            sessionId = sessionId,
+            fields = mapOf(
+                "bluetoothAddress" to session.device.bluetoothAddress,
+                "remoteDeviceId" to remoteDeviceId,
+                "route" to ipSession.routeKind.wireName,
+                "remoteAddress" to ipSession.remoteAddress
+            )
+        )
+        runCatching { session.complete("$sessionId-rfcomm-upgrade") }
+            .onFailure { throwable ->
+                debugLog.appendEvent(
+                    event = "sync.session.ip-upgrade.rfcomm-complete-failed",
+                    sessionId = sessionId,
+                    fields = failureFields(throwable) + mapOf(
+                        "bluetoothAddress" to session.device.bluetoothAddress,
+                        "remoteDeviceId" to remoteDeviceId
+                    ),
+                    throwable = throwable
+                )
+            }
+        session.close()
+        return try {
+            createIpPhoneSyncSession(
+                device = session.device,
+                localDeviceId = session.localDeviceId,
+                ipSession = ipSession
+            )
+        } catch (throwable: Throwable) {
+            ipSession.close()
+            throw throwable
+        }
+    }
+
+    internal suspend fun exchangeInSession(
+        session: PhoneSyncSession,
+        request: JSONObject,
+        sessionId: String
+    ): BluetoothSyncExchange {
+        if (session.legacyFallback) {
+            return exchange(
+                request = request,
+                deviceAddress = session.device.address,
+                deviceNameHint = session.device.name,
+                sessionId = sessionId
+            )
+        }
+        return executeSessionOperation(session, sessionId, request.optString("action")) {
+            connectionMutex.withLock {
+                val transport = session.transport ?: error("持久同步连接已关闭")
+                val wireRequest = session.requestForExchange(request)
+                writeFrameLogged(transport.outputStream, sessionId, "sessionRequest", wireRequest)
+                val response = readFrameLogged(transport.inputStream, sessionId, "sessionResponse")
+                writeResponseAck(transport.outputStream, sessionId, success = true, applied = true)
+                session.recordNegotiation(response)
+                BluetoothSyncExchange(
+                    deviceName = session.device.name,
+                    deviceAddress = session.device.address,
+                    request = request,
+                    response = response
+                )
+            }
+        }
+    }
+
+    internal suspend fun exchangeLibraryInSession(
+        session: PhoneSyncSession,
+        cursorRequest: JSONObject,
+        buildManifestRequest: suspend (String, JSONObject?) -> JSONObject,
+        buildArticleRequests: suspend (JSONObject, Boolean) -> List<JSONObject>,
+        sessionId: String,
+        onProgress: (PhoneBluetoothSyncProgress) -> Unit,
+        applyResponse: suspend (BluetoothLibrarySyncExchange) -> Unit
+    ): BluetoothLibrarySyncExchange {
+        if (session.legacyFallback) {
+            return exchangeLibrary(
+                cursorRequest = cursorRequest,
+                buildManifestRequest = buildManifestRequest,
+                buildArticleRequests = buildArticleRequests,
+                deviceAddress = session.device.address,
+                deviceNameHint = session.device.name,
+                sessionId = sessionId,
+                onProgress = onProgress,
+                applyResponse = applyResponse
+            )
+        }
+        return executeSessionOperation(
+            session = session,
+            sessionId = sessionId,
+            action = BluetoothSyncProtocol.ACTION_SYNC_LIBRARY
+        ) {
+            connectionMutex.withLock {
+                exchangeLibraryOnSessionTransport(
+                    session = session,
+                    cursorRequest = cursorRequest,
+                    buildManifestRequest = buildManifestRequest,
+                    buildArticleRequests = buildArticleRequests,
+                    sessionId = sessionId,
+                    onProgress = onProgress,
+                    applyResponse = applyResponse
+                )
+            }
+        }
+    }
+
+    internal suspend fun finishSession(
+        session: PhoneSyncSession,
+        phase: String,
+        sessionId: String
+    ) {
+        if (session.legacyFallback || session.transport == null) {
+            session.close()
+            return
+        }
+        try {
+            connectionMutex.withLock {
+                val transport = session.transport ?: return@withLock
+                val request = session.requestForExchange(
+                    BluetoothSyncProtocol.buildSessionControlRequest(
+                        version = LibrarySyncPayload.PROTOCOL_VERSION,
+                        phase = phase
+                    )
+                )
+                writeFrameLogged(transport.outputStream, sessionId, "sessionFinishRequest", request)
+                val response = readFrameLogged(
+                    transport.inputStream,
+                    sessionId,
+                    "sessionFinishResponse"
+                )
+                require(response.optBoolean("success", false)) {
+                    response.optString("message").ifBlank { "手表未确认结束同步会话" }
+                }
+                require(response.optString("action") == BluetoothSyncProtocol.ACTION_SYNC_SESSION) {
+                    "手表返回了错误的同步会话结束响应"
+                }
+                require(response.optString("phase") == phase) { "手表同步会话结束阶段不匹配" }
+                writeResponseAck(transport.outputStream, sessionId, success = true, applied = true)
+                session.recordNegotiation(response)
+            }
+        } finally {
+            debugLog.appendEvent(
+                event = "sync.session.closed",
+                sessionId = sessionId,
+                fields = mapOf("phase" to phase, "deviceAddress" to session.device.address)
+            )
+            session.close()
+        }
+    }
+
+    private suspend fun <T> executeSessionOperation(
+        session: PhoneSyncSession,
+        sessionId: String,
+        action: String,
+        block: suspend () -> T
+    ): T {
+        val cancellationHandle = installSessionCancellationLogger(session, sessionId, action)
+        try {
+            return block()
+        } catch (throwable: Throwable) {
+            if (
+                throwable is CancellationException ||
+                !isSessionTransportFailure(throwable) ||
+                !session.recoveryGate.tryAcquire()
+            ) {
+                throw throwable
+            }
+            debugLog.appendEvent(
+                event = "sync.session.recover",
+                sessionId = sessionId,
+                fields = failureFields(throwable) + mapOf("action" to action),
+                throwable = throwable
+            )
+            session.transport?.close()
+            session.transport = null
+            val replacement = openPersistentSession(
+                device = session.device,
+                localDeviceId = session.localDeviceId,
+                sessionId = "$sessionId-recovery"
+            ) ?: throw throwable
+            session.replaceWith(replacement)
+            return block()
+        } finally {
+            cancellationHandle?.dispose()
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -1114,13 +1515,174 @@ class PhoneBluetoothSyncClient(
         }
     }
 
+    private suspend fun exchangeLibraryOnSessionTransport(
+        session: PhoneSyncSession,
+        cursorRequest: JSONObject,
+        buildManifestRequest: suspend (String, JSONObject?) -> JSONObject,
+        buildArticleRequests: suspend (JSONObject, Boolean) -> List<JSONObject>,
+        sessionId: String,
+        onProgress: (PhoneBluetoothSyncProgress) -> Unit,
+        applyResponse: suspend (BluetoothLibrarySyncExchange) -> Unit
+    ): BluetoothLibrarySyncExchange {
+        val transport = session.transport ?: error("持久同步连接已关闭")
+        val startedAt = SystemClock.elapsedRealtime()
+        val tracker = ByteTransferTracker().apply { start() }
+        var lastProgressStage: PhoneBluetoothSyncStage? = null
+        var lastProgressPercent = -1
+        fun report(stage: PhoneBluetoothSyncStage, percent: Int, force: Boolean = false) {
+            val clamped = percent.coerceIn(0, 100)
+            if (!force && lastProgressStage == stage && lastProgressPercent == clamped) return
+            lastProgressStage = stage
+            lastProgressPercent = clamped
+            onProgress(
+                PhoneBluetoothSyncProgress(
+                    stage = stage,
+                    percent = clamped,
+                    bytesTransferred = tracker.bytesTransferred(),
+                    bytesPerSecond = tracker.bytesPerSecond()
+                )
+            )
+        }
+        report(PhoneBluetoothSyncStage.CONNECTING, 5, force = true)
+        val wireCursorRequest = session.requestForExchange(cursorRequest)
+        writeFrameLogged(
+            transport.outputStream,
+            sessionId,
+            "sessionCursorRequest",
+            wireCursorRequest,
+            tracker
+        )
+        val cursorResponse = readFrameLogged(
+            transport.inputStream,
+            sessionId,
+            "sessionCursorResponse",
+            tracker
+        ).also { response ->
+            require(response.optBoolean("success", false)) {
+                response.optString("message").ifBlank { "手表游标握手失败" }
+            }
+            requireSupportedLibraryProtocol(response)
+            require(response.optString("phase") == LibrarySyncPayload.PHASE_CURSOR) {
+                "手表未返回资料库游标"
+            }
+            session.recordNegotiation(response)
+            require(!session.legacyFallback) { "手表未接受持久同步会话" }
+        }
+        val peerDeviceId = cursorResponse.optString("deviceId").trim()
+            .ifBlank { session.device.remoteDeviceId.ifBlank { session.device.address } }
+        val request = buildManifestRequest(peerDeviceId, cursorResponse)
+        val manifestRequests = if (LibrarySyncPayload.supportsManifestBatches(cursorResponse)) {
+            LibrarySyncPayload.buildManifestFrames(request)
+        } else {
+            listOf(request)
+        }
+        manifestRequests.forEachIndexed { index, frame ->
+            writeFrameLogged(
+                transport.outputStream,
+                sessionId,
+                batchLabel("sessionManifestRequest", index, manifestRequests.size),
+                frame,
+                tracker
+            )
+        }
+        report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
+        val manifestResponse = readManifestFrames(transport.inputStream, sessionId, tracker)
+        if (!manifestResponse.optBoolean("success", true)) {
+            writeResponseAck(transport.outputStream, sessionId, success = true, applied = true)
+            return BluetoothLibrarySyncExchange(
+                deviceName = session.device.name,
+                deviceAddress = session.device.address,
+                cursorResponse = cursorResponse,
+                request = request,
+                manifestResponse = manifestResponse,
+                articleRequestFrameCount = 0,
+                responseFrameCount = 1,
+                response = manifestResponse
+            )
+        }
+        val supportsArticleBatches = manifestResponse.optBoolean("supportsArticleBatches", false)
+        val articleRequests = buildArticleRequests(manifestResponse, supportsArticleBatches)
+        val articleRequestStats = frameStats(articleRequests)
+        var requestWireBytesSent = 0L
+        val requestTotalWireBytes = articleRequestStats.totalWireBytes.coerceAtLeast(1L)
+        report(PhoneBluetoothSyncStage.TRANSFERRING, 30)
+        articleRequests.forEachIndexed { index, articleRequest ->
+            writeFrameLogged(
+                outputStream = transport.outputStream,
+                sessionId = sessionId,
+                label = batchLabel("sessionArticlesRequest", index, articleRequests.size),
+                payload = articleRequest,
+                byteTracker = tracker,
+                onBytesTransferred = { bytes ->
+                    requestWireBytesSent += bytes
+                    report(
+                        PhoneBluetoothSyncStage.TRANSFERRING,
+                        percentBetweenBytes(30, 58, requestWireBytesSent, requestTotalWireBytes)
+                    )
+                }
+            )
+        }
+        report(PhoneBluetoothSyncStage.TRANSFERRING, 58)
+        val responseRead = readLibraryResponse(
+            transport.inputStream,
+            sessionId,
+            onProgress,
+            tracker
+        )
+        val exchange = BluetoothLibrarySyncExchange(
+            deviceName = session.device.name,
+            deviceAddress = session.device.address,
+            cursorResponse = cursorResponse,
+            request = request,
+            manifestResponse = manifestResponse,
+            articleRequestFrameCount = articleRequests.size,
+            responseFrameCount = responseRead.stats.frameCount,
+            response = responseRead.response
+        )
+        report(PhoneBluetoothSyncStage.VERIFYING, 88)
+        if (manifestResponse.optBoolean("supportsReceivedAck", false)) {
+            writeResponseAck(
+                outputStream = transport.outputStream,
+                sessionId = sessionId,
+                success = true,
+                applied = false,
+                phase = BluetoothSyncProtocol.ACK_PHASE_RECEIVED
+            )
+        }
+        try {
+            applyResponse(exchange)
+            writeResponseAck(transport.outputStream, sessionId, success = true, applied = true)
+        } catch (throwable: Throwable) {
+            writeResponseAck(
+                outputStream = transport.outputStream,
+                sessionId = sessionId,
+                success = false,
+                applied = false,
+                message = throwable.message
+            )
+            throw throwable
+        }
+        debugLog.appendEvent(
+            event = "sync.session.library.complete",
+            sessionId = sessionId,
+            fields = frameStatsFields("articlesRequest", articleRequestStats) +
+                frameStatsFields("libraryResponse", responseRead.stats) +
+                mapOf(
+                    "deviceAddress" to session.device.address,
+                    "elapsedMs" to elapsedSince(startedAt)
+                )
+        )
+        return exchange
+    }
+
     @SuppressLint("MissingPermission")
     private suspend fun probeLibrarySyncDevice(
         device: BluetoothDevice,
         deviceId: String,
         sessionId: String,
-        timeoutMs: Long
-    ): PhoneBluetoothWatchProbeResult {
+        timeoutMs: Long,
+        retainSession: Boolean
+    ): ProbedWatch {
         debugLog.appendEvent(
             event = "bt.library.probe.device.start",
             sessionId = sessionId,
@@ -1134,23 +1696,56 @@ class PhoneBluetoothSyncClient(
                 fallbackTimeoutMs = timeoutMs
             )
         }
-        val ipSession = result.getOrNull()
+        val identity = result.getOrNull()
+        val ipSession = identity
             ?.takeIf { it.ipUpgradeAccepted && it.deviceId.isNotBlank() }
             ?.let { awaitIpSession(it.deviceId, IP_UPGRADE_WAIT_MS) }
+        var sessionLease = identity?.session
+        if (ipSession != null && sessionLease != null) {
+            runCatching { sessionLease.complete("$sessionId-rfcomm-upgrade") }
+            sessionLease.close()
+            sessionLease = if (retainSession) {
+                createIpPhoneSyncSession(device, deviceId, identity, ipSession)
+            } else {
+                ipSession.close()
+                null
+            }
+        } else if (!retainSession) {
+            sessionLease?.let { lease ->
+                runCatching { lease.complete("$sessionId-probe-complete") }
+                lease.close()
+            }
+            sessionLease = null
+            ipSession?.close()
+        }
+        val keepLegacyIpSession =
+            retainSession && sessionLease == null && ipSession != null &&
+                identity?.supportsPersistentSession == false
         val probe = result.fold(
             onSuccess = { identity ->
                 PhoneBluetoothWatchProbeResult(
-                    device = ipSession?.let { session ->
+                    device = sessionLease?.device ?: ipSession?.takeIf { keepLegacyIpSession }?.let { session ->
                         PhoneBluetoothWatchDevice(
                             name = "${device.name.orEmpty()} (${session.routeKind.wireName})",
                             address = PhoneIpSyncSessionRegistry.IP_DEVICE_PREFIX + identity.deviceId,
                             uuidCount = device.uuids?.size ?: 0,
                             remoteDeviceId = identity.deviceId,
-                            bluetoothAddress = device.address
+                            bluetoothAddress = device.address,
+                            supportsPersistentSession = identity.supportsPersistentSession
                         )
-                    } ?: device.toWatchDevice(identity.deviceId),
+                    } ?: device.toWatchDevice(
+                        remoteDeviceId = identity.deviceId,
+                        supportsPersistentSession = identity.supportsPersistentSession
+                    ),
                     reachable = true,
-                    message = if (ipSession != null) "已通过蓝牙升级到 IP" else null,
+                    message = if (sessionLease?.device?.address?.startsWith(
+                            PhoneIpSyncSessionRegistry.IP_DEVICE_PREFIX
+                        ) == true || keepLegacyIpSession
+                    ) {
+                        "已通过蓝牙升级到 IP"
+                    } else {
+                        null
+                    },
                     capabilities = identity.capabilities
                 )
             },
@@ -1178,7 +1773,7 @@ class PhoneBluetoothSyncClient(
                 "message" to probe.message.orEmpty()
             )
         )
-        return probe
+        return ProbedWatch(probe, sessionLease)
     }
 
     private suspend fun probeLibrarySyncDeviceWithManifestFallback(
@@ -1187,37 +1782,22 @@ class PhoneBluetoothSyncClient(
         sessionId: String,
         fallbackTimeoutMs: Long
     ): ProbeIdentity {
-        val exchange = probeDirectWithSdpRecovery(device, deviceId, sessionId)
-        if (exchange != null && LibrarySyncPayload.isProbeResponse(exchange.response)) {
-            requireSupportedLibraryProtocol(exchange.response)
+        val direct = probeDirectWithPersistentSessionSdpRecovery(device, deviceId, sessionId)
+        if (direct != null) {
             debugLog.appendEvent(
                 event = "bt.library.probe.direct.success",
                 sessionId = sessionId,
-                fields = payloadFields("probeResponse", exchange.response)
+                fields = mapOf(
+                    "deviceId" to direct.deviceId,
+                    "persistentSessionAccepted" to direct.persistentSessionAccepted
+                )
             )
-            return ProbeIdentity(
-                exchange.response.optString("deviceId").trim(),
-                exchange.response.optJSONObject("watchCapabilities")?.toWatchCapabilities(),
-                exchange.response.optBoolean(FIELD_IP_UPGRADE_ACCEPTED, false)
-            )
-        }
-        if (exchange != null && exchange.response.optBoolean("success", false)) {
-            requireSupportedLibraryProtocol(exchange.response)
-            debugLog.appendEvent(
-                event = "bt.library.probe.direct.compat.success",
-                sessionId = sessionId,
-                fields = payloadFields("probeResponse", exchange.response)
-            )
-            return ProbeIdentity(
-                exchange.response.optString("deviceId").trim(),
-                exchange.response.optJSONObject("watchCapabilities")?.toWatchCapabilities(),
-                exchange.response.optBoolean(FIELD_IP_UPGRADE_ACCEPTED, false)
-            )
+            return direct
         }
         debugLog.appendEvent(
             event = "bt.library.probe.direct.compat.fallback",
             sessionId = sessionId,
-            fields = payloadFields("probeResponse", exchange.response)
+            fields = emptyMap()
         )
         return withTimeout(fallbackTimeoutMs) {
             exchangeLibrary(
@@ -1235,9 +1815,122 @@ class PhoneBluetoothSyncClient(
                 ProbeIdentity(
                     it.optString("deviceId").trim(),
                     it.optJSONObject("watchCapabilities")?.toWatchCapabilities(),
-                    it.optBoolean(FIELD_IP_UPGRADE_ACCEPTED, false)
+                    it.optBoolean(FIELD_IP_UPGRADE_ACCEPTED, false),
+                    it.optBoolean(BluetoothSyncProtocol.FIELD_SUPPORTS_PERSISTENT_SESSION, false),
+                    false
                 )
             }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun probeDirectWithPersistentSessionSdpRecovery(
+        device: BluetoothDevice,
+        deviceId: String,
+        sessionId: String
+    ): ProbeIdentity? {
+        var fastFailureRetries = 0
+        while (true) {
+            val attempt = fastFailureRetries + 1
+            val attemptStartedAt = SystemClock.elapsedRealtime()
+            val attemptSessionId = if (attempt == 1) {
+                "$sessionId-direct"
+            } else {
+                "$sessionId-direct-retry${attempt - 1}"
+            }
+            val result = runCatching {
+                withTimeout(DIRECT_PROBE_TIMEOUT_MS) {
+                    probeDirectPersistentOnce(device, deviceId, attemptSessionId)
+                }
+            }
+            if (result.isSuccess) return result.getOrThrow()
+            val throwable = result.exceptionOrNull() ?: error("蓝牙探测失败但没有异常")
+            if (throwable is CancellationException) currentCoroutineContext().ensureActive()
+            val elapsedMs = elapsedSince(attemptStartedAt)
+            val recovery = sdpProbeFailureRecovery(
+                elapsedMs = elapsedMs,
+                timedOut = throwable is TimeoutCancellationException,
+                completedFastFailureRetries = fastFailureRetries
+            )
+            debugLog.appendEvent(
+                event = "bt.library.probe.direct.failed",
+                sessionId = sessionId,
+                fields = failureFields(throwable) + mapOf(
+                    "attempt" to attempt,
+                    "elapsedMs" to elapsedMs,
+                    "recoveryDelayMs" to recovery.delayMs,
+                    "retrySameCandidate" to recovery.retrySameCandidate
+                ),
+                throwable = throwable
+            )
+            delay(recovery.delayMs)
+            if (recovery.retrySameCandidate) {
+                fastFailureRetries += 1
+                continue
+            }
+            throw throwable
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun probeDirectPersistentOnce(
+        device: BluetoothDevice,
+        deviceId: String,
+        sessionId: String
+    ): ProbeIdentity? {
+        var socket: BluetoothSocket? = null
+        return try {
+            socket = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
+            connectLogged(socket, sessionId, device)
+            val request = BluetoothSyncProtocol.withPersistentSessionRequest(
+                LibrarySyncPayload.buildProbeRequest(deviceId)
+            ).apply {
+                (context.applicationContext as? PhoneCompanionApplication)
+                    ?.currentIpEndpointDescriptorForSync()
+                    ?.let { put(FIELD_IP_ENDPOINT_DESCRIPTOR, it) }
+            }
+            writeFrameLogged(socket, sessionId, "probeRequest", request)
+            val response = readFrameLogged(socket, sessionId, "probeResponse")
+            writeResponseAck(socket, sessionId, success = true, applied = true)
+            val connectedSocket = checkNotNull(socket)
+            if (!response.optBoolean("success", false)) {
+                closeSocketLogged(connectedSocket, sessionId, "probe-rejected")
+                socket = null
+                null
+            } else {
+                requireSupportedLibraryProtocol(response)
+                val supportsPersistent = response.optBoolean(
+                    BluetoothSyncProtocol.FIELD_SUPPORTS_PERSISTENT_SESSION,
+                    false
+                )
+                val accepted = supportsPersistent && response.optBoolean(
+                    BluetoothSyncProtocol.FIELD_PERSISTENT_SESSION_ACCEPTED,
+                    false
+                )
+                ProbeIdentity(
+                    deviceId = response.optString("deviceId").trim(),
+                    capabilities = response.optJSONObject("watchCapabilities")?.toWatchCapabilities(),
+                    ipUpgradeAccepted = response.optBoolean(FIELD_IP_UPGRADE_ACCEPTED, false),
+                    supportsPersistentSession = supportsPersistent,
+                    persistentSessionAccepted = accepted,
+                    session = if (accepted) {
+                        createBluetoothPhoneSyncSession(
+                            device,
+                            deviceId,
+                            response,
+                            connectedSocket
+                        ).also {
+                            socket = null
+                        }
+                    } else {
+                        closeSocketLogged(connectedSocket, sessionId, "probe-legacy")
+                        socket = null
+                        null
+                    }
+                )
+            }
+        } finally {
+            socket?.let { closeSocketLogged(it, sessionId, "probe") }
         }
     }
 
@@ -1308,6 +2001,83 @@ class PhoneBluetoothSyncClient(
             delay(IP_UPGRADE_POLL_INTERVAL_MS)
         }
         return PhoneIpSyncSessionRegistry.session(deviceId)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun createBluetoothPhoneSyncSession(
+        device: BluetoothDevice,
+        localDeviceId: String,
+        response: JSONObject,
+        socket: BluetoothSocket
+    ): PhoneSyncSession {
+        val remoteDeviceId = response.optString("deviceId").trim()
+        val watchDevice = device.toWatchDevice(
+            remoteDeviceId = remoteDeviceId,
+            supportsPersistentSession = true
+        )
+        return PhoneSyncSession(
+            client = this,
+            device = watchDevice,
+            localDeviceId = localDeviceId,
+            transport = PhoneSyncSession.Transport(
+                inputStream = socket.inputStream,
+                outputStream = socket.outputStream,
+                owner = "rfcomm",
+                closeOnLegacyFallback = true,
+                closeTransport = { runCatching { socket.close() } }
+            ),
+            persistentAccepted = true,
+            negotiationPending = false,
+            ipUpgradeExpected = response.optBoolean(FIELD_IP_UPGRADE_ACCEPTED, false)
+        )
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun createIpPhoneSyncSession(
+        device: BluetoothDevice,
+        localDeviceId: String,
+        identity: ProbeIdentity,
+        ipSession: PhoneIpSyncSession
+    ): PhoneSyncSession = createIpPhoneSyncSession(
+        device = PhoneBluetoothWatchDevice(
+            name = device.name.orEmpty(),
+            address = PhoneIpSyncSessionRegistry.IP_DEVICE_PREFIX + identity.deviceId,
+            uuidCount = device.uuids?.size ?: 0,
+            remoteDeviceId = identity.deviceId,
+            bluetoothAddress = device.address,
+            supportsPersistentSession = true
+        ),
+        localDeviceId = localDeviceId,
+        ipSession = ipSession
+    )
+
+    private fun createIpPhoneSyncSession(
+        device: PhoneBluetoothWatchDevice,
+        localDeviceId: String,
+        ipSession: PhoneIpSyncSession
+    ): PhoneSyncSession {
+        val remoteDeviceId = device.remoteDeviceId.ifBlank { ipSession.watchDeviceId }
+        val watchDevice = device.copy(
+            name = "${device.name} (${ipSession.routeKind.wireName})",
+            address = PhoneIpSyncSessionRegistry.IP_DEVICE_PREFIX + remoteDeviceId,
+            remoteDeviceId = remoteDeviceId,
+            supportsPersistentSession = true
+        )
+        return PhoneSyncSession(
+            client = this,
+            device = watchDevice,
+            localDeviceId = localDeviceId,
+            transport = PhoneSyncSession.Transport(
+                inputStream = ipSession.inputStream,
+                outputStream = ipSession.outputStream,
+                owner = "ip:${ipSession.routeKind.wireName}",
+                closeOnLegacyFallback = false,
+                closeTransport = { ipSession.close() }
+            ),
+            persistentAccepted = false,
+            negotiationPending = true,
+            ipUpgradeExpected = false
+        )
     }
 
     private fun requireSupportedLibraryProtocol(payload: JSONObject) {
@@ -2002,6 +2772,30 @@ class PhoneBluetoothSyncClient(
     }
 
     @OptIn(InternalCoroutinesApi::class)
+    private suspend fun installSessionCancellationLogger(
+        session: PhoneSyncSession,
+        sessionId: String,
+        action: String
+    ) = currentCoroutineContext()[Job]?.invokeOnCompletion(
+        onCancelling = true,
+        invokeImmediately = false
+    ) { cause ->
+        if (cause !is CancellationException) return@invokeOnCompletion
+        val transport = session.transport ?: return@invokeOnCompletion
+        runCatching { transport.close() }
+        if (session.transport === transport) session.transport = null
+        debugLog.appendEvent(
+            event = "sync.session.close.cancelled",
+            sessionId = sessionId,
+            fields = mapOf(
+                "action" to action,
+                "owner" to transport.owner,
+                "message" to cause.message.orEmpty()
+            )
+        )
+    }
+
+    @OptIn(InternalCoroutinesApi::class)
     private suspend fun installSocketCancellationLogger(
         sessionId: String,
         owner: String,
@@ -2156,6 +2950,24 @@ class PhoneBluetoothSyncClient(
         return false
     }
 
+    private fun isSessionTransportFailure(throwable: Throwable): Boolean {
+        if (isIpTransportFailure(throwable)) return true
+        var current: Throwable? = throwable
+        while (current != null) {
+            val message = current.message.orEmpty().lowercase()
+            if (
+                message.contains("connection reset") ||
+                message.contains("bluetooth socket failure") ||
+                message.contains("socket closed") ||
+                message.contains("持久同步连接已关闭")
+            ) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
+    }
+
     @SuppressLint("MissingPermission")
     private fun rememberSuccessfulDevice(device: BluetoothDevice, sessionId: String) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -2197,12 +3009,16 @@ class PhoneBluetoothSyncClient(
     }
 
     @SuppressLint("MissingPermission")
-    private fun BluetoothDevice.toWatchDevice(remoteDeviceId: String = ""): PhoneBluetoothWatchDevice =
+    private fun BluetoothDevice.toWatchDevice(
+        remoteDeviceId: String = "",
+        supportsPersistentSession: Boolean = false
+    ): PhoneBluetoothWatchDevice =
         PhoneBluetoothWatchDevice(
             name = name.orEmpty(),
             address = address,
             uuidCount = uuids?.size ?: 0,
-            remoteDeviceId = remoteDeviceId
+            remoteDeviceId = remoteDeviceId,
+            supportsPersistentSession = supportsPersistentSession
         )
 
     private fun payloadFields(prefix: String, payload: JSONObject): Map<String, Any?> {
@@ -2317,10 +3133,10 @@ class PhoneBluetoothSyncClient(
         private const val SDP_BUSY_FAST_FAILURE_THRESHOLD_MS = 1_000L
         private const val SDP_STACK_DRAIN_DELAY_MS = 1_500L
         private const val MAX_FAST_SDP_FAILURE_RETRIES = 1
-        // The paired RFCOMM probe has already proved reachability. Do not hold the user in the
-        // discovery UI while a same-LAN route is unavailable; late IP routes are discarded by
-        // the watch once the RFCOMM transfer begins.
-        private const val IP_UPGRADE_WAIT_MS = 1_000L
+        // The paired RFCOMM probe has already proved reachability. Keep the initial wait bounded;
+        // a route that arrives after it is checked once more by remoteDeviceId before transfer.
+        private const val IP_UPGRADE_WAIT_MS = 3_000L
+        private const val LATE_IP_UPGRADE_WAIT_MS = 1_000L
         private const val IP_UPGRADE_POLL_INTERVAL_MS = 50L
         private const val FIELD_IP_ENDPOINT_DESCRIPTOR = "ipEndpointDescriptor"
         private const val FIELD_IP_UPGRADE_ACCEPTED = "ipUpgradeAccepted"
@@ -2382,6 +3198,37 @@ internal data class SdpProbeFailureRecovery(
     val delayMs: Long,
     val retrySameCandidate: Boolean
 )
+
+internal class SingleSessionRecoveryGate {
+    private var acquired = false
+
+    fun tryAcquire(): Boolean {
+        if (acquired) return false
+        acquired = true
+        return true
+    }
+}
+
+internal fun pendingLateIpUpgradeDeviceId(
+    ipUpgradeExpected: Boolean,
+    remoteDeviceId: String,
+    transportOwner: String?
+): String? = remoteDeviceId.trim().takeIf {
+    ipUpgradeExpected &&
+        it.isNotEmpty() &&
+        transportOwner == "rfcomm"
+}
+
+internal fun shouldRetainProbeSession(
+    candidateCount: Int,
+    candidateAddress: String,
+    activeWatchAddresses: Set<String>,
+    cachedWatchAddress: String?
+): Boolean = candidateCount == 1 ||
+    candidateAddress.uppercase() in activeWatchAddresses ||
+    candidateAddress.equals(cachedWatchAddress, ignoreCase = true)
+
+internal fun shouldReleaseProbeSession(reachableCount: Int): Boolean = reachableCount != 1
 
 internal fun shouldStopAfterPrioritizedWatchProbe(
     candidateAddress: String,

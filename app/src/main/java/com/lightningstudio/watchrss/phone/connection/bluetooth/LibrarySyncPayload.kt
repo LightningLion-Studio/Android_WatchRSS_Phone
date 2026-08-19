@@ -61,7 +61,7 @@ data class LibrarySyncCursor(
 )
 
 object LibrarySyncPayload {
-    const val PROTOCOL_VERSION = 13
+    const val PROTOCOL_VERSION = 14
     const val MIN_SUPPORTED_WATCH_PROTOCOL_VERSION = 13
     const val LEGACY_PROTOCOL_VERSION = 4
     const val MAX_BODY_REQUEST_CHUNKS_PER_SYNC = Int.MAX_VALUE
@@ -116,6 +116,7 @@ object LibrarySyncPayload {
             put("supportsReaderAssets", true)
             put("supportsResourceChunkAck", true)
             put("supportsReaderPresetPreview", true)
+            put(BluetoothSyncProtocol.FIELD_SUPPORTS_PERSISTENT_SESSION, true)
             put(FIELD_SUPPORTS_TRANSFER_BYTE_PROGRESS, true)
             put("deviceId", deviceId)
             put("sentAt", System.currentTimeMillis())

@@ -10,6 +10,16 @@ import org.junit.Test
 
 class LibrarySyncPayloadTest {
     @Test
+    fun protocolV14_keepsV13WatchCompatibility() {
+        assertEquals(14, LibrarySyncPayload.PROTOCOL_VERSION)
+        assertEquals(13, LibrarySyncPayload.MIN_SUPPORTED_WATCH_PROTOCOL_VERSION)
+        assertTrue(
+            LibrarySyncPayload.buildProbeRequest("phone")
+                .getBoolean(BluetoothSyncProtocol.FIELD_SUPPORTS_PERSISTENT_SESSION)
+        )
+    }
+
+    @Test
     fun manifestFrames_splitAndReassemblePayloadLargerThanTransportFrame() {
         val manifest = JSONArray().also { array ->
             repeat(5_600) { index ->

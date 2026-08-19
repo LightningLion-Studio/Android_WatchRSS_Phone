@@ -3,7 +3,6 @@ package com.lightningstudio.watchrss.phone
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
-import android.net.Uri
 import android.os.Bundle
 import android.webkit.CookieManager
 import android.webkit.WebView
@@ -133,8 +132,10 @@ class BiliWatchLoginActivity : ComponentActivity() {
 
     private fun openQrUrlInBili() {
         if (qrUrl.isBlank()) return
-        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(qrUrl)))
-        status = "已打开 B 站，请完成确认"
+        // 没有可打开的应用（B 站/浏览器）时由 openExternally 弹出阻断式提示。
+        if (openExternally(qrUrl)) {
+            status = "已打开 B 站，请完成确认"
+        }
     }
 
     private fun completeFromWebCookies() {

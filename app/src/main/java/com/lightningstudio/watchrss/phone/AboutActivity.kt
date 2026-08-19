@@ -3,8 +3,6 @@ package com.lightningstudio.watchrss.phone
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -56,9 +54,7 @@ class AboutActivity : ComponentActivity() {
                         )
                     },
                     onBeianClick = {
-                        val intent = Intent(Intent.ACTION_VIEW)
-                        intent.data = Uri.parse("https://beian.miit.gov.cn/")
-                        startActivity(intent)
+                        openExternally("https://beian.miit.gov.cn/")
                     }
                 )
             }

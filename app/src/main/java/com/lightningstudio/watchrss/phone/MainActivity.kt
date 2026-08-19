@@ -1,7 +1,6 @@
 package com.lightningstudio.watchrss.phone
 
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -262,7 +261,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 is AppAccessState.PaymentPending -> GateMessage("等待支付确认", "订单 ${state.order.merchantOrderId}") {
-                    state.order.paymentUrl?.let { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it))) }
+                    state.order.paymentUrl?.let { openExternally(it) }
                 }
                 is AppAccessState.Revoked -> GateMessage("本手机授权已撤销", state.summary.revokeReason ?: "设备名额已被较新的登录占用") { reauthenticate() }
                 is AppAccessState.ReauthenticationRequired -> GateMessage("请重新验证账号", "验证后本手机将成为最新授权设备") { reauthenticate() }
@@ -369,9 +368,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             runCatching { coordinator.startPayment(agreementAccepted = true) }
                 .onSuccess { order ->
-                    order.paymentUrl?.let {
-                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it)))
-                    }
+                    order.paymentUrl?.let { openExternally(it) }
                     startPaymentPolling()
                 }
                 .onFailure {

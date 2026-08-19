@@ -151,6 +151,12 @@
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />
         <activity
+            android:name=".NoBrowserDialogActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@style/Theme.WatchRSS.Overlay" />
+        <activity
             android:name=".ContactDeveloperActivity"
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />

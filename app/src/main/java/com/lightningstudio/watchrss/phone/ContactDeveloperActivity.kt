@@ -39,6 +39,7 @@ import com.lightningstudio.watchrss.phone.ui.theme.roundedCombinedClickable
 
 private const val WATCH_RSS_QQ_GROUP_NUMBER = "1083518433"
 private const val WATCH_RSS_QQ_GROUP_URL = "https://qm.qq.com/q/cJNTQuxfoW"
+private const val BEIAN_MIIT_URL = "https://beian.miit.gov.cn/"
 
 class ContactDeveloperActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -49,21 +50,19 @@ class ContactDeveloperActivity : ComponentActivity() {
                 ContactDeveloperScreen(
                     onBack = onBack,
                     onJoinQQ = {
-                        try {
-                            val intent = Intent(Intent.ACTION_VIEW)
-                            intent.data = Uri.parse("mqqopensdkapi://bizAgent/qm/qr?url=http%3A%2F%2Fqm.qq.com%2Fcgi-bin%2Fqm%2Fqr%3Ffrom%3Dapp%26p%3Dandroid%26jump_from%3Dwebapi%26k%3D1083518433")
-                            startActivity(intent)
-                        } catch (e: Exception) {
-                            // 如果没有安装QQ，打开浏览器
-                            val intent = Intent(Intent.ACTION_VIEW)
-                            intent.data = Uri.parse("https://qm.qq.com/q/cJNTQuxfoW")
-                            startActivity(intent)
+                        val qqIntent = Intent(Intent.ACTION_VIEW).apply {
+                            data = Uri.parse(
+                                "mqqopensdkapi://bizAgent/qm/qr?url=http%3A%2F%2Fqm.qq.com%2Fcgi-bin%2Fqm%2Fqr" +
+                                    "%3Ffrom%3Dapp%26p%3Dandroid%26jump_from%3Dwebapi%26k%3D1083518433"
+                            )
+                        }
+                        // 未安装 QQ 时降级到浏览器；无浏览器时由 openExternally 弹出阻断式提示。
+                        if (runCatching { startActivity(qqIntent) }.isFailure) {
+                            openExternally(WATCH_RSS_QQ_GROUP_URL)
                         }
                     },
                     onBeianClick = {
-                        val intent = Intent(Intent.ACTION_VIEW)
-                        intent.data = Uri.parse("https://beian.miit.gov.cn/")
-                        startActivity(intent)
+                        openExternally(BEIAN_MIIT_URL)
                     }
                 )
             }

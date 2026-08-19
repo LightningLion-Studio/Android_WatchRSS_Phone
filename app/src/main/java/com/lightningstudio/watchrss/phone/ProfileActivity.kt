@@ -119,12 +119,7 @@ class ProfileActivity : ComponentActivity() {
                         )
                     },
                     onBeianClick = {
-                        startActivity(
-                            Intent(
-                                Intent.ACTION_VIEW,
-                                Uri.parse("https://beian.miit.gov.cn/")
-                            )
-                        )
+                        openExternally("https://beian.miit.gov.cn/")
                     },
                     accountContent = { leadingPane, onClose ->
                         AccountScreen(
@@ -187,12 +182,7 @@ class ProfileActivity : ComponentActivity() {
                                     )
                                 },
                                 onBeianClick = {
-                                    startActivity(
-                                        Intent(
-                                            Intent.ACTION_VIEW,
-                                            Uri.parse("https://beian.miit.gov.cn/")
-                                        )
-                                    )
+                                    openExternally("https://beian.miit.gov.cn/")
                                 }
                             )
                             ProfileDetailPage.CONTACT -> ContactDeveloperScreen(
@@ -207,22 +197,13 @@ class ProfileActivity : ComponentActivity() {
                                                 "%26k%3D1083518433"
                                         )
                                     )
+                                    // 未安装 QQ 时降级到浏览器；无浏览器时由 openExternally 弹出阻断式提示。
                                     if (runCatching { startActivity(qqIntent) }.isFailure) {
-                                        startActivity(
-                                            Intent(
-                                                Intent.ACTION_VIEW,
-                                                Uri.parse("https://qm.qq.com/q/cJNTQuxfoW")
-                                            )
-                                        )
+                                        openExternally("https://qm.qq.com/q/cJNTQuxfoW")
                                     }
                                 },
                                 onBeianClick = {
-                                    startActivity(
-                                        Intent(
-                                            Intent.ACTION_VIEW,
-                                            Uri.parse("https://beian.miit.gov.cn/")
-                                        )
-                                    )
+                                    openExternally("https://beian.miit.gov.cn/")
                                 }
                             )
                         }

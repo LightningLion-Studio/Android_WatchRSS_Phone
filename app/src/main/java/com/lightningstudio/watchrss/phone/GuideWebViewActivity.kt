@@ -12,7 +12,6 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
@@ -207,12 +206,10 @@ private fun openExternalUrl(context: Context, url: String) {
     val fallbackUrl = intent
         ?.getStringExtra("browser_fallback_url")
         ?.takeIf { isHttpUrl(it) }
-    if (fallbackUrl != null) {
-        val fallbackIntent = Intent(Intent.ACTION_VIEW, Uri.parse(fallbackUrl))
-        if (runCatching { context.startActivity(fallbackIntent) }.isSuccess) return
-    }
+    if (fallbackUrl != null && context.tryOpenExternal(fallbackUrl)) return
 
-    Toast.makeText(context, "没有可打开的应用", Toast.LENGTH_SHORT).show()
+    // 弹不出任何应用时，用 App 内阻断式弹窗明确告知，而不是 Toast 一闪而过。
+    context.showUnopenableDialog(url)
 }
 
 private fun isHttpUrl(url: String): Boolean {

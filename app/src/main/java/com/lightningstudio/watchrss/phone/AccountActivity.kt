@@ -2,7 +2,6 @@ package com.lightningstudio.watchrss.phone
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
@@ -1576,9 +1575,7 @@ internal fun AccountScreen(
                     busy = true
                     runCatching { accessCoordinator.startPayment(agreementAccepted = true) }
                         .onSuccess { order ->
-                            order.paymentUrl?.let {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it)))
-                            }
+                            order.paymentUrl?.let { context.openExternally(it) }
                         }
                         .onFailure { error = it.message ?: "订单创建失败" }
                     busy = false

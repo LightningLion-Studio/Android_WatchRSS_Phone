@@ -2,7 +2,6 @@ package com.lightningstudio.watchrss.phone
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -344,8 +343,7 @@ fun DataManagementScreen(
             error = error,
             onDismiss = onDismissVersionTooHigh,
             onOpenReleases = {
-                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(GITHUB_RELEASES_URL))
-                context.startActivity(intent)
+                context.openExternally(GITHUB_RELEASES_URL)
             }
         )
     }

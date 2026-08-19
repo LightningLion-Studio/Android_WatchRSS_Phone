@@ -8,4 +8,12 @@
         <item name="android:backgroundDimEnabled">false</item>
         <item name="android:windowDisablePreview">true</item>
     </style>
+
+    <!-- 阻断式弹窗（NoBrowserDialogActivity）：半透明全屏窗口，
+         由 Compose 绘制遮罩 + 居中卡片，露出下层界面。 -->
+    <style name="Theme.WatchRSS.Overlay" parent="Theme.WatchRSS">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowDisablePreview">true</item>
+    </style>
 </resources>

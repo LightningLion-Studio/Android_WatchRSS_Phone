@@ -59,6 +59,9 @@ class PhoneOobeActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         consentStore = PhonePrivacyConsentStore(this)
+        (application as PhoneCompanionApplication).container.usageTelemetry.recordReleaseOobeOpened(
+            resources.displayMetrics.widthPixels
+        )
         val replayFromStart = intent.getBooleanExtra(EXTRA_REPLAY_FROM_START, false)
         setContent {
             WatchRssPhoneTheme {

@@ -36,6 +36,10 @@ class PhoneUsageTelemetry(
 ) {
     private val consentStore = PhonePrivacyConsentStore(context)
     private val store = DailyTelemetryStore(context)
+    private val downloadPreferences = context.applicationContext.getSharedPreferences(
+        DOWNLOAD_PREFERENCES,
+        Context.MODE_PRIVATE
+    )
     private val uploadScheduled = AtomicBoolean(false)
     private val generation = AtomicLong(0L)
 
@@ -48,6 +52,18 @@ class PhoneUsageTelemetry(
     }
 
     fun recordAppLaunch() = capture("app_opened")
+
+    /** Records the first qualifying OOBE open locally; upload still waits for privacy consent. */
+    fun recordReleaseOobeOpened(screenWidthPixels: Int) {
+        if (!shouldCountReleaseOobeOpen(BuildConfig.DEBUG, screenWidthPixels)) return
+        synchronized(downloadPreferences) {
+            if (downloadPreferences.getBoolean(KEY_RELEASE_OOBE_RECORDED, false)) return
+            store.record(EVENT_RELEASE_OOBE_LARGE_SCREEN_OPENED)
+            downloadPreferences.edit().putBoolean(KEY_RELEASE_OOBE_RECORDED, true).apply()
+        }
+        generation.incrementAndGet()
+        scheduleUpload()
+    }
 
     fun recordScreenOpen(screen: String) =
         capture("screen_opened", mapOf("screen" to screen))
@@ -152,6 +168,7 @@ class PhoneUsageTelemetry(
     }
 
     companion object {
+        const val EVENT_RELEASE_OOBE_LARGE_SCREEN_OPENED = "release_oobe_large_screen_opened"
         const val EVENT_ONBOARDING_STEP_COMPLETED = "onboarding_step_completed"
         const val EVENT_ONBOARDING_STEP_SKIPPED = "onboarding_step_skipped"
         const val EVENT_ONBOARDING_IMPORT_SUCCEEDED = "onboarding_import_succeeded"
@@ -161,6 +178,8 @@ class PhoneUsageTelemetry(
         const val EVENT_TIP_SHOWN = "tip_shown"
         const val EVENT_TIP_DISMISSED = "tip_dismissed"
 
+        private const val DOWNLOAD_PREFERENCES = "watchrss_download_telemetry"
+        private const val KEY_RELEASE_OOBE_RECORDED = "release_oobe_recorded"
         private const val UPLOAD_DEBOUNCE_MS = 750L
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
@@ -171,3 +190,6 @@ class PhoneUsageTelemetry(
             .build()
     }
 }
+
+internal fun shouldCountReleaseOobeOpen(debugBuild: Boolean, screenWidthPixels: Int): Boolean =
+    !debugBuild && screenWidthPixels > 720

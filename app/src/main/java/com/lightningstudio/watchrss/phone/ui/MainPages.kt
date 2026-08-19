@@ -258,27 +258,31 @@ fun StatusCard(
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium
                 )
-                LinearProgressIndicator(
-                    progress = { syncProgress.percent / 100f },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "进度:${syncProgress.percent}%",
-                        style = MaterialTheme.typography.bodyMedium
+                if (syncProgress.indeterminate) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                } else {
+                    LinearProgressIndicator(
+                        progress = { syncProgress.percent / 100f },
+                        modifier = Modifier.fillMaxWidth()
                     )
-                    if (syncProgress.bytesPerSecond > 0) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(
-                            text = "${syncProgress.bytesPerSecond / 1024} KB/s",
+                            text = "进度:${syncProgress.percent}%",
                             style = MaterialTheme.typography.bodyMedium
                         )
+                        if (syncProgress.bytesPerSecond > 0) {
+                            Text(
+                                text = "${syncProgress.bytesPerSecond / 1024} KB/s",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
                     }
                 }
-                if (syncProgress.bytesPerSecond > 0 && syncProgress.percent in 1..99) {
+                if (!syncProgress.indeterminate && syncProgress.bytesPerSecond > 0 && syncProgress.percent in 1..99) {
                     val remainingBytes = (syncProgress.bytesTransferred * (100 - syncProgress.percent)) / syncProgress.percent
                     val remainingSeconds = if (syncProgress.bytesPerSecond > 0) remainingBytes / syncProgress.bytesPerSecond else 0
                     val remainingText = when {

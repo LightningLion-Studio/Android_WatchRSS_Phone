@@ -2139,9 +2139,9 @@ class PhoneBluetoothSyncClient(
             .optPositiveLong(LibrarySyncPayload.FIELD_BATCH_TOTAL_WIRE_BYTES)
             ?.takeIf { it >= responseWireBytesRead }
         if (responseTotalWireBytes != null) {
-            report(percentBetweenBytes(60, 84, responseWireBytesRead, responseTotalWireBytes))
+            report(percentBetweenBytes(60, 100, responseWireBytesRead, responseTotalWireBytes))
         } else {
-            report(percentBetween(60, 84, completed, batchCount))
+            report(percentBetween(60, 100, completed, batchCount))
         }
         while (completed < batchCount) {
             val index = completed
@@ -2153,7 +2153,7 @@ class PhoneBluetoothSyncClient(
                 onBytesTransferred = { bytes ->
                     responseWireBytesRead += bytes
                     if (responseTotalWireBytes != null) {
-                        report(percentBetweenBytes(60, 84, responseWireBytesRead, responseTotalWireBytes))
+                        report(percentBetweenBytes(60, 100, responseWireBytesRead, responseTotalWireBytes))
                     }
                 }
             )
@@ -2168,10 +2168,10 @@ class PhoneBluetoothSyncClient(
             stats = stats + frameStats(frame)
             completed += 1
             if (responseTotalWireBytes == null) {
-                report(percentBetween(60, 84, completed, batchCount))
+                report(percentBetween(60, 100, completed, batchCount))
             }
         }
-        report(84)
+        report(100)
         return LibraryResponseRead(
             response = accumulator.toPayload(),
             stats = stats

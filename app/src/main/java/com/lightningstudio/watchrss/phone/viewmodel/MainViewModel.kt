@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncProgress
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncStage
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothWatchDevice
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncSession
 import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSessionRegistry
@@ -71,6 +72,7 @@ data class MainUiState(
 data class MainSyncProgressUi(
     val phase: String,
     val percent: Int,
+    val indeterminate: Boolean = false,
     val bytesTransferred: Long = 0L,
     val bytesPerSecond: Long = 0L
 )
@@ -163,6 +165,8 @@ class MainViewModel(
     private var conflictResolutionDeferred: CompletableDeferred<PhoneSyncConflictResolution>? = null
     private var smoothedSyncProgressJob: Job? = null
     private var smoothedSyncProgressTarget: MainSyncProgressUi? = null
+    private var verificationTransitionJob: Job? = null
+    private var verificationProgressTarget: MainSyncProgressUi? = null
 
     val uiState: StateFlow<MainUiState> = combine(
         combine(
@@ -1268,14 +1272,41 @@ class MainViewModel(
 
     private fun updateLibrarySyncProgress(progress: PhoneBluetoothSyncProgress) {
         val percent = progress.percent.coerceIn(0, 100)
-        updateSmoothedSyncProgress(
-            MainSyncProgressUi(
-                phase = progress.stage.displayName,
-                percent = percent,
-                bytesTransferred = progress.bytesTransferred,
-                bytesPerSecond = progress.bytesPerSecond
-            )
+        val uiProgress = MainSyncProgressUi(
+            phase = progress.stage.displayName,
+            percent = percent,
+            indeterminate = progress.stage == PhoneBluetoothSyncStage.VERIFYING,
+            bytesTransferred = progress.bytesTransferred,
+            bytesPerSecond = progress.bytesPerSecond
         )
+        if (progress.stage == PhoneBluetoothSyncStage.VERIFYING) {
+            transitionToVerification(uiProgress)
+        } else {
+            verificationTransitionJob?.cancel()
+            verificationTransitionJob = null
+            verificationProgressTarget = null
+            updateSmoothedSyncProgress(uiProgress)
+        }
+    }
+
+    private fun transitionToVerification(progress: MainSyncProgressUi) {
+        verificationProgressTarget = progress
+        if (sessionState.value.syncProgress?.indeterminate == true) {
+            updateSmoothedSyncProgress(progress)
+            return
+        }
+        if (verificationTransitionJob?.isActive == true) return
+        smoothedSyncProgressJob?.cancel()
+        smoothedSyncProgressJob = null
+        sessionState.value.syncProgress?.let { current ->
+            sessionState.value = sessionState.value.copy(
+                syncProgress = current.copy(percent = 100, indeterminate = false)
+            )
+        }
+        verificationTransitionJob = viewModelScope.launch {
+            delay(VERIFICATION_TRANSITION_HOLD_MS)
+            verificationProgressTarget?.let(::updateSmoothedSyncProgress)
+        }
     }
 
     private fun updateBluetoothProbeProgress(completed: Int, total: Int) {
@@ -1381,7 +1412,7 @@ class MainViewModel(
 
     private suspend fun completeSmoothedSyncProgress() {
         val current = sessionState.value.syncProgress ?: MainSyncProgressUi(phase = "同步完成", percent = 100)
-        updateSmoothedSyncProgress(current.copy(phase = "同步完成", percent = 100))
+        updateSmoothedSyncProgress(current.copy(phase = "同步完成", percent = 100, indeterminate = false))
         var ticks = 0
         while ((sessionState.value.syncProgress?.percent ?: 100) < 100 && ticks < SMOOTH_PROGRESS_FINISH_MAX_TICKS) {
             delay(SMOOTH_PROGRESS_TICK_MS)
@@ -1398,17 +1429,22 @@ class MainViewModel(
         smoothedSyncProgressJob?.cancel()
         smoothedSyncProgressJob = null
         smoothedSyncProgressTarget = null
+        verificationTransitionJob?.cancel()
+        verificationTransitionJob = null
+        verificationProgressTarget = null
         sessionState.value = sessionState.value.copy(syncProgress = null)
     }
 
     override fun onCleared() {
         super.onCleared()
         smoothedSyncProgressJob?.cancel()
+        verificationTransitionJob?.cancel()
     }
 
     private companion object {
         private const val SMOOTH_PROGRESS_TICK_MS = 80L
         private const val SMOOTH_PROGRESS_COMPLETE_HOLD_MS = 180L
+        private const val VERIFICATION_TRANSITION_HOLD_MS = 180L
         private const val SMOOTH_PROGRESS_FINISH_MAX_TICKS = 18
     }
 }

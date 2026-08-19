@@ -3022,14 +3022,13 @@ private fun SyncStatusCard(
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium
                 )
-                LinearProgressIndicator(
-                    progress = { syncProgress.percent / 100f },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
+                if (syncProgress.indeterminate) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                } else {
+                    LinearProgressIndicator(
+                        progress = { syncProgress.percent / 100f },
+                        modifier = Modifier.fillMaxWidth()
+                    )
                     Text(
                         text = "${syncProgress.percent}%",
                         style = MaterialTheme.typography.labelLarge

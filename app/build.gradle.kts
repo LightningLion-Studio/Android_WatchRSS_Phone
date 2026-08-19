@@ -52,7 +52,7 @@ android {
         applicationId = "com.lightningstudio.watchrss.phone"
         minSdk = 30
         targetSdk = 36
-        versionCode = 46
+        versionCode = 47
         versionName = "1.2.2-16"
         buildConfigField(
             "String",

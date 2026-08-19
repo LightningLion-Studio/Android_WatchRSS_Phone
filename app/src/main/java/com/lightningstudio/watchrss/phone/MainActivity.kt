@@ -260,8 +260,22 @@ class MainActivity : ComponentActivity() {
                         ) { Text("免费试用 3 天") }
                     }
                 }
-                is AppAccessState.PaymentPending -> GateMessage("等待支付确认", "订单 ${state.order.merchantOrderId}") {
-                    state.order.paymentUrl?.let { openExternally(it) }
+                is AppAccessState.PaymentPending -> {
+                    GateMessage(
+                        title = "等待支付确认",
+                        detail = "订单 ${state.order.merchantOrderId}",
+                        actionLabel = "继续支付"
+                    ) {
+                        state.order.paymentUrl?.let { openExternally(it) }
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            pollJob?.cancel()
+                            pollJob = null
+                            lifecycleScope.launch { coordinator.cancelPendingPayment() }
+                        },
+                        modifier = Modifier.padding(top = 12.dp)
+                    ) { Text("取消支付") }
                 }
                 is AppAccessState.Revoked -> GateMessage("本手机授权已撤销", state.summary.revokeReason ?: "设备名额已被较新的登录占用") { reauthenticate() }
                 is AppAccessState.ReauthenticationRequired -> GateMessage("请重新验证账号", "验证后本手机将成为最新授权设备") { reauthenticate() }

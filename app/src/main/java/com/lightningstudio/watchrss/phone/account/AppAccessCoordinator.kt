@@ -190,6 +190,11 @@ class AppAccessCoordinator(
         notifyIfNewlyAuthorized(wasAuthorized)
     }
 
+    suspend fun cancelPendingPayment() = operationMutex.withLock {
+        store.clearPendingOrder()
+        loadServerStatusLocked()
+    }
+
     private fun notifyIfNewlyAuthorized(wasAuthorized: Boolean) {
         authorizationNotifier.afterPotentialTransition(wasAuthorized, isAuthorized)
     }

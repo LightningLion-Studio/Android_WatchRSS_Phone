@@ -59,6 +59,30 @@ class RotatingProbeCandidateWindowTest {
     }
 
     @Test
+    fun `active and cached candidates stay in every capped window in priority order`() {
+        val candidates = listOf("cached") + (0 until 10).map(Int::toString) + "active"
+        val prioritizedCandidates = listOf("active", "cached")
+
+        val first = rotatingProbeCandidateWindow(
+            candidates = candidates,
+            maxCandidates = 9,
+            startOffset = 0,
+            prioritizedCandidates = prioritizedCandidates
+        )
+        val second = rotatingProbeCandidateWindow(
+            candidates = candidates,
+            maxCandidates = 9,
+            startOffset = first.nextOffset,
+            prioritizedCandidates = prioritizedCandidates
+        )
+
+        assertEquals(prioritizedCandidates, first.candidates.take(2))
+        assertEquals(prioritizedCandidates, second.candidates.take(2))
+        assertEquals(9, first.candidates.size)
+        assertEquals(9, second.candidates.size)
+    }
+
+    @Test
     fun `prioritized candidates move ahead below the cap`() {
         val window = rotatingProbeCandidateWindow(
             candidates = listOf("a", "b", "c"),

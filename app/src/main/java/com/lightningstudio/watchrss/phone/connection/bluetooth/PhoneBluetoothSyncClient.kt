@@ -234,11 +234,17 @@ class PhoneBluetoothSyncClient(
         val activeCandidates = allCandidates.filter { device ->
             device.address.uppercase() in activeWatchAddresses
         }
+        val cachedAddress = cachedDeviceAddress()
+        val cachedCandidates = allCandidates.filter { device ->
+            cachedAddress != null && device.address.equals(cachedAddress, ignoreCase = true)
+        }
+        val prioritizedCandidates = (activeCandidates + cachedCandidates)
+            .distinctBy { it.address.uppercase() }
         val probeWindow = rotatingProbeCandidateWindow(
             candidates = allCandidates,
             maxCandidates = MAX_DEVICE_PROBE_CANDIDATES,
             startOffset = probeCandidateOffset(),
-            prioritizedCandidates = activeCandidates
+            prioritizedCandidates = prioritizedCandidates
         )
         rememberProbeCandidateOffset(probeWindow.nextOffset)
         val candidates = probeWindow.candidates
@@ -251,9 +257,10 @@ class PhoneBluetoothSyncClient(
                 "skippedCandidates" to (allCandidates.size - candidates.size).coerceAtLeast(0),
                 "startOffset" to probeWindow.startOffset,
                 "nextOffset" to probeWindow.nextOffset,
-                "cachedAddress" to cachedDeviceAddress().orEmpty(),
+                "cachedAddress" to cachedAddress.orEmpty(),
                 "activeCandidates" to activeCandidates.size,
                 "activeAddresses" to activeCandidates.joinToString(",") { it.address },
+                "prioritizedAddresses" to prioritizedCandidates.joinToString(",") { it.address },
                 "probeOrder" to candidates.joinToString(",") { it.address }
             )
         )
@@ -271,7 +278,7 @@ class PhoneBluetoothSyncClient(
         }
 
         val results = mutableListOf<PhoneBluetoothWatchProbeResult>()
-        var stoppedAfterActiveReachable = false
+        var stoppedAfterPrioritizedReachable = false
         for ((index, device) in candidates.withIndex()) {
             val result = probeLibrarySyncDevice(
                 device = device,
@@ -281,12 +288,21 @@ class PhoneBluetoothSyncClient(
             )
             results += result
             onProbe(index + 1, candidates.size, result)
-            if (shouldStopAfterActiveWatchProbe(device.address, activeWatchAddresses, result.reachable)) {
-                stoppedAfterActiveReachable = true
+            if (
+                shouldStopAfterPrioritizedWatchProbe(
+                    candidateAddress = device.address,
+                    activeWatchAddresses = activeWatchAddresses,
+                    cachedWatchAddress = cachedAddress,
+                    reachable = result.reachable
+                )
+            ) {
+                stoppedAfterPrioritizedReachable = true
                 debugLog.appendEvent(
-                    event = "bt.library.probe.active-reachable-stop",
+                    event = "bt.library.probe.prioritized-reachable-stop",
                     sessionId = sessionId,
                     fields = deviceFields(device) + mapOf(
+                        "active" to (device.address.uppercase() in activeWatchAddresses),
+                        "cached" to device.address.equals(cachedAddress, ignoreCase = true),
                         "attemptedCandidates" to results.size,
                         "skippedCandidates" to (candidates.size - results.size).coerceAtLeast(0)
                     )
@@ -301,7 +317,7 @@ class PhoneBluetoothSyncClient(
                 "candidates" to candidates.size,
                 "attemptedCandidates" to results.size,
                 "reachable" to results.count { it.reachable },
-                "stoppedAfterActiveReachable" to stoppedAfterActiveReachable,
+                "stoppedAfterPrioritizedReachable" to stoppedAfterPrioritizedReachable,
                 "elapsedMs" to elapsedSince(startedAt)
             )
         )
@@ -2288,11 +2304,15 @@ internal data class SdpProbeFailureRecovery(
     val retrySameCandidate: Boolean
 )
 
-internal fun shouldStopAfterActiveWatchProbe(
+internal fun shouldStopAfterPrioritizedWatchProbe(
     candidateAddress: String,
     activeWatchAddresses: Set<String>,
+    cachedWatchAddress: String?,
     reachable: Boolean
-): Boolean = reachable && candidateAddress.uppercase() in activeWatchAddresses
+): Boolean = reachable && (
+    candidateAddress.uppercase() in activeWatchAddresses ||
+        candidateAddress.equals(cachedWatchAddress, ignoreCase = true)
+)
 
 internal data class RotatingProbeCandidateWindow<T>(
     val candidates: List<T>,
@@ -2309,9 +2329,10 @@ internal fun <T> rotatingProbeCandidateWindow(
     if (candidates.isEmpty() || maxCandidates <= 0) {
         return RotatingProbeCandidateWindow(emptyList(), startOffset = 0, nextOffset = 0)
     }
-    val prioritizedSet = prioritizedCandidates.toSet()
-    val fixedCandidates = candidates
-        .filter { it in prioritizedSet }
+    val candidateSet = candidates.toSet()
+    val fixedCandidates = prioritizedCandidates
+        .filter { it in candidateSet }
+        .distinct()
         .take(maxCandidates)
     val fixedSet = fixedCandidates.toSet()
     val rotatingCandidates = candidates.filterNot { it in fixedSet }

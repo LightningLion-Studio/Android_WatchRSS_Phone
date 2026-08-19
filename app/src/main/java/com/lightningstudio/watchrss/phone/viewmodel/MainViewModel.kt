@@ -77,6 +77,16 @@ data class MainSyncProgressUi(
     val bytesPerSecond: Long = 0L
 )
 
+internal fun syncFailureMessage(throwable: Throwable, phase: String?): String {
+    val detail = generateSequence(throwable) { it.cause }
+        .mapNotNull { cause -> cause.message?.trim()?.takeIf(String::isNotEmpty) }
+        .firstOrNull()
+    val errorName = throwable::class.java.simpleName.ifBlank { "同步异常" }
+    val reason = if (detail == null) errorName else "$errorName：$detail"
+    val stage = phase?.trim()?.removeSuffix("中")?.takeIf(String::isNotEmpty)
+    return if (stage == null) "同步失败：$reason" else "${stage}失败：$reason"
+}
+
 data class MainConflictPromptUi(
     val conflicts: List<PhoneSyncDeleteConflict>,
     val manual: Boolean = false
@@ -1039,15 +1049,21 @@ class MainViewModel(
             usageTelemetry.recordSyncResult(true, "library")
             tipManager.recordEvent(TipEvents.SYNC_COMPLETED)
         }.onFailure { throwable ->
+            val error = syncFailureMessage(
+                throwable = throwable,
+                phase = verificationProgressTarget?.phase
+                    ?: sessionState.value.syncProgress?.phase
+                    ?: sessionState.value.syncStatusMessage
+            )
             clearSmoothedSyncProgress()
             sessionState.value = sessionState.value.copy(
                 syncStatusMessage = null,
-                syncStatusError = null,
+                syncStatusError = error,
                 error = null,
                 conflictPrompt = null
             )
             usageTelemetry.recordSyncResult(false, "library", throwable.message)
-            _toastEvent.tryEmit(throwable.message ?: "操作失败")
+            _toastEvent.tryEmit(error)
         }
         conflictResolutionDeferred?.complete(PhoneSyncConflictResolution.KEEP_LATEST)
         conflictResolutionDeferred = null

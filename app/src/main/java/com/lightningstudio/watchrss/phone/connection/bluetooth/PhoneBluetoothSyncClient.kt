@@ -609,8 +609,21 @@ class PhoneBluetoothSyncClient(
                 val wireRequest = session.requestForExchange(request)
                 writeFrameLogged(transport.outputStream, sessionId, "sessionRequest", wireRequest)
                 val response = readFrameLogged(transport.inputStream, sessionId, "sessionResponse")
-                writeResponseAck(transport.outputStream, sessionId, success = true, applied = true)
+                val ackFailure = writeResponseAck(
+                    transport.outputStream,
+                    sessionId,
+                    success = true,
+                    applied = true
+                )
                 session.recordNegotiation(response)
+                ackFailure?.let { throwable ->
+                    invalidateSessionTransportAfterCommittedResponse(
+                        session = session,
+                        sessionId = sessionId,
+                        action = request.optString("action"),
+                        throwable = throwable
+                    )
+                }
                 BluetoothSyncExchange(
                     deviceName = session.device.name,
                     deviceAddress = session.device.address,
@@ -1278,11 +1291,16 @@ class PhoneBluetoothSyncClient(
                     success = true,
                     applied = false,
                     phase = BluetoothSyncProtocol.ACK_PHASE_RECEIVED
-                )
+                )?.let { throw it }
             }
             try {
                 applyResponse(exchange)
-                writeResponseAck(connectedSocket, sessionId, success = true, applied = ackApplied)
+                writeResponseAck(
+                    connectedSocket,
+                    sessionId,
+                    success = true,
+                    applied = ackApplied
+                )?.let { throw it }
                 if (rememberDeviceOnSuccess) {
                     rememberSuccessfulDevice(device, sessionId)
                 }
@@ -1472,7 +1490,7 @@ class PhoneBluetoothSyncClient(
                     success = true,
                     applied = false,
                     phase = BluetoothSyncProtocol.ACK_PHASE_RECEIVED
-                )
+                )?.let { throw it }
             }
             try {
                 applyResponse(exchange)
@@ -1481,7 +1499,7 @@ class PhoneBluetoothSyncClient(
                     sessionId,
                     success = true,
                     applied = ackApplied
-                )
+                )?.let { throw it }
             } catch (throwable: Throwable) {
                 writeResponseAck(
                     outputStream = ipSession.outputStream,
@@ -1647,11 +1665,16 @@ class PhoneBluetoothSyncClient(
                 success = true,
                 applied = false,
                 phase = BluetoothSyncProtocol.ACK_PHASE_RECEIVED
-            )
+            )?.let { throw it }
         }
         try {
             applyResponse(exchange)
-            writeResponseAck(transport.outputStream, sessionId, success = true, applied = true)
+            writeResponseAck(
+                transport.outputStream,
+                sessionId,
+                success = true,
+                applied = true
+            )?.let { throw it }
         } catch (throwable: Throwable) {
             writeResponseAck(
                 outputStream = transport.outputStream,
@@ -2699,8 +2722,8 @@ class PhoneBluetoothSyncClient(
         }
     }
 
-    private fun writeResponseAck(socket: BluetoothSocket, sessionId: String) {
-        writeResponseAck(socket, sessionId, success = true, applied = true)
+    private fun writeResponseAck(socket: BluetoothSocket, sessionId: String): Throwable? {
+        return writeResponseAck(socket, sessionId, success = true, applied = true)
     }
 
     private fun writeResponseAck(
@@ -2710,7 +2733,7 @@ class PhoneBluetoothSyncClient(
         applied: Boolean,
         phase: String = BluetoothSyncProtocol.ACK_PHASE_APPLIED,
         message: String? = null
-    ) = writeResponseAck(
+    ): Throwable? = writeResponseAck(
         outputStream = socket.outputStream,
         sessionId = sessionId,
         success = success,
@@ -2726,8 +2749,8 @@ class PhoneBluetoothSyncClient(
         applied: Boolean,
         phase: String = BluetoothSyncProtocol.ACK_PHASE_APPLIED,
         message: String? = null
-    ) {
-        runCatching {
+    ): Throwable? {
+        val failure = captureResponseAckFailure {
             writeFrameLogged(
                 outputStream = outputStream,
                 sessionId = sessionId,
@@ -2740,9 +2763,30 @@ class PhoneBluetoothSyncClient(
                     message?.takeIf { it.isNotBlank() }?.let { put("message", it) }
                 }
             )
-        }.onFailure { throwable ->
+        }
+        failure?.let { throwable ->
             Log.w(TAG, "response ack skipped: ${throwable.message}")
         }
+        return failure
+    }
+
+    private fun invalidateSessionTransportAfterCommittedResponse(
+        session: PhoneSyncSession,
+        sessionId: String,
+        action: String,
+        throwable: Throwable
+    ) {
+        debugLog.appendEvent(
+            event = "sync.session.ack.failed.response-committed",
+            sessionId = sessionId,
+            fields = failureFields(throwable) + mapOf(
+                "action" to action,
+                "deviceAddress" to session.device.address
+            ),
+            throwable = throwable
+        )
+        session.transport?.close()
+        session.transport = null
     }
 
     private fun closeSocketLogged(socket: BluetoothSocket, sessionId: String, owner: String) {
@@ -3208,6 +3252,9 @@ internal class SingleSessionRecoveryGate {
         return true
     }
 }
+
+internal inline fun captureResponseAckFailure(writeAck: () -> Unit): Throwable? =
+    runCatching(writeAck).exceptionOrNull()
 
 internal fun pendingLateIpUpgradeDeviceId(
     ipUpgradeExpected: Boolean,

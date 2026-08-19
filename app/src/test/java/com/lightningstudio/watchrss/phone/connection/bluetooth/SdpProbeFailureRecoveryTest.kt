@@ -53,4 +53,40 @@ class SdpProbeFailureRecoveryTest {
         assertEquals(250L, recovery.delayMs)
         assertFalse(recovery.retrySameCandidate)
     }
+
+    @Test
+    fun `actual sync retries one fast socket io failure after listener rearm delay`() {
+        val recovery = PhoneBluetoothSyncClient.sdpSyncConnectFailureRecovery(
+            elapsedMs = 300L,
+            completedFastFailureRetries = 0,
+            retryableIoFailure = true
+        )
+
+        assertEquals(1_500L, recovery.delayMs)
+        assertTrue(recovery.retrySameCandidate)
+    }
+
+    @Test
+    fun `actual sync does not retry non io failures`() {
+        val recovery = PhoneBluetoothSyncClient.sdpSyncConnectFailureRecovery(
+            elapsedMs = 100L,
+            completedFastFailureRetries = 0,
+            retryableIoFailure = false
+        )
+
+        assertEquals(0L, recovery.delayMs)
+        assertFalse(recovery.retrySameCandidate)
+    }
+
+    @Test
+    fun `actual sync does not retry the same fast failure forever`() {
+        val recovery = PhoneBluetoothSyncClient.sdpSyncConnectFailureRecovery(
+            elapsedMs = 200L,
+            completedFastFailureRetries = 1,
+            retryableIoFailure = true
+        )
+
+        assertEquals(0L, recovery.delayMs)
+        assertFalse(recovery.retrySameCandidate)
+    }
 }

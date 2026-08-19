@@ -765,18 +765,15 @@ class PhoneBluetoothSyncClient(
             Log.i(TAG, "connecting library sync to name=${device.name} address=${device.address} uuid=${BluetoothSyncProtocol.SERVICE_UUID}")
             cancelDiscoveryLogged(adapter, sessionId)
 
-            val createStartedAt = SystemClock.elapsedRealtime()
-            socket = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
-            debugLog.appendEvent(
-                event = "bt.socket.create.success",
+            val connectedSocket = connectLibrarySocketWithSdpRecovery(
+                device = device,
                 sessionId = sessionId,
-                fields = deviceFields(device) + mapOf("elapsedMs" to elapsedSince(createStartedAt))
+                onSocketChanged = { socket = it }
             )
-            connectLogged(socket, sessionId, device)
             report(PhoneBluetoothSyncStage.CONNECTING, 20)
             val cursorResponse = cursorRequest?.let { cursorPayload ->
-                writeFrameLogged(socket, sessionId, "cursorRequest", cursorPayload, tracker)
-                readFrameLogged(socket, sessionId, "cursorResponse", tracker).also { response ->
+                writeFrameLogged(connectedSocket, sessionId, "cursorRequest", cursorPayload, tracker)
+                readFrameLogged(connectedSocket, sessionId, "cursorResponse", tracker).also { response ->
                     require(response.optBoolean("success", false)) {
                         response.optString("message").ifBlank { "手表游标握手失败" }
                     }
@@ -799,7 +796,7 @@ class PhoneBluetoothSyncClient(
             }
             manifestRequests.forEachIndexed { index, frame ->
                 writeFrameLogged(
-                    socket,
+                    connectedSocket,
                     sessionId,
                     batchLabel("manifestRequest", index, manifestRequests.size),
                     frame,
@@ -807,7 +804,7 @@ class PhoneBluetoothSyncClient(
                 )
             }
             report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
-            val manifestResponse = readManifestFrames(socket.inputStream, sessionId, tracker)
+            val manifestResponse = readManifestFrames(connectedSocket.inputStream, sessionId, tracker)
             if (!manifestResponse.optBoolean("success", true)) {
                 debugLog.appendEvent(
                     event = "bt.library.manifest.rejected",
@@ -815,7 +812,7 @@ class PhoneBluetoothSyncClient(
                     fields = payloadFields("manifestResponse", manifestResponse) +
                         mapOf("elapsedMs" to elapsedSince(totalStartedAt))
                 )
-                writeResponseAck(socket, sessionId, success = true, applied = true)
+                writeResponseAck(connectedSocket, sessionId, success = true, applied = true)
                 return BluetoothLibrarySyncExchange(
                     deviceName = device.name.orEmpty(),
                     deviceAddress = device.address,
@@ -844,7 +841,7 @@ class PhoneBluetoothSyncClient(
                 report(PhoneBluetoothSyncStage.TRANSFERRING, 30)
                 articleRequests.forEachIndexed { index, articleRequest ->
                     writeFrameLogged(
-                        socket = socket,
+                        socket = connectedSocket,
                         sessionId = sessionId,
                         label = batchLabel("articlesRequest", index, articleRequestFrameCount),
                         payload = articleRequest,
@@ -860,7 +857,7 @@ class PhoneBluetoothSyncClient(
                 }
                 report(PhoneBluetoothSyncStage.TRANSFERRING, 58)
             }
-            val responseRead = readLibraryResponse(socket.inputStream, sessionId, onProgress, tracker)
+            val responseRead = readLibraryResponse(connectedSocket.inputStream, sessionId, onProgress, tracker)
             val response = responseRead.response
             report(PhoneBluetoothSyncStage.VERIFYING, 88)
             val exchange = BluetoothLibrarySyncExchange(
@@ -875,7 +872,7 @@ class PhoneBluetoothSyncClient(
             )
             if (manifestResponse.optBoolean("supportsReceivedAck", false)) {
                 writeResponseAck(
-                    socket = socket,
+                    socket = connectedSocket,
                     sessionId = sessionId,
                     success = true,
                     applied = false,
@@ -884,13 +881,13 @@ class PhoneBluetoothSyncClient(
             }
             try {
                 applyResponse(exchange)
-                writeResponseAck(socket, sessionId, success = true, applied = ackApplied)
+                writeResponseAck(connectedSocket, sessionId, success = true, applied = ackApplied)
                 if (rememberDeviceOnSuccess) {
                     rememberSuccessfulDevice(device, sessionId)
                 }
             } catch (throwable: Throwable) {
                 writeResponseAck(
-                    socket = socket,
+                    socket = connectedSocket,
                     sessionId = sessionId,
                     success = false,
                     applied = false,
@@ -1766,6 +1763,68 @@ class PhoneBluetoothSyncClient(
         }
     }
 
+    @SuppressLint("MissingPermission")
+    private suspend fun connectLibrarySocketWithSdpRecovery(
+        device: BluetoothDevice,
+        sessionId: String,
+        onSocketChanged: (BluetoothSocket?) -> Unit
+    ): BluetoothSocket {
+        var completedFastFailureRetries = 0
+        while (true) {
+            val attempt = completedFastFailureRetries + 1
+            val createStartedAt = SystemClock.elapsedRealtime()
+            val candidate = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
+            onSocketChanged(candidate)
+            debugLog.appendEvent(
+                event = "bt.socket.create.success",
+                sessionId = sessionId,
+                fields = deviceFields(device) + mapOf(
+                    "attempt" to attempt,
+                    "elapsedMs" to elapsedSince(createStartedAt)
+                )
+            )
+
+            val connectStartedAt = SystemClock.elapsedRealtime()
+            val result = runCatching { connectLogged(candidate, sessionId, device) }
+            if (result.isSuccess) {
+                if (completedFastFailureRetries > 0) {
+                    debugLog.appendEvent(
+                        event = "bt.library.connect.recovered",
+                        sessionId = sessionId,
+                        fields = deviceFields(device) + mapOf("attempt" to attempt)
+                    )
+                }
+                return candidate
+            }
+
+            currentCoroutineContext().ensureActive()
+            val throwable = result.exceptionOrNull() ?: error("蓝牙连接失败但没有异常")
+            val elapsedMs = elapsedSince(connectStartedAt)
+            val recovery = sdpSyncConnectFailureRecovery(
+                elapsedMs = elapsedMs,
+                completedFastFailureRetries = completedFastFailureRetries,
+                retryableIoFailure = throwable is IOException
+            )
+            debugLog.appendEvent(
+                event = "bt.library.connect.recovery",
+                sessionId = sessionId,
+                fields = failureFields(throwable) + deviceFields(device) + mapOf(
+                    "attempt" to attempt,
+                    "elapsedMs" to elapsedMs,
+                    "recoveryDelayMs" to recovery.delayMs,
+                    "retrySameDevice" to recovery.retrySameCandidate
+                ),
+                throwable = throwable
+            )
+            if (!recovery.retrySameCandidate) throw throwable
+
+            closeSocketLogged(candidate, sessionId, "library-connect-failed")
+            onSocketChanged(null)
+            completedFastFailureRetries += 1
+            delay(recovery.delayMs)
+        }
+    }
+
     private fun writeFrameLogged(
         socket: BluetoothSocket,
         sessionId: String,
@@ -2294,6 +2353,26 @@ class PhoneBluetoothSyncClient(
                 },
                 retrySameCandidate = fastFailure &&
                     completedFastFailureRetries < MAX_FAST_SDP_FAILURE_RETRIES
+            )
+        }
+
+        internal fun sdpSyncConnectFailureRecovery(
+            elapsedMs: Long,
+            completedFastFailureRetries: Int,
+            retryableIoFailure: Boolean
+        ): SdpProbeFailureRecovery {
+            val recovery = sdpProbeFailureRecovery(
+                elapsedMs = elapsedMs,
+                timedOut = false,
+                completedFastFailureRetries = completedFastFailureRetries
+            )
+            return recovery.copy(
+                delayMs = if (retryableIoFailure && recovery.retrySameCandidate) {
+                    recovery.delayMs
+                } else {
+                    0L
+                },
+                retrySameCandidate = retryableIoFailure && recovery.retrySameCandidate
             )
         }
     }

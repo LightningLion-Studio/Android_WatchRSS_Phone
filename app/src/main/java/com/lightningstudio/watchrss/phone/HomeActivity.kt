@@ -511,6 +511,10 @@ class HomeActivity : ComponentActivity() {
                 "text/plain",
                 "text/*",
                 "application/epub+zip",
+                "text/x-opml",
+                "application/x-opml+xml",
+                "application/xml",
+                "text/xml",
                 WATCHRSS_BACKUP_MIME_TYPE,
                 "application/zip",
                 "application/octet-stream",
@@ -558,7 +562,8 @@ class HomeActivity : ComponentActivity() {
                 mimeType = file.mimeType,
                 bytes = file.bytes
             )
-            LocalFileImportTarget.UNSUPPORTED -> error("只支持 Markdown（.md）、TXT 和 EPUB 文件")
+            LocalFileImportTarget.OPML_SUBSCRIPTIONS -> viewModel.importOpml(file.bytes)
+            LocalFileImportTarget.UNSUPPORTED -> error("只支持 OPML、Markdown（.md）、TXT 和 EPUB 文件")
         }
     }
 

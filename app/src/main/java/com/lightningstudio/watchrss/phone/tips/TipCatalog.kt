@@ -99,7 +99,7 @@ object TipCatalog {
         TipDefinition(
             id = TipIds.IMPORTS_THREE_WAYS,
             title = "三种导入",
-            message = "RSS 订阅频道、网页导入独立文章、文件导入 TXT/EPUB，按需选择。",
+            message = "RSS 订阅频道、OPML 批量订阅、网页独立文章、TXT/EPUB 本地内容，按需选择。",
             priority = 8,
             rule = TipRules.allOf(
                 TipRules.param(TipParameters.HAS_NO_IMPORTS),

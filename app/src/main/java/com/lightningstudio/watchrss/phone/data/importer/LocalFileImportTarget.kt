@@ -2,6 +2,7 @@ package com.lightningstudio.watchrss.phone.data.importer
 
 enum class LocalFileImportTarget {
     MARKDOWN_NOTE,
+    OPML_SUBSCRIPTIONS,
     LOCAL_CONTENT,
     UNSUPPORTED
 }
@@ -12,8 +13,15 @@ fun classifyLocalFileImport(fileName: String, mimeType: String?): LocalFileImpor
     val lowerMime = mimeType.orEmpty().trim().lowercase()
     return when {
         isMarkdownFileName(lowerName) -> LocalFileImportTarget.MARKDOWN_NOTE
+        lowerName.endsWith(".opml") -> LocalFileImportTarget.OPML_SUBSCRIPTIONS
         lowerName.endsWith(".txt") -> LocalFileImportTarget.LOCAL_CONTENT
         lowerName.endsWith(".epub") -> LocalFileImportTarget.LOCAL_CONTENT
+        lowerMime == "text/x-opml" ||
+            lowerMime == "application/x-opml+xml" ||
+            lowerMime == "application/xml" ||
+            lowerMime == "text/xml" -> {
+            LocalFileImportTarget.OPML_SUBSCRIPTIONS
+        }
         lowerMime == "text/markdown" || lowerMime == "text/x-markdown" -> {
             LocalFileImportTarget.MARKDOWN_NOTE
         }

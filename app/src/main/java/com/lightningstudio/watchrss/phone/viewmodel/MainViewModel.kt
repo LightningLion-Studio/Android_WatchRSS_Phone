@@ -16,6 +16,7 @@ import com.lightningstudio.watchrss.phone.data.backup.WatchRssBackupService
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.importer.LocalContentImportKind
+import com.lightningstudio.watchrss.phone.data.importer.OpmlImporter
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
@@ -396,6 +397,39 @@ class MainViewModel(
                     return@runBusy
                 }
                 continueLocalContentImport(inspection)
+            }
+        }
+    }
+
+    fun importOpml(bytes: ByteArray) {
+        viewModelScope.launch {
+            runBusy("正在导入 OPML 订阅…") {
+                val subscriptions = OpmlImporter().parse(bytes)
+                var importedCount = 0
+                var articleCount = 0
+                subscriptions.forEach { subscription ->
+                    runCatching { repository.addRssSource(subscription.feedUrl) }
+                        .onSuccess { result ->
+                            importedCount += 1
+                            articleCount += result.articleCount
+                            usageTelemetry.recordRssSourceAdded(
+                                url = result.source.url,
+                                title = result.source.title,
+                                articleCount = result.articleCount
+                            )
+                        }
+                }
+                if (importedCount > 0) {
+                    tipManager.recordEvent(TipEvents.RSS_SOURCE_ADDED)
+                }
+                val failedCount = subscriptions.size - importedCount
+                sessionState.value = sessionState.value.copy(
+                    message = buildString {
+                        append("OPML 导入完成：成功 $importedCount 个订阅源，导入 $articleCount 篇文章")
+                        if (failedCount > 0) append("，失败 $failedCount 个")
+                    },
+                    error = if (importedCount == 0) "OPML 中的订阅源均导入失败" else null
+                )
             }
         }
     }

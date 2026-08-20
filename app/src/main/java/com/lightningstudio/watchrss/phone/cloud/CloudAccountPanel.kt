@@ -173,6 +173,40 @@ fun CloudAccountPanel(
                     }
                 }
             } else if (recoveryEnvelopeExists && !hasLocalKey) {
+                Text("可使用恢复词，或请求另一台已授权设备批准此手机。")
+                Button(
+                    onClick = {
+                        runAction {
+                            onBusyChange(true)
+                            runCatching { service.requestDeviceApproval() }
+                                .onSuccess {
+                                    bootstrap = it
+                                    onMessage("审批请求已发出，请在旧设备的会员云空间中批准")
+                                }
+                                .onFailure { onError(it.message ?: "无法发起设备审批") }
+                            onBusyChange(false)
+                        }
+                    },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("请求旧设备批准") }
+                OutlinedButton(
+                    onClick = {
+                        runAction {
+                            onBusyChange(true)
+                            runCatching { service.acceptDeviceApproval() }
+                                .onSuccess { approved ->
+                                    bootstrap = service.loadBootstrap()
+                                    if (approved) onMessage("当前手机已获得解密能力")
+                                    else onMessage("尚未批准，请在旧设备批准后再检查")
+                                }
+                                .onFailure { onError(it.message ?: "无法检查审批结果") }
+                            onBusyChange(false)
+                        }
+                    },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("检查批准结果") }
                 OutlinedTextField(
                     value = recoveryInput,
                     onValueChange = { recoveryInput = it },
@@ -197,7 +231,7 @@ fun CloudAccountPanel(
                     enabled = !busy && RecoveryWords.parse(recoveryInput).size == 24,
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("使用恢复词授权此手机") }
-                Text("仅短信登录不能解密；也可由另一台已授权设备批准。")
+                Text("仅短信登录不能解密。设备审批使用本机硬件保护密钥。")
             } else if (hasLocalKey) {
                 Text(
                     "✓ 端到端加密云备份已启用",
@@ -362,6 +396,13 @@ fun CloudAccountPanel(
                     }
                 }
 
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("设备授权", fontWeight = FontWeight.Medium)
+                    TextButton(onClick = { refresh() }, enabled = !busy) { Text("刷新") }
+                }
                 bootstrap?.devices?.filter { it.revokedAt == null }?.forEach { device ->
                     val hasEnvelope = bootstrap!!.keyEnvelopes.any {
                         it.recipientType == "device" && it.recipientDeviceId == device.deviceId

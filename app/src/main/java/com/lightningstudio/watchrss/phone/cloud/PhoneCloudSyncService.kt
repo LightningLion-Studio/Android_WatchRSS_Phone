@@ -277,6 +277,37 @@ class PhoneCloudSyncService(
         storeEnvelopeForCurrentDevice(session)
     }
 
+    suspend fun requestDeviceApproval(): CloudBootstrap {
+        val session = requireSession()
+        val bootstrap = client.bootstrap(session)
+        require(bootstrap.member.readable) { "当前账号不能读取会员云空间" }
+        client.registerDevice(
+            session = session,
+            deviceId = deviceId,
+            displayName = "手机 · ${Build.MODEL}",
+            publicKeySpki = keyManager.devicePublicKeySpki(session.userId, deviceId),
+            keyVersion = deviceApprovalKeyVersion(bootstrap)
+        )
+        return client.bootstrap(session).also {
+            update(CloudSyncPhase.NEEDS_RECOVERY, "等待旧设备批准此手机", it.member)
+        }
+    }
+
+    suspend fun acceptDeviceApproval(): Boolean {
+        val session = requireSession()
+        val bootstrap = client.bootstrap(session)
+        deviceApprovalEnvelopes(bootstrap, deviceId).forEach { stored ->
+            keyManager.unwrapDeviceEnvelope(session.userId, deviceId, stored.envelope)
+        }
+        val approved = keyManager.hasAccountKey(session.userId)
+        update(
+            if (approved) CloudSyncPhase.IDLE else CloudSyncPhase.NEEDS_RECOVERY,
+            if (approved) "旧设备批准成功，当前手机已获得解密能力" else "仍在等待旧设备批准",
+            bootstrap.member
+        )
+        return approved
+    }
+
     suspend fun approveDevice(recipientDeviceId: String) {
         val session = requireSession()
         val bootstrap = client.bootstrap(session)
@@ -394,12 +425,11 @@ class PhoneCloudSyncService(
                 cache.prune(session.userId)
                 var bootstrap = client.bootstrap(session)
                 if (!keyManager.hasAccountKey(session.userId)) {
-                    update(
-                        CloudSyncPhase.NEEDS_RECOVERY,
-                        "请输入24词恢复密钥，或由已授权设备批准",
-                        bootstrap.member
-                    )
-                    error("当前设备尚未获得云端解密密钥")
+                    bootstrap = requestDeviceApproval()
+                    if (!acceptDeviceApproval()) {
+                        error("当前设备尚未获得云端解密密钥，请在旧设备批准后重试")
+                    }
+                    bootstrap = client.bootstrap(session)
                 }
                 if (bootstrap.member.writable) {
                     registerCurrentDevice(session)
@@ -882,6 +912,18 @@ class PhoneCloudSyncService(
         private const val RELAY_LIBRARY_OBJECT = "library-sync.json"
     }
 }
+
+internal fun deviceApprovalKeyVersion(bootstrap: CloudBootstrap): Int =
+    bootstrap.keyEnvelopes.maxOfOrNull { it.envelope.keyVersion }
+        ?: bootstrap.devices.maxOfOrNull { it.keyVersion }
+        ?: 1
+
+internal fun deviceApprovalEnvelopes(
+    bootstrap: CloudBootstrap,
+    deviceId: String
+): List<StoredCloudKeyEnvelope> = bootstrap.keyEnvelopes
+    .filter { it.recipientType == "device" && it.recipientDeviceId == deviceId }
+    .sortedBy { it.envelope.keyVersion }
 
 internal fun isCloudKeySetupComplete(
     envelopes: List<StoredCloudKeyEnvelope>,

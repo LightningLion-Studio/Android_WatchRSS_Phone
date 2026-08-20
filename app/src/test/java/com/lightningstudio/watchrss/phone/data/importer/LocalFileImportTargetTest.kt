@@ -40,6 +40,21 @@ class LocalFileImportTargetTest {
         )
     }
 
+    @Test fun `opml extension and mime route to subscription import`() {
+        assertEquals(
+            LocalFileImportTarget.OPML_SUBSCRIPTIONS,
+            classifyLocalFileImport("subscriptions.OPML", "application/octet-stream")
+        )
+        assertEquals(
+            LocalFileImportTarget.OPML_SUBSCRIPTIONS,
+            classifyLocalFileImport("subscriptions.xml", "text/x-opml")
+        )
+        assertEquals(
+            LocalFileImportTarget.OPML_SUBSCRIPTIONS,
+            classifyLocalFileImport("subscriptions.xml", "application/xml")
+        )
+    }
+
     @Test fun `filename becomes imported note title`() {
         assertEquals("第一导入", markdownTitleFromFileName("下载/第一导入.md"))
     }

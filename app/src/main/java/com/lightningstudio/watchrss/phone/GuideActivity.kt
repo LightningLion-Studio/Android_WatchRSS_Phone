@@ -142,7 +142,7 @@ fun GuideScreen(onBack: () -> Unit) {
                             )
                         }
                         Text(
-                            text = "1. 在「导入内容」页面点击「导入文件」\n2. 选择手机中的 .txt 或 .epub 文件\n3. 腕上RSS 会自动将章节解析为可阅读的文章列表",
+                            text = "1. 在「导入内容」页面点击「导入文件」\n2. 选择 .opml 批量导入 RSS 订阅，或选择 .txt / .epub 导入本地内容\n3. 腕上RSS 会下载订阅文章或将本地章节解析为文章列表",
                             style = MaterialTheme.typography.bodyMedium
                         )
                     }

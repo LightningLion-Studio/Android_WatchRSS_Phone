@@ -84,6 +84,10 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/*" />
                 <data android:mimeType="application/epub+zip" />
+                <data android:mimeType="text/x-opml" />
+                <data android:mimeType="application/x-opml+xml" />
+                <data android:mimeType="application/xml" />
+                <data android:mimeType="text/xml" />
                 <data android:mimeType="application/octet-stream" />
             </intent-filter>
             <intent-filter>
@@ -100,6 +104,10 @@
                 <data android:scheme="file" />
                 <data android:mimeType="text/*" />
                 <data android:mimeType="application/epub+zip" />
+                <data android:mimeType="text/x-opml" />
+                <data android:mimeType="application/x-opml+xml" />
+                <data android:mimeType="application/xml" />
+                <data android:mimeType="text/xml" />
                 <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>

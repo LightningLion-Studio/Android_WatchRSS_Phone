@@ -19,6 +19,7 @@ import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSessionRegist
 import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
@@ -33,6 +34,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -678,10 +680,10 @@ class PhoneBluetoothSyncClient(
         session: PhoneSyncSession,
         phase: String,
         sessionId: String
-    ) {
+    ) = withContext(Dispatchers.IO) {
         if (session.legacyFallback || session.transport == null) {
             session.close()
-            return
+            return@withContext
         }
         try {
             connectionMutex.withLock {

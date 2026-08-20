@@ -717,6 +717,33 @@ class LibrarySyncPayloadTest {
     }
 
     @Test
+    fun chunkedBodyRequest_rebuildsMetadataWhenCachedChunkHashIsStale() {
+        val original = testArticle(
+            articleId = "stale-body-cache",
+            contentText = "A".repeat(4096)
+        )
+        val cachedMetadata = ArticleSyncBody.metadataFor(original)
+        val changed = original.copy(contentText = "B".repeat(4096))
+        val currentMetadata = ArticleSyncBody.metadataFor(changed)
+        assertEquals(cachedMetadata.bodyByteCount, currentMetadata.bodyByteCount)
+
+        val payload = ArticleSyncBody.payloadForRequest(
+            article = changed,
+            request = ArticleBodyRequest(
+                articleId = changed.articleId,
+                bodyHash = cachedMetadata.bodyHash,
+                chunkIndexes = cachedMetadata.chunkHashes.indices.toList()
+            ),
+            cachedMetadata = cachedMetadata
+        )
+        val rebuilt = ArticleSyncBody.rebuildBody(null, payload)
+
+        assertEquals(currentMetadata.bodyHash, payload.bodyHash)
+        assertEquals(currentMetadata.chunkHashes, payload.chunkHashes)
+        assertEquals(changed.contentText, rebuilt.second)
+    }
+
+    @Test
     fun chunkedBodyRequest_sendsFullBodyForFullArticleWhenPeerRequestsReusableBody() {
         val article = testArticle(
             articleId = "full-body-reuse",

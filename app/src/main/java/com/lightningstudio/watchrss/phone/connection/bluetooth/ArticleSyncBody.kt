@@ -63,7 +63,7 @@ data class ChunkedArticlePayload(
 
 object ArticleSyncBody {
     const val CHUNK_SIZE_BYTES = 128 * 1024
-    private const val BODY_ENCODING_VERSION = 2
+    private const val BODY_ENCODING_VERSION = 3
 
     fun metadataFor(article: PhoneArticleEntity): ArticleBodyMetadata {
         val bodyBytes = encodeBody(article.contentHtml, article.contentText)
@@ -189,6 +189,13 @@ object ArticleSyncBody {
         val chunkCount = chunkCountFor(bodyBytes, chunkSize)
         require(chunkCount == metadata.chunkHashes.size) {
             "同步正文缓存分块数不匹配：expected=${metadata.chunkHashes.size} actual=$chunkCount"
+        }
+        metadata.chunkHashes.forEachIndexed { index, expectedHash ->
+            val start = index * chunkSize
+            val end = min(start + chunkSize, bodyBytes.size)
+            require(sha256(bodyBytes, start, end - start) == expectedHash) {
+                "同步正文缓存分块校验失败：${request.articleId}#$index"
+            }
         }
         val indexes = request.chunkIndexes
             .distinct()

@@ -13,7 +13,6 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
@@ -124,7 +123,6 @@ import com.lightningstudio.watchrss.phone.tips.ui.TipSuppressionState
 import com.lightningstudio.watchrss.phone.tips.ui.tipAnchor
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageStatisticsPojo
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalUriHandler
@@ -139,7 +137,6 @@ import com.lightningstudio.watchrss.phone.ArticleContentNodesSnapshot
 import com.lightningstudio.watchrss.phone.ArticleReaderScreen
 import com.lightningstudio.watchrss.phone.PlatformWebViewScreen
 import com.lightningstudio.watchrss.phone.cloud.CloudRssInventoryMode
-import com.lightningstudio.watchrss.phone.generateQRCode
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
@@ -158,6 +155,9 @@ import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptKind
 import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptUi
 import com.lightningstudio.watchrss.phone.ui.theme.roundedClickable
 import com.lightningstudio.watchrss.phone.ui.theme.roundedCombinedClickable
+import com.lightningstudio.watchrss.phone.ui.SupportContactBlockingAlert
+import com.lightningstudio.watchrss.phone.ui.SupportContactInlineFooter
+import com.lightningstudio.watchrss.phone.ui.SupportContactQrDialog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
@@ -203,8 +203,6 @@ private const val READER_FULLSCREEN_BACK_SETTLE_MS = 480
 private const val ARTICLE_CARD_TITLE_LINES = 2
 private const val ONLINE_NOVEL_IMPORT_WARNING =
     "小说导入仅支持txt/epub等开放格式本地文件，不支持来自在线小说库的阅读链接分享（七猫/番茄/晋江/起点等平台均不支持），仍然要将页面作为网页或RSS尝试导入吗？"
-private const val WATCH_RSS_QQ_GROUP_URL = "https://qm.qq.com/q/cJNTQuxfoW"
-private const val WATCH_RSS_QQ_GROUP_NUMBER = "1083518433"
 private val MainNavigationRailWidth = 80.dp
 
 @Composable
@@ -348,6 +346,7 @@ fun MainScreen(
     onChooseConflictResolution: (PhoneSyncConflictResolution) -> Unit,
     onShowManualConflictOptions: () -> Unit,
     onDismissMessage: () -> Unit,
+    onDismissSupportAlert: () -> Unit,
     tipSuppression: TipSuppressionState? = null
 ) {
     var selectedContentChannelKey by rememberSaveable { mutableStateOf<String?>(null) }
@@ -2153,6 +2152,14 @@ fun MainScreen(
             onDismiss = onDismissBluetoothDevicePrompt
         )
     }
+    uiState.supportAlert?.let { alert ->
+        SupportContactBlockingAlert(
+            title = alert.title,
+            message = alert.message,
+            errorDetails = alert.errorDetails,
+            onDismiss = onDismissSupportAlert
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2394,6 +2401,9 @@ private fun MainScreenBackupImportDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                SupportContactInlineFooter(
+                    hint = "备份导入异常？联系客服并提供备份文件信息"
+                )
             }
         },
         confirmButton = {
@@ -3050,19 +3060,26 @@ private fun SyncStatusCard(
                 )
             }
             error?.takeIf { it.isNotBlank() }?.let {
-                Text(
-                    text = it,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error,
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .roundedClickable(
                             shape = RoundedCornerShape(8.dp),
                             onClick = onDismissMessage
-                        )
-                )
+                        ),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = it,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    SupportContactInlineFooter(
+                        hint = "同步失败？联系客服并提供上方错误信息"
+                    )
+                }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
@@ -3569,6 +3586,7 @@ private fun ContentPage(
                             icon = { Icon(Icons.Default.RssFeed, contentDescription = null) },
                             title = "暂无内容",
                             text = "可在导入页添加 RSS、网页文章或本地文件",
+                            supportHint = "不知道如何开始？联系客服获取帮助",
                             modifier = Modifier.testTag("content_empty")
                         )
                     }
@@ -3861,6 +3879,7 @@ private fun MorphingChannelArticlePane(
                             icon = { MainContentChannelLeadingIcon(channel.icon) },
                             title = channel.emptyTitle,
                             text = channel.emptyText,
+                            supportHint = "频道为空？联系客服了解同步或导入方式",
                             modifier = Modifier.testTag("channel_empty")
                         )
                     }
@@ -4321,6 +4340,7 @@ private fun ChannelArticleListPane(
                             icon = { MainContentChannelLeadingIcon(channel.icon) },
                             title = channel.emptyTitle,
                             text = channel.emptyText,
+                            supportHint = "频道为空？联系客服了解同步或导入方式",
                             modifier = Modifier.testTag("channel_empty")
                         )
                     }
@@ -4490,6 +4510,7 @@ private fun ChannelArticlePane(
                             icon = { MainContentChannelLeadingIcon(channel.icon) },
                             title = channel.emptyTitle,
                             text = channel.emptyText,
+                            supportHint = "频道为空？联系客服了解同步或导入方式",
                             modifier = Modifier.testTag("channel_empty")
                         )
                     }
@@ -4756,6 +4777,7 @@ private fun ImportsPage(
                         icon = { Icon(Icons.Default.FileOpen, contentDescription = null) },
                         title = "暂无导入",
                         text = "添加网页文章，或导入 TXT / EPUB / WRSS 文件后会显示在这里",
+                        supportHint = "导入遇到问题？联系客服获取帮助",
                         modifier = Modifier.testTag("imports_empty")
                     )
                 }
@@ -5276,7 +5298,8 @@ private fun EmptyStateCard(
     icon: @Composable () -> Unit,
     title: String,
     text: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    supportHint: String? = null
 ) {
     ElevatedCard(modifier = modifier) {
         Column(
@@ -5297,6 +5320,9 @@ private fun EmptyStateCard(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            supportHint?.let {
+                SupportContactInlineFooter(hint = it)
+            }
         }
     }
 }
@@ -5376,7 +5402,7 @@ private fun OnlineNovelImportWarningDialog(
 ) {
     var showContactQr by remember { mutableStateOf(false) }
     if (showContactQr) {
-        QqGroupQrDialog(onDismiss = { showContactQr = false })
+        SupportContactQrDialog(onDismiss = { showContactQr = false })
         return
     }
 
@@ -5398,49 +5424,6 @@ private fun OnlineNovelImportWarningDialog(
                 TextButton(onClick = { showContactQr = true }) {
                     Text("联系我们")
                 }
-            }
-        }
-    )
-}
-
-@Composable
-private fun QqGroupQrDialog(onDismiss: () -> Unit) {
-    val qrBitmap = remember {
-        generateQRCode(WATCH_RSS_QQ_GROUP_URL, 512).asImageBitmap()
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        modifier = Modifier.testTag("dialog_qq_group_qr"),
-        title = { Text("联系我们") },
-        text = {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text("扫描二维码加入 QQ 群")
-                Surface(
-                    modifier = Modifier.size(220.dp),
-                    shape = RoundedCornerShape(16.dp),
-                    color = Color.White
-                ) {
-                    Image(
-                        bitmap = qrBitmap,
-                        contentDescription = "QQ群二维码",
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(12.dp)
-                    )
-                }
-                Text(
-                    text = "群号：$WATCH_RSS_QQ_GROUP_NUMBER",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        },
-        confirmButton = {
-            Button(onClick = onDismiss) {
-                Text("返回")
             }
         }
     )
@@ -5472,6 +5455,9 @@ private fun MainScreenDeleteConflictDialog(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                SupportContactInlineFooter(
+                    hint = "冲突无法解决？联系客服并提供内容标题"
+                )
             }
         },
         confirmButton = {

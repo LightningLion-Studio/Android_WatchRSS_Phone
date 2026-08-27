@@ -115,6 +115,8 @@ import com.lightningstudio.watchrss.phone.ui.AdaptiveReaderOpenThreePane
 import com.lightningstudio.watchrss.phone.ui.AdaptiveReaderReturnThreePane
 import com.lightningstudio.watchrss.phone.ui.AdaptiveTwoPane
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
+import com.lightningstudio.watchrss.phone.ui.SupportContactInlineFooter
+import com.lightningstudio.watchrss.phone.ui.generateQRCode
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -2019,11 +2021,16 @@ private fun AccountFeedback(message: String?, error: String?) {
         )
     }
     error?.let {
-        Text(
-            text = it,
-            color = MaterialTheme.colorScheme.error,
-            style = MaterialTheme.typography.bodyMedium
-        )
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                text = it,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            SupportContactInlineFooter(
+                hint = "登录遇到问题？联系客服并提供上方提示"
+            )
+        }
     }
 }
 

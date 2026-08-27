@@ -276,9 +276,10 @@ class HomeActivity : ComponentActivity() {
                     onChooseConflictResolution = viewModel::chooseConflictResolution,
                     onShowManualConflictOptions = viewModel::showManualConflictOptions,
                     onDismissMessage = viewModel::clearMessage,
-                        onImportFile = ::selectLocalFile,
-                        tipSuppression = tipSuppression
-                    )
+                    onDismissSupportAlert = viewModel::dismissSupportAlert,
+                    onImportFile = ::selectLocalFile,
+                    tipSuppression = tipSuppression
+                )
                     }
                     state.txtChapterPrompt?.let { prompt ->
                         TxtChapterImportDialog(

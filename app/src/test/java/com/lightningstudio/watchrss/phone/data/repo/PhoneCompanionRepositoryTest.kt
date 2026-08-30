@@ -1640,6 +1640,36 @@ class PhoneCompanionRepositoryTest {
     }
 
     @Test
+    fun syncExport_reassemblesLargeInlineBodyFromDatabaseChunks() = runBlocking {
+        val largeText = buildString {
+            repeat(220_000) { index -> append(('a'.code + index % 23).toChar()) }
+        }
+        val articleDao = FakePhoneArticleDao().apply {
+            items = listOf(
+                article(
+                    id = "large-inline",
+                    contentText = largeText,
+                    independentSaved = true,
+                    independentChangedAt = 10L
+                )
+            )
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        val manifest = repository.getArticleManifestsForSync().single()
+        val outgoing = repository.getArticlesForSync(listOf("large-inline")).single()
+
+        assertEquals(largeText, outgoing.contentText)
+        assertTrue(manifest.bodyByteCount > 0L)
+        assertEquals(manifest.bodyHash, articleDao.items.single().syncBodyHash)
+    }
+
+    @Test
     fun getArticleManifestsForSync_marksMissingExternalBodyUnavailable() = runBlocking {
         val sourceUrl = ImportedContentIds.ROOT_SOURCE_URL
         val articleDao = FakePhoneArticleDao().apply {
@@ -2286,6 +2316,53 @@ class PhoneCompanionRepositoryTest {
 
         override suspend fun getAllForSync(): List<PhoneArticleEntity> = items
 
+        override suspend fun getAllMetadataForSync(): List<PhoneArticleEntity> = items
+
+        override suspend fun getMetadataForSync(
+            articleIds: List<String>
+        ): List<PhoneArticleEntity> = items.filter { it.articleId in articleIds }
+
+        override suspend fun getContentHtmlChunk(
+            articleId: String,
+            startCharacter: Int,
+            characterCount: Int
+        ): String? = items
+            .firstOrNull { it.articleId == articleId }
+            ?.contentHtml
+            ?.syncChunk(startCharacter, characterCount)
+
+        override suspend fun getContentTextChunk(
+            articleId: String,
+            startCharacter: Int,
+            characterCount: Int
+        ): String? = items
+            .firstOrNull { it.articleId == articleId }
+            ?.contentText
+            ?.syncChunk(startCharacter, characterCount)
+
+        override suspend fun updateSyncMetadata(
+            articleId: String,
+            bodyHash: String,
+            bodyByteCount: Long,
+            chunkSize: Int,
+            chunkHashesJson: String,
+            metadataHash: String
+        ) {
+            items = items.map { article ->
+                if (article.articleId == articleId) {
+                    article.copy(
+                        syncBodyHash = bodyHash,
+                        syncBodyByteCount = bodyByteCount,
+                        syncChunkSize = chunkSize,
+                        syncChunkHashesJson = chunkHashesJson,
+                        syncMetadataHash = metadataHash
+                    )
+                } else {
+                    article
+                }
+            }
+        }
+
         override suspend fun updateTitle(articleId: String, title: String, updatedAt: Long) {
             items = items.map { article ->
                 if (article.articleId == articleId) {
@@ -2331,6 +2408,12 @@ class PhoneCompanionRepositoryTest {
 
         override suspend fun deleteAll() {
             items = emptyList()
+        }
+
+        private fun String.syncChunk(startCharacter: Int, characterCount: Int): String {
+            val startIndex = (startCharacter - 1).coerceAtLeast(0).coerceAtMost(length)
+            val endIndex = (startIndex + characterCount).coerceAtMost(length)
+            return substring(startIndex, endIndex)
         }
     }
 

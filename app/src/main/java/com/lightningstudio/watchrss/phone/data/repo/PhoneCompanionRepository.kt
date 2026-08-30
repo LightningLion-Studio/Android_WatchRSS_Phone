@@ -830,13 +830,13 @@ class PhoneCompanionRepository(
     }
 
     suspend fun getArticlesForSync(): List<PhoneArticleEntity> = withContext(Dispatchers.IO) {
-        articleDao.getAllForSync()
+        articleDao.getAllMetadataForSync()
             .filter { it.shouldSyncThroughLibrary() }
             .mapNotNull { it.articleForBodyExport() }
     }
 
     suspend fun getArticleManifestsForSync(): List<ArticleSyncManifestEntry> = withContext(Dispatchers.IO) {
-        articleDao.getAllForSync()
+        articleDao.getAllMetadataForSync()
             .filter { it.shouldSyncThroughLibrary() }
             .map { it.syncManifestEntryForExport() }
     }
@@ -844,8 +844,8 @@ class PhoneCompanionRepository(
     private suspend fun getArticleManifestsForSync(articleIds: Collection<String>): List<ArticleSyncManifestEntry> {
         val idSet = articleIds.toSet()
         if (idSet.isEmpty()) return emptyList()
-        return articleDao.getAllForSync()
-            .filter { it.articleId in idSet && it.shouldSyncThroughLibrary() }
+        return articleMetadataForSync(idSet)
+            .filter { it.shouldSyncThroughLibrary() }
             .map { it.syncManifestEntryForExport() }
     }
 
@@ -853,10 +853,15 @@ class PhoneCompanionRepository(
         withContext(Dispatchers.IO) {
             val idSet = articleIds.toSet()
             if (idSet.isEmpty()) return@withContext emptyList()
-            articleDao.getAllForSync()
-                .filter { it.articleId in idSet }
+            articleMetadataForSync(idSet)
                 .mapNotNull { it.articleForBodyExport() }
         }
+
+    private suspend fun articleMetadataForSync(articleIds: Set<String>): List<PhoneArticleEntity> {
+        return articleIds
+            .chunked(SYNC_ID_QUERY_BATCH_SIZE)
+            .flatMap { articleDao.getMetadataForSync(it) }
+    }
 
     suspend fun getRssSourcesForSync(): List<PhoneRssSourceEntity> = withContext(Dispatchers.IO) {
         rssSourceDao.getAllForSync()
@@ -1022,14 +1027,16 @@ class PhoneCompanionRepository(
 
     suspend fun repairImportedContentSourceStates(): Int = withContext(Dispatchers.IO) {
         var repaired = 0
-        repaired += if (repairMissingImportedTextSourceIfNeeded(rssSourceDao.getAllForSync())) 1 else 0
         val sources = rssSourceDao.getAllForSync()
+        val articleMetadata = articleDao.getAllMetadataForSync()
+        repaired += if (repairMissingImportedTextSourceIfNeeded(sources, articleMetadata)) 1 else 0
+        val importedSources = sources
             .filter { ImportedContentIds.isImportedContentUrl(it.url) }
-        sources.forEach { source ->
+        importedSources.forEach { source ->
             val liveArticles = if (ImportedContentIds.isImportedTextSourceUrl(source.url)) {
-                liveImportedTextArticles()
+                liveImportedTextArticles(articleMetadata)
             } else {
-                articleDao.getByRssSourceUrl(source.url).filterNot { it.deleted }
+                articleMetadata.filter { it.rssSourceUrl == source.url && !it.deleted }
             }
             if (liveArticles.isEmpty() || !source.deleted) return@forEach
             val latestArticleUpdate = liveArticles.maxOf { article ->
@@ -1049,10 +1056,11 @@ class PhoneCompanionRepository(
     }
 
     private suspend fun repairMissingImportedTextSourceIfNeeded(
-        sources: List<PhoneRssSourceEntity>
+        sources: List<PhoneRssSourceEntity>,
+        articleMetadata: List<PhoneArticleEntity>? = null
     ): Boolean {
         if (sources.any { it.url == ImportedContentIds.ROOT_SOURCE_URL }) return false
-        val liveArticles = liveImportedTextArticles()
+        val liveArticles = liveImportedTextArticles(articleMetadata)
         if (liveArticles.isEmpty()) return false
         val latestArticleUpdate = liveArticles.maxOf { article ->
             maxOf(article.updatedAt, article.importedAt)
@@ -1081,8 +1089,10 @@ class PhoneCompanionRepository(
         return true
     }
 
-    private suspend fun liveImportedTextArticles(): List<PhoneArticleEntity> {
-        return articleDao.getAllForSync().filter { article ->
+    private suspend fun liveImportedTextArticles(
+        articleMetadata: List<PhoneArticleEntity>? = null
+    ): List<PhoneArticleEntity> {
+        return (articleMetadata ?: articleDao.getAllMetadataForSync()).filter { article ->
             !article.deleted &&
                 (
                     article.rssSourceUrl == ImportedContentIds.ROOT_SOURCE_URL ||
@@ -2131,7 +2141,7 @@ class PhoneCompanionRepository(
         ArticleSyncBody.cachedMetadataFor(hydrated)?.let { cached ->
             if (hasSyncMetadata(cached)) return this
             val updated = withSyncMetadata(cached)
-            articleDao.upsert(updated)
+            articleDao.updateSyncMetadata(updated)
             return updated
         }
         val metadata = ArticleSyncBody.metadataFor(hydrated)
@@ -2139,12 +2149,16 @@ class PhoneCompanionRepository(
             return this
         }
         val updated = withSyncMetadata(metadata)
-        articleDao.upsert(updated)
+        articleDao.updateSyncMetadata(updated)
         return updated
     }
 
     private suspend fun PhoneArticleEntity.syncManifestEntryForExport(): ArticleSyncManifestEntry {
-        val hydrated = hydrateExternalTextForSync()
+        val hydrated = if (ArticleSyncBody.cachedMetadataFor(this) != null) {
+            hydrateExternalTextForSync()
+        } else {
+            loadStoredBodyForSync()
+        }
         if (!hydrated.bodyAvailable) {
             val tombstone = if (deleted) withUnavailableTombstoneBodyMetadata() else this
             if (tombstone != this) articleDao.upsert(tombstone)
@@ -2153,10 +2167,21 @@ class PhoneCompanionRepository(
         return ensureSyncMetadata(hydrated.article).toSyncManifestEntry(bodyAvailable = true)
     }
 
-    private fun PhoneArticleEntity.articleForBodyExport(): PhoneArticleEntity? {
-        val hydrated = hydrateExternalTextForSync()
+    private suspend fun PhoneArticleEntity.articleForBodyExport(): PhoneArticleEntity? {
+        val hydrated = loadStoredBodyForSync()
         if (!hydrated.bodyAvailable) return null
         return hydrated.article.withCurrentSyncMetadata()
+    }
+
+    private suspend fun PhoneArticleDao.updateSyncMetadata(article: PhoneArticleEntity) {
+        updateSyncMetadata(
+            articleId = article.articleId,
+            bodyHash = article.syncBodyHash,
+            bodyByteCount = article.syncBodyByteCount,
+            chunkSize = article.syncChunkSize,
+            chunkHashesJson = article.syncChunkHashesJson,
+            metadataHash = article.syncMetadataHash
+        )
     }
 
     private fun PhoneArticleEntity.withCurrentSyncMetadata(): PhoneArticleEntity {
@@ -2383,6 +2408,58 @@ class PhoneCompanionRepository(
         return SyncHydratedArticle(copy(contentHtml = html, contentText = text), bodyAvailable)
     }
 
+    private suspend fun PhoneArticleEntity.loadStoredBodyForSync(): SyncHydratedArticle {
+        val stored = copy(
+            contentHtml = articleDao.readContentHtmlChunked(articleId),
+            contentText = articleDao.readContentTextChunked(articleId)
+        )
+        return stored.hydrateExternalTextForSync()
+    }
+
+    private suspend fun PhoneArticleDao.readContentHtmlChunked(articleId: String): String? {
+        val first = getContentHtmlChunk(
+            articleId = articleId,
+            startCharacter = 1,
+            characterCount = SYNC_DB_TEXT_CHUNK_CHARACTERS
+        ) ?: return null
+        return readTextChunks(articleId, first) { id, start, count ->
+            getContentHtmlChunk(id, start, count)
+        }
+    }
+
+    private suspend fun PhoneArticleDao.readContentTextChunked(articleId: String): String {
+        val first = getContentTextChunk(
+            articleId = articleId,
+            startCharacter = 1,
+            characterCount = SYNC_DB_TEXT_CHUNK_CHARACTERS
+        ).orEmpty()
+        return readTextChunks(articleId, first) { id, start, count ->
+            getContentTextChunk(id, start, count)
+        }
+    }
+
+    private suspend fun readTextChunks(
+        articleId: String,
+        firstChunk: String,
+        readChunk: suspend (String, Int, Int) -> String?
+    ): String {
+        if (firstChunk.length < SYNC_DB_TEXT_CHUNK_CHARACTERS) return firstChunk
+        val text = StringBuilder(firstChunk)
+        var startCharacter = firstChunk.length + 1
+        while (true) {
+            val chunk = readChunk(
+                articleId,
+                startCharacter,
+                SYNC_DB_TEXT_CHUNK_CHARACTERS
+            ).orEmpty()
+            if (chunk.isEmpty()) break
+            text.append(chunk)
+            startCharacter += chunk.length
+            if (chunk.length < SYNC_DB_TEXT_CHUNK_CHARACTERS) break
+        }
+        return text.toString()
+    }
+
     private fun PhoneArticleEntity.shouldExternalizeLocalContent(store: ArticleContentStore): Boolean {
         if (!ImportedContentIds.isImportedContentUrl(url)) return false
         val html = contentHtml.orEmpty()
@@ -2558,6 +2635,8 @@ class PhoneCompanionRepository(
         private const val FULL_SNAPSHOT_INTERVAL_MS = 7L * 24L * 60L * 60L * 1000L
         private const val SYNC_KIND_ARTICLE = "article"
         private const val SYNC_KIND_RSS_SOURCE = "rssSource"
+        private const val SYNC_DB_TEXT_CHUNK_CHARACTERS = 64 * 1024
+        private const val SYNC_ID_QUERY_BATCH_SIZE = 800
         private const val MAX_INLINE_CONTENT_CHARS = 100_000
         private const val MAX_REPAIRED_TITLE_CHARS = 80
         private const val MIN_HTML_TOC_LINKS = 3

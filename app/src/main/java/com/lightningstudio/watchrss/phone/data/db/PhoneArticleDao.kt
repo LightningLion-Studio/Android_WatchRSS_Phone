@@ -201,6 +201,89 @@ interface PhoneArticleDao {
     @Query("SELECT * FROM phone_articles")
     suspend fun getAllForSync(): List<PhoneArticleEntity>
 
+    @Query(
+        """
+        SELECT articleId, sourceDeviceId, url, title, siteName, excerpt,
+               substr(contentHtml, 1, 1024) AS contentHtml,
+               substr(contentText, 1, 1024) AS contentText,
+               imageUrl, contentHash, importedAt, updatedAt, independentSaved,
+               independentChangedAt, independentSortOrder, rssSourceUrl, rssSourceTitle,
+               favoriteSaved, favoriteChangedAt, favoriteSortOrder,
+               watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
+               deleted, deletedAt, syncBodyHash, syncBodyByteCount,
+               syncChunkSize, syncChunkHashesJson, syncMetadataHash, readingProgress, isRead,
+               readingPositionBytes, readingPositionContentHash, readingPositionChangedAt
+        FROM phone_articles
+        """
+    )
+    suspend fun getAllMetadataForSync(): List<PhoneArticleEntity>
+
+    @Query(
+        """
+        SELECT articleId, sourceDeviceId, url, title, siteName, excerpt,
+               substr(contentHtml, 1, 1024) AS contentHtml,
+               substr(contentText, 1, 1024) AS contentText,
+               imageUrl, contentHash, importedAt, updatedAt, independentSaved,
+               independentChangedAt, independentSortOrder, rssSourceUrl, rssSourceTitle,
+               favoriteSaved, favoriteChangedAt, favoriteSortOrder,
+               watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
+               deleted, deletedAt, syncBodyHash, syncBodyByteCount,
+               syncChunkSize, syncChunkHashesJson, syncMetadataHash, readingProgress, isRead,
+               readingPositionBytes, readingPositionContentHash, readingPositionChangedAt
+        FROM phone_articles
+        WHERE articleId IN (:articleIds)
+        """
+    )
+    suspend fun getMetadataForSync(articleIds: List<String>): List<PhoneArticleEntity>
+
+    @Query(
+        """
+        SELECT substr(contentHtml, :startCharacter, :characterCount)
+        FROM phone_articles
+        WHERE articleId = :articleId
+        LIMIT 1
+        """
+    )
+    suspend fun getContentHtmlChunk(
+        articleId: String,
+        startCharacter: Int,
+        characterCount: Int
+    ): String?
+
+    @Query(
+        """
+        SELECT substr(contentText, :startCharacter, :characterCount)
+        FROM phone_articles
+        WHERE articleId = :articleId
+        LIMIT 1
+        """
+    )
+    suspend fun getContentTextChunk(
+        articleId: String,
+        startCharacter: Int,
+        characterCount: Int
+    ): String?
+
+    @Query(
+        """
+        UPDATE phone_articles
+        SET syncBodyHash = :bodyHash,
+            syncBodyByteCount = :bodyByteCount,
+            syncChunkSize = :chunkSize,
+            syncChunkHashesJson = :chunkHashesJson,
+            syncMetadataHash = :metadataHash
+        WHERE articleId = :articleId
+        """
+    )
+    suspend fun updateSyncMetadata(
+        articleId: String,
+        bodyHash: String,
+        bodyByteCount: Long,
+        chunkSize: Int,
+        chunkHashesJson: String,
+        metadataHash: String
+    )
+
     @Query("UPDATE phone_articles SET title = :title, updatedAt = :updatedAt, syncMetadataHash = '' WHERE articleId = :articleId")
     suspend fun updateTitle(articleId: String, title: String, updatedAt: Long)
 

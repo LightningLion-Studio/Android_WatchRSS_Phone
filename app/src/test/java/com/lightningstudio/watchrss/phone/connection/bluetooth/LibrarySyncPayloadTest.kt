@@ -792,6 +792,43 @@ class LibrarySyncPayloadTest {
 
         assertEquals(emptyList<Int>(), parsed.chunks.map { it.index })
         assertTrue(parsed.metadataOnly)
+        assertEquals(metadata.bodyHash, parsed.bodyHash)
+        assertEquals(metadata.bodyByteCount, parsed.bodyByteCount)
+        assertEquals(metadata.chunkSize, parsed.chunkSize)
+        assertEquals(metadata.chunkHashes, parsed.chunkHashes)
+    }
+
+    @Test
+    fun chunkedBodyRequest_metadataOnlyFallsBackToFullBodyAfterManifestDrift() {
+        val manifestArticle = testArticle(
+            articleId = "metadata-only-drift",
+            contentText = "manifest body"
+        )
+        val manifestMetadata = ArticleSyncBody.metadataFor(manifestArticle)
+        val currentArticle = manifestArticle.copy(contentText = "current body")
+        val currentMetadata = ArticleSyncBody.metadataFor(currentArticle)
+        val frames = LibrarySyncPayload.buildChunkedArticleRequestFrames(
+            deviceId = "phone",
+            articles = listOf(currentArticle),
+            articleRequests = listOf(
+                ArticleBodyRequest(
+                    articleId = currentArticle.articleId,
+                    bodyHash = manifestMetadata.bodyHash,
+                    chunkIndexes = emptyList(),
+                    metadataOnly = true
+                )
+            ),
+            bodyRequests = emptyList(),
+            useBatches = true
+        )
+        val parsed = LibrarySyncPayload.parseChunkedArticles(
+            LibrarySyncPayload.combineArticlePayloads(frames)
+        ).single()
+
+        assertEquals(false, parsed.metadataOnly)
+        assertEquals(currentMetadata.bodyHash, parsed.bodyHash)
+        assertEquals(currentMetadata.chunkHashes.indices.toList(), parsed.chunks.map { it.index })
+        assertEquals(currentArticle.contentText, ArticleSyncBody.rebuildBody(null, parsed).second)
     }
 
     @Test
@@ -1134,18 +1171,16 @@ class LibrarySyncPayloadTest {
         val article = testArticle(articleId = "out-of-bounds", contentText = "正文")
         val metadata = ArticleSyncBody.metadataFor(article)
 
-        listOf(metadata.bodyHash, "stale-body-hash").forEach { requestedBodyHash ->
-            assertIllegalArgumentContains("out-of-bounds#${metadata.chunkHashes.size}") {
-                ArticleSyncBody.payloadForRequest(
-                    article,
-                    ArticleBodyRequest(
-                        articleId = article.articleId,
-                        bodyHash = requestedBodyHash,
-                        chunkIndexes = listOf(metadata.chunkHashes.size)
-                    ),
-                    metadata
-                )
-            }
+        assertIllegalArgumentContains("out-of-bounds#${metadata.chunkHashes.size}") {
+            ArticleSyncBody.payloadForRequest(
+                article,
+                ArticleBodyRequest(
+                    articleId = article.articleId,
+                    bodyHash = metadata.bodyHash,
+                    chunkIndexes = listOf(metadata.chunkHashes.size)
+                ),
+                metadata
+            )
         }
     }
 

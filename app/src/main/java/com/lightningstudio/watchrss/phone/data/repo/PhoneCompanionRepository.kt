@@ -1254,21 +1254,6 @@ class PhoneCompanionRepository(
                     contentHtml = contentHtml,
                     contentText = contentText,
                 )
-                if (!payload.metadataOnly && !explicitUnavailableTombstone && !retainsLocalDeletedBody) {
-                    val actualRemoteMetadata = ArticleSyncBody.metadataFor(preparedRemote)
-                    require(actualRemoteMetadata.bodyHash == payload.bodyHash) {
-                        "同步正文整体校验失败：${payload.article.articleId}"
-                    }
-                    require(actualRemoteMetadata.bodyByteCount == payload.bodyByteCount) {
-                        "同步正文长度校验失败：${payload.article.articleId}"
-                    }
-                    require(actualRemoteMetadata.chunkSize == payload.chunkSize) {
-                        "同步正文分块大小校验失败：${payload.article.articleId}"
-                    }
-                    require(actualRemoteMetadata.chunkHashes == payload.chunkHashes) {
-                        "同步正文分块元数据校验失败：${payload.article.articleId}"
-                    }
-                }
                 val mergedArticle = if (localHydrated == null) {
                     preparedRemote
                 } else {

@@ -1252,7 +1252,10 @@ object LibrarySyncPayload {
 
     private fun PhoneArticleEntity.toChunkedJsonItemSequence(request: ArticleBodyRequest?): Sequence<JSONObject> = sequence {
         val article = this@toChunkedJsonItemSequence
-        val metadata = ArticleSyncBody.currentMetadataFor(article)
+        // Repository export has already refreshed this metadata. Avoid a second full gzip/hash pass
+        // here; payloadForRequest still streams and verifies the current body before emitting chunks.
+        val metadata = ArticleSyncBody.cachedMetadataSnapshotFor(article)
+            ?: ArticleSyncBody.metadataFor(article)
         val bodyRequest = request.resolvedBodyRequestFor(article, metadata)
         val payload = ArticleSyncBody.payloadForRequest(article, bodyRequest, metadata)
         if (payload.chunks.isEmpty()) {

@@ -3,11 +3,15 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedWriter
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.InputStreamReader
+import java.io.OutputStream
+import java.io.OutputStreamWriter
 import java.io.Reader
+import java.io.Writer
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.zip.GZIPInputStream
@@ -64,32 +68,38 @@ data class ChunkedArticlePayload(
 object ArticleSyncBody {
     const val CHUNK_SIZE_BYTES = 128 * 1024
     private const val BODY_ENCODING_VERSION = 3
+    private const val MAX_DECOMPRESSED_TEXT_BYTES = 32 * 1024 * 1024
+    private const val JSON_WRITE_BUFFER_CHARS = 16 * 1024
+    private val HEX_DIGITS = "0123456789abcdef".toCharArray()
 
     fun metadataFor(article: PhoneArticleEntity): ArticleBodyMetadata {
-        val bodyBytes = encodeBody(article.contentHtml, article.contentText)
-        return metadataFor(article, bodyBytes)
+        val output = BodyChunkOutputStream()
+        writeEncodedBody(article.contentHtml, article.contentText, output)
+        return output.metadata(metadataHashFor(article))
     }
 
     fun cachedMetadataFor(article: PhoneArticleEntity): ArticleBodyMetadata? {
-        val expectedMetadataHash = metadataHashFor(article)
-        if (article.syncMetadataHash != expectedMetadataHash) return null
-        val chunkHashes = article.syncChunkHashesJson.toStringList()
+        val metadata = cachedMetadataSnapshotFor(article) ?: return null
+        return runCatching {
+            validateCachedBodyMetadata(article, metadata)
+            metadata
+        }.getOrNull()
+    }
+
+    /**
+     * Reads the persisted metadata without encoding the body. The returned snapshot is deliberately
+     * unverified: callers must pass it to [payloadForRequest], which streams the current body and
+     * validates the whole-body and per-chunk hashes before any cached chunk is sent.
+     */
+    internal fun cachedMetadataSnapshotFor(article: PhoneArticleEntity): ArticleBodyMetadata? {
         val metadata = ArticleBodyMetadata(
             bodyHash = article.syncBodyHash,
             bodyByteCount = article.syncBodyByteCount,
             chunkSize = article.syncChunkSize,
-            chunkHashes = chunkHashes,
+            chunkHashes = article.syncChunkHashesJson.toStringList(),
             metadataHash = article.syncMetadataHash
         )
-        if (!metadata.isCurrentFor(article)) return null
-        val bodyBytes = encodeBody(article.contentHtml, article.contentText)
-        val current = metadataFor(article, bodyBytes)
-        return metadata.takeIf {
-            it.bodyHash == current.bodyHash &&
-                it.bodyByteCount == current.bodyByteCount &&
-                it.chunkSize == current.chunkSize &&
-                it.chunkHashes == current.chunkHashes
-        }
+        return metadata.takeIf { it.isCurrentFor(article) }
     }
 
     fun currentMetadataFor(article: PhoneArticleEntity): ArticleBodyMetadata =
@@ -100,44 +110,69 @@ object ArticleSyncBody {
         request: ArticleBodyRequest,
         cachedMetadata: ArticleBodyMetadata? = cachedMetadataFor(article)
     ): ChunkedArticlePayload {
-        val bodyBytes = encodeBody(article.contentHtml, article.contentText)
-        val currentMetadata = metadataFor(article, bodyBytes)
+        cachedMetadata
+            ?.takeIf {
+                it.metadataHash == metadataHashFor(article) &&
+                    (
+                        (
+                            request.metadataOnly &&
+                                request.bodyHash.isNotBlank() &&
+                                request.bodyHash == it.bodyHash
+                            ) ||
+                            (
+                                request.bodyHash.isNotBlank() &&
+                                    !request.metadataOnly &&
+                                    request.bodyHash == it.bodyHash &&
+                                    request.chunkIndexes.isNotEmpty()
+                                )
+                        )
+            }
+            ?.let { metadata ->
+                runCatching {
+                    metadata.toPayload(
+                        article = article,
+                        chunks = if (request.metadataOnly) {
+                            emptyList()
+                        } else {
+                            chunksForRequestWithCachedMetadata(article, request, metadata)
+                        },
+                        metadataOnly = request.metadataOnly
+                    ).also {
+                        if (request.metadataOnly) {
+                            validateCachedBodyMetadata(article, metadata)
+                        }
+                    }
+                }.getOrNull()
+            }
+            ?.let { return it }
+
+        val currentMetadata = metadataFor(article)
         val metadata = cachedMetadata?.takeIf { it == currentMetadata } ?: currentMetadata
-        requireValidRequestedChunkIndexes(request, currentMetadata)
-        val shouldSendFullBody = !request.metadataOnly &&
-            (
-                request.chunkIndexes.isEmpty() ||
-                    request.bodyHash.isBlank() ||
-                    request.bodyHash != currentMetadata.bodyHash
-                )
+        val shouldSendFullBody = if (request.metadataOnly) {
+            request.bodyHash.isBlank() || request.bodyHash != currentMetadata.bodyHash
+        } else {
+            request.chunkIndexes.isEmpty() ||
+                request.bodyHash.isBlank() ||
+                request.bodyHash != currentMetadata.bodyHash
+        }
+        if (!shouldSendFullBody && !request.metadataOnly) {
+            requireValidRequestedChunkIndexes(request, currentMetadata)
+        }
         val responseRequest = if (shouldSendFullBody) {
             request.copy(
                 bodyHash = currentMetadata.bodyHash,
-                chunkIndexes = currentMetadata.chunkHashes.indices.toList()
+                chunkIndexes = currentMetadata.chunkHashes.indices.toList(),
+                metadataOnly = false
             )
         } else {
             request
         }
-        val chunks = if (request.metadataOnly) {
+        val chunks = if (responseRequest.metadataOnly) {
             emptyList()
         } else {
-            chunksForRequestWithMetadata(bodyBytes, responseRequest, metadata)
+            chunksForRequestWithCachedMetadata(article, responseRequest, metadata)
         }
-        return metadata.toPayload(article, chunks, metadataOnly = request.metadataOnly)
-    }
-
-    private fun metadataFor(
-        article: PhoneArticleEntity,
-        bodyBytes: ByteArray
-    ): ArticleBodyMetadata {
-        val chunkHashes = chunkHashesFor(bodyBytes)
-        return ArticleBodyMetadata(
-            bodyHash = sha256(bodyBytes),
-            bodyByteCount = bodyBytes.size.toLong(),
-            chunkSize = CHUNK_SIZE_BYTES,
-            chunkHashes = chunkHashes,
-            metadataHash = metadataHashFor(article)
-        )
+        return metadata.toPayload(article, chunks, metadataOnly = responseRequest.metadataOnly)
     }
 
     fun metadataHashFor(article: PhoneArticleEntity): String {
@@ -176,47 +211,18 @@ object ArticleSyncBody {
     ): List<ArticleBodyChunk> =
         payloadForRequest(article, request, cachedMetadata).chunks
 
-    private fun chunksForRequestWithMetadata(
+    private fun chunksForRequestWithCachedMetadata(
         article: PhoneArticleEntity,
         request: ArticleBodyRequest,
         metadata: ArticleBodyMetadata
     ): List<ArticleBodyChunk> {
-        val bodyBytes = encodeBody(article.contentHtml, article.contentText)
-        return chunksForRequestWithMetadata(bodyBytes, request, metadata)
-    }
-
-    private fun chunksForRequestWithMetadata(
-        bodyBytes: ByteArray,
-        request: ArticleBodyRequest,
-        metadata: ArticleBodyMetadata
-    ): List<ArticleBodyChunk> {
-        val chunkSize = metadata.chunkSize.takeIf { it > 0 } ?: CHUNK_SIZE_BYTES
-        require(bodyBytes.size.toLong() == metadata.bodyByteCount) {
-            "同步正文缓存大小不匹配：expected=${metadata.bodyByteCount} actual=${bodyBytes.size}"
-        }
-        val chunkCount = chunkCountFor(bodyBytes, chunkSize)
-        require(chunkCount == metadata.chunkHashes.size) {
-            "同步正文缓存分块数不匹配：expected=${metadata.chunkHashes.size} actual=$chunkCount"
-        }
-        metadata.chunkHashes.forEachIndexed { index, expectedHash ->
-            val start = index * chunkSize
-            val end = min(start + chunkSize, bodyBytes.size)
-            require(sha256(bodyBytes, start, end - start) == expectedHash) {
-                "同步正文缓存分块校验失败：${request.articleId}#$index"
-            }
-        }
         requireValidRequestedChunkIndexes(request, metadata)
-        val indexes = request.chunkIndexes.distinct()
-        return indexes.map { index ->
-            val start = index * chunkSize
-            val end = min(start + chunkSize, bodyBytes.size)
-            val bytes = bodyBytes.copyOfRange(start, end)
-            ArticleBodyChunk(
-                index = index,
-                hash = metadata.chunkHashes[index],
-                bytes = bytes
-            )
-        }
+        val output = CachedBodyChunkOutputStream(
+            metadata = metadata,
+            captureIndexes = request.chunkIndexes.toSet()
+        )
+        writeEncodedBody(article.contentHtml, article.contentText, output)
+        return output.chunks()
     }
 
     private fun requireValidRequestedChunkIndexes(
@@ -321,11 +327,78 @@ object ArticleSyncBody {
         Base64.getDecoder().decode(value)
 
     private fun encodeBody(contentHtml: String?, contentText: String): ByteArray {
-        val rawBody = JSONObject().apply {
-            put("contentHtml", contentHtml)
-            put("contentText", contentText)
-        }.toString().toByteArray(Charsets.UTF_8)
-        return gzip(rawBody)
+        return ByteArrayOutputStream().also { output ->
+            writeEncodedBody(contentHtml, contentText, output)
+        }.toByteArray()
+    }
+
+    private fun writeEncodedBody(contentHtml: String?, contentText: String, output: OutputStream) {
+        GZIPOutputStream(output).use { gzip ->
+            BufferedWriter(
+                OutputStreamWriter(gzip, Charsets.UTF_8),
+                JSON_WRITE_BUFFER_CHARS
+            ).use { writer ->
+                writer.append('{')
+                var needsComma = false
+                if (contentHtml != null) {
+                    writeJsonStringField(writer, "contentHtml", contentHtml)
+                    needsComma = true
+                }
+                if (needsComma) writer.append(',')
+                writeJsonStringField(writer, "contentText", contentText)
+                writer.append('}')
+            }
+        }
+    }
+
+    private fun validateCachedBodyMetadata(
+        article: PhoneArticleEntity,
+        metadata: ArticleBodyMetadata
+    ) {
+        val output = CachedBodyChunkOutputStream(metadata, emptySet())
+        writeEncodedBody(article.contentHtml, article.contentText, output)
+        output.chunks()
+    }
+
+    private fun writeJsonStringField(writer: Writer, name: String, value: String) {
+        writeJsonString(writer, name)
+        writer.append(':')
+        writeJsonString(writer, value)
+    }
+
+    private fun writeJsonString(writer: Writer, value: String) {
+        writer.write('"'.code)
+        var runStart = 0
+        value.forEachIndexed { index, char ->
+            val escape = when (char) {
+                '\\' -> "\\\\"
+                '"' -> "\\\""
+                '/' -> "\\/"
+                '\b' -> "\\b"
+                '\u000C' -> "\\f"
+                '\n' -> "\\n"
+                '\r' -> "\\r"
+                '\t' -> "\\t"
+                else -> null
+            }
+            if (escape != null || char.code < 0x20) {
+                if (runStart < index) {
+                    writer.write(value, runStart, index - runStart)
+                }
+                if (escape != null) {
+                    writer.write(escape)
+                } else {
+                    writer.write("\\u00")
+                    writer.write(HEX_DIGITS[char.code ushr 4].code)
+                    writer.write(HEX_DIGITS[char.code and 0x0f].code)
+                }
+                runStart = index + 1
+            }
+        }
+        if (runStart < value.length) {
+            writer.write(value, runStart, value.length - runStart)
+        }
+        writer.write('"'.code)
     }
 
     private fun decodeBody(bytes: ByteArray): Pair<String?, String> {
@@ -381,14 +454,6 @@ object ArticleSyncBody {
         require(hasContentText) { "同步正文JSON缺少字段：contentText" }
         require(cursor.nextNonWhitespace() == -1) { "同步正文JSON包含尾随数据" }
         return contentHtml to contentText
-    }
-
-    private fun gzip(bytes: ByteArray): ByteArray {
-        val out = ByteArrayOutputStream()
-        GZIPOutputStream(out).use { gzip ->
-            gzip.write(bytes)
-        }
-        return out.toByteArray()
     }
 
     private class BodyJsonCursor(
@@ -588,18 +653,7 @@ object ArticleSyncBody {
         }
     }
 
-    private fun chunkHashesFor(bytes: ByteArray): List<String> {
-        val chunkCount = chunkCountFor(bytes)
-        return buildList(chunkCount) {
-            repeat(chunkCount) { index ->
-                val start = index * CHUNK_SIZE_BYTES
-                val end = min(start + CHUNK_SIZE_BYTES, bytes.size)
-                add(sha256(bytes, start, end - start))
-            }
-        }
-    }
-
-    private fun chunkCountFor(bytes: ByteArray, chunkSize: Int = CHUNK_SIZE_BYTES): Int {
+    private fun chunkCountFor(bytes: ByteArray, chunkSize: Int): Int {
         if (bytes.isEmpty()) return 1
         return ((bytes.size - 1) / chunkSize) + 1
     }
@@ -625,11 +679,17 @@ object ArticleSyncBody {
         )
 
     private fun ArticleBodyMetadata.isCurrentFor(article: PhoneArticleEntity): Boolean {
-        return metadataHash == metadataHashFor(article) &&
-            bodyHash.isNotBlank() &&
-            bodyByteCount > 0L &&
-            chunkSize > 0 &&
-            chunkHashes.isNotEmpty()
+        if (
+            metadataHash != metadataHashFor(article) ||
+            bodyHash.isBlank() ||
+            bodyByteCount <= 0L ||
+            chunkSize <= 0 ||
+            chunkHashes.isEmpty()
+        ) {
+            return false
+        }
+        val expectedChunkCount = ((bodyByteCount - 1L) / chunkSize.toLong()) + 1L
+        return expectedChunkCount == chunkHashes.size.toLong()
     }
 
     private fun String.toStringList(): List<String> {
@@ -650,8 +710,163 @@ object ArticleSyncBody {
         val digest = MessageDigest.getInstance("SHA-256").apply {
             update(bytes, offset, length)
         }.digest()
-        return digest.joinToString("") { "%02x".format(it) }
+        return digest.toHexString()
     }
 
-    private const val MAX_DECOMPRESSED_TEXT_BYTES = 32 * 1024 * 1024
+    private class BodyChunkOutputStream : OutputStream() {
+        private val bodyDigest = MessageDigest.getInstance("SHA-256")
+        private var chunkDigest = MessageDigest.getInstance("SHA-256")
+        private val chunkHashes = mutableListOf<String>()
+        private var chunkByteCount = 0
+        private var bodyByteCount = 0L
+        private var bodyHash: String? = null
+
+        override fun write(b: Int) {
+            write(byteArrayOf(b.toByte()), 0, 1)
+        }
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            if (len <= 0) return
+            var offset = off
+            var remaining = len
+            while (remaining > 0) {
+                val count = min(remaining, CHUNK_SIZE_BYTES - chunkByteCount)
+                bodyDigest.update(b, offset, count)
+                chunkDigest.update(b, offset, count)
+                chunkByteCount += count
+                bodyByteCount += count
+                offset += count
+                remaining -= count
+                if (chunkByteCount == CHUNK_SIZE_BYTES) {
+                    finishChunk()
+                }
+            }
+        }
+
+        fun metadata(metadataHash: String): ArticleBodyMetadata {
+            finish()
+            return ArticleBodyMetadata(
+                bodyHash = bodyHash.orEmpty(),
+                bodyByteCount = bodyByteCount,
+                chunkSize = CHUNK_SIZE_BYTES,
+                chunkHashes = chunkHashes.toList(),
+                metadataHash = metadataHash
+            )
+        }
+
+        private fun finish() {
+            if (bodyHash != null) return
+            if (chunkByteCount > 0 || bodyByteCount == 0L) {
+                finishChunk()
+            }
+            bodyHash = bodyDigest.digest().toHexString()
+        }
+
+        private fun finishChunk() {
+            chunkHashes += chunkDigest.digest().toHexString()
+            chunkByteCount = 0
+            chunkDigest = MessageDigest.getInstance("SHA-256")
+        }
+    }
+
+    private class CachedBodyChunkOutputStream(
+        private val metadata: ArticleBodyMetadata,
+        private val captureIndexes: Set<Int>
+    ) : OutputStream() {
+        init {
+            require(metadata.chunkSize > 0) { "同步正文缓存分块大小无效：${metadata.chunkSize}" }
+        }
+
+        private val bodyDigest = MessageDigest.getInstance("SHA-256")
+        private var chunkBuffer: ByteArrayOutputStream? = newChunkBuffer(0)
+        private var chunkDigest = MessageDigest.getInstance("SHA-256")
+        private val chunks = mutableListOf<ArticleBodyChunk>()
+        private var chunkIndex = 0
+        private var chunkByteCount = 0
+        private var bodyByteCount = 0L
+        private var finished = false
+
+        override fun write(b: Int) {
+            write(byteArrayOf(b.toByte()), 0, 1)
+        }
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            if (len <= 0) return
+            var offset = off
+            var remaining = len
+            while (remaining > 0) {
+                val count = min(remaining, metadata.chunkSize - chunkByteCount)
+                bodyDigest.update(b, offset, count)
+                chunkDigest.update(b, offset, count)
+                chunkBuffer?.write(b, offset, count)
+                chunkByteCount += count
+                bodyByteCount += count
+                offset += count
+                remaining -= count
+                if (chunkByteCount == metadata.chunkSize) {
+                    finishChunk()
+                }
+            }
+        }
+
+        fun chunks(): List<ArticleBodyChunk> {
+            finish()
+            return chunks.toList()
+        }
+
+        private fun finish() {
+            if (finished) return
+            if (chunkByteCount > 0) {
+                finishChunk()
+            }
+            require(bodyByteCount == metadata.bodyByteCount) {
+                "同步正文缓存大小不匹配：expected=${metadata.bodyByteCount} actual=$bodyByteCount"
+            }
+            require(chunkIndex == metadata.chunkHashes.size) {
+                "同步正文缓存分块数不匹配：expected=${metadata.chunkHashes.size} actual=$chunkIndex"
+            }
+            require(bodyDigest.digest().toHexString() == metadata.bodyHash) {
+                "同步正文缓存整体校验失败"
+            }
+            finished = true
+        }
+
+        private fun finishChunk() {
+            val expectedHash = metadata.chunkHashes.getOrNull(chunkIndex)
+                ?: error("同步正文缓存缺少分块哈希：$chunkIndex")
+            require(chunkDigest.digest().toHexString() == expectedHash) {
+                "同步正文缓存分块校验失败：$chunkIndex"
+            }
+            val bytes = chunkBuffer?.toByteArray()
+            if (bytes != null) {
+                chunks += ArticleBodyChunk(
+                    index = chunkIndex,
+                    hash = expectedHash,
+                    bytes = bytes
+                )
+            }
+            chunkIndex += 1
+            chunkByteCount = 0
+            chunkDigest = MessageDigest.getInstance("SHA-256")
+            chunkBuffer = newChunkBuffer(chunkIndex)
+        }
+
+        private fun newChunkBuffer(index: Int): ByteArrayOutputStream? {
+            return if (index in captureIndexes) {
+                ByteArrayOutputStream()
+            } else {
+                null
+            }
+        }
+    }
+
+    private fun ByteArray.toHexString(): String {
+        val encoded = CharArray(size * 2)
+        forEachIndexed { index, byte ->
+            val value = byte.toInt() and 0xff
+            encoded[index * 2] = HEX_DIGITS[value ushr 4]
+            encoded[index * 2 + 1] = HEX_DIGITS[value and 0x0f]
+        }
+        return String(encoded)
+    }
 }

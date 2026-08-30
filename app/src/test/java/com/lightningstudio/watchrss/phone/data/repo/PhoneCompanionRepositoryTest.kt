@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.data.repo
 
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyRequest
+import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyChunk
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncBody
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncManifestEntry
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ChunkedArticlePayload
@@ -33,9 +34,11 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.security.MessageDigest
 
 class PhoneCompanionRepositoryTest {
     @Test
@@ -1013,7 +1016,7 @@ class PhoneCompanionRepositoryTest {
             favoriteChangedAt = 50L
         ).copy(sourceDeviceId = "watch")
         val remoteMetadata = ArticleSyncBody.metadataFor(remote)
-        val remotePayload = ArticleSyncBody.payloadForRequest(
+        val canonicalPayload = ArticleSyncBody.payloadForRequest(
             article = remote,
             request = ArticleBodyRequest(
                 articleId = remote.articleId,
@@ -1021,6 +1024,16 @@ class PhoneCompanionRepositoryTest {
                 chunkIndexes = remoteMetadata.chunkHashes.indices.toList()
             ),
             cachedMetadata = remoteMetadata
+        )
+        val wireBytes = canonicalPayload.chunks.single().bytes.copyOf().also { bytes ->
+            bytes[4] = 1 // Valid alternate GZIP header; decoded article semantics are unchanged.
+        }
+        val wireHash = sha256(wireBytes)
+        val remotePayload = canonicalPayload.copy(
+            bodyHash = wireHash,
+            bodyByteCount = wireBytes.size.toLong(),
+            chunkHashes = listOf(wireHash),
+            chunks = listOf(ArticleBodyChunk(index = 0, hash = wireHash, bytes = wireBytes))
         )
         articleDao.items = listOf(local)
         val repository = PhoneCompanionRepository(
@@ -1063,7 +1076,7 @@ class PhoneCompanionRepositoryTest {
             updatedAt = 20L
         ).copy(sourceDeviceId = "watch")
         val remoteMetadata = ArticleSyncBody.metadataFor(remote)
-        val remotePayload = ArticleSyncBody.payloadForRequest(
+        val canonicalPayload = ArticleSyncBody.payloadForRequest(
             article = remote,
             request = ArticleBodyRequest(
                 articleId = remote.articleId,
@@ -1071,6 +1084,16 @@ class PhoneCompanionRepositoryTest {
                 chunkIndexes = remoteMetadata.chunkHashes.indices.toList()
             ),
             cachedMetadata = remoteMetadata
+        )
+        val wireBytes = canonicalPayload.chunks.single().bytes.copyOf().also { bytes ->
+            bytes[4] = 1 // Valid alternate GZIP header; decoded article semantics are unchanged.
+        }
+        val wireHash = sha256(wireBytes)
+        val remotePayload = canonicalPayload.copy(
+            bodyHash = wireHash,
+            bodyByteCount = wireBytes.size.toLong(),
+            chunkHashes = listOf(wireHash),
+            chunks = listOf(ArticleBodyChunk(index = 0, hash = wireHash, bytes = wireBytes))
         )
         articleDao.items = listOf(local)
         val repository = PhoneCompanionRepository(
@@ -1086,6 +1109,7 @@ class PhoneCompanionRepositoryTest {
         val updated = repository.getArticlesForSync().single()
         assertEquals("<article>手表完整正文</article>", updated.contentHtml)
         assertEquals("手表完整正文", updated.contentText)
+        assertNotEquals(remotePayload.bodyHash, updated.syncBodyHash)
         assertEquals(remoteMetadata.bodyHash, updated.syncBodyHash)
         assertEquals(remoteMetadata.bodyByteCount, updated.syncBodyByteCount)
         assertEquals(remoteMetadata.chunkSize, updated.syncChunkSize)
@@ -2068,6 +2092,11 @@ class PhoneCompanionRepositoryTest {
             continuePlaybackInBackground = continuePlaybackInBackground
         )
     }
+
+    private fun sha256(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { "%02x".format(it) }
 
     private fun article(
         id: String,

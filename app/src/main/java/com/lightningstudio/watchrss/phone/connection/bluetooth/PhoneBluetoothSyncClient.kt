@@ -76,6 +76,9 @@ private data class LibraryResponseRead(
     val stats: LibraryFrameStats
 )
 
+internal fun isSessionOperationSafeForTransparentReplay(action: String): Boolean =
+    action != BluetoothSyncProtocol.ACTION_SYNC_LIBRARY
+
 private class PreviewStreamStats {
     private var windowStartedAt = SystemClock.elapsedRealtime()
     private var sentFrames = 0
@@ -605,7 +608,13 @@ class PhoneBluetoothSyncClient(
                 sessionId = sessionId
             )
         }
-        return executeSessionOperation(session, sessionId, request.optString("action")) {
+        val action = request.optString("action")
+        return executeSessionOperation(
+            session = session,
+            sessionId = sessionId,
+            action = action,
+            allowTransparentReplay = isSessionOperationSafeForTransparentReplay(action)
+        ) {
             connectionMutex.withLock {
                 val transport = session.transport ?: error("持久同步连接已关闭")
                 val wireRequest = session.requestForExchange(request)
@@ -660,7 +669,10 @@ class PhoneBluetoothSyncClient(
         return executeSessionOperation(
             session = session,
             sessionId = sessionId,
-            action = BluetoothSyncProtocol.ACTION_SYNC_LIBRARY
+            action = BluetoothSyncProtocol.ACTION_SYNC_LIBRARY,
+            allowTransparentReplay = isSessionOperationSafeForTransparentReplay(
+                BluetoothSyncProtocol.ACTION_SYNC_LIBRARY
+            )
         ) {
             connectionMutex.withLock {
                 exchangeLibraryOnSessionTransport(
@@ -724,6 +736,7 @@ class PhoneBluetoothSyncClient(
         session: PhoneSyncSession,
         sessionId: String,
         action: String,
+        allowTransparentReplay: Boolean,
         block: suspend () -> T
     ): T {
         val cancellationHandle = installSessionCancellationLogger(session, sessionId, action)
@@ -732,6 +745,7 @@ class PhoneBluetoothSyncClient(
         } catch (throwable: Throwable) {
             if (
                 throwable is CancellationException ||
+                !allowTransparentReplay ||
                 !isSessionTransportFailure(throwable) ||
                 !session.recoveryGate.tryAcquire()
             ) {

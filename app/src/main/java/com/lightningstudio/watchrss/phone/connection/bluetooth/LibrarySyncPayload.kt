@@ -538,12 +538,21 @@ object LibrarySyncPayload {
                         watchLaterChangedAt = item.optLong("watchLaterChangedAt"),
                         deletedAt = item.optLong("deletedAt"),
                         deleted = item.optBoolean("deleted", item.optLong("deletedAt") > 0L),
-                        bodyHash = item.optString("bodyHash").trim().ifBlank {
-                            item.optString("contentHash").trim()
-                        },
-                        bodyByteCount = item.optLong("bodyByteCount"),
-                        chunkSize = item.optInt("chunkSize"),
-                        chunkHashes = item.optStringArray("chunkHashes"),
+                        bodyHash = item.optString("bodyHash").trim(),
+                        bodyByteCount = item.optStrictLong(
+                            name = "bodyByteCount",
+                            articleId = articleId,
+                            missingValue = -1L
+                        ),
+                        chunkSize = item.optStrictInt(
+                            name = "chunkSize",
+                            articleId = articleId,
+                            missingValue = -1
+                        ),
+                        chunkHashes = item.optStrictStringArray(
+                            name = "chunkHashes",
+                            articleId = articleId
+                        ),
                         metadataHash = item.optString("metadataHash").trim(),
                         bodyAvailable = item.optBoolean("bodyAvailable", true),
                         bodySyncMode = item.optString("bodySyncMode")
@@ -596,26 +605,27 @@ object LibrarySyncPayload {
                     (remote.isRead && !local.isRead)
             }
             val hasReusableLocalBody = local?.canReuseLocalBodyFor(remote) == true
-            val shouldRequestMetadataOnlyBody = remote.shouldRequestMetadataOnlyBody(
-                supportsMetadataOnlyArticles = supportsMetadataOnlyArticles
-            )
+            val shouldRequestMetadataOnlyBody = hasReusableLocalBody &&
+                remote.shouldRequestMetadataOnlyBody(
+                    supportsMetadataOnlyArticles = supportsMetadataOnlyArticles
+                )
             val metadataOnly = needsMetadata && shouldRequestMetadataOnlyBody
             if (!remote.deleted && !remote.bodyAvailable && !hasReusableLocalBody) {
                 return@mapNotNull null
             }
             val needsBody = !remote.deleted &&
                 remote.bodyAvailable &&
-                !hasReusableLocalBody &&
-                !shouldRequestMetadataOnlyBody
+                !hasReusableLocalBody
+            if (needsBody) remote.requireValidBodyShape()
             if (!needsMetadata && !needsBody) return@mapNotNull null
-            val localHashes = if (local?.canReuseLocalChunksFor(remote) == true) {
-                local.chunkHashes.toSet()
-            } else {
-                emptySet()
-            }
+            val reusableLocalChunks = local?.takeIf { it.canReuseLocalChunksFor(remote) }
             val chunkIndexes = if (needsBody) {
-                remote.chunkHashes.mapIndexedNotNull { index, hash ->
-                    index.takeIf { hash !in localHashes }
+                if (remote.bodySyncMode == ARTICLE_BODY_SYNC_MODE_SAVED) {
+                    remote.chunkHashes.indices.toList()
+                } else {
+                    remote.chunkHashes.mapIndexedNotNull { index, hash ->
+                        index.takeIf { reusableLocalChunks?.chunkHashes?.getOrNull(index) != hash }
+                    }
                 }
             } else {
                 emptyList()
@@ -675,7 +685,10 @@ object LibrarySyncPayload {
                     ArticleBodyRequest(
                         articleId = articleId,
                         bodyHash = item.optString("bodyHash").trim(),
-                        chunkIndexes = item.optIntArray("chunkIndexes"),
+                        chunkIndexes = item.optStrictNonNegativeIntArray(
+                            name = "chunkIndexes",
+                            articleId = articleId
+                        ),
                         metadataOnly = item.optBoolean("metadataOnly", false)
                     )
                 )
@@ -792,12 +805,23 @@ object LibrarySyncPayload {
             val chunks = body.optJSONArray("chunks") ?: JSONArray()
             val payload = ChunkedArticlePayload(
                 article = article,
-                bodyHash = body.optString("bodyHash").trim().ifBlank { article.contentHash },
-                bodyByteCount = body.optLong("bodyByteCount"),
-                chunkSize = body.optInt("chunkSize"),
-                chunkHashes = body.optStringArray("chunkHashes"),
+                bodyHash = body.optString("bodyHash").trim(),
+                bodyByteCount = body.optStrictLong(
+                    name = "bodyByteCount",
+                    articleId = article.articleId,
+                    missingValue = -1L
+                ),
+                chunkSize = body.optStrictInt(
+                    name = "chunkSize",
+                    articleId = article.articleId,
+                    missingValue = -1
+                ),
+                chunkHashes = body.optStrictStringArray(
+                    name = "chunkHashes",
+                    articleId = article.articleId
+                ),
                 metadataOnly = body.optBoolean("metadataOnly", false),
-                chunks = buildList {
+                chunks = mergeBodyChunks(article.articleId, emptyList(), buildList {
                     for (chunkIndex in 0 until chunks.length()) {
                         val chunk = chunks.optJSONObject(chunkIndex) ?: continue
                         val encoded = chunk.optString("data").takeIf { it.isNotBlank() } ?: continue
@@ -809,7 +833,7 @@ object LibrarySyncPayload {
                             )
                         )
                     }
-                }
+                })
             )
             val existing = byArticleId[article.articleId]
             byArticleId[article.articleId] = if (existing == null) {
@@ -817,6 +841,7 @@ object LibrarySyncPayload {
             } else {
                 require(
                     existing.bodyHash == payload.bodyHash &&
+                        existing.bodyByteCount == payload.bodyByteCount &&
                         existing.chunkSize == payload.chunkSize &&
                         existing.chunkHashes == payload.chunkHashes &&
                         existing.metadataOnly == payload.metadataOnly
@@ -825,9 +850,7 @@ object LibrarySyncPayload {
                 }
                 existing.copy(
                     article = payload.article,
-                    chunks = (existing.chunks + payload.chunks)
-                        .distinctBy { it.index }
-                        .sortedBy { it.index }
+                    chunks = mergeBodyChunks(article.articleId, existing.chunks, payload.chunks)
                 )
             }
         }
@@ -1252,16 +1275,6 @@ object LibrarySyncPayload {
                 chunkIndexes = metadata.chunkHashes.indices.toList()
             )
         }
-        if (
-            !metadataOnly &&
-            chunkIndexes.isEmpty() &&
-            article.bodySyncModeForSync() == ARTICLE_BODY_SYNC_MODE_FULL
-        ) {
-            return copy(
-                bodyHash = bodyHash.ifBlank { metadata.bodyHash },
-                chunkIndexes = metadata.chunkHashes.indices.toList()
-            )
-        }
         return this
     }
 
@@ -1386,22 +1399,111 @@ object LibrarySyncPayload {
         return coerceIn(0f, 1f) > other.coerceIn(0f, 1f) + READING_PROGRESS_SYNC_EPSILON
     }
 
-    private fun JSONObject.optStringArray(name: String): List<String> {
+    private fun JSONObject.optStrictStringArray(name: String, articleId: String): List<String> {
         val array = optJSONArray(name) ?: return emptyList()
         return buildList {
             for (index in 0 until array.length()) {
-                array.optString(index).trim().takeIf { it.isNotBlank() }?.let(::add)
+                val raw = array.opt(index)
+                require(raw is String) {
+                    "同步正文元数据字段类型无效：$articleId.$name[$index]"
+                }
+                val value = raw.trim()
+                require(value.isNotBlank()) {
+                    "同步正文元数据包含空分块哈希：$articleId.$name[$index]"
+                }
+                add(value)
             }
         }
     }
 
-    private fun JSONObject.optIntArray(name: String): List<Int> {
+    private fun JSONObject.optStrictNonNegativeIntArray(name: String, articleId: String): List<Int> {
         val array = optJSONArray(name) ?: return emptyList()
         return buildList {
             for (index in 0 until array.length()) {
-                add(array.optInt(index))
+                val raw = array.opt(index)
+                val value = when (raw) {
+                    is Byte -> raw.toInt()
+                    is Short -> raw.toInt()
+                    is Int -> raw
+                    is Long -> raw.takeIf { it <= Int.MAX_VALUE }?.toInt()
+                    else -> null
+                }
+                require(value != null && value >= 0) {
+                    "同步正文请求索引无效：$articleId.$name[$index]=$raw"
+                }
+                add(value)
             }
         }
+    }
+
+    private fun JSONObject.optStrictLong(name: String, articleId: String, missingValue: Long): Long {
+        if (!has(name)) return missingValue
+        val raw = opt(name)
+        return when (raw) {
+            is Byte -> raw.toLong()
+            is Short -> raw.toLong()
+            is Int -> raw.toLong()
+            is Long -> raw
+            else -> throw IllegalArgumentException(
+                "同步正文元数据字段类型无效：$articleId.$name=$raw"
+            )
+        }
+    }
+
+    private fun JSONObject.optStrictInt(name: String, articleId: String, missingValue: Int): Int {
+        if (!has(name)) return missingValue
+        val raw = opt(name)
+        return when (raw) {
+            is Byte -> raw.toInt()
+            is Short -> raw.toInt()
+            is Int -> raw
+            is Long -> raw.takeIf {
+                it >= Int.MIN_VALUE.toLong() && it <= Int.MAX_VALUE.toLong()
+            }?.toInt()
+            else -> null
+        } ?: throw IllegalArgumentException(
+            "同步正文元数据字段类型无效：$articleId.$name=$raw"
+        )
+    }
+
+    private fun ArticleSyncManifestEntry.requireValidBodyShape() {
+        require(bodyHash.isNotBlank()) {
+            "同步正文清单缺少整体哈希：$articleId.bodyHash"
+        }
+        require(bodyByteCount >= 0L) {
+            "同步正文清单大小无效：$articleId.bodyByteCount=$bodyByteCount"
+        }
+        require(chunkSize > 0) {
+            "同步正文清单分块大小无效：$articleId.chunkSize=$chunkSize"
+        }
+        val expectedChunkCount = if (bodyByteCount == 0L) {
+            1L
+        } else {
+            ((bodyByteCount - 1L) / chunkSize) + 1L
+        }
+        require(chunkHashes.size.toLong() == expectedChunkCount) {
+            "同步正文清单分块数不匹配：$articleId.chunkHashes " +
+                "expected=$expectedChunkCount actual=${chunkHashes.size}"
+        }
+        require(chunkHashes.all { it.isNotBlank() }) {
+            "同步正文清单包含空分块哈希：$articleId.chunkHashes"
+        }
+    }
+
+    private fun mergeBodyChunks(
+        articleId: String,
+        first: List<ArticleBodyChunk>,
+        second: List<ArticleBodyChunk>
+    ): List<ArticleBodyChunk> {
+        val byIndex = linkedMapOf<Int, ArticleBodyChunk>()
+        (first + second).forEach { chunk ->
+            val existing = byIndex[chunk.index]
+            require(existing == null || existing == chunk) {
+                "同步正文重复分块冲突：$articleId#${chunk.index}"
+            }
+            if (existing == null) byIndex[chunk.index] = chunk
+        }
+        return byIndex.values.sortedBy { it.index }
     }
 
     private fun String.optJsonStringList(): List<String> {

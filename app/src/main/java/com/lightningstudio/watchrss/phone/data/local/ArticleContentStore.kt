@@ -7,6 +7,7 @@ import java.io.RandomAccessFile
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import kotlin.math.ceil
 
 interface ArticleContentStore {
@@ -26,8 +27,10 @@ data class StoredTextChunkHandle(
     val chunkCount: Int
 )
 
-class FileArticleContentStore(context: Context) : ArticleContentStore {
-    private val directory = File(context.applicationContext.filesDir, "imported_text")
+class FileArticleContentStore internal constructor(
+    private val directory: File
+) : ArticleContentStore {
+    constructor(context: Context) : this(File(context.applicationContext.filesDir, "imported_text"))
 
     override fun markerFor(articleId: String): String {
         return "$ARTICLE_CONTENT_MARKER_PREFIX${safeFileName(articleId)}.txt"
@@ -38,40 +41,44 @@ class FileArticleContentStore(context: Context) : ArticleContentStore {
     }
 
     override fun storeText(articleId: String, text: String): String {
-        if (!directory.exists()) {
-            directory.mkdirs()
-        }
-        val marker = markerFor(articleId)
-        val target = File(directory, marker.removePrefix(ARTICLE_CONTENT_MARKER_PREFIX))
-        val temporary = File(directory, "${target.name}.part")
+        check(directory.isDirectory || directory.mkdirs()) { "无法创建正文存储目录" }
         val encoded = text.toByteArray(Charsets.UTF_8)
-        FileOutputStream(temporary).use { output ->
-            output.write(encoded)
-            output.fd.sync()
-        }
-        check(temporary.length() == encoded.size.toLong()) { "正文临时文件校验失败" }
+        val contentHash = encoded.sha256Hex()
+        val marker = buildV2Marker(articleId, contentHash)
+        val target = checkNotNull(fileFor(marker)) { "正文存储路径非法" }
+        if (target.matchesContent(encoded.size.toLong(), contentHash)) return marker
+
+        val temporary = Files.createTempFile(directory.toPath(), ".write-", ".part").toFile()
         try {
-            Files.move(
-                temporary.toPath(),
-                target.toPath(),
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING
-            )
-        } catch (_: AtomicMoveNotSupportedException) {
-            Files.move(
-                temporary.toPath(),
-                target.toPath(),
-                StandardCopyOption.REPLACE_EXISTING
-            )
+            FileOutputStream(temporary).use { output ->
+                output.write(encoded)
+                output.fd.sync()
+            }
+            check(temporary.length() == encoded.size.toLong()) { "正文临时文件校验失败" }
+            try {
+                Files.move(
+                    temporary.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(
+                    temporary.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+            }
+            check(target.matchesContent(encoded.size.toLong(), contentHash)) { "正文文件校验失败" }
+        } finally {
+            runCatching { temporary.delete() }
         }
         return marker
     }
 
     override fun loadText(marker: String): String? {
-        if (!isMarker(marker)) return null
-        val fileName = marker.removePrefix(ARTICLE_CONTENT_MARKER_PREFIX)
         return runCatching {
-            File(directory, fileName).takeIf { it.isFile }?.readText(Charsets.UTF_8)
+            fileFor(marker)?.takeIf { it.isFile }?.readText(Charsets.UTF_8)
         }.getOrNull()
     }
 
@@ -111,11 +118,12 @@ class FileArticleContentStore(context: Context) : ArticleContentStore {
         if (!directory.isDirectory) return
         val retainedFileNames = retainedMarkers
             .asSequence()
-            .filter(::isMarker)
-            .map { it.removePrefix(ARTICLE_CONTENT_MARKER_PREFIX) }
+            .mapNotNull(::articleContentMarkerFileName)
             .toSet()
         directory.listFiles()?.forEach { file ->
-            if (file.isFile && file.name !in retainedFileNames) {
+            val managedFile = isArticleContentFileName(file.name) ||
+                (file.name.startsWith(".write-") && file.name.endsWith(".part"))
+            if (file.isFile && managedFile && file.name !in retainedFileNames) {
                 runCatching { file.delete() }
             }
         }
@@ -135,9 +143,31 @@ class FileArticleContentStore(context: Context) : ArticleContentStore {
     }
 
     private fun fileFor(marker: String): File? {
-        if (!isMarker(marker)) return null
-        val fileName = marker.removePrefix(ARTICLE_CONTENT_MARKER_PREFIX)
-        return File(directory, fileName)
+        val fileName = articleContentMarkerFileName(marker) ?: return null
+        val canonicalDirectory = runCatching { directory.canonicalFile }.getOrNull() ?: return null
+        val canonicalTarget = runCatching { File(directory, fileName).canonicalFile }.getOrNull() ?: return null
+        return canonicalTarget.takeIf { it.parentFile == canonicalDirectory }
+    }
+
+    private fun buildV2Marker(articleId: String, contentHash: String): String {
+        val keyHash = articleId.toByteArray(Charsets.UTF_8).sha256Hex()
+        return "$ARTICLE_CONTENT_MARKER_PREFIX$V2_FILE_NAME_PREFIX$keyHash-$contentHash.txt"
+    }
+
+    private fun File.matchesContent(expectedLength: Long, expectedHash: String): Boolean {
+        if (!isFile || length() != expectedLength) return false
+        return runCatching {
+            inputStream().buffered().use { input ->
+                val digest = MessageDigest.getInstance(SHA_256)
+                val buffer = ByteArray(FILE_HASH_BUFFER_BYTES)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    if (read > 0) digest.update(buffer, 0, read)
+                }
+                digest.digest().toHex() == expectedHash
+            }
+        }.getOrDefault(false)
     }
 
     private fun safeFileName(articleId: String): String {
@@ -148,14 +178,35 @@ class FileArticleContentStore(context: Context) : ArticleContentStore {
 
     companion object {
         private const val MAX_FILE_NAME_CHARS = 96
+        private const val FILE_HASH_BUFFER_BYTES = 8 * 1024
+        private const val SHA_256 = "SHA-256"
         private const val UTF8_CONTINUATION_MASK = 0xC0
         private const val UTF8_CONTINUATION_PREFIX = 0x80
     }
 }
 
 fun isArticleContentMarker(value: String?): Boolean {
-    return value?.startsWith(ARTICLE_CONTENT_MARKER_PREFIX) == true
+    return articleContentMarkerFileName(value) != null
 }
+
+private fun articleContentMarkerFileName(value: String?): String? {
+    if (value == null || !value.startsWith(ARTICLE_CONTENT_MARKER_PREFIX)) return null
+    val fileName = value.removePrefix(ARTICLE_CONTENT_MARKER_PREFIX)
+    if ('/' in fileName || '\\' in fileName || ".." in fileName) return null
+    return fileName.takeIf(::isArticleContentFileName)
+}
+
+private fun isArticleContentFileName(fileName: String): Boolean {
+    return V2_FILE_NAME_REGEX.matches(fileName) || LEGACY_FILE_NAME_REGEX.matches(fileName)
+}
+
+private fun ByteArray.sha256Hex(): String = MessageDigest.getInstance("SHA-256").digest(this).toHex()
+
+private fun ByteArray.toHex(): String = joinToString(separator = "") { byte -> "%02x".format(byte) }
+
+private const val V2_FILE_NAME_PREFIX = "v2-"
+private val V2_FILE_NAME_REGEX = Regex("""v2-[0-9a-f]{64}-[0-9a-f]{64}\.txt""")
+private val LEGACY_FILE_NAME_REGEX = Regex("""[A-Za-z0-9._-]{1,96}\.txt""")
 
 const val ARTICLE_CONTENT_MARKER_PREFIX = "watchrss-local-text:"
 const val ARTICLE_TEXT_CHUNK_BYTES = 2 * 1024

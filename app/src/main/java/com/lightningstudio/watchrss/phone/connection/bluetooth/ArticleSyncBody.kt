@@ -81,7 +81,15 @@ object ArticleSyncBody {
             chunkHashes = chunkHashes,
             metadataHash = article.syncMetadataHash
         )
-        return metadata.takeIf { it.isCurrentFor(article) }
+        if (!metadata.isCurrentFor(article)) return null
+        val bodyBytes = encodeBody(article.contentHtml, article.contentText)
+        val current = metadataFor(article, bodyBytes)
+        return metadata.takeIf {
+            it.bodyHash == current.bodyHash &&
+                it.bodyByteCount == current.bodyByteCount &&
+                it.chunkSize == current.chunkSize &&
+                it.chunkHashes == current.chunkHashes
+        }
     }
 
     fun currentMetadataFor(article: PhoneArticleEntity): ArticleBodyMetadata =
@@ -92,28 +100,28 @@ object ArticleSyncBody {
         request: ArticleBodyRequest,
         cachedMetadata: ArticleBodyMetadata? = cachedMetadataFor(article)
     ): ChunkedArticlePayload {
-        cachedMetadata
-            ?.takeIf { request.bodyHash.isBlank() || request.bodyHash == it.bodyHash }
-            ?.let { metadata ->
-                if (request.metadataOnly) {
-                    return metadata.toPayload(article, emptyList(), metadataOnly = true)
-                }
-                runCatching {
-                    metadata.toPayload(
-                        article = article,
-                        chunks = chunksForRequestWithMetadata(article, request, metadata),
-                        metadataOnly = false
-                    )
-                }.getOrNull()
-            }
-            ?.let { return it }
-
         val bodyBytes = encodeBody(article.contentHtml, article.contentText)
-        val metadata = metadataFor(article, bodyBytes)
+        val currentMetadata = metadataFor(article, bodyBytes)
+        val metadata = cachedMetadata?.takeIf { it == currentMetadata } ?: currentMetadata
+        requireValidRequestedChunkIndexes(request, currentMetadata)
+        val shouldSendFullBody = !request.metadataOnly &&
+            (
+                request.chunkIndexes.isEmpty() ||
+                    request.bodyHash.isBlank() ||
+                    request.bodyHash != currentMetadata.bodyHash
+                )
+        val responseRequest = if (shouldSendFullBody) {
+            request.copy(
+                bodyHash = currentMetadata.bodyHash,
+                chunkIndexes = currentMetadata.chunkHashes.indices.toList()
+            )
+        } else {
+            request
+        }
         val chunks = if (request.metadataOnly) {
             emptyList()
         } else {
-            chunksForRequestWithMetadata(bodyBytes, request, metadata)
+            chunksForRequestWithMetadata(bodyBytes, responseRequest, metadata)
         }
         return metadata.toPayload(article, chunks, metadataOnly = request.metadataOnly)
     }
@@ -197,9 +205,8 @@ object ArticleSyncBody {
                 "同步正文缓存分块校验失败：${request.articleId}#$index"
             }
         }
-        val indexes = request.chunkIndexes
-            .distinct()
-            .filter { it in 0 until chunkCount }
+        requireValidRequestedChunkIndexes(request, metadata)
+        val indexes = request.chunkIndexes.distinct()
         return indexes.map { index ->
             val start = index * chunkSize
             val end = min(start + chunkSize, bodyBytes.size)
@@ -212,25 +219,42 @@ object ArticleSyncBody {
         }
     }
 
+    private fun requireValidRequestedChunkIndexes(
+        request: ArticleBodyRequest,
+        metadata: ArticleBodyMetadata
+    ) {
+        val invalidIndex = request.chunkIndexes.firstOrNull { it !in metadata.chunkHashes.indices }
+        require(invalidIndex == null) {
+            "同步正文请求分块越界：${request.articleId}#$invalidIndex " +
+                "chunkCount=${metadata.chunkHashes.size}"
+        }
+    }
+
     fun rebuildBody(
         localArticle: PhoneArticleEntity?,
         payload: ChunkedArticlePayload
     ): Pair<String?, String> {
-        if (localArticle != null && localArticle.syncBodyHash == payload.bodyHash) {
-            return localArticle.contentHtml to localArticle.contentText
-        }
+        validatePayloadShape(payload)
         val localBodyBytes = localArticle
             ?.let { encodeBody(it.contentHtml, it.contentText) }
+        if (
+            localArticle != null &&
+            localBodyBytes != null &&
+            localBodyBytes.size.toLong() == payload.bodyByteCount &&
+            sha256(localBodyBytes) == payload.bodyHash
+        ) {
+            return localArticle.contentHtml to localArticle.contentText
+        }
         val sentByIndex = payload.chunks.associateBy { it.index }
-        val chunkSize = payload.chunkSize.takeIf { it > 0 } ?: CHUNK_SIZE_BYTES
-        val expectedSize = payload.bodyByteCount
-            .coerceIn(0L, Int.MAX_VALUE.toLong())
-            .toInt()
-        val rebuilt = ByteArrayOutputStream(expectedSize)
+        val chunkSize = payload.chunkSize
+        val rebuilt = ByteArrayOutputStream()
         payload.chunkHashes.forEachIndexed { index, expectedHash ->
             val sent = sentByIndex[index]
             when {
                 sent != null -> {
+                    require(sent.bytes.size == expectedChunkByteCount(payload, index)) {
+                        "同步正文分块长度不匹配：${payload.article.articleId}#$index"
+                    }
                     require(sent.hash == expectedHash && sha256(sent.bytes) == expectedHash) {
                         "同步正文分块校验失败：${payload.article.articleId}#$index"
                     }
@@ -240,6 +264,9 @@ object ArticleSyncBody {
                     val start = index * chunkSize
                     val end = min(start + chunkSize, localBodyBytes.size)
                     val length = end - start
+                    require(length == expectedChunkByteCount(payload, index)) {
+                        "同步正文分块长度不匹配：${payload.article.articleId}#$index"
+                    }
                     require(sha256(localBodyBytes, start, length) == expectedHash) {
                         "同步正文缺少分块：${payload.article.articleId}#$index"
                     }
@@ -249,10 +276,42 @@ object ArticleSyncBody {
             }
         }
         val bodyBytes = rebuilt.toByteArray()
+        require(bodyBytes.size.toLong() == payload.bodyByteCount) {
+            "同步正文长度不匹配：${payload.article.articleId} " +
+                "expected=${payload.bodyByteCount} actual=${bodyBytes.size}"
+        }
         require(sha256(bodyBytes) == payload.bodyHash) {
             "同步正文整体校验失败：${payload.article.articleId}"
         }
         return decodeBody(bodyBytes)
+    }
+
+    private fun validatePayloadShape(payload: ChunkedArticlePayload) {
+        require(payload.bodyHash.isNotBlank()) {
+            "同步正文元数据缺少整体哈希：${payload.article.articleId}"
+        }
+        require(payload.bodyByteCount in 0L..Int.MAX_VALUE.toLong()) {
+            "同步正文元数据大小无效：${payload.article.articleId}#${payload.bodyByteCount}"
+        }
+        require(payload.chunkSize > 0) {
+            "同步正文元数据分块大小无效：${payload.article.articleId}#${payload.chunkSize}"
+        }
+        val expectedChunkCount = chunkCountFor(payload.bodyByteCount, payload.chunkSize)
+        require(payload.chunkHashes.size.toLong() == expectedChunkCount) {
+            "同步正文元数据分块数不匹配：${payload.article.articleId} " +
+                "expected=$expectedChunkCount actual=${payload.chunkHashes.size}"
+        }
+        require(payload.chunkHashes.all { it.isNotBlank() }) {
+            "同步正文元数据包含空分块哈希：${payload.article.articleId}"
+        }
+        require(payload.chunks.all { it.index in payload.chunkHashes.indices }) {
+            "同步正文元数据包含越界分块：${payload.article.articleId}"
+        }
+    }
+
+    private fun expectedChunkByteCount(payload: ChunkedArticlePayload, index: Int): Int {
+        val chunkStart = index.toLong() * payload.chunkSize
+        return minOf(payload.chunkSize.toLong(), payload.bodyByteCount - chunkStart).toInt()
     }
 
     fun encodeChunkData(bytes: ByteArray): String =
@@ -289,11 +348,14 @@ object ArticleSyncBody {
         val cursor = BodyJsonCursor(reader)
         var contentHtml: String? = null
         var contentText = ""
+        var hasContentHtml = false
+        var hasContentText = false
         cursor.expectObjectStart()
         var firstField = true
         while (true) {
             val marker = cursor.nextNonWhitespace()
-            if (marker == -1 || marker.toChar() == '}') break
+            require(marker != -1) { "同步正文JSON对象未结束" }
+            if (marker.toChar() == '}') break
             if (!firstField) {
                 require(marker.toChar() == ',') { "同步正文JSON格式错误" }
             } else {
@@ -301,13 +363,23 @@ object ArticleSyncBody {
             }
             val name = cursor.readName()
             cursor.expect(':')
-            val value = cursor.readNullableString()
             when (name) {
-                "contentHtml" -> contentHtml = value?.ifBlank { null }
-                "contentText" -> contentText = value.orEmpty()
+                "contentHtml" -> {
+                    require(!hasContentHtml) { "同步正文JSON字段重复：contentHtml" }
+                    contentHtml = cursor.readNullableString()
+                    hasContentHtml = true
+                }
+                "contentText" -> {
+                    require(!hasContentText) { "同步正文JSON字段重复：contentText" }
+                    contentText = cursor.readNullableString().orEmpty()
+                    hasContentText = true
+                }
+                else -> cursor.skipValue()
             }
             firstField = false
         }
+        require(hasContentText) { "同步正文JSON缺少字段：contentText" }
+        require(cursor.nextNonWhitespace() == -1) { "同步正文JSON包含尾随数据" }
         return contentHtml to contentText
     }
 
@@ -350,6 +422,20 @@ object ArticleSyncBody {
             }
         }
 
+        fun skipValue(depth: Int = 0) {
+            require(depth <= MAX_JSON_NESTING_DEPTH) { "同步正文JSON嵌套过深" }
+            when (val marker = nextNonWhitespace()) {
+                '"'.code -> readStringBody()
+                '{'.code -> skipObject(depth + 1)
+                '['.code -> skipArray(depth + 1)
+                't'.code -> expectLiteral("rue")
+                'f'.code -> expectLiteral("alse")
+                'n'.code -> expectLiteral("ull")
+                '-'.code, in '0'.code..'9'.code -> skipNumber(marker)
+                else -> error("同步正文JSON值格式错误：$marker")
+            }
+        }
+
         fun nextNonWhitespace(): Int {
             while (true) {
                 val char = read()
@@ -369,9 +455,62 @@ object ArticleSyncBody {
                 when (char.toChar()) {
                     '"' -> return builder.toString()
                     '\\' -> builder.append(readEscapedChar())
-                    else -> builder.append(char.toChar())
+                    else -> {
+                        require(char >= 0x20) { "同步正文JSON字符串包含控制字符" }
+                        builder.append(char.toChar())
+                    }
                 }
             }
+        }
+
+        private fun skipObject(depth: Int) {
+            var firstField = true
+            while (true) {
+                val marker = nextNonWhitespace()
+                require(marker != -1) { "同步正文JSON对象未结束" }
+                if (marker == '}'.code) return
+                if (!firstField) {
+                    require(marker == ','.code) { "同步正文JSON格式错误" }
+                } else {
+                    unread(marker)
+                }
+                readName()
+                expect(':')
+                skipValue(depth)
+                firstField = false
+            }
+        }
+
+        private fun skipArray(depth: Int) {
+            var firstValue = true
+            while (true) {
+                val marker = nextNonWhitespace()
+                require(marker != -1) { "同步正文JSON数组未结束" }
+                if (marker == ']'.code) return
+                if (!firstValue) {
+                    require(marker == ','.code) { "同步正文JSON格式错误" }
+                } else {
+                    unread(marker)
+                }
+                skipValue(depth)
+                firstValue = false
+            }
+        }
+
+        private fun skipNumber(first: Int) {
+            val value = buildString {
+                append(first.toChar())
+                while (true) {
+                    val char = read()
+                    if (char == -1 || char.toChar().isWhitespace()) break
+                    if (char == ','.code || char == '}'.code || char == ']'.code) {
+                        unread(char)
+                        break
+                    }
+                    append(char.toChar())
+                }
+            }
+            require(JSON_NUMBER.matches(value)) { "同步正文JSON数字格式错误" }
         }
 
         private fun readEscapedChar(): Char {
@@ -418,6 +557,8 @@ object ArticleSyncBody {
 
         private companion object {
             const val NO_BUFFER = -2
+            const val MAX_JSON_NESTING_DEPTH = 128
+            val JSON_NUMBER = Regex("-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
         }
     }
 
@@ -461,6 +602,11 @@ object ArticleSyncBody {
     private fun chunkCountFor(bytes: ByteArray, chunkSize: Int = CHUNK_SIZE_BYTES): Int {
         if (bytes.isEmpty()) return 1
         return ((bytes.size - 1) / chunkSize) + 1
+    }
+
+    private fun chunkCountFor(bodyByteCount: Long, chunkSize: Int): Long {
+        if (bodyByteCount == 0L) return 1L
+        return ((bodyByteCount - 1L) / chunkSize) + 1L
     }
 
     private fun ArticleBodyMetadata.toPayload(

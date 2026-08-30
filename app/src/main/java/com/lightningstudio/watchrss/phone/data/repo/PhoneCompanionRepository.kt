@@ -772,7 +772,7 @@ class PhoneCompanionRepository(
         val articles = articleDao.getByRssSourceUrl(sourceUrl).filterNot { it.deleted }
         val now = System.currentTimeMillis()
         articles.forEachIndexed { index, article ->
-            val deleted = article.markDeletedByUser(now + index)
+            val deleted = article.markDeletedForStorage(now + index)
             articleDao.upsert(deleted)
             recordArticleChange(deleted.articleId, "delete", now + index)
         }
@@ -793,7 +793,7 @@ class PhoneCompanionRepository(
             articleDao.getByRssSourceUrl(sourceUrl)
                 .filterNot { it.deleted }
                 .forEachIndexed { index, article ->
-                    val deletedArticle = article.markDeletedByUser(now + index)
+                    val deletedArticle = article.markDeletedForStorage(now + index)
                     articleDao.upsert(deletedArticle)
                     recordArticleChange(deletedArticle.articleId, "delete", now + index)
                 }
@@ -812,7 +812,7 @@ class PhoneCompanionRepository(
     suspend fun deleteArticle(articleId: String) = withContext(Dispatchers.IO) {
         val current = articleDao.getById(articleId) ?: return@withContext
         val now = System.currentTimeMillis()
-        val deleted = current.markDeletedByUser(now)
+        val deleted = current.markDeletedForStorage(now)
         articleDao.upsert(deleted)
         recordArticleChange(deleted.articleId, "delete", now)
     }
@@ -822,7 +822,7 @@ class PhoneCompanionRepository(
             .filterNot { it.deleted }
         val now = System.currentTimeMillis()
         importedArticles.forEachIndexed { index, article ->
-            val deleted = article.markDeletedByUser(now + index)
+            val deleted = article.markDeletedForStorage(now + index)
             articleDao.upsert(deleted)
             recordArticleChange(deleted.articleId, "delete", now + index)
         }
@@ -1195,8 +1195,9 @@ class PhoneCompanionRepository(
                     conflictResolution = conflictResolutions[remote.articleId]
                 )
             }
-            if (local != next) {
-                articleDao.upsert(next.externalizeLargeLocalContent())
+            val verifiedNext = next.withCurrentSyncMetadata()
+            if (local != verifiedNext) {
+                articleDao.upsert(verifiedNext.externalizeLargeLocalContent())
                 merged += 1
             }
         }
@@ -1208,26 +1209,66 @@ class PhoneCompanionRepository(
         conflictResolutions: Map<String, PhoneSyncConflictResolution> = emptyMap()
     ): Int =
         withContext(Dispatchers.IO) {
+            val localByArticleId = mutableMapOf<String, PhoneArticleEntity?>()
+            incoming.forEach { payload ->
+                if (!localByArticleId.containsKey(payload.article.articleId)) {
+                    localByArticleId[payload.article.articleId] = articleDao.getById(payload.article.articleId)
+                }
+            }
+            incoming.filter { it.metadataOnly }.forEach { payload ->
+                val local = localByArticleId[payload.article.articleId]
+                    ?: error("同步正文仅元数据响应缺少本地正文：${payload.article.articleId}")
+                val hydrated = local.hydrateExternalTextForSync()
+                check(hydrated.bodyAvailable) {
+                    "同步正文仅元数据响应的本地正文文件缺失：${payload.article.articleId}"
+                }
+                requireMetadataOnlyLocalBody(payload, hydrated.article)
+            }
             var merged = 0
             incoming.forEach { payload ->
-                val local = articleDao.getById(payload.article.articleId)
-                val localHydrated = local?.hydrateExternalText()
-                val (contentHtml, contentText) = if (payload.article.deleted) {
-                    localHydrated?.contentHtml to localHydrated?.contentText.orEmpty()
+                val local = localByArticleId[payload.article.articleId]
+                val hydratedLocal = local?.hydrateExternalTextForSync()
+                val localHydrated = hydratedLocal?.article?.takeIf { hydratedLocal.bodyAvailable }
+                val explicitUnavailableTombstone = payload.isExplicitUnavailableTombstone()
+                val retainsLocalDeletedBody = payload.article.deleted &&
+                    localHydrated != null
+                val (contentHtml, contentText) = if (retainsLocalDeletedBody) {
+                    if (!payload.metadataOnly && !explicitUnavailableTombstone) {
+                        // Validate a full tombstone payload before retaining the verified local body.
+                        ArticleSyncBody.rebuildBody(requireNotNull(localHydrated), payload)
+                    }
+                    requireNotNull(localHydrated).let { it.contentHtml to it.contentText }
+                } else if (payload.article.deleted && explicitUnavailableTombstone) {
+                    null to ""
+                } else if (payload.article.deleted) {
+                    require(!payload.metadataOnly) {
+                        "同步删除仅元数据响应缺少本地正文：${payload.article.articleId}"
+                    }
+                    ArticleSyncBody.rebuildBody(null, payload)
                 } else if (payload.metadataOnly) {
-                    localHydrated?.contentHtml to localHydrated?.contentText.orEmpty()
+                    requireNotNull(localHydrated).let { it.contentHtml to it.contentText }
                 } else {
                     ArticleSyncBody.rebuildBody(localHydrated, payload)
                 }
                 val preparedRemote = payload.article.copy(
                     contentHtml = contentHtml,
                     contentText = contentText,
-                    syncBodyHash = payload.bodyHash,
-                    syncBodyByteCount = payload.bodyByteCount,
-                    syncChunkSize = payload.chunkSize,
-                    syncChunkHashesJson = payload.chunkHashes.toJsonString(),
-                    syncMetadataHash = ArticleSyncBody.metadataHashFor(payload.article)
                 )
+                if (!payload.metadataOnly && !explicitUnavailableTombstone && !retainsLocalDeletedBody) {
+                    val actualRemoteMetadata = ArticleSyncBody.metadataFor(preparedRemote)
+                    require(actualRemoteMetadata.bodyHash == payload.bodyHash) {
+                        "同步正文整体校验失败：${payload.article.articleId}"
+                    }
+                    require(actualRemoteMetadata.bodyByteCount == payload.bodyByteCount) {
+                        "同步正文长度校验失败：${payload.article.articleId}"
+                    }
+                    require(actualRemoteMetadata.chunkSize == payload.chunkSize) {
+                        "同步正文分块大小校验失败：${payload.article.articleId}"
+                    }
+                    require(actualRemoteMetadata.chunkHashes == payload.chunkHashes) {
+                        "同步正文分块元数据校验失败：${payload.article.articleId}"
+                    }
+                }
                 val mergedArticle = if (localHydrated == null) {
                     preparedRemote
                 } else {
@@ -1237,22 +1278,14 @@ class PhoneCompanionRepository(
                         conflictResolution = conflictResolutions[payload.article.articleId]
                     )
                 }
-                val usesPreparedRemoteBody = mergedArticle.contentHtml == preparedRemote.contentHtml &&
-                    mergedArticle.contentText == preparedRemote.contentText
-                val keepsLocalBodyForMetadataOnly = payload.metadataOnly &&
-                    localHydrated != null &&
-                    mergedArticle.contentHtml == localHydrated.contentHtml &&
-                    mergedArticle.contentText == localHydrated.contentText
-                val next = if (usesPreparedRemoteBody || keepsLocalBodyForMetadataOnly) {
-                    mergedArticle.copy(
-                        syncBodyHash = payload.bodyHash,
-                        syncBodyByteCount = payload.bodyByteCount,
-                        syncChunkSize = payload.chunkSize,
-                        syncChunkHashesJson = payload.chunkHashes.toJsonString(),
-                        syncMetadataHash = ArticleSyncBody.metadataHashFor(payload.article)
-                    )
+                val next = if (
+                    explicitUnavailableTombstone &&
+                    !retainsLocalDeletedBody &&
+                    mergedArticle.deleted
+                ) {
+                    mergedArticle.withUnavailableTombstoneBodyMetadata(clearBody = true)
                 } else {
-                    mergedArticle
+                    mergedArticle.withCurrentSyncMetadata()
                 }
                 if (local != next) {
                     articleDao.upsert(next.externalizeLargeLocalContent())
@@ -1340,7 +1373,13 @@ class PhoneCompanionRepository(
                 imageUrl = null,
                 contentHash = WebArticleImporter.sha256(entity.summary.ifBlank { entity.link })
             )
-            saveImportedArticle(imported, type = type, independent = false, timestamp = syncedAt)
+            saveImportedArticle(
+                imported,
+                type = type,
+                independent = false,
+                timestamp = syncedAt,
+                preserveExistingBody = true
+            )
         }
         return entities.size
     }
@@ -1349,7 +1388,8 @@ class PhoneCompanionRepository(
         imported: ImportedWebArticle,
         type: PhoneSavedItemType?,
         independent: Boolean,
-        timestamp: Long = System.currentTimeMillis()
+        timestamp: Long = System.currentTimeMillis(),
+        preserveExistingBody: Boolean = false
     ): PhoneArticleEntity {
         val current = articleDao.getById(imported.articleId)
         val base = current ?: PhoneArticleEntity(
@@ -1385,10 +1425,10 @@ class PhoneCompanionRepository(
             title = imported.title,
             siteName = imported.siteName,
             excerpt = imported.excerpt,
-            contentHtml = imported.contentHtml,
-            contentText = imported.contentText,
+            contentHtml = if (preserveExistingBody && current != null) current.contentHtml else imported.contentHtml,
+            contentText = if (preserveExistingBody && current != null) current.contentText else imported.contentText,
             imageUrl = imported.imageUrl,
-            contentHash = imported.contentHash,
+            contentHash = if (preserveExistingBody && current != null) current.contentHash else imported.contentHash,
             updatedAt = timestamp,
             deleted = false
         )
@@ -1414,7 +1454,16 @@ class PhoneCompanionRepository(
             )
             null -> withIndependent
         }
-        val stored = saved.withCurrentSyncMetadata().externalizeLargeLocalContent()
+        val stored = if (preserveExistingBody && current != null) {
+            val hydrated = saved.hydrateExternalTextForSync()
+            if (hydrated.bodyAvailable) {
+                saved.withSyncMetadata(ArticleSyncBody.currentMetadataFor(hydrated.article))
+            } else {
+                saved.copy(syncMetadataHash = ArticleSyncBody.metadataHashFor(saved))
+            }
+        } else {
+            saved.withCurrentSyncMetadata().externalizeLargeLocalContent()
+        }
         articleDao.upsert(stored)
         recordArticleChange(stored.articleId, "upsert", timestamp)
         return stored
@@ -2059,6 +2108,16 @@ class PhoneCompanionRepository(
         )
     }
 
+    private fun PhoneArticleEntity.markDeletedForStorage(timestamp: Long): PhoneArticleEntity {
+        val tombstone = markDeletedByUser(timestamp)
+        val hydrated = tombstone.hydrateExternalTextForSync()
+        return if (hydrated.bodyAvailable) {
+            tombstone.withSyncMetadata(ArticleSyncBody.metadataFor(hydrated.article))
+        } else {
+            tombstone.withUnavailableTombstoneBodyMetadata()
+        }
+    }
+
     private fun PhoneArticleEntity.applyRemoteSourceDelete(
         source: PhoneRssSourceEntity,
         offset: Int
@@ -2100,18 +2159,16 @@ class PhoneCompanionRepository(
     }
 
     private suspend fun PhoneArticleEntity.syncManifestEntryForExport(): ArticleSyncManifestEntry {
-        if (deleted) {
-            return toSyncManifestEntry(bodyAvailable = true)
-        }
         val hydrated = hydrateExternalTextForSync()
         if (!hydrated.bodyAvailable) {
-            return toSyncManifestEntry(bodyAvailable = false)
+            val tombstone = if (deleted) withUnavailableTombstoneBodyMetadata() else this
+            if (tombstone != this) articleDao.upsert(tombstone)
+            return tombstone.toSyncManifestEntry(bodyAvailable = false)
         }
         return ensureSyncMetadata(hydrated.article).toSyncManifestEntry(bodyAvailable = true)
     }
 
     private fun PhoneArticleEntity.articleForBodyExport(): PhoneArticleEntity? {
-        if (deleted) return hydrateExternalText().withCurrentSyncMetadata()
         val hydrated = hydrateExternalTextForSync()
         if (!hydrated.bodyAvailable) return null
         return hydrated.article.withCurrentSyncMetadata()
@@ -2119,6 +2176,21 @@ class PhoneCompanionRepository(
 
     private fun PhoneArticleEntity.withCurrentSyncMetadata(): PhoneArticleEntity {
         return withSyncMetadata(ArticleSyncBody.currentMetadataFor(this))
+    }
+
+    private fun PhoneArticleEntity.withUnavailableTombstoneBodyMetadata(
+        clearBody: Boolean = false
+    ): PhoneArticleEntity {
+        require(deleted) { "仅删除记录可标记正文不可用：$articleId" }
+        return copy(
+            contentHtml = if (clearBody) null else contentHtml,
+            contentText = if (clearBody) "" else contentText,
+            syncBodyHash = "",
+            syncBodyByteCount = 0L,
+            syncChunkSize = 0,
+            syncChunkHashesJson = "",
+            syncMetadataHash = ArticleSyncBody.metadataHashFor(this)
+        )
     }
 
     private fun PhoneArticleEntity.withSyncMetadata(metadata: ArticleBodyMetadata): PhoneArticleEntity {
@@ -2520,4 +2592,34 @@ class PhoneCompanionRepository(
             "tableofcontents"
         )
     }
+}
+
+internal fun requireMetadataOnlyLocalBody(
+    payload: ChunkedArticlePayload,
+    localArticle: PhoneArticleEntity?
+): ArticleBodyMetadata {
+    require(payload.metadataOnly) { "同步正文请求不是仅元数据模式：${payload.article.articleId}" }
+    require(payload.chunks.isEmpty()) { "仅元数据同步包含正文分块：${payload.article.articleId}" }
+    require(localArticle != null) { "仅元数据同步缺少可复用的本地正文：${payload.article.articleId}" }
+    val actual = ArticleSyncBody.metadataFor(localArticle)
+    require(payload.bodyHash == actual.bodyHash) {
+        "同步正文仅元数据响应与本地正文不匹配：${payload.article.articleId}"
+    }
+    require(payload.bodyByteCount == actual.bodyByteCount) {
+        "同步正文仅元数据响应长度不匹配：${payload.article.articleId}"
+    }
+    require(payload.chunkSize == actual.chunkSize && payload.chunkHashes == actual.chunkHashes) {
+        "同步正文仅元数据响应分块清单不匹配：${payload.article.articleId}"
+    }
+    return actual.copy(metadataHash = ArticleSyncBody.metadataHashFor(payload.article))
+}
+
+internal fun ChunkedArticlePayload.isExplicitUnavailableTombstone(): Boolean {
+    return article.deleted &&
+        !metadataOnly &&
+        bodyHash.isBlank() &&
+        bodyByteCount == 0L &&
+        chunkSize == 0 &&
+        chunkHashes.isEmpty() &&
+        chunks.isEmpty()
 }

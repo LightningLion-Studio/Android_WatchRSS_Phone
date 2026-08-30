@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.data.repo
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyRequest
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncBody
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncManifestEntry
+import com.lightningstudio.watchrss.phone.connection.bluetooth.ChunkedArticlePayload
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
@@ -20,6 +21,7 @@ import com.lightningstudio.watchrss.phone.data.importer.ImportedRssItem
 import com.lightningstudio.watchrss.phone.data.importer.ImportedRssSource
 import com.lightningstudio.watchrss.phone.data.importer.ImportedWebArticle
 import com.lightningstudio.watchrss.phone.data.importer.LocalContentImportKind
+import com.lightningstudio.watchrss.phone.data.importer.WebArticleImporter
 import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
 import com.lightningstudio.watchrss.phone.data.local.StoredTextChunkHandle
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
@@ -30,6 +32,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -742,6 +745,69 @@ class PhoneCompanionRepositoryTest {
     }
 
     @Test
+    fun deleteArticle_recomputesTombstoneMetadataHash() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val current = article(
+            id = "article-with-metadata",
+            contentText = "完整正文",
+            favoriteSaved = true,
+            favoriteChangedAt = 10L
+        )
+        val currentMetadata = ArticleSyncBody.metadataFor(current)
+        articleDao.items = listOf(
+            current.copy(
+                syncBodyHash = currentMetadata.bodyHash,
+                syncBodyByteCount = currentMetadata.bodyByteCount,
+                syncChunkSize = currentMetadata.chunkSize,
+                syncChunkHashesJson = JSONArray(currentMetadata.chunkHashes).toString(),
+                syncMetadataHash = currentMetadata.metadataHash
+            )
+        )
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        repository.deleteArticle(current.articleId)
+
+        val tombstone = articleDao.items.single()
+        assertTrue(tombstone.deleted)
+        assertEquals(ArticleSyncBody.metadataHashFor(tombstone), tombstone.syncMetadataHash)
+        assertTrue(tombstone.syncMetadataHash != currentMetadata.metadataHash)
+    }
+
+    @Test
+    fun deletedManifest_marksMissingExternalBodyUnavailable() = runBlocking {
+        val contentStore = FakeArticleContentStore()
+        val articleDao = FakePhoneArticleDao().apply {
+            items = listOf(
+                article(
+                    id = "deleted-missing-body",
+                    contentText = contentStore.markerFor("missing"),
+                    deleted = true,
+                    deletedAt = 20L,
+                    updatedAt = 20L
+                ).copy(syncMetadataHash = "pre-delete-metadata")
+            )
+        }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone",
+            articleContentStore = contentStore
+        )
+
+        val manifest = repository.getArticleManifestsForSync().single()
+
+        assertFalse(manifest.bodyAvailable)
+        assertEquals(ArticleSyncBody.metadataHashFor(articleDao.items.single()), manifest.metadataHash)
+        assertEquals(emptyList<PhoneArticleEntity>(), repository.getArticlesForSync(listOf(manifest.articleId)))
+    }
+
+    @Test
     fun prepareDeleteConflictResolutions_keepPhoneSendsFreshLocalVersion() = runBlocking {
         val articleDao = FakePhoneArticleDao()
         val local = article(
@@ -916,14 +982,15 @@ class PhoneCompanionRepositoryTest {
         repository.mergeArticlesFromSync(listOf(remoteState))
 
         val updated = articleDao.items.single()
+        val actualMetadata = ArticleSyncBody.metadataFor(updated)
         assertEquals("本地完整正文", updated.contentText)
-        assertEquals("local-body", updated.syncBodyHash)
-        assertEquals("local-metadata", updated.syncMetadataHash)
+        assertEquals(actualMetadata.bodyHash, updated.syncBodyHash)
+        assertEquals(actualMetadata.metadataHash, updated.syncMetadataHash)
         assertTrue(updated.favoriteSaved)
     }
 
     @Test
-    fun mergeChunkedArticlesFromSync_keepPhonePreservesLocalSyncBodyMetadata() = runBlocking {
+    fun mergeChunkedArticlesFromSync_keepPhoneRecomputesMetadataForPreservedLocalBody() = runBlocking {
         val articleDao = FakePhoneArticleDao()
         val local = article(
             id = "article-1",
@@ -969,12 +1036,348 @@ class PhoneCompanionRepositoryTest {
         )
 
         val updated = articleDao.items.single()
+        val expectedMetadata = ArticleSyncBody.metadataFor(updated)
         assertEquals("手机保留正文", updated.contentText)
-        assertEquals("local-body", updated.syncBodyHash)
-        assertEquals(123L, updated.syncBodyByteCount)
-        assertEquals(456, updated.syncChunkSize)
-        assertEquals("""["local-chunk"]""", updated.syncChunkHashesJson)
-        assertEquals("local-metadata", updated.syncMetadataHash)
+        assertEquals(expectedMetadata.bodyHash, updated.syncBodyHash)
+        assertEquals(expectedMetadata.bodyByteCount, updated.syncBodyByteCount)
+        assertEquals(expectedMetadata.chunkSize, updated.syncChunkSize)
+        assertEquals(JSONArray(expectedMetadata.chunkHashes).toString(), updated.syncChunkHashesJson)
+        assertEquals(expectedMetadata.metadataHash, updated.syncMetadataHash)
+    }
+
+    @Test
+    fun mergeChunkedArticlesFromSync_missingExternalBodyUsesCompleteRemoteBody() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val contentStore = FakeArticleContentStore()
+        val local = article(
+            id = "article-1",
+            url = ImportedContentIds.txtArticleUrl("article-1"),
+            contentText = contentStore.markerFor("missing-text"),
+            updatedAt = 10L
+        ).copy(excerpt = "不能冒充正文的摘要")
+        val remote = article(
+            id = "article-1",
+            url = local.url,
+            contentHtml = "<article>手表完整正文</article>",
+            contentText = "手表完整正文",
+            updatedAt = 20L
+        ).copy(sourceDeviceId = "watch")
+        val remoteMetadata = ArticleSyncBody.metadataFor(remote)
+        val remotePayload = ArticleSyncBody.payloadForRequest(
+            article = remote,
+            request = ArticleBodyRequest(
+                articleId = remote.articleId,
+                bodyHash = "",
+                chunkIndexes = remoteMetadata.chunkHashes.indices.toList()
+            ),
+            cachedMetadata = remoteMetadata
+        )
+        articleDao.items = listOf(local)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone",
+            articleContentStore = contentStore
+        )
+
+        repository.mergeChunkedArticlesFromSync(listOf(remotePayload))
+
+        val updated = repository.getArticlesForSync().single()
+        assertEquals("<article>手表完整正文</article>", updated.contentHtml)
+        assertEquals("手表完整正文", updated.contentText)
+        assertEquals(remoteMetadata.bodyHash, updated.syncBodyHash)
+        assertEquals(remoteMetadata.bodyByteCount, updated.syncBodyByteCount)
+        assertEquals(remoteMetadata.chunkSize, updated.syncChunkSize)
+        assertEquals(JSONArray(remoteMetadata.chunkHashes).toString(), updated.syncChunkHashesJson)
+    }
+
+    @Test
+    fun mergeChunkedArticlesFromSync_missingExternalBodyRejectsMetadataOnlyWithoutChangingDatabase() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val contentStore = FakeArticleContentStore()
+        val local = article(
+            id = "article-1",
+            url = ImportedContentIds.txtArticleUrl("article-1"),
+            contentText = contentStore.markerFor("missing-text"),
+            updatedAt = 10L
+        ).copy(
+            excerpt = "不能冒充正文的摘要",
+            syncBodyHash = "cached-body",
+            syncBodyByteCount = 321L,
+            syncChunkSize = 123,
+            syncChunkHashesJson = """["cached-chunk"]""",
+            syncMetadataHash = "cached-metadata"
+        )
+        val remote = local.copy(
+            sourceDeviceId = "watch",
+            contentText = local.excerpt,
+            updatedAt = 20L
+        )
+        val remoteMetadata = ArticleSyncBody.metadataFor(remote)
+        val remotePayload = ArticleSyncBody.payloadForRequest(
+            article = remote,
+            request = ArticleBodyRequest(
+                articleId = remote.articleId,
+                bodyHash = remoteMetadata.bodyHash,
+                chunkIndexes = emptyList(),
+                metadataOnly = true
+            ),
+            cachedMetadata = remoteMetadata
+        )
+        articleDao.items = listOf(local)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone",
+            articleContentStore = contentStore
+        )
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking {
+                repository.mergeChunkedArticlesFromSync(listOf(remotePayload))
+            }
+        }
+
+        assertEquals(listOf(local), articleDao.items)
+    }
+
+    @Test
+    fun mergeChunkedArticlesFromSync_metadataOnlyPreservesBodyAndRecomputesCompleteMetadata() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val local = article(
+            id = "article-1",
+            title = "手机旧标题",
+            contentHtml = "<article>手机完整正文</article>",
+            contentText = "手机完整正文",
+            updatedAt = 10L
+        ).copy(
+            syncBodyHash = "stale-body",
+            syncBodyByteCount = 0L,
+            syncChunkSize = 0,
+            syncChunkHashesJson = "",
+            syncMetadataHash = "stale-metadata"
+        )
+        val remote = local.copy(
+            sourceDeviceId = "watch",
+            title = "手表新标题",
+            updatedAt = 20L,
+            contentHtml = null,
+            contentText = ""
+        )
+        val localBodyMetadata = ArticleSyncBody.metadataFor(local)
+        val remotePayload = ChunkedArticlePayload(
+            article = remote,
+            bodyHash = localBodyMetadata.bodyHash,
+            bodyByteCount = localBodyMetadata.bodyByteCount,
+            chunkSize = localBodyMetadata.chunkSize,
+            chunkHashes = localBodyMetadata.chunkHashes,
+            chunks = emptyList(),
+            metadataOnly = true
+        )
+        articleDao.items = listOf(local)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        repository.mergeChunkedArticlesFromSync(listOf(remotePayload))
+
+        val updated = articleDao.items.single()
+        val expectedMetadata = ArticleSyncBody.metadataFor(updated.copy(
+            syncBodyHash = "",
+            syncBodyByteCount = 0L,
+            syncChunkSize = 0,
+            syncChunkHashesJson = "",
+            syncMetadataHash = ""
+        ))
+        assertEquals("手表新标题", updated.title)
+        assertEquals("<article>手机完整正文</article>", updated.contentHtml)
+        assertEquals("手机完整正文", updated.contentText)
+        assertEquals(expectedMetadata.bodyHash, updated.syncBodyHash)
+        assertEquals(expectedMetadata.bodyByteCount, updated.syncBodyByteCount)
+        assertEquals(expectedMetadata.chunkSize, updated.syncChunkSize)
+        assertEquals(JSONArray(expectedMetadata.chunkHashes).toString(), updated.syncChunkHashesJson)
+        assertEquals(expectedMetadata.metadataHash, updated.syncMetadataHash)
+    }
+
+    @Test
+    fun mergeChunkedDeletedMetadataOnly_preservesVerifiedLocalBodyMetadata() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val local = article(
+            id = "deleted-remote",
+            contentText = "手机保留正文",
+            favoriteSaved = true,
+            favoriteChangedAt = 10L,
+            updatedAt = 10L
+        )
+        val remoteTombstone = local.copy(
+            sourceDeviceId = "watch",
+            contentText = "",
+            favoriteSaved = false,
+            favoriteChangedAt = 30L,
+            deleted = true,
+            deletedAt = 30L,
+            updatedAt = 30L
+        )
+        val localMetadata = ArticleSyncBody.metadataFor(local)
+        val payload = ChunkedArticlePayload(
+            article = remoteTombstone,
+            bodyHash = localMetadata.bodyHash,
+            bodyByteCount = localMetadata.bodyByteCount,
+            chunkSize = localMetadata.chunkSize,
+            chunkHashes = localMetadata.chunkHashes,
+            chunks = emptyList(),
+            metadataOnly = true
+        )
+        articleDao.items = listOf(local)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        repository.mergeChunkedArticlesFromSync(listOf(payload))
+
+        val stored = articleDao.items.single()
+        val actual = ArticleSyncBody.metadataFor(stored)
+        assertTrue(stored.deleted)
+        assertEquals("手机保留正文", stored.contentText)
+        assertEquals(actual.bodyHash, stored.syncBodyHash)
+        assertEquals(actual.bodyByteCount, stored.syncBodyByteCount)
+        assertEquals(actual.chunkSize, stored.syncChunkSize)
+        assertEquals(JSONArray(actual.chunkHashes).toString(), stored.syncChunkHashesJson)
+        assertEquals(ArticleSyncBody.metadataHashFor(stored), stored.syncMetadataHash)
+    }
+
+    @Test
+    fun mergeChunkedDeletedMetadataOnly_rejectsMismatchedShapeBeforeWrite() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val local = article(id = "deleted-invalid", contentText = "手机正文")
+        val metadata = ArticleSyncBody.metadataFor(local)
+        val remoteTombstone = local.copy(
+            sourceDeviceId = "watch",
+            contentText = "",
+            deleted = true,
+            deletedAt = 30L,
+            updatedAt = 30L
+        )
+        val payload = ChunkedArticlePayload(
+            article = remoteTombstone,
+            bodyHash = metadata.bodyHash,
+            bodyByteCount = metadata.bodyByteCount + 1L,
+            chunkSize = metadata.chunkSize,
+            chunkHashes = metadata.chunkHashes,
+            chunks = emptyList(),
+            metadataOnly = true
+        )
+        articleDao.items = listOf(local)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { repository.mergeChunkedArticlesFromSync(listOf(payload)) }
+        }
+        assertEquals(listOf(local), articleDao.items)
+    }
+
+    @Test
+    fun mergeChunkedDeletedExplicitUnavailable_doesNotManufactureEmptyBodyMetadata() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val tombstone = article(
+            id = "deleted-without-body",
+            contentText = "",
+            deleted = true,
+            deletedAt = 30L,
+            updatedAt = 30L
+        ).copy(sourceDeviceId = "watch")
+        val payload = ChunkedArticlePayload(
+            article = tombstone,
+            bodyHash = "",
+            bodyByteCount = 0L,
+            chunkSize = 0,
+            chunkHashes = emptyList(),
+            chunks = emptyList(),
+            metadataOnly = false
+        )
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        repository.mergeChunkedArticlesFromSync(listOf(payload))
+
+        val stored = articleDao.items.single()
+        assertTrue(stored.deleted)
+        assertEquals("", stored.syncBodyHash)
+        assertEquals(0L, stored.syncBodyByteCount)
+        assertEquals(0, stored.syncChunkSize)
+        assertEquals("", stored.syncChunkHashesJson)
+        assertEquals(ArticleSyncBody.metadataHashFor(stored), stored.syncMetadataHash)
+    }
+
+    @Test
+    fun replaceSavedItems_preservesExistingCompleteExternalBodyAndSyncMetadata() = runBlocking {
+        val link = "https://example.com/post"
+        val articleId = WebArticleImporter.stableArticleId(link)
+        val contentStore = FakeArticleContentStore()
+        val full = article(
+            id = articleId,
+            url = link,
+            title = "已有标题",
+            contentHtml = "<article>已有完整正文</article>",
+            contentText = "已有完整正文",
+            updatedAt = 10L
+        ).copy(contentHash = "complete-content-hash")
+        val metadata = ArticleSyncBody.metadataFor(full)
+        val htmlMarker = contentStore.storeText("$articleId-html", full.contentHtml.orEmpty())
+        val textMarker = contentStore.storeText("$articleId-text", full.contentText)
+        val stored = full.copy(
+            contentHtml = htmlMarker,
+            contentText = textMarker,
+            syncBodyHash = metadata.bodyHash,
+            syncBodyByteCount = metadata.bodyByteCount,
+            syncChunkSize = metadata.chunkSize,
+            syncChunkHashesJson = JSONArray(metadata.chunkHashes).toString(),
+            syncMetadataHash = metadata.metadataHash
+        )
+        val articleDao = FakePhoneArticleDao().apply { items = listOf(stored) }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone",
+            articleContentStore = contentStore
+        )
+
+        repository.replaceSavedItems(
+            PhoneSavedItemType.FAVORITE,
+            JSONArray(
+                """
+                [{"id":7,"title":"收藏标题","link":"$link","summary":"只有摘要","channelTitle":"示例频道"}]
+                """.trimIndent()
+            )
+        )
+
+        val updated = articleDao.items.single()
+        assertEquals(htmlMarker, updated.contentHtml)
+        assertEquals(textMarker, updated.contentText)
+        assertEquals("complete-content-hash", updated.contentHash)
+        assertEquals(metadata.bodyHash, updated.syncBodyHash)
+        assertEquals(metadata.bodyByteCount, updated.syncBodyByteCount)
+        assertEquals(metadata.chunkSize, updated.syncChunkSize)
+        assertEquals(JSONArray(metadata.chunkHashes).toString(), updated.syncChunkHashesJson)
+        assertTrue(updated.favoriteSaved)
     }
 
     @Test

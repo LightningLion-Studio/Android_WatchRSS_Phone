@@ -6,6 +6,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class LibrarySyncPayloadTest {
@@ -450,6 +451,25 @@ class LibrarySyncPayloadTest {
     }
 
     @Test
+    fun chunkedBodyRequest_reusesChunksOnlyAtMatchingIndexes() {
+        val remoteManifest = remoteManifestWithChunks(
+            articleId = "article-positional",
+            chunkHashes = listOf("remote-only", "shared")
+        )
+        val localManifest = remoteManifest.copy(
+            bodyHash = "local-body",
+            chunkHashes = listOf("shared", "local-only")
+        )
+
+        val requests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+            localManifest = listOf(localManifest),
+            remoteManifest = listOf(remoteManifest)
+        )
+
+        assertEquals(listOf(0, 1), requests.single().chunkIndexes)
+    }
+
+    @Test
     fun chunkedBodyRequest_requestsFullBodyWhenLocalBodyIsUnavailable() {
         val article = testArticle(
             articleId = "article-1",
@@ -636,7 +656,7 @@ class LibrarySyncPayloadTest {
     }
 
     @Test
-    fun chunkedBodyRequest_requestsMetadataOnlyForSavedBodyWhenPeerSupportsIt() {
+    fun chunkedBodyRequest_requestsAllChunksForNewSavedArticle() {
         val remoteManifest = testArticle(
             articleId = "article-saved",
             contentText = "正文"
@@ -648,8 +668,66 @@ class LibrarySyncPayloadTest {
             supportsMetadataOnlyArticles = true
         )
 
-        assertEquals(emptyList<Int>(), requests.single().chunkIndexes)
-        assertTrue(requests.single().metadataOnly)
+        assertEquals(remoteManifest.chunkHashes.indices.toList(), requests.single().chunkIndexes)
+        assertEquals(false, requests.single().metadataOnly)
+    }
+
+    @Test
+    fun chunkedBodyRequest_requestsMetadataOnlyWhenSameBodyHasNewerMetadata() {
+        val localManifest = testArticle(
+            articleId = "article-saved-metadata",
+            contentText = "同一正文"
+        ).toManifestEntry().copy(
+            updatedAt = 20L,
+            independentChangedAt = 20L,
+            metadataHash = "local-metadata",
+            bodySyncMode = ARTICLE_BODY_SYNC_MODE_SAVED
+        )
+        val remoteManifest = localManifest.copy(
+            updatedAt = 30L,
+            independentChangedAt = 30L,
+            metadataHash = "remote-metadata"
+        )
+
+        val request = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+            localManifest = listOf(localManifest),
+            remoteManifest = listOf(remoteManifest),
+            supportsMetadataOnlyArticles = true
+        ).single()
+
+        assertEquals(emptyList<Int>(), request.chunkIndexes)
+        assertTrue(request.metadataOnly)
+    }
+
+    @Test
+    fun chunkedBodyRequest_requestsAllChunksForSavedArticleWhenLocalBodyCannotBeReused() {
+        val remoteManifest = remoteManifestWithChunks("saved-mismatch", listOf("a", "b")).copy(
+            bodySyncMode = ARTICLE_BODY_SYNC_MODE_SAVED,
+            updatedAt = 30L,
+            metadataHash = "remote-metadata"
+        )
+        val matchingLocal = remoteManifest.copy(
+            updatedAt = 20L,
+            metadataHash = "local-metadata"
+        )
+        val unusableLocals = listOf(
+            matchingLocal.copy(bodyAvailable = false),
+            matchingLocal.copy(bodyHash = "different-body"),
+            matchingLocal.copy(bodyByteCount = remoteManifest.bodyByteCount + 1L),
+            matchingLocal.copy(chunkSize = remoteManifest.chunkSize + 1),
+            matchingLocal.copy(chunkHashes = listOf("a", "different"))
+        )
+
+        unusableLocals.forEach { localManifest ->
+            val request = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
+                localManifest = listOf(localManifest),
+                remoteManifest = listOf(remoteManifest),
+                supportsMetadataOnlyArticles = true
+            ).single()
+
+            assertEquals(false, request.metadataOnly)
+            assertEquals(remoteManifest.chunkHashes.indices.toList(), request.chunkIndexes)
+        }
     }
 
     @Test
@@ -744,6 +822,74 @@ class LibrarySyncPayloadTest {
     }
 
     @Test
+    fun cachedBodyMetadata_isRejectedWhenOnlyBodyContentChanges() {
+        val original = testArticle(
+            articleId = "stale-body-metadata",
+            contentText = "A".repeat(4096)
+        )
+        val cached = ArticleSyncBody.metadataFor(original)
+        val changed = original.copy(
+            contentText = "B".repeat(4096),
+            syncBodyHash = cached.bodyHash,
+            syncBodyByteCount = cached.bodyByteCount,
+            syncChunkSize = cached.chunkSize,
+            syncChunkHashesJson = JSONArray(cached.chunkHashes).toString(),
+            syncMetadataHash = cached.metadataHash
+        )
+
+        assertEquals(null, ArticleSyncBody.cachedMetadataFor(changed))
+        assertEquals(ArticleSyncBody.metadataFor(changed), ArticleSyncBody.currentMetadataFor(changed))
+    }
+
+    @Test
+    fun rebuildBody_doesNotTrustStaleStoredLocalHash() {
+        val remoteArticle = testArticle(
+            articleId = "stale-local-body-hash",
+            contentText = "远端正文".repeat(4096)
+        )
+        val metadata = ArticleSyncBody.metadataFor(remoteArticle)
+        val payload = ArticleSyncBody.payloadForRequest(
+            article = remoteArticle,
+            request = ArticleBodyRequest(
+                articleId = remoteArticle.articleId,
+                bodyHash = metadata.bodyHash,
+                chunkIndexes = metadata.chunkHashes.indices.toList()
+            ),
+            cachedMetadata = metadata
+        )
+        val localArticle = remoteArticle.copy(
+            contentText = "错误的本地正文",
+            syncBodyHash = metadata.bodyHash
+        )
+
+        val rebuilt = ArticleSyncBody.rebuildBody(localArticle, payload)
+
+        assertEquals(remoteArticle.contentText, rebuilt.second)
+    }
+
+    @Test
+    fun rebuildBody_rejectsConflictingBodyByteCount() {
+        val article = testArticle(
+            articleId = "body-byte-count-conflict",
+            contentText = "正文".repeat(4096)
+        )
+        val metadata = ArticleSyncBody.metadataFor(article)
+        val payload = ArticleSyncBody.payloadForRequest(
+            article = article,
+            request = ArticleBodyRequest(
+                articleId = article.articleId,
+                bodyHash = metadata.bodyHash,
+                chunkIndexes = metadata.chunkHashes.indices.toList()
+            ),
+            cachedMetadata = metadata
+        ).copy(bodyByteCount = metadata.bodyByteCount + 1L)
+
+        assertIllegalArgumentContains("长度不匹配") {
+            ArticleSyncBody.rebuildBody(null, payload)
+        }
+    }
+
+    @Test
     fun chunkedBodyRequest_sendsFullBodyForFullArticleWhenPeerRequestsReusableBody() {
         val article = testArticle(
             articleId = "full-body-reuse",
@@ -773,6 +919,61 @@ class LibrarySyncPayloadTest {
         assertEquals(false, parsed.metadataOnly)
         assertEquals(metadata.chunkHashes.indices.toList(), parsed.chunks.map { it.index })
         assertEquals(article.contentText, rebuilt.second)
+    }
+
+    @Test
+    fun chunkedBodyRequest_expandsEmptyExplicitBodyRequestForSavedArticle() {
+        val article = testArticle(
+            articleId = "saved-empty-request",
+            contentText = pseudoRandomText(seed = 321, length = ArticleSyncBody.CHUNK_SIZE_BYTES * 2)
+        )
+        val metadata = ArticleSyncBody.metadataFor(article)
+        val frames = LibrarySyncPayload.buildChunkedArticleRequestFrames(
+            deviceId = "phone",
+            articles = listOf(article),
+            articleRequests = listOf(
+                ArticleBodyRequest(
+                    articleId = article.articleId,
+                    bodyHash = metadata.bodyHash,
+                    chunkIndexes = emptyList(),
+                    metadataOnly = false
+                )
+            ),
+            bodyRequests = emptyList(),
+            useBatches = true
+        )
+
+        val parsed = LibrarySyncPayload.parseChunkedArticles(
+            LibrarySyncPayload.combineArticlePayloads(frames)
+        ).single()
+
+        assertEquals(false, parsed.metadataOnly)
+        assertEquals(metadata.chunkHashes.indices.toList(), parsed.chunks.map { it.index })
+    }
+
+    @Test
+    fun payloadForRequest_sendsCurrentFullBodyWhenRequestHashIsBlankOrStale() {
+        val article = testArticle(
+            articleId = "body-drift",
+            contentText = pseudoRandomText(seed = 654, length = ArticleSyncBody.CHUNK_SIZE_BYTES * 2)
+        )
+        val metadata = ArticleSyncBody.metadataFor(article)
+
+        listOf("", "stale-manifest-body-hash").forEach { requestedBodyHash ->
+            val payload = ArticleSyncBody.payloadForRequest(
+                article = article,
+                request = ArticleBodyRequest(
+                    articleId = article.articleId,
+                    bodyHash = requestedBodyHash,
+                    chunkIndexes = listOf(0),
+                    metadataOnly = false
+                ),
+                cachedMetadata = metadata
+            )
+
+            assertEquals(metadata.bodyHash, payload.bodyHash)
+            assertEquals(metadata.chunkHashes.indices.toList(), payload.chunks.map { it.index })
+        }
     }
 
     @Test
@@ -841,6 +1042,134 @@ class LibrarySyncPayloadTest {
         assertTrue(frames.all { BluetoothSyncProtocol.encodedSize(it) <= BluetoothSyncProtocol.MAX_FRAME_BYTES })
         assertBatchWireByteHints(frames)
         assertEquals(article.contentText, rebuilt.second)
+    }
+
+    @Test
+    fun wireParser_rejectsPositionalChunkHashGapsAndNonStrings() {
+        val article = testArticle(articleId = "strict-hashes", contentText = "正文")
+        val payload = LibrarySyncPayload.buildManifestRequest("phone", listOf(article))
+        val item = payload.getJSONArray("articleManifest").getJSONObject(0)
+
+        listOf<Any>("", 7).forEach { invalid ->
+            item.put("chunkHashes", JSONArray().put("first").put(invalid).put("third"))
+            assertIllegalArgumentContains("strict-hashes.chunkHashes[1]") {
+                LibrarySyncPayload.parseArticleManifest(payload)
+            }
+        }
+    }
+
+    @Test
+    fun wireParser_rejectsConflictingBodyByteCountAcrossArticleFrames() {
+        val article = testArticle(articleId = "byte-count-frames", contentText = "正文")
+        val metadata = ArticleSyncBody.metadataFor(article)
+        val frames = LibrarySyncPayload.buildChunkedResponseFrames(
+            deviceId = "phone",
+            articles = listOf(article),
+            articleRequests = listOf(ArticleBodyRequest(article.articleId, metadata.bodyHash, listOf(0))),
+            useBatches = true
+        )
+        val item = LibrarySyncPayload.combineArticlePayloads(frames)
+            .getJSONArray("articles")
+            .getJSONObject(0)
+        val conflicting = JSONObject(item.toString()).apply {
+            getJSONObject("body").put("bodyByteCount", metadata.bodyByteCount + 1L)
+        }
+
+        assertIllegalArgumentContains("byte-count-frames") {
+            LibrarySyncPayload.parseChunkedArticles(JSONArray().put(item).put(conflicting))
+        }
+    }
+
+    @Test
+    fun wireParser_allowsOnlyIdenticalDuplicateChunks() {
+        val article = testArticle(articleId = "duplicate-chunk", contentText = "正文")
+        val metadata = ArticleSyncBody.metadataFor(article)
+        val frames = LibrarySyncPayload.buildChunkedResponseFrames(
+            deviceId = "phone",
+            articles = listOf(article),
+            articleRequests = listOf(ArticleBodyRequest(article.articleId, metadata.bodyHash, listOf(0))),
+            useBatches = true
+        )
+        val item = LibrarySyncPayload.combineArticlePayloads(frames)
+            .getJSONArray("articles")
+            .getJSONObject(0)
+        val identical = JSONObject(item.toString())
+        assertEquals(
+            1,
+            LibrarySyncPayload.parseChunkedArticles(JSONArray().put(item).put(identical))
+                .single()
+                .chunks
+                .size
+        )
+
+        val conflicting = JSONObject(item.toString()).apply {
+            getJSONObject("body").getJSONArray("chunks").getJSONObject(0).put("data", "AA==")
+        }
+        assertIllegalArgumentContains("重复分块冲突：duplicate-chunk#0") {
+            LibrarySyncPayload.parseChunkedArticles(JSONArray().put(item).put(conflicting))
+        }
+    }
+
+    @Test
+    fun wireParser_rejectsNegativeAndNonIntegerBodyRequestIndexes() {
+        listOf<Any>(-1, 1.0).forEach { invalid ->
+            val request = JSONObject().apply {
+                put(
+                    "bodyRequests",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("articleId", "bad-request-index")
+                            .put("chunkIndexes", JSONArray().put(invalid))
+                    )
+                )
+            }
+            assertIllegalArgumentContains("bad-request-index.chunkIndexes[0]") {
+                LibrarySyncPayload.parseBodyRequests(request)
+            }
+        }
+    }
+
+    @Test
+    fun bodyResponder_rejectsOutOfBoundsRequestedChunkIndex() {
+        val article = testArticle(articleId = "out-of-bounds", contentText = "正文")
+        val metadata = ArticleSyncBody.metadataFor(article)
+
+        listOf(metadata.bodyHash, "stale-body-hash").forEach { requestedBodyHash ->
+            assertIllegalArgumentContains("out-of-bounds#${metadata.chunkHashes.size}") {
+                ArticleSyncBody.payloadForRequest(
+                    article,
+                    ArticleBodyRequest(
+                        articleId = article.articleId,
+                        bodyHash = requestedBodyHash,
+                        chunkIndexes = listOf(metadata.chunkHashes.size)
+                    ),
+                    metadata
+                )
+            }
+        }
+    }
+
+    @Test
+    fun bodyRequester_rejectsMalformedManifestButAcceptsCanonicalEmptyShape() {
+        val valid = remoteManifestWithChunks("manifest-shape", listOf("chunk"))
+        listOf(
+            valid.copy(bodyHash = ""),
+            valid.copy(bodyByteCount = -1L),
+            valid.copy(chunkSize = 0),
+            valid.copy(chunkHashes = emptyList())
+        ).forEach { invalid ->
+            assertIllegalArgumentContains("manifest-shape") {
+                LibrarySyncPayload.buildBodyRequestsForRemoteArticles(emptyList(), listOf(invalid))
+            }
+        }
+
+        val canonicalEmpty = valid.copy(bodyByteCount = 0L, chunkHashes = listOf("empty-chunk"))
+        assertEquals(
+            listOf(0),
+            LibrarySyncPayload.buildBodyRequestsForRemoteArticles(emptyList(), listOf(canonicalEmpty))
+                .single()
+                .chunkIndexes
+        )
     }
 
     private fun assertResponseProgressHeader(frames: List<JSONObject>, totalArticles: Int) {
@@ -918,6 +1247,15 @@ class LibrarySyncPayloadTest {
         }
     }
 
+    private fun assertIllegalArgumentContains(expected: String, block: () -> Unit) {
+        try {
+            block()
+            fail("Expected IllegalArgumentException containing $expected")
+        } catch (exception: IllegalArgumentException) {
+            assertTrue(exception.message.orEmpty().contains(expected))
+        }
+    }
+
     private fun PhoneArticleEntity.toManifestEntry(): ArticleSyncManifestEntry {
         val metadata = ArticleSyncBody.metadataFor(this)
         return ArticleSyncManifestEntry(
@@ -949,7 +1287,7 @@ class LibrarySyncPayloadTest {
             deletedAt = 0L,
             bodyHash = "body-$articleId",
             bodyByteCount = chunkHashes.size.toLong(),
-            chunkSize = ArticleSyncBody.CHUNK_SIZE_BYTES,
+            chunkSize = 1,
             chunkHashes = chunkHashes,
             metadataHash = "metadata-$articleId"
         )

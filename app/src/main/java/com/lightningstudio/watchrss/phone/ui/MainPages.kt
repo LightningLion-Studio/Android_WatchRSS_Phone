@@ -222,7 +222,7 @@ fun HomePage(
             }
 
             Text(
-                text = "群号：1083518433",
+                text = "群号：$WATCH_RSS_QQ_GROUP_NUMBER",
                 style = MaterialTheme.typography.bodyLarge,
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.primary

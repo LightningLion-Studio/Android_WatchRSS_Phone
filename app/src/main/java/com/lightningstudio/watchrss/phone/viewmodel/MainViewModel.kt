@@ -39,7 +39,7 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageRepository
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageStatisticsPojo
 import com.lightningstudio.watchrss.phone.tips.TipEvents
 import com.lightningstudio.watchrss.phone.tips.TipManager
-
+import com.lightningstudio.watchrss.phone.ui.SupportContactAlertUi
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -67,7 +67,8 @@ data class MainUiState(
     val txtChapterPrompt: TxtChapterPromptUi? = null,
     val txtUpdatePrompt: TxtUpdatePromptUi? = null,
     val llmTokenUsageStats: PhoneLlmTokenUsageStatisticsPojo? = null,
-    val llmTokenUsageDaily: List<PhoneLlmTokenUsageDailyPojo> = emptyList()
+    val llmTokenUsageDaily: List<PhoneLlmTokenUsageDailyPojo> = emptyList(),
+    val supportAlert: SupportContactAlertUi? = null
 )
 
 data class MainSyncProgressUi(
@@ -243,6 +244,20 @@ class MainViewModel(
             syncStatusMessage = null,
             syncStatusError = null,
             error = null
+        )
+    }
+
+    fun dismissSupportAlert() {
+        sessionState.value = sessionState.value.copy(supportAlert = null)
+    }
+
+    private fun showSupportAlert(title: String, message: String, errorDetails: String? = null) {
+        sessionState.value = sessionState.value.copy(
+            supportAlert = SupportContactAlertUi(
+                title = title,
+                message = message,
+                errorDetails = errorDetails
+            )
         )
     }
 
@@ -683,9 +698,13 @@ class MainViewModel(
             }
             if (failures.isEmpty()) {
                 _toastEvent.tryEmit("已刷新 RSS 源：$refreshedCount 个")
+                sessionState.value = sessionState.value.copy(
+                    syncStatusError = null,
+                    error = null
+                )
             } else {
-                _toastEvent.tryEmit("已刷新 $refreshedCount 个 RSS 源，失败 ${failures.size} 个")
-                _toastEvent.tryEmit(failures.first())
+                val summary = "已刷新 $refreshedCount 个 RSS 源，失败 ${failures.size} 个"
+                showSyncStatusError(summary)
             }
         }
     }
@@ -870,6 +889,11 @@ class MainViewModel(
                     conflictPrompt = null
                 )
                 _toastEvent.tryEmit(throwable.message ?: "操作失败")
+                showSupportAlert(
+                    title = "同步失败",
+                    message = "探测手表时出错，请检查蓝牙是否开启、手表端是否已打开应用。",
+                    errorDetails = throwable.message
+                )
                 return@launch
             }
             val reachableDevices = probeTargets.devices
@@ -885,6 +909,11 @@ class MainViewModel(
                         bluetoothDevicePrompt = null
                     )
                     _toastEvent.tryEmit("未找到已打开 WatchRSS 的已配对手表，请在手表端打开应用并保持亮屏后重试")
+                    showSupportAlert(
+                        title = "未找到可同步手表",
+                        message = "未找到已打开 WatchRSS 的已配对手表。请确认手表端已打开应用并保持亮屏，然后重试。",
+                        errorDetails = "未找到已打开 WatchRSS 的已配对手表"
+                    )
                 }
                 1 -> {
                     val device = reachableDevices.single()
@@ -940,6 +969,11 @@ class MainViewModel(
                 )
                 usageTelemetry.recordSyncResult(false, "account", throwable.message)
                 _toastEvent.tryEmit(throwable.message ?: "操作失败")
+                showSupportAlert(
+                    title = "账号同步失败",
+                    message = "探测手表时出错，请检查蓝牙是否开启、手表端是否已打开应用。",
+                    errorDetails = throwable.message
+                )
                 return@launch
             }
             val reachableDevices = probeTargets.devices
@@ -956,6 +990,11 @@ class MainViewModel(
                     )
                     usageTelemetry.recordSyncResult(false, "account", "no_watch")
                     _toastEvent.tryEmit("未找到已打开 WatchRSS 的已配对手表，请在手表端打开应用并保持亮屏后重试")
+                    showSupportAlert(
+                        title = "未找到可同步手表",
+                        message = "未找到已打开 WatchRSS 的已配对手表。请确认手表端已打开应用并保持亮屏，然后重试。",
+                        errorDetails = "未找到已打开 WatchRSS 的已配对手表"
+                    )
                 }
                 1 -> {
                     val device = reachableDevices.single()
@@ -1098,6 +1137,11 @@ class MainViewModel(
             )
             usageTelemetry.recordSyncResult(false, "library", throwable.message)
             _toastEvent.tryEmit(error)
+            showSupportAlert(
+                title = "资料库同步失败",
+                message = "同步过程中断，请确认手表保持亮屏并重试。",
+                errorDetails = error
+            )
         }
         conflictResolutionDeferred?.complete(PhoneSyncConflictResolution.KEEP_LATEST)
         conflictResolutionDeferred = null
@@ -1151,6 +1195,11 @@ class MainViewModel(
             )
             usageTelemetry.recordSyncResult(false, "account", throwable.message)
             _toastEvent.tryEmit(throwable.message ?: "操作失败")
+            showSupportAlert(
+                title = "账号同步失败",
+                message = "账号同步过程中断，请确认手表保持亮屏并重试。",
+                errorDetails = throwable.message
+            )
         }
         sessionState.value = sessionState.value.copy(isBusy = false, conflictPrompt = null)
     }

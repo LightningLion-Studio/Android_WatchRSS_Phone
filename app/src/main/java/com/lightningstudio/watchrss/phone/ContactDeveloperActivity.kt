@@ -30,15 +30,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.rememberAsyncImagePainter
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.qrcode.QRCodeWriter
 import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
+import com.lightningstudio.watchrss.phone.ui.WATCH_RSS_QQ_GROUP_NUMBER
+import com.lightningstudio.watchrss.phone.ui.WATCH_RSS_QQ_GROUP_URL
 import com.lightningstudio.watchrss.phone.ui.adaptiveContentWidth
+import com.lightningstudio.watchrss.phone.ui.generateQRCode
 import com.lightningstudio.watchrss.phone.ui.theme.roundedCombinedClickable
 
-private const val WATCH_RSS_QQ_GROUP_NUMBER = "1083518433"
-private const val WATCH_RSS_QQ_GROUP_URL = "https://qm.qq.com/q/cJNTQuxfoW"
 private const val BEIAN_MIIT_URL = "https://beian.miit.gov.cn/"
 
 class ContactDeveloperActivity : ComponentActivity() {
@@ -249,20 +248,4 @@ private fun BeianNumberText(onClick: () -> Unit) {
             }
         )
     )
-}
-
-fun generateQRCode(content: String, size: Int = 512): Bitmap {
-    val writer = QRCodeWriter()
-    val bitMatrix = writer.encode(content, BarcodeFormat.QR_CODE, size, size)
-    val width = bitMatrix.width
-    val height = bitMatrix.height
-    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565)
-
-    for (x in 0 until width) {
-        for (y in 0 until height) {
-            bitmap.setPixel(x, y, if (bitMatrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
-        }
-    }
-
-    return bitmap
 }

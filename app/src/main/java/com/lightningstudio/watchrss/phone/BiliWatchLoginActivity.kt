@@ -33,6 +33,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.connection.bili.PhoneBiliGateway
 import com.lightningstudio.watchrss.phone.connection.bili.WatchBiliLoginSession
+import com.lightningstudio.watchrss.phone.ui.SupportContactInlineFooter
+import com.lightningstudio.watchrss.phone.ui.generateQRCode
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -186,6 +188,9 @@ private fun QrLoginPage(
         }
         TextButton(onClick = onRefresh) { Text("刷新二维码") }
         TextButton(onClick = onCancel) { Text("取消") }
+        SupportContactInlineFooter(
+            hint = "手表登录连接不上？联系客服并提供当前状态"
+        )
     }
 }
 

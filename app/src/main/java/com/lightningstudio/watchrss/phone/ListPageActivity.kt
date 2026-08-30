@@ -60,6 +60,8 @@ import com.lightningstudio.watchrss.phone.data.importer.classifyLocalFileImport
 import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
 import com.lightningstudio.watchrss.phone.ui.DeleteConflictDialog
 import com.lightningstudio.watchrss.phone.ui.SharedImportDialog
+import com.lightningstudio.watchrss.phone.ui.SupportContactBlockingAlert
+import com.lightningstudio.watchrss.phone.ui.SupportContactInlineFooter
 import com.lightningstudio.watchrss.phone.ui.TxtUpdateDialog
 import com.lightningstudio.watchrss.phone.ui.TxtChapterImportDialog
 import com.lightningstudio.watchrss.phone.ui.BluetoothDeviceChooserDialog
@@ -220,7 +222,8 @@ class ListPageActivity : ComponentActivity() {
                             )
                         )
                     },
-                    onDismissMessage = viewModel::clearMessage
+                    onDismissMessage = viewModel::clearMessage,
+                    onDismissSupportAlert = viewModel::dismissSupportAlert,
                 )
 
                 // 全局对话框（与 MainActivity 共享同一套状态）
@@ -436,7 +439,8 @@ fun ListPageScreen(
     onAddRssSource: () -> Unit,
     onImportArticle: () -> Unit,
     onImportFile: () -> Unit,
-    onDismissMessage: () -> Unit
+    onDismissMessage: () -> Unit,
+    onDismissSupportAlert: () -> Unit
 ) {
     val currentTab = pageType.toMainTab()
 
@@ -524,7 +528,22 @@ fun ListPageScreen(
                             )
                         }
                     }
+                    if (uiState.error != null || uiState.message?.contains("失败") == true) {
+                        SupportContactInlineFooter(
+                            hint = "操作遇到问题？联系客服并提供上方提示"
+                        )
+                    }
                 }
+            }
+
+            // 阻断式客服 Alert
+            uiState.supportAlert?.let { alert ->
+                SupportContactBlockingAlert(
+                    title = alert.title,
+                    message = alert.message,
+                    errorDetails = alert.errorDetails,
+                    onDismiss = onDismissSupportAlert
+                )
             }
 
             when (pageType) {

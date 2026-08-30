@@ -62,6 +62,8 @@ import com.lightningstudio.watchrss.phone.ui.LiquidGlassSegment
 import com.lightningstudio.watchrss.phone.ui.MainTab
 import com.lightningstudio.watchrss.phone.ui.GlassTopBar
 import com.lightningstudio.watchrss.phone.ui.RefreshablePageColumn
+import com.lightningstudio.watchrss.phone.ui.SupportContactBlockingAlert
+import com.lightningstudio.watchrss.phone.ui.SupportContactInlineFooter
 import com.lightningstudio.watchrss.phone.ui.TAB_BAR_HEIGHT
 import com.lightningstudio.watchrss.phone.ui.TxtUpdateDialog
 import com.lightningstudio.watchrss.phone.ui.TxtChapterImportDialog
@@ -197,7 +199,8 @@ class RssActivity : ComponentActivity() {
                             )
                         )
                     },
-                    onDismissMessage = viewModel::clearMessage
+                    onDismissMessage = viewModel::clearMessage,
+                    onDismissSupportAlert = viewModel::dismissSupportAlert,
                 )
                 uiState.txtChapterPrompt?.let { prompt ->
                     TxtChapterImportDialog(
@@ -308,7 +311,8 @@ fun RssScreen(
     onAddRssSource: () -> Unit,
     onImportArticle: () -> Unit,
     onImportFile: () -> Unit,
-    onDismissMessage: () -> Unit
+    onDismissMessage: () -> Unit,
+    onDismissSupportAlert: () -> Unit
 ) {
     val backgroundColor = MaterialTheme.colorScheme.background
     val backdrop = rememberLayerBackdrop {
@@ -385,7 +389,22 @@ fun RssScreen(
                             )
                         }
                     }
+                    if (uiState.error != null || uiState.message?.contains("失败") == true) {
+                        SupportContactInlineFooter(
+                            hint = "操作遇到问题？联系客服并提供上方提示"
+                        )
+                    }
                 }
+            }
+
+            // 阻断式客服 Alert
+            uiState.supportAlert?.let { alert ->
+                SupportContactBlockingAlert(
+                    title = alert.title,
+                    message = alert.message,
+                    errorDetails = alert.errorDetails,
+                    onDismiss = onDismissSupportAlert
+                )
             }
 
             // 内容列表

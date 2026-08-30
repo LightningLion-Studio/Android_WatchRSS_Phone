@@ -28,6 +28,7 @@ import com.lightningstudio.watchrss.phone.viewmodel.SharedImportPromptUi
 import com.lightningstudio.watchrss.phone.viewmodel.TxtUpdatePromptUi
 import com.lightningstudio.watchrss.phone.viewmodel.TxtChapterPromptUi
 import com.lightningstudio.watchrss.phone.data.repo.TxtUpdateRelation
+import com.lightningstudio.watchrss.phone.ui.SupportContactInlineFooter
 
 @Composable
 fun AddRssSourceDialog(
@@ -172,6 +173,9 @@ fun TxtUpdateDialog(
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
+                SupportContactInlineFooter(
+                    hint = "TXT 更新识别不准？联系客服并提供文件名"
+                )
             }
         },
         confirmButton = {
@@ -248,6 +252,9 @@ fun DeleteConflictDialog(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                SupportContactInlineFooter(
+                    hint = "冲突无法解决？联系客服并提供内容标题"
+                )
                 if (prompt.manual) {
                     Button(
                         modifier = Modifier.fillMaxWidth(),

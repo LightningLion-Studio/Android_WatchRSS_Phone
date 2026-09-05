@@ -2,7 +2,11 @@ package com.lightningstudio.watchrss.phone
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.graphics.Bitmap
 import android.graphics.Typeface
+import android.media.MediaMetadataRetriever
+import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -19,6 +23,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
@@ -27,6 +32,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -50,6 +56,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -67,6 +76,7 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StrikethroughS
@@ -74,6 +84,7 @@ import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -93,6 +104,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -111,9 +123,11 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.contentDescription
@@ -130,11 +144,14 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil.compose.AsyncImage
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
 import com.lightningstudio.watchrss.phone.account.RemoteEnvironment
 import com.lightningstudio.watchrss.phone.account.RemoteEnvironmentStore
 import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundFit
 import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundAssetEntity
+import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundImportInspection
+import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundImportMode
 import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundType
 import com.lightningstudio.watchrss.phone.data.reader.ReaderFontSynthesis
 import com.lightningstudio.watchrss.phone.data.reader.ReaderFontAssetEntity
@@ -157,6 +174,7 @@ import com.lightningstudio.watchrss.phone.data.reader.ReaderTextAlignment
 import com.lightningstudio.watchrss.phone.data.reader.ReaderTextStyleOverride
 import com.lightningstudio.watchrss.phone.data.reader.ReaderTypographyRole
 import com.lightningstudio.watchrss.phone.data.reader.SystemReaderFont
+import com.lightningstudio.watchrss.phone.data.storage.AppStorageStats
 import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
 import com.lightningstudio.watchrss.phone.ui.AdaptiveReaderOpenThreePane
 import com.lightningstudio.watchrss.phone.ui.AdaptiveReaderReturnThreePane
@@ -193,17 +211,27 @@ import kotlin.math.roundToInt
 class SettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.colorMode = ActivityInfo.COLOR_MODE_HDR
         val repository =
             (application as PhoneCompanionApplication).container.readerPresetRepository
         setContent {
             WatchRssPhoneTheme {
-                ReaderSettingsHost(repository = repository, onFinish = ::finish)
+                ReaderSettingsHost(
+                    repository = repository,
+                    onFinish = ::finish,
+                    openStorageInitially = intent.getBooleanExtra(EXTRA_OPEN_STORAGE, false)
+                )
             }
         }
     }
 
     companion object {
-        fun createIntent(context: Context): Intent = Intent(context, SettingsActivity::class.java)
+        fun createIntent(context: Context, openStorage: Boolean = false): Intent =
+            Intent(context, SettingsActivity::class.java).apply {
+                if (openStorage) putExtra(EXTRA_OPEN_STORAGE, true)
+            }
+
+        const val EXTRA_OPEN_STORAGE = "open_storage"
     }
 }
 
@@ -214,7 +242,14 @@ private enum class SettingsPage {
     CATEGORY_TYPOGRAPHY,
     FONTS,
     BACKGROUNDS,
-    APP
+    APP,
+    BACKGROUND_IMPORT,
+    STORAGE
+}
+
+private enum class RememberedBackgroundImportChoice {
+    APPLY_TO_WATCH,
+    IMPORT_ONLY
 }
 
 private enum class FontSizeMode {
@@ -226,6 +261,13 @@ private data class ImportedPresetApplyTarget(
     val id: String,
     val name: String,
     val warnings: List<String>
+)
+
+private data class PendingBackgroundImport(
+    val uri: Uri,
+    val inspection: ReaderBackgroundImportInspection,
+    val attachToDraftType: ReaderBackgroundType?,
+    val offerWatchApply: Boolean
 )
 
 private data class SettingsPaneTransition(
@@ -240,7 +282,8 @@ private val SettingsPage.depth: Int
     get() = when (this) {
         SettingsPage.ROOT -> 0
         SettingsPage.EDITOR,
-        SettingsPage.CATEGORY_TYPOGRAPHY -> 2
+        SettingsPage.CATEGORY_TYPOGRAPHY,
+        SettingsPage.BACKGROUND_IMPORT -> 2
         else -> 1
     }
 
@@ -248,6 +291,7 @@ private fun SettingsPage.parent(): SettingsPage = when (this) {
     SettingsPage.ROOT -> SettingsPage.ROOT
     SettingsPage.EDITOR -> SettingsPage.PRESETS
     SettingsPage.CATEGORY_TYPOGRAPHY -> SettingsPage.EDITOR
+    SettingsPage.BACKGROUND_IMPORT -> SettingsPage.APP
     else -> SettingsPage.ROOT
 }
 
@@ -256,7 +300,8 @@ private fun SettingsPage.parent(): SettingsPage = when (this) {
 internal fun ReaderSettingsHost(
     repository: ReaderPresetRepository,
     onFinish: () -> Unit,
-    leadingPane: (@Composable () -> Unit)? = null
+    leadingPane: (@Composable () -> Unit)? = null,
+    openStorageInitially: Boolean = false
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val container = (context.applicationContext as PhoneCompanionApplication).container
@@ -272,7 +317,18 @@ internal fun ReaderSettingsHost(
         repository.setSystemDark(isSystemDark)
     }
     val scope = rememberCoroutineScope()
-    var page by rememberSaveable { mutableStateOf(SettingsPage.ROOT) }
+    val backgroundImportPreferences = remember {
+        context.getSharedPreferences(BACKGROUND_IMPORT_PREFERENCES, Context.MODE_PRIVATE)
+    }
+    var rememberedBackgroundImportChoice by remember {
+        mutableStateOf(
+            backgroundImportPreferences.getString(BACKGROUND_IMPORT_CHOICE_KEY, null)
+                ?.let { runCatching { RememberedBackgroundImportChoice.valueOf(it) }.getOrNull() }
+        )
+    }
+    var page by rememberSaveable {
+        mutableStateOf(if (openStorageInitially) SettingsPage.STORAGE else SettingsPage.ROOT)
+    }
     var draft by remember { mutableStateOf<ReaderPreset?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var renamePreset by remember { mutableStateOf<ReaderPreset?>(null) }
@@ -311,6 +367,17 @@ internal fun ReaderSettingsHost(
     var showSystemFontPicker by remember { mutableStateOf(false) }
     var systemFontsLoading by remember { mutableStateOf(false) }
     var systemFonts by remember { mutableStateOf<List<SystemReaderFont>>(emptyList()) }
+    var pendingBackgroundImport by remember { mutableStateOf<PendingBackgroundImport?>(null) }
+    var pendingVideoImport by remember { mutableStateOf<PendingBackgroundImport?>(null) }
+    var editingVideoBackground by remember { mutableStateOf<ReaderBackgroundAssetEntity?>(null) }
+    var storageStats by remember { mutableStateOf<AppStorageStats?>(null) }
+    var storageBusy by remember { mutableStateOf(false) }
+    var backgroundImportAttachType by remember { mutableStateOf<ReaderBackgroundType?>(null) }
+    var offerWatchApplyAfterImport by remember { mutableStateOf(false) }
+    var importedBackgroundWatchTarget by remember {
+        mutableStateOf<ReaderBackgroundAssetEntity?>(null)
+    }
+    var rememberBackgroundImportChoice by remember { mutableStateOf(false) }
 
     LaunchedEffect(transferService) {
         while (true) {
@@ -587,17 +654,192 @@ internal fun ReaderSettingsHost(
             )
         )
     }
-    val backgroundPicker =
-        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            uri ?: return@rememberLauncherForActivityResult
-            scope.launch {
-                message = runCatching {
-                    persistReadPermission(context, uri)
-                    repository.importBackground(uri)
-                    "背景资源已导入"
-                }.getOrElse { it.message ?: "背景导入失败" }
+
+    fun createAndSyncBackgroundPreset(background: ReaderBackgroundAssetEntity) {
+        scope.launch {
+            message = "正在创建背景预设…"
+            runCatching {
+                val type = ReaderBackgroundType.valueOf(background.kind)
+                val presetName = if (type == ReaderBackgroundType.VIDEO) {
+                    "视频背景"
+                } else {
+                    "照片背景"
+                }
+                val template = if (isSystemDark) {
+                    ReaderPreset.darkDefault(name = presetName)
+                } else {
+                    ReaderPreset.lightDefault(name = presetName)
+                }
+                repository.saveAsNew(
+                    draft = template.copy(
+                        background = template.background.copy(
+                            type = type,
+                            assetId = background.id
+                        )
+                    ),
+                    name = presetName,
+                    applyAfterSave = true
+                )
+            }.onSuccess {
+                message = "预设已创建，正在连接手表…"
+                requestSync()
+            }.onFailure {
+                message = it.message ?: "创建并同步背景预设失败"
             }
         }
+    }
+
+    fun handleImportedBackground(
+        pending: PendingBackgroundImport,
+        imported: ReaderBackgroundAssetEntity,
+        importedMessage: String
+    ) {
+        pending.attachToDraftType?.let {
+            val importedType = runCatching { ReaderBackgroundType.valueOf(imported.kind) }
+                .getOrNull() ?: return@let
+            draft?.let { current ->
+                updateDraft(
+                    current.copy(
+                        background = current.background.copy(
+                            type = importedType,
+                            assetId = imported.id
+                        )
+                    )
+                )
+            }
+        }
+        if (!pending.offerWatchApply) {
+            message = importedMessage
+            return
+        }
+        when (rememberedBackgroundImportChoice) {
+            RememberedBackgroundImportChoice.APPLY_TO_WATCH -> {
+                createAndSyncBackgroundPreset(imported)
+            }
+            RememberedBackgroundImportChoice.IMPORT_ONLY -> {
+                message = importedMessage
+            }
+            null -> {
+                rememberBackgroundImportChoice = false
+                importedBackgroundWatchTarget = imported
+                message = null
+            }
+        }
+    }
+
+    fun saveRememberedBackgroundChoice(choice: RememberedBackgroundImportChoice) {
+        if (!rememberBackgroundImportChoice) return
+        backgroundImportPreferences.edit()
+            .putString(BACKGROUND_IMPORT_CHOICE_KEY, choice.name)
+            .apply()
+        rememberedBackgroundImportChoice = choice
+    }
+
+    fun importVideo(
+        pending: PendingBackgroundImport,
+        extractFirstFrame: Boolean
+    ) {
+        pendingVideoImport = null
+        scope.launch {
+            message = if (extractFirstFrame) "正在截取视频首帧…" else "正在导入视频…"
+            runCatching {
+                val video = repository.importBackground(
+                    uri = pending.uri,
+                    inspection = pending.inspection
+                )
+                if (extractFirstFrame) {
+                    repository.extractVideoFrame(video.id, 0L)
+                } else {
+                    video
+                }
+            }.onSuccess { imported ->
+                handleImportedBackground(
+                    pending,
+                    imported,
+                    if (extractFirstFrame) "已保留原视频并截取首帧" else "视频已导入"
+                )
+            }.onFailure {
+                message = it.message ?: "视频导入失败"
+            }
+        }
+    }
+
+    fun refreshStorageStats() {
+        scope.launch {
+            storageStats = container.appStorageManager.calculate()
+        }
+    }
+
+    val backgroundPicker =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri == null) {
+                backgroundImportAttachType = null
+                offerWatchApplyAfterImport = false
+                return@rememberLauncherForActivityResult
+            }
+            scope.launch {
+                message = "正在分析背景资源…"
+                runCatching {
+                    persistReadPermission(context, uri)
+                    repository.inspectBackground(uri)
+                }.onSuccess { inspection ->
+                    val pending = PendingBackgroundImport(
+                        uri = uri,
+                        inspection = inspection,
+                        attachToDraftType = backgroundImportAttachType,
+                        offerWatchApply = offerWatchApplyAfterImport
+                    )
+                    backgroundImportAttachType = null
+                    offerWatchApplyAfterImport = false
+                    if (inspection.kind == ReaderBackgroundType.VIDEO) {
+                        pendingVideoImport = pending
+                        message = null
+                    } else if (inspection.requiresChoice) {
+                        pendingBackgroundImport = pending
+                    } else {
+                        runCatching {
+                            repository.importBackground(
+                                uri = uri,
+                                inspection = inspection
+                            )
+                        }.onSuccess { imported ->
+                            handleImportedBackground(pending, imported, "背景资源已导入")
+                        }.onFailure {
+                            message = it.message ?: "背景导入失败"
+                        }
+                    }
+                }.onFailure {
+                    backgroundImportAttachType = null
+                    offerWatchApplyAfterImport = false
+                    message = it.message ?: "背景导入失败"
+                }
+            }
+        }
+
+    fun completeBackgroundImport(
+        pending: PendingBackgroundImport,
+        mode: ReaderBackgroundImportMode
+    ) {
+        pendingBackgroundImport = null
+        scope.launch {
+            runCatching {
+                repository.importBackground(
+                    uri = pending.uri,
+                    mode = mode,
+                    inspection = pending.inspection
+                )
+            }.onSuccess { imported ->
+                val importedMessage = if (mode == ReaderBackgroundImportMode.COMPATIBLE_STATIC) {
+                    "已导入兼容静态图"
+                } else {
+                    "背景资源已导入"
+                }
+                handleImportedBackground(pending, imported, importedMessage)
+            }.onFailure {
+                message = it.message ?: "背景导入失败"
+            }
+        }
+    }
 
     fun openSystemFontPicker() {
         showSystemFontPicker = true
@@ -741,6 +983,10 @@ internal fun ReaderSettingsHost(
         watchPreviewStatus = "正在传输预览资源…"
     }
     LaunchedEffect(page) {
+        if (page == SettingsPage.STORAGE) refreshStorageStats()
+    }
+
+    LaunchedEffect(page) {
         if (
             page != SettingsPage.EDITOR &&
             page != SettingsPage.CATEGORY_TYPOGRAPHY &&
@@ -841,6 +1087,8 @@ internal fun ReaderSettingsHost(
                                 SettingsPage.FONTS -> "字体库"
                                 SettingsPage.BACKGROUNDS -> "背景资源"
                                 SettingsPage.APP -> "应用功能"
+                                SettingsPage.BACKGROUND_IMPORT -> "背景导入设置"
+                                SettingsPage.STORAGE -> "存储空间"
                             }
                         )
                     },
@@ -876,7 +1124,11 @@ internal fun ReaderSettingsHost(
                     onOpenPresets = { navigateTo(SettingsPage.PRESETS) },
                     onOpenFonts = { navigateTo(SettingsPage.FONTS) },
                     onOpenBackgrounds = { navigateTo(SettingsPage.BACKGROUNDS) },
-                    onOpenApp = { navigateTo(SettingsPage.APP) }
+                    onOpenApp = { navigateTo(SettingsPage.APP) },
+                    onOpenStorage = {
+                        refreshStorageStats()
+                        navigateTo(SettingsPage.STORAGE)
+                    }
                 )
                 SettingsPage.PRESETS -> PresetManager(
                     presets = presets,
@@ -967,6 +1219,8 @@ internal fun ReaderSettingsHost(
                             },
                             onImportFont = { showFontImportSourcePicker = true },
                             onImportBackground = { type ->
+                                backgroundImportAttachType = type
+                                offerWatchApplyAfterImport = false
                                 backgroundPicker.launch(
                                     arrayOf(
                                         if (type == ReaderBackgroundType.IMAGE) {
@@ -1024,15 +1278,76 @@ internal fun ReaderSettingsHost(
                     onDelete = { deleteFont = it }
                 )
                 SettingsPage.BACKGROUNDS -> AssetLibrary(
-                    title = "原图/原视频按 SHA-256 去重。视频片段最长 60 秒，手表版本由同步时派生。",
-                    entries = backgrounds.map {
-                        "${it.displayName}\n${it.kind} · ${it.width}×${it.height} · ${formatBytes(it.byteCount)}"
-                    },
-                    importLabel = "导入图片或视频",
+                    backgrounds = backgrounds,
+                    backgroundFile = repository::backgroundFile,
                     modifier = Modifier.padding(padding),
-                    onImport = { backgroundPicker.launch(arrayOf("image/*", "video/*")) }
+                    onImport = {
+                        backgroundImportAttachType = null
+                        offerWatchApplyAfterImport = true
+                        backgroundPicker.launch(arrayOf("image/*", "video/*"))
+                    },
+                    onEditVideo = { editingVideoBackground = it }
                 )
-                SettingsPage.APP -> AppFeatureSettings(Modifier.padding(padding))
+                SettingsPage.APP -> AppFeatureSettings(
+                    modifier = Modifier.padding(padding),
+                    rememberedBackgroundChoice = rememberedBackgroundImportChoice,
+                    onOpenBackgroundImportSettings = {
+                        navigateTo(SettingsPage.BACKGROUND_IMPORT)
+                    }
+                )
+                SettingsPage.BACKGROUND_IMPORT -> BackgroundImportPreferenceSettings(
+                    choice = rememberedBackgroundImportChoice,
+                    modifier = Modifier.padding(padding),
+                    onClear = {
+                        backgroundImportPreferences.edit()
+                            .remove(BACKGROUND_IMPORT_CHOICE_KEY)
+                            .apply()
+                        rememberedBackgroundImportChoice = null
+                        message = "已取消记住的背景导入选择"
+                    }
+                )
+                SettingsPage.STORAGE -> StorageSettings(
+                    stats = storageStats,
+                    busy = storageBusy,
+                    modifier = Modifier.padding(padding),
+                    onRefresh = ::refreshStorageStats,
+                    onClearCache = {
+                        storageBusy = true
+                        scope.launch {
+                            runCatching {
+                                container.appStorageManager.clearCache()
+                            }.onSuccess { cleared ->
+                                storageStats = container.appStorageManager.calculate()
+                                message = if (cleared > 0L) {
+                                    "已清理 ${formatBytes(cleared)} 缓存"
+                                } else {
+                                    "没有可清理的缓存"
+                                }
+                            }.onFailure {
+                                message = it.message ?: "缓存清理失败"
+                            }
+                            storageBusy = false
+                        }
+                    },
+                    onClearWatchCopies = {
+                        storageBusy = true
+                        scope.launch {
+                            runCatching {
+                                container.appStorageManager.clearWatchBackgroundCopies()
+                            }.onSuccess { cleared ->
+                                storageStats = container.appStorageManager.calculate()
+                                message = if (cleared > 0L) {
+                                    "已清理 ${formatBytes(cleared)} 手表视频副本，需要时会自动重新生成"
+                                } else {
+                                    "没有可清理的手表视频副本"
+                                }
+                            }.onFailure {
+                                message = it.message ?: "手表视频副本清理失败"
+                            }
+                            storageBusy = false
+                        }
+                    }
+                )
             }
         }
     }
@@ -1109,6 +1424,115 @@ internal fun ReaderSettingsHost(
             onCustomFile = {
                 showFontImportSourcePicker = false
                 openFontFilePicker()
+            }
+        )
+    }
+
+    pendingVideoImport?.let { pending ->
+        VideoImportChoiceDialog(
+            inspection = pending.inspection,
+            onDismiss = { pendingVideoImport = null },
+            onImportVideo = { importVideo(pending, extractFirstFrame = false) },
+            onExtractFirstFrame = { importVideo(pending, extractFirstFrame = true) }
+        )
+    }
+
+    editingVideoBackground?.let { background ->
+        VideoBackgroundEditorDialog(
+            asset = background,
+            file = repository.backgroundFile(background.id),
+            onDismiss = { editingVideoBackground = null },
+            onSaveVideo = { cropX, cropY, frameTimeMs ->
+                editingVideoBackground = null
+                scope.launch {
+                    message = runCatching {
+                        repository.updateVideoEdit(background.id, cropX, cropY, frameTimeMs)
+                        "视频裁切区域已保存，下次同步会重新生成手表视频"
+                    }.getOrElse { it.message ?: "视频设置保存失败" }
+                }
+            },
+            onExtractFrame = { cropX, cropY, frameTimeMs ->
+                editingVideoBackground = null
+                scope.launch {
+                    runCatching {
+                        repository.updateVideoEdit(background.id, cropX, cropY, frameTimeMs)
+                        repository.extractVideoFrame(background.id, frameTimeMs, cropX, cropY)
+                    }.onSuccess {
+                        message = "已从视频创建一张照片，原视频仍然保留"
+                    }.onFailure {
+                        message = it.message ?: "视频画面保存失败"
+                    }
+                }
+            }
+        )
+    }
+
+    pendingBackgroundImport?.let { pending ->
+        BackgroundImportChoiceDialog(
+            pending = pending,
+            onDismiss = { pendingBackgroundImport = null },
+            onKeepOriginal = {
+                completeBackgroundImport(pending, ReaderBackgroundImportMode.KEEP_ORIGINAL)
+            },
+            onCompatibleStatic = {
+                completeBackgroundImport(pending, ReaderBackgroundImportMode.COMPATIBLE_STATIC)
+            }
+        )
+    }
+
+    importedBackgroundWatchTarget?.let { background ->
+        AlertDialog(
+            onDismissRequest = {
+                importedBackgroundWatchTarget = null
+                rememberBackgroundImportChoice = false
+            },
+            title = { Text("是否应用至手表？") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "应用至手表会自动创建并启用一个阅读预设，然后同步预设和背景资源。"
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                rememberBackgroundImportChoice = !rememberBackgroundImportChoice
+                            },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = rememberBackgroundImportChoice,
+                            onCheckedChange = { rememberBackgroundImportChoice = it }
+                        )
+                        Text("记住选择")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        saveRememberedBackgroundChoice(
+                            RememberedBackgroundImportChoice.APPLY_TO_WATCH
+                        )
+                        importedBackgroundWatchTarget = null
+                        rememberBackgroundImportChoice = false
+                        createAndSyncBackgroundPreset(background)
+                    }
+                ) { Text("应用至手表") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        saveRememberedBackgroundChoice(
+                            RememberedBackgroundImportChoice.IMPORT_ONLY
+                        )
+                        importedBackgroundWatchTarget = null
+                        rememberBackgroundImportChoice = false
+                        message = "背景资源已导入"
+                    }
+                ) {
+                    Text("仅导入")
+                }
             }
         )
     }
@@ -1631,7 +2055,8 @@ private fun SettingsRoot(
     onOpenPresets: () -> Unit,
     onOpenFonts: () -> Unit,
     onOpenBackgrounds: () -> Unit,
-    onOpenApp: () -> Unit
+    onOpenApp: () -> Unit,
+    onOpenStorage: () -> Unit
 ) {
     AdaptiveWindowScope(modifier = modifier.fillMaxSize()) { windowInfo ->
         AdaptiveContentFrame(
@@ -1672,6 +2097,12 @@ private fun SettingsRoot(
                         "纯色、图片和最长 60 秒视频",
                         Icons.Default.Image,
                         onOpenBackgrounds
+                    )
+                    SettingsEntry(
+                        "存储空间",
+                        "查看照片、视频、手表副本和缓存占用",
+                        Icons.Default.Info,
+                        onOpenStorage
                     )
                     SettingsEntry(
                         "应用功能",
@@ -3246,42 +3677,499 @@ private fun FontAssetName(
 
 @Composable
 private fun AssetLibrary(
-    title: String,
-    entries: List<String>,
-    importLabel: String,
-    secondaryImportLabel: String? = null,
+    backgrounds: List<ReaderBackgroundAssetEntity>,
+    backgroundFile: (String?) -> File?,
     modifier: Modifier,
     onImport: () -> Unit,
-    onSecondaryImport: (() -> Unit)? = null
+    onEditVideo: (ReaderBackgroundAssetEntity) -> Unit
 ) {
-    SettingsColumn(modifier) {
-        Text(title, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            "从相册或文件中选择照片、动态图片和视频。导入后可以直接创建预设并同步到手表。",
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
         Button(onClick = onImport, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Default.Add, contentDescription = null)
-            Text(" $importLabel")
+            Text(" 导入并应用至手表")
         }
-        if (secondaryImportLabel != null && onSecondaryImport != null) {
-            OutlinedButton(
-                onClick = onSecondaryImport,
-                modifier = Modifier.fillMaxWidth()
+        if (backgrounds.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.Default.FontDownload, contentDescription = null)
-                Text(" $secondaryImportLabel")
+                Text(
+                    "还没有照片或视频",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
-        }
-        if (entries.isEmpty()) {
-            Text("还没有资源", modifier = Modifier.padding(vertical = 24.dp))
-        }
-        entries.forEach {
-            ElevatedCard(Modifier.fillMaxWidth()) {
-                Text(it, Modifier.padding(16.dp))
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(bottom = 24.dp)
+            ) {
+                gridItems(backgrounds, key = { it.id }) { asset ->
+                    BackgroundAssetThumbnail(
+                        asset = asset,
+                        file = backgroundFile(asset.id),
+                        onClick = if (asset.kind == ReaderBackgroundType.VIDEO.name) {
+                            { onEditVideo(asset) }
+                        } else null
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun AppFeatureSettings(modifier: Modifier) {
+private fun BackgroundAssetThumbnail(
+    asset: ReaderBackgroundAssetEntity,
+    file: File?,
+    onClick: (() -> Unit)? = null
+) {
+    val badges = backgroundAssetBadges(asset)
+    ElevatedCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            if (file != null) {
+                AsyncImage(
+                    model = file,
+                    contentDescription = buildString {
+                        append(if (asset.kind == ReaderBackgroundType.VIDEO.name) "视频" else "照片")
+                        append("，${asset.width}×${asset.height}，${formatBytes(asset.byteCount)}")
+                    },
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Icon(
+                    Icons.Default.Image,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.align(Alignment.Center)
+                )
+            }
+            if (asset.kind == ReaderBackgroundType.VIDEO.name) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .clip(RoundedCornerShape(50))
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .padding(8.dp)
+                ) {
+                    Icon(
+                        Icons.Default.PlayArrow,
+                        contentDescription = "视频",
+                        tint = Color.White
+                    )
+                }
+            }
+            if (badges.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    badges.forEach { badge ->
+                        Text(
+                            text = badge,
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color.Black.copy(alpha = 0.62f))
+                                .padding(horizontal = 6.dp, vertical = 3.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun backgroundAssetBadges(asset: ReaderBackgroundAssetEntity): List<String> {
+    val source = runCatching { JSONObject(asset.variantsJson).optJSONObject("source") }.getOrNull()
+    return buildList {
+        if (source?.optBoolean("animated") == true) add("动态")
+        if (source?.optBoolean("hdr") == true) add("HDR")
+        else if (source?.optBoolean("wideColor") == true) add("广色域")
+    }
+}
+
+@Composable
+private fun VideoImportChoiceDialog(
+    inspection: ReaderBackgroundImportInspection,
+    onDismiss: () -> Unit,
+    onImportVideo: () -> Unit,
+    onExtractFirstFrame: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("如何使用这个视频？") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("${inspection.width}×${inspection.height} · ${formatDuration(inspection.durationMs)}")
+                Text(
+                    "作为视频导入时会保留原视频；同步到手表时自动生成 AVC、10 Mbps、466×466 的静音版本。也可以立即截取首帧作为照片，原视频仍会保留，之后可重新选择画面或裁切区域。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onImportVideo) { Text("作为视频导入") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onDismiss) { Text("取消") }
+                TextButton(onClick = onExtractFirstFrame) { Text("截取首帧") }
+            }
+        }
+    )
+}
+
+@Composable
+private fun VideoBackgroundEditorDialog(
+    asset: ReaderBackgroundAssetEntity,
+    file: File?,
+    onDismiss: () -> Unit,
+    onSaveVideo: (Float, Float, Long) -> Unit,
+    onExtractFrame: (Float, Float, Long) -> Unit
+) {
+    val edit = remember(asset.variantsJson) {
+        runCatching { JSONObject(asset.variantsJson).optJSONObject("edit") }.getOrNull()
+    }
+    var frameTimeMs by remember(asset.id) {
+        mutableFloatStateOf(
+            edit?.optLong("frameTimeMs", 0L)?.toFloat()?.coerceAtLeast(0f) ?: 0f
+        )
+    }
+    var cropX by remember(asset.id) {
+        mutableFloatStateOf(edit?.optDouble("cropX", 0.0)?.toFloat() ?: 0f)
+    }
+    var cropY by remember(asset.id) {
+        mutableFloatStateOf(edit?.optDouble("cropY", 0.0)?.toFloat() ?: 0f)
+    }
+    val preview by produceState<Bitmap?>(
+        initialValue = null,
+        file?.absolutePath,
+        frameTimeMs.roundToInt(),
+        cropX,
+        cropY
+    ) {
+        value = file?.let { source ->
+            withContext(Dispatchers.IO) {
+                loadVideoFramePreview(source, frameTimeMs.toLong(), cropX, cropY)
+            }
+        }
+    }
+    DisposableEffect(preview) {
+        onDispose { preview?.takeUnless(Bitmap::isRecycled)?.recycle() }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("编辑视频背景") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 560.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (preview != null) {
+                        Image(
+                            bitmap = preview!!.asImageBitmap(),
+                            contentDescription = "当前选择的视频画面",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        CircularProgressIndicator()
+                    }
+                }
+                Text("选择画面 · ${formatDuration(frameTimeMs.toLong())}")
+                Slider(
+                    value = frameTimeMs.coerceIn(0f, asset.durationMs.coerceAtLeast(1L).toFloat()),
+                    onValueChange = { frameTimeMs = it },
+                    valueRange = 0f..asset.durationMs.coerceAtLeast(1L).toFloat()
+                )
+                Text("裁切区域")
+                CropAnchorPicker(
+                    cropX = cropX,
+                    cropY = cropY,
+                    onSelected = { x, y -> cropX = x; cropY = y }
+                )
+                Text(
+                    "原视频不会被修改。保存后，下次同步会按新的区域重新生成手表视频。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSaveVideo(cropX, cropY, frameTimeMs.toLong()) }) {
+                Text("保存视频设置")
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onDismiss) { Text("取消") }
+                TextButton(onClick = { onExtractFrame(cropX, cropY, frameTimeMs.toLong()) }) {
+                    Text("保存为照片")
+                }
+            }
+        }
+    )
+}
+
+@Composable
+private fun CropAnchorPicker(
+    cropX: Float,
+    cropY: Float,
+    onSelected: (Float, Float) -> Unit
+) {
+    val anchors = listOf(-1f, 0f, 1f)
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        anchors.forEachIndexed { row, y ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                anchors.forEachIndexed { column, x ->
+                    val labels = listOf("左上", "上方", "右上", "左侧", "居中", "右侧", "左下", "下方", "右下")
+                    FilterChip(
+                        selected = cropX == x && cropY == y,
+                        onClick = { onSelected(x, y) },
+                        label = { Text(labels[row * 3 + column]) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun loadVideoFramePreview(
+    source: File,
+    timeMs: Long,
+    cropX: Float,
+    cropY: Float
+): Bitmap? {
+    val retriever = MediaMetadataRetriever()
+    return try {
+        retriever.setDataSource(source.absolutePath)
+        val frame = retriever.getFrameAtTime(
+            timeMs.coerceAtLeast(0L) * 1_000L,
+            MediaMetadataRetriever.OPTION_CLOSEST
+        ) ?: return null
+        val side = minOf(frame.width, frame.height)
+        val maxLeft = (frame.width - side).coerceAtLeast(0)
+        val maxTop = (frame.height - side).coerceAtLeast(0)
+        val left = (((cropX.coerceIn(-1f, 1f) + 1f) / 2f) * maxLeft).toInt()
+            .coerceIn(0, maxLeft)
+        val top = (((cropY.coerceIn(-1f, 1f) + 1f) / 2f) * maxTop).toInt()
+            .coerceIn(0, maxTop)
+        Bitmap.createBitmap(frame, left, top, side, side).also {
+            if (it !== frame) frame.recycle()
+        }
+    } finally {
+        retriever.release()
+    }
+}
+
+private fun formatDuration(durationMs: Long): String {
+    val totalSeconds = durationMs.coerceAtLeast(0L) / 1_000L
+    return "%d:%02d".format(totalSeconds / 60L, totalSeconds % 60L)
+}
+
+@Composable
+private fun StorageSettings(
+    stats: AppStorageStats?,
+    busy: Boolean,
+    modifier: Modifier,
+    onRefresh: () -> Unit,
+    onClearCache: () -> Unit,
+    onClearWatchCopies: () -> Unit
+) {
+    SettingsColumn(modifier) {
+        if (stats == null) {
+            Box(Modifier.fillMaxWidth().height(160.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+        } else {
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("已使用", style = MaterialTheme.typography.titleMedium)
+                    Text(formatBytes(stats.totalBytes), style = MaterialTheme.typography.headlineMedium)
+                    Text(
+                        "达到 900 MB 后，首页会提醒清理。原始照片和视频不会因清理缓存而删除。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            StorageBreakdownRow("原始照片和视频", stats.originalBackgroundBytes)
+            StorageBreakdownRow("手表视频副本", stats.watchBackgroundBytes)
+            StorageBreakdownRow("字体", stats.fontBytes)
+            StorageBreakdownRow("缓存", stats.cacheBytes)
+            StorageBreakdownRow("数据库", stats.databaseBytes)
+            StorageBreakdownRow("文章、备忘录和其他数据", stats.otherBytes)
+            Button(
+                onClick = onClearCache,
+                enabled = !busy && stats.cacheBytes > 0L,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("清理缓存") }
+            OutlinedButton(
+                onClick = onClearWatchCopies,
+                enabled = !busy && stats.watchBackgroundBytes > 0L,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("清理手表视频副本") }
+            Text(
+                "手表视频副本会在下次同步时自动重新生成；原始视频始终保留，仍可重新裁切或选择画面。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            TextButton(onClick = onRefresh, enabled = !busy) { Text("重新统计") }
+        }
+    }
+}
+
+@Composable
+private fun StorageBreakdownRow(label: String, bytes: Long) {
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(label)
+            Text(formatBytes(bytes), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun BackgroundImportChoiceDialog(
+    pending: PendingBackgroundImport,
+    onDismiss: () -> Unit,
+    onKeepOriginal: () -> Unit,
+    onCompatibleStatic: () -> Unit
+) {
+    val inspection = pending.inspection
+    val features = buildList {
+        if (inspection.animated) add("多帧/动态")
+        if (inspection.hdr) add("HDR") else if (inspection.wideColor) add("广色域")
+        if (inspection.formatLabel.isNotBlank()) add(inspection.formatLabel)
+    }.distinct()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择图片导入方式") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "${inspection.width}×${inspection.height}" +
+                        features.takeIf(List<String>::isNotEmpty)
+                            ?.joinToString(prefix = " · ", separator = " · ")
+                            .orEmpty()
+                )
+                Text(
+                    if (inspection.animated) {
+                        "保留原格式可在手机上播放动态效果；兼容静态图会提取第一帧、转换为 sRGB PNG，适合不支持动态图片或 HEIF 的设备。"
+                    } else {
+                        "保留原格式可保留 HDR、广色域或 HEIF 信息；兼容静态图会转换为 sRGB PNG，以提高其他设备和手表的兼容性。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onKeepOriginal) {
+                Text(if (inspection.animated) "保留动态效果" else "保留原格式")
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onDismiss) { Text("取消") }
+                TextButton(onClick = onCompatibleStatic) { Text("兼容静态图") }
+            }
+        }
+    )
+}
+
+@Composable
+private fun BackgroundImportPreferenceSettings(
+    choice: RememberedBackgroundImportChoice?,
+    modifier: Modifier,
+    onClear: () -> Unit
+) {
+    SettingsColumn(modifier) {
+        Text(
+            "管理“导入并应用至手表”流程中记住的选择。清除后，下次导入会重新询问。",
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        ElevatedCard(Modifier.fillMaxWidth()) {
+            ListItem(
+                headlineContent = { Text("当前记住的选择") },
+                supportingContent = {
+                    Text(
+                        when (choice) {
+                            RememberedBackgroundImportChoice.APPLY_TO_WATCH -> "应用至手表"
+                            RememberedBackgroundImportChoice.IMPORT_ONLY -> "仅导入"
+                            null -> "未记住，每次导入都会询问"
+                        }
+                    )
+                }
+            )
+        }
+        Button(
+            onClick = onClear,
+            enabled = choice != null,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("取消记住的选择")
+        }
+    }
+}
+
+@Composable
+private fun AppFeatureSettings(
+    modifier: Modifier,
+    rememberedBackgroundChoice: RememberedBackgroundImportChoice?,
+    onOpenBackgroundImportSettings: () -> Unit
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val container = (context.applicationContext as PhoneCompanionApplication).container
     val aiStore = container.aiSettingsStore
@@ -3340,6 +4228,17 @@ private fun AppFeatureSettings(modifier: Modifier) {
             systemShare = it
             prefs.edit().putBoolean("system_share", it).apply()
         }
+        SectionTitle("导入")
+        SettingsEntry(
+            title = "背景导入选择",
+            supporting = when (rememberedBackgroundChoice) {
+                RememberedBackgroundImportChoice.APPLY_TO_WATCH -> "已记住：应用至手表"
+                RememberedBackgroundImportChoice.IMPORT_ONLY -> "已记住：仅导入"
+                null -> "每次导入时询问"
+            },
+            icon = Icons.Default.Image,
+            onClick = onOpenBackgroundImportSettings
+        )
         SectionTitle("抖音")
         OutlinedTextField(
             value = cookie,
@@ -4262,7 +5161,11 @@ private fun enumLabel(value: Any?): String = when (value) {
 }
 
 private fun formatBytes(bytes: Long): String = when {
-    bytes >= 1024L * 1024L -> "%.1f MiB".format(bytes / (1024f * 1024f))
-    bytes >= 1024L -> "%.1f KiB".format(bytes / 1024f)
+    bytes >= 1024L * 1024L * 1024L -> "%.1f GB".format(bytes / (1024f * 1024f * 1024f))
+    bytes >= 1024L * 1024L -> "%.1f MB".format(bytes / (1024f * 1024f))
+    bytes >= 1024L -> "%.1f KB".format(bytes / 1024f)
     else -> "$bytes B"
 }
+
+private const val BACKGROUND_IMPORT_PREFERENCES = "reader_background_import_preferences"
+private const val BACKGROUND_IMPORT_CHOICE_KEY = "remembered_apply_choice"

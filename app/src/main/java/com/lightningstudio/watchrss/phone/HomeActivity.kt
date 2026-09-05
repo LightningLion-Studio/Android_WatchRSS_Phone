@@ -98,6 +98,7 @@ class HomeActivity : ComponentActivity() {
         )
     }
     private val pendingAnnouncement = mutableStateOf<PhoneAnnouncement?>(null)
+    private val storageUsedBytes = mutableStateOf(0L)
     private val reviewCoordinator by lazy {
         (application as PhoneCompanionApplication).container.oppoReviewCoordinator
     }
@@ -177,6 +178,15 @@ class HomeActivity : ComponentActivity() {
             }
         }
 
+    override fun onResume() {
+        super.onResume()
+        val manager = (application as PhoneCompanionApplication).container.appStorageManager
+        lifecycleScope.launch {
+            runCatching { manager.calculate().totalBytes }
+                .onSuccess { storageUsedBytes.value = it }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val container = (application as PhoneCompanionApplication).container
@@ -199,6 +209,7 @@ class HomeActivity : ComponentActivity() {
                 ProvideReaderPreset(container.readerPresetRepository) {
                     val state by viewModel.uiState.collectAsState()
                     val updateState by appUpdateDownloader.state.collectAsState()
+                    val currentStorageUsedBytes by storageUsedBytes
                     val tipSuppression = remember { TipSuppressionState() }
 
                     LaunchedEffect(Unit) {
@@ -226,6 +237,10 @@ class HomeActivity : ComponentActivity() {
                     },
                     onOpenNotes = {
                         startActivity(NotesActivity.createIntent(this@HomeActivity))
+                    },
+                    storageUsedBytes = currentStorageUsedBytes,
+                    onOpenStorage = {
+                        startActivity(SettingsActivity.createIntent(this@HomeActivity, openStorage = true))
                     },
                     onChooseBluetoothDevice = viewModel::chooseBluetoothDeviceForSync,
                     onDismissBluetoothDevicePrompt = viewModel::dismissBluetoothDevicePrompt,

@@ -34,7 +34,7 @@ import com.lightningstudio.watchrss.phone.data.note.NoteFolderEntity
         AppMetaEntity::class,
         PhoneLlmTokenUsageEntity::class
     ],
-    version = 14,
+    version = 15,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
@@ -257,6 +257,12 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
                 database.createNoteTables()
             }
         }
+
+        val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("DROP INDEX IF EXISTS index_reader_background_assets_sha256")
+            }
+        }
     }
 }
 
@@ -331,7 +337,6 @@ private fun SupportSQLiteDatabase.createReaderPresetTables() {
         """.trimIndent()
     )
     execSQL("CREATE INDEX IF NOT EXISTS index_reader_background_assets_deleted_displayName ON reader_background_assets(deleted, displayName)")
-    execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_reader_background_assets_sha256 ON reader_background_assets(sha256)")
     execSQL(
         """
         CREATE TABLE IF NOT EXISTS reader_deletions (

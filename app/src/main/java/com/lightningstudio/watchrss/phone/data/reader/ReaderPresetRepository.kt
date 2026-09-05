@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 
@@ -91,7 +92,10 @@ class ReaderPresetRepository(
         .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
     val backgrounds: StateFlow<List<ReaderBackgroundAssetEntity>> = dao.observeAllBackgrounds()
-        .map { it.filterNot(ReaderBackgroundAssetEntity::deleted) }
+        .map {
+            it.filterNot(ReaderBackgroundAssetEntity::deleted)
+                .sortedByDescending(ReaderBackgroundAssetEntity::updatedAt)
+        }
         .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
     val activePreset: StateFlow<ReaderPreset> = combine(
@@ -147,11 +151,23 @@ class ReaderPresetRepository(
             deleted = false
         )
         dao.upsertPreset(saved.toEntity())
-        if (applyAfterSave) setActivePreset(saved.id)
+        if (applyAfterSave) {
+            updateSelection(
+                selectionState.value.copy(
+                    lightPresetId = saved.id,
+                    darkPresetId = null,
+                    darkFollowsLight = true
+                )
+            )
+        }
         return saved
     }
 
-    suspend fun saveAsNew(draft: ReaderPreset, name: String): ReaderPreset =
+    suspend fun saveAsNew(
+        draft: ReaderPreset,
+        name: String,
+        applyAfterSave: Boolean = false
+    ): ReaderPreset =
         savePreset(
             draft.copy(
                 id = UUID.randomUUID().toString(),
@@ -159,7 +175,8 @@ class ReaderPresetRepository(
                 updatedAt = 0L,
                 modifiedBy = deviceId,
                 deleted = false
-            )
+            ),
+            applyAfterSave = applyAfterSave
         )
 
     suspend fun duplicate(id: String): ReaderPreset {
@@ -351,11 +368,17 @@ class ReaderPresetRepository(
         resourceStore.deleteFontFile(current.fileName)
     }
 
-    suspend fun importBackground(uri: Uri): ReaderBackgroundAssetEntity {
-        val imported = resourceStore.importBackground(uri)
-        dao.backgroundByHash(imported.sha256)?.takeIf { !it.deleted }?.let { return it }
+    suspend fun inspectBackground(uri: Uri): ReaderBackgroundImportInspection =
+        resourceStore.inspectBackground(uri)
+
+    suspend fun importBackground(
+        uri: Uri,
+        mode: ReaderBackgroundImportMode = ReaderBackgroundImportMode.KEEP_ORIGINAL,
+        inspection: ReaderBackgroundImportInspection? = null
+    ): ReaderBackgroundAssetEntity {
+        val imported = resourceStore.importBackground(uri, mode, inspection)
         val entity = ReaderBackgroundAssetEntity(
-            id = imported.sha256,
+            id = imported.id,
             sha256 = imported.sha256,
             displayName = uniqueBackgroundName(imported.displayName),
             kind = imported.kind.name,
@@ -366,13 +389,75 @@ class ReaderPresetRepository(
             width = imported.width,
             height = imported.height,
             posterAssetId = null,
-            variantsJson = "{}",
+            variantsJson = imported.variantsJson,
             updatedAt = System.currentTimeMillis(),
             modifiedBy = deviceId,
             deleted = false
         )
         dao.upsertBackground(entity)
         return entity
+    }
+
+    suspend fun extractVideoFrame(
+        sourceAssetId: String,
+        timeMs: Long,
+        cropX: Float = 0f,
+        cropY: Float = 0f
+    ): ReaderBackgroundAssetEntity {
+        val sourceAsset = requireNotNull(
+            dao.backgroundById(sourceAssetId)?.takeUnless { it.deleted }
+        ) { "背景原视频不存在" }
+        require(sourceAsset.kind == ReaderBackgroundType.VIDEO.name) { "所选资源不是视频" }
+        val sourceFile = requireNotNull(resourceStore.backgroundFile(sourceAsset.masterFileName)) {
+            "背景原视频不存在"
+        }
+        val imported = resourceStore.extractVideoFrame(
+            source = sourceFile,
+            sourceAssetId = sourceAssetId,
+            timeMs = timeMs.coerceIn(0L, sourceAsset.durationMs.coerceAtLeast(0L)),
+            cropX = cropX,
+            cropY = cropY
+        )
+        val entity = ReaderBackgroundAssetEntity(
+            id = imported.id,
+            sha256 = imported.sha256,
+            displayName = uniqueBackgroundName(imported.displayName),
+            kind = imported.kind.name,
+            mimeType = imported.mimeType,
+            masterFileName = imported.fileName,
+            byteCount = imported.byteCount,
+            durationMs = imported.durationMs,
+            width = imported.width,
+            height = imported.height,
+            posterAssetId = null,
+            variantsJson = imported.variantsJson,
+            updatedAt = System.currentTimeMillis(),
+            modifiedBy = deviceId,
+            deleted = false
+        )
+        dao.upsertBackground(entity)
+        return entity
+    }
+
+    suspend fun updateVideoEdit(
+        assetId: String,
+        cropX: Float,
+        cropY: Float,
+        frameTimeMs: Long
+    ): ReaderBackgroundAssetEntity {
+        val current = requireNotNull(dao.backgroundById(assetId)?.takeUnless { it.deleted }) {
+            "背景原视频不存在"
+        }
+        require(current.kind == ReaderBackgroundType.VIDEO.name) { "所选资源不是视频" }
+        val variants = runCatching { JSONObject(current.variantsJson) }.getOrElse { JSONObject() }
+        variants.remove("watch")
+        variants.remove("watchPoster")
+        variants.put("edit", JSONObject().apply {
+            put("cropX", cropX.coerceIn(-1f, 1f).toDouble())
+            put("cropY", cropY.coerceIn(-1f, 1f).toDouble())
+            put("frameTimeMs", frameTimeMs.coerceIn(0L, current.durationMs.coerceAtLeast(0L)))
+        })
+        return current.copy(variantsJson = variants.toString()).also { updateBackgroundAsset(it) }
     }
 
     suspend fun updateBackgroundAsset(entity: ReaderBackgroundAssetEntity) {
@@ -488,7 +573,6 @@ class ReaderPresetRepository(
                 dao.deleteDeletion(DELETION_KIND_FONT, font.id)
             }
             incoming.backgrounds.forEach { background ->
-                require(background.id == background.sha256) { "背景资源 ID 与哈希不匹配" }
                 dao.upsertBackground(
                     background.copy(
                         updatedAt = nextTimestamp(),

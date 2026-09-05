@@ -468,7 +468,6 @@ object ReaderPresetPackageArchive {
             ) { "预设包缺少字体文件：${font.displayName}" }
         }
         payload.snapshot.backgrounds.forEach { background ->
-            require(background.id == background.sha256) { "背景资源 ID 与哈希不匹配" }
             require(
                 Triple(
                     ReaderPresetPackageResource.KIND_BACKGROUND,
@@ -483,7 +482,7 @@ object ReaderPresetPackageArchive {
                         variant.fileName,
                         variant.sha256
                     ) in descriptorKeys
-                ) { "预设包缺少背景派生文件：${variant.fileName}" }
+                ) { "预设包缺少背景适配文件：${variant.fileName}" }
             }
         }
     }
@@ -538,7 +537,7 @@ fun ReaderBackgroundAssetEntity.variantDescriptors(): List<ReaderBackgroundVaria
             if (fileName.isBlank() && hash.isBlank() && byteCount < 0L) continue
             requireSafeFileName(fileName)
             require(hash.matches(Regex("[0-9a-f]{64}")) && byteCount >= 0L) {
-                "背景派生资源元数据无效"
+                "背景适配资源元数据无效"
             }
             add(ReaderBackgroundVariantDescriptor(fileName, hash, byteCount))
         }

@@ -143,6 +143,7 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.repo.PhoneImportedTextReader
+import com.lightningstudio.watchrss.phone.data.storage.AppStorageManager
 import com.lightningstudio.watchrss.phone.platform.OnlineNovelLinkDetector
 import com.lightningstudio.watchrss.phone.platform.PlatformLinkRouter
 import com.lightningstudio.watchrss.phone.viewmodel.MainBluetoothDevicePromptUi
@@ -316,6 +317,8 @@ fun MainScreen(
     onSyncLibrary: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenNotes: () -> Unit,
+    storageUsedBytes: Long,
+    onOpenStorage: () -> Unit,
     onChooseBluetoothDevice: (MainBluetoothDeviceUi) -> Unit,
     onDismissBluetoothDevicePrompt: () -> Unit,
     onExportBluetoothLog: () -> Unit,
@@ -1208,6 +1211,8 @@ fun MainScreen(
                                     onSyncLibrary = onSyncLibrary,
                                     onOpenProfile = onOpenProfile,
                                     onOpenNotes = onOpenNotes,
+                                    storageUsedBytes = storageUsedBytes,
+                                    onOpenStorage = onOpenStorage,
                                     onExportBluetoothLog = onExportBluetoothLog,
                                     onOpenRss = {
                                         navigateToTopLevelPage(
@@ -1303,6 +1308,8 @@ fun MainScreen(
                                 onSyncLibrary = onSyncLibrary,
                                     onOpenProfile = onOpenProfile,
                                     onOpenNotes = onOpenNotes,
+                                storageUsedBytes = storageUsedBytes,
+                                onOpenStorage = onOpenStorage,
                                 onExportBluetoothLog = onExportBluetoothLog,
                                 onOpenRss = {
                                     navigateToTopLevelPage(
@@ -1353,6 +1360,8 @@ fun MainScreen(
                                 onSyncLibrary = onSyncLibrary,
                                 onOpenProfile = onOpenProfile,
                                 onOpenNotes = onOpenNotes,
+                                storageUsedBytes = storageUsedBytes,
+                                onOpenStorage = onOpenStorage,
                                 onExportBluetoothLog = onExportBluetoothLog,
                                 onOpenRss = {
                                     navigateToTopLevelPage(
@@ -2776,6 +2785,8 @@ private fun DashboardPage(
     onSyncLibrary: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenNotes: () -> Unit,
+    storageUsedBytes: Long,
+    onOpenStorage: () -> Unit,
     onExportBluetoothLog: () -> Unit,
     onOpenRss: () -> Unit,
     onOpenFavorites: () -> Unit,
@@ -2817,6 +2828,14 @@ private fun DashboardPage(
                 ),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+                if (storageUsedBytes >= AppStorageManager.CLEANUP_REMINDER_BYTES) {
+                    item {
+                        StorageCleanupReminderCard(
+                            usedBytes = storageUsedBytes,
+                            onOpenStorage = onOpenStorage
+                        )
+                    }
+                }
                 if (windowInfo.isExpanded) {
                     item {
                         Row(
@@ -2893,6 +2912,51 @@ private fun DashboardPage(
             }
         }
     }
+}
+
+@Composable
+private fun StorageCleanupReminderCard(
+    usedBytes: Long,
+    onOpenStorage: () -> Unit
+) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Delete, contentDescription = null)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("存储空间需要清理", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "腕上RSS 已占用 ${formatStorageBytes(usedBytes)}",
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
+            Text(
+                "可以清理缓存和手表视频副本，原始照片与视频不会被删除。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer
+            )
+            Button(onClick = onOpenStorage, modifier = Modifier.fillMaxWidth()) {
+                Text("查看并清理")
+            }
+        }
+    }
+}
+
+private fun formatStorageBytes(bytes: Long): String = when {
+    bytes < 1024L -> "$bytes B"
+    bytes < 1024L * 1024L -> "%.1f KB".format(bytes / 1024.0)
+    bytes < 1024L * 1024L * 1024L -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
+    else -> "%.2f GB".format(bytes / (1024.0 * 1024.0 * 1024.0))
 }
 
 @Composable

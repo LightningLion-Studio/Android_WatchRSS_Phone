@@ -28,6 +28,7 @@ import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetTransferService
 import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
+import com.lightningstudio.watchrss.phone.data.storage.AppStorageManager
 import com.lightningstudio.watchrss.phone.onboarding.OnboardingDraftStore
 import com.lightningstudio.watchrss.phone.onboarding.OnboardingProfileStore
 import com.lightningstudio.watchrss.phone.push.OppoPushCoordinator
@@ -69,7 +70,8 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_10_11,
             PhoneCompanionDatabase.MIGRATION_11_12,
             PhoneCompanionDatabase.MIGRATION_12_13,
-            PhoneCompanionDatabase.MIGRATION_13_14
+            PhoneCompanionDatabase.MIGRATION_13_14,
+            PhoneCompanionDatabase.MIGRATION_14_15
         )
             .build()
     }
@@ -186,6 +188,8 @@ class PhoneCompanionContainer(context: Context) {
     val onboardingProfileStore: OnboardingProfileStore by lazy {
         OnboardingProfileStore(appContext)
     }
+
+    val appStorageManager: AppStorageManager by lazy { AppStorageManager(appContext) }
 
     val readerPresetRepository: ReaderPresetRepository by lazy {
         ReaderPresetRepository(

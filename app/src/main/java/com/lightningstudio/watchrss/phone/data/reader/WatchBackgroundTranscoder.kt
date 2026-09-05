@@ -3,24 +3,26 @@ package com.lightningstudio.watchrss.phone.data.reader
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
-import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
-import androidx.media3.common.audio.SpeedProvider
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.Crop
 import androidx.media3.effect.Presentation
 import androidx.media3.transformer.Composition
+import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
+import androidx.media3.transformer.VideoEncoderSettings
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneWatchCapabilities
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import java.util.UUID
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.roundToInt
@@ -36,9 +38,7 @@ class WatchBackgroundTranscoder(
         if (capabilities.widthPx <= 0 || capabilities.heightPx <= 0) return
         repository.backgrounds.value
             .filter { !it.deleted && it.kind == ReaderBackgroundType.VIDEO.name }
-            .forEach { asset ->
-                runCatching { prepare(asset, capabilities) }
-            }
+            .forEach { asset -> prepare(asset, capabilities) }
     }
 
     suspend fun prepare(
@@ -56,69 +56,69 @@ class WatchBackgroundTranscoder(
             profile.maxFrameRate.roundToInt().coerceAtLeast(1)
         )
         val existing = runCatching { JSONObject(asset.variantsJson) }.getOrElse { JSONObject() }
+        val edit = existing.optJSONObject("edit")
+        val cropX = edit?.optDouble("cropX", 0.0)?.toFloat()?.coerceIn(-1f, 1f) ?: 0f
+        val cropY = edit?.optDouble("cropY", 0.0)?.toFloat()?.coerceIn(-1f, 1f) ?: 0f
+        val frameTimeMs = edit?.optLong("frameTimeMs", 0L)
+            ?.coerceIn(0L, asset.durationMs.coerceAtLeast(0L)) ?: 0L
         val watch = existing.optJSONObject("watch")
         if (
             watch != null &&
-            watch.optInt("width") == capabilities.widthPx &&
-            watch.optInt("height") == capabilities.heightPx &&
+            watch.optString("mime") == MimeTypes.VIDEO_H264 &&
+            watch.optInt("width") == WATCH_VIDEO_SIZE &&
+            watch.optInt("height") == WATCH_VIDEO_SIZE &&
+            watch.optInt("bitrate") == WATCH_VIDEO_BITRATE &&
             watch.optInt("fps") == targetFps &&
+            watch.optDouble("cropX", 0.0).toFloat() == cropX &&
+            watch.optDouble("cropY", 0.0).toFloat() == cropY &&
             repository.resourceStore.variantFile(watch.optString("fileName"))?.isFile == true
         ) {
             return asset
         }
 
         val temp = repository.resourceStore.targetVariantFile(
-            ".${asset.sha256}-${capabilities.widthPx}x${capabilities.heightPx}.transcode"
+            ".${asset.id}-${UUID.randomUUID()}.transcode"
         )
         temp.delete()
         val durationMs = asset.durationMs.coerceAtLeast(1L).coerceAtMost(60_000L)
-        val preferredMime = profile.mime
-        val usedMime = runCatching {
-            export(
-                source = source,
-                target = temp,
-                width = capabilities.widthPx,
-                height = capabilities.heightPx,
-                fps = targetFps,
-                durationMs = durationMs,
-                mime = preferredMime
-            )
-            preferredMime
-        }.getOrElse {
-            temp.delete()
-            require(preferredMime != MimeTypes.VIDEO_H264) { throw it }
-            export(
-                source = source,
-                target = temp,
-                width = capabilities.widthPx,
-                height = capabilities.heightPx,
-                fps = targetFps,
-                durationMs = durationMs,
-                mime = MimeTypes.VIDEO_H264
-            )
-            MimeTypes.VIDEO_H264
-        }
+        export(
+            source = source,
+            target = temp,
+            sourceWidth = asset.width,
+            sourceHeight = asset.height,
+            cropX = cropX,
+            cropY = cropY,
+            fps = targetFps,
+            durationMs = durationMs
+        )
         val videoHash = repository.resourceStore.fileSha256(temp)
-        val videoFile = repository.resourceStore.targetVariantFile("$videoHash.mp4")
-        if (!videoFile.exists()) require(temp.renameTo(videoFile)) { "手表视频版本保存失败" }
-        else temp.delete()
+        val videoFile = repository.resourceStore.targetVariantFile(
+            "${asset.id}-${UUID.randomUUID()}.mp4"
+        )
+        require(temp.renameTo(videoFile)) { "手表视频版本保存失败" }
 
-        val posterTemp = repository.resourceStore.targetVariantFile(".${asset.sha256}.poster")
-        createPoster(source, posterTemp)
+        val posterTemp = repository.resourceStore.targetVariantFile(".${asset.id}.poster")
+        posterTemp.delete()
+        createPoster(source, posterTemp, frameTimeMs, cropX, cropY)
         val posterHash = repository.resourceStore.fileSha256(posterTemp)
-        val posterFile = repository.resourceStore.targetVariantFile("$posterHash.jpg")
-        if (!posterFile.exists()) require(posterTemp.renameTo(posterFile)) { "视频封面保存失败" }
-        else posterTemp.delete()
+        val posterFile = repository.resourceStore.targetVariantFile(
+            "${asset.id}-${UUID.randomUUID()}-poster.jpg"
+        )
+        require(posterTemp.renameTo(posterFile)) { "视频封面保存失败" }
 
         val variants = JSONObject(asset.variantsJson.ifBlank { "{}" }).apply {
             put("watch", JSONObject().apply {
                 put("fileName", videoFile.name)
                 put("sha256", videoHash)
                 put("byteCount", videoFile.length())
-                put("mime", usedMime)
-                put("width", capabilities.widthPx)
-                put("height", capabilities.heightPx)
+                put("mime", MimeTypes.VIDEO_H264)
+                put("codec", "AVC")
+                put("bitrate", WATCH_VIDEO_BITRATE)
+                put("width", WATCH_VIDEO_SIZE)
+                put("height", WATCH_VIDEO_SIZE)
                 put("fps", targetFps)
+                put("cropX", cropX.toDouble())
+                put("cropY", cropY.toDouble())
                 put("hardwareDecoder", profile.decoderName)
             })
             put("watchPoster", JSONObject().apply {
@@ -126,6 +126,7 @@ class WatchBackgroundTranscoder(
                 put("sha256", posterHash)
                 put("byteCount", posterFile.length())
                 put("mime", "image/jpeg")
+                put("frameTimeMs", frameTimeMs)
             })
         }
         return asset.copy(variantsJson = variants.toString()).also {
@@ -136,11 +137,12 @@ class WatchBackgroundTranscoder(
     private suspend fun export(
         source: File,
         target: File,
-        width: Int,
-        height: Int,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        cropX: Float,
+        cropY: Float,
         fps: Int,
-        durationMs: Long,
-        mime: String
+        durationMs: Long
     ) = withContext(Dispatchers.Main) {
         suspendCancellableCoroutine { continuation ->
             val mediaItem = MediaItem.Builder()
@@ -158,19 +160,32 @@ class WatchBackgroundTranscoder(
                 .setEffects(
                     Effects(
                         emptyList(),
-                        listOf(
-                            Presentation.createForWidthAndHeight(
-                                width,
-                                height,
-                                Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP
+                        buildList {
+                            cropEffect(sourceWidth, sourceHeight, cropX, cropY)?.let(::add)
+                            add(
+                                Presentation.createForWidthAndHeight(
+                                    WATCH_VIDEO_SIZE,
+                                    WATCH_VIDEO_SIZE,
+                                    Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP
+                                )
                             )
-                        )
+                        }
                     )
                 )
                 .build()
             lateinit var transformer: Transformer
             transformer = Transformer.Builder(appContext)
-                .setVideoMimeType(mime)
+                .setVideoMimeType(MimeTypes.VIDEO_H264)
+                .setEncoderFactory(
+                    DefaultEncoderFactory.Builder(appContext)
+                        .setRequestedVideoEncoderSettings(
+                            VideoEncoderSettings.Builder()
+                                .setBitrate(WATCH_VIDEO_BITRATE)
+                                .build()
+                        )
+                        .setEnableFallback(true)
+                        .build()
+                )
                 .setRemoveAudio(true)
                 .addListener(object : Transformer.Listener {
                     override fun onCompleted(
@@ -196,18 +211,64 @@ class WatchBackgroundTranscoder(
         }
     }
 
-    private fun createPoster(source: File, output: File) {
+    private fun createPoster(
+        source: File,
+        output: File,
+        timeMs: Long,
+        cropX: Float,
+        cropY: Float
+    ) {
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(source.absolutePath)
-            val bitmap = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                ?: error("无法生成视频封面")
+            val bitmap = retriever.getFrameAtTime(
+                timeMs.coerceAtLeast(0L) * 1_000L,
+                MediaMetadataRetriever.OPTION_CLOSEST
+            ) ?: error("无法生成视频封面")
+            val square = cropSquareBitmap(bitmap, cropX, cropY)
+            if (square !== bitmap) bitmap.recycle()
+            val scaled = Bitmap.createScaledBitmap(
+                square,
+                WATCH_VIDEO_SIZE,
+                WATCH_VIDEO_SIZE,
+                true
+            )
+            if (scaled !== square) square.recycle()
             output.outputStream().buffered().use {
-                require(bitmap.compress(Bitmap.CompressFormat.JPEG, 88, it)) { "封面编码失败" }
+                require(scaled.compress(Bitmap.CompressFormat.JPEG, 88, it)) { "封面编码失败" }
             }
-            bitmap.recycle()
+            scaled.recycle()
         } finally {
             retriever.release()
+        }
+    }
+
+    private fun cropSquareBitmap(source: Bitmap, cropX: Float, cropY: Float): Bitmap {
+        val side = minOf(source.width, source.height)
+        val maxLeft = (source.width - side).coerceAtLeast(0)
+        val maxTop = (source.height - side).coerceAtLeast(0)
+        val left = (((cropX.coerceIn(-1f, 1f) + 1f) / 2f) * maxLeft).toInt()
+            .coerceIn(0, maxLeft)
+        val top = (((cropY.coerceIn(-1f, 1f) + 1f) / 2f) * maxTop).toInt()
+            .coerceIn(0, maxTop)
+        return Bitmap.createBitmap(source, left, top, side, side)
+    }
+
+    private fun cropEffect(
+        width: Int,
+        height: Int,
+        cropX: Float,
+        cropY: Float
+    ): Crop? {
+        if (width <= 0 || height <= 0 || width == height) return null
+        return if (width > height) {
+            val halfWidth = height.toFloat() / width
+            val center = cropX.coerceIn(-1f, 1f) * (1f - halfWidth)
+            Crop(center - halfWidth, center + halfWidth, -1f, 1f)
+        } else {
+            val halfHeight = width.toFloat() / height
+            val center = -cropY.coerceIn(-1f, 1f) * (1f - halfHeight)
+            Crop(-1f, 1f, center - halfHeight, center + halfHeight)
         }
     }
 
@@ -224,24 +285,23 @@ class WatchBackgroundTranscoder(
         }
     }
 
+    companion object {
+        const val WATCH_VIDEO_SIZE = 466
+        const val WATCH_VIDEO_BITRATE = 10_000_000
+    }
+
     private fun selectProfile(capabilities: PhoneWatchCapabilities): SelectedProfile {
         val hardware = capabilities.videoDecoders.filter { it.hardwareAccelerated }
-        val h265 = hardware.firstOrNull {
-            it.mime == MimeTypes.VIDEO_H265 &&
-                it.maxWidth >= capabilities.widthPx &&
-                it.maxHeight >= capabilities.heightPx
-        }
-        val selected = h265 ?: hardware.firstOrNull {
+        val selected = hardware.firstOrNull {
             it.mime == MimeTypes.VIDEO_H264 &&
-                it.maxWidth >= capabilities.widthPx &&
-                it.maxHeight >= capabilities.heightPx
-        } ?: error("手表没有满足目标分辨率的 H.265/H.264 硬件解码器")
-        return SelectedProfile(selected.mime, selected.name, selected.maxFrameRate)
+                it.maxWidth >= WATCH_VIDEO_SIZE &&
+                it.maxHeight >= WATCH_VIDEO_SIZE
+        } ?: error("手表没有满足 466×466 的 AVC 硬件解码器")
+        return SelectedProfile(selected.name, selected.maxFrameRate)
     }
 }
 
 private data class SelectedProfile(
-    val mime: String,
     val decoderName: String,
     val maxFrameRate: Double
 )

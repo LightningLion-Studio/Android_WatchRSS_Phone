@@ -32,8 +32,8 @@ private data class CapabilityCard(
 private val CAPABILITIES = listOf(
     CapabilityCard("大声朗读", "把文章变成语音，通勤路上用听的"),
     CapabilityCard("AI 总结", "一键生成摘要，30 秒了解全文"),
-    CapabilityCard("哔哩哔哩", "在手表上看 B 站视频，点赞投币"),
-    CapabilityCard("抖音", "抖音精选，沉浸式竖屏播放")
+    CapabilityCard("腕上RSS · 哔哩哔哩频道", "哔哩哔哩精选内容浏览与播放；这是腕上RSS提供的第三方连接功能，不是哔哩哔哩官方客户端。平台会员和社区互动权益由哔哩哔哩决定"),
+    CapabilityCard("腕上RSS · 抖音频道", "抖音精选内容浏览与播放；这是腕上RSS提供的第三方连接功能，不是官方客户端")
 )
 
 @Composable

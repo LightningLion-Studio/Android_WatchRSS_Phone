@@ -140,6 +140,7 @@ internal fun trustedTimeDecision(
 }
 
 internal fun JSONObject.toAccessSummary() = AppAccessSummary(
+    product = optJSONObject("product")?.toAccessProduct() ?: AppAccessProductInfo(),
     purchaseCount = optInt("purchaseCount"), capacity = optInt("capacity"), occupied = optInt("occupied"),
     deviceStatus = optString("deviceStatus", "unknown"), revokeReason = optString("revokeReason").takeIf { it.isNotBlank() },
     accessMode = optString("accessMode", "none"),
@@ -148,14 +149,47 @@ internal fun JSONObject.toAccessSummary() = AppAccessSummary(
     trialExpiresAtMillis = optLong("trialExpiresAt").takeIf { it > 0L }
 )
 
+internal fun AppAccessProductInfo.toJson() = JSONObject().apply {
+    put("productId", productId)
+    put("productName", productName)
+    put("priceFen", priceFen)
+    put("oneTime", oneTime)
+    put("autoRenew", autoRenew)
+    put("deviceCapacity", deviceCapacity)
+    put("includedFeatures", org.json.JSONArray(includedFeatures))
+    put("excludedFeatures", org.json.JSONArray(excludedFeatures))
+}
+
 internal fun AppAccessSummary.toJson() = JSONObject().apply {
+    put("product", product.toJson())
     put("purchaseCount", purchaseCount); put("capacity", capacity); put("occupied", occupied)
     put("deviceStatus", deviceStatus); put("revokeReason", revokeReason)
     put("accessMode", accessMode); put("trialEligible", trialEligible)
     put("trialStartedAt", trialStartedAtMillis); put("trialExpiresAt", trialExpiresAtMillis)
 }
 
+internal fun JSONObject.toAccessProduct() = AppAccessProductInfo(
+    productId = optString("productId", "watchrss_phone_device_authorization"),
+    productName = optString("productName", "手机版设备授权包"),
+    priceFen = optInt("priceFen", 600),
+    oneTime = optBoolean("oneTime", true),
+    autoRenew = optBoolean("autoRenew", false),
+    deviceCapacity = optInt("deviceCapacity", 3),
+    includedFeatures = optStringList("includedFeatures").ifEmpty { AppAccessProductInfo().includedFeatures },
+    excludedFeatures = optStringList("excludedFeatures").ifEmpty { AppAccessProductInfo().excludedFeatures }
+)
+
+private fun JSONObject.optStringList(key: String): List<String> {
+    val array = optJSONArray(key) ?: return emptyList()
+    return buildList {
+        for (index in 0 until array.length()) {
+            array.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+        }
+    }
+}
+
 internal fun JSONObject.toPaymentOrder() = AppPaymentOrder(
+    product = optJSONObject("product")?.toAccessProduct() ?: AppAccessProductInfo(),
     orderId = getString("orderId"), merchantOrderId = optString("merchantOrderId"), amountFen = optInt("amountFen"),
     status = optString("status"), paymentUrl = optString("paymentUrl").takeIf { it.isNotBlank() },
     paidAtMillis = optLong("paidAt").takeIf { it > 0L },

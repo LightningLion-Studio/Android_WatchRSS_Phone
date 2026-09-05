@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -46,8 +45,6 @@ import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.text.DateFormat
-import java.util.Date
 
 /** The only exported router. No protected activity is entered before app access is valid. */
 class MainActivity : ComponentActivity() {
@@ -183,8 +180,6 @@ class MainActivity : ComponentActivity() {
     @androidx.compose.runtime.Composable
     private fun AccessGate(state: AppAccessState) {
         var showPaymentAgreement by remember { mutableStateOf(false) }
-        var showTrialConfirmation by remember { mutableStateOf(false) }
-        var trialStarting by remember { mutableStateOf(false) }
         if (showPaymentAgreement) {
             PaidServiceAgreementDialog(
                 onOpenAgreement = {
@@ -202,39 +197,11 @@ class MainActivity : ComponentActivity() {
                 onDismiss = { showPaymentAgreement = false }
             )
         }
-        if (showTrialConfirmation) {
-            AlertDialog(
-                onDismissRequest = { if (!trialStarting) showTrialConfirmation = false },
-                title = { Text("开始 3 天免费试用？") },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("试用从领取成功起连续 72 小时，仅绑定当前手机，每个账号只能领取一次。")
-                        Text("预计结束时间：${trialEstimatedEndText(System.currentTimeMillis())}")
-                        Text("试用到期后会返回购买页面，本地文章、订阅、收藏和稍后读不会被删除。")
-                    }
-                },
-                confirmButton = {
-                    TextButton(
-                        enabled = !trialStarting,
-                        onClick = {
-                            trialStarting = true
-                            startTrialAfterConfirmation {
-                                trialStarting = false
-                                showTrialConfirmation = false
-                            }
-                        }
-                    ) { Text(if (trialStarting) "正在领取…" else "确认开始") }
-                },
-                dismissButton = {
-                    TextButton(
-                        enabled = !trialStarting,
-                        onClick = { showTrialConfirmation = false }
-                    ) { Text("取消") }
-                }
-            )
-        }
         Column(
-            Modifier.fillMaxSize().padding(28.dp),
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(28.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -248,22 +215,25 @@ class MainActivity : ComponentActivity() {
                         state.summary,
                         OnboardingProfileStore(this@MainActivity).load()
                     )
+                    PaidAccessTransparencyCard(
+                        product = state.summary.product,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
                     GateMessage(
                         title = copy.title,
                         detail = copy.detail,
-                        actionLabel = "立即购买 ¥6"
+                        actionLabel = "购买手机版设备授权 ¥6"
                     ) { showPaymentAgreement = true }
-                    if (state.summary.trialEligible) {
-                        OutlinedButton(
-                            onClick = { showTrialConfirmation = true },
-                            modifier = Modifier.padding(top = 12.dp)
-                        ) { Text("免费试用 3 天") }
-                    }
                 }
                 is AppAccessState.PaymentPending -> {
+                    PaidAccessTransparencyCard(
+                        product = state.order.product,
+                        modifier = Modifier.padding(top = 8.dp),
+                        compact = true
+                    )
                     GateMessage(
                         title = "等待支付确认",
-                        detail = "订单 ${state.order.merchantOrderId}",
+                        detail = "订单 ${state.order.merchantOrderId}；支付完成后只会增加手机版设备授权容量。",
                         actionLabel = "继续支付"
                     ) {
                         state.order.paymentUrl?.let { openExternally(it) }
@@ -280,7 +250,14 @@ class MainActivity : ComponentActivity() {
                 is AppAccessState.Revoked -> GateMessage("本手机授权已撤销", state.summary.revokeReason ?: "设备名额已被较新的登录占用") { reauthenticate() }
                 is AppAccessState.ReauthenticationRequired -> GateMessage("请重新验证账号", "验证后本手机将成为最新授权设备") { reauthenticate() }
                 is AppAccessState.ValidationError -> GateMessage("授权校验失败", state.message) { lifecycleScope.launch { coordinator.reconcile() } }
-                is AppAccessState.Authorized -> Text(if (state.offline) "正在使用离线授权…" else "授权有效")
+                is AppAccessState.Authorized -> {
+                    PaidAccessActivatedCard(capacity = state.summary.capacity)
+                    Text(
+                        if (state.offline) "正在使用离线授权…" else "授权有效",
+                        modifier = Modifier.padding(top = 10.dp),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             }
             val remoteEnvironment = RemoteEnvironmentStore(this@MainActivity).active()
             if (shouldShowProductionEnvironmentSwitch(BuildConfig.DEBUG, remoteEnvironment)) {
@@ -320,14 +297,14 @@ class MainActivity : ComponentActivity() {
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "首页概览、RSS 与小说集中管理，阅读状态与手表保持同步。",
+                    text = "首页概览、RSS、小说与备忘录集中管理，阅读资料和状态与手表保持同步。",
                     modifier = Modifier.padding(top = 6.dp, bottom = 14.dp),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 ValuePreviewRow("多端资料库", "收藏、稍后读与文章双向同步")
                 HorizontalDivider(Modifier.padding(vertical = 10.dp))
-                ValuePreviewRow("沉浸阅读器", "字体、背景、自动滚动与 AI 总结")
+                ValuePreviewRow("小说与备忘录", "本地小说阅读、备忘录编辑与资料整理")
                 HorizontalDivider(Modifier.padding(vertical = 10.dp))
                 ValuePreviewRow("手机端管理", "订阅整理、网页导入与账号安全")
             }
@@ -395,26 +372,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startTrialAfterConfirmation(onComplete: () -> Unit) {
-        lifecycleScope.launch {
-            runCatching { coordinator.startTrial() }
-                .onFailure {
-                    Toast.makeText(
-                        this@MainActivity,
-                        it.message ?: "试用领取失败",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-            onComplete()
-        }
-    }
-
     private companion object { const val KEY_PENDING_INTENT = "pending_inbound_intent" }
 }
-
-internal fun trialEstimatedEndText(nowMillis: Long): String = DateFormat
-    .getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
-    .format(Date(nowMillis + 72L * 60L * 60L * 1_000L))
 
 internal fun shouldShowProductionEnvironmentSwitch(
     isDebugBuild: Boolean,

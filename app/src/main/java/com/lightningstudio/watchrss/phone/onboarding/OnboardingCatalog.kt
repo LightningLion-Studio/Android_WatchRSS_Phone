@@ -1,13 +1,13 @@
 package com.lightningstudio.watchrss.phone.onboarding
 
 /**
- * 24 步投入型引导目录。顺序即体验顺序，调整只需移动列表项。
+ * 24 步产品介绍与可选设置目录。顺序即体验顺序，调整只需移动列表项。
  *
- * 心理学结构：
+ * 结构：
  * 1-2    欢迎 + 协议（同意勾选是最早的一次微小承诺）
- * 3-7    热场选择题（点选必答，投入成本极低但已经开始）
- * 8-13   思考输入（自由文本/数字，全部可跳过；跳过会在付费墙降级文案中兑现损失框架）
- * 14-17  魔术时刻（动画 + 真实导入任务，制造沉没成本与 IKEA 效应）
+ * 3-7    热场选择题（点选必答，帮助应用了解阅读场景）
+ * 8-13   思考输入（自由文本/数字，全部可跳过）
+ * 14-17  功能演示（动画 + 可选的真实导入任务）
  * 18-20  登录（外部 AccountActivity，19-20 为虚拟计数步）
  * 21-24  授权说明 + 价值回放 + 付费前说明 + 完成（完成后由 MainActivity 的付费墙收口）
  */
@@ -18,7 +18,7 @@ val ONBOARDING_CATALOG: List<OnboardingStep> = listOf(
         type = StepType.WELCOME,
         title = "欢迎使用腕上RSS",
         body = "在手机管理阅读，在手表继续阅读。",
-        detail = "接下来几步，带你定制专属的阅读计划——大约需要 3 分钟。"
+        detail = "可选步骤可以跳过；你自己的本地资料不会因为未购买而被删除。"
     ),
     // ── 阶段二：协议（必须在任何输入之前，PIPL）─────────────────────
     OnboardingStep(
@@ -69,7 +69,7 @@ val ONBOARDING_CATALOG: List<OnboardingStep> = listOf(
         options = listOf("RSS 订阅", "网页文章", "哔哩哔哩", "抖音", "微信公众号", "播客"),
         echoKey = "platforms"
     ),
-    // ── 阶段四：思考输入（可跳过；跳过 = 损失框架）──────────────────
+    // ── 阶段四：思考输入（可跳过）───────────────────────────────
     OnboardingStep(
         id = "favorite_website",
         type = StepType.TEXT,
@@ -152,9 +152,9 @@ val ONBOARDING_CATALOG: List<OnboardingStep> = listOf(
     OnboardingStep(
         id = "features",
         type = StepType.FEATURE_PREVIEW,
-        title = "手腕上的完整能力",
-        body = "腕上RSS 手表端支持这些能力——你的手机是它们的补给站。",
-        detail = "手表端已支持连接手机同步；哔哩哔哩与抖音账号在手表端登录。"
+        title = "手机与手表的功能范围",
+        body = "腕上RSS把小说、备忘录和阅读资料带到手机与手表之间。",
+        detail = "哔哩哔哩与抖音是第三方连接功能，不是腕上RSS手机版设备授权的购买内容。"
     ),
     // ── 阶段六：登录与收尾 ─────────────────────────────────────────
     OnboardingStep(
@@ -179,23 +179,23 @@ val ONBOARDING_CATALOG: List<OnboardingStep> = listOf(
     OnboardingStep(
         id = "auth_info",
         type = StepType.AUTH_INFO,
-        title = "关于手机版授权",
-        body = "手机版是一次性买断：¥6 为账号增加 3 台手机永久授权，不自动续费。",
-        detail = "每台登录的手机占用 1 个名额；新设备挤占时，最早激活的那台会自动撤销。"
+        title = "关于手机版设备授权包",
+        body = "一次支付 ¥6，账号增加 3 台手机授权容量，不自动续费。",
+        detail = "它用于手机端小说、备忘录和手机与手表协同；与哔哩哔哩、抖音的会员或平台功能无关。每台登录的手机占用 1 个名额。"
     ),
     OnboardingStep(
         id = "value_recap",
         type = StepType.VALUE_RECAP,
         title = "你的计划已就绪",
         body = "下面是你亲手定制的计划。",
-        detail = "所有内容已保存在本机，下一步是解锁完整功能。"
+        detail = "所有内容已保存在本机；是否购买手机版设备授权，由你根据手机与手表协同需要决定。"
     ),
     OnboardingStep(
         id = "payment_intro",
         type = StepType.PAYMENT_INTRO,
-        title = "解锁手机版",
-        body = "一次性支付 ¥6，为账号增加 3 台手机永久授权容量，不自动续费。支付成功后 7 天内可在订单页无理由全额退款。",
-        detail = "勾选表示你已阅读并同意《腕上RSS手机版付费服务协议》。"
+        title = "手机版设备授权包",
+        body = "一次支付 ¥6，为账号增加 3 台手机授权容量，不自动续费。支付成功后 7 天内可在订单页无理由全额退款。",
+        detail = "这笔付款主要用于小说阅读、备忘录和手机与手表协同；不包含哔哩哔哩或抖音会员，也不会提升播放速度、清晰度或网络质量。勾选表示你已阅读并同意《腕上RSS手机版付费服务协议》。"
     ),
     OnboardingStep(
         id = "complete",

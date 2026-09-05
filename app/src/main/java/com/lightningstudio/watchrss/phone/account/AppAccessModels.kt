@@ -1,6 +1,28 @@
 package com.lightningstudio.watchrss.phone.account
 
+data class AppAccessProductInfo(
+    val productId: String = "watchrss_phone_device_authorization",
+    val productName: String = "手机版设备授权包",
+    val priceFen: Int = 600,
+    val oneTime: Boolean = true,
+    val autoRenew: Boolean = false,
+    val deviceCapacity: Int = 3,
+    val includedFeatures: List<String> = listOf(
+        "手机端小说与本地资料阅读",
+        "手机端备忘录",
+        "手机与手表协同同步阅读资料和状态",
+        "账号增加3台手机授权容量"
+    ),
+    val excludedFeatures: List<String> = listOf(
+        "哔哩哔哩或抖音会员及平台权益",
+        "腕上RSS当前未提供的其他平台社区功能",
+        "网络速度、清晰度、码率、CDN或加载优先级提升",
+        "WatchRSS云会员、云空间及其他独立云服务"
+    )
+)
+
 data class AppAccessSummary(
+    val product: AppAccessProductInfo = AppAccessProductInfo(),
     val purchaseCount: Int = 0,
     val capacity: Int = 0,
     val occupied: Int = 0,
@@ -23,6 +45,7 @@ data class AppAuthorization(
 )
 
 data class AppPaymentOrder(
+    val product: AppAccessProductInfo = AppAccessProductInfo(),
     val orderId: String,
     val merchantOrderId: String,
     val amountFen: Int,

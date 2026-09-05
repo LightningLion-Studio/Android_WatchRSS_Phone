@@ -5,10 +5,7 @@ import com.lightningstudio.watchrss.phone.account.AppAccessSummary
 /**
  * 草稿 → 档案的净化与付费墙文案生成。全部为纯函数，JVM 可测。
  *
- * 三层文案策略：
- * - FULL：有档案、计划名非空、answeredCount >= 6 —— 回显用户亲手写下的目标与文章（一致性压力）
- * - PARTIAL：answeredCount 1-5 —— "还差一点定制"（未完成感）
- * - NONE：无档案或全跳过 —— "未定制的阅读计划将无法在手机上继续"（损失框架）
+ * 三层文案策略只用于帮助用户回顾已填写内容，不制造必须购买、倒计时或损失压力。
  */
 object OnboardingProfileBuilder {
 
@@ -65,23 +62,23 @@ object OnboardingProfileBuilder {
                 val days = p.commitmentDays.ifBlank { "每一天" }
                 val article = p.importedArticleTitle?.let { "第一篇文章《$it》已保存在资料库。" } ?: ""
                 PaywallCopy(
-                    title = "《${p.planName}》就差最后一步",
-                    detail = "你为「$scene」场景定制的阅读计划已经就绪：每天 $target 篇，坚持 $days 天。$article${price}在手机与手表上继续。"
+                    title = "你的阅读计划已准备好",
+                    detail = "你为「$scene」场景定制的阅读计划：每天 $target 篇，坚持 $days 天。$article$price"
                 )
             }
             ProfileTier.PARTIAL -> PaywallCopy(
-                title = "你的阅读计划还差一点定制",
-                detail = "${profile!!.answeredCount} 个定制项已保存，补齐后可在手机与手表上继续阅读。${price}继续。"
+                title = "你的阅读计划已保存",
+                detail = "已保存 ${profile!!.answeredCount} 个定制项。你可以先查看本地内容；如需手机与手表协同，再了解$price"
             )
             ProfileTier.NONE -> PaywallCopy(
-                title = "解锁手机与手表完整体验",
-                detail = "${price}管理订阅、同步资料并继续阅读。"
+                title = "了解手机版设备授权",
+                detail = "${price}主要用于小说阅读、备忘录和手机与手表协同；与哔哩哔哩、抖音的会员或平台功能无关。"
             )
         }
     }
 
     private fun priceSentence(): String =
-        "一次购买手机版永久授权（¥6，可授权 3 台手机）后即可"
+        "一次支付 ¥6 获取手机版设备授权包：账号增加 3 台手机容量，不自动续费。"
 
     private fun sanitizedFirst(answers: Map<String, List<String>>, key: String): String =
         sanitizedList(answers, key).firstOrNull().orEmpty()

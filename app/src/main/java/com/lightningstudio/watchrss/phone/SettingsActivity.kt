@@ -134,6 +134,8 @@ import com.lightningstudio.watchrss.phone.account.AccountEnvironment
 import com.lightningstudio.watchrss.phone.account.RemoteEnvironment
 import com.lightningstudio.watchrss.phone.account.RemoteEnvironmentStore
 import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundFit
+import com.lightningstudio.watchrss.phone.connection.bluetooth.previewResourceSignature
+import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundPreparationException
 import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundAssetEntity
 import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundType
 import com.lightningstudio.watchrss.phone.data.reader.ReaderFontSynthesis
@@ -298,6 +300,7 @@ internal fun ReaderSettingsHost(
     var previewAfterPermission by remember { mutableStateOf(false) }
     var watchPreviewEnabled by remember { mutableStateOf(false) }
     var watchPreviewStarting by remember { mutableStateOf(false) }
+    var watchPreviewStartJob by remember { mutableStateOf<Job?>(null) }
     var watchPreviewDeviceAddress by remember { mutableStateOf<String?>(null) }
     var watchPreviewSessionId by remember { mutableStateOf<String?>(null) }
     var watchPreviewStatus by remember { mutableStateOf("关闭") }
@@ -391,6 +394,8 @@ internal fun ReaderSettingsHost(
         val updates = watchPreviewUpdates
         val job = watchPreviewJob
         watchPreviewStopRequested.set(true)
+        watchPreviewStartJob?.cancel()
+        watchPreviewStartJob = null
         watchPreviewEnabled = false
         watchPreviewStarting = false
         watchPreviewDeviceAddress = null
@@ -411,7 +416,8 @@ internal fun ReaderSettingsHost(
         if (watchPreviewStarting || watchPreviewEnabled) return
         watchPreviewStarting = true
         watchPreviewStatus = "正在连接手表…"
-        scope.launch {
+        watchPreviewStopRequested.set(false)
+        watchPreviewStartJob = scope.launch {
             runCatching {
                 val targets = container.bluetoothSyncManager.probeLibrarySyncTargets()
                 val devices = targets.devices
@@ -424,12 +430,12 @@ internal fun ReaderSettingsHost(
                 }
                 val updates = Channel<ReaderPreset>(Channel.CONFLATED)
                 val firstConnection = CompletableDeferred<String>()
-                watchPreviewStopRequested.set(false)
                 val previewAddress = device.readerPreviewAddress
                 watchPreviewDeviceAddress = previewAddress
                 watchPreviewUpdates = updates
-                val job = scope.launch {
-                    while (!watchPreviewStopRequested.get()) {
+                val job = scope.launch preview@{
+                    var connectionFailures = 0
+                    while (!watchPreviewStopRequested.get() && watchPreviewUpdates === updates) {
                         val attemptSessionId = UUID.randomUUID().toString()
                         watchPreviewSessionId = attemptSessionId
                         val attemptPreset = draft ?: current
@@ -440,18 +446,35 @@ internal fun ReaderSettingsHost(
                                 initialPreset = attemptPreset,
                                 updates = updates,
                                 onConnected = { deviceName ->
+                                    connectionFailures = 0
                                     if (!firstConnection.isCompleted) {
                                         firstConnection.complete(deviceName)
                                     }
                                 },
+                                onStage = { stage ->
+                                    if (watchPreviewUpdates === updates) watchPreviewStatus = stage
+                                },
                                 onApplied = {
                                     scope.launch {
-                                        watchPreviewStatus = "手表已更新"
+                                        if (watchPreviewUpdates === updates) watchPreviewStatus = "手表已更新"
                                     }
                                 }
                             )
                         }.onFailure {
-                            if (!watchPreviewStopRequested.get()) {
+                            if (it is kotlinx.coroutines.CancellationException) throw it
+                            if (watchPreviewUpdates !== updates) return@preview
+                            if (it is WatchBackgroundPreparationException) {
+                                if (!firstConnection.isCompleted) firstConnection.completeExceptionally(it)
+                                watchPreviewStatus = it.message ?: "背景预处理失败"
+                                watchPreviewEnabled = false
+                                watchPreviewStopRequested.set(true)
+                                updates.close()
+                            } else if (!watchPreviewStopRequested.get()) {
+                                connectionFailures += 1
+                                if (!firstConnection.isCompleted && connectionFailures >= 3) {
+                                    firstConnection.completeExceptionally(it)
+                                    return@preview
+                                }
                                 watchPreviewStatus = "连接中断，正在重新连接…"
                                 delay(500L)
                             }
@@ -459,11 +482,21 @@ internal fun ReaderSettingsHost(
                     }
                 }
                 watchPreviewJob = job
-                val deviceName = withTimeout(20_000L) { firstConnection.await() }
+                // Connection operations already have their own timeout. Preparation and transfer
+                // can legitimately exceed 20 seconds; stopping cancels this wait via job completion.
+                job.invokeOnCompletion { cause ->
+                    if (!firstConnection.isCompleted) firstConnection.completeExceptionally(
+                        cause ?: kotlinx.coroutines.CancellationException("预览已停止")
+                    )
+                }
+                val deviceName = firstConnection.await()
                 watchPreviewEnabled = true
-                watchPreviewResourceSignature = current.usedResourceSignature()
+                watchPreviewResourceSignature = (draft ?: current).previewResourceSignature()
                 watchPreviewStatus = "正在“${deviceName.ifBlank { device.name }}”上预览"
             }.onFailure {
+                if (it is kotlinx.coroutines.CancellationException) throw it
+                // Do not cancel this start job while reporting its own failure.
+                watchPreviewStartJob = null
                 stopWatchPreview(showStatus = false)
                 watchPreviewStatus = it.message ?: "无法开启手表预览"
             }
@@ -727,15 +760,16 @@ internal fun ReaderSettingsHost(
 
     LaunchedEffect(
         watchPreviewEnabled,
+        watchPreviewStarting,
         draft?.editableFingerprint()
     ) {
-        if (!watchPreviewEnabled) return@LaunchedEffect
+        if (!watchPreviewEnabled && !watchPreviewStarting) return@LaunchedEffect
         val current = draft ?: return@LaunchedEffect
         watchPreviewUpdates?.trySend(current)
     }
-    LaunchedEffect(watchPreviewEnabled, draft?.usedResourceSignature()) {
+    LaunchedEffect(watchPreviewEnabled, draft?.previewResourceSignature()) {
         if (!watchPreviewEnabled) return@LaunchedEffect
-        val signature = draft?.usedResourceSignature().orEmpty()
+        val signature = draft?.previewResourceSignature().orEmpty()
         if (signature == watchPreviewResourceSignature) return@LaunchedEffect
         watchPreviewResourceSignature = signature
         watchPreviewStatus = "正在传输预览资源…"
@@ -2119,21 +2153,16 @@ private fun PresetEditor(
             ListItem(
                 headlineContent = { Text("手表实时预览") },
                 supportingContent = {
-                    Text(
-                        if (watchPreviewStarting) "正在通过蓝牙连接…" else watchPreviewStatus
-                    )
+                    Text(watchPreviewStatus)
                 },
                 trailingContent = {
                     Switch(
                         checked = watchPreviewEnabled || watchPreviewStarting,
-                        enabled = !watchPreviewStarting,
                         onCheckedChange = onWatchPreviewChanged
                     )
                 },
-                modifier = Modifier.clickable(
-                    enabled = !watchPreviewStarting
-                ) {
-                    onWatchPreviewChanged(!watchPreviewEnabled)
+                modifier = Modifier.clickable {
+                    onWatchPreviewChanged(!(watchPreviewEnabled || watchPreviewStarting))
                 }
             )
         }
@@ -3623,21 +3652,6 @@ private fun formatNumericValue(value: Float): String =
 
 private fun ReaderPreset.editableFingerprint(): String =
     ReaderPresetCodec.encode(copy(updatedAt = 0L, modifiedBy = "", deleted = false))
-
-private fun ReaderPreset.usedResourceSignature(): String {
-    val fonts = buildSet {
-        body.fontAssetId?.let(::add)
-        ReaderTypographyRole.entries.forEach { role ->
-            resolvedStyle(role).fontAssetId?.let(::add)
-        }
-    }.sorted().joinToString("|")
-    return listOf(
-        fonts,
-        background.type.name,
-        background.assetId.orEmpty(),
-        background.posterAssetId.orEmpty()
-    ).joinToString(":")
-}
 
 private fun ReaderPreset.safeExportName(): String =
     name.trim()

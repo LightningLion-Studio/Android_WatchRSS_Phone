@@ -384,6 +384,24 @@ class ReaderPresetRepository(
         )
     }
 
+    internal suspend fun updateBackgroundVariants(
+        assetId: String,
+        sourceSha256: String,
+        variantsJson: String
+    ): ReaderBackgroundAssetEntity = database.withTransaction {
+        val latest = dao.backgroundById(assetId)
+        require(latest != null && !latest.deleted && latest.sha256 == sourceSha256) {
+            "背景资源已变化，请重新选择"
+        }
+        val merged = org.json.JSONObject(latest.variantsJson.ifBlank { "{}" })
+        val prepared = org.json.JSONObject(variantsJson)
+        listOf("watch", "watchPoster").forEach { key ->
+            prepared.optJSONObject(key)?.let { merged.put(key, it) }
+        }
+        latest.copy(variantsJson = merged.toString(), updatedAt = nextTimestamp(latest.updatedAt), modifiedBy = deviceId)
+            .also { dao.upsertBackground(it) }
+    }
+
     fun fontFile(assetId: String?): File? {
         val record = fonts.value.firstOrNull { it.id == assetId } ?: return null
         return resourceStore.fontFile(record.fileName)

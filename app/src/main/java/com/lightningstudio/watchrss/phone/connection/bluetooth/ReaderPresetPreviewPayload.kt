@@ -2,6 +2,7 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPreset
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetCodec
+import com.lightningstudio.watchrss.phone.data.reader.ReaderTypographyRole
 import org.json.JSONObject
 
 object ReaderPresetPreviewPayload {
@@ -86,4 +87,19 @@ object ReaderPresetPreviewPayload {
         left is JSONObject && right is JSONObject -> left.toString() == right.toString()
         else -> left == right
     }
+}
+
+internal fun ReaderPreset.previewResourceSignature(): String {
+    val fontIds = buildSet {
+        body.fontAssetId?.let(::add)
+        ReaderTypographyRole.entries.forEach { role ->
+            resolvedStyle(role).fontAssetId?.let(::add)
+        }
+    }.sorted().joinToString("|")
+    return listOf(
+        fontIds,
+        background.type.name,
+        background.assetId.orEmpty(),
+        background.posterAssetId.orEmpty()
+    ).joinToString(":")
 }

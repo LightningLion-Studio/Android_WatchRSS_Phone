@@ -9,6 +9,25 @@ import org.junit.Test
 
 class ReaderPresetPreviewPayloadTest {
     @Test
+    fun positionAndZoomUseDeltasWithoutChangingResourceIdentity() {
+        val before = ReaderPreset.lightDefault(id = "draft", name = "background").let {
+            it.copy(background = it.background.copy(
+                type = com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundType.VIDEO,
+                assetId = "full-frame-video"))
+        }
+        val after = before.copy(background = before.background.copy(
+            zoom = 3f, focusX = 0.1f, focusY = 0.9f, rotationDegrees = 25f,
+            brightness = 1.2f, saturation = 0.8f))
+        assertEquals(before.previewResourceSignature(), after.previewResourceSignature())
+        val frame = ReaderPresetPreviewPayload.delta("preview", 2, before, after)
+        assertEquals(ReaderPresetPreviewPayload.PHASE_UPDATE, frame.getString("phase"))
+        assertTrue(frame.getJSONObject("changes").has("background"))
+        assertFalse(frame.optBoolean("resourceTransfer"))
+        assertFalse(before.previewResourceSignature() == after.copy(
+            background = after.background.copy(assetId = "different-video")).previewResourceSignature())
+    }
+
+    @Test
     fun updateContainsTemporaryPresetWithoutActiveSelection() {
         val request = ReaderPresetPreviewPayload.update(
             sessionId = "preview-session",

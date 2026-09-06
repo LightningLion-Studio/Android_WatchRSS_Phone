@@ -16,9 +16,11 @@ import com.lightningstudio.watchrss.phone.data.reader.ReaderPreset
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetSnapshot
 import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundType
 import com.lightningstudio.watchrss.phone.data.reader.ReaderTypographyRole
+import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundPreparationException
 import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundTranscoder
 import android.os.SystemClock
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -810,7 +812,11 @@ class PhoneBluetoothSyncManager(
         syncSession: PhoneSyncSession? = null,
         onResourceProgress: (completed: Int, total: Int) -> Unit = { _, _ -> }
     ) {
-        client.capabilitiesFor(deviceAddress)?.let { capabilities ->
+        if (readerPresetRepository.exportSnapshot().backgrounds.any {
+                !it.deleted && readerPresetRepository.resourceStore.backgroundFile(it.masterFileName) != null
+            }) {
+            val capabilities = client.capabilitiesFor(deviceAddress)
+                ?: throw WatchBackgroundPreparationException("未获取到手表能力，请重新连接手表")
             watchBackgroundTranscoder.prepareAll(capabilities)
         }
         val snapshot = readerPresetRepository.exportSnapshot()
@@ -946,16 +952,46 @@ class PhoneBluetoothSyncManager(
         initialPreset: ReaderPreset,
         updates: ReceiveChannel<ReaderPreset>,
         onConnected: (String) -> Unit,
-        onApplied: (Long) -> Unit
+        onApplied: (Long) -> Unit,
+        onStage: (String) -> Unit = {}
+    ) {
+        try {
+            streamPreparedReaderPresetPreview(deviceAddress, sessionId, initialPreset, updates, onConnected, onApplied, onStage)
+        } catch (failure: Exception) {
+            // Preparation can be cancelled before a streaming socket exists. Clear the
+            // watch's transfer state as well instead of leaving it until its idle timeout.
+            withContext(kotlinx.coroutines.NonCancellable) {
+                withTimeoutOrNull(3_000L) {
+                    runCatching { stopReaderPresetPreview(deviceAddress, sessionId) }
+                }
+            }
+            throw failure
+        }
+    }
+
+    private suspend fun streamPreparedReaderPresetPreview(
+        deviceAddress: String,
+        sessionId: String,
+        initialPreset: ReaderPreset,
+        updates: ReceiveChannel<ReaderPreset>,
+        onConnected: (String) -> Unit,
+        onApplied: (Long) -> Unit,
+        onStage: (String) -> Unit
     ) {
         var sequence = 0L
         var latestPreset = initialPreset
         var lastSentPreset = initialPreset
         var connected = false
         var lastPresetChangeAt = SystemClock.elapsedRealtime()
-        if (syncReaderPreviewResources(deviceAddress, initialPreset, sessionId)) {
-            sequence = 1L
+        while (true) {
+            sequence = syncReaderPreviewResources(deviceAddress, latestPreset, sessionId, onStage, sequence)
+            val queued = updates.tryReceive().getOrNull() ?: break
+            val resourceChanged = queued.previewResourceSignature() != latestPreset.previewResourceSignature()
+            latestPreset = queued
+            lastSentPreset = queued
+            if (!resourceChanged) break
         }
+        onStage("正在连接预览…")
         delay(READER_RECONNECT_DELAY_MS)
         withContext(Dispatchers.IO) {
             client.streamReaderPresetPreview(
@@ -1031,26 +1067,14 @@ class PhoneBluetoothSyncManager(
         }
     }
 
-    private fun ReaderPreset.previewResourceSignature(): String {
-        val fontIds = buildSet {
-            body.fontAssetId?.let(::add)
-            ReaderTypographyRole.entries.forEach { role ->
-                resolvedStyle(role).fontAssetId?.let(::add)
-            }
-        }.sorted().joinToString("|")
-        return listOf(
-            fontIds,
-            background.type.name,
-            background.assetId.orEmpty(),
-            background.posterAssetId.orEmpty()
-        ).joinToString(":")
-    }
-
     private suspend fun syncReaderPreviewResources(
         deviceAddress: String,
         preset: ReaderPreset,
-        parentSessionId: String
-    ): Boolean {
+        parentSessionId: String,
+        onStage: (String) -> Unit,
+        startSequence: Long
+    ): Long {
+        val sequence = java.util.concurrent.atomic.AtomicLong(startSequence)
         val referencedFontIds = buildSet {
             preset.body.fontAssetId?.let(::add)
             ReaderTypographyRole.entries.forEach { role ->
@@ -1068,7 +1092,7 @@ class PhoneBluetoothSyncManager(
             val transferResponse = exchangeReaderFrame(
                 request = ReaderPresetPreviewPayload.resourceTransfer(
                     sessionId = parentSessionId,
-                    sequence = 0L,
+                    sequence = sequence.get(),
                     preset = preset
                 ),
                 sessionId = "$parentSessionId-preview-resource-status",
@@ -1077,16 +1101,30 @@ class PhoneBluetoothSyncManager(
             requireSuccess(transferResponse)
         }
         var fullSnapshot = readerPresetRepository.exportSnapshot()
-        if (preset.background.type == ReaderBackgroundType.VIDEO) {
-            val background = fullSnapshot.backgrounds.firstOrNull {
-                it.id == preset.background.assetId && !it.deleted
-            }
+        val backgrounds = fullSnapshot.backgrounds.filter { it.id in referencedBackgroundIds && !it.deleted }
+        if (backgrounds.isNotEmpty()) {
+            onStage("正在预处理背景…")
             val capabilities = client.capabilitiesFor(deviceAddress)
-            if (background != null && capabilities != null) {
-                watchBackgroundTranscoder.prepare(background, capabilities)
-                fullSnapshot = readerPresetRepository.exportSnapshot()
+                ?: throw WatchBackgroundPreparationException("未获取到手表能力，请重新连接手表")
+            kotlinx.coroutines.coroutineScope {
+                val keepAlive = launch {
+                    while (true) {
+                        delay(30_000L)
+                        val heartbeat = exchangeReaderFrame(
+                            request = ReaderPresetPreviewPayload.resourceTransfer(parentSessionId,
+                                sequence.incrementAndGet(), preset),
+                            sessionId = "$parentSessionId-preview-preparation-keepalive",
+                            deviceAddress = deviceAddress
+                        ).response
+                        requireSuccess(heartbeat)
+                    }
+                }
+                try { backgrounds.forEach { watchBackgroundTranscoder.prepare(it, capabilities) } }
+                finally { keepAlive.cancel(); keepAlive.join() }
             }
+            fullSnapshot = readerPresetRepository.exportSnapshot()
         }
+        onStage("正在传输预览资源…")
         val previewSnapshot = ReaderPresetSnapshot(
             presets = emptyList(),
             fonts = fullSnapshot.fonts.filter { it.id in referencedFontIds && !it.deleted },
@@ -1096,7 +1134,7 @@ class PhoneBluetoothSyncManager(
             deletions = emptyList()
         )
         if (previewSnapshot.fonts.isEmpty() && previewSnapshot.backgrounds.isEmpty()) {
-            return resourceTransferStarted
+            return if (resourceTransferStarted) sequence.incrementAndGet() else sequence.get()
         }
         delay(READER_RECONNECT_DELAY_MS)
         val manifest = exchangeReaderFrame(
@@ -1118,7 +1156,7 @@ class PhoneBluetoothSyncManager(
                 } else {
                     val watchVariant = variants?.optJSONObject("watch")?.optString("fileName")
                         ?.takeIf(String::isNotBlank)
-                    add(watchVariant ?: background.masterFileName)
+                    add(requireNotNull(watchVariant) { "缺少已预处理的图片版本" })
                 }
             }
         }
@@ -1141,7 +1179,7 @@ class PhoneBluetoothSyncManager(
             label = "background",
             resources = backgroundResources
         )
-        return resourceTransferStarted
+        return if (resourceTransferStarted) sequence.incrementAndGet() else sequence.get()
     }
 
     private suspend fun pushReaderPreviewResources(

@@ -993,6 +993,32 @@ class PhoneCompanionRepositoryTest {
     }
 
     @Test
+    fun authoritativeSnapshot_remoteWinsAndTargetOnlyArticleIsPruned() = runBlocking {
+        val articleDao = FakePhoneArticleDao()
+        val local = article(id = "keep", title = "手机较新标题").copy(updatedAt = 200L)
+        val targetOnly = article(id = "remove", title = "仅手机存在")
+        articleDao.items = listOf(local, targetOnly)
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = FakePhoneRssSourceDao(),
+            deviceId = "test-phone"
+        )
+
+        repository.mergeArticlesFromSync(
+            incoming = listOf(local.copy(title = "手表权威标题", updatedAt = 100L)),
+            authoritative = true
+        )
+        repository.finalizeAuthoritativeLibrarySnapshot(
+            retainedArticleIds = listOf("keep"),
+            retainedSourceUrls = emptyList()
+        )
+
+        assertEquals(listOf("keep"), articleDao.items.map { it.articleId })
+        assertEquals("手表权威标题", articleDao.items.single().title)
+    }
+
+    @Test
     fun mergeChunkedArticlesFromSync_keepPhoneRecomputesMetadataForPreservedLocalBody() = runBlocking {
         val articleDao = FakePhoneArticleDao()
         val local = article(
@@ -2316,6 +2342,8 @@ class PhoneCompanionRepositoryTest {
 
         override suspend fun getAllForSync(): List<PhoneArticleEntity> = items
 
+        override suspend fun getAllIds(): List<String> = items.map { it.articleId }
+
         override suspend fun getAllMetadataForSync(): List<PhoneArticleEntity> = items
 
         override suspend fun getMetadataForSync(
@@ -2406,6 +2434,10 @@ class PhoneCompanionRepositoryTest {
             items = items.filterNot { it.rssSourceUrl == rssSourceUrl }
         }
 
+        override suspend fun deleteByIds(articleIds: List<String>) {
+            items = items.filterNot { it.articleId in articleIds }
+        }
+
         override suspend fun deleteAll() {
             items = emptyList()
         }
@@ -2428,12 +2460,18 @@ class PhoneCompanionRepositoryTest {
 
         override suspend fun getAllForSync(): List<PhoneRssSourceEntity> = sources
 
+        override suspend fun getAllUrls(): List<String> = sources.map { it.url }
+
         override suspend fun upsert(source: PhoneRssSourceEntity) {
             sources = sources.filterNot { it.url == source.url } + source
         }
 
         override suspend fun upsertAll(sources: List<PhoneRssSourceEntity>) {
             sources.forEach { upsert(it) }
+        }
+
+        override suspend fun deleteByUrls(urls: List<String>) {
+            sources = sources.filterNot { it.url in urls }
         }
 
         override suspend fun deleteAll() {

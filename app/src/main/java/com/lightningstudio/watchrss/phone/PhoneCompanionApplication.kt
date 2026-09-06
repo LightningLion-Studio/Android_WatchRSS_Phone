@@ -33,6 +33,8 @@ import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 
 class PhoneCompanionApplication : Application(), ImageLoaderFactory {
+    val supportOverlay = com.lightningstudio.watchrss.phone.support.SupportOverlay()
+    val supportViewModel by lazy { com.lightningstudio.watchrss.phone.support.SupportViewModel(this) }
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastForegroundSyncAt = 0L
     @Volatile private var resumedActivity: Activity? = null
@@ -76,6 +78,7 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
                     }
                     return
                 }
+                supportOverlay.onResumed(activity)
                 startConsentDependentServices()
                 container.oppoReviewCoordinator.onAppEntry()
                 if (!shouldEnforceAppAccess(
@@ -113,7 +116,8 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
                         container.stopCloudChangeScheduler()
                         stopWatchBaseStation()
                         if (activity !is MainActivity && activity !is AccountActivity &&
-                            activity !is DataManagementActivity && activity !is ContactDeveloperActivity
+                            activity !is DataManagementActivity && activity !is ContactDeveloperActivity &&
+                            activity !is SupportActivity
                         ) {
                             activity.startActivity(
                                 Intent(activity, MainActivity::class.java)
@@ -136,6 +140,7 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
             override fun onActivityStarted(activity: Activity) = Unit
             override fun onActivityPaused(activity: Activity) {
+                supportOverlay.onPaused(activity)
                 if (resumedAtMillis > 0) {
                     val elapsed = SystemClock.elapsedRealtime() - resumedAtMillis
                     if (elapsed > 0) container.oppoReviewCoordinator.recordForeground(elapsed)

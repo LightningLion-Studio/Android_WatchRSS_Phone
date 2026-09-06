@@ -23,11 +23,17 @@ interface PhoneRssSourceDao {
     @Query("SELECT * FROM phone_rss_sources")
     suspend fun getAllForSync(): List<PhoneRssSourceEntity>
 
+    @Query("SELECT url FROM phone_rss_sources")
+    suspend fun getAllUrls(): List<String>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(source: PhoneRssSourceEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(sources: List<PhoneRssSourceEntity>)
+
+    @Query("DELETE FROM phone_rss_sources WHERE url IN (:urls)")
+    suspend fun deleteByUrls(urls: List<String>)
 
     @Query("DELETE FROM phone_rss_sources")
     suspend fun deleteAll()

@@ -164,6 +164,7 @@
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:theme="@style/Theme.WatchRSS.Overlay" />
+        <activity android:name=".SupportActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".ContactDeveloperActivity"
             android:exported="false"

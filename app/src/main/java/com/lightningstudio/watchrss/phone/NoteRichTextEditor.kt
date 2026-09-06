@@ -1229,6 +1229,28 @@ private fun markdownFenceMarker(line: String): MarkdownFence? {
     return MarkdownFence(marker, length).takeIf { length >= 3 }
 }
 
+/** Shared read-only Markdown renderer for support content and note previews. */
+@Composable
+internal fun ReadOnlyMarkdown(markup: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val imageLoader = remember(context) { NoteImageLoader(context.filesDir) }
+    var viewerImage by remember { mutableStateOf<NotePreviewBlock.Image?>(null) }
+    NoteMarkdownPreview(
+        markup = markup,
+        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+        textColor = MaterialTheme.colorScheme.onSurface,
+        codeTextColor = MaterialTheme.colorScheme.onSurface,
+        codeBackgroundColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+        imageLoader = imageLoader,
+        onImageClick = { viewerImage = it },
+        modifier = modifier,
+        scrollable = false
+    )
+    viewerImage?.let { image ->
+        NoteImageViewerDialog(image, imageLoader, onDismiss = { viewerImage = null })
+    }
+}
+
 @Composable
 private fun NoteMarkdownPreview(
     markup: String,
@@ -1238,13 +1260,14 @@ private fun NoteMarkdownPreview(
     codeBackgroundColor: Color,
     imageLoader: ImageLoader,
     onImageClick: (NotePreviewBlock.Image) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    scrollable: Boolean = true
 ) {
     val blocks = remember(markup) { parseNotePreviewBlocks(markup) }
     val verticalScrollState = rememberScrollState()
     Column(
         modifier = modifier
-            .verticalScroll(verticalScrollState)
+            .then(if (scrollable) Modifier.verticalScroll(verticalScrollState) else Modifier)
             .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {

@@ -57,6 +57,17 @@ data class NoteSyncStats(
     val conflictsOnPhone: Int
 )
 
+data class WatchDebugLog(
+    val text: String,
+    val truncated: Boolean
+)
+
+enum class LibrarySyncMode(val protocolValue: String) {
+    MERGE(BluetoothSyncProtocol.LIBRARY_MODE_MERGE),
+    PHONE_TO_WATCH_REPLACE(BluetoothSyncProtocol.LIBRARY_MODE_PHONE_TO_WATCH_REPLACE),
+    WATCH_TO_PHONE_REPLACE(BluetoothSyncProtocol.LIBRARY_MODE_WATCH_TO_PHONE_REPLACE)
+}
+
 enum class PhoneBluetoothSyncStage(val displayName: String) {
     CONNECTING("建立连接中"),
     SYNCING_ACCOUNT("账号授权同步中"),
@@ -164,6 +175,36 @@ class PhoneBluetoothSyncManager(
                 )
             }
             throw throwable
+        }
+    }
+
+    /** Returns the newest part of the watch log. This is deliberately optional for sharing. */
+    suspend fun collectWatchDebugLog(): WatchDebugLog {
+        val targets = probeLibrarySyncTargets()
+        val device = targets.devices.singleOrNull()
+            ?: error(if (targets.devices.isEmpty()) "未连接到可用手表" else "发现多块手表，请先通过同步选择目标手表")
+        val sessionId = BluetoothDebugLog.newSessionId("pullWatchLog")
+        return try {
+            val request = JSONObject().apply {
+                put("version", LibrarySyncPayload.PROTOCOL_VERSION)
+                put("action", BluetoothSyncProtocol.ACTION_PULL_DEBUG_LOG)
+                put("maxChars", 700_000)
+            }
+            val exchange = targets.sessionLease?.exchange(request, sessionId)
+                ?: client.exchange(
+                    request = request,
+                    deviceAddress = device.address,
+                    deviceNameHint = device.name,
+                    sessionId = sessionId
+                )
+            requireSuccess(exchange.response)
+            WatchDebugLog(
+                text = exchange.response.optString("log"),
+                truncated = exchange.response.optBoolean("truncated")
+            )
+        } finally {
+            targets.sessionLease?.runCatching { complete("$sessionId-complete") }
+            targets.sessionLease?.close()
         }
     }
 
@@ -277,6 +318,8 @@ class PhoneBluetoothSyncManager(
 
     internal suspend fun syncAll(
         device: PhoneBluetoothWatchDevice,
+        forceFull: Boolean = false,
+        mode: LibrarySyncMode = LibrarySyncMode.MERGE,
         reusableSession: PhoneSyncSession? = null,
         onProgress: (PhoneBluetoothSyncProgress) -> Unit = {},
         resolveDeleteConflicts: suspend (List<PhoneSyncDeleteConflict>) -> Map<String, PhoneSyncConflictResolution> = {
@@ -300,7 +343,7 @@ class PhoneBluetoothSyncManager(
         var accountSyncWarning: String? = null
         var tokenUsageSyncWarning: String? = null
         return try {
-            if (canSyncAccount()) {
+            if (mode == LibrarySyncMode.MERGE && canSyncAccount()) {
                 reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_ACCOUNT, 0)
                 runCatching {
                     syncAccount(
@@ -316,16 +359,20 @@ class PhoneBluetoothSyncManager(
             val libraryResult = syncLibrary(
                 deviceAddress = effectiveDevice.address,
                 syncSession = syncSession,
+                forceFull = forceFull || mode != LibrarySyncMode.MERGE,
+                mode = mode,
                 onProgress = onProgress,
                 resolveDeleteConflicts = resolveDeleteConflicts
             )
-            runCatching {
-                syncLlmTokenUsage(
-                    device = effectiveDevice,
-                    reusableSession = syncSession
-                )
-            }.onFailure { throwable ->
-                tokenUsageSyncWarning = throwable.message ?: "词元用量同步失败"
+            if (mode == LibrarySyncMode.MERGE) {
+                runCatching {
+                    syncLlmTokenUsage(
+                        device = effectiveDevice,
+                        reusableSession = syncSession
+                    )
+                }.onFailure { throwable ->
+                    tokenUsageSyncWarning = throwable.message ?: "词元用量同步失败"
+                }
             }
             if (syncSession != null) {
                 syncSession.complete("$sessionId-complete")
@@ -389,9 +436,30 @@ class PhoneBluetoothSyncManager(
         }.getOrThrow()
     }
 
+    suspend fun clearWatchLibrary(deviceAddress: String): PhoneBluetoothSyncResult {
+        val sessionId = BluetoothDebugLog.newSessionId("clearWatchLibrary")
+        val exchange = exchange(
+            request = JSONObject().apply {
+                put("version", LibrarySyncPayload.PROTOCOL_VERSION)
+                put("action", BluetoothSyncProtocol.ACTION_CLEAR_LIBRARY)
+                put("nonce", System.currentTimeMillis().toString())
+            },
+            timeoutMs = LIBRARY_SYNC_TIMEOUT_MS,
+            sessionId = sessionId,
+            deviceAddress = deviceAddress
+        )
+        requireSuccess(exchange.response)
+        return PhoneBluetoothSyncResult(
+            deviceName = exchange.deviceName,
+            deviceAddress = exchange.deviceAddress
+        )
+    }
+
     internal suspend fun syncLibrary(
         deviceAddress: String? = null,
         syncSession: PhoneSyncSession? = null,
+        forceFull: Boolean = false,
+        mode: LibrarySyncMode = LibrarySyncMode.MERGE,
         onProgress: (PhoneBluetoothSyncProgress) -> Unit = {},
         resolveDeleteConflicts: suspend (List<PhoneSyncDeleteConflict>) -> Map<String, PhoneSyncConflictResolution> = {
             emptyMap()
@@ -409,6 +477,7 @@ class PhoneBluetoothSyncManager(
         var activePeerDeviceId = ""
         var conflictMergeResolutions = emptyMap<String, PhoneSyncConflictResolution>()
         var syncWindow: PhoneLibrarySyncWindow? = null
+        var remoteFullManifest = emptyList<ArticleSyncManifestEntry>()
         val sessionId = BluetoothDebugLog.newSessionId("syncLibrary")
         debugLog.appendEvent(
             event = "sync.library.start",
@@ -434,10 +503,25 @@ class PhoneBluetoothSyncManager(
                     val remoteCursor = cursorResponse
                         ?.let(LibrarySyncPayload::parseCursor)
                         ?: LibrarySyncCursor(0L, 0L, 0L)
-                    repository.prepareLibrarySyncWindow(
+                    if (mode != LibrarySyncMode.MERGE) {
+                        require(cursorResponse?.optBoolean("supportsAuthoritativeLibraryReplace") == true) {
+                            "手表端版本不支持单向覆盖，请先升级手表端"
+                        }
+                    }
+                    val preparedWindow = repository.prepareLibrarySyncWindow(
                         peerDeviceId = peerDeviceId,
-                        peerAppliedLocalSeq = remoteCursor.lastRemoteSeqApplied
-                    ).also { window ->
+                        peerAppliedLocalSeq = if (forceFull) 0L else remoteCursor.lastRemoteSeqApplied
+                    )
+                    val window = if (forceFull || mode != LibrarySyncMode.MERGE) {
+                        preparedWindow.copy(
+                            articleManifest = preparedWindow.fullArticleManifest,
+                            rssSources = repository.getRssSourcesForSync(),
+                            fullSnapshot = true,
+                            fromSeqExclusive = 0L,
+                            fallbackReason = if (mode == LibrarySyncMode.MERGE) "forcedFull" else mode.protocolValue
+                        )
+                    } else preparedWindow
+                    window.also {
                         syncWindow = window
                         debugLog.appendEvent(
                             event = "sync.library.window.prepared",
@@ -457,7 +541,7 @@ class PhoneBluetoothSyncManager(
                                 "fallbackReason" to window.fallbackReason
                             )
                         )
-                    }.let { window ->
+                    }.let {
                         val localCursor = repository.getLibrarySyncCursor(peerDeviceId)
                         LibrarySyncPayload.buildManifestRequestFromEntries(
                             deviceId = deviceId,
@@ -474,7 +558,10 @@ class PhoneBluetoothSyncManager(
                                 lastRemoteSeqApplied = localCursor.lastRemoteSeqApplied,
                                 lastLocalSeqAckedByPeer = localCursor.lastLocalSeqAckedByPeer
                             )
-                        )
+                        ).apply {
+                            put("forceFull", forceFull || mode != LibrarySyncMode.MERGE)
+                            put("libraryMode", mode.protocolValue)
+                        }
                     }
                 },
                 buildArticleRequests = { manifestResponse, supportsArticleBatches ->
@@ -485,11 +572,16 @@ class PhoneBluetoothSyncManager(
                     }
                     val window = syncWindow ?: error("同步窗口尚未准备")
                     val remoteManifest = LibrarySyncPayload.parseArticleManifest(manifestResponse)
+                    remoteFullManifest = remoteManifest
                     val supportsChunkedBodies = manifestResponse.optBoolean("supportsChunkedBodies", false) &&
                         manifestResponse.optInt("version") > LibrarySyncPayload.LEGACY_PROTOCOL_VERSION
                     val supportsMetadataOnlyArticles = LibrarySyncPayload.supportsMetadataOnlyArticles(manifestResponse)
                     reportProgress(onProgress, PhoneBluetoothSyncStage.TRANSFERRING, 28)
-                    val deleteConflicts = repository.findDeleteConflicts(remoteManifest)
+                    val deleteConflicts = if (mode == LibrarySyncMode.MERGE) {
+                        repository.findDeleteConflicts(remoteManifest)
+                    } else {
+                        emptyList()
+                    }
                     val conflictResolutions = if (deleteConflicts.isNotEmpty()) {
                         resolveDeleteConflicts(deleteConflicts)
                     } else {
@@ -502,7 +594,9 @@ class PhoneBluetoothSyncManager(
                     conflictMergeResolutions = conflictPlan.mergeResolutions
                     if (supportsChunkedBodies) {
                         val watchRequests = LibrarySyncPayload.parseBodyRequests(manifestResponse)
-                        val phoneRequests = mergeBodyRequests(
+                        val phoneRequests = if (mode == LibrarySyncMode.PHONE_TO_WATCH_REPLACE) {
+                            emptyList()
+                        } else mergeBodyRequests(
                             defaultRequests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
                                 localManifest = window.fullArticleManifest,
                                 remoteManifest = remoteManifest,
@@ -583,28 +677,53 @@ class PhoneBluetoothSyncManager(
                                 array.optJSONObject(index)?.has("body") == true
                             }
                         } == true)
-                    val received = if (chunkedResponse) {
+                    val phoneIsTarget = mode != LibrarySyncMode.PHONE_TO_WATCH_REPLACE
+                    val received = if (!phoneIsTarget) {
+                        receivedArticles = 0
+                        0
+                    } else if (chunkedResponse) {
                         val chunked = LibrarySyncPayload.parseChunkedArticles(exchange.response)
                         receivedArticles = chunked.size
-                        repository.mergeChunkedArticlesFromSync(chunked, conflictMergeResolutions)
+                        repository.mergeChunkedArticlesFromSync(
+                            chunked,
+                            conflictMergeResolutions,
+                            authoritative = mode == LibrarySyncMode.WATCH_TO_PHONE_REPLACE
+                        )
                     } else {
                         val articles = LibrarySyncPayload.parseArticles(exchange.response)
                         receivedArticles = articles.size
-                        repository.mergeArticlesFromSync(articles, conflictMergeResolutions)
+                        repository.mergeArticlesFromSync(
+                            articles,
+                            conflictMergeResolutions,
+                            authoritative = mode == LibrarySyncMode.WATCH_TO_PHONE_REPLACE
+                        )
                     }
                     val receivedSources = LibrarySyncPayload.parseRssSources(exchange.manifestResponse)
                     reportProgress(onProgress, PhoneBluetoothSyncStage.VERIFYING, 94)
                     merged = received
                     receivedSourcesCount = receivedSources.size
-                    mergedSources = repository.mergeRssSourcesFromSync(receivedSources)
+                    mergedSources = when (mode) {
+                        LibrarySyncMode.PHONE_TO_WATCH_REPLACE -> 0
+                        LibrarySyncMode.WATCH_TO_PHONE_REPLACE -> repository.mergeAuthoritativeRssSources(receivedSources)
+                        LibrarySyncMode.MERGE -> repository.mergeRssSourcesFromSync(receivedSources)
+                    }
+                    if (mode == LibrarySyncMode.WATCH_TO_PHONE_REPLACE) {
+                        repository.finalizeAuthoritativeLibrarySnapshot(
+                            retainedArticleIds = remoteFullManifest.map { it.articleId },
+                            retainedSourceUrls = receivedSources.map { it.url }
+                        )
+                    }
                     val remoteChangeSequence = LibrarySyncPayload.parseChangeSequence(exchange.manifestResponse)
                     remoteSeqApplied = remoteChangeSequence.toSeqInclusive
+                    if (mode != LibrarySyncMode.MERGE) {
+                        repository.resetLibrarySyncPeerState()
+                    }
                     repository.markLibrarySyncSuccess(
                         peerDeviceId = activePeerDeviceId.ifBlank {
                             exchange.deviceAddress.ifBlank { exchange.deviceName }
                         },
-                        localSeqToInclusive = window.toSeqInclusive,
-                        remoteSeqToInclusive = remoteChangeSequence.toSeqInclusive,
+                        localSeqToInclusive = if (mode == LibrarySyncMode.WATCH_TO_PHONE_REPLACE) 0L else window.toSeqInclusive,
+                        remoteSeqToInclusive = if (mode == LibrarySyncMode.PHONE_TO_WATCH_REPLACE) 0L else remoteChangeSequence.toSeqInclusive,
                         remoteProtocolVersion = exchange.manifestResponse.optInt("version"),
                         fullSnapshot = window.fullSnapshot
                     )
@@ -632,7 +751,7 @@ class PhoneBluetoothSyncManager(
                     "fallbackReason" to window.fallbackReason
                 )
             )
-            val readerSyncWarning = if (exchange.manifestResponse.optInt("version") >= 11 &&
+            val readerSyncWarning = if (mode == LibrarySyncMode.MERGE && exchange.manifestResponse.optInt("version") >= 11 &&
                 exchange.manifestResponse.optBoolean("supportsReaderPresets", true)
             ) {
                 runCatching {
@@ -660,13 +779,16 @@ class PhoneBluetoothSyncManager(
             } else {
                 null
             }
-            reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_NOTES, 0)
-            val noteStats = syncNotes(
-                deviceAddress = exchange.deviceAddress,
-                parentSessionId = sessionId,
-                syncSession = syncSession
-            )
-            reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_NOTES, 100)
+            val noteStats = if (mode == LibrarySyncMode.MERGE) {
+                reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_NOTES, 0)
+                syncNotes(
+                    deviceAddress = exchange.deviceAddress,
+                    parentSessionId = sessionId,
+                    syncSession = syncSession
+                ).also {
+                    reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_NOTES, 100)
+                }
+            } else null
             reportProgress(onProgress, PhoneBluetoothSyncStage.VERIFYING, 100)
             PhoneBluetoothSyncResult(
                 deviceName = exchange.deviceName,

@@ -201,6 +201,9 @@ interface PhoneArticleDao {
     @Query("SELECT * FROM phone_articles")
     suspend fun getAllForSync(): List<PhoneArticleEntity>
 
+    @Query("SELECT articleId FROM phone_articles")
+    suspend fun getAllIds(): List<String>
+
     @Query(
         """
         SELECT articleId, sourceDeviceId, url, title, siteName, excerpt,
@@ -314,6 +317,9 @@ interface PhoneArticleDao {
 
     @Query("DELETE FROM phone_articles WHERE rssSourceUrl = :rssSourceUrl")
     suspend fun deleteByRssSourceUrl(rssSourceUrl: String)
+
+    @Query("DELETE FROM phone_articles WHERE articleId IN (:articleIds)")
+    suspend fun deleteByIds(articleIds: List<String>)
 
     @Query("DELETE FROM phone_articles")
     suspend fun deleteAll()

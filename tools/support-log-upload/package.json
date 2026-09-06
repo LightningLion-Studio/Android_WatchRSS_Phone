@@ -1,0 +1,1 @@
+{"name":"watchrss-phone-support-log-upload","private":true,"type":"module","scripts":{"build":"vite build --base=./ --outDir ../../app/src/main/assets/support_log_upload"},"dependencies":{"@instantdb/core":"0.22.146"},"devDependencies":{"vite":"5.4.2"}}

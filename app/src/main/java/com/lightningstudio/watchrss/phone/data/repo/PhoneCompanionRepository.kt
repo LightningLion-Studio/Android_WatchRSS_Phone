@@ -1167,7 +1167,8 @@ class PhoneCompanionRepository(
 
     suspend fun mergeArticlesFromSync(
         incoming: List<PhoneArticleEntity>,
-        conflictResolutions: Map<String, PhoneSyncConflictResolution> = emptyMap()
+        conflictResolutions: Map<String, PhoneSyncConflictResolution> = emptyMap(),
+        authoritative: Boolean = false
     ): Int = withContext(Dispatchers.IO) {
         var merged = 0
         incoming.forEach { remote ->
@@ -1195,7 +1196,7 @@ class PhoneCompanionRepository(
             } else {
                 remoteWithBody.withCurrentSyncMetadata()
             }
-            val next = if (local == null) {
+            val next = if (authoritative || local == null) {
                 preparedRemote
             } else {
                 val localHydrated = local.hydrateExternalText()
@@ -1216,7 +1217,8 @@ class PhoneCompanionRepository(
 
     suspend fun mergeChunkedArticlesFromSync(
         incoming: List<ChunkedArticlePayload>,
-        conflictResolutions: Map<String, PhoneSyncConflictResolution> = emptyMap()
+        conflictResolutions: Map<String, PhoneSyncConflictResolution> = emptyMap(),
+        authoritative: Boolean = false
     ): Int =
         withContext(Dispatchers.IO) {
             val localByArticleId = mutableMapOf<String, PhoneArticleEntity?>()
@@ -1264,7 +1266,7 @@ class PhoneCompanionRepository(
                     contentHtml = contentHtml,
                     contentText = contentText,
                 )
-                val mergedArticle = if (localHydrated == null) {
+                val mergedArticle = if (authoritative || localHydrated == null) {
                     preparedRemote
                 } else {
                     mergeArticle(
@@ -1322,6 +1324,43 @@ class PhoneCompanionRepository(
             }
             merged
         }
+
+    suspend fun mergeAuthoritativeRssSources(incoming: List<PhoneRssSourceEntity>): Int =
+        withContext(Dispatchers.IO) {
+            incoming.forEach { rssSourceDao.upsert(it) }
+            incoming.size
+        }
+
+    /**
+     * Finalizes a validated authoritative snapshot without holding article bodies twice.
+     * Matching rows are retained while target-only rows are pruned.
+     */
+    suspend fun finalizeAuthoritativeLibrarySnapshot(
+        retainedArticleIds: Collection<String>,
+        retainedSourceUrls: Collection<String>
+    ) = withContext(Dispatchers.IO) {
+        val articleIds = retainedArticleIds.toHashSet()
+        val sourceUrls = retainedSourceUrls.toHashSet()
+        articleDao.getAllIds().filterNot(articleIds::contains).chunked(400).forEach { articleDao.deleteByIds(it) }
+        rssSourceDao.getAllUrls().filterNot(sourceUrls::contains).chunked(400).forEach { rssSourceDao.deleteByUrls(it) }
+        savedItemDao.deleteAll()
+        syncChangeLogDao.deleteAll()
+        syncPeerStateDao.deleteAll()
+        pruneUnreferencedArticleContent()
+    }
+
+    suspend fun clearLibrary() = withContext(Dispatchers.IO) {
+        articleDao.deleteAll()
+        rssSourceDao.deleteAll()
+        savedItemDao.deleteAll()
+        syncChangeLogDao.deleteAll()
+        syncPeerStateDao.deleteAll()
+        articleContentStore?.prune(emptySet())
+    }
+
+    suspend fun resetLibrarySyncPeerState() = withContext(Dispatchers.IO) {
+        syncPeerStateDao.deleteAll()
+    }
 
     suspend fun replaceSavedItems(type: PhoneSavedItemType, data: JSONArray): Int {
         val syncedAt = System.currentTimeMillis()

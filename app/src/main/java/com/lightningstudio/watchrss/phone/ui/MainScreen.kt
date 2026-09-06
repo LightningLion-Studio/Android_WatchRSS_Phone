@@ -1,5 +1,9 @@
 package com.lightningstudio.watchrss.phone.ui
 
+import android.content.Intent
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.material.icons.filled.SupportAgent
+import com.lightningstudio.watchrss.phone.SupportActivity
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -13,6 +17,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
@@ -315,6 +320,11 @@ fun MainScreen(
     onConfirmSharedFileImport: (SharedImportPromptUi) -> Unit,
     onDismissSharedImport: () -> Unit,
     onSyncLibrary: () -> Unit,
+    onForceFullSync: () -> Unit,
+    onReplaceWatchWithPhone: () -> Unit,
+    onReplacePhoneWithWatch: () -> Unit,
+    onClearPhoneLibrary: () -> Unit,
+    onClearWatchLibrary: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenNotes: () -> Unit,
     storageUsedBytes: Long,
@@ -350,7 +360,9 @@ fun MainScreen(
     onShowManualConflictOptions: () -> Unit,
     onDismissMessage: () -> Unit,
     onDismissSupportAlert: () -> Unit,
-    tipSuppression: TipSuppressionState? = null
+    tipSuppression: TipSuppressionState? = null,
+    supportDestination: String? = null,
+    onSupportDestinationConsumed: () -> Unit = {}
 ) {
     var selectedContentChannelKey by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedReaderArticleId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -599,6 +611,28 @@ fun MainScreen(
         readerOpenProgress = 1f
         readerOpenAnimating = false
         readerLeftPaneReturnState = null
+    }
+
+    LaunchedEffect(supportDestination) {
+        if (supportDestination == null) return@LaunchedEffect
+        when (supportDestination) {
+            "home", "sync" -> navigateToTopLevelPage(MainPage.DASHBOARD)
+            "imports" -> navigateToTopLevelPage(MainPage.IMPORTS)
+            "rss", "add_rss" -> {
+                navigateToTopLevelPage(MainPage.RSS)
+                if (supportDestination == "add_rss") urlDialogMode = UrlDialogMode.RSS
+            }
+            "favorites", "watch_later", "independent", "imported" -> {
+                val key = when (supportDestination) {
+                    "favorites" -> CONTENT_CHANNEL_FAVORITES
+                    "watch_later" -> CONTENT_CHANNEL_WATCH_LATER
+                    "independent" -> CONTENT_CHANNEL_INDEPENDENT
+                    else -> CONTENT_CHANNEL_IMPORTED_TEXT
+                }
+                navigateToContentChannel(key, MainPage.RSS, MainPage.DASHBOARD)
+            }
+        }
+        onSupportDestinationConsumed()
     }
 
     fun switchChannelToTopLevelPage(destination: MainPage, returnPage: MainPage) {
@@ -1109,7 +1143,6 @@ fun MainScreen(
                 onOpenChannelSettings = {
                     selectedSource?.let { channelSettingsSourceUrl = it.url }
                 },
-                onExportBluetoothLog = onExportBluetoothLog,
                 onOpenProfile = onOpenProfile,
                 modifier = modifier
             )
@@ -1209,11 +1242,22 @@ fun MainScreen(
                                     contentPadding = contentPadding,
                                     windowInfo = windowInfo,
                                     onSyncLibrary = onSyncLibrary,
+                                    onForceFullSync = onForceFullSync,
+                                    onReplaceWatchWithPhone = onReplaceWatchWithPhone,
+                                    onReplacePhoneWithWatch = onReplacePhoneWithWatch,
+                                    onClearPhoneLibrary = onClearPhoneLibrary,
+                                    onClearWatchLibrary = onClearWatchLibrary,
                                     onOpenProfile = onOpenProfile,
                                     onOpenNotes = onOpenNotes,
                                     storageUsedBytes = storageUsedBytes,
                                     onOpenStorage = onOpenStorage,
                                     onExportBluetoothLog = onExportBluetoothLog,
+                                    onOpenImports = {
+                                        navigateToTopLevelPage(
+                                            MainPage.IMPORTS,
+                                            usePager = !windowInfo.isMediumOrExpanded
+                                        )
+                                    },
                                     onOpenRss = {
                                         navigateToTopLevelPage(
                                             MainPage.RSS,
@@ -1306,11 +1350,22 @@ fun MainScreen(
                                 contentPadding = contentPadding,
                                 windowInfo = windowInfo,
                                 onSyncLibrary = onSyncLibrary,
-                                    onOpenProfile = onOpenProfile,
-                                    onOpenNotes = onOpenNotes,
+                                onForceFullSync = onForceFullSync,
+                                onReplaceWatchWithPhone = onReplaceWatchWithPhone,
+                                onReplacePhoneWithWatch = onReplacePhoneWithWatch,
+                                onClearPhoneLibrary = onClearPhoneLibrary,
+                                onClearWatchLibrary = onClearWatchLibrary,
+                                onOpenProfile = onOpenProfile,
+                                onOpenNotes = onOpenNotes,
                                 storageUsedBytes = storageUsedBytes,
                                 onOpenStorage = onOpenStorage,
                                 onExportBluetoothLog = onExportBluetoothLog,
+                                onOpenImports = {
+                                    navigateToTopLevelPage(
+                                        MainPage.IMPORTS,
+                                        usePager = !windowInfo.isMediumOrExpanded
+                                    )
+                                },
                                 onOpenRss = {
                                     navigateToTopLevelPage(
                                         MainPage.RSS,
@@ -1358,11 +1413,22 @@ fun MainScreen(
                                 contentPadding = contentPadding,
                                 windowInfo = windowInfo,
                                 onSyncLibrary = onSyncLibrary,
+                                onForceFullSync = onForceFullSync,
+                                onReplaceWatchWithPhone = onReplaceWatchWithPhone,
+                                onReplacePhoneWithWatch = onReplacePhoneWithWatch,
+                                onClearPhoneLibrary = onClearPhoneLibrary,
+                                onClearWatchLibrary = onClearWatchLibrary,
                                 onOpenProfile = onOpenProfile,
                                 onOpenNotes = onOpenNotes,
                                 storageUsedBytes = storageUsedBytes,
                                 onOpenStorage = onOpenStorage,
                                 onExportBluetoothLog = onExportBluetoothLog,
+                                onOpenImports = {
+                                    navigateToTopLevelPage(
+                                        MainPage.IMPORTS,
+                                        usePager = !windowInfo.isMediumOrExpanded
+                                    )
+                                },
                                 onOpenRss = {
                                     navigateToTopLevelPage(
                                         MainPage.RSS,
@@ -2538,7 +2604,6 @@ private fun MainTopBar(
     onRefreshAllRssSources: () -> Unit,
     onRefreshSelectedSource: () -> Unit,
     onOpenChannelSettings: () -> Unit,
-    onExportBluetoothLog: () -> Unit,
     onOpenProfile: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -2548,6 +2613,7 @@ private fun MainTopBar(
         MainPage.IMPORTS -> "导入"
         MainPage.CHANNEL -> selectedChannel?.title?.takeIf { it.isNotBlank() } ?: "频道"
     }
+    val context = LocalContext.current
     CenterAlignedTopAppBar(
         modifier = modifier,
         title = {
@@ -2572,6 +2638,11 @@ private fun MainTopBar(
             }
         },
         navigationIcon = {
+            if (page == MainPage.DASHBOARD) {
+                IconButton(onClick = { context.startActivity(Intent(context, SupportActivity::class.java)) }, modifier = Modifier.testTag("topbar_support")) {
+                    Icon(Icons.Default.SupportAgent, contentDescription = "AI 客服")
+                }
+            }
             if (page == MainPage.CHANNEL) {
                 IconButton(
                     onClick = onBack,
@@ -2584,12 +2655,6 @@ private fun MainTopBar(
         actions = {
             when (page) {
                 MainPage.DASHBOARD -> {
-                    IconButton(
-                        onClick = onExportBluetoothLog,
-                        modifier = Modifier.testTag("topbar_export_log")
-                    ) {
-                        Icon(Icons.Default.BugReport, contentDescription = "导出蓝牙日志")
-                    }
                     IconButton(
                         onClick = onOpenProfile,
                         modifier = Modifier.testTag("topbar_profile")
@@ -2776,6 +2841,34 @@ private fun MainFloatingActionButton(
     }
 }
 
+
+@Composable
+private fun DashboardImportCard(onClick: () -> Unit) {
+    ElevatedCard(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("dashboard_imports_card"),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+        )
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Icon(Icons.Default.FileOpen, contentDescription = null)
+            Text(
+                text = "导入内容",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+    }
+}
+
 @Composable
 private fun DashboardPage(
     uiState: MainUiState,
@@ -2783,11 +2876,17 @@ private fun DashboardPage(
     contentPadding: PaddingValues,
     windowInfo: AdaptiveWindowInfo,
     onSyncLibrary: () -> Unit,
+    onForceFullSync: () -> Unit,
+    onReplaceWatchWithPhone: () -> Unit,
+    onReplacePhoneWithWatch: () -> Unit,
+    onClearPhoneLibrary: () -> Unit,
+    onClearWatchLibrary: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenNotes: () -> Unit,
     storageUsedBytes: Long,
     onOpenStorage: () -> Unit,
     onExportBluetoothLog: () -> Unit,
+    onOpenImports: () -> Unit,
     onOpenRss: () -> Unit,
     onOpenFavorites: () -> Unit,
     onOpenWatchLater: () -> Unit,
@@ -2808,7 +2907,6 @@ private fun DashboardPage(
                 onRefreshAllRssSources = {},
                 onRefreshSelectedSource = {},
                 onOpenChannelSettings = {},
-                onExportBluetoothLog = onExportBluetoothLog,
                 onOpenProfile = onOpenProfile,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -2842,7 +2940,10 @@ private fun DashboardPage(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
-                            Box(modifier = Modifier.weight(1f)) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
                                 SyncStatusCard(
                                     transportLabel = uiState.syncTransportLabel,
                                     message = uiState.syncStatusMessage,
@@ -2850,9 +2951,15 @@ private fun DashboardPage(
                                     syncProgress = uiState.syncProgress,
                                     isBusy = uiState.isBusy,
                                     onSyncLibrary = onSyncLibrary,
+                                    onForceFullSync = onForceFullSync,
+                                    onReplaceWatchWithPhone = onReplaceWatchWithPhone,
+                                    onReplacePhoneWithWatch = onReplacePhoneWithWatch,
+                                    onClearPhoneLibrary = onClearPhoneLibrary,
+                                    onClearWatchLibrary = onClearWatchLibrary,
                                     onExportBluetoothLog = onExportBluetoothLog,
                                     onDismissMessage = onDismissMessage
                                 )
+                                DashboardImportCard(onClick = onOpenImports)
                             }
                             Box(modifier = Modifier.weight(1f)) {
                                 LibrarySummaryCard(
@@ -2881,9 +2988,17 @@ private fun DashboardPage(
                             syncProgress = uiState.syncProgress,
                             isBusy = uiState.isBusy,
                             onSyncLibrary = onSyncLibrary,
+                            onForceFullSync = onForceFullSync,
+                            onReplaceWatchWithPhone = onReplaceWatchWithPhone,
+                            onReplacePhoneWithWatch = onReplacePhoneWithWatch,
+                            onClearPhoneLibrary = onClearPhoneLibrary,
+                            onClearWatchLibrary = onClearWatchLibrary,
                             onExportBluetoothLog = onExportBluetoothLog,
                             onDismissMessage = onDismissMessage
                         )
+                    }
+                    item {
+                        DashboardImportCard(onClick = onOpenImports)
                     }
                     item {
                         LibrarySummaryCard(
@@ -3059,9 +3174,17 @@ private fun SyncStatusCard(
     syncProgress: MainSyncProgressUi?,
     isBusy: Boolean,
     onSyncLibrary: () -> Unit,
+    onForceFullSync: () -> Unit,
+    onReplaceWatchWithPhone: () -> Unit,
+    onReplacePhoneWithWatch: () -> Unit,
+    onClearPhoneLibrary: () -> Unit,
+    onClearWatchLibrary: () -> Unit,
     onExportBluetoothLog: () -> Unit,
     onDismissMessage: () -> Unit
 ) {
+    var showForceSyncDialog by remember { mutableStateOf(false) }
+    var destructiveAction by remember { mutableStateOf<DestructiveLibraryAction?>(null) }
+    var destructiveConfirmationStep by remember { mutableStateOf(0) }
     ElevatedCard(
         modifier = Modifier
             .testTag("dashboard_sync_card")
@@ -3146,16 +3269,36 @@ private fun SyncStatusCard(
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = onSyncLibrary,
-                    enabled = !isBusy,
+                Surface(
+                    color = if (isBusy) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.38f)
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    shape = RoundedCornerShape(20.dp),
                     modifier = Modifier
                         .weight(1f)
+                        .combinedClickable(
+                            enabled = !isBusy,
+                            onClick = onSyncLibrary,
+                            onLongClick = { showForceSyncDialog = true },
+                            onLongClickLabel = "选择强制全量同步方式"
+                        )
                         .testTag("dashboard_sync_watch")
                 ) {
-                    Icon(Icons.Default.Sync, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("同步")
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(40.dp)
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Sync, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("同步")
+                    }
                 }
                 OutlinedButton(
                     onClick = onExportBluetoothLog,
@@ -3171,6 +3314,122 @@ private fun SyncStatusCard(
             }
         }
     }
+    if (showForceSyncDialog) {
+        AlertDialog(
+            onDismissRequest = { showForceSyncDialog = false },
+            modifier = Modifier.testTag("dialog_force_full_sync"),
+            title = { Text("强制全量同步") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("两端会完整传输资料库，随后按最新操作合并。耗时可能明显更长。")
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            showForceSyncDialog = false
+                            onForceFullSync()
+                        }
+                    ) {
+                        Text("双向全量传输后合并")
+                    }
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            showForceSyncDialog = false
+                            destructiveAction = DestructiveLibraryAction.PHONE_OVERWRITES_WATCH
+                            destructiveConfirmationStep = 1
+                        }
+                    ) { Text("让手机覆盖手表") }
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            showForceSyncDialog = false
+                            destructiveAction = DestructiveLibraryAction.WATCH_OVERWRITES_PHONE
+                            destructiveConfirmationStep = 1
+                        }
+                    ) { Text("让手表覆盖手机") }
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            showForceSyncDialog = false
+                            destructiveAction = DestructiveLibraryAction.CLEAR_PHONE
+                            destructiveConfirmationStep = 1
+                        }
+                    ) { Text("清空手机库内容") }
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            showForceSyncDialog = false
+                            destructiveAction = DestructiveLibraryAction.CLEAR_WATCH
+                            destructiveConfirmationStep = 1
+                        }
+                    ) { Text("清空手表库内容") }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showForceSyncDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+    destructiveAction?.let { action ->
+        AlertDialog(
+            onDismissRequest = {
+                destructiveAction = null
+                destructiveConfirmationStep = 0
+            },
+            title = {
+                Text(if (destructiveConfirmationStep == 1) "确认${action.label}？" else "再次确认：${action.label}")
+            },
+            text = {
+                Text(
+                    if (destructiveConfirmationStep == 1) action.warning
+                    else "这是最后一次确认。执行后目标端原有资料库无法通过同步恢复，确定继续吗？"
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    if (destructiveConfirmationStep == 1) {
+                        destructiveConfirmationStep = 2
+                    } else {
+                        when (action) {
+                            DestructiveLibraryAction.PHONE_OVERWRITES_WATCH -> onReplaceWatchWithPhone()
+                            DestructiveLibraryAction.WATCH_OVERWRITES_PHONE -> onReplacePhoneWithWatch()
+                            DestructiveLibraryAction.CLEAR_PHONE -> onClearPhoneLibrary()
+                            DestructiveLibraryAction.CLEAR_WATCH -> onClearWatchLibrary()
+                        }
+                        destructiveAction = null
+                        destructiveConfirmationStep = 0
+                    }
+                }) {
+                    Text(if (destructiveConfirmationStep == 1) "继续" else "确认执行")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    destructiveAction = null
+                    destructiveConfirmationStep = 0
+                }) { Text("取消") }
+            }
+        )
+    }
+}
+
+private enum class DestructiveLibraryAction(
+    val label: String,
+    val warning: String
+) {
+    PHONE_OVERWRITES_WATCH(
+        "让手机覆盖手表",
+        "手机是唯一数据源。传输校验成功后，手表端多余或不同的资料库内容会被删除或改成与手机一致。"
+    ),
+    WATCH_OVERWRITES_PHONE(
+        "让手表覆盖手机",
+        "手表是唯一数据源。传输校验成功后，手机端多余或不同的资料库内容会被删除或改成与手表一致。"
+    ),
+    CLEAR_PHONE("清空手机库内容", "将删除手机端的 RSS 源、文章、收藏、稍后读和阅读进度。手表端不受影响。"),
+    CLEAR_WATCH("清空手表库内容", "将删除所选手表端的 RSS 源、文章、收藏、稍后读和阅读进度。手机端不受影响。")
 }
 
 @Composable

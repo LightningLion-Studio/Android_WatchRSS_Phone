@@ -61,9 +61,9 @@ class BluetoothDebugLog(context: Context) {
         }
     }
 
-    suspend fun exportTo(contentResolver: ContentResolver, uri: Uri): Long =
+    suspend fun exportTo(contentResolver: ContentResolver, uri: Uri, watchLog: String? = null): Long =
         withContext(Dispatchers.IO) {
-            val text = snapshot()
+            val text = snapshot(watchLog)
             contentResolver.openOutputStream(uri)?.use { output ->
                 val bytes = text.toByteArray(Charsets.UTF_8)
                 output.write(bytes)
@@ -71,7 +71,7 @@ class BluetoothDebugLog(context: Context) {
             } ?: error("无法创建日志文件")
         }
 
-    private fun snapshot(): String {
+    fun snapshot(watchLog: String? = null): String {
         val body = synchronized(lock) {
             if (file.exists()) {
                 file.readText()
@@ -87,6 +87,12 @@ class BluetoothDebugLog(context: Context) {
             appendLine("sdk=${Build.VERSION.SDK_INT}")
             appendLine()
             append(body.ifBlank { "No Bluetooth debug entries recorded." })
+            watchLog?.let {
+                appendLine()
+                appendLine()
+                appendLine("===== WatchRSS Watch App Log (best effort) =====")
+                append(it.ifBlank { "No watch log entries returned." })
+            }
         }
     }
 

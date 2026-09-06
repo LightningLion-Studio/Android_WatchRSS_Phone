@@ -221,19 +221,22 @@ class SettingsActivity : ComponentActivity() {
                 ReaderSettingsHost(
                     repository = repository,
                     onFinish = ::finish,
-                    openStorageInitially = intent.getBooleanExtra(EXTRA_OPEN_STORAGE, false)
+                    openStorageInitially = intent.getBooleanExtra(EXTRA_OPEN_STORAGE, false),
+                    initialSection = intent.getStringExtra(EXTRA_SECTION)
                 )
             }
         }
     }
 
     companion object {
-        fun createIntent(context: Context, openStorage: Boolean = false): Intent =
+        fun createIntent(context: Context, openStorage: Boolean = false, section: String? = null): Intent =
             Intent(context, SettingsActivity::class.java).apply {
+                putExtra(EXTRA_SECTION, section)
                 if (openStorage) putExtra(EXTRA_OPEN_STORAGE, true)
             }
 
         const val EXTRA_OPEN_STORAGE = "open_storage"
+        private const val EXTRA_SECTION = "settings_section"
     }
 }
 
@@ -303,7 +306,8 @@ internal fun ReaderSettingsHost(
     repository: ReaderPresetRepository,
     onFinish: () -> Unit,
     leadingPane: (@Composable () -> Unit)? = null,
-    openStorageInitially: Boolean = false
+    openStorageInitially: Boolean = false,
+    initialSection: String? = null
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val container = (context.applicationContext as PhoneCompanionApplication).container
@@ -328,9 +332,13 @@ internal fun ReaderSettingsHost(
                 ?.let { runCatching { RememberedBackgroundImportChoice.valueOf(it) }.getOrNull() }
         )
     }
-    var page by rememberSaveable {
-        mutableStateOf(if (openStorageInitially) SettingsPage.STORAGE else SettingsPage.ROOT)
-    }
+    var page by rememberSaveable { mutableStateOf(if (openStorageInitially) SettingsPage.STORAGE else when (initialSection) {
+        "presets" -> SettingsPage.PRESETS
+        "fonts" -> SettingsPage.FONTS
+        "backgrounds" -> SettingsPage.BACKGROUNDS
+        "app_settings" -> SettingsPage.APP
+        else -> SettingsPage.ROOT
+    }) }
     var draft by remember { mutableStateOf<ReaderPreset?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var renamePreset by remember { mutableStateOf<ReaderPreset?>(null) }

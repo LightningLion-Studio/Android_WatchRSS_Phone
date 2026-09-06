@@ -1,5 +1,9 @@
 package com.lightningstudio.watchrss.phone
 
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.ui.layout.onGloballyPositioned
+
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -142,6 +146,9 @@ class AccountActivity : ComponentActivity() {
                     tipManager = container.tipManager
                 ) {
                 AccountScreen(
+                    initialSection = AccountSection.entries.firstOrNull {
+                        it.name == intent.getStringExtra(EXTRA_SECTION)
+                    } ?: AccountSection.ROOT,
                     accountRepository = accountRepository,
                     cloudSyncService = container.cloudSyncService,
                     rssSources = rssSources,
@@ -185,15 +192,19 @@ class AccountActivity : ComponentActivity() {
     }
 
     companion object {
+        private const val EXTRA_SECTION = "account_section"
         private const val EXTRA_FINISH_AFTER_LOGIN =
             "com.lightningstudio.watchrss.phone.extra.FINISH_AFTER_LOGIN"
 
-        fun createIntent(context: Context, finishAfterLogin: Boolean = false): Intent =
+        fun createIntent(context: Context, finishAfterLogin: Boolean = false, section: AccountSection = AccountSection.ROOT): Intent =
             Intent(context, AccountActivity::class.java).apply {
                 putExtra(EXTRA_FINISH_AFTER_LOGIN, finishAfterLogin)
+                putExtra(EXTRA_SECTION, section.name)
             }
     }
 }
+
+enum class AccountSection { ROOT, ORDERS, SECURITY, CLOUD_SYNC }
 
 private enum class AccountPage {
     ROOT,
@@ -231,7 +242,8 @@ internal fun AccountScreen(
     loginWithPasskey: suspend (String, String?) -> LoginProgress,
     createPasskey: suspend () -> Unit,
     runAction: (suspend () -> Unit) -> Unit,
-    leadingPane: (@Composable () -> Unit)? = null
+    leadingPane: (@Composable () -> Unit)? = null,
+    initialSection: AccountSection = AccountSection.ROOT
 ) {
     val session by accountRepository.session.collectAsState()
     val context = LocalContext.current
@@ -240,7 +252,13 @@ internal fun AccountScreen(
     val appAccessState by accessCoordinator.state.collectAsState()
     val cloudSyncState by cloudSyncService.state.collectAsState()
     val coroutineScope = rememberCoroutineScope()
-    var page by rememberSaveable(session?.userId) { mutableStateOf(AccountPage.ROOT) }
+    var page by rememberSaveable(session?.userId) {
+        mutableStateOf(if (initialSection == AccountSection.CLOUD_SYNC && session != null) AccountPage.CLOUD_SYNC else AccountPage.ROOT)
+    }
+    val sectionRequester = remember { BringIntoViewRequester() }
+    var sectionReady by remember(session?.userId, initialSection) { mutableStateOf(false) }
+    val sectionAnchor = Modifier.bringIntoViewRequester(sectionRequester)
+        .onGloballyPositioned { sectionReady = true }
     var paneTransition by remember { mutableStateOf<AccountPaneTransition?>(null) }
     var paneTransitionProgress by remember { mutableStateOf(1f) }
     var phone by remember { mutableStateOf("") }
@@ -772,7 +790,8 @@ internal fun AccountScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Text("密码与账号安全", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+            Text("密码与账号安全", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
+                modifier = if (initialSection == AccountSection.SECURITY) sectionAnchor else Modifier)
             OutlinedButton(
                 onClick = {
                     securityVerificationPurpose = SecurityVerificationPurpose.UPDATE_PASSWORD
@@ -1721,6 +1740,10 @@ internal fun AccountScreen(
         )
     }
 
+    LaunchedEffect(sectionReady, paymentOrdersLoading) {
+        if (sectionReady && !paymentOrdersLoading) sectionRequester.bringIntoView()
+    }
+
     AdaptiveWindowScope(modifier = Modifier.fillMaxSize()) { windowInfo ->
         val rootPane: @Composable () -> Unit = {
             AccountPageScaffold(title = "账号", onBack = onBack) {
@@ -1760,7 +1783,8 @@ internal fun AccountScreen(
                             Modifier.padding(16.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Text("订单与退款", fontWeight = FontWeight.SemiBold)
+                            Text("订单与退款", fontWeight = FontWeight.SemiBold,
+                                modifier = if (initialSection == AccountSection.ORDERS) sectionAnchor else Modifier)
                             Text(
                                 "订单对应的是手机版设备授权包，不是哔哩哔哩、抖音或WatchRSS云会员。",
                                 style = MaterialTheme.typography.bodySmall,

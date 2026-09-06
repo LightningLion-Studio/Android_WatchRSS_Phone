@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import android.widget.Toast
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_EXTENSION
@@ -63,9 +64,11 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.io.File
 
 class HomeActivity : ComponentActivity() {
     companion object {
+        const val EXTRA_SUPPORT_DESTINATION = "support_destination"
         private const val TAG = "腕上RSS_Home"
         private val URL_PATTERN = Regex("""https?://\S+""")
 
@@ -75,6 +78,8 @@ class HomeActivity : ComponentActivity() {
             }
         }
     }
+
+    private val pendingSupportDestination = mutableStateOf<String?>(null)
 
     private val viewModel: MainViewModel by viewModels {
         val container = (application as PhoneCompanionApplication).container
@@ -113,27 +118,6 @@ class HomeActivity : ComponentActivity() {
                 pendingBluetoothAction?.invoke()
             }
             pendingBluetoothAction = null
-        }
-
-    private val exportBluetoothLogLauncher =
-        registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
-            if (uri == null) {
-                viewModel.showSyncStatusMessage("已取消导出蓝牙日志")
-                return@registerForActivityResult
-            }
-            lifecycleScope.launch {
-                runCatching {
-                    (application as PhoneCompanionApplication)
-                        .container
-                        .bluetoothDebugLog
-                        .exportTo(contentResolver, uri)
-                }.onSuccess { bytes ->
-                    viewModel.showSyncStatusMessage("蓝牙日志已导出：$bytes 字节")
-                }.onFailure { throwable ->
-                    Log.e(TAG, "Failed to export bluetooth log", throwable)
-                    viewModel.showSyncStatusError("蓝牙日志导出失败：${throwable.message ?: "未知错误"}")
-                }
-            }
         }
 
     private val exportBackupLauncher =
@@ -180,6 +164,7 @@ class HomeActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingSupportDestination.value = intent.getStringExtra(EXTRA_SUPPORT_DESTINATION)
         val container = (application as PhoneCompanionApplication).container
 
         Log.i(TAG, "=== 腕上RSS 手机端 已启动 ===")
@@ -215,6 +200,11 @@ class HomeActivity : ComponentActivity() {
                     ) {
                         MainScreen(
                         uiState = state,
+                        supportDestination = pendingSupportDestination.value,
+                        onSupportDestinationConsumed = {
+                            pendingSupportDestination.value = null
+                            intent.removeExtra(EXTRA_SUPPORT_DESTINATION)
+                        },
                     onUrlChange = viewModel::updateUrlInput,
                     onImportArticle = viewModel::importIndependentArticle,
                     onAddRssSource = viewModel::addRssSource,
@@ -235,6 +225,19 @@ class HomeActivity : ComponentActivity() {
                     },
                     onChooseBluetoothDevice = viewModel::chooseBluetoothDeviceForSync,
                     onDismissBluetoothDevicePrompt = viewModel::dismissBluetoothDevicePrompt,
+                    onForceFullSync = {
+                        ensureBluetoothPermissions(viewModel::forceFullSyncByBluetooth)
+                    },
+                    onReplaceWatchWithPhone = {
+                        ensureBluetoothPermissions(viewModel::replaceWatchWithPhoneLibrary)
+                    },
+                    onReplacePhoneWithWatch = {
+                        ensureBluetoothPermissions(viewModel::replacePhoneWithWatchLibrary)
+                    },
+                    onClearPhoneLibrary = viewModel::clearPhoneLibrary,
+                    onClearWatchLibrary = {
+                        ensureBluetoothPermissions(viewModel::clearWatchLibraryByBluetooth)
+                    },
                     onExportBluetoothLog = ::exportBluetoothLog,
                     onOpenArticle = { article ->
                         val platform = PlatformLinkRouter.detect(article.url)
@@ -486,6 +489,7 @@ class HomeActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        pendingSupportDestination.value = intent.getStringExtra(EXTRA_SUPPORT_DESTINATION)
         handleInboundIntent(intent)
     }
 
@@ -508,8 +512,43 @@ class HomeActivity : ComponentActivity() {
     }
 
     private fun exportBluetoothLog() {
-        val fileName = "watchrss-phone-bluetooth-${System.currentTimeMillis()}.txt"
-        exportBluetoothLogLauncher.launch(fileName)
+        // Probing a paired watch can take a few seconds. Show progress before the
+        // coroutine starts so the log button never looks like it did nothing.
+        viewModel.showSyncStatusMessage("正在收集手机日志…")
+        lifecycleScope.launch {
+            val container = (application as PhoneCompanionApplication).container
+            viewModel.showSyncStatusMessage("正在连接手表并收集手表日志…")
+            val watchLog = runCatching {
+                viewModel.collectWatchDebugLog()
+            }.onFailure { throwable ->
+                Log.w(TAG, "Watch log unavailable; sharing phone log only", throwable)
+            }.getOrNull()
+            runCatching {
+                val directory = File(cacheDir, "shared_logs").apply { mkdirs() }
+                val file = File(directory, "watchrss-logs-${System.currentTimeMillis()}.txt")
+                file.writeText(container.bluetoothDebugLog.snapshot(watchLog?.text))
+                FileProvider.getUriForFile(this@HomeActivity, "$packageName.fileprovider", file)
+            }.onSuccess { uri ->
+                startActivity(Intent.createChooser(
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        putExtra(Intent.EXTRA_TITLE, "WatchRSS 日志")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    },
+                    "分享 WatchRSS 日志"
+                ))
+                val suffix = when {
+                    watchLog == null -> "（未连接到手表，仅含手机日志）"
+                    watchLog.truncated -> "（含手表日志，已截取最新部分）"
+                    else -> "（含手表日志）"
+                }
+                viewModel.showSyncStatusMessage("已打开分享面板$suffix")
+            }.onFailure { throwable ->
+                Log.e(TAG, "Failed to share bluetooth log", throwable)
+                viewModel.showSyncStatusError("分享日志失败：${throwable.message ?: "未知错误"}")
+            }
+        }
     }
 
     private fun exportBackup() {

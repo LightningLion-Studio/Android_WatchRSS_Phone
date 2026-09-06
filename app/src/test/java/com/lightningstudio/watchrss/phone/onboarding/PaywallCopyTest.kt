@@ -32,10 +32,8 @@ class PaywallCopyTest {
         assertTrue(copy.detail.contains("坚持 30 天"))
         assertTrue(copy.detail.contains("《论持久战》"))
         assertTrue(copy.detail.contains("一次支付 ¥6 获取手机版设备授权包"))
-        assertTrue(copy.detail.contains("哔哩哔哩"))
-        assertTrue(copy.detail.contains("抖音"))
-        assertTrue(copy.detail.contains("小说阅读"))
-        assertTrue(copy.detail.contains("备忘录"))
+        assertTrue(copy.detail.contains("账号增加 3 台手机容量"))
+        assertTrue(copy.detail.contains("不自动续费"))
         assertFalse(copy.detail.contains("完整体验"))
         assertFalse(copy.detail.contains("就差最后一步"))
         assertFalse(copy.detail.contains("已购买"))
@@ -62,7 +60,7 @@ class PaywallCopyTest {
         val profile = OnboardingProfile(planName = "", answeredCount = 3)
         val copy = OnboardingProfileBuilder.paywallCopyFor(summary, profile)
         assertEquals("你的阅读计划已保存", copy.title)
-        assertTrue(copy.detail.contains("3 个定制项已保存"))
+        assertTrue(copy.detail.contains("已保存 3 个定制项"))
     }
 
     @Test

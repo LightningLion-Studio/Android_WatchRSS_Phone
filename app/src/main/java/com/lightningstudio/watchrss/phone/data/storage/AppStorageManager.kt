@@ -65,7 +65,7 @@ class AppStorageManager(context: Context) {
         val before = appContext.cacheDir.sizeRecursively() +
             appContext.externalCacheDirs.filterNotNull().sumOf { it.sizeRecursively() }
         appContext.cacheDir.deleteChildren()
-        appContext.externalCacheDirs.filterNotNull().forEach(File::deleteChildren)
+        appContext.externalCacheDirs.filterNotNull().forEach { it.deleteChildren() }
         val after = appContext.cacheDir.sizeRecursively() +
             appContext.externalCacheDirs.filterNotNull().sumOf { it.sizeRecursively() }
         (before - after).coerceAtLeast(0L)

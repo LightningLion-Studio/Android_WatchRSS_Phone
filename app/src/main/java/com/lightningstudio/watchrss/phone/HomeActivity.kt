@@ -178,15 +178,6 @@ class HomeActivity : ComponentActivity() {
             }
         }
 
-    override fun onResume() {
-        super.onResume()
-        val manager = (application as PhoneCompanionApplication).container.appStorageManager
-        lifecycleScope.launch {
-            runCatching { manager.calculate().totalBytes }
-                .onSuccess { storageUsedBytes.value = it }
-        }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val container = (application as PhoneCompanionApplication).container
@@ -459,6 +450,11 @@ class HomeActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        val manager = (application as PhoneCompanionApplication).container.appStorageManager
+        lifecycleScope.launch {
+            runCatching { manager.calculate().totalBytes }
+                .onSuccess { storageUsedBytes.value = it }
+        }
         (appUpdateDownloader.state.value as? AppUpdateState.Ready)?.let { ready ->
             if (packageManager.canRequestPackageInstalls()) {
                 appUpdateDownloader.launchInstaller(ready.apk)

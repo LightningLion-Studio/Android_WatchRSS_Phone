@@ -4,10 +4,15 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.AssetManager
 import android.graphics.BitmapFactory
+import android.graphics.Bitmap
+import android.graphics.ColorSpace
+import android.graphics.ImageDecoder
+import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.Typeface
 import android.graphics.fonts.SystemFonts
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.provider.OpenableColumns
 import android.util.Xml
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +22,27 @@ import java.io.FileInputStream
 import java.io.InputStream
 import java.security.MessageDigest
 import java.util.UUID
+import org.json.JSONObject
+
+enum class ReaderBackgroundImportMode {
+    KEEP_ORIGINAL,
+    COMPATIBLE_STATIC
+}
+
+data class ReaderBackgroundImportInspection(
+    val mimeType: String,
+    val kind: ReaderBackgroundType,
+    val formatLabel: String,
+    val width: Int,
+    val height: Int,
+    val durationMs: Long,
+    val animated: Boolean,
+    val hdr: Boolean,
+    val wideColor: Boolean
+) {
+    val requiresChoice: Boolean
+        get() = animated || hdr || formatLabel in setOf("HEIC", "HEIF", "GIF")
+}
 
 data class ImportedReaderFont(
     val sha256: String,
@@ -43,6 +69,7 @@ data class SystemReaderFont(
 )
 
 data class ImportedReaderBackground(
+    val id: String,
     val sha256: String,
     val displayName: String,
     val kind: ReaderBackgroundType,
@@ -51,7 +78,8 @@ data class ImportedReaderBackground(
     val byteCount: Long,
     val durationMs: Long,
     val width: Int,
-    val height: Int
+    val height: Int,
+    val variantsJson: String = "{}"
 )
 
 class ReaderResourceStore(context: Context) {
@@ -339,52 +367,319 @@ class ReaderResourceStore(context: Context) {
         else -> "font/ttf"
     }
 
-    suspend fun importBackground(uri: Uri): ImportedReaderBackground =
+    suspend fun inspectBackground(uri: Uri): ReaderBackgroundImportInspection =
         withContext(Dispatchers.IO) {
             val resolver = appContext.contentResolver
-            val displayName = displayName(uri, "阅读背景")
             val mimeType = resolver.getType(uri).orEmpty()
             val kind = when {
                 mimeType.startsWith("image/") -> ReaderBackgroundType.IMAGE
                 mimeType.startsWith("video/") -> ReaderBackgroundType.VIDEO
                 else -> throw IllegalArgumentException("仅支持图片或视频背景")
             }
-            val extension = displayName.substringAfterLast('.', "")
-                .lowercase()
-                .takeIf { it.matches(Regex("[a-z0-9]{1,8}")) }
-                ?: if (kind == ReaderBackgroundType.IMAGE) "img" else "video"
+            if (kind == ReaderBackgroundType.VIDEO) {
+                val temp = File(appContext.cacheDir, ".${UUID.randomUUID()}.inspect-video")
+                try {
+                    copyUri(uri, temp, MAX_BACKGROUND_BYTES)
+                    val metadata = videoMetadata(temp)
+                    require(metadata.first > 0 && metadata.second > 0) { "无法读取背景尺寸" }
+                    ReaderBackgroundImportInspection(
+                        mimeType = mimeType,
+                        kind = kind,
+                        formatLabel = safeBackgroundExtension(kind, mimeType, false).uppercase(),
+                        width = metadata.first,
+                        height = metadata.second,
+                        durationMs = metadata.third,
+                        animated = false,
+                        hdr = false,
+                        wideColor = false
+                    )
+                } finally {
+                    temp.delete()
+                }
+            } else {
+                inspectImage(uri, mimeType)
+            }
+        }
+
+    suspend fun importBackground(
+        uri: Uri,
+        mode: ReaderBackgroundImportMode = ReaderBackgroundImportMode.KEEP_ORIGINAL,
+        inspection: ReaderBackgroundImportInspection? = null
+    ): ImportedReaderBackground =
+        withContext(Dispatchers.IO) {
+            val resolver = appContext.contentResolver
+            val mimeType = resolver.getType(uri).orEmpty()
+            val kind = when {
+                mimeType.startsWith("image/") -> ReaderBackgroundType.IMAGE
+                mimeType.startsWith("video/") -> ReaderBackgroundType.VIDEO
+                else -> throw IllegalArgumentException("仅支持图片或视频背景")
+            }
+            val convertToStatic = mode == ReaderBackgroundImportMode.COMPATIBLE_STATIC &&
+                kind == ReaderBackgroundType.IMAGE
+            val extension = safeBackgroundExtension(kind, mimeType, convertToStatic)
             val temp = File(backgrounds, ".${UUID.randomUUID()}.import")
+            val converted = File(backgrounds, ".${UUID.randomUUID()}.compatible.png")
             try {
                 copyUri(uri, temp, MAX_BACKGROUND_BYTES)
-                val hash = sha256Blocking(temp)
-                val finalName = "$hash.$extension"
-                val target = File(backgrounds, finalName)
-                if (!target.exists()) {
-                    check(temp.renameTo(target)) { "背景资源保存失败" }
+                val source = if (convertToStatic) {
+                    convertToCompatibleStatic(temp, converted)
+                    converted
+                } else {
+                    temp
                 }
+                val hash = sha256Blocking(source)
+                val assetId = UUID.randomUUID().toString()
+                val finalName = "$assetId.$extension"
+                val target = File(backgrounds, finalName)
+                check(source.renameTo(target)) { "背景资源保存失败" }
                 val metadata = if (kind == ReaderBackgroundType.IMAGE) {
                     imageMetadata(target)
                 } else {
                     videoMetadata(target)
                 }
                 require(metadata.first > 0 && metadata.second > 0) { "无法读取背景尺寸" }
+                val mediaInfo = inspection ?: if (kind == ReaderBackgroundType.IMAGE) {
+                    inspectImage(uri, mimeType)
+                } else {
+                    null
+                }
+                val sourceMetadata = JSONObject().apply {
+                    put("format", if (convertToStatic) "PNG" else mediaInfo?.formatLabel.orEmpty())
+                    put("animated", if (convertToStatic) false else mediaInfo?.animated ?: false)
+                    put("hdr", if (convertToStatic) false else mediaInfo?.hdr ?: false)
+                    put("wideColor", if (convertToStatic) false else mediaInfo?.wideColor ?: false)
+                    put("compatibilityConverted", convertToStatic)
+                }
                 ImportedReaderBackground(
+                    id = assetId,
                     sha256 = hash,
-                    displayName = displayName.substringBeforeLast('.').ifBlank { "阅读背景" },
+                    displayName = when {
+                        convertToStatic -> "照片（兼容静态图）"
+                        kind == ReaderBackgroundType.IMAGE -> "照片"
+                        else -> "视频"
+                    },
                     kind = kind,
-                    mimeType = mimeType.ifBlank {
+                    mimeType = if (convertToStatic) "image/png" else mimeType.ifBlank {
                         if (kind == ReaderBackgroundType.IMAGE) "image/*" else "video/*"
                     },
                     fileName = finalName,
                     byteCount = target.length(),
                     durationMs = metadata.third,
                     width = metadata.first,
-                    height = metadata.second
+                    height = metadata.second,
+                    variantsJson = JSONObject().put("source", sourceMetadata).toString()
                 )
             } finally {
                 temp.delete()
+                converted.delete()
             }
         }
+
+    suspend fun extractVideoFrame(
+        source: File,
+        sourceAssetId: String,
+        timeMs: Long,
+        cropX: Float = 0f,
+        cropY: Float = 0f
+    ): ImportedReaderBackground = withContext(Dispatchers.IO) {
+        require(source.isFile) { "背景原视频不存在" }
+        val retriever = MediaMetadataRetriever()
+        val bitmap = try {
+            retriever.setDataSource(source.absolutePath)
+            retriever.getFrameAtTime(
+                timeMs.coerceAtLeast(0L) * 1_000L,
+                MediaMetadataRetriever.OPTION_CLOSEST
+            ) ?: error("无法截取所选视频画面")
+        } finally {
+            retriever.release()
+        }
+        val square = cropSquareBitmap(bitmap, cropX, cropY)
+        if (square !== bitmap) bitmap.recycle()
+        val scaled = if (square.width == WATCH_BACKGROUND_SIZE && square.height == WATCH_BACKGROUND_SIZE) {
+            square
+        } else {
+            Bitmap.createScaledBitmap(
+                square,
+                WATCH_BACKGROUND_SIZE,
+                WATCH_BACKGROUND_SIZE,
+                true
+            ).also { square.recycle() }
+        }
+        val assetId = UUID.randomUUID().toString()
+        val target = File(backgrounds, "$assetId.jpg")
+        try {
+            target.outputStream().buffered().use { output ->
+                check(scaled.compress(Bitmap.CompressFormat.JPEG, 92, output)) {
+                    "视频画面保存失败"
+                }
+            }
+        } finally {
+            scaled.recycle()
+        }
+        val hash = sha256Blocking(target)
+        val sourceMetadata = JSONObject().apply {
+            put("format", "JPEG")
+            put("animated", false)
+            put("hdr", false)
+            put("wideColor", false)
+            put("extractedFromVideo", sourceAssetId)
+            put("frameTimeMs", timeMs.coerceAtLeast(0L))
+            put("cropX", cropX.coerceIn(-1f, 1f).toDouble())
+            put("cropY", cropY.coerceIn(-1f, 1f).toDouble())
+        }
+        ImportedReaderBackground(
+            id = assetId,
+            sha256 = hash,
+            displayName = "视频画面",
+            kind = ReaderBackgroundType.IMAGE,
+            mimeType = "image/jpeg",
+            fileName = target.name,
+            byteCount = target.length(),
+            durationMs = 0L,
+            width = WATCH_BACKGROUND_SIZE,
+            height = WATCH_BACKGROUND_SIZE,
+            variantsJson = JSONObject().put("source", sourceMetadata).toString()
+        )
+    }
+
+    private fun cropSquareBitmap(source: Bitmap, cropX: Float, cropY: Float): Bitmap {
+        val side = minOf(source.width, source.height)
+        val maxLeft = (source.width - side).coerceAtLeast(0)
+        val maxTop = (source.height - side).coerceAtLeast(0)
+        val left = (((cropX.coerceIn(-1f, 1f) + 1f) / 2f) * maxLeft).toInt()
+            .coerceIn(0, maxLeft)
+        val top = (((cropY.coerceIn(-1f, 1f) + 1f) / 2f) * maxTop).toInt()
+            .coerceIn(0, maxTop)
+        return Bitmap.createBitmap(source, left, top, side, side)
+    }
+
+    private fun safeBackgroundExtension(
+        kind: ReaderBackgroundType,
+        mimeType: String,
+        convertedToStatic: Boolean
+    ): String {
+        if (convertedToStatic) return "png"
+        return when (mimeType.lowercase()) {
+            "image/jpeg", "image/jpg" -> "jpg"
+            "image/png" -> "png"
+            "image/webp" -> "webp"
+            "image/gif" -> "gif"
+            "image/heic", "image/heic-sequence" -> "heic"
+            "image/heif", "image/heif-sequence" -> "heif"
+            "image/avif" -> "avif"
+            "video/mp4" -> "mp4"
+            "video/webm" -> "webm"
+            "video/3gpp" -> "3gp"
+            "video/quicktime" -> "mov"
+            "video/x-matroska" -> "mkv"
+            else -> if (kind == ReaderBackgroundType.IMAGE) "img" else "video"
+        }
+    }
+
+    private fun inspectImage(
+        uri: Uri,
+        mimeType: String
+    ): ReaderBackgroundImportInspection {
+        val resolver = appContext.contentResolver
+        var width = 0
+        var height = 0
+        var animated = false
+        var hdr = false
+        var wideColor = false
+        val format = imageFormatLabel(mimeType)
+        resolver.openInputStream(uri)?.use { input ->
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeStream(input, null, options)
+            width = options.outWidth
+            height = options.outHeight
+            wideColor = options.outColorSpace?.isWideGamut == true
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            runCatching {
+                ImageDecoder.decodeDrawable(ImageDecoder.createSource(resolver, uri)) {
+                        decoder, info, _ ->
+                    width = info.size.width
+                    height = info.size.height
+                    val colorSpace = info.colorSpace
+                    wideColor = wideColor || colorSpace?.isWideGamut == true
+                    hdr = colorSpace == ColorSpace.get(ColorSpace.Named.BT2020_HLG) ||
+                        colorSpace == ColorSpace.get(ColorSpace.Named.BT2020_PQ)
+                    val longest = maxOf(width, height).coerceAtLeast(1)
+                    if (longest > INSPECTION_MAX_DIMENSION) {
+                        val scale = INSPECTION_MAX_DIMENSION.toFloat() / longest
+                        decoder.setTargetSize(
+                            (width * scale).toInt().coerceAtLeast(1),
+                            (height * scale).toInt().coerceAtLeast(1)
+                        )
+                    }
+                }
+            }.onSuccess { drawable ->
+                animated = drawable is AnimatedImageDrawable
+            }
+            if (Build.VERSION.SDK_INT >= 34 && !animated) {
+                runCatching {
+                    ImageDecoder.decodeBitmap(ImageDecoder.createSource(resolver, uri)) {
+                            decoder, info, _ ->
+                        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                        val longest = maxOf(info.size.width, info.size.height).coerceAtLeast(1)
+                        if (longest > INSPECTION_MAX_DIMENSION) {
+                            val scale = INSPECTION_MAX_DIMENSION.toFloat() / longest
+                            decoder.setTargetSize(
+                                (info.size.width * scale).toInt().coerceAtLeast(1),
+                                (info.size.height * scale).toInt().coerceAtLeast(1)
+                            )
+                        }
+                    }
+                }.onSuccess { bitmap ->
+                    hdr = hdr || bitmap.hasGainmap()
+                    bitmap.recycle()
+                }
+            }
+        }
+        require(width > 0 && height > 0) { "无法读取背景尺寸" }
+        return ReaderBackgroundImportInspection(
+            mimeType = mimeType,
+            kind = ReaderBackgroundType.IMAGE,
+            formatLabel = format,
+            width = width,
+            height = height,
+            durationMs = 0L,
+            animated = animated,
+            hdr = hdr,
+            wideColor = wideColor
+        )
+    }
+
+    private fun convertToCompatibleStatic(source: File, target: File) {
+        require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) { "当前系统无法转换该图片" }
+        val bitmap = ImageDecoder.decodeBitmap(ImageDecoder.createSource(source)) { decoder, info, _ ->
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            decoder.setTargetColorSpace(ColorSpace.get(ColorSpace.Named.SRGB))
+            val longest = maxOf(info.size.width, info.size.height).coerceAtLeast(1)
+            if (longest > COMPATIBLE_MAX_DIMENSION) {
+                val scale = COMPATIBLE_MAX_DIMENSION.toFloat() / longest
+                decoder.setTargetSize(
+                    (info.size.width * scale).toInt().coerceAtLeast(1),
+                    (info.size.height * scale).toInt().coerceAtLeast(1)
+                )
+            }
+        }
+        target.outputStream().buffered().use { output ->
+            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) { "兼容图片转换失败" }
+        }
+        bitmap.recycle()
+    }
+
+    private fun imageFormatLabel(mimeType: String): String = when {
+        mimeType.contains("heic", ignoreCase = true) -> "HEIC"
+        mimeType.contains("heif", ignoreCase = true) -> "HEIF"
+        mimeType.contains("webp", ignoreCase = true) -> "WebP"
+        mimeType.contains("gif", ignoreCase = true) -> "GIF"
+        mimeType.contains("avif", ignoreCase = true) -> "AVIF"
+        mimeType.contains("png", ignoreCase = true) -> "PNG"
+        mimeType.contains("jpeg", ignoreCase = true) -> "JPEG"
+        else -> "图片"
+    }
 
     fun fontFile(fileName: String): File? =
         safeChild(fonts, fileName)?.takeIf(File::isFile)
@@ -408,7 +703,7 @@ class ReaderResourceStore(context: Context) {
         requireNotNull(safeChild(backgrounds, fileName)) { "背景文件名无效" }
 
     fun targetVariantFile(fileName: String): File =
-        requireNotNull(safeChild(variants, fileName)) { "背景派生文件名无效" }
+        requireNotNull(safeChild(variants, fileName)) { "背景适配文件名无效" }
 
     suspend fun fileSha256(file: File): String = withContext(Dispatchers.IO) {
         sha256Blocking(file)
@@ -464,12 +759,17 @@ class ReaderResourceStore(context: Context) {
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(file.absolutePath)
-            val width = retriever
+            val encodedWidth = retriever
                 .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
                 ?.toIntOrNull() ?: 0
-            val height = retriever
+            val encodedHeight = retriever
                 .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
                 ?.toIntOrNull() ?: 0
+            val rotation = retriever
+                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                ?.toIntOrNull() ?: 0
+            val width = if (rotation % 180 != 0) encodedHeight else encodedWidth
+            val height = if (rotation % 180 != 0) encodedWidth else encodedHeight
             val duration = retriever
                 .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull() ?: 0L
@@ -532,6 +832,9 @@ class ReaderResourceStore(context: Context) {
         const val SYSTEM_FONT_CACHE_DIRECTORY = "reader_system_fonts"
         const val MAX_FONT_BYTES = 512L * 1024L * 1024L
         const val MAX_BACKGROUND_BYTES = 512L * 1024L * 1024L
+        private const val INSPECTION_MAX_DIMENSION = 512
+        private const val COMPATIBLE_MAX_DIMENSION = 4096
+        const val WATCH_BACKGROUND_SIZE = 466
         val SUPPORTED_FONT_EXTENSIONS = setOf("ttf", "otf", "ttc")
         private const val SAMSUNG_FLIP_FONT_PACKAGE_PREFIX = "com.monotype.android.font."
         private const val ANDROID_SETTINGS_PACKAGE = "com.android.settings"

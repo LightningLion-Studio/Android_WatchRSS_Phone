@@ -1736,28 +1736,20 @@ internal fun AccountScreen(
                     ElevatedCard(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
-                                if (accessSummary.accessMode == "trial") "手机版试用中" else "手机版永久授权",
+                                if (accessSummary.accessMode == "trial") "手机版预览授权" else "手机版设备授权包",
                                 fontWeight = FontWeight.SemiBold
                             )
                             if (accessSummary.accessMode == "trial") {
-                                Text(
-                                    trialRemainingText(
-                                        accessSummary.trialExpiresAtMillis,
-                                        System.currentTimeMillis()
-                                    )
-                                )
-                                Text("仅限当前手机 · 到期不会删除本地数据")
+                                Text("这是旧版临时预览授权；页面不显示倒计时。到期不会删除本地资料。")
                             } else {
                                 Text("已购买 ${accessSummary.purchaseCount} 次 · 容量 ${accessSummary.capacity} 台 · 已占用 ${accessSummary.occupied} 台")
                             }
+                            PaidAccessTransparencyCard(
+                                product = accessSummary.product,
+                                compact = true
+                            )
                             Button(onClick = { showPaymentAgreement = true }) {
-                                Text(
-                                    if (accessSummary.accessMode == "trial") {
-                                        "立即购买 ¥6"
-                                    } else {
-                                        "再付 ¥6 增加 3 台"
-                                    }
-                                )
+                                Text("购买手机版设备授权 ¥6")
                             }
                         }
                     }
@@ -1769,12 +1761,17 @@ internal fun AccountScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Text("订单与退款", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "订单对应的是手机版设备授权包，不是哔哩哔哩、抖音或WatchRSS云会员。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                             when {
                                 paymentOrdersLoading -> Text("正在加载订单…")
                                 paymentOrders.isEmpty() -> Text("暂无订单")
                                 else -> paymentOrders.forEach { order ->
                                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        Text("订单 ${order.merchantOrderId}")
+                                        Text("${order.product.productName} · 订单 ${order.merchantOrderId}")
                                         Text(
                                             paymentOrderStatusText(order),
                                             style = MaterialTheme.typography.bodySmall,

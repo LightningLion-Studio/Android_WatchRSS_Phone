@@ -13,6 +13,10 @@ import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
+import coil.ImageLoader
+import coil.ImageLoaderFactory
+import coil.decode.ImageDecoderDecoder
+import coil.decode.VideoFrameDecoder
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncWorker
 import com.lightningstudio.watchrss.phone.connection.ble.WatchBleBandwidthServer
 import com.lightningstudio.watchrss.phone.connection.ip.WatchIpSyncService
@@ -28,7 +32,7 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 
-class PhoneCompanionApplication : Application() {
+class PhoneCompanionApplication : Application(), ImageLoaderFactory {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastForegroundSyncAt = 0L
     @Volatile private var resumedActivity: Activity? = null
@@ -42,6 +46,13 @@ class PhoneCompanionApplication : Application() {
     val container: PhoneCompanionContainer by lazy {
         PhoneCompanionContainer(this)
     }
+
+    override fun newImageLoader(): ImageLoader = ImageLoader.Builder(this)
+        .components {
+            add(ImageDecoderDecoder.Factory())
+            add(VideoFrameDecoder.Factory())
+        }
+        .build()
 
     override fun onCreate() {
         super.onCreate()

@@ -2,6 +2,7 @@ package com.lightningstudio.watchrss.phone
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -194,6 +195,7 @@ import org.jsoup.select.NodeVisitor
 class ArticleReaderActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.colorMode = ActivityInfo.COLOR_MODE_HDR
         val articleId = intent.getStringExtra(EXTRA_ARTICLE_ID).orEmpty()
         val repository = (application as PhoneCompanionApplication).container.repository
         val readerPresetRepository =

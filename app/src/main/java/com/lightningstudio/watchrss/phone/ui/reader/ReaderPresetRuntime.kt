@@ -137,6 +137,8 @@ fun ReaderBackgroundSurface(
         when (background.type) {
             ReaderBackgroundType.SOLID -> Unit
             ReaderBackgroundType.IMAGE -> if (file != null) {
+                val hasColorAdjustment = background.brightness != 1f || background.saturation != 1f
+                val hasGeometryAdjustment = background.zoom != 1f || background.rotationDegrees != 0f
                 AsyncImage(
                     model = file,
                     contentDescription = null,
@@ -145,17 +147,33 @@ fun ReaderBackgroundSurface(
                         horizontalBias = background.focusX * 2f - 1f,
                         verticalBias = background.focusY * 2f - 1f
                     ),
-                    colorFilter = ColorFilter.colorMatrix(
-                        backgroundColorMatrix(background.brightness, background.saturation)
-                    ),
+                    colorFilter = if (hasColorAdjustment) {
+                        ColorFilter.colorMatrix(
+                            backgroundColorMatrix(background.brightness, background.saturation)
+                        )
+                    } else {
+                        null
+                    },
                     modifier = Modifier
                         .fillMaxSize()
-                        .graphicsLayer {
-                            scaleX = background.zoom
-                            scaleY = background.zoom
-                            rotationZ = background.rotationDegrees
-                        }
-                        .blur(background.blurDp.coerceAtLeast(0f).dp)
+                        .then(
+                            if (hasGeometryAdjustment) {
+                                Modifier.graphicsLayer {
+                                    scaleX = background.zoom
+                                    scaleY = background.zoom
+                                    rotationZ = background.rotationDegrees
+                                }
+                            } else {
+                                Modifier
+                            }
+                        )
+                        .then(
+                            if (background.blurDp > 0f) {
+                                Modifier.blur(background.blurDp.dp)
+                            } else {
+                                Modifier
+                            }
+                        )
                 )
             }
             ReaderBackgroundType.VIDEO -> if (file != null) {

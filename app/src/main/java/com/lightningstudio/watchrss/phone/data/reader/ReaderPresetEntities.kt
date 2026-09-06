@@ -49,8 +49,7 @@ data class ReaderFontAssetEntity(
 @Entity(
     tableName = "reader_background_assets",
     indices = [
-        Index(value = ["deleted", "displayName"]),
-        Index(value = ["sha256"], unique = true)
+        Index(value = ["deleted", "displayName"])
     ]
 )
 data class ReaderBackgroundAssetEntity(
@@ -117,9 +116,6 @@ interface ReaderPresetDao {
 
     @Query("SELECT * FROM reader_background_assets WHERE id = :id LIMIT 1")
     suspend fun backgroundById(id: String): ReaderBackgroundAssetEntity?
-
-    @Query("SELECT * FROM reader_background_assets WHERE sha256 = :sha256 LIMIT 1")
-    suspend fun backgroundByHash(sha256: String): ReaderBackgroundAssetEntity?
 
     @Query(
         "SELECT COUNT(*) FROM reader_presets " +

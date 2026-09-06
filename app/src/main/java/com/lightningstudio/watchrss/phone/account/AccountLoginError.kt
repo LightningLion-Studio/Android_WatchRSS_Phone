@@ -95,7 +95,8 @@ internal fun trialAccessErrorMessage(throwable: Throwable): String {
     return when (code) {
         "trial_device_mismatch" -> "该账号的试用已绑定其他手机"
         "trial_already_used" -> "该账号已领取过试用"
-        "trial_not_available_for_paid_account" -> "该账号已获得永久授权，无需领取试用"
+        "trial_not_available_for_paid_account" -> "该账号已获得手机版设备授权，无需领取试用"
+        "trial_not_available" -> "当前版本不提供限时试用；本地内容不会因未购买而删除"
         "proof_consumed", "activation_proof_device_mismatch" -> "登录凭证已失效，请重新登录后领取"
         else -> if (httpError.statusCode >= 500) {
             "账号服务暂时不可用，请稍后重试"

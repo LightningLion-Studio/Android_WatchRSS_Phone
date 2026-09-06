@@ -24,8 +24,8 @@ import com.lightningstudio.watchrss.phone.onboarding.OnboardingStep
 import com.lightningstudio.watchrss.phone.onboarding.OnboardingUiState
 
 /**
- * 价值回放：把用户亲手写下的内容读给他们听——一致性压力在付费墙前最后一次加压。
- * 跳过多则降级为"未定制"的损失框架文案。
+ * 价值回放：把用户亲手写下的内容读给他们听，帮助用户确认本地计划内容。
+ * 跳过不会影响本地内容，也不会改变用户是否购买的选择。
  */
 @Composable
 internal fun ValueRecapStep(

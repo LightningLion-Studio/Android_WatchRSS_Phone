@@ -26,12 +26,18 @@ class PaywallCopyTest {
             answeredCount = 9
         )
         val copy = OnboardingProfileBuilder.paywallCopyFor(summary, profile)
-        assertEquals("《睡前充电计划》就差最后一步", copy.title)
+        assertEquals("你的阅读计划已准备好", copy.title)
         assertTrue(copy.detail.contains("睡前躺平"))
         assertTrue(copy.detail.contains("每天 3 篇"))
         assertTrue(copy.detail.contains("坚持 30 天"))
         assertTrue(copy.detail.contains("《论持久战》"))
-        assertTrue(copy.detail.contains("一次购买手机版永久授权"))
+        assertTrue(copy.detail.contains("一次支付 ¥6 获取手机版设备授权包"))
+        assertTrue(copy.detail.contains("哔哩哔哩"))
+        assertTrue(copy.detail.contains("抖音"))
+        assertTrue(copy.detail.contains("小说阅读"))
+        assertTrue(copy.detail.contains("备忘录"))
+        assertFalse(copy.detail.contains("完整体验"))
+        assertFalse(copy.detail.contains("就差最后一步"))
         assertFalse(copy.detail.contains("已购买"))
         assertFalse(copy.detail.contains("剩余"))
         assertEquals("前往网页支付", copy.actionLabel)
@@ -44,7 +50,7 @@ class PaywallCopyTest {
             answeredCount = 6
         )
         val copy = OnboardingProfileBuilder.paywallCopyFor(summary, profile)
-        assertEquals("《计划》就差最后一步", copy.title)
+        assertEquals("你的阅读计划已准备好", copy.title)
         assertTrue(copy.detail.contains("你的碎片时间"))
         assertTrue(copy.detail.contains("每天 若干 篇"))
         assertTrue(copy.detail.contains("坚持 每一天 天"))
@@ -55,15 +61,19 @@ class PaywallCopyTest {
     fun `partial tier reports saved count`() {
         val profile = OnboardingProfile(planName = "", answeredCount = 3)
         val copy = OnboardingProfileBuilder.paywallCopyFor(summary, profile)
-        assertEquals("你的阅读计划还差一点定制", copy.title)
+        assertEquals("你的阅读计划已保存", copy.title)
         assertTrue(copy.detail.contains("3 个定制项已保存"))
     }
 
     @Test
     fun `none tier applies loss framing and leaks no user content`() {
         val copy = OnboardingProfileBuilder.paywallCopyFor(summary, null)
-        assertEquals("解锁手机与手表完整体验", copy.title)
-        assertTrue(copy.detail.contains("管理订阅、同步资料并继续阅读"))
+        assertEquals("了解手机版设备授权", copy.title)
+        assertTrue(copy.detail.contains("小说阅读"))
+        assertTrue(copy.detail.contains("备忘录"))
+        assertTrue(copy.detail.contains("哔哩哔哩"))
+        assertTrue(copy.detail.contains("抖音"))
+        assertFalse(copy.detail.contains("完整体验"))
         assertFalse(copy.detail.contains("已购买"))
         assertFalse(copy.detail.contains("剩余"))
 

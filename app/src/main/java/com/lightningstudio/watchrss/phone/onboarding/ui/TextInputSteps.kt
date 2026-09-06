@@ -27,7 +27,7 @@ import com.lightningstudio.watchrss.phone.onboarding.OnboardingStep
 import com.lightningstudio.watchrss.phone.onboarding.OnboardingUiState
 
 /**
- * 文本输入步骤（自由文本，可跳过）。跳过会在付费墙降级文案中兑现损失框架。
+ * 文本输入步骤（自由文本，可跳过）。跳过不会影响本地内容或后续使用。
  */
 @Composable
 internal fun TextStep(

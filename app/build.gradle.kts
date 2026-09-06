@@ -172,6 +172,8 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     implementation("io.coil-kt:coil-compose:2.5.0")
+    implementation("io.coil-kt:coil-gif:2.5.0")
+    implementation("io.coil-kt:coil-video:2.5.0")
     implementation("com.google.zxing:core:3.5.3")
     implementation(libs.nanohttpd)
     implementation(libs.nanohttpd.websocket)

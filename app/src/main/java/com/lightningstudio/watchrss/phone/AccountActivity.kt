@@ -890,16 +890,14 @@ internal fun AccountScreen(
                 enabled = !busy && !totpLoading,
                 modifier = Modifier.fillMaxWidth()
             ) { Text("添加 TOTP 验证器") }
-            if (shouldShowCloudSyncEntry(BuildConfig.DEBUG)) {
-                CloudSyncEntryCard(
-                    summary = cloudSyncMenuSummary(
-                        member = cloudSyncState.member,
-                        hasLocalKey = cloudSyncService.hasLocalAccountKey()
-                    ),
-                    enabled = !busy && appAccessState is AppAccessState.Authorized,
-                    onClick = onCloudSyncClick
-                )
-            }
+            CloudSyncEntryCard(
+                summary = cloudSyncMenuSummary(
+                    member = cloudSyncState.member,
+                    hasLocalKey = cloudSyncService.hasLocalAccountKey()
+                ),
+                enabled = !busy && appAccessState is AppAccessState.Authorized,
+                onClick = onCloudSyncClick
+            )
             OutlinedButton(
                 onClick = {
                     runAction {
@@ -1932,7 +1930,6 @@ internal fun cloudSyncMenuSummary(
     else -> "云备份可用 · 等待启用或恢复"
 }
 
-internal fun shouldShowCloudSyncEntry(isDebugBuild: Boolean): Boolean = isDebugBuild
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

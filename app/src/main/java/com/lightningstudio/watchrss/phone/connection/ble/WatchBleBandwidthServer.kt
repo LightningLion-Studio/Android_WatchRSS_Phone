@@ -79,6 +79,7 @@ internal class WatchBleBandwidthServer(
 
     @Volatile
     private var endpointDescriptorProvider: (() -> ByteArray)? = null
+    private val endpointReadSnapshots = EndpointReadSnapshots()
 
     @Volatile
     private var statusListener: ((String) -> Unit)? = null
@@ -190,6 +191,7 @@ internal class WatchBleBandwidthServer(
             status: Int,
             newState: Int
         ) {
+            if (newState == BluetoothProfile.STATE_DISCONNECTED) endpointReadSnapshots.remove(device.address)
             if (status == BluetoothGatt.GATT_SUCCESS &&
                 newState == BluetoothProfile.STATE_CONNECTED
             ) {
@@ -260,25 +262,14 @@ internal class WatchBleBandwidthServer(
             characteristic: BluetoothGattCharacteristic
         ) {
             val endpointRead = characteristic.uuid == IpSyncProtocol.BLE_ENDPOINT_CHARACTERISTIC_UUID
-            val endpointValue = if (endpointRead) {
-                endpointDescriptorProvider?.invoke() ?: byteArrayOf()
-            } else {
+            val responseValue = if (endpointRead && device.bondState == BluetoothDevice.BOND_BONDED) {
+                endpointReadSnapshots.chunk(device.address, offset, BleBandwidthProtocol.MAX_ATTRIBUTE_BYTES) {
+                    runCatching { endpointDescriptorProvider?.invoke() }.getOrNull()
+                }
+            } else if (!endpointRead && characteristic.uuid in BleBandwidthProtocol.DATA_UUIDS && offset == 0) {
                 byteArrayOf()
-            }
-            val validOffset = offset in 0..endpointValue.size
-            val valid = if (endpointRead) {
-                device.bondState == BluetoothDevice.BOND_BONDED && validOffset
-            } else {
-                characteristic.uuid in BleBandwidthProtocol.DATA_UUIDS && offset == 0
-            }
-            val responseValue = when {
-                !valid -> null
-                endpointRead -> endpointValue.copyOfRange(
-                    offset,
-                    minOf(endpointValue.size, offset + BleBandwidthProtocol.MAX_ATTRIBUTE_BYTES)
-                )
-                else -> byteArrayOf()
-            }
+            } else null
+            val valid = responseValue != null
             gattServer?.sendResponse(
                 device,
                 requestId,
@@ -1074,6 +1065,7 @@ internal class WatchBleBandwidthServer(
     }
 
     override fun close() {
+        endpointReadSnapshots.clear()
         failPending("BLE 测试页已关闭")
         localAudioProbeServer.close()
         cancelAdvertisingRestart()

@@ -956,6 +956,8 @@ internal fun AccountScreen(
         }
     }
 
+    var showCloudInventory by remember(session?.userId) { mutableStateOf(false) }
+
     fun openCloudSync() {
         if (page == AccountPage.CLOUD_SYNC || paneTransition != null) return
         page = AccountPage.CLOUD_SYNC
@@ -966,6 +968,7 @@ internal fun AccountScreen(
 
     fun leaveCloudSync() {
         if (page != AccountPage.CLOUD_SYNC || paneTransition != null) return
+        if (showCloudInventory) { showCloudInventory = false; return }
         page = AccountPage.ROOT
         if (leadingPane != null) {
             completePaneTransition(AccountPaneTransition.CLOSING_CLOUD)
@@ -1828,37 +1831,44 @@ internal fun AccountScreen(
             }
         }
         val cloudPane: @Composable () -> Unit = {
-            AccountPageScaffold(
-                title = "云同步",
-                onBack = ::leaveCloudSync,
-                backEnabled = paneTransition == null
-            ) {
-                val activeSession = session
-                if (activeSession == null) {
-                    Text("登录后可管理云同步。")
-                } else {
-                    CloudAccountPanel(
-                        service = cloudSyncService,
-                        userId = activeSession.userId,
-                        rssSources = rssSources,
-                        busy = busy,
-                        runAction = runAction,
-                        onBusyChange = { busy = it },
-                        onMessage = {
-                            message = it
-                            error = null
-                            if (it == "加密云备份已启用") {
-                                tipManager?.recordEvent(TipEvents.CLOUD_ENCRYPTION_ENABLED)
+            androidx.compose.runtime.key(showCloudInventory) {
+                AccountPageScaffold(
+                    title = if (showCloudInventory) "频道云库存" else "云同步",
+                    onBack = ::leaveCloudSync,
+                    backEnabled = paneTransition == null
+                ) {
+                    val activeSession = session
+                    if (activeSession == null) {
+                        Text("登录后可管理云同步。")
+                    } else if (showCloudInventory) {
+                        com.lightningstudio.watchrss.phone.cloud.CloudInventoryPanel(
+                            service = cloudSyncService, userId = activeSession.userId,
+                            sources = rssSources, enabled = !busy
+                        )
+                    } else {
+                        CloudAccountPanel(
+                            service = cloudSyncService,
+                            onOpenInventory = { showCloudInventory = true },
+                            userId = activeSession.userId,
+                            busy = busy,
+                            runAction = runAction,
+                            onBusyChange = { busy = it },
+                            onMessage = {
+                                message = it
+                                error = null
+                                if (it == "加密云备份已启用") {
+                                    tipManager?.recordEvent(TipEvents.CLOUD_ENCRYPTION_ENABLED)
+                                }
+                            },
+                            onError = {
+                                error = it
+                                message = null
                             }
-                        },
-                        onError = {
-                            error = it
-                            message = null
-                        }
-                    )
-                }
-                if (page == AccountPage.CLOUD_SYNC) {
-                    AccountFeedback(message = message, error = error)
+                        )
+                    }
+                    if (page == AccountPage.CLOUD_SYNC) {
+                        AccountFeedback(message = message, error = error)
+                    }
                 }
             }
         }

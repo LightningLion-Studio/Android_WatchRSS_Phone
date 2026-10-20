@@ -7,7 +7,7 @@ object NoteCloudStateCodec {
     private const val FORMAT = "watchrss-notes"
     fun encode(notes: List<NoteEntity>): ByteArray = JSONObject().apply {
         put("format", FORMAT); put("version", 1)
-        put("notes", JSONArray().apply { notes.forEach { note -> put(JSONObject().apply {
+        put("notes", JSONArray().apply { notes.sortedBy { it.noteId }.forEach { note -> put(JSONObject().apply {
             put("id", note.noteId); put("folder", note.folderId ?: JSONObject.NULL); put("title", note.title)
             put("markdown", note.markdown); put("hash", note.contentHash); put("base", note.baseMarkdown)
             put("updatedAt", note.updatedAt); put("modifiedBy", note.modifiedBy); put("pinned", note.pinned)

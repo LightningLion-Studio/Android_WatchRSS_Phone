@@ -13,6 +13,28 @@ class CloudSnapshotCodecTest {
     private val codec = CloudSnapshotCodec(SecureRandom())
 
     @Test
+    fun readerBatchKeySurvivesManifestRoundtripAndRejectsWrongScope() {
+        val readerKey = ByteArray(32) { 7 }
+        val name = "reader/article/version.txt"
+        val source = "第一段\n\n第二段\n".repeat(2000).toByteArray()
+        val encrypted = codec.create(readerKey, 1, "reader", 1, listOf(CloudLogicalObject(name, source)))
+        val salt = ByteArray(16) { 9 }; val nonce = ByteArray(12) { 3 }
+        val wrapping = CloudSnapshotCodec.hkdfSha256(key, salt, "watchrss/cloud/reader-key/v1".toByteArray(), 32)
+        val envelope = org.json.JSONObject().put("version", 1).put("scope", "batch:test")
+            .put("saltBase64", java.util.Base64.getEncoder().encodeToString(salt))
+            .put("nonceBase64", java.util.Base64.getEncoder().encodeToString(nonce))
+            .put("ciphertextBase64", java.util.Base64.getEncoder().encodeToString(CloudSnapshotCodec.encryptAesGcm(
+                wrapping, nonce, readerKey, "watchrss-reader-key-v1:batch:test".toByteArray())))
+        val descriptor = encrypted.manifest.objects.single().copy(readerKeyEnvelope = envelope)
+        val projected = encrypted.manifest.copy(objects = listOf(CloudObjectDescriptor.fromJson(descriptor.toJson())))
+        assertArrayEquals(source, codec.restoreObjects(key, projected) { encrypted.newCiphertextChunks.getValue(it) }.getValue(name))
+        envelope.put("scope", "batch:wrong")
+        org.junit.Assert.assertThrows(AEADBadTagException::class.java) {
+            codec.restoreObjects(key, projected) { encrypted.newCiphertextChunks.getValue(it) }
+        }
+    }
+
+    @Test
     fun encryptsAndRestoresMultipleLogicalObjects() {
         val source = "hello watchrss".repeat(10_000).toByteArray()
         val privateLibrary = ByteArray(5 * 1024 * 1024) { index -> (index % 251).toByte() }

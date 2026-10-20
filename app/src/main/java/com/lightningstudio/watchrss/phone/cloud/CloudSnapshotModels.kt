@@ -13,7 +13,8 @@ data class CloudLogicalObject(
     val name: String,
     val bytes: ByteArray,
     val compress: Boolean = true,
-    val file: File? = null
+    val file: File? = null,
+    val incrementalChunks: Boolean = false
 ) {
     constructor(name: String, file: File, compress: Boolean = true) :
         this(name, ByteArray(0), compress, file)
@@ -72,13 +73,15 @@ data class CloudObjectDescriptor(
     val encoding: String,
     val originalBytes: Long,
     val encodedBytes: Long,
-    val chunks: List<CloudChunkDescriptor>
+    val chunks: List<CloudChunkDescriptor>,
+    val readerKeyEnvelope: JSONObject? = null
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("name", name)
         put("encoding", encoding)
         put("originalBytes", originalBytes)
         put("encodedBytes", encodedBytes)
+        readerKeyEnvelope?.let { put("readerKeyEnvelope", it) }
         put("chunks", JSONArray().apply { chunks.forEach { put(it.toJson()) } })
     }
 
@@ -89,7 +92,8 @@ data class CloudObjectDescriptor(
                 encoding = json.getString("encoding"),
                 originalBytes = json.getLong("originalBytes"),
                 encodedBytes = json.getLong("encodedBytes"),
-                chunks = json.getJSONArray("chunks").toObjectList(CloudChunkDescriptor::fromJson)
+                chunks = json.getJSONArray("chunks").toObjectList(CloudChunkDescriptor::fromJson),
+                readerKeyEnvelope = json.optJSONObject("readerKeyEnvelope")
             )
     }
 }

@@ -1,5 +1,9 @@
 package com.lightningstudio.watchrss.phone.cloud
 
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.sync.withPermit
+
 import android.content.Context
 import android.os.Build
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
@@ -10,7 +14,9 @@ import com.lightningstudio.watchrss.phone.data.note.NoteCloudStateCodec
 import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
 import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -20,6 +26,7 @@ import java.security.SecureRandom
 
 enum class CloudSyncPhase {
     IDLE,
+    PAUSED,
     CHECKING,
     NEEDS_RECOVERY,
     WAITING_FOR_WIFI,
@@ -67,17 +74,50 @@ class PhoneCloudSyncService(
     private val networkGate: CloudNetworkGate = CloudNetworkGate(context),
     private val rssInventoryPreferences: CloudRssInventoryPreferences =
         CloudRssInventoryPreferences(context),
-    private val codec: CloudSnapshotCodec = CloudSnapshotCodec()
+    private val codec: CloudSnapshotCodec = CloudSnapshotCodec(),
+    private val legacyDeviceId: String? = null
 ) {
+    private val debugTrace = java.io.File(context.cacheDir, "cloud-sync-debug.trace")
+    private fun traceSync(stage: String) {
+        if (com.lightningstudio.watchrss.phone.BuildConfig.DEBUG) runCatching {
+            if (debugTrace.length() > 65536) debugTrace.writeText("")
+            debugTrace.appendText("${System.currentTimeMillis()} $stage\n")
+        }
+    }
+    private val recordStore = PhoneCloudRecordStore(context.applicationContext)
+    private val recordSync = PhoneCloudRecordSync(client, recordStore,
+        backupService::cloudRecordPages, { session, kind, value ->
+            backupService.applyCloudRecord(kind, value) { checkApprovalOwner(session) }
+        },
+        keyManager::currentKeyVersion, keyManager::getAccountKey, ::checkApprovalOwner)
     private val noteTransfer = NoteImportExportService(context, noteRepository)
-    private val syncMutex = Mutex()
+    private val syncMutex = CloudSyncSingleFlight()
     private val _state = MutableStateFlow(PhoneCloudSyncState())
     val state: StateFlow<PhoneCloudSyncState> = _state
 
-    suspend fun loadMembership(): CloudMemberState =
-        client.membership(requireSession()).also { member ->
-            update(CloudSyncPhase.IDLE, "会员状态已更新", member)
+    private val pauseGate = CloudSyncPauseGate(settings.syncPaused) { settings.syncPaused = it }
+    val paused: StateFlow<Boolean> = pauseGate.state
+
+    /** Finish the current snapshot atomically; no subsequent snapshot/transfer starts. */
+    fun setSyncPaused(value: Boolean) {
+        pauseGate.setPaused(value)
+        if (!syncMutex.isLocked) {
+            update(if (value) CloudSyncPhase.PAUSED else CloudSyncPhase.IDLE,
+                if (value) "已暂停同步" else "等待同步")
         }
+    }
+
+    /** Quota-only request: never starts a backup, download or approval flow. */
+    suspend fun refreshDashboardMembership(): CloudMemberState {
+        val session = requireSession()
+        val member = client.membership(session)
+        if (accountRepository.session.value?.userId == session.userId) {
+            _state.update { it.copy(member = member) }
+        }
+        return member
+    }
+
+    suspend fun loadMembership(): CloudMemberState = refreshDashboardMembership()
 
     fun hasLocalAccountKey(): Boolean =
         accountRepository.session.value?.let { keyManager.hasAccountKey(it.userId) } == true
@@ -111,13 +151,23 @@ class PhoneCloudSyncService(
 
     suspend fun loadBootstrap(): CloudBootstrap {
         val session = requireSession()
-        return client.bootstrap(session).also { bootstrap ->
-            update(CloudSyncPhase.IDLE, "云服务已连接", bootstrap.member)
+        val bootstrap = client.bootstrap(session)
+        checkApprovalOwner(session)
+        restoreLegacyDeviceEnvelopes(session, bootstrap)
+        ensureApprovalIdentity(session, bootstrap)
+        return client.bootstrap(session).also {
+            checkApprovalOwner(session)
+            // Loading account/authorization information must not erase transfer or completion state.
+            val member = it.member
+            _state.update { current -> current.copy(member = member) }
         }
     }
 
     suspend fun listSnapshotHeads(): List<CloudSnapshotHead> =
         client.snapshotHeads(requireSession())
+
+    suspend fun listSnapshotHistory(): List<CloudSnapshotHead> =
+        client.snapshotHistory(requireSession())
 
     suspend fun inspectSnapshot(snapshotId: String): CloudSnapshotRestorePreview {
         val session = requireSession()
@@ -158,6 +208,7 @@ class PhoneCloudSyncService(
         require(mode != BackupImportMode.REPLACE || privateArchive != null) {
             "该手表快照没有完整私有归档，不能执行覆盖恢复"
         }
+        if (mode == BackupImportMode.MERGE) backupService.createSafetySnapshot()
         update(CloudSyncPhase.MERGING, "正在恢复云快照")
         val privateResult = privateArchive?.let {
             backupService.restorePrivateLibrary(it, mode)
@@ -166,7 +217,7 @@ class PhoneCloudSyncService(
             ?.let { backupService.restoreCloudRelayLibrary(it) }
             ?: 0
         val stateResult = decoded.objects[RSS_STATE_OBJECT]
-            ?.let { backupService.applyCloudRssState(it) }
+            ?.let { backupService.applyCloudRssState(it, restoreAsNewChange = true) }
             ?: (0 to 0)
         settings.markApplied(
             decoded.download.head.sourceDeviceId,
@@ -216,6 +267,7 @@ class PhoneCloudSyncService(
                     keyManager.clearAccountKeys(session.userId)
                     settings.clearLibraryState()
                     cache.clear(session.userId)
+                    recordStore.clear(session.userId)
                 }
             } catch (error: Exception) {
                 update(CloudSyncPhase.ERROR, "云端资料库已删除，但本机云状态清理失败")
@@ -277,6 +329,46 @@ class PhoneCloudSyncService(
         storeEnvelopeForCurrentDevice(session)
     }
 
+    private fun checkApprovalOwner(session: PhoneAccountSession) {
+        val current=accountRepository.session.value
+        check(current?.userId==session.userId && current.accessToken==session.accessToken) { "账号已切换，请重新操作" }
+    }
+
+    suspend fun beginCodeApproval(): String {
+        val session=requireSession()
+        requestDeviceApproval();checkApprovalOwner(session)
+        return client.approvalRequest(session,deviceId).also { checkApprovalOwner(session) }
+    }
+
+    suspend fun redeemCodeApproval(id: String, code: String): Boolean {
+        require(code.matches(Regex("[0-9]{8}"))) { "请输入旧设备显示的 8 位配对码" }
+        val session=requireSession()
+        client.redeemApproval(session,id,deviceId,code);checkApprovalOwner(session)
+        return acceptDeviceApproval().also { checkApprovalOwner(session) }
+    }
+
+    suspend fun pendingCodeApprovals(): List<org.json.JSONObject> {
+        val session=requireSession()
+        if(!keyManager.hasAccountKey(session.userId))return emptyList()
+        if(!client.membership(session).writable)return emptyList()
+        checkApprovalOwner(session)
+        ensureApprovalIdentity(session, client.bootstrap(session))
+        return client.pendingApprovals(session,deviceId).also { checkApprovalOwner(session) }
+    }
+
+    suspend fun offerCodeApproval(target: org.json.JSONObject, code: String) = withContext(Dispatchers.IO) {
+        val session=requireSession()
+        val publicKey=CloudKeyEnvelopeCodec.decodeP256PublicKey(target.getString("publicKeySpki"))
+        val envelopes=keyManager.keyVersions(session.userId).map { version ->
+            val key=keyManager.getAccountKey(session.userId,version) ?: error("本机缺少云密钥")
+            try { CloudKeyEnvelopeCodec.createDeviceEnvelope(key,session.userId,target.getString("deviceId"),publicKey,version) }
+            finally { key.fill(0) }
+        }
+        checkApprovalOwner(session)
+        client.offerApproval(session,target.getString("id"),deviceId,code,envelopes)
+        checkApprovalOwner(session)
+    }
+
     suspend fun requestDeviceApproval(): CloudBootstrap {
         val session = requireSession()
         val bootstrap = client.bootstrap(session)
@@ -296,6 +388,8 @@ class PhoneCloudSyncService(
     suspend fun acceptDeviceApproval(): Boolean {
         val session = requireSession()
         val bootstrap = client.bootstrap(session)
+        checkApprovalOwner(session)
+        restoreLegacyDeviceEnvelopes(session, bootstrap)
         deviceApprovalEnvelopes(bootstrap, deviceId).forEach { stored ->
             keyManager.unwrapDeviceEnvelope(session.userId, deviceId, stored.envelope)
         }
@@ -411,19 +505,121 @@ class PhoneCloudSyncService(
         client.revokeDevice(requireSession(), deviceId)
     }
 
-    suspend fun syncNow(manual: Boolean = false): PhoneCloudSyncResult =
-        syncMutex.withLock {
+    private val readingPriority = CloudReadingPriority()
+    private val readingManifests = object : LinkedHashMap<String, CloudSnapshotManifest>(4, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CloudSnapshotManifest>?) = size > 4
+    }
+
+    /** Foreground reads bypass the bulk-sync lock. Bulk transfers yield between chunks. */
+    suspend fun loadArticleForReading(articleId: String): com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity? =
+        withContext(Dispatchers.IO) {
+            val article = repository.getArticle(articleId) ?: return@withContext null
+            val legacyFlatEpub = article.url.contains("/import-epub/") && article.contentHtml.isNullOrBlank() &&
+                article.contentText.isNotBlank() && !article.contentText.contains('\n') && article.contentText.length > 280 &&
+                !com.lightningstudio.watchrss.phone.data.local.isArticleContentMarker(article.contentText)
+            if (com.lightningstudio.watchrss.phone.BuildConfig.DEBUG) android.util.Log.d("WatchRssBody", "open textChars=${article.contentText.length} html=${!article.contentHtml.isNullOrBlank()} legacyFlat=$legacyFlatEpub deleted=${article.deleted}")
+            if ((!legacyFlatEpub && (article.contentText.isNotBlank() || !article.contentHtml.isNullOrBlank())) || article.deleted) return@withContext article
+            if (!com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.isImportedContentUrl(article.url)) return@withContext article
+            val session = requireSession()
+            readingPriority.foreground {
+                try {
+                    restoreArticleBody(session, article, readingHeads(session), foreground = true)
+                } catch (error: Exception) {
+                    if (error is CancellationException) throw error
+                    if (com.lightningstudio.watchrss.phone.BuildConfig.DEBUG) android.util.Log.w("WatchRssBody", "reading failed: ${error.javaClass.simpleName}" + if (error is CloudHttpException) " status=${error.status}" else "")
+                    if (!legacyFlatEpub) throw error
+                }
+                checkApprovalOwner(session)
+                repository.getArticle(articleId)
+            }
+        }
+
+    // The normal native heads endpoint deliberately hides reader projections.
+    // The authorized history endpoint includes them; keep only each device's latest head.
+    private suspend fun readingHeads(session: PhoneAccountSession): List<CloudSnapshotHead> =
+        client.snapshotHistory(session).groupBy { it.sourceDeviceId }.values.map { rows -> rows.maxBy { it.deviceSequence } }
+
+    private suspend fun yieldToReading() {
+        readingPriority.awaitBackgroundTurn()
+    }
+
+    private suspend fun restoreArticleBody(
+        session: PhoneAccountSession,
+        article: com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity,
+        heads: List<CloudSnapshotHead>,
+        foreground: Boolean = false
+    ) {
+        val hash = CloudSnapshotCodec.sha256(article.articleId.toByteArray()).take(32)
+        val version = CloudSnapshotCodec.sha256((article.contentHash.ifBlank { article.updatedAt.toString() }).toByteArray()).take(32)
+        val name = "reader/$hash/$version.txt"
+        for (head in heads.sortedWith(compareByDescending<CloudSnapshotHead> { it.sourceDeviceId.startsWith("reader-migration-") }.thenByDescending { it.completedAt ?: "" })) {
+            if (!foreground) yieldToReading()
+            checkApprovalOwner(session)
+            val key = keyManager.getAccountKey(session.userId, head.keyVersion) ?: continue
+            val cacheKey = "${session.userId}:${head.id}"
+            val manifest = synchronized(readingManifests) { readingManifests[cacheKey] } ?: run {
+                val encrypted = cache.loadManifest(session.userId, head.id) ?: run {
+                    val remote = client.snapshot(session, head.id, manifestOnly = true)
+                    client.download(remote.manifestSignedUrl, head.manifestSizeBytes, head.manifestSha256)
+                }
+                codec.decryptManifest(key, head.id, encrypted).also {
+                    checkApprovalOwner(session)
+                    synchronized(readingManifests) { readingManifests[cacheKey] = it }
+                }
+            }
+            if (com.lightningstudio.watchrss.phone.BuildConfig.DEBUG && foreground) android.util.Log.d("WatchRssBody", "manifest projection=${head.sourceDeviceId.startsWith("reader-migration-")} total=${manifest.objects.size} versions=${manifest.objects.count { it.name.startsWith("reader/$hash/") }} exact=${manifest.objects.any { it.name == name }}")
+            val descriptor = manifest.objects.firstOrNull { it.name == name } ?: continue
+            if (com.lightningstudio.watchrss.phone.BuildConfig.DEBUG && foreground) android.util.Log.d("WatchRssBody", "matched chapter chunks=${descriptor.chunks.size} bytes=${descriptor.originalBytes}")
+            require(descriptor.originalBytes in 0..16L * 1024 * 1024 && descriptor.chunks.size <= 4096) { "章节过大，请稍后通过完整同步恢复" }
+            val chunks = mutableMapOf<String, ByteArray>()
+            for (chunk in descriptor.chunks) {
+                if (!foreground) yieldToReading()
+                checkApprovalOwner(session)
+                require(chunk.ciphertextBytes in 1..(17 * 1024 * 1024))
+                val encrypted = cache.loadChunk(session.userId, chunk.ciphertextSha256) ?: run {
+                    val remote = client.snapshot(session, head.id, chunk = chunk.ciphertextSha256)
+                        .chunks.single { it.sha256 == chunk.ciphertextSha256 }
+                    require(remote.sizeBytes == chunk.ciphertextBytes.toLong())
+                    client.download(remote.signedUrl, remote.sizeBytes, remote.sha256)
+                }
+                chunks[chunk.ciphertextSha256] = encrypted
+            }
+            val text = codec.restoreObjects(key, manifest.copy(objects = listOf(descriptor))) { chunks.getValue(it) }
+                .getValue(name).toString(Charsets.UTF_8)
+            checkApprovalOwner(session)
+            if (article.contentText.isNotEmpty()) {
+                val whitespace = Regex("\\s+")
+                require(article.contentText.replace(whitespace, "") == text.replace(whitespace, "")) { "正文版本不一致" }
+            }
+            repository.fillMissingCloudBody(article, text) { checkApprovalOwner(session) }
+            return
+        }
+        error("正文尚未同步完成，请稍后重试；后台将继续恢复")
+    }
+
+    suspend fun syncNow(manual: Boolean = false): PhoneCloudSyncResult = withContext(Dispatchers.IO) {
+        traceSync("sync-request")
+        syncMutex.run(manual, { PhoneCloudSyncResult(0, 0, 0, false, 0) }) {
+            traceSync("sync-lock")
             var uploadedBytes = 0L
             var downloadedBytes = 0L
             var applied = 0
             var pendingStates = 0
             var uploaded = false
+            fun pausedResult(): PhoneCloudSyncResult? {
+                if (!paused.value) return null
+                update(CloudSyncPhase.PAUSED, "已暂停同步")
+                return PhoneCloudSyncResult(uploadedBytes, downloadedBytes, applied, uploaded, pendingStates)
+            }
+            pausedResult()?.let { return@run it }
             try {
+                val localSequenceAtStart = repository.getLibrarySyncCursor(null).localMaxSeq
                 update(CloudSyncPhase.CHECKING, "正在检查云端")
                 require(networkGate.isConnected()) { "当前没有可用网络" }
                 val session = requireSession()
                 cache.prune(session.userId)
                 var bootstrap = client.bootstrap(session)
+                pausedResult()?.let { return@run it }
                 if (!keyManager.hasAccountKey(session.userId)) {
                     bootstrap = requestDeviceApproval()
                     if (!acceptDeviceApproval()) {
@@ -449,10 +645,14 @@ class PhoneCloudSyncService(
                         "等待Wi‑Fi并充电后同步",
                         bootstrap.member
                     )
-                    return@withLock PhoneCloudSyncResult(0, 0, 0, false, 0)
+                    return@run PhoneCloudSyncResult(0, 0, 0, false, 0)
                 }
+                pausedResult()?.let { return@run it }
+                settings.ensureFullBodyRestoreVersion(session.userId)
                 val heads = client.snapshotHeads(session)
                 for (head in heads.sortedBy(CloudSnapshotHead::deviceSequence)) {
+                    pausedResult()?.let { return@run it }
+                    if (head.sourceDeviceId.startsWith("reader-migration-")) continue
                     if (head.sourceDeviceId == deviceId &&
                         head.deviceSequence <= settings.appliedSequence(deviceId, fullTransfer)
                     ) {
@@ -483,6 +683,7 @@ class PhoneCloudSyncService(
                     if (outcome.changed) applied += 1
                 }
 
+                pausedResult()?.let { return@run it }
                 if (fullTransfer && bootstrap.member.readable) {
                     update(
                         CloudSyncPhase.DOWNLOADING,
@@ -494,11 +695,33 @@ class PhoneCloudSyncService(
                     refreshRssInventory(session)
                 }
 
+                pausedResult()?.let { return@run it }
+                val compacted = repository.compactCloudExcerpts { checkApprovalOwner(session) }
+                traceSync("metadata-compacted:$compacted")
+                recordSync.sync(session, bootstrap.member.writable)
+                if (fullTransfer) {
+                    val missingBodies = repository.missingCloudBodyIds()
+                    val bodyHeads = if (missingBodies.isEmpty()) emptyList() else readingHeads(session)
+                    for (articleId in missingBodies) {
+                        pausedResult()?.let { return@run it }
+                        yieldToReading()
+                        val article = repository.getArticle(articleId) ?: continue
+                        if (article.contentText.isNotBlank() || !article.contentHtml.isNullOrBlank()) continue
+                        update(CloudSyncPhase.DOWNLOADING, "正在恢复文章正文", bootstrap.member)
+                        restoreArticleBody(session, article, bodyHeads)
+                    }
+                    check(repository.missingCloudBodyIds().isEmpty()) { "仍有正文尚未恢复，后台将继续同步" }
+                }
+                pausedResult()?.let { return@run it }
                 if (bootstrap.member.writable) {
                     val currentKeyVersion = keyManager.currentKeyVersion(session.userId)
                     val accountKey = keyManager.getAccountKey(session.userId, currentKeyVersion)
                         ?: error("当前账号主密钥不存在")
                     val freshHeads = client.snapshotHeads(session)
+                    checkApprovalOwner(session)
+                    check(freshHeads.filterNot { it.sourceDeviceId.startsWith("reader-migration-") }.all {
+                        it.deviceSequence <= settings.appliedSequence(it.sourceDeviceId, fullTransfer)
+                    }) { "云端资料仍有更新待合并，将继续同步" }
                     val uploadResult = uploadSnapshot(
                         session = session,
                         accountKey = accountKey,
@@ -510,7 +733,7 @@ class PhoneCloudSyncService(
                     uploadedBytes += uploadResult.bytes
                     uploaded = uploadResult.uploaded
                 }
-                if (!fullTransfer && !uploaded) {
+                if (!fullTransfer) {
                     update(
                         CloudSyncPhase.WAITING_FOR_WIFI,
                         "小状态已同步；正文等待Wi‑Fi",
@@ -518,6 +741,8 @@ class PhoneCloudSyncService(
                         uploadedBytes,
                         downloadedBytes
                     )
+                } else if (pendingStates > 0 || localSequenceAtStart != repository.getLibrarySyncCursor(null).localMaxSeq) {
+                    update(CloudSyncPhase.DOWNLOADING, "仍有本机改动待合并，将继续同步", bootstrap.member, uploadedBytes, downloadedBytes)
                 } else {
                     update(
                         CloudSyncPhase.COMPLETE,
@@ -527,8 +752,10 @@ class PhoneCloudSyncService(
                         downloadedBytes,
                         System.currentTimeMillis()
                     )
+                    traceSync("sync-complete:pending=$pendingStates")
                 }
                 cache.prune(session.userId)
+                pausedResult()?.let { return@run it }
                 PhoneCloudSyncResult(
                     uploadedBytes = uploadedBytes,
                     downloadedBytes = downloadedBytes,
@@ -536,16 +763,29 @@ class PhoneCloudSyncService(
                     snapshotUploaded = uploaded,
                     pendingArticleStates = pendingStates
                 )
-            } catch (error: Exception) {
-                if (_state.value.phase != CloudSyncPhase.NEEDS_RECOVERY) {
-                    update(CloudSyncPhase.ERROR, error.message ?: "云同步失败")
+            } catch (error: CancellationException) {
+                traceSync("cancelled")
+                update(CloudSyncPhase.IDLE, "等待继续同步")
+                throw error
+            } catch (error: Throwable) {
+                traceSync("failure:${error.javaClass.simpleName}:status=${(error as? CloudHttpException)?.status ?: (error as? CloudObjectUploadException)?.status}:${error.stackTrace.firstOrNull { it.className.startsWith("com.lightningstudio.watchrss.phone") }}")
+                if (com.lightningstudio.watchrss.phone.BuildConfig.DEBUG) android.util.Log.w("WatchRssCloud", "sync failed phase=${_state.value.phase} type=${error.javaClass.simpleName} at=${error.stackTrace.firstOrNull { it.className.startsWith("com.lightningstudio.watchrss.phone") }}" + if (error is CloudHttpException) " status=${error.status}" else "")
+                if (error is CloudDeviceAuthorizationException) {
+                    update(CloudSyncPhase.NEEDS_RECOVERY, "设备身份需要重新验证")
+                } else if (_state.value.phase != CloudSyncPhase.NEEDS_RECOVERY) {
+                    update(CloudSyncPhase.ERROR, if (error is CloudHttpException && error.status == 413) {
+                        "云空间不足，同步尚未完成。请释放云空间后重试，本机内容已保留。"
+                    } else error.message ?: "云同步失败")
                 }
                 throw error
             }
         }
 
+    }
+
     private suspend fun refreshRssInventory(session: PhoneAccountSession) {
         repository.getCloudEligibleRssSources().forEach { source ->
+            if (paused.value) return
             runCatching {
                 client.rssInventory(
                     session,
@@ -591,12 +831,15 @@ class PhoneCloudSyncService(
             manifest.allChunks.map(CloudChunkDescriptor::ciphertextSha256)
         )
         val selectedObjects = manifest.objects.filter { descriptor ->
-            fullTransfer || descriptor.name == RSS_STATE_OBJECT || descriptor.name == NOTES_STATE_OBJECT || descriptor.name == NOTES_ARCHIVE_OBJECT
+            descriptor.name == RSS_STATE_OBJECT || descriptor.name == NOTES_STATE_OBJECT || descriptor.name == NOTES_ARCHIVE_OBJECT ||
+                (fullTransfer && descriptor.name in setOf(PRIVATE_LIBRARY_OBJECT, RELAY_LIBRARY_OBJECT))
         }
         val chunkUrls = download.chunks.associateBy(CloudDownloadObject::sha256)
         selectedObjects.flatMap(CloudObjectDescriptor::chunks)
             .distinctBy(CloudChunkDescriptor::ciphertextSha256)
             .forEach { descriptor ->
+                yieldToReading()
+                checkApprovalOwner(session)
                 if (cache.loadChunk(session.userId, descriptor.ciphertextSha256) == null) {
                     val remote = chunkUrls[descriptor.ciphertextSha256]
                         ?: error("云快照缺少加密块 ${descriptor.ciphertextSha256}")
@@ -606,33 +849,40 @@ class PhoneCloudSyncService(
                     }
                 }
             }
+        yieldToReading()
+        checkApprovalOwner(session)
         update(CloudSyncPhase.MERGING, "正在合并远端快照")
-        val objects = codec.restoreObjects(
-            accountKey,
-            manifest.copy(objects = selectedObjects)
-        ) { sha -> cache.loadChunk(session.userId, sha) ?: error("本地缺少加密块 $sha") }
         var changed = false
-        if (fullTransfer) {
-            objects[PRIVATE_LIBRARY_OBJECT]?.let { archive ->
-                val result = backupService.restorePrivateLibrary(archive, BackupImportMode.MERGE)
-                changed = changed ||
-                    result.changedArticleCount > 0 ||
-                    result.changedSourceCount > 0 ||
-                    result.changedSavedItemCount > 0
+        var rssPending = 0
+        // Restore one logical object at a time: retaining the archive, relay and
+        // RSS JSON together can exhaust the heap on a full phone library.
+        val restoreOrder = listOf(PRIVATE_LIBRARY_OBJECT, RELAY_LIBRARY_OBJECT, RSS_STATE_OBJECT, NOTES_STATE_OBJECT, NOTES_ARCHIVE_OBJECT)
+        for (descriptor in selectedObjects.sortedBy { restoreOrder.indexOf(it.name) }) {
+            yieldToReading()
+            checkApprovalOwner(session)
+            traceSync("object-start:${descriptor.name}")
+            val bytes = codec.restoreObjects(accountKey, manifest.copy(objects = listOf(descriptor))) {
+                sha -> cache.loadChunk(session.userId, sha) ?: error("本地缺少加密块 $sha")
+            }.getValue(descriptor.name)
+            when (descriptor.name) {
+                PRIVATE_LIBRARY_OBJECT -> {
+                    val result = backupService.restorePrivateLibrary(bytes, BackupImportMode.MERGE) { checkApprovalOwner(session) }
+                    changed = changed || result.changedArticleCount > 0 || result.changedSourceCount > 0 || result.changedSavedItemCount > 0
+                }
+                RELAY_LIBRARY_OBJECT -> changed = backupService.restoreCloudRelayLibrary(bytes, { checkApprovalOwner(session) }, { yieldToReading() }) > 0 || changed
+                RSS_STATE_OBJECT -> {
+                    val applied = backupService.applyCloudRssState(bytes, createMissing = true) { checkApprovalOwner(session) }
+                    changed = changed || applied.first > 0
+                    rssPending = applied.second
+                }
+                NOTES_STATE_OBJECT -> {
+                    NoteCloudStateCodec.decode(bytes).forEach { noteRepository.applyRemote(it, it.modifiedBy) }
+                    changed = true
+                }
+                NOTES_ARCHIVE_OBJECT -> noteTransfer.restoreAssetsZip(bytes)
             }
-            objects[RELAY_LIBRARY_OBJECT]?.let { relay ->
-                changed = backupService.restoreCloudRelayLibrary(relay) > 0 || changed
-            }
+            traceSync("object-done:${descriptor.name}")
         }
-        val (rssApplied, rssPending) = objects[RSS_STATE_OBJECT]
-            ?.let { backupService.applyCloudRssState(it) }
-            ?: (0 to 0)
-        changed = changed || rssApplied > 0
-        objects[NOTES_STATE_OBJECT]?.let { bytes ->
-            NoteCloudStateCodec.decode(bytes).forEach { noteRepository.applyRemote(it, it.modifiedBy) }
-            changed = true
-        }
-        objects[NOTES_ARCHIVE_OBJECT]?.let(noteTransfer::restoreAssetsZip)
         cache.storeManifest(
             session.userId,
             head.id,
@@ -700,9 +950,33 @@ class PhoneCloudSyncService(
         keyVersion: Int
     ): UploadOutcome {
         val previous = loadLatestManifest(session.userId, accountKey, keyVersion)
+        val privateFingerprint = if (fullTransfer) backupService.privateCloudFingerprint() else null
+        val pendingManifest = cache.loadPendingManifest(session.userId)?.let { (id, bytes) ->
+            runCatching { codec.decryptManifest(accountKey, id, bytes) }.getOrNull()
+                ?.takeIf { it.keyVersion == keyVersion }
+        }
+        // A retry can carry an authenticated pending body when every block is still local.
+        val bodySource = listOfNotNull(previous, pendingManifest).firstOrNull { candidate ->
+            candidate.settings.optString("privateBodyFingerprintV1") == privateFingerprint &&
+                ((candidate === previous && heads.any { it.id == candidate.snapshotId }) || candidate.allChunks.all { cache.loadChunk(session.userId, it.ciphertextSha256) != null })
+        }
+        val priorBodies = bodySource?.objects.orEmpty().filter { it.name == PRIVATE_LIBRARY_OBJECT || it.name == RELAY_LIBRARY_OBJECT }
+        val carryPrivate = fullTransfer && privateFingerprint != null &&
+            bodySource?.settings?.optString("privateBodyFingerprintV1") == privateFingerprint &&
+            priorBodies.map { it.name }.toSet() == setOf(PRIVATE_LIBRARY_OBJECT, RELAY_LIBRARY_OBJECT) &&
+            priorBodies.all { it.readerKeyEnvelope == null }
         val logicalObjects: List<CloudLogicalObject>
         val carried: List<CloudObjectDescriptor>
-        if (fullTransfer) {
+        if (carryPrivate) {
+            traceSync("upload-private:reuse")
+            logicalObjects = listOfNotNull(
+                CloudLogicalObject(RSS_STATE_OBJECT, backupService.createCloudRssState()),
+                CloudLogicalObject(NOTES_STATE_OBJECT, NoteCloudStateCodec.encode(noteRepository.allNotes())),
+                runCatching { CloudLogicalObject(NOTES_ARCHIVE_OBJECT, noteTransfer.exportZip()) }.getOrNull()
+            )
+            carried = priorBodies
+        } else if (fullTransfer) {
+            traceSync("upload-private:build")
             logicalObjects = listOfNotNull(
                 CloudLogicalObject(PRIVATE_LIBRARY_OBJECT, backupService.createCloudPrivateArchiveFile(), false),
                 CloudLogicalObject(RSS_STATE_OBJECT, backupService.createCloudRssState()),
@@ -724,8 +998,8 @@ class PhoneCloudSyncService(
         }
         val parentHeads = heads.associate { it.sourceDeviceId to it.id }
         val observedHeads = heads.associate { it.sourceDeviceId to it.deviceSequence }
-        val contentHash = snapshotContentHash(logicalObjects, carried, keyVersion)
-        val contentChanged = settings.lastContentHash(fullTransfer) != contentHash
+        val contentHash = snapshotContentHash(logicalObjects, carried, keyVersion, privateFingerprint)
+        val contentChanged = settings.lastContentHash(fullTransfer) != contentHash || heads.none { it.sourceDeviceId == deviceId }
         val mergeNeeded = heads.isNotEmpty() && heads.none { candidate ->
             heads.all { current ->
                 current.sourceDeviceId == candidate.sourceDeviceId ||
@@ -740,40 +1014,92 @@ class PhoneCloudSyncService(
             .firstOrNull { it.deviceId == deviceId }
             ?.lastSequence
             ?: 0L
+        val reusableManifests = heads.filter { it.keyVersion == keyVersion }.mapNotNull { head ->
+            cache.loadManifest(session.userId, head.id)?.let { bytes ->
+                runCatching { codec.decryptManifest(accountKey, head.id, bytes) }.getOrNull()
+            }
+        }
+        val snapshotSettings = if (!fullTransfer) org.json.JSONObject(previous?.settings?.toString() ?: "{}") else org.json.JSONObject()
+        if (privateFingerprint != null && privateFingerprint == backupService.privateCloudFingerprint()) {
+            snapshotSettings.put("privateBodyFingerprintV1", privateFingerprint)
+        }
         val encrypted = codec.create(
             accountKey = accountKey,
             keyVersion = keyVersion,
             sourceDeviceId = deviceId,
             deviceSequence = settings.nextSequence(serverSequence),
-            logicalObjects = logicalObjects,
+            logicalObjects = logicalObjects.map { it.copy(incrementalChunks = true) },
             parentHeads = parentHeads,
             observedHeads = observedHeads,
             previousManifest = previous,
-            carryForwardObjects = carried
+            carryForwardObjects = carried,
+            reusableManifests = reusableManifests + listOfNotNull(pendingManifest),
+            snapshotSettings = snapshotSettings,
+            onReusedChunk = { descriptor, materialize ->
+                if (cache.loadChunk(session.userId, descriptor.ciphertextSha256) == null) {
+                    cache.storeChunk(session.userId, descriptor.ciphertextSha256, materialize())
+                }
+            }
         )
         encrypted.newCiphertextChunks.forEach { (sha, bytes) ->
             cache.storeChunk(session.userId, sha, bytes)
         }
+        checkApprovalOwner(session)
+        cache.storePendingManifest(session.userId, encrypted.manifest.snapshotId, encrypted.encryptedManifest,
+            encrypted.manifest.allChunks.map { it.ciphertextSha256 })
+        traceSync("upload-chunks:new=${encrypted.newCiphertextChunks.size}:total=${encrypted.manifest.allChunks.size}:newBytes=${encrypted.newCiphertextChunks.values.sumOf { it.size.toLong() }}")
         update(CloudSyncPhase.UPLOADING, "正在预留云空间", bootstrap.member)
         val reservation = client.reserveSnapshot(session, encrypted, settings.retentionDays)
+        traceSync("upload-plan:objects=${reservation.missingObjects.size}:bytes=${reservation.missingObjects.sumOf { it.sizeBytes }}")
         var uploadedBytes = 0L
-        reservation.missingObjects.forEach { target ->
+        var uploadedObjects = 0
+        val uploadSlots = kotlinx.coroutines.sync.Semaphore(3)
+        val progressLock = Any()
+        kotlinx.coroutines.coroutineScope {
+        reservation.missingObjects.map { target -> async { uploadSlots.withPermit {
+            checkApprovalOwner(session)
             val bytes = if (target.kind == "manifest") {
                 encrypted.encryptedManifest
             } else {
                 cache.loadChunk(session.userId, target.sha256)
                     ?: error("本地缺少待上传加密块 ${target.sha256}")
             }
-            uploader.upload(target, bytes)
-            uploadedBytes += bytes.size
-            update(
-                CloudSyncPhase.UPLOADING,
-                "已上传 ${formatBytes(uploadedBytes)}",
-                bootstrap.member,
-                uploadedBytes
-            )
+            var attempt = 0
+            var sent = false
+            while (true) {
+                checkApprovalOwner(session)
+                try {
+                    // Late blocks need a fresh URL on slow links.
+                    val fresh = if (bytes.size <= 2 * 1024 * 1024) client.refreshUpload(session, target) else target
+                    if (!fresh.alreadyUploaded) {
+                        uploader.upload(fresh, bytes)
+                        sent = true
+                    }
+                    break
+                } catch (error: java.io.IOException) {
+                    val status = when (error) {
+                        is CloudHttpException -> error.status
+                        is CloudObjectUploadException -> error.status
+                        else -> null
+                    }
+                    if (status != null && status !in setOf(408, 429, 500, 502, 503, 504)) throw error
+                    if (++attempt >= 3) throw error
+                    traceSync("upload-retry:$attempt")
+                    kotlinx.coroutines.delay(attempt * 1000L)
+                }
+            }
+            synchronized(progressLock) {
+                if (sent) uploadedBytes += bytes.size
+                uploadedObjects++
+                if (uploadedObjects % 20 == 0 || uploadedObjects == reservation.missingObjects.size) traceSync("upload-progress:$uploadedObjects/${reservation.missingObjects.size}:bytes=$uploadedBytes")
+                update(CloudSyncPhase.UPLOADING, "已上传 ${formatBytes(uploadedBytes)}", bootstrap.member, uploadedBytes)
+            }
+        } } }.awaitAll()
         }
+        traceSync("upload-verify:start")
+        update(CloudSyncPhase.UPLOADING, "正在完成同步", bootstrap.member, uploadedBytes)
         client.completeSnapshot(session, encrypted)
+        traceSync("upload-verify:done")
         cache.storeManifest(
             session.userId,
             encrypted.manifest.snapshotId,
@@ -785,6 +1111,7 @@ class PhoneCloudSyncService(
             encrypted.manifest.snapshotId,
             encrypted.manifest.allChunks.map(CloudChunkDescriptor::ciphertextSha256)
         )
+        cache.clearPendingManifest(session.userId, encrypted.manifest.snapshotId)
         cache.prune(session.userId)
         settings.markApplied(deviceId, encrypted.manifest.deviceSequence, full = fullTransfer)
         settings.markApplied(deviceId, encrypted.manifest.deviceSequence, full = false)
@@ -813,6 +1140,38 @@ class PhoneCloudSyncService(
                 .getOrNull()
                 ?.takeIf { it.keyVersion == keyVersion }
         }
+
+    // Keep the legacy installation's ECDH key and account keys available while
+    // moving cloud identity to the ID already bound to the app authorization.
+    private fun restoreLegacyDeviceEnvelopes(session: PhoneAccountSession, bootstrap: CloudBootstrap) {
+        val legacy = legacyDeviceId?.takeIf { it != deviceId } ?: return
+        if (keyManager.hasAccountKey(session.userId)) return
+        val device = bootstrap.devices.firstOrNull { it.deviceId == legacy && it.revokedAt == null }
+            ?: return
+        val envelopes = deviceApprovalEnvelopes(bootstrap, legacy)
+        if (envelopes.isEmpty()) return
+        if (device.publicKeySpki != keyManager.devicePublicKeySpki(session.userId, legacy)) return
+        envelopes.forEach { keyManager.unwrapDeviceEnvelope(session.userId, legacy, it.envelope) }
+    }
+
+    private val identityMigrationMutex = Mutex()
+
+    private suspend fun ensureApprovalIdentity(session: PhoneAccountSession, bootstrap: CloudBootstrap) {
+        if (!bootstrap.member.writable || !keyManager.hasAccountKey(session.userId)) return
+        identityMigrationMutex.withLock {
+            checkApprovalOwner(session)
+            val device = bootstrap.devices.firstOrNull { it.deviceId == deviceId }
+            // An explicit server revocation must never be undone by migration.
+            if (device?.revokedAt != null) return@withLock
+            val versions = deviceApprovalEnvelopes(bootstrap, deviceId).map { it.envelope.keyVersion }
+            if (device != null && device.publicKeySpki == keyManager.devicePublicKeySpki(session.userId, deviceId)
+                && keyManager.keyVersions(session.userId).all { it in versions }) return@withLock
+            registerCurrentDevice(session)
+            checkApprovalOwner(session)
+            storeEnvelopeForCurrentDevice(session)
+            checkApprovalOwner(session)
+        }
+    }
 
     private suspend fun registerCurrentDevice(session: PhoneAccountSession) {
         client.registerDevice(
@@ -852,14 +1211,17 @@ class PhoneCloudSyncService(
     private fun snapshotContentHash(
         objects: List<CloudLogicalObject>,
         carried: List<CloudObjectDescriptor>,
-        keyVersion: Int
+        keyVersion: Int,
+        privateFingerprint: String? = null
     ): String {
+        val bodyNames = setOf(PRIVATE_LIBRARY_OBJECT, RELAY_LIBRARY_OBJECT)
         val description = buildString {
             append("keyVersion:").append(keyVersion).append(';')
-            objects.sortedBy(CloudLogicalObject::name).forEach {
+            if (privateFingerprint != null) append("private:").append(privateFingerprint).append(';')
+            objects.filter { privateFingerprint == null || it.name !in bodyNames }.sortedBy(CloudLogicalObject::name).forEach {
                 append(it.name).append(':').append(it.sha256()).append(';')
             }
-            carried.sortedBy(CloudObjectDescriptor::name).forEach { descriptor ->
+            carried.filter { privateFingerprint == null || it.name !in bodyNames }.sortedBy(CloudObjectDescriptor::name).forEach { descriptor ->
                 append(descriptor.name).append(':')
                 descriptor.chunks.forEach { append(it.ciphertextSha256) }
                 append(';')

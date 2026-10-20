@@ -8,6 +8,44 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface PhoneArticleDao {
+    @Query("""SELECT * FROM phone_articles WHERE articleId>:after AND
+        (url LIKE 'https://watchrss.local/import-%' OR rssSourceUrl LIKE 'https://watchrss.local/import-%'
+         OR (rssSourceUrl IS NULL OR rssSourceUrl=''))
+        ORDER BY articleId LIMIT :limit""")
+    suspend fun privateCloudBodyPage(after: String, limit: Int): List<PhoneArticleEntity>
+
+    @Query("SELECT * FROM phone_articles WHERE length(excerpt)>280")
+    suspend fun longCloudExcerpts(): List<PhoneArticleEntity>
+
+    @Query("""UPDATE phone_articles SET excerpt=:excerpt, contentText=:text, contentHtml=:html,
+        updatedAt=MAX(updatedAt,:clock), sourceDeviceId=:device, syncMetadataHash=''
+        WHERE articleId=:id AND contentHash=:hash AND excerpt=:oldExcerpt
+        AND contentText=:oldText AND COALESCE(contentHtml,'')=COALESCE(:oldHtml,'')""")
+    suspend fun compactCloudExcerpt(id: String, hash: String, oldExcerpt: String, oldText: String,
+        oldHtml: String?, excerpt: String, text: String, html: String?, clock: Long, device: String): Int
+
+    @Query("""UPDATE phone_articles SET contentText=:text, contentHtml=:html
+        WHERE articleId=:id AND contentHash=:hash AND deleted=0
+        AND contentText=:expectedText AND (contentHtml IS NULL OR contentHtml='')""")
+    suspend fun fillMissingCloudBody(id: String, hash: String, text: String, html: String?, expectedText: String): Int
+
+    @Query("""SELECT articleId FROM phone_articles WHERE deleted=0 AND contentText=''
+        AND (contentHtml IS NULL OR contentHtml='') AND url LIKE 'https://watchrss.local/%'
+        ORDER BY articleId""")
+    suspend fun missingPrivateBodyIds(): List<String>
+
+    @Query("""SELECT articleId, sourceDeviceId, url, title, siteName, excerpt,
+               NULL AS contentHtml, '' AS contentText, imageUrl, contentHash,
+               importedAt, updatedAt, independentSaved, independentChangedAt,
+               independentSortOrder, rssSourceUrl, rssSourceTitle,
+               favoriteSaved, favoriteChangedAt, favoriteSortOrder,
+               watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
+               deleted, deletedAt, syncBodyHash, syncBodyByteCount,
+               syncChunkSize, syncChunkHashesJson, syncMetadataHash, readingProgress, isRead,
+               readingPositionBytes, readingPositionContentHash, readingPositionChangedAt
+        FROM phone_articles WHERE articleId > :after ORDER BY articleId LIMIT :limit""")
+    suspend fun cloudRecordPage(after: String, limit: Int): List<PhoneArticleEntity>
+
     @Query(
         """
         SELECT articleId, sourceDeviceId, url, title, siteName, excerpt,

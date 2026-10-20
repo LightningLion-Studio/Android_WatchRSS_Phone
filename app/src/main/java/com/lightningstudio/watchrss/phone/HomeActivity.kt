@@ -256,7 +256,7 @@ class HomeActivity : ComponentActivity() {
                         }
                     },
                     canOpenArticleInline = { article -> article.articleId.isNotBlank() },
-                    onLoadArticleForInlineReader = container.repository::getArticle,
+                    onLoadArticleForInlineReader = container.cloudSyncService::loadArticleForReading,
                     onLoadImportedTextReaderForInlineReader = container.repository::getImportedTextReader,
                     onLoadImportedTextChunkForInlineReader = container.repository::loadImportedTextChunk,
                     onToggleFavorite = viewModel::toggleFavorite,

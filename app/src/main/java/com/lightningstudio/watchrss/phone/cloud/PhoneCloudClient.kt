@@ -19,8 +19,18 @@ import java.util.concurrent.TimeUnit
 class PhoneCloudClient(
     private val environment: AccountEnvironment,
     private val deviceAccessToken: () -> String? = { null },
-    private val http: OkHttpClient = defaultHttpClient()
+    private val http: OkHttpClient = defaultHttpClient(),
+    private val refreshDeviceSession: suspend (String, String) -> Boolean = { _, _ -> false }
 ) {
+    internal suspend fun recordPage(session: PhoneAccountSession, cursor: String): JSONObject? {
+        require(cursor.matches(Regex("[0-9]+")))
+        return try { get(session, "/functions/v1/cloud/records?after=$cursor&limit=50").use { it.jsonBody() } }
+        catch (error: CloudHttpException) { if (error.status == 404) null else throw error }
+    }
+
+    internal suspend fun postRecords(session: PhoneAccountSession, items: JSONArray): JSONObject =
+        post(session, "/functions/v1/cloud/records", JSONObject().put("formatVersion", 1).put("items", items)).use { it.jsonBody() }
+
     suspend fun membership(session: PhoneAccountSession): CloudMemberState =
         get(session, "/functions/v1/account/entitlement").use { response ->
             response.jsonBody().memberState()
@@ -35,6 +45,25 @@ class PhoneCloudClient(
                 keyEnvelopes = json.getJSONArray("keyEnvelopes").objects { it.keyEnvelope() }
             )
         }
+
+    suspend fun approvalRequest(session: PhoneAccountSession, deviceId: String): String =
+        post(session, "/functions/v1/cloud/approvals", JSONObject().put("deviceId", deviceId).put("restart",true)).use { it.jsonBody().getString("id") }
+
+    suspend fun pendingApprovals(session: PhoneAccountSession, deviceId: String): List<JSONObject> =
+        get(session, "/functions/v1/cloud/approvals?deviceId=${java.net.URLEncoder.encode(deviceId,"UTF-8")}").use {
+            val array=it.jsonBody().getJSONArray("requests")
+            (0 until array.length()).map { i -> array.getJSONObject(i) }
+        }
+
+    suspend fun offerApproval(session: PhoneAccountSession, id: String, deviceId: String, code: String, envelopes: List<CloudKeyEnvelope>) {
+        val values=JSONArray()
+        envelopes.forEach { e -> values.put(JSONObject().put("algorithm",e.algorithm).put("keyVersion",e.keyVersion).put("wrappedKeyBase64",e.wrappedKeyBase64).put("nonceBase64",e.nonceBase64).put("ephemeralPublicKeySpki",e.ephemeralPublicKeySpki)) }
+        post(session,"/functions/v1/cloud/approvals/$id/offer",JSONObject().put("deviceId",deviceId).put("code",code).put("envelopes",values)).close()
+    }
+
+    suspend fun redeemApproval(session: PhoneAccountSession, id: String, deviceId: String, code: String) {
+        post(session,"/functions/v1/cloud/approvals/$id/redeem",JSONObject().put("deviceId",deviceId).put("code",code)).close()
+    }
 
     suspend fun registerDevice(
         session: PhoneAccountSession,
@@ -54,6 +83,7 @@ class PhoneCloudClient(
                 put("keyVersion", keyVersion)
                 put("capabilities", JSONObject().apply {
                     put("snapshotSchema", 2)
+                    put("rssRecordsVersion", 1)
                     put("cloudRelay", true)
                     put("settings", false)
                     put("credentialEnvelopes", false)
@@ -131,10 +161,21 @@ class PhoneCloudClient(
                         signedUrl = item.getString("signedUrl"),
                         token = item.getString("token"),
                         tusEndpoint = item.getString("tusEndpoint"),
-                        bucketName = item.getString("bucketName")
+                        bucketName = item.getString("bucketName"),
+                        reservationId = item.optString("reservationId").takeIf { it.isNotBlank() }
                     )
                 }
             )
+        }
+    }
+
+    suspend fun refreshUpload(session: PhoneAccountSession, target: CloudUploadObject): CloudUploadObject {
+        val id = target.reservationId ?: return target
+        require(runCatching { java.util.UUID.fromString(id) }.isSuccess)
+        return post(session, "/functions/v1/cloud/uploads/$id/refresh", JSONObject()).use {
+            val body = it.jsonBody()
+            if (body.optBoolean("alreadyUploaded")) target.copy(alreadyUploaded = true)
+            else target.copy(signedUrl = body.getString("signedUrl"))
         }
     }
 
@@ -164,11 +205,34 @@ class PhoneCloudClient(
             response.jsonBody().getJSONArray("heads").objects { it.snapshotHead() }
         }
 
+    suspend fun snapshotHistory(session: PhoneAccountSession): List<CloudSnapshotHead> {
+        val result = mutableListOf<CloudSnapshotHead>()
+        var offset = 0L
+        do {
+            val next = get(session, "/functions/v1/cloud/snapshots/heads?history=true&limit=100&offset=$offset").use { response ->
+                val json = response.jsonBody()
+                check(json.has("nextOffset")) { "历史快照功能需要更新云服务" }
+                result += json.getJSONArray("heads").objects { it.snapshotHead() }
+                if (json.isNull("nextOffset")) null else json.getLong("nextOffset")
+            }
+            if (next == null) break
+            check(next > offset) { "历史快照分页无效" }
+            offset = next
+        } while (true)
+        return result
+    }
+
     suspend fun snapshot(
         session: PhoneAccountSession,
-        snapshotId: String
+        snapshotId: String,
+        manifestOnly: Boolean = false,
+        chunk: String? = null
     ): CloudSnapshotDownload =
-        get(session, "/functions/v1/cloud/snapshots/$snapshotId").use { response ->
+        get(session, "/functions/v1/cloud/snapshots/$snapshotId" + when {
+            chunk != null -> { require(chunk.matches(Regex("[a-f0-9]{64}"))); "?chunk=$chunk" }
+            manifestOnly -> "?manifestOnly=true"
+            else -> ""
+        }).use { response ->
             val json = response.jsonBody()
             val snapshot = json.getJSONObject("snapshot")
             CloudSnapshotDownload(
@@ -336,7 +400,7 @@ class PhoneCloudClient(
     ): okhttp3.Response = withContext(Dispatchers.IO) {
         require(environment.backendBaseUrl.isNotBlank()) { "云服务地址未配置" }
         require(!session.isExpired) { "登录已过期，请重新登录" }
-        val request = builder
+        fun buildRequest() = builder
             .withWatchRssAppVersionHeader()
             .header("authorization", "Bearer ${session.accessToken}")
             .apply {
@@ -347,15 +411,37 @@ class PhoneCloudClient(
             .header("apikey", environment.supabaseAnonKey)
             .header("accept", "application/json")
             .build()
-        http.newCall(request).execute().also { response ->
-            if (!response.isSuccessful) response.throwHttp()
+        val firstRequest = buildRequest()
+        // Reserve/complete may verify hundreds of stored immutable blocks.
+        val requestHttp = if (firstRequest.url.encodedPath in setOf(
+                "/functions/v1/cloud/snapshots/reserve", "/functions/v1/cloud/snapshots/complete"
+            )) http.newBuilder().readTimeout(180, TimeUnit.SECONDS).build() else http
+        var response = requestHttp.newCall(firstRequest).execute()
+        val rejected = firstRequest.header("x-watchrss-device-authorization")?.removePrefix("Bearer ")
+        if (response.code == 403 && rejected != null && isRefreshableCloudDeviceSessionError(
+                runCatching { JSONObject(response.peekBody(4096).string()).optString("error") }.getOrDefault("")
+            )) {
+            response.close()
+            if (refreshDeviceSession(rejected, session.userId)) {
+                response = requestHttp.newCall(buildRequest()).execute()
+            } else {
+                throw CloudDeviceAuthorizationException()
+            }
         }
+        if (response.code == 403) {
+            val code = runCatching { JSONObject(response.peekBody(4096).string()).optString("error") }.getOrDefault("")
+            if (code in setOf("device_session_revoked", "device_session_expired", "device_session_invalid", "device_revoked", "device_mismatch")) {
+                response.close()
+                throw CloudDeviceAuthorizationException()
+            }
+        }
+        response.also { if (!it.isSuccessful) it.throwHttp() }
     }
 
     private fun okhttp3.Response.throwHttp(): Nothing {
         val detail = body?.string().orEmpty()
         close()
-        throw IOException("HTTP $code: ${detail.ifBlank { message }}")
+        throw CloudHttpException(code, detail.ifBlank { message })
     }
 
     private fun okhttp3.Response.jsonBody(): JSONObject {
@@ -407,7 +493,9 @@ class PhoneCloudClient(
         manifestSha256 = getString("manifestSha256"),
         manifestSizeBytes = getLong("manifestSizeBytes"),
         parentHeads = getJSONObject("parentHeads").stringMap(),
-        observedHeads = getJSONObject("observedHeads").longMap()
+        observedHeads = getJSONObject("observedHeads").longMap(),
+        completedAt = nullableString("completedAt"),
+        totalSizeBytes = optLong("totalSizeBytes", getLong("manifestSizeBytes"))
     )
 
     private fun JSONObject.nullableString(name: String): String? =
@@ -435,3 +523,10 @@ class PhoneCloudClient(
             .build()
     }
 }
+
+internal fun isRefreshableCloudDeviceSessionError(code: String): Boolean =
+    code == "device_session_revoked" || code == "device_session_expired"
+
+internal class CloudDeviceAuthorizationException : IOException("设备身份需要重新验证，请前往账号页面完成验证")
+
+internal class CloudHttpException(val status: Int, val detail: String) : IOException("HTTP $status: $detail")

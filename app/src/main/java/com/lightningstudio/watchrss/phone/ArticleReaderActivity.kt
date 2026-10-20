@@ -207,16 +207,32 @@ class ArticleReaderActivity : ComponentActivity() {
                     val article by remember(articleId) {
                         repository.observeArticle(articleId)
                     }.collectAsState(initial = null)
+                    var bodyRetry by remember(articleId) { mutableStateOf(0) }
+                    val bodyReady by produceState<Result<Unit>?>(null, articleId, bodyRetry) {
+                        value = null
+                        value = try {
+                            (application as PhoneCompanionApplication).container.cloudSyncService.loadArticleForReading(articleId)
+                            Result.success(Unit)
+                        } catch (error: CancellationException) { throw error }
+                        catch (error: Exception) { Result.failure(error) }
+                    }
                     val importedTextReader by produceState<PhoneImportedTextReader?>(
                         initialValue = null,
-                        articleId
+                        articleId, bodyReady
                     ) {
                         value = repository.getImportedTextReader(articleId)
                     }
                     TipOverlayHost(
                         tipManager = (application as PhoneCompanionApplication).container.tipManager
                     ) {
-                    ArticleReaderScreen(
+                    if (bodyReady?.isFailure == true) {
+                        Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Text("正文暂未加载完成，请重试。")
+                            androidx.compose.material3.TextButton(onClick = { bodyRetry++ }) { Text("重试") }
+                            androidx.compose.material3.TextButton(onClick = { finish() }) { Text("返回") }
+                        }
+                    } else ArticleReaderScreen(
+                        contentReady = bodyReady?.isSuccess == true,
                         article = article,
                         importedTextReader = importedTextReader,
                         invalidArticleId = articleId.isBlank(),

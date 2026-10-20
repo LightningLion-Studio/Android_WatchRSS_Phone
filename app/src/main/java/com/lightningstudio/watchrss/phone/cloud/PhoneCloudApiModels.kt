@@ -47,7 +47,9 @@ data class CloudSnapshotHead(
     val manifestSha256: String,
     val manifestSizeBytes: Long,
     val parentHeads: Map<String, String>,
-    val observedHeads: Map<String, Long>
+    val observedHeads: Map<String, Long>,
+    val completedAt: String? = null,
+    val totalSizeBytes: Long = manifestSizeBytes
 )
 
 data class CloudUploadObject(
@@ -58,7 +60,9 @@ data class CloudUploadObject(
     val signedUrl: String,
     val token: String,
     val tusEndpoint: String,
-    val bucketName: String
+    val bucketName: String,
+    val reservationId: String? = null,
+    val alreadyUploaded: Boolean = false
 )
 
 data class CloudSnapshotReservation(

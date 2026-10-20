@@ -28,7 +28,10 @@ class CloudSnapshotCodec(
         previousManifest: CloudSnapshotManifest? = null,
         carryForwardObjects: List<CloudObjectDescriptor> = emptyList(),
         snapshotId: String = UUID.randomUUID().toString(),
-        createdAtMillis: Long = System.currentTimeMillis()
+        createdAtMillis: Long = System.currentTimeMillis(),
+        reusableManifests: List<CloudSnapshotManifest> = emptyList(),
+        onReusedChunk: ((CloudChunkDescriptor, () -> ByteArray) -> Unit)? = null,
+        snapshotSettings: JSONObject = JSONObject()
     ): EncryptedCloudSnapshot {
         require(accountKey.size == KEY_BYTES) { "账号主密钥必须为256位" }
         require(keyVersion > 0) { "账号密钥版本无效" }
@@ -39,10 +42,14 @@ class CloudSnapshotCodec(
             "云快照对象名称重复"
         }
 
-        val reusableByPlaintextHash = previousManifest
-            ?.allChunks
-            ?.associateBy(CloudChunkDescriptor::plaintextSha256)
-            .orEmpty()
+        // Only account-root ciphertext from this key version is interchangeable.
+        // Reader projections can use a separate wrapped root despite identical plaintext hashes.
+        val reusableByPlaintextHash = (reusableManifests + listOfNotNull(previousManifest))
+            .filter { it.keyVersion == keyVersion }
+            .flatMap { it.objects }
+            .filter { it.readerKeyEnvelope == null }
+            .flatMap { it.chunks }
+            .associateBy(CloudChunkDescriptor::plaintextSha256).toMutableMap()
         val newChunks = linkedMapOf<String, ByteArray>()
         val objectDescriptors = logicalObjects.map { logicalObject ->
             require(logicalObject.name.matches(OBJECT_NAME_PATTERN)) {
@@ -51,18 +58,24 @@ class CloudSnapshotCodec(
             val descriptors = mutableListOf<CloudChunkDescriptor>()
             var encodedBytes = 0L
             logicalObject.openStream().use { input ->
+                val incremental = if (logicalObject.incrementalChunks) CloudContentChunks(input) else null
                 while (true) {
-                    val raw = input.readChunk(CLOUD_SNAPSHOT_CHUNK_BYTES) ?: break
+                    val raw = (if (incremental != null) incremental.next() else input.readChunk(CLOUD_SNAPSHOT_CHUNK_BYTES)) ?: break
                     val plaintext = if (logicalObject.compress) gzip(raw) else raw
                     encodedBytes += plaintext.size
                     val plaintextHash = sha256(plaintext)
-                    descriptors += reusableByPlaintextHash[plaintextHash] ?: encryptChunk(
+                    val reused = reusableByPlaintextHash[plaintextHash]
+                    if (reused != null) onReusedChunk?.invoke(reused) {
+                        encryptChunk(accountKey, plaintext, plaintextHash, reused).second
+                    }
+                    descriptors += reused ?: encryptChunk(
                         accountKey = accountKey,
                         plaintext = plaintext,
                         plaintextHash = plaintextHash
                     ).also { encrypted ->
                         newChunks[encrypted.first.ciphertextSha256] = encrypted.second
                     }.first
+                    reusableByPlaintextHash[plaintextHash] = descriptors.last()
                 }
             }
             CloudObjectDescriptor(
@@ -81,7 +94,8 @@ class CloudSnapshotCodec(
             createdAtMillis = createdAtMillis,
             parentHeads = parentHeads,
             observedHeads = observedHeads,
-            objects = carryForwardObjects + objectDescriptors
+            objects = carryForwardObjects + objectDescriptors,
+            settings = snapshotSettings
         )
         val encryptedManifest = encryptManifest(accountKey, manifest)
         return EncryptedCloudSnapshot(
@@ -132,9 +146,10 @@ class CloudSnapshotCodec(
         ciphertextChunk: (String) -> ByteArray
     ): Map<String, ByteArray> =
         manifest.objects.associate { descriptor ->
+            val objectKey = unwrapReaderKey(accountKey, descriptor)
             val encodedChunks = descriptor.chunks.map { chunk ->
                 decryptChunk(
-                    accountKey = accountKey,
+                    accountKey = objectKey,
                     descriptor = chunk,
                     blob = ciphertextChunk(chunk.ciphertextSha256)
                 )
@@ -157,13 +172,29 @@ class CloudSnapshotCodec(
             descriptor.name to restored
         }
 
+    private fun unwrapReaderKey(accountKey: ByteArray, descriptor: CloudObjectDescriptor): ByteArray {
+        val envelope = descriptor.readerKeyEnvelope ?: return accountKey
+        require(envelope.getInt("version") == 1)
+        val salt = Base64.getDecoder().decode(envelope.getString("saltBase64"))
+        val nonce = Base64.getDecoder().decode(envelope.getString("nonceBase64"))
+        require(salt.size == 16 && nonce.size == 12)
+        val wrappingKey = hkdfSha256(accountKey, salt, "watchrss/cloud/reader-key/v1".toByteArray(), 32)
+        return try {
+            decryptAesGcm(wrappingKey, nonce,
+                Base64.getDecoder().decode(envelope.getString("ciphertextBase64")),
+                "watchrss-reader-key-v1:${envelope.optString("scope", descriptor.name)}".toByteArray())
+                .also { require(it.size == 32) }
+        } finally { wrappingKey.fill(0) }
+    }
+
     private fun encryptChunk(
         accountKey: ByteArray,
         plaintext: ByteArray,
-        plaintextHash: String
+        plaintextHash: String,
+        reused: CloudChunkDescriptor? = null
     ): Pair<CloudChunkDescriptor, ByteArray> {
-        val salt = randomBytes(SALT_BYTES)
-        val nonce = randomBytes(NONCE_BYTES)
+        val salt = reused?.saltBase64?.fromBase64() ?: randomBytes(SALT_BYTES)
+        val nonce = reused?.nonceBase64?.fromBase64() ?: randomBytes(NONCE_BYTES)
         val key = hkdfSha256(
             inputKey = accountKey,
             salt = salt,
@@ -191,6 +222,7 @@ class CloudSnapshotCodec(
             saltBase64 = salt.toBase64(),
             nonceBase64 = nonce.toBase64()
         )
+        require(reused == null || reused == descriptor) { "复用块校验失败" }
         return descriptor to blob
     }
 

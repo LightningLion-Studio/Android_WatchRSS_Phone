@@ -29,6 +29,7 @@ import com.lightningstudio.watchrss.phone.connection.bili.failureResponse
 import com.lightningstudio.watchrss.phone.connection.bili.successResponse
 import com.lightningstudio.watchrss.phone.connection.bluetooth.NoteSyncPayload
 import com.lightningstudio.watchrss.phone.connection.ip.IpSyncProtocol
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,7 +40,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import com.lightningstudio.watchrss.phone.connection.bili.WatchBiliLoginSession
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -54,6 +57,7 @@ internal class WatchBleBandwidthServer(
     private val pendingVideoStats =
         ConcurrentHashMap<Int, CompletableDeferred<ControlMessage.VideoStats>>()
     private val trialCounter = AtomicInteger(0)
+    private val connectionEpoch = AtomicInteger(0)
     private val notificationLock = Any()
     private val rpcLock = Any()
     private val baseStationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -195,6 +199,12 @@ internal class WatchBleBandwidthServer(
             if (status == BluetoothGatt.GATT_SUCCESS &&
                 newState == BluetoothProfile.STATE_CONNECTED
             ) {
+                if (connectedDevice != null && connectedDevice?.address != device.address) {
+                    gattServer?.cancelConnection(device)
+                    return
+                }
+                connectionEpoch.incrementAndGet()
+                WatchBiliLoginSession.clear()
                 cancelAdvertisingRestart()
                 // Android terminates a connectable legacy advertisement once a
                 // central connects. Reflect that state so a later disconnect
@@ -212,6 +222,8 @@ internal class WatchBleBandwidthServer(
             }
 
             if (connectedDevice?.address == device.address) {
+                connectionEpoch.incrementAndGet()
+                WatchBiliLoginSession.clear()
                 connectedDevice = null
                 activeNotificationCharacteristic = null
                 notificationsEnabled = false
@@ -288,7 +300,8 @@ internal class WatchBleBandwidthServer(
             offset: Int,
             value: ByteArray
         ) {
-            val valid = descriptor.uuid == BleBandwidthProtocol.CCCD_UUID &&
+            val valid = connectedDevice?.address == device.address &&
+                descriptor.uuid == BleBandwidthProtocol.CCCD_UUID &&
                 !preparedWrite &&
                 offset == 0
             if (valid) {
@@ -333,6 +346,7 @@ internal class WatchBleBandwidthServer(
             value: ByteArray
         ) {
             val control = if (
+                connectedDevice?.address == device.address &&
                 characteristic.uuid in BleBandwidthProtocol.CONTROL_UUIDS &&
                 !preparedWrite &&
                 offset == 0
@@ -447,10 +461,20 @@ internal class WatchBleBandwidthServer(
                     it.checksum == message.checksum
             }
         } ?: return
-        baseStationScope.launch { handleRpc(completed.bytes) }
+        val epoch = connectionEpoch.get()
+        baseStationScope.launch {
+            try {
+                handleRpc(completed.bytes, epoch)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                if (epoch == connectionEpoch.get()) reportStatus("手表请求传输中断，请重新连接")
+            }
+        }
     }
 
-    private suspend fun handleRpc(bytes: ByteArray) {
+    private suspend fun handleRpc(bytes: ByteArray, epoch: Int) {
+        if (epoch != connectionEpoch.get()) return
         var requestId = 0
         val response = runCatching {
             val request = BiliBaseStationRequest.decode(bytes)
@@ -460,7 +484,7 @@ internal class WatchBleBandwidthServer(
             } else if (request.method == "auth.open") {
                 val app = appContext as? PhoneCompanionApplication
                     ?: error("手机登录服务不可用")
-                if (!app.requestWatchBiliLogin()) error("请先在手机打开腕上RSS，再从手表发起登录")
+                if (!withContext(Dispatchers.Main) { epoch == connectionEpoch.get() && app.requestWatchBiliLogin() }) error("请先在手机打开腕上RSS，再从手表发起登录")
                 successResponse(request.id, org.json.JSONObject().put("status", "opened"))
             } else if (request.method == "video.start") {
                 startRealtimeVideo(
@@ -484,10 +508,12 @@ internal class WatchBleBandwidthServer(
             }
         }.getOrElse { error -> failureResponse(requestId, error) }
         outboundMutex.withLock {
+            if (epoch != connectionEpoch.get()) return@withLock
             sendPayload(
                 response,
                 requestId,
-                BleBandwidthProtocol.PAYLOAD_KIND_RPC
+                BleBandwidthProtocol.PAYLOAD_KIND_RPC,
+                epoch
             )
         }
     }
@@ -878,11 +904,11 @@ internal class WatchBleBandwidthServer(
         )
     }
 
-    private suspend fun sendPayload(payload: ByteArray, index: Int, payloadKind: Int) {
+    private suspend fun sendPayload(payload: ByteArray, index: Int, payloadKind: Int, expectedEpoch: Int = connectionEpoch.get()) {
         val trialId = trialCounter.updateAndGet { current ->
             if (current >= 0xffff) 1 else current + 1
         }
-        sendPayloadEnvelope(trialId, payload, 0, payload.size, index, payloadKind)
+        sendPayloadEnvelope(trialId, payload, 0, payload.size, index, payloadKind, expectedEpoch = expectedEpoch)
     }
 
     private suspend fun sendPayloadEnvelope(
@@ -892,7 +918,8 @@ internal class WatchBleBandwidthServer(
         sourceSize: Int,
         index: Int,
         payloadKind: Int,
-        videoPacketIntervalMs: Long = BLE_VIDEO_QUALITY_PACKET_INTERVAL_MS
+        videoPacketIntervalMs: Long = BLE_VIDEO_QUALITY_PACKET_INTERVAL_MS,
+        expectedEpoch: Int = connectionEpoch.get()
     ) {
         val maxPayload = BleBandwidthProtocol.maxPayloadBytes(mtu)
         var offset = 0
@@ -904,7 +931,7 @@ internal class WatchBleBandwidthServer(
                 sourceSize,
                 index,
                 payloadKind
-            )
+            ), expectedEpoch
         )
         while (offset < sourceSize) {
             if (payloadKind == BleBandwidthProtocol.PAYLOAD_KIND_VIDEO) {
@@ -915,7 +942,7 @@ internal class WatchBleBandwidthServer(
                 trialId, sequence, source, sourceOffset + offset, count
             )
             checksum = BleBandwidthProtocol.updateChecksum(checksum, packet)
-            sendNotification(packet)
+            sendNotification(packet, expectedEpoch)
             offset += count
             sequence += 1
             if (payloadKind == BleBandwidthProtocol.PAYLOAD_KIND_VIDEO && offset < sourceSize) {
@@ -927,7 +954,7 @@ internal class WatchBleBandwidthServer(
         }
         // RPC responses and video frames are independent envelopes. The watch
         // drops a damaged message and recovers at the next BEGIN.
-        sendNotification(BleBandwidthProtocol.encodeEnd(trialId, sourceSize, checksum))
+        sendNotification(BleBandwidthProtocol.encodeEnd(trialId, sourceSize, checksum), expectedEpoch)
     }
 
     private fun readAssetUInt16(source: ByteArray, offset: Int): Int =
@@ -1002,7 +1029,8 @@ internal class WatchBleBandwidthServer(
         }
     }
 
-    private suspend fun sendNotification(value: ByteArray) {
+    private suspend fun sendNotification(value: ByteArray, expectedEpoch: Int = connectionEpoch.get()) {
+        check(expectedEpoch == connectionEpoch.get()) { "手表连接已更换" }
         val server = requireNotNull(gattServer) { "GATT Server 未启动" }
         val device = requireNotNull(connectedDevice) { "手表 BLE 未连接" }
         val characteristic = requireNotNull(activeNotificationCharacteristic) {
@@ -1065,6 +1093,8 @@ internal class WatchBleBandwidthServer(
     }
 
     override fun close() {
+        connectionEpoch.incrementAndGet()
+        WatchBiliLoginSession.clear()
         endpointReadSnapshots.clear()
         failPending("BLE 测试页已关闭")
         localAudioProbeServer.close()

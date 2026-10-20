@@ -56,6 +56,17 @@ class AppAccessCoordinator(
         authorizationNotifier.afterReconcile(isAuthorized)
     }
 
+    /** Refresh a rotated session using the existing device possession proof, never reclaim a revoked device. */
+    suspend fun refreshRejectedDeviceSession(rejectedToken: String, expectedUserId: String): Boolean = operationMutex.withLock {
+        if (accountRepository.session.value?.userId != expectedUserId) return@withLock false
+        if (store.load()?.deviceAccessToken != rejectedToken) {
+            return@withLock !store.load()?.deviceAccessToken.isNullOrBlank()
+        }
+        reconcileLocked()
+        accountRepository.session.value?.userId == expectedUserId &&
+            store.load()?.deviceAccessToken?.let { it.isNotBlank() && it != rejectedToken } == true
+    }
+
     private suspend fun reconcileLocked() {
         val cached = store.load()
         val trustedNow = store.trustedNowMillis()

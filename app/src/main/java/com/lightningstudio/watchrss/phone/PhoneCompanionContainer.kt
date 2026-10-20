@@ -268,10 +268,13 @@ class PhoneCompanionContainer(context: Context) {
             backupService = backupService,
             repository = repository,
             noteRepository = noteRepository,
-            deviceId = deviceIdentity.deviceId,
+            // Approval endpoints bind this ID to the possession-verified app license.
+            deviceId = licenseDeviceIdentity.deviceId,
+            legacyDeviceId = deviceIdentity.deviceId,
             client = PhoneCloudClient(
                 accountEnvironment,
-                deviceAccessToken = { appAccessCoordinator.deviceAccessToken }
+                deviceAccessToken = { appAccessCoordinator.deviceAccessToken },
+                refreshDeviceSession = { token, owner -> appAccessCoordinator.refreshRejectedDeviceSession(token, owner) }
             ),
             keyManager = com.lightningstudio.watchrss.phone.cloud.CloudKeyManager(
                 appContext,
@@ -303,6 +306,13 @@ class PhoneCompanionContainer(context: Context) {
             cloudSyncService = cloudSyncService,
             scope = appScope
         )
+    }
+
+    fun setCloudSyncPaused(paused: Boolean) {
+        cloudSyncService.setSyncPaused(paused)
+        if (!paused && accountRepository.hasUsableSession) {
+            appScope.launch { runCatching { cloudSyncService.syncNow() } }
+        }
     }
 
     fun startCloudChangeScheduler() {

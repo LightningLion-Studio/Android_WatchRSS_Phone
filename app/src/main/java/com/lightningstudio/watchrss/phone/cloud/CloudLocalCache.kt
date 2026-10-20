@@ -23,6 +23,23 @@ class CloudLocalCache internal constructor(
         }
     }
 
+    /** Unfinished upload is a reuse source, never an acknowledged cloud head. */
+    fun storePendingManifest(userId: String, snapshotId: String, bytes: ByteArray, chunks: Collection<String>) {
+        storeManifest(userId, snapshotId, bytes, markAsLocalHead = false)
+        recordManifestReferences(userId, snapshotId, chunks)
+        atomicWrite(pendingFile(userId), snapshotId.toByteArray())
+    }
+
+    fun loadPendingManifest(userId: String): Pair<String, ByteArray>? {
+        val id = pendingFile(userId).takeIf(File::isFile)?.readText()?.trim()
+            ?.takeIf { it.matches(SAFE_ID) } ?: return null
+        return loadManifest(userId, id)?.let { id to it }
+    }
+
+    fun clearPendingManifest(userId: String, snapshotId: String) {
+        if (loadPendingManifest(userId)?.first == snapshotId) pendingFile(userId).delete()
+    }
+
     fun recordManifestReferences(
         userId: String,
         snapshotId: String,
@@ -65,6 +82,7 @@ class CloudLocalCache internal constructor(
     }
 
     fun deleteSnapshot(userId: String, snapshotId: String) {
+        clearPendingManifest(userId, snapshotId)
         manifestFile(userId, snapshotId).delete()
         manifestReferenceFile(userId, snapshotId).delete()
         val latest = latestFile(userId)
@@ -108,6 +126,9 @@ class CloudLocalCache internal constructor(
         }
         val retainedIds = linkedSetOf<String>()
         latestSnapshotId?.let(retainedIds::add)
+        val pendingId = loadPendingManifest(userId)?.first
+        pendingId?.let(retainedIds::add)
+        val pendingChunks = pendingId?.let { manifestReferenceFile(userId, it).takeIf(File::isFile)?.readLines()?.toSet() }.orEmpty()
         manifests.asSequence()
             .map { it.name.removeSuffix(MANIFEST_SUFFIX) }
             .filter { it !in retainedIds }
@@ -144,6 +165,7 @@ class CloudLocalCache internal constructor(
         if (remainingBytes > maxBytes) {
             chunkFiles.asSequence()
                 .filter(File::isFile)
+                .filter { it.name.removeSuffix(CHUNK_SUFFIX) !in pendingChunks }
                 .sortedBy(File::lastModified)
                 .forEach { chunk ->
                     if (remainingBytes <= maxBytes) return@forEach
@@ -176,6 +198,7 @@ class CloudLocalCache internal constructor(
     }
 
     private fun latestFile(userId: String): File = File(userDirectory(userId), "latest")
+    private fun pendingFile(userId: String): File = File(userDirectory(userId), "pending-upload")
 
     private fun chunkFile(userId: String, sha256: String): File {
         require(sha256.matches(SHA256)) { "加密块标识无效" }

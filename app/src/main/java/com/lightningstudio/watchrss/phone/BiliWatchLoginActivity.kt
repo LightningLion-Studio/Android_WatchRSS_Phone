@@ -1,5 +1,12 @@
 package com.lightningstudio.watchrss.phone
 
+import android.view.WindowManager
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -42,13 +49,14 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/**
- * This activity has no navigation entry. A connected watch can open it only
- * while the companion app is already foregrounded.
- */
+/** Only a valid session initiated by the connected watch may open this login page. */
 class BiliWatchLoginActivity : ComponentActivity() {
     companion object {
-        fun createIntent(context: Context): Intent = Intent(context, BiliWatchLoginActivity::class.java)
+        private const val EXTRA_SESSION = "bili_login_session"
+        fun createIntent(context: Context, session: Long): Intent =
+            Intent(context, BiliWatchLoginActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                .putExtra(EXTRA_SESSION, session)
     }
 
     private var qrUrl by mutableStateOf("")
@@ -56,23 +64,76 @@ class BiliWatchLoginActivity : ComponentActivity() {
     private var webLogin by mutableStateOf(false)
     private var webView: WebView? = null
     private val gateway = PhoneBiliGateway()
+    private var loginJob: Job? = null
+    private var sessionToken = 0L
+    private var waitingForWatch by mutableStateOf(true)
+    private fun acceptSession(intent: Intent): Boolean {
+        val token = intent.getLongExtra(EXTRA_SESSION, 0L)
+        if (token == 0L || !WatchBiliLoginSession.isCurrent(token)) return false
+        loginJob?.cancel()
+        sessionToken = token
+        waitingForWatch = false
+        webLogin = false
+        requestQrCode()
+        return true
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        acceptSession(intent)
+    }
+
+    override fun onDestroy() {
+        loginJob?.cancel()
+        webView?.destroy()
+        if (isFinishing) WatchBiliLoginSession.fail("手机已结束登录，请重新连接", sessionToken)
+        super.onDestroy()
+    }
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        WatchBiliLoginSession.begin()
-        requestQrCode()
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (!acceptSession(intent)) {
+            finish()
+            return
+        }
+        lifecycleScope.launch {
+            while (isActive) {
+                delay(1000)
+                if (!waitingForWatch && !WatchBiliLoginSession.isCurrent(sessionToken)) {
+                    loginJob?.cancel()
+                    qrUrl = ""
+                    webLogin = false
+                    waitingForWatch = true
+                    status = "连接已断开或登录已超时，请在手表重新连接"
+                }
+            }
+        }
         setContent {
             WatchRssPhoneTheme {
-                if (webLogin) PasswordLoginPage(
+                if (waitingForWatch) {
+                    Column(
+                        Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
+                            .verticalScroll(rememberScrollState()).padding(24.dp),
+                        verticalArrangement = Arrangement.spacedBy(20.dp)
+                    ) {
+                        Text("为手表登录 B 站", style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
+                        Text("请在 Watch S 的腕上RSS中重新发起 B 站登录。")
+                        Text(status)
+                        TextButton(onClick = ::finish) { Text("返回") }
+                    }
+                } else if (webLogin) PasswordLoginPage(
                     onWebViewReady = { webView = it },
                     onComplete = ::completeFromWebCookies,
-                    onBack = { webLogin = false }
+                    onBack = { webLogin = false; requestQrCode() }
                 ) else QrLoginPage(
                     qrUrl = qrUrl,
                     status = status,
                     onOpenBili = ::openQrUrlInBili,
-                    onPasswordLogin = { webLogin = true },
+                    onPasswordLogin = { loginJob?.cancel(); webLogin = true },
                     onRefresh = ::requestQrCode,
                     onCancel = ::finish
                 )
@@ -81,7 +142,10 @@ class BiliWatchLoginActivity : ComponentActivity() {
     }
 
     private fun requestQrCode() {
-        lifecycleScope.launch {
+        loginJob?.cancel()
+        qrUrl = ""
+        val token = sessionToken
+        loginJob = lifecycleScope.launch {
             status = "正在获取二维码"
             runCatching {
                 withContext(Dispatchers.IO) { gateway.requestQrCode() }
@@ -90,43 +154,43 @@ class BiliWatchLoginActivity : ComponentActivity() {
                 qrUrl = response.optString("url")
                 if (key.isBlank() || qrUrl.isBlank()) {
                     status = "未能取得二维码"
-                    WatchBiliLoginSession.fail(status)
+                    WatchBiliLoginSession.fail(status, token)
                 } else {
                     status = "请在 B 站确认登录"
-                    pollQrCode(key)
+                    pollQrCode(key, token)
                 }
             }.onFailure { error ->
+                if (error is CancellationException) throw error
                 status = "二维码获取失败：${error.message ?: "未知错误"}"
-                WatchBiliLoginSession.fail(status)
+                WatchBiliLoginSession.fail(status, token)
             }
         }
     }
 
-    private fun pollQrCode(key: String) {
-        lifecycleScope.launch {
-            while (isActive && !webLogin) {
-                delay(1_600)
-                val result = runCatching {
-                    withContext(Dispatchers.IO) { gateway.pollQrCode(key) }
-                }.getOrElse { error ->
-                    status = "等待 B 站响应：${error.message ?: "网络错误"}"
-                    continue
+    private suspend fun pollQrCode(key: String, token: Long) {
+        while (kotlin.coroutines.coroutineContext.isActive && !webLogin && WatchBiliLoginSession.isCurrent(token)) {
+            delay(1_600)
+            val result = runCatching {
+                withContext(Dispatchers.IO) { gateway.pollQrCode(key) }
+            }.getOrElse { error ->
+                if (error is CancellationException) throw error
+                status = "等待 B 站响应：${error.message ?: "网络错误"}"
+                continue
+            }
+            when (result.optString("status")) {
+                "success" -> {
+                    WatchBiliLoginSession.complete(
+                        cookie = result.getString("cookie"),
+                        refreshToken = result.optString("refreshToken"), token = token
+                    )
+                    status = "登录完成，正在同步到手表"
+                    return
                 }
-                when (result.optString("status")) {
-                    "success" -> {
-                        WatchBiliLoginSession.complete(
-                            cookie = result.getString("cookie"),
-                            refreshToken = result.optString("refreshToken")
-                        )
-                        status = "登录完成，正在同步到手表"
-                        return@launch
-                    }
-                    "scanned" -> status = "已扫码，请在 B 站确认"
-                    "expired" -> {
-                        status = "二维码已过期，请刷新"
-                        WatchBiliLoginSession.fail(status)
-                        return@launch
-                    }
+                "scanned" -> status = "已扫码，请在 B 站确认"
+                "expired" -> {
+                    status = "二维码已过期，请刷新"
+                    WatchBiliLoginSession.fail(status, token)
+                    return
                 }
             }
         }
@@ -146,7 +210,7 @@ class BiliWatchLoginActivity : ComponentActivity() {
             status = "尚未检测到登录状态，请完成手机号和密码登录后重试"
             return
         }
-        WatchBiliLoginSession.complete(cookie, refreshToken = "")
+        WatchBiliLoginSession.complete(cookie, refreshToken = "", token = sessionToken)
         status = "登录完成，正在同步到手表"
         webLogin = false
     }
@@ -162,11 +226,12 @@ private fun QrLoginPage(
     onCancel: () -> Unit
 ) {
     Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
+        modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
+            .verticalScroll(rememberScrollState()).padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text("登录", style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
+        Text("为手表登录 B 站", style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
         Text("此页面由手表请求打开，完成后凭据仅同步到手表。")
         Text(
             "连接手表指引\n1. 确认手机蓝牙已开启，且 OPPO Watch S 已连接。\n2. 保持手机端腕上RSS在前台，并让手表停留在登录页面。\n3. 完成登录后回到手表，凭据会自动同步。",

@@ -116,6 +116,7 @@ class LocalContentImporterTest {
         assertTrue(result.source.url.startsWith("${ImportedContentIds.EPUB_SOURCE_ROOT_URL}/"))
         assertEquals(listOf("第一章", "第二章"), result.source.items.map { it.title })
         assertTrue(result.source.items[0].contentText.contains("第一章正文"))
+        assertTrue("EPUB heading and body must remain separate paragraphs", result.source.items[0].contentText.contains("\n"))
         assertTrue(result.source.items[1].contentText.contains("第二章正文"))
         assertTrue(result.source.items.all { it.url.startsWith("${result.source.url}/chapter/") })
     }

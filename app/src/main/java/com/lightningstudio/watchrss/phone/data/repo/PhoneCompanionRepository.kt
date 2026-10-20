@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.data.repo
 
+import com.lightningstudio.watchrss.phone.cloud.compactCloudExcerpt
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncBody
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyMetadata
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyRequest
@@ -255,6 +256,42 @@ class PhoneCompanionRepository(
             } else {
                 migrated.hydrateExternalText()
             }
+        }
+
+    suspend fun compactCloudExcerpts(checkOwner: () -> Unit): Int = withContext(Dispatchers.IO) {
+        var changed = 0
+        for (row in articleDao.longCloudExcerpts()) {
+            val compact = row.compactCloudExcerpt(System.currentTimeMillis(), deviceId).externalizeLargeLocalContent()
+            checkOwner()
+            changed += articleDao.compactCloudExcerpt(row.articleId, row.contentHash, row.excerpt, row.contentText,
+                row.contentHtml, compact.excerpt, compact.contentText, compact.contentHtml, compact.updatedAt, deviceId)
+        }
+        changed
+    }
+
+    internal suspend fun privateCloudVersions(): Map<String,String> = withContext(Dispatchers.IO) {
+        val versions = mutableMapOf<String,String>()
+        var after = ""
+        while (true) {
+            val page = articleDao.privateCloudBodyPage(after,25)
+            if (page.isEmpty()) break
+            for (raw in page) {
+                val row = raw.hydrateExternalTextForBackup()
+                versions[row.articleId] = com.lightningstudio.watchrss.phone.cloud.CloudArchiveReuse.version(row.contentHash,row.deleted,row.contentText,row.contentHtml)
+            }
+            after = page.last().articleId
+        }
+        versions
+    }
+
+    suspend fun missingCloudBodyIds(): List<String> = articleDao.missingPrivateBodyIds()
+
+    suspend fun fillMissingCloudBody(article: PhoneArticleEntity, text: String, checkOwner: () -> Unit) =
+        withContext(Dispatchers.IO) {
+            checkOwner()
+            val prepared = article.copy(contentText = text, contentHtml = null).externalizeLargeLocalContent()
+            checkOwner()
+            articleDao.fillMissingCloudBody(article.articleId, article.contentHash, prepared.contentText, prepared.contentHtml, article.contentText)
         }
 
     suspend fun getRssSource(sourceUrl: String): PhoneRssSourceEntity? =
@@ -841,7 +878,7 @@ class PhoneCompanionRepository(
             .map { it.syncManifestEntryForExport() }
     }
 
-    private suspend fun getArticleManifestsForSync(articleIds: Collection<String>): List<ArticleSyncManifestEntry> {
+    suspend fun getArticleManifestsForSync(articleIds: Collection<String>): List<ArticleSyncManifestEntry> {
         val idSet = articleIds.toSet()
         if (idSet.isEmpty()) return emptyList()
         return articleMetadataForSync(idSet)
@@ -1173,12 +1210,14 @@ class PhoneCompanionRepository(
         var merged = 0
         incoming.forEach { remote ->
             val local = articleDao.getById(remote.articleId)
+            val localHydrated = local?.hydrateExternalText()
             val retainsLocalBody =
-                local != null &&
+                local != null && remote.contentHash == local.contentHash &&
+                (remote.contentHash.isNotBlank() || remote.updatedAt == local.updatedAt) &&
                 remote.contentHtml.isNullOrBlank() &&
                 remote.contentText.isBlank()
             val remoteWithBody = if (retainsLocalBody) {
-                val localBody = requireNotNull(local)
+                val localBody = requireNotNull(localHydrated)
                 remote.copy(
                     contentHtml = localBody.contentHtml,
                     contentText = localBody.contentText,
@@ -1199,9 +1238,8 @@ class PhoneCompanionRepository(
             val next = if (authoritative || local == null) {
                 preparedRemote
             } else {
-                val localHydrated = local.hydrateExternalText()
                 mergeArticle(
-                    local = localHydrated,
+                    local = requireNotNull(localHydrated),
                     remote = preparedRemote,
                     conflictResolution = conflictResolutions[remote.articleId]
                 )
@@ -1550,14 +1588,22 @@ class PhoneCompanionRepository(
         if (recordSyncChanges && source != existing) {
             recordRssSourceChange(source.url, "upsert", now)
         }
+        val activeSourceUrls = rssSourceDao.getAllForSync().filterNot { it.deleted }.map { it.url }.toSet()
         val articles = imported.items.mapIndexed { index, item ->
             val timestamp = now - index
+            val canonicalId = WebArticleImporter.stableArticleId(item.url)
             val existingArticle = existingByUrl[item.url]
+                ?: articleDao.getById(canonicalId)
                 ?: existingByContentHash[item.contentHash ?: WebArticleImporter.sha256(
                     item.contentHtml ?: item.contentText.ifBlank { item.url }
                 )]
+            // One canonical URL has one local row. Another subscribed feed must not
+            // steal it, reset its clocks, or erase its local read/saved state.
+            if (existingArticle?.keepsOtherActiveRssOwner(source.url, activeSourceUrls) == true) {
+                return@mapIndexed existingArticle
+            }
             val candidate = PhoneArticleEntity(
-                articleId = WebArticleImporter.stableArticleId(item.url),
+                articleId = canonicalId,
                 sourceDeviceId = deviceId,
                 url = item.url,
                 title = item.title.ifBlank { item.url },
@@ -1585,7 +1631,10 @@ class PhoneCompanionRepository(
                 deleted = false,
                 deletedAt = 0L
             )
-                .withSavedStateFrom(existingArticle)
+                // Normalize the feed preview before comparing against the stored row.
+                // Otherwise every refresh restores the long summary and stamps a new change.
+                .compactCloudExcerpt(timestamp, deviceId)
+                .withRssLocalStateFrom(existingArticle?.hydrateExternalText())
                 .withCurrentSyncMetadata()
                 .externalizeLargeLocalContent()
             if (
@@ -1605,7 +1654,7 @@ class PhoneCompanionRepository(
                     sourceDeviceId = existingArticle.sourceDeviceId,
                     importedAt = existingArticle.importedAt,
                     updatedAt = existingArticle.updatedAt
-                )
+                ).withCurrentSyncMetadata()
             } else {
                 candidate
             }
@@ -1625,22 +1674,6 @@ class PhoneCompanionRepository(
             }
         }
         return PhoneRssSourceImportResult(source, articles.size)
-    }
-
-    private fun PhoneArticleEntity.withSavedStateFrom(existing: PhoneArticleEntity?): PhoneArticleEntity {
-        if (existing == null) return this
-        return copy(
-            favoriteSaved = existing.favoriteSaved,
-            favoriteChangedAt = existing.favoriteChangedAt,
-            favoriteSortOrder = existing.favoriteSortOrder,
-            watchLaterSaved = existing.watchLaterSaved,
-            watchLaterChangedAt = existing.watchLaterChangedAt,
-            watchLaterSortOrder = existing.watchLaterSortOrder,
-            readingProgress = existing.readingProgress,
-            readingPositionBytes = existing.readingPositionBytes,
-            readingPositionContentHash = existing.readingPositionContentHash,
-            readingPositionChangedAt = existing.readingPositionChangedAt
-        )
     }
 
     private suspend fun recordArticleChange(
@@ -1850,7 +1883,18 @@ class PhoneCompanionRepository(
         val isImportedContentArticle = ImportedContentIds.isImportedContentUrl(rssSourceUrl) ||
             ImportedContentIds.isImportedContentUrl(remote.url) ||
             ImportedContentIds.isImportedContentUrl(local.url)
+        // A metadata-only tombstone can arrive before the legacy article/body.
+        // Old feed snapshots must not turn it live just because it is RSS or saved.
+        val newestDeletionAt = maxOf(
+            if (local.deleted) local.deletedAt else 0L,
+            if (remote.deleted) remote.deletedAt else 0L
+        )
+        val newestLiveOperationAt = maxOf(
+            if (!local.deleted) local.latestOperationAt() else 0L,
+            if (!remote.deleted) remote.latestOperationAt() else 0L
+        )
         val deleted = when {
+            newestDeletionAt > 0L && newestDeletionAt >= newestLiveOperationAt -> true
             favoriteSaved || watchLaterSaved || independentSaved -> false
             !rssSourceUrl.isNullOrBlank() && !isImportedContentArticle -> false
             remoteDeletedNewer -> remote.deleted
@@ -1861,7 +1905,24 @@ class PhoneCompanionRepository(
         } else {
             0L
         }
+        // State-only records can win the timestamp while carrying no body.
+        // Hydrate only from the same content version; never revive stale text.
+        val body = if (metadata.contentText.isBlank() && metadata.contentHtml.isNullOrBlank()) {
+            listOf(local, remote).firstOrNull { it.contentHash == metadata.contentHash &&
+                (metadata.contentHash.isNotBlank() || it.updatedAt == metadata.updatedAt) &&
+                (it.contentText.isNotBlank() || !it.contentHtml.isNullOrBlank()) } ?: metadata
+        } else if (metadata.contentHtml.isNullOrBlank()) {
+            listOf(local, remote).firstOrNull { it.contentHash == metadata.contentHash &&
+                (metadata.contentHash.isNotBlank() || it.updatedAt == metadata.updatedAt) && !it.contentHtml.isNullOrBlank() } ?: metadata
+        } else metadata
         return metadata.copy(
+            contentText = body.contentText,
+            contentHtml = body.contentHtml,
+            syncBodyHash = body.syncBodyHash,
+            syncBodyByteCount = body.syncBodyByteCount,
+            syncChunkSize = body.syncChunkSize,
+            syncChunkHashesJson = body.syncChunkHashesJson,
+            syncMetadataHash = body.syncMetadataHash,
             independentSaved = independentSaved,
             independentChangedAt = independentChangedAt,
             independentSortOrder = independentSortOrder,

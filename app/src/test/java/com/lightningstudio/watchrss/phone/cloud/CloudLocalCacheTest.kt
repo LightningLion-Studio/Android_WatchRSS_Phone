@@ -10,6 +10,24 @@ import org.junit.Test
 
 class CloudLocalCacheTest {
     @Test
+    fun `unfinished upload survives restart and pruning without becoming a completed head`() = withCache { root, cache ->
+        val bytes = "pending ciphertext".toByteArray()
+        val sha = CloudSnapshotCodec.sha256(bytes)
+        cache.storeChunk("owner", sha, bytes)
+        cache.storePendingManifest("owner", "pending-1", "manifest".toByteArray(), listOf(sha))
+        val reconstructed = CloudLocalCache(root)
+        assertNull(reconstructed.loadLatestManifest("owner"))
+        assertEquals("pending-1", reconstructed.loadPendingManifest("owner")?.first)
+        assertNull(reconstructed.loadPendingManifest("other"))
+        reconstructed.prune("owner", maxBytes = 0, keepManifestCount = 1)
+        assertArrayEquals(bytes, reconstructed.loadChunk("owner", sha))
+        reconstructed.clearPendingManifest("owner", "different")
+        assertEquals("pending-1", reconstructed.loadPendingManifest("owner")?.first)
+        reconstructed.clearPendingManifest("owner", "pending-1")
+        assertNull(reconstructed.loadPendingManifest("owner"))
+    }
+
+    @Test
     fun `prune keeps local head and removes unreferenced snapshots and chunks`() = withCache { root, cache ->
         val userId = "user-1"
         val retainedChunk = "retained".toByteArray()

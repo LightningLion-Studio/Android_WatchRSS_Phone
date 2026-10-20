@@ -1,0 +1,41 @@
+{
+  "userId": "record-fixture-user",
+  "keyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "kind": "article",
+  "value": {
+    "articleId": "article-fixture",
+    "contentHash": "",
+    "deleted": false,
+    "deletedAt": 0,
+    "excerpt": "",
+    "favoriteChangedAt": 1700000000000,
+    "favoriteSaved": true,
+    "favoriteSortOrder": 0,
+    "importedAt": 0,
+    "independentChangedAt": 0,
+    "independentSaved": false,
+    "independentSortOrder": 0,
+    "isRead": false,
+    "readingPositionBytes": 0,
+    "readingPositionChangedAt": 0,
+    "readingPositionContentHash": "",
+    "readingProgress": 0,
+    "siteName": "",
+    "sourceDeviceId": "",
+    "title": "你好 RSS",
+    "updatedAt": 0,
+    "url": "https://example.com/a",
+    "watchLaterChangedAt": 0,
+    "watchLaterSaved": false,
+    "watchLaterSortOrder": 0
+  },
+  "recordId": "218ef24506c44d0941adbdb19e548fda1a65ded3456d63efd53b4ca82e48ea80",
+  "envelope": {
+    "algorithm": "A256GCM",
+    "keyVersion": 3,
+    "nonceBase64": "BwcHBwcHBwcHBwcH",
+    "ciphertextBase64": "kKSwUYej9q5BaPBOmG4YxeifETBt6SzhJWGjwJttQcyYQmxRQLlf+phmxCfbMdJnD56KtkKPG8W6578JSLJLNdGtZtubGwKe+MfzYMVo/vbrKLQpFruarEPndeLJ+B94I84PP4MyZxSYZwqQZWg+FJGnb0kNF/cAoSPBronjsGUe0gBInpi9sFLWxUC5/0j5XAqL7QWuR2M0cyYuUsWjrWENwjNHpuFGFJ2p4l2939i6oGbuMaRFHgTsN84WrwN/ZLMTYE/1XOpmFUa5CMZZGwttjQX+qECnG5perO86LLHGyNRBN0dYlUND/TuMD+/2q3oMPPcWqcOAF1iegEGpHpNDYJwAvgT9IJhgNa9wIAJJYofwx7FBgwYiitRv5fWp5azoXu8VSRisSGhgp5GxY/xOg+QWN+6VtkOYyZtndwITziajd9AgPeOt2HDOx8Ko0armvrDhJAfWjU6rn+8sim5WffOCkke2mTzRpSp5YeWI1vkVU4Re3KaWN7neA7qI3lohE1cOpY8twiLOmVTsN9soYaKu8ZCIZ8OWFcZP3Ll2cr8eh0nkClxco6rXPg2T5eUnQWyM8Jg7CU1BFRHN0oSzaUR0uFqvymMrNGOJFiUuDak4fyuM0v1kuUH/6Whjckms8z4xD/hWFesQCOQpMDhhwsHMhjko9HtztpRmzdcOltKOrciZdj/mNfFiqEgQWvJNo+kqXTuZwFHSAtk4H0jXZykNvmG3AYpsLzhnB5FbFJTWl15HLNMmeVRM96w0W1oM/lYRsa7O25hoWtBTSdTc7OAz8DqEzmvv+fNgYKsVW8sGrEXEvV8+L7R5QBvlB2me8FszgiEri/yV"
+  },
+  "canonicalPlaintext": "{\"format\":\"watchrss-rss-record\",\"kind\":\"article\",\"value\":{\"articleId\":\"article-fixture\",\"contentHash\":\"\",\"deleted\":false,\"deletedAt\":0,\"excerpt\":\"\",\"favoriteChangedAt\":1700000000000,\"favoriteSaved\":true,\"favoriteSortOrder\":0,\"importedAt\":0,\"independentChangedAt\":0,\"independentSaved\":false,\"independentSortOrder\":0,\"isRead\":false,\"readingPositionBytes\":0,\"readingPositionChangedAt\":0,\"readingPositionContentHash\":\"\",\"readingProgress\":0,\"siteName\":\"\",\"sourceDeviceId\":\"\",\"title\":\"你好 RSS\",\"updatedAt\":0,\"url\":\"https://example.com/a\",\"watchLaterChangedAt\":0,\"watchLaterSaved\":false,\"watchLaterSortOrder\":0},\"version\":1}",
+  "hash": "7e23e018165412eac27595fc8abd591f93e7d2da74c4dd8023ce468ee9171c3b"
+}

@@ -847,11 +847,11 @@ internal fun parseTotpFactors(json: JSONObject): List<TotpFactor> {
 internal fun normalizeAccountPhone(phone: String): String {
     val compact = phone.trim().filterNot { it == ' ' || it == '-' }
     val localPhone = when {
-        compact.matches(Regex("1\\d{10}")) -> "+86$compact"
+        compact.matches(Regex("(?:1\\d{10}|200\\d{8})")) -> "+86$compact"
         compact.matches(Regex("86\\d{11}")) -> "+$compact"
-        compact.matches(Regex("\\+861\\d{10}")) -> compact
+        compact.matches(Regex("\\+86(?:1\\d{10}|200\\d{8})")) -> compact
         else -> throw IllegalArgumentException("目前仅支持中国大陆手机号")
     }
-    require(localPhone.matches(Regex("\\+861[3-9]\\d{9}"))) { "请输入正确的中国大陆手机号" }
+    require(localPhone.matches(Regex("\\+86(?:1[3-9]\\d{9}|200\\d{8})"))) { "请输入正确的中国大陆手机号" }
     return localPhone
 }

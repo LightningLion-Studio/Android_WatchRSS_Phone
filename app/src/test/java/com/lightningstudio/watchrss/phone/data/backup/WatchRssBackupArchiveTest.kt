@@ -18,6 +18,19 @@ import java.util.zip.ZipOutputStream
 
 class WatchRssBackupArchiveTest {
     @Test
+    fun zipBytesAreStableAcrossExportTimesAndDefaultTimezones() {
+        val snapshot = sampleSnapshot()
+        val zone = java.util.TimeZone.getDefault()
+        try {
+            java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("Pacific/Honolulu"))
+            val first = ByteArrayOutputStream().also { WatchRssBackupArchive.write(snapshot, it) }.toByteArray()
+            java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("Asia/Shanghai"))
+            val second = ByteArrayOutputStream().also { WatchRssBackupArchive.write(snapshot, it) }.toByteArray()
+            org.junit.Assert.assertArrayEquals(first, second)
+        } finally { java.util.TimeZone.setDefault(zone) }
+    }
+
+    @Test
     fun roundTrip_preservesUserLibraryAndDropsDeviceSyncMetadata() {
         val snapshot = sampleSnapshot()
         val output = ByteArrayOutputStream()

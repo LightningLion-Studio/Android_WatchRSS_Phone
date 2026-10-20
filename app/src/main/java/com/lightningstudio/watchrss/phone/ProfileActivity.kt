@@ -34,7 +34,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.SupportAgent
@@ -101,6 +103,9 @@ class ProfileActivity : ComponentActivity() {
                     onAccountClick = {
                         startActivity(AccountActivity.createIntent(this@ProfileActivity))
                     },
+                    onCloudSyncClick = {
+                        startActivity(AccountActivity.createIntent(this@ProfileActivity, section = AccountSection.CLOUD_SYNC))
+                    },
                     onSettingsClick = {
                         startActivity(SettingsActivity.createIntent(this@ProfileActivity))
                     },
@@ -109,6 +114,9 @@ class ProfileActivity : ComponentActivity() {
                     },
                     onAboutClick = {
                         startActivity(Intent(this@ProfileActivity, AboutActivity::class.java))
+                    },
+                    onDocumentLibraryClick = {
+                        startActivity(Intent(this@ProfileActivity, DocumentLibraryActivity::class.java))
                     },
                     onContactDeveloperClick = {
                         startActivity(
@@ -241,9 +249,11 @@ private fun ProfileScreen(
     onDetailSelected: (ProfileDetailPage?) -> Unit,
     onBack: () -> Unit,
     onAccountClick: () -> Unit,
+    onCloudSyncClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onManageDataClick: () -> Unit,
     onAboutClick: () -> Unit,
+    onDocumentLibraryClick: () -> Unit,
     onContactDeveloperClick: () -> Unit,
     onBeianClick: () -> Unit,
     accountContent: @Composable (
@@ -271,9 +281,11 @@ private fun ProfileScreen(
                     windowInfo = windowInfo,
                     onBack = onBack,
                     onAccountClick = { onDetailSelected(ProfileDetailPage.ACCOUNT) },
+                    onCloudSyncClick = onCloudSyncClick,
                     onSettingsClick = { onDetailSelected(ProfileDetailPage.SETTINGS) },
                     onManageDataClick = onManageDataClick,
                     onAboutClick = { onDetailSelected(ProfileDetailPage.ABOUT) },
+                    onDocumentLibraryClick = onDocumentLibraryClick,
                     onContactDeveloperClick = {
                         onDetailSelected(ProfileDetailPage.CONTACT)
                     },
@@ -322,9 +334,11 @@ private fun ProfileScreen(
                 windowInfo = windowInfo,
                 onBack = onBack,
                 onAccountClick = onAccountClick,
+                onCloudSyncClick = onCloudSyncClick,
                 onSettingsClick = onSettingsClick,
                 onManageDataClick = onManageDataClick,
                 onAboutClick = onAboutClick,
+                onDocumentLibraryClick = onDocumentLibraryClick,
                 onContactDeveloperClick = onContactDeveloperClick,
                 onBeianClick = onBeianClick
             )
@@ -339,9 +353,11 @@ private fun ProfileMasterPane(
     windowInfo: AdaptiveWindowInfo,
     onBack: () -> Unit,
     onAccountClick: () -> Unit,
+    onCloudSyncClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onManageDataClick: () -> Unit,
     onAboutClick: () -> Unit,
+    onDocumentLibraryClick: () -> Unit,
     onContactDeveloperClick: () -> Unit,
     onBeianClick: () -> Unit
 ) {
@@ -383,30 +399,20 @@ private fun ProfileMasterPane(
                     )
                     ProfileNavigation(
                         windowInfo = windowInfo,
+                        onCloudSyncClick = onCloudSyncClick,
                         onSettingsClick = onSettingsClick,
                         onManageDataClick = onManageDataClick,
                         onAboutClick = onAboutClick,
+                        onDocumentLibraryClick = onDocumentLibraryClick,
                         onContactDeveloperClick = onContactDeveloperClick
                     )
-                    Spacer(Modifier.height(48.dp))
+                    Box(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        BeianNumberText(onClick = onBeianClick)
+                    }
                 }
-            }
-
-            // 备案号常显且底部居中：备案号是安全、可信、引以为傲的合规标识，
-            // 不是需要弱化或隐藏的内容，因此不做延迟渐显、始终直接显示；
-            // 底部居中与主流App对备案号的展示方式保持一致。
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .adaptiveContentWidth(
-                        windowInfo = windowInfo,
-                        mediumMaxWidth = 720.dp,
-                        expandedMaxWidth = 840.dp
-                    )
-                    .padding(bottom = 16.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                BeianNumberText(onClick = onBeianClick)
             }
         }
     }
@@ -523,9 +529,11 @@ private fun ProfileIdentityCard(
 @Composable
 private fun ProfileNavigation(
     windowInfo: AdaptiveWindowInfo,
+    onCloudSyncClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onManageDataClick: () -> Unit,
     onAboutClick: () -> Unit,
+    onDocumentLibraryClick: () -> Unit,
     onContactDeveloperClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -549,6 +557,12 @@ private fun ProfileNavigation(
             onClick = onSettingsClick
         )
         ProfileEntry(
+            title = "云同步",
+            supportingText = "云端资料、恢复密钥与设备授权",
+            icon = Icons.Default.Sync,
+            onClick = onCloudSyncClick
+        )
+        ProfileEntry(
             title = "管理资料",
             supportingText = "导出、恢复或删除本机资料库",
             icon = Icons.Default.Storage,
@@ -568,6 +582,12 @@ private fun ProfileNavigation(
                 supportingText = "加入用户群，反馈问题或提出建议",
                 icon = Icons.Default.SupportAgent,
                 onClick = onContactDeveloperClick
+            )
+            ProfileEntry(
+                title = "文档库",
+                supportingText = "手表版、手机版与小程序版 Q&A",
+                icon = Icons.Default.MenuBook,
+                onClick = onDocumentLibraryClick
             )
         }
     }

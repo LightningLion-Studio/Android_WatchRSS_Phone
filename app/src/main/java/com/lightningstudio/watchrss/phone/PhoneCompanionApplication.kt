@@ -49,6 +49,14 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
         PhoneCompanionContainer(this)
     }
 
+    private val cloudApprovalPrompts by lazy {
+        com.lightningstudio.watchrss.phone.cloud.CloudApprovalPrompts(
+            service={container.cloudSyncService},
+            owner={container.accountRepository.session.value?.let { "${it.userId}:${it.accessToken}" }},
+            allowed={container.appAccessCoordinator.isAuthorized && PhonePrivacyConsentStore(this).hasRequiredConsent()}
+        )
+    }
+
     override fun newImageLoader(): ImageLoader = ImageLoader.Builder(this)
         .components {
             add(ImageDecoderDecoder.Factory())
@@ -79,6 +87,7 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
                     return
                 }
                 supportOverlay.onResumed(activity)
+                cloudApprovalPrompts.resume(activity)
                 startConsentDependentServices()
                 container.oppoReviewCoordinator.onAppEntry()
                 if (!shouldEnforceAppAccess(
@@ -140,6 +149,7 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
             override fun onActivityStarted(activity: Activity) = Unit
             override fun onActivityPaused(activity: Activity) {
+                if (resumedActivity === activity) cloudApprovalPrompts.pause()
                 supportOverlay.onPaused(activity)
                 if (resumedAtMillis > 0) {
                     val elapsed = SystemClock.elapsedRealtime() - resumedAtMillis
@@ -221,7 +231,8 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
     /** Only foreground phone sessions may be opened by a watch request. */
     fun requestWatchBiliLogin(): Boolean {
         val activity = resumedActivity ?: return false
-        activity.startActivity(BiliWatchLoginActivity.createIntent(activity))
+        val token = com.lightningstudio.watchrss.phone.connection.bili.WatchBiliLoginSession.begin()
+        activity.startActivity(BiliWatchLoginActivity.createIntent(activity, token))
         return true
     }
 

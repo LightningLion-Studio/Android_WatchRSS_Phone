@@ -33,4 +33,31 @@ class WatchBiliLoginSessionTest {
         assertTrue(error is IllegalArgumentException)
         assertFalse(WatchBiliLoginSession.watchResponse().has("cookie"))
     }
+
+    @Test
+    fun disconnectedSessionCannotPublishLateLogin() {
+        val token = WatchBiliLoginSession.begin()
+        WatchBiliLoginSession.clear()
+        WatchBiliLoginSession.complete("SESSDATA=old", "", token)
+        assertFalse(WatchBiliLoginSession.watchResponse().has("cookie"))
+        assertFalse(WatchBiliLoginSession.isCurrent(token))
+    }
+
+    @Test
+    fun previousRequestCannotOverwriteNewLogin() {
+        val old = WatchBiliLoginSession.begin()
+        val current = WatchBiliLoginSession.begin()
+        WatchBiliLoginSession.complete("SESSDATA=current", "", current)
+        WatchBiliLoginSession.complete("SESSDATA=old", "", old)
+        WatchBiliLoginSession.fail("old request failed", old)
+        assertEquals("SESSDATA=current", WatchBiliLoginSession.watchResponse().getString("cookie"))
+    }
+
+    @Test
+    fun cookieSubstringAndEmptySessionAreRejected() {
+        for (cookie in listOf("NOTSESSDATA=value", "SESSDATA=", "SESSDATA=; sid=x")) {
+            WatchBiliLoginSession.begin()
+            assertTrue(runCatching { WatchBiliLoginSession.complete(cookie, "") }.isFailure)
+        }
+    }
 }

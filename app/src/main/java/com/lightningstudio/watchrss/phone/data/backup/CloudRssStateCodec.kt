@@ -142,7 +142,7 @@ internal object CloudRssStateCodec {
                         watchLaterSortOrder = json.optLong("watchLaterSortOrder"),
                         deleted = json.optBoolean("deleted"),
                         deletedAt = json.optLong("deletedAt"),
-                        readingProgress = json.optDouble("readingProgress")
+                        readingProgress = json.optDouble("readingProgress", 0.0)
                             .toFloat()
                             .coerceIn(0f, 1f),
                         readingPositionBytes = json.optLong("readingPositionBytes").coerceAtLeast(0L),
@@ -194,3 +194,35 @@ internal object CloudRssStateCodec {
     private fun JSONObject.nullableString(name: String): String? =
         if (!has(name) || isNull(name)) null else getString(name)
 }
+
+internal fun CloudRssArticleState.toMetadataArticle(): PhoneArticleEntity = PhoneArticleEntity(
+    articleId = articleId,
+    sourceDeviceId = sourceDeviceId,
+    url = url,
+    title = title,
+    siteName = siteName,
+    excerpt = excerpt,
+    imageUrl = imageUrl,
+    contentHash = contentHash,
+    importedAt = importedAt,
+    updatedAt = updatedAt,
+    rssSourceUrl = rssSourceUrl,
+    rssSourceTitle = rssSourceTitle,
+    independentSaved = independentSaved,
+    independentChangedAt = independentChangedAt,
+    independentSortOrder = independentSortOrder,
+    favoriteSaved = favoriteSaved,
+    favoriteChangedAt = favoriteChangedAt,
+    favoriteSortOrder = favoriteSortOrder,
+    watchLaterSaved = watchLaterSaved,
+    watchLaterChangedAt = watchLaterChangedAt,
+    watchLaterSortOrder = watchLaterSortOrder,
+    deleted = deleted,
+    deletedAt = deletedAt,
+    readingProgress = readingProgress,
+    readingPositionBytes = readingPositionBytes,
+    readingPositionContentHash = readingPositionContentHash,
+    readingPositionChangedAt = readingPositionChangedAt,
+    isRead = isRead,
+    contentText = "", contentHtml = null
+)

@@ -10,6 +10,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 
 class PhoneCloudSyncWorker(
     appContext: Context,
@@ -22,6 +23,7 @@ class PhoneCloudSyncWorker(
             container.cloudSyncService.syncNow()
             Result.success()
         }.getOrElse { error ->
+            if (error is CancellationException) throw error
             if (runAttemptCount < 3 && error !is IllegalArgumentException) {
                 Result.retry()
             } else {

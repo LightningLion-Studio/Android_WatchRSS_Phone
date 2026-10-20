@@ -4,6 +4,7 @@ import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import org.jsoup.nodes.TextNode
 import org.jsoup.parser.Parser
 import java.io.ByteArrayInputStream
 import java.nio.ByteBuffer
@@ -298,7 +299,16 @@ class LocalContentImporter {
         doc.outputSettings().prettyPrint(false)
         doc.select("script,style,noscript,template,svg,form,button").remove()
         val body = doc.selectFirst("body") ?: doc.body() ?: return null
-        val text = body.text().trim()
+        // Jsoup.text() collapses block boundaries. Keep the retained EPUB
+        // paragraph structure in the plain projection used by cloud readers.
+        val textBody = body.clone()
+        textBody.select("p,div,article,section,h1,h2,h3,h4,h5,h6,blockquote,pre,li,tr").forEach {
+            it.after(TextNode("\n"))
+        }
+        val text = textBody.wholeText()
+            .replace("\r\n", "\n").replace('\r', '\n')
+            .replace(Regex("\n{3,}"), "\n\n")
+            .trim()
         if (text.isBlank()) return null
         val title = firstMeaningfulText(
             tocTitle,

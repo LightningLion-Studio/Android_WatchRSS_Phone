@@ -21,7 +21,7 @@ object MarkdownNoteArchive {
                 entries.sortedBy { it.path }.forEach { entry ->
                     val path = safePath(entry.path)
                     require(seen.add(path)) { "归档含重复路径：$path" }
-                    zip.putNextEntry(ZipEntry(path))
+                    zip.putNextEntry(ZipEntry(path).apply { time = 0L })
                     zip.write(entry.bytes)
                     zip.closeEntry()
                 }

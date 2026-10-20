@@ -121,6 +121,10 @@
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />
         <activity
+            android:name=".DocumentLibraryActivity"
+            android:exported="false"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
             android:name=".LegalDocumentActivity"
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />

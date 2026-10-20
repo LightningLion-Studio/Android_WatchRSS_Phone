@@ -16,6 +16,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -141,6 +142,7 @@ import com.lightningstudio.watchrss.phone.ArticleContentNodesKey
 import com.lightningstudio.watchrss.phone.ArticleContentNodesSnapshot
 import com.lightningstudio.watchrss.phone.ArticleReaderScreen
 import com.lightningstudio.watchrss.phone.PlatformWebViewScreen
+import com.lightningstudio.watchrss.phone.cloud.DashboardCloudSyncBanner
 import com.lightningstudio.watchrss.phone.cloud.CloudRssInventoryMode
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
@@ -438,14 +440,19 @@ fun MainScreen(
         readerOpenProgress >= 1f
     val inlineReaderContentReady = inlineReaderOpenSettled
     val inlineReaderLoadArticleId = selectedReaderArticleId
+    var readerBodyError by remember(selectedReaderArticleId) { mutableStateOf<String?>(null) }
+    var readerBodyRetry by remember(selectedReaderArticleId) { mutableStateOf(0) }
     val hydratedSelectedReaderArticle by produceState<PhoneArticleEntity?>(
         initialValue = null,
-        inlineReaderLoadArticleId
+        inlineReaderLoadArticleId, readerBodyRetry
     ) {
         val articleId = inlineReaderLoadArticleId
         value = null
+        readerBodyError = null
         if (articleId != null) {
-            value = runCatching { onLoadArticleForInlineReader(articleId) }.getOrNull()
+            try { value = onLoadArticleForInlineReader(articleId) }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) { readerBodyError = "正文暂未加载完成，请重试。" }
         }
     }
     val selectedReaderArticle = hydratedSelectedReaderArticle
@@ -453,7 +460,7 @@ fun MainScreen(
         ?: selectedReaderArticleListItem
     val selectedImportedTextReader by produceState<PhoneImportedTextReader?>(
         initialValue = null,
-        inlineReaderLoadArticleId
+        inlineReaderLoadArticleId, hydratedSelectedReaderArticle?.contentText
     ) {
         val articleId = inlineReaderLoadArticleId
         value = null
@@ -1066,6 +1073,8 @@ fun MainScreen(
                     onOpenImportedArticle = input.onOpenImportedArticle,
                     onOpenOriginal = input.onOpenOriginal,
                     listState = input.listState,
+                    bodyError = readerBodyError,
+                    onRetryBody = { readerBodyRetry++ },
                     contentReady = input.contentReady,
                     contentNodesCache = input.contentNodesCache,
                     positionAlreadyRestored = input.positionAlreadyRestored,
@@ -2545,6 +2554,8 @@ private fun InlineArticleReaderPane(
     onOpenOriginal: (String) -> Unit,
     listState: LazyListState,
     contentReady: Boolean,
+    bodyError: String?,
+    onRetryBody: () -> Unit,
     contentNodesCache: MutableMap<ArticleContentNodesKey, ArticleContentNodesSnapshot>,
     positionAlreadyRestored: Boolean,
     onPositionRestored: (String) -> Unit,
@@ -2553,6 +2564,14 @@ private fun InlineArticleReaderPane(
     showFullscreenControl: Boolean,
     onToggleFullscreen: () -> Unit
 ) {
+    if (bodyError != null) {
+        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(bodyError)
+            TextButton(onClick = onRetryBody) { Text("重试") }
+            TextButton(onClick = onBack) { Text("返回") }
+        }
+        return
+    }
     val fullscreenControl = if (showFullscreenControl) onToggleFullscreen else null
     val platform = PlatformLinkRouter.detect(article.url)
     if (contentReady && platform != null) {
@@ -2959,6 +2978,7 @@ private fun DashboardPage(
                                     onExportBluetoothLog = onExportBluetoothLog,
                                     onDismissMessage = onDismissMessage
                                 )
+                                DashboardCloudSyncBanner()
                                 DashboardImportCard(onClick = onOpenImports)
                             }
                             Box(modifier = Modifier.weight(1f)) {
@@ -2997,6 +3017,7 @@ private fun DashboardPage(
                             onDismissMessage = onDismissMessage
                         )
                     }
+                    item { DashboardCloudSyncBanner() }
                     item {
                         DashboardImportCard(onClick = onOpenImports)
                     }

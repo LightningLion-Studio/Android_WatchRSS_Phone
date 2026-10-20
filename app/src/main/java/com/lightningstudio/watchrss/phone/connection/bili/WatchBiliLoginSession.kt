@@ -16,25 +16,48 @@ internal object WatchBiliLoginSession {
     )
 
     private var state = State(status = "idle")
+    private var generation = 0L
+    private var deadlineNanos = 0L
 
     @Synchronized
-    fun begin() {
-        state = State(status = "waiting")
+    fun clear() {
+        generation++
+        deadlineNanos = 0L
+        state = State(status = "idle")
     }
 
     @Synchronized
-    fun complete(cookie: String, refreshToken: String) {
-        require(cookie.contains("SESSDATA=")) { "B站未返回有效登录 Cookie" }
+    fun isCurrent(token: Long): Boolean = token == generation && deadlineNanos > System.nanoTime()
+
+
+    @Synchronized
+    fun begin(): Long {
+        generation++
+        deadlineNanos = System.nanoTime() + 300_000_000_000L
+        state = State(status = "waiting")
+        return generation
+    }
+
+    @Synchronized
+    fun complete(cookie: String, refreshToken: String, token: Long = generation) {
+        if (!isCurrent(token)) return
+        require(Regex("(?:^|;\\s*)SESSDATA=[^;\\s]+").containsMatchIn(cookie)) { "B站未返回有效登录 Cookie" }
         state = State(status = "success", cookie = cookie, refreshToken = refreshToken)
     }
 
     @Synchronized
-    fun fail(message: String) {
+    fun fail(message: String, token: Long = generation) {
+        if (!isCurrent(token)) return
         state = State(status = "error", message = message)
     }
 
     @Synchronized
-    fun watchResponse(): JSONObject = JSONObject()
+    fun watchResponse(): JSONObject {
+        if (deadlineNanos != 0L && System.nanoTime() >= deadlineNanos) {
+            clear()
+            state = State(status = "error", message = "登录已超时，请在手表重新连接")
+        }
+        return JSONObject()
         .put("status", state.status)
         .put("message", state.message)
         .apply {
@@ -43,4 +66,5 @@ internal object WatchBiliLoginSession {
                 put("refreshToken", state.refreshToken)
             }
         }
+    }
 }

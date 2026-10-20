@@ -92,7 +92,10 @@ enum class LegalDocument(
     PAID_SERVICE_AGREEMENT(
         "付费服务协议",
         "/functions/v1/legal/phone/paid-service-agreement"
-    );
+    ),
+    WATCH_QA("手表版 Q&A", "/functions/v1/legal/watch/qa"),
+    PHONE_QA("手机版 Q&A", "/functions/v1/legal/phone/qa"),
+    MINI_PROGRAM_QA("小程序版 Q&A", "/functions/v1/legal/wechat-mini/qa");
 
     companion object {
         fun fromName(value: String?): LegalDocument =
@@ -174,7 +177,7 @@ private fun LegalDocumentScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
-                        Text("协议正文加载失败，请检查网络后重试。", textAlign = TextAlign.Center)
+                        Text("正文加载失败，请检查网络后重试。", textAlign = TextAlign.Center)
                         Button(
                             onClick = onRetry,
                             modifier = Modifier

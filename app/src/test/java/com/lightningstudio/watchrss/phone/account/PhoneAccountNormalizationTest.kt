@@ -13,6 +13,16 @@ class PhoneAccountNormalizationTest {
     }
 
     @Test
+    fun `reserved test range accepts local and country prefixed inputs`() {
+        listOf("20000000000", "8620000000000", "+86 200-0000-0000").forEach { input ->
+            assertEquals("+8620000000000", normalizeAccountPhone(input))
+        }
+        listOf("20100000000", "2000000000", "200000000000", "2000000000x").forEach { input ->
+            assertThrows(IllegalArgumentException::class.java) { normalizeAccountPhone(input) }
+        }
+    }
+
+    @Test
     fun `international phone is rejected until supported`() {
         assertThrows(IllegalArgumentException::class.java) {
             normalizeAccountPhone("+12025550100")

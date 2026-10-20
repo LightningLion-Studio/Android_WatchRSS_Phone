@@ -18,6 +18,10 @@ class PhoneCloudStateStore(
         Context.MODE_PRIVATE
     )
 
+    var syncPaused: Boolean
+        get() = preferences.getBoolean("sync_paused", false)
+        set(value) { check(preferences.edit().putBoolean("sync_paused", value).commit()) }
+
     var retentionDays: Int?
         get() = preferences.getInt(KEY_RETENTION_DAYS, 30).takeIf { it > 0 }
         set(value) {
@@ -29,12 +33,20 @@ class PhoneCloudStateStore(
         get() = runCatching {
             CloudNetworkPolicy.valueOf(
                 preferences.getString(KEY_NETWORK_POLICY, null)
-                    ?: CloudNetworkPolicy.WIFI_BODIES_ANY_STATE.name
+                    ?: CloudNetworkPolicy.ANY_NETWORK.name
             )
-        }.getOrDefault(CloudNetworkPolicy.WIFI_BODIES_ANY_STATE)
+        }.getOrDefault(CloudNetworkPolicy.ANY_NETWORK)
         set(value) {
             preferences.edit().putString(KEY_NETWORK_POLICY, value.name).apply()
         }
+
+    // Older versions could acknowledge an index without restoring private bodies.
+    fun ensureFullBodyRestoreVersion(userId: String) {
+        val key = "body_restore_v2_$userId"
+        if (!preferences.getBoolean(key, false)) {
+            check(preferences.edit().remove(KEY_APPLIED_FULL).putBoolean(key, true).commit())
+        }
+    }
 
     @Synchronized
     fun nextSequence(serverSequence: Long): Long {

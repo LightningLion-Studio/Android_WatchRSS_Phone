@@ -13,7 +13,11 @@ import java.util.Base64
 class SupabaseTusUploader(
     context: Context,
     prefsName: String = "watchrss_tus_uploads",
-    private val http: OkHttpClient = OkHttpClient()
+    private val http: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+        .writeTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+        .callTimeout(90, java.util.concurrent.TimeUnit.SECONDS).build()
 ) {
     private val preferences = context.applicationContext.getSharedPreferences(
         prefsName,
@@ -24,6 +28,11 @@ class SupabaseTusUploader(
         withContext(Dispatchers.IO) {
             require(bytes.size.toLong() == target.sizeBytes) { "待上传云对象长度不匹配" }
             require(CloudSnapshotCodec.sha256(bytes) == target.sha256) { "待上传云对象哈希不匹配" }
+            if (bytes.size <= 2 * 1024 * 1024) {
+                CloudSignedObjectUploader(http).upload(target, bytes)
+                preferences.edit().remove(target.sha256).apply()
+                return@withContext
+            }
             var uploadUrl = preferences.getString(target.sha256, null)
             val existingOffset = uploadUrl?.let { queryOffset(it, target.token) }
             var offset: Long

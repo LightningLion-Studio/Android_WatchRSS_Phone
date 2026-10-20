@@ -84,7 +84,7 @@ internal object WatchRssBackupArchive {
                     zip.writeUtf8Entry(bodyHtmlEntry(article.articleId), html)
                 }
             }
-            snapshot.readerResources.forEach { resource ->
+            snapshot.readerResources.sortedWith(compareBy({ it.kind }, { it.fileName })).forEach { resource ->
                 require(resource.file.isFile && resource.file.length() == resource.byteCount) {
                     "阅读器备份资源无效：${resource.fileName}"
                 }
@@ -418,14 +418,14 @@ internal object WatchRssBackupArchive {
     }
 
     private fun ZipOutputStream.writeUtf8Entry(name: String, value: String) {
-        putNextEntry(ZipEntry(name))
+        putNextEntry(ZipEntry(name).apply { time = 0L })
         val bytes = value.toByteArray(Charsets.UTF_8)
         write(bytes)
         closeEntry()
     }
 
     private fun ZipOutputStream.writeFileEntry(name: String, file: File) {
-        putNextEntry(ZipEntry(name))
+        putNextEntry(ZipEntry(name).apply { time = 0L })
         file.inputStream().buffered().use { it.copyTo(this) }
         closeEntry()
     }

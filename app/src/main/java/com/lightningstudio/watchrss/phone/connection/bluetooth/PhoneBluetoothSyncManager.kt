@@ -490,6 +490,7 @@ class PhoneBluetoothSyncManager(
         return runCatching {
             val initialCursor = repository.getLibrarySyncCursor(null)
             val exchange = exchangeLibrary(
+                timeoutMs = if (forceFull || mode != LibrarySyncMode.MERGE) LIBRARY_FULL_SYNC_TIMEOUT_MS else LIBRARY_SYNC_TIMEOUT_MS,
                 cursorRequest = LibrarySyncPayload.buildCursorRequest(
                     deviceId = deviceId,
                     cursor = LibrarySyncCursor(
@@ -594,11 +595,17 @@ class PhoneBluetoothSyncManager(
                     conflictMergeResolutions = conflictPlan.mergeResolutions
                     if (supportsChunkedBodies) {
                         val watchRequests = LibrarySyncPayload.parseBodyRequests(manifestResponse)
+                        // The sync window was captured before the remote manifest round trip. Refresh
+                        // the relevant local rows so a body deleted in the meantime cannot be treated
+                        // as reusable and incorrectly turn a full-body request into metadata-only.
+                        val currentLocalManifest = repository.getArticleManifestsForSync(
+                            remoteManifest.map { it.articleId }
+                        )
                         val phoneRequests = if (mode == LibrarySyncMode.PHONE_TO_WATCH_REPLACE) {
                             emptyList()
                         } else mergeBodyRequests(
                             defaultRequests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
-                                localManifest = window.fullArticleManifest,
+                                localManifest = currentLocalManifest,
                                 remoteManifest = remoteManifest,
                                 maxBodyRequestChunks = LibrarySyncPayload.MAX_BODY_REQUEST_CHUNKS_PER_SYNC,
                                 supportsMetadataOnlyArticles = supportsMetadataOnlyArticles
@@ -1429,6 +1436,7 @@ class PhoneBluetoothSyncManager(
 
     @SuppressLint("MissingPermission")
     private suspend fun exchangeLibrary(
+        timeoutMs: Long,
         cursorRequest: JSONObject,
         buildManifestRequest: suspend (String, JSONObject?) -> JSONObject,
         buildArticleRequests: suspend (JSONObject, Boolean) -> List<JSONObject>,
@@ -1439,7 +1447,7 @@ class PhoneBluetoothSyncManager(
         applyResponse: suspend (BluetoothLibrarySyncExchange) -> Unit
     ): BluetoothLibrarySyncExchange {
         return try {
-            withTimeout(LIBRARY_SYNC_TIMEOUT_MS) {
+            withTimeout(timeoutMs) {
                 withContext(Dispatchers.IO) {
                     syncSession?.exchangeLibrary(
                         cursorRequest = cursorRequest,
@@ -1463,7 +1471,7 @@ class PhoneBluetoothSyncManager(
             debugLog.appendEvent(
                 event = "sync.library.timeout",
                 sessionId = sessionId,
-                fields = mapOf("timeoutMs" to LIBRARY_SYNC_TIMEOUT_MS),
+                fields = mapOf("timeoutMs" to timeoutMs),
                 throwable = exception
             )
             throw IllegalStateException(
@@ -1517,6 +1525,9 @@ class PhoneBluetoothSyncManager(
         // Allow the initial exchange plus the single supported recovery attempt.
         private const val LIBRARY_SYNC_TIMEOUT_MS =
             BluetoothSyncProtocol.PERSISTENT_SESSION_IDLE_TIMEOUT_MS * 2
+        // A real 5,378-chapter authoritative transfer delivered all 134 body
+        // frames just before the 30-minute deadline, leaving no time to apply.
+        private const val LIBRARY_FULL_SYNC_TIMEOUT_MS = 60 * 60 * 1_000L
         private const val READER_EXCHANGE_TIMEOUT_MS = 90_000L
         private const val READER_RECONNECT_DELAY_MS = 180L
         private const val READER_EXCHANGE_RETRY_DELAY_MS = 700L

@@ -31,6 +31,12 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibrarySyncPayload
+import com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordCodec
+import com.lightningstudio.watchrss.phone.data.backup.toMetadataArticle
+import com.lightningstudio.watchrss.phone.data.backup.mergeCloudState
+import com.lightningstudio.watchrss.phone.data.backup.CloudRssStateCodec
+import org.json.JSONObject
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -41,6 +47,125 @@ import org.junit.Test
 import java.security.MessageDigest
 
 class PhoneCompanionRepositoryTest {
+    @Test
+    fun oversizedExcerptIsMovedToBodyWithoutLosingTextOrLocalState() = runBlocking {
+        val original = "段落😀\n".repeat(20000)
+        val row = article("legacy", contentText="", favoriteSaved=true).copy(excerpt=original)
+        val dao = FakePhoneArticleDao().apply { items=listOf(row) }
+        val repository = PhoneCompanionRepository(savedItemDao=FakePhoneSavedItemDao(),articleDao=dao,rssSourceDao=FakePhoneRssSourceDao(),deviceId="phone")
+        assertEquals(1, repository.compactCloudExcerpts {})
+        val actual=dao.items.single()
+        assertEquals(280, actual.excerpt.codePointCount(0,actual.excerpt.length))
+        assertEquals(original,actual.contentText)
+        assertTrue(actual.favoriteSaved)
+        assertEquals(row.contentHash,actual.contentHash)
+        val value = JSONObject(CloudRssStateCodec.encode(listOf(actual),0).toString(Charsets.UTF_8)).getJSONArray("articles").getJSONObject(0)
+        assertFalse(value.has("contentText"))
+        val key = ByteArray(32) { 1 }
+        val id = PhoneCloudRecordCodec.id(key,"user","article",value)
+        PhoneCloudRecordCodec.encrypt(key,"user",id,1,"article",value)
+        assertEquals(0,repository.compactCloudExcerpts {})
+        dao.items=listOf(row.copy(contentText="existing full body"))
+        repository.compactCloudExcerpts {}
+        assertEquals("existing full body",dao.items.single().contentText)
+    }
+
+    @Test
+    fun missingRowsMaterializeWithoutChangingRemoteClocksOrTombstones() {
+        val remote = article("index-only", contentText = "must not enter metadata", favoriteSaved = true,
+            favoriteChangedAt = 7, deleted = true, deletedAt = 9, updatedAt = 11)
+        val state = CloudRssStateCodec.decode(CloudRssStateCodec.encode(listOf(remote), 100)).single()
+        val restored = state.toMetadataArticle()
+        assertEquals(remote.articleId, restored.articleId)
+        assertEquals(remote.contentHash, restored.contentHash)
+        assertEquals(11L, restored.updatedAt)
+        assertEquals(9L, restored.deletedAt)
+        assertEquals(7L, restored.favoriteChangedAt)
+        assertTrue(restored.deleted)
+        assertTrue(restored.favoriteSaved)
+        assertEquals("", restored.contentText)
+        assertEquals(null, restored.contentHtml)
+    }
+
+    @Test
+    fun newerIndexCannotRelabelOldBodyAsANewVersion() = runBlocking {
+        val old = article("book", contentText = "old", updatedAt = 10)
+        val dao = FakePhoneArticleDao().apply { items = listOf(old) }
+        val repository = PhoneCompanionRepository(savedItemDao = FakePhoneSavedItemDao(), articleDao = dao,
+            rssSourceDao = FakePhoneRssSourceDao(), deviceId = "phone")
+        repository.mergeArticlesFromSync(listOf(old.copy(contentHash = "new-version", updatedAt = 20, contentText = "")))
+        assertEquals("new-version", dao.items.single().contentHash)
+        assertEquals("", dao.items.single().contentText)
+    }
+
+    @Test
+    fun matchingVersionRecoversHtmlFromBackupAlongsideAPlainProjection() = runBlocking {
+        val flat = article("book", contentText = "first second", updatedAt = 20)
+        val dao = FakePhoneArticleDao().apply { items = listOf(flat) }
+        val repository = PhoneCompanionRepository(savedItemDao = FakePhoneSavedItemDao(), articleDao = dao,
+            rssSourceDao = FakePhoneRssSourceDao(), deviceId = "phone")
+        repository.mergeArticlesFromBackup(listOf(flat.copy(contentHtml = "<p>first</p><p>second</p>", updatedAt = 10)))
+        assertEquals("<p>first</p><p>second</p>", dao.items.single().contentHtml)
+        assertEquals(20L, dao.items.single().updatedAt)
+    }
+
+    @Test
+    fun fullSyncAndBackupFillMatchingVersionBehindNewerMetadata() = runBlocking {
+        val missing = article("cloud-book", contentText = "", updatedAt = 20, favoriteSaved = true, favoriteChangedAt = 20)
+        val body = missing.copy(contentText = "first\nsecond", updatedAt = 10, favoriteSaved = false, favoriteChangedAt = 5)
+        for (backup in listOf(false, true)) {
+            val dao = FakePhoneArticleDao().apply { items = listOf(missing) }
+            val repository = PhoneCompanionRepository(savedItemDao = FakePhoneSavedItemDao(), articleDao = dao,
+                rssSourceDao = FakePhoneRssSourceDao(), deviceId = "phone")
+            if (backup) repository.mergeArticlesFromBackup(listOf(body)) else repository.mergeArticlesFromSync(listOf(body))
+            assertEquals("first\nsecond", dao.items.single().contentText)
+            assertEquals(20L, dao.items.single().updatedAt)
+            assertTrue(dao.items.single().favoriteSaved)
+            dao.items = listOf(missing.copy(contentHash = "edited"))
+            if (backup) repository.mergeArticlesFromBackup(listOf(body)) else repository.mergeArticlesFromSync(listOf(body))
+            assertEquals("", dao.items.single().contentText)
+        }
+    }
+
+    @Test
+    fun foregroundBodyFillPreservesStateAndRejectsDeletedOrChangedVersions() = runBlocking {
+        val row = article("book", url = ImportedContentIds.epubChapterUrl("b", 1, "c"), contentText = "", favoriteSaved = true)
+        val dao = FakePhoneArticleDao().apply { items = listOf(row) }
+        val repository = PhoneCompanionRepository(savedItemDao = FakePhoneSavedItemDao(), articleDao = dao,
+            rssSourceDao = FakePhoneRssSourceDao(), deviceId = "phone")
+        assertEquals(listOf("book"), repository.missingCloudBodyIds())
+        repository.fillMissingCloudBody(row, "first\nsecond") {}
+        assertEquals("first\nsecond", dao.items.single().contentText)
+        assertTrue(dao.items.single().favoriteSaved)
+        assertTrue(repository.missingCloudBodyIds().isEmpty())
+        dao.items = listOf(row.copy(contentHash = "new-version"))
+        repository.fillMissingCloudBody(row, "stale") {}
+        assertEquals("", dao.items.single().contentText)
+        dao.items = listOf(row.copy(deleted = true))
+        repository.fillMissingCloudBody(row, "stale") {}
+        assertEquals("", dao.items.single().contentText)
+        dao.items = listOf(row)
+        var rejected = false
+        try { repository.fillMissingCloudBody(row, "wrong-owner") { error("owner changed") } }
+        catch (_: IllegalStateException) { rejected = true }
+        assertTrue(rejected)
+        assertEquals("", dao.items.single().contentText)
+    }
+
+    @Test
+    fun newerCloudMetadataInvalidatesOldBodyButNotUnsentLocalState() {
+        val local = article("book", contentText = "old body", updatedAt = 10, favoriteSaved = true, favoriteChangedAt = 50)
+        val remote = local.copy(title = "renamed", contentHash = "new-hash", updatedAt = 20,
+            sourceDeviceId = "other", contentText = "", favoriteSaved = false, favoriteChangedAt = 40)
+        val state = CloudRssStateCodec.decode(CloudRssStateCodec.encode(listOf(remote), 100)).single()
+        val merged = local.mergeCloudState(state)
+        assertEquals("renamed", merged.title)
+        assertEquals("new-hash", merged.contentHash)
+        assertEquals("", merged.contentText)
+        assertTrue(merged.favoriteSaved)
+        assertEquals(local.contentText, local.mergeCloudState(state.copy(updatedAt = 5)).contentText)
+    }
+
     @Test
     fun prepareLibrarySyncWindow_usesReportedPeerCursorAndFallsBackWhenPeerWentBackwards() = runBlocking {
         val changeLogDao = FakeSyncChangeLogDao(maxSeq = 100L)
@@ -2121,6 +2246,68 @@ class PhoneCompanionRepositoryTest {
         assertEquals(true, merged.continuePlaybackInBackground)
     }
 
+    @Test
+    fun encryptedUnknownTombstoneThenOlderLegacyLiveDoesNotResurrect() = runBlocking {
+        val sourceUrl = "https://example.com/feed"
+        val wireValue = JSONObject().put("articleId", "deleted-first").put("url", "https://example.com/a")
+            .put("rssSourceUrl", sourceUrl).put("title", "deleted").put("deleted", true)
+            .put("deletedAt", 100L).put("updatedAt", 100L).put("sourceDeviceId", "mini")
+        val key = ByteArray(32) { it.toByte() }; val owner = "owner"
+        val id = PhoneCloudRecordCodec.id(key, owner, "article", wireValue)
+        val decrypted = PhoneCloudRecordCodec.decrypt(key, owner, id, PhoneCloudRecordCodec.encrypt(key, owner, id, 1, "article", wireValue)).second
+        // Same no-body stub constructor used by WatchRssBackupService.applyCloudRecord.
+        val unknownStub = LibrarySyncPayload.parseArticles(JSONObject().put("articles", JSONArray().put(decrypted))).single()
+        val dao = FakePhoneArticleDao()
+        val repository = PhoneCompanionRepository(savedItemDao=FakePhoneSavedItemDao(),articleDao=dao,rssSourceDao=FakePhoneRssSourceDao(),deviceId="phone")
+        repository.mergeArticlesFromSync(listOf(unknownStub))
+        assertTrue(dao.items.single().deleted)
+        assertEquals("", dao.items.single().contentText)
+        assertEquals(100L, dao.items.single().deletedAt)
+        val olderLegacy = article(id="deleted-first", url="https://example.com/a", rssSourceUrl=sourceUrl,
+            contentText="older body", favoriteSaved=true, favoriteChangedAt=50L, updatedAt=50L)
+        repository.mergeArticlesFromSync(listOf(olderLegacy))
+        assertTrue(dao.items.single().deleted)
+        assertEquals(100L, dao.items.single().deletedAt)
+        assertTrue(dao.items.filterNot { it.deleted }.isEmpty())
+        val exported = JSONObject(CloudRssStateCodec.encode(dao.items, 0).toString(Charsets.UTF_8)).getJSONArray("articles").getJSONObject(0)
+        assertTrue(exported.getBoolean("deleted"));assertEquals(100L,exported.getLong("deletedAt"))
+    }
+
+    @Test
+    fun encryptedSourceSettingsApplyExportAndLegacyOmissionPreserveTrue() = runBlocking {
+        val sourceUrl="https://example.com/flags"
+        val wire=JSONObject().put("url",sourceUrl).put("title","settings").put("updatedAt",100L)
+            .put("useOriginalContent",true).put("continuePlaybackInBackground",true)
+        val key=ByteArray(32) { it.toByte() };val owner="owner"
+        val id=PhoneCloudRecordCodec.id(key,owner,"source",wire)
+        val decrypted=PhoneCloudRecordCodec.decrypt(key,owner,id,PhoneCloudRecordCodec.encrypt(key,owner,id,1,"source",wire)).second
+        fun state(value:JSONObject)=JSONObject().put("format","watchrss-rss-state").put("version",1).put("articles",JSONArray()).put("sources",JSONArray().put(value)).toString().toByteArray()
+        val incoming=CloudRssStateCodec.decodeSources(state(decrypted)).single()
+        assertTrue(incoming.syncedSettingsIncluded)
+        val sourceDao=FakePhoneRssSourceDao()
+        val repository=PhoneCompanionRepository(savedItemDao=FakePhoneSavedItemDao(),articleDao=FakePhoneArticleDao(),rssSourceDao=sourceDao,deviceId="phone")
+        repository.mergeRssSourcesFromSync(listOf(incoming))
+        val olderClientWire=JSONObject().put("url",sourceUrl).put("title","legacy metadata").put("updatedAt",200L)
+        val legacy=CloudRssStateCodec.decodeSources(state(olderClientWire)).single()
+        assertFalse(legacy.syncedSettingsIncluded)
+        repository.mergeRssSourcesFromSync(listOf(legacy))
+        val exported=JSONObject(CloudRssStateCodec.encode(emptyList(),0,sourceDao.sources).toString(Charsets.UTF_8)).getJSONArray("sources").getJSONObject(0)
+        assertTrue(exported.getBoolean("useOriginalContent"));assertTrue(exported.getBoolean("continuePlaybackInBackground"))
+        assertEquals("legacy metadata",exported.getString("title"))
+    }
+
+    @Test
+    fun cloudInventoryRefreshDoesNotResurrectPreviouslyDeletedRecord() = runBlocking {
+        val sourceUrl="https://example.com/feed";val articleUrl="https://example.com/deleted"
+        val id=WebArticleImporter.stableArticleId(articleUrl)
+        val dao=FakePhoneArticleDao().apply { items=listOf(article(id=id,url=articleUrl,rssSourceUrl=sourceUrl,
+            contentText="",deleted=true,deletedAt=100L,updatedAt=100L)) }
+        val repository=PhoneCompanionRepository(savedItemDao=FakePhoneSavedItemDao(),articleDao=dao,rssSourceDao=FakePhoneRssSourceDao(),deviceId="phone")
+        repository.mergeCloudRssInventory(ImportedRssSource(url=sourceUrl,title="Feed",description="",siteUrl=null,imageUrl=null,
+            items=listOf(ImportedRssItem(url=articleUrl,title="still in feed",excerpt="",contentHtml=null,contentText="feed body",imageUrl=null,guid=null))))
+        assertEquals(1,dao.items.size);assertTrue(dao.items.single().deleted);assertEquals(100L,dao.items.single().deletedAt)
+    }
+
     private fun source(
         url: String,
         title: String = "示例源",
@@ -2311,6 +2498,24 @@ class PhoneCompanionRepositoryTest {
 
     private class FakePhoneArticleDao : PhoneArticleDao {
         var items: List<PhoneArticleEntity> = emptyList()
+        override suspend fun privateCloudBodyPage(after: String, limit: Int) = items.filter { it.articleId>after && (ImportedContentIds.isImportedContentUrl(it.url) || ImportedContentIds.isImportedContentUrl(it.rssSourceUrl) || it.rssSourceUrl.isNullOrBlank()) }.sortedBy { it.articleId }.take(limit)
+        override suspend fun longCloudExcerpts() = items.filter { it.excerpt.codePointCount(0,it.excerpt.length)>280 }
+        override suspend fun compactCloudExcerpt(id: String, hash: String, oldExcerpt: String, oldText: String,
+            oldHtml: String?, excerpt: String, text: String, html: String?, clock: Long, device: String): Int {
+            val old = items.firstOrNull { it.articleId==id && it.contentHash==hash && it.excerpt==oldExcerpt && it.contentText==oldText && it.contentHtml==oldHtml } ?: return 0
+            items=items.map { if(it.articleId==id) old.copy(excerpt=excerpt,contentText=text,contentHtml=html,updatedAt=maxOf(old.updatedAt,clock),sourceDeviceId=device,syncMetadataHash="") else it }
+            return 1
+        }
+        override suspend fun missingPrivateBodyIds(): List<String> = items.filter {
+            !it.deleted && it.contentText.isEmpty() && it.contentHtml.isNullOrEmpty() && it.url.startsWith("https://watchrss.local/")
+        }.map { it.articleId }.sorted()
+        override suspend fun fillMissingCloudBody(id: String, hash: String, text: String, html: String?, expectedText: String): Int {
+            val current = items.firstOrNull { it.articleId == id && it.contentHash == hash && !it.deleted && it.contentText == expectedText && it.contentHtml.isNullOrEmpty() } ?: return 0
+            items = items.map { if (it.articleId == id) current.copy(contentText = text, contentHtml = html) else it }
+            return 1
+        }
+        override suspend fun cloudRecordPage(after: String, limit: Int): List<PhoneArticleEntity> =
+            items.filter { it.articleId > after }.sortedBy { it.articleId }.take(limit).map { it.copy(contentHtml = null, contentText = "") }
 
         override fun observeRecent(limit: Int): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
@@ -2451,6 +2656,8 @@ class PhoneCompanionRepositoryTest {
 
     private class FakePhoneRssSourceDao : PhoneRssSourceDao {
         var sources: List<PhoneRssSourceEntity> = emptyList()
+        override suspend fun cloudRecordPage(after: String, limit: Int): List<PhoneRssSourceEntity> =
+            sources.filter { it.url > after }.sortedBy { it.url }.take(limit)
 
         override fun observeActive(): Flow<List<PhoneRssSourceEntity>> = emptyFlow()
 

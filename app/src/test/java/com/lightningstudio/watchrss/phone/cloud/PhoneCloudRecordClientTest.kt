@@ -18,7 +18,7 @@ class PhoneCloudRecordClientTest {
             inspect(chain.request())
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(status).message("test")
                 .body(json.toResponseBody("application/json".toMediaType())).build()
-        }.build())
+        }.build()).also { it.useEpoch(session, "epoch") }
     @Test fun missingDeploymentSkipsOnlyRecords() = runBlocking {
         assertNull(client(404, "{}").recordPage(session, "0"))
     }

@@ -46,4 +46,14 @@ interface NoteDao {
 
     @Query("UPDATE note_conflicts SET resolvedAt = :resolvedAt WHERE conflictId = :conflictId")
     suspend fun resolveConflict(conflictId: String, resolvedAt: Long)
+    @Query("DELETE FROM note_conflicts")
+    suspend fun clearConflicts()
+    @Query("DELETE FROM note_assets")
+    suspend fun clearAssets()
+    @Query("DELETE FROM notes")
+    suspend fun clearNotes()
+    @Query("DELETE FROM note_folders")
+    suspend fun clearFolders()
+    @androidx.room.Transaction
+    suspend fun clearForAccountSwitch() { clearConflicts(); clearAssets(); clearNotes(); clearFolders() }
 }

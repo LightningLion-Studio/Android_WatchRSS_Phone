@@ -9,14 +9,50 @@ enum class CloudNetworkPolicy {
     ANY_NETWORK
 }
 
-class PhoneCloudStateStore(
-    context: Context,
-    prefsName: String = "watchrss_cloud_state"
-) {
-    private val preferences = context.applicationContext.getSharedPreferences(
-        prefsName,
-        Context.MODE_PRIVATE
-    )
+class PhoneCloudStateStore internal constructor(private val preferences: android.content.SharedPreferences) {
+    constructor(context: Context, prefsName: String = "watchrss_cloud_state") : this(
+        context.applicationContext.getSharedPreferences(prefsName, Context.MODE_PRIVATE))
+
+    private var scope = ""
+    fun bindScope(baseUrl: String, userId: String) {
+        scope = CloudSnapshotCodec.sha256("${baseUrl.trimEnd('/')}\n$userId".toByteArray()) + ":"
+        if (!preferences.getBoolean("scoped_cloud_v2", false)) {
+            val editor = preferences.edit().putBoolean("scoped_cloud_v2", true)
+            listOf(KEY_DEVICE_SEQUENCE, KEY_APPLIED_FULL, KEY_APPLIED_STATE, KEY_CONTENT_HASH, KEY_CONTENT_HASH_FULL, KEY_CONTENT_HASH_STATE, KEY_PARENT_HEADS).forEach(editor::remove)
+            preferences.all.keys.filter { it.startsWith("body_restore_v2_") }.forEach(editor::remove)
+            check(editor.commit())
+        }
+    }
+    private fun scoped(key: String): String = scope + key
+    var libraryEpoch: String?
+        get() = preferences.getString(scoped("library_epoch"), null)
+        set(value) { check(preferences.edit().putString(scoped("library_epoch"), value).commit()) }
+    fun observeEpoch(epoch: String, invalidate: () -> Unit): Boolean {
+        require(epoch.isNotBlank())
+        val changed = libraryEpoch != null && libraryEpoch != epoch
+        if (changed) invalidate()
+        libraryEpoch = epoch
+        return changed
+    }
+    fun quarantineKey(version: Int, reason: String) {
+        val key = scoped("quarantined_keys")
+        val rows = JSONObject(preferences.getString(key, "{}").orEmpty())
+        rows.put(version.toString(), reason)
+        check(preferences.edit().putString(key, rows.toString()).commit())
+    }
+    fun quarantinedKeyVersions(): Set<Int> = JSONObject(preferences.getString(scoped("quarantined_keys"), "{}").orEmpty())
+        .keys().asSequence().mapNotNull { it.toIntOrNull() }.toSet()
+    var ownerUserId: String?
+        get() = preferences.getString("private_library_owner", null)
+        set(value) { check(preferences.edit().putString("private_library_owner", value).commit()) }
+    fun claimLegacyOwner(userId: String) { if (ownerUserId == null) ownerUserId = userId }
+    fun requireUploadOwner(userId: String) { check(ownerUserId == userId) { "本机资料属于其他账号，请先清空本机资料或明确确认合并" } }
+    fun clearScope() {
+        check(scope.isNotEmpty())
+        val editor = preferences.edit()
+        preferences.all.keys.filter { it.startsWith(scope) }.forEach(editor::remove)
+        check(editor.commit())
+    }
 
     var syncPaused: Boolean
         get() = preferences.getBoolean("sync_paused", false)
@@ -42,16 +78,16 @@ class PhoneCloudStateStore(
 
     // Older versions could acknowledge an index without restoring private bodies.
     fun ensureFullBodyRestoreVersion(userId: String) {
-        val key = "body_restore_v2_$userId"
+        val key = scoped("body_restore_v2_$userId")
         if (!preferences.getBoolean(key, false)) {
-            check(preferences.edit().remove(KEY_APPLIED_FULL).putBoolean(key, true).commit())
+            check(preferences.edit().remove(scoped(KEY_APPLIED_FULL)).putBoolean(key, true).commit())
         }
     }
 
     @Synchronized
     fun nextSequence(serverSequence: Long): Long {
-        val next = maxOf(preferences.getLong(KEY_DEVICE_SEQUENCE, 0L), serverSequence) + 1L
-        check(preferences.edit().putLong(KEY_DEVICE_SEQUENCE, next).commit())
+        val next = maxOf(preferences.getLong(scoped(KEY_DEVICE_SEQUENCE), 0L), serverSequence) + 1L
+        check(preferences.edit().putLong(scoped(KEY_DEVICE_SEQUENCE), next).commit())
         return next
     }
 
@@ -67,10 +103,10 @@ class PhoneCloudStateStore(
     fun lastContentHash(full: Boolean): String? =
         preferences.getString(
             contentHashKey(full),
-            preferences.getString(KEY_CONTENT_HASH, null)
+            preferences.getString(scoped(KEY_CONTENT_HASH), null)
         )
 
-    fun lastParentHeads(): String? = preferences.getString(KEY_PARENT_HEADS, null)
+    fun lastParentHeads(): String? = preferences.getString(scoped(KEY_PARENT_HEADS), null)
 
     fun markUploaded(
         contentHash: String,
@@ -79,20 +115,20 @@ class PhoneCloudStateStore(
     ) {
         preferences.edit()
             .putString(contentHashKey(full), contentHash)
-            .putString(KEY_PARENT_HEADS, JSONObject(parentHeads).toString())
+            .putString(scoped(KEY_PARENT_HEADS), JSONObject(parentHeads).toString())
             .apply()
     }
 
     fun clearLibraryState() {
         check(
             preferences.edit()
-                .remove(KEY_DEVICE_SEQUENCE)
-                .remove(KEY_APPLIED_FULL)
-                .remove(KEY_APPLIED_STATE)
-                .remove(KEY_CONTENT_HASH)
-                .remove(KEY_CONTENT_HASH_FULL)
-                .remove(KEY_CONTENT_HASH_STATE)
-                .remove(KEY_PARENT_HEADS)
+                .remove(scoped(KEY_DEVICE_SEQUENCE))
+                .remove(scoped(KEY_APPLIED_FULL))
+                .remove(scoped(KEY_APPLIED_STATE))
+                .remove(scoped(KEY_CONTENT_HASH))
+                .remove(scoped(KEY_CONTENT_HASH_FULL))
+                .remove(scoped(KEY_CONTENT_HASH_STATE))
+                .remove(scoped(KEY_PARENT_HEADS))
                 .commit()
         ) { "本机云同步状态清理失败" }
     }
@@ -103,10 +139,10 @@ class PhoneCloudStateStore(
         }.getOrDefault(JSONObject())
 
     private fun appliedKey(full: Boolean): String =
-        if (full) KEY_APPLIED_FULL else KEY_APPLIED_STATE
+        if (full) scoped(KEY_APPLIED_FULL) else scoped(KEY_APPLIED_STATE)
 
     private fun contentHashKey(full: Boolean): String =
-        if (full) KEY_CONTENT_HASH_FULL else KEY_CONTENT_HASH_STATE
+        if (full) scoped(KEY_CONTENT_HASH_FULL) else scoped(KEY_CONTENT_HASH_STATE)
 
     private companion object {
         private const val KEY_RETENTION_DAYS = "retention_days"

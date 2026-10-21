@@ -22,55 +22,69 @@ class PhoneCloudClient(
     private val http: OkHttpClient = defaultHttpClient(),
     private val refreshDeviceSession: suspend (String, String) -> Boolean = { _, _ -> false }
 ) {
+    val backendBaseUrl: String get() = environment.backendBaseUrl.trimEnd('/')
+    private val epochs = java.util.concurrent.ConcurrentHashMap<String, String>()
+    internal var checkSession: (PhoneAccountSession) -> Unit = {}
+    internal var onDeviceKeyConflict: (PhoneAccountSession) -> Unit = {}
+    internal var onEpochMismatch: (PhoneAccountSession) -> Unit = {}
+    internal var onBootstrap: suspend (PhoneAccountSession, CloudBootstrap) -> Unit = { _, _ -> }
+    internal var onRecordMetadata: suspend (PhoneAccountSession, JSONObject) -> Unit = { _, _ -> }
+    fun scopeId(session: PhoneAccountSession): String = CloudSnapshotCodec.sha256("$backendBaseUrl\n${session.userId}".toByteArray())
+    fun useEpoch(session: PhoneAccountSession, epoch: String) { require(epoch.isNotBlank()); epochs[scopeId(session)] = epoch }
+    internal fun knownEpoch(session: PhoneAccountSession): String? = epochs[scopeId(session)]
+    fun forgetEpoch(session: PhoneAccountSession) { epochs.remove(scopeId(session)) }
+    fun epoch(session: PhoneAccountSession): String = epochs[scopeId(session)] ?: error("请先读取云资料库纪元")
+    internal suspend fun v2Post(session: PhoneAccountSession, path: String, body: JSONObject, expectedEpoch: String? = knownEpoch(session)): JSONObject =
+        post(session, path, body, expectedEpoch).use { it.jsonBody() }
+    internal suspend fun v2Get(session: PhoneAccountSession, path: String): JSONObject = get(session, path).use { it.jsonBody() }
+    suspend fun storeCommitments(session: PhoneAccountSession, deviceId: String, values: List<CloudKeyCommitment>, expectedEpoch: String? = knownEpoch(session)) {
+        v2Post(session, "/functions/v1/cloud/keys/commitments", JSONObject().put("deviceId", deviceId)
+            .put("commitments", JSONArray().apply { values.forEach { put(JSONObject().put("keyVersion", it.keyVersion)
+                .put("commitment", it.commitment).put("rotationProof", it.rotationProof ?: JSONObject.NULL)) } }), expectedEpoch)
+    }
+    internal var currentDeviceId: String? = null
+    suspend fun rotate(session: PhoneAccountSession, body: JSONObject, expectedEpoch: String? = knownEpoch(session)) { v2Post(session, "/functions/v1/cloud/keys/rotate", body, expectedEpoch) }
+
     internal suspend fun recordPage(session: PhoneAccountSession, cursor: String): JSONObject? {
         require(cursor.matches(Regex("[0-9]+")))
-        return try { get(session, "/functions/v1/cloud/records?after=$cursor&limit=50").use { it.jsonBody() } }
+        return try { get(session, "/functions/v1/cloud/records?after=$cursor&limit=50" + (currentDeviceId?.let { "&deviceId=${java.net.URLEncoder.encode(it, "UTF-8")}" } ?: "")).use { it.jsonBody() }.also { onRecordMetadata(session, it) } }
         catch (error: CloudHttpException) { if (error.status == 404) null else throw error }
     }
 
-    internal suspend fun postRecords(session: PhoneAccountSession, items: JSONArray): JSONObject =
-        post(session, "/functions/v1/cloud/records", JSONObject().put("formatVersion", 1).put("items", items)).use { it.jsonBody() }
+    internal suspend fun postRecords(session: PhoneAccountSession, items: JSONArray, expectedEpoch: String? = knownEpoch(session)): JSONObject =
+        post(session, "/functions/v1/cloud/records", JSONObject().put("formatVersion", 1).put("items", items), expectedEpoch).use { it.jsonBody() }
 
     suspend fun membership(session: PhoneAccountSession): CloudMemberState =
         get(session, "/functions/v1/account/entitlement").use { response ->
             response.jsonBody().memberState()
         }
 
-    suspend fun bootstrap(session: PhoneAccountSession): CloudBootstrap =
-        post(session, "/functions/v1/cloud/bootstrap", JSONObject()).use { response ->
-            val json = response.jsonBody()
-            CloudBootstrap(
-                member = json.getJSONObject("member").memberState(),
-                devices = json.getJSONArray("devices").objects { it.device() },
-                keyEnvelopes = json.getJSONArray("keyEnvelopes").objects { it.keyEnvelope() }
-            )
-        }
-
-    suspend fun approvalRequest(session: PhoneAccountSession, deviceId: String): String =
-        post(session, "/functions/v1/cloud/approvals", JSONObject().put("deviceId", deviceId).put("restart",true)).use { it.jsonBody().getString("id") }
-
-    suspend fun pendingApprovals(session: PhoneAccountSession, deviceId: String): List<JSONObject> =
-        get(session, "/functions/v1/cloud/approvals?deviceId=${java.net.URLEncoder.encode(deviceId,"UTF-8")}").use {
-            val array=it.jsonBody().getJSONArray("requests")
-            (0 until array.length()).map { i -> array.getJSONObject(i) }
-        }
-
-    suspend fun offerApproval(session: PhoneAccountSession, id: String, deviceId: String, code: String, envelopes: List<CloudKeyEnvelope>) {
-        val values=JSONArray()
-        envelopes.forEach { e -> values.put(JSONObject().put("algorithm",e.algorithm).put("keyVersion",e.keyVersion).put("wrappedKeyBase64",e.wrappedKeyBase64).put("nonceBase64",e.nonceBase64).put("ephemeralPublicKeySpki",e.ephemeralPublicKeySpki)) }
-        post(session,"/functions/v1/cloud/approvals/$id/offer",JSONObject().put("deviceId",deviceId).put("code",code).put("envelopes",values)).close()
+    suspend fun bootstrap(session: PhoneAccountSession): CloudBootstrap {
+        val json = post(session, "/functions/v1/cloud/bootstrap", JSONObject()).use { it.jsonBody() }
+        val result = CloudBootstrap(
+            member = json.getJSONObject("member").memberState(),
+            devices = json.getJSONArray("devices").objects { it.device() }.filterNot { it.deviceId.startsWith("reader-migration-") },
+            keyEnvelopes = json.getJSONArray("keyEnvelopes").objects { it.keyEnvelope() },
+            libraryEpoch = json.optString("libraryEpoch"), keyVersionFloor = json.optInt("keyVersionFloor"),
+            keyCommitments = parseCommitments(json))
+        onBootstrap(session, result)
+        return result
     }
 
-    suspend fun redeemApproval(session: PhoneAccountSession, id: String, deviceId: String, code: String) {
-        post(session,"/functions/v1/cloud/approvals/$id/redeem",JSONObject().put("deviceId",deviceId).put("code",code)).close()
-    }
+    internal fun parseCommitments(json: JSONObject): List<CloudKeyCommitment> =
+        (json.optJSONArray("keyCommitments") ?: JSONArray()).objects {
+            CloudKeyCommitment(it.getInt("keyVersion"), it.getString("commitment"), it.nullableString("rotationProof"))
+        }
 
     suspend fun registerDevice(
         session: PhoneAccountSession,
         deviceId: String,
         displayName: String,
         publicKeySpki: String,
-        keyVersion: Int
+        keyVersion: Int,
+        attestation: String? = null,
+        attestationKeyVersion: Int? = null,
+        expectedEpoch: String? = knownEpoch(session)
     ) {
         post(
             session,
@@ -78,6 +92,7 @@ class PhoneCloudClient(
             JSONObject().apply {
                 put("deviceId", deviceId)
                 put("platform", "phone")
+                attestation?.let { put("attestation", it); put("attestationKeyVersion", attestationKeyVersion) }
                 put("displayName", displayName)
                 put("publicKeySpki", publicKeySpki)
                 put("keyVersion", keyVersion)
@@ -88,37 +103,40 @@ class PhoneCloudClient(
                     put("settings", false)
                     put("credentialEnvelopes", false)
                 })
-            }
+            }, expectedEpoch
         ).close()
     }
 
     suspend fun storeRecoveryEnvelope(
         session: PhoneAccountSession,
         createdByDeviceId: String,
-        envelope: CloudKeyEnvelope
+        envelope: CloudKeyEnvelope,
+        expectedEpoch: String? = knownEpoch(session)
     ) {
-        storeEnvelope(session, "recovery", null, createdByDeviceId, envelope)
+        storeEnvelope(session, "recovery", null, createdByDeviceId, envelope, expectedEpoch)
     }
 
     suspend fun storeDeviceEnvelope(
         session: PhoneAccountSession,
         recipientDeviceId: String,
         createdByDeviceId: String,
-        envelope: CloudKeyEnvelope
+        envelope: CloudKeyEnvelope,
+        expectedEpoch: String? = knownEpoch(session)
     ) {
         storeEnvelope(
             session,
             "device",
             recipientDeviceId,
             createdByDeviceId,
-            envelope
+            envelope, expectedEpoch
         )
     }
 
     suspend fun reserveSnapshot(
         session: PhoneAccountSession,
         snapshot: EncryptedCloudSnapshot,
-        retentionDays: Int?
+        retentionDays: Int?,
+        expectedEpoch: String? = knownEpoch(session)
     ): CloudSnapshotReservation {
         val manifestHash = CloudSnapshotCodec.sha256(snapshot.encryptedManifest)
         val chunks = JSONArray().apply {
@@ -146,7 +164,7 @@ class PhoneCloudClient(
                 put("observedHeads", JSONObject(snapshot.manifest.observedHeads))
                 put("retentionDays", retentionDays ?: JSONObject.NULL)
                 put("chunks", chunks)
-            }
+            }, expectedEpoch
         ).use { response ->
             val json = response.jsonBody()
             CloudSnapshotReservation(
@@ -158,10 +176,10 @@ class PhoneCloudClient(
                         sha256 = item.getString("sha256"),
                         sizeBytes = item.getLong("sizeBytes"),
                         objectPath = item.getString("objectPath"),
-                        signedUrl = item.getString("signedUrl"),
-                        token = item.getString("token"),
-                        tusEndpoint = item.getString("tusEndpoint"),
-                        bucketName = item.getString("bucketName"),
+                        signedUrl = item.optString("uploadUrl", item.optString("signedUrl")),
+                        token = "", tusEndpoint = "", bucketName = "",
+                        transport = item.getString("transport"),
+                        uploadMethod = item.getString("uploadMethod"),
                         reservationId = item.optString("reservationId").takeIf { it.isNotBlank() }
                     )
                 }
@@ -169,19 +187,34 @@ class PhoneCloudClient(
         }
     }
 
-    suspend fun refreshUpload(session: PhoneAccountSession, target: CloudUploadObject): CloudUploadObject {
+    suspend fun refreshUpload(session: PhoneAccountSession, target: CloudUploadObject, expectedEpoch: String? = knownEpoch(session)): CloudUploadObject {
         val id = target.reservationId ?: return target
         require(runCatching { java.util.UUID.fromString(id) }.isSuccess)
-        return post(session, "/functions/v1/cloud/uploads/$id/refresh", JSONObject()).use {
+        return post(session, "/functions/v1/cloud/uploads/$id/refresh", JSONObject(), expectedEpoch).use {
             val body = it.jsonBody()
             if (body.optBoolean("alreadyUploaded")) target.copy(alreadyUploaded = true)
-            else target.copy(signedUrl = body.getString("signedUrl"))
+            else target.copy(signedUrl = body.optString("uploadUrl", body.optString("signedUrl")),
+                transport = body.getString("transport"), uploadMethod = body.getString("uploadMethod"))
         }
+    }
+
+    /** V2 metadata and ciphertext writes use the same owner/epoch fence. Never forwards a bearer to Storage. */
+    suspend fun uploadCiphertext(session: PhoneAccountSession, target: CloudUploadObject, bytes: ByteArray, expectedEpoch: String) {
+        require(target.transport == "epoch-proxy" && target.uploadMethod == "PUT") { "云上传服务需要升级" }
+        require(bytes.size.toLong() == target.sizeBytes && CloudSnapshotCodec.sha256(bytes) == target.sha256) { "上传对象长度或哈希不匹配" }
+        require(bytes.size <= 16 * 1024 * 1024)
+        if (knownEpoch(session) != expectedEpoch) throw CloudTrustException()
+        val id = requireNotNull(target.reservationId) { "缺少云上传预留" }
+        require(java.util.UUID.fromString(id).toString() == id)
+        val url = backendBaseUrl + "/functions/v1/cloud/uploads/$id"
+        require(target.signedUrl == url) { "云上传地址不匹配" }
+        request(session, Request.Builder().url(url).put(bytes.toRequestBody("application/octet-stream".toMediaType())), expectedEpoch).close()
     }
 
     suspend fun completeSnapshot(
         session: PhoneAccountSession,
-        snapshot: EncryptedCloudSnapshot
+        snapshot: EncryptedCloudSnapshot,
+        expectedEpoch: String? = knownEpoch(session)
     ) {
         post(
             session,
@@ -196,7 +229,7 @@ class PhoneCloudClient(
                             .distinct()
                     )
                 )
-            }
+            }, expectedEpoch
         ).close()
     }
 
@@ -252,7 +285,8 @@ class PhoneCloudClient(
         session: PhoneAccountSession,
         snapshotId: String,
         deviceId: String,
-        result: String = "applied"
+        result: String = "applied",
+        expectedEpoch: String? = knownEpoch(session)
     ) {
         post(
             session,
@@ -260,15 +294,15 @@ class PhoneCloudClient(
             JSONObject().apply {
                 put("deviceId", deviceId)
                 put("result", result)
-            }
+            }, expectedEpoch
         ).close()
     }
 
-    suspend fun revokeDevice(session: PhoneAccountSession, deviceId: String) {
+    suspend fun revokeDevice(session: PhoneAccountSession, deviceId: String, expectedEpoch: String? = knownEpoch(session)) {
         post(
             session,
             "/functions/v1/cloud/devices/$deviceId/revoke",
-            JSONObject()
+            JSONObject(), expectedEpoch
         ).close()
     }
 
@@ -315,20 +349,20 @@ class PhoneCloudClient(
         }
     }
 
-    suspend fun deleteSnapshot(session: PhoneAccountSession, snapshotId: String) {
+    suspend fun deleteSnapshot(session: PhoneAccountSession, snapshotId: String, expectedEpoch: String? = knownEpoch(session)) {
         request(
             session,
             Request.Builder()
                 .url(environment.backendBaseUrl + "/functions/v1/cloud/snapshots/$snapshotId")
-                .delete()
+                .delete(), expectedEpoch
         ).close()
     }
 
-    suspend fun resetLibrary(session: PhoneAccountSession): CloudLibraryResetResult =
+    suspend fun resetLibrary(session: PhoneAccountSession, expectedEpoch: String? = knownEpoch(session)): CloudLibraryResetResult =
         post(
             session,
             "/functions/v1/cloud/library/reset",
-            JSONObject().apply { put("confirmation", RESET_LIBRARY_CONFIRMATION) }
+            JSONObject().apply { put("confirmation", RESET_LIBRARY_CONFIRMATION) }, expectedEpoch
         ).use { response ->
             response.jsonBody().let { body ->
                 require(body.optBoolean("libraryDeleted")) { "服务端未确认云端资料库删除" }
@@ -357,7 +391,8 @@ class PhoneCloudClient(
         recipientType: String,
         recipientDeviceId: String?,
         createdByDeviceId: String,
-        envelope: CloudKeyEnvelope
+        envelope: CloudKeyEnvelope,
+        expectedEpoch: String? = knownEpoch(session)
     ) {
         post(
             session,
@@ -371,19 +406,20 @@ class PhoneCloudClient(
                 put("nonceBase64", envelope.nonceBase64)
                 put("ephemeralPublicKeySpki", envelope.ephemeralPublicKeySpki ?: JSONObject.NULL)
                 put("createdByDeviceId", createdByDeviceId)
-            }
+            }, expectedEpoch
         ).close()
     }
 
     private suspend fun post(
         session: PhoneAccountSession,
         path: String,
-        body: JSONObject
+        body: JSONObject,
+        expectedEpoch: String? = knownEpoch(session)
     ): okhttp3.Response = request(
         session,
         Request.Builder()
             .url(environment.backendBaseUrl + path)
-            .post(body.toString().toRequestBody(JSON))
+            .post(body.toString().toRequestBody(JSON)), expectedEpoch
     )
 
     private suspend fun get(
@@ -396,11 +432,14 @@ class PhoneCloudClient(
 
     private suspend fun request(
         session: PhoneAccountSession,
-        builder: Request.Builder
+        builder: Request.Builder,
+        expectedEpoch: String? = null
     ): okhttp3.Response = withContext(Dispatchers.IO) {
+        checkSession(session)
         require(environment.backendBaseUrl.isNotBlank()) { "云服务地址未配置" }
         require(!session.isExpired) { "登录已过期，请重新登录" }
         fun buildRequest() = builder
+            .also { checkSession(session) }
             .withWatchRssAppVersionHeader()
             .header("authorization", "Bearer ${session.accessToken}")
             .apply {
@@ -408,14 +447,25 @@ class PhoneCloudClient(
                     header("x-watchrss-device-authorization", "Bearer $it")
                 }
             }
+            .apply {
+                val request = build()
+                if (request.method != "GET" && request.url.encodedPath.startsWith("/functions/v1/cloud/") &&
+                    request.url.encodedPath != "/functions/v1/cloud/bootstrap") {
+                    header("x-watchrss-library-epoch", requireNotNull(expectedEpoch) { "请先读取云资料库纪元" })
+                }
+            }
+            .apply { currentDeviceId?.let { header("x-watchrss-cloud-device-id", it) } }
             .header("apikey", environment.supabaseAnonKey)
             .header("accept", "application/json")
             .build()
         val firstRequest = buildRequest()
         // Reserve/complete may verify hundreds of stored immutable blocks.
-        val requestHttp = if (firstRequest.url.encodedPath in setOf(
-                "/functions/v1/cloud/snapshots/reserve", "/functions/v1/cloud/snapshots/complete"
-            )) http.newBuilder().readTimeout(180, TimeUnit.SECONDS).build() else http
+        val requestHttp = http.newBuilder().followRedirects(false).followSslRedirects(false).apply {
+            if (firstRequest.url.encodedPath in setOf("/functions/v1/cloud/snapshots/reserve", "/functions/v1/cloud/snapshots/complete") ||
+                (firstRequest.method == "PUT" && firstRequest.url.encodedPath.startsWith("/functions/v1/cloud/uploads/"))) {
+                readTimeout(180, TimeUnit.SECONDS); writeTimeout(180, TimeUnit.SECONDS)
+            }
+        }.build()
         var response = requestHttp.newCall(firstRequest).execute()
         val rejected = firstRequest.header("x-watchrss-device-authorization")?.removePrefix("Bearer ")
         if (response.code == 403 && rejected != null && isRefreshableCloudDeviceSessionError(
@@ -435,7 +485,14 @@ class PhoneCloudClient(
                 throw CloudDeviceAuthorizationException()
             }
         }
-        response.also { if (!it.isSuccessful) it.throwHttp() }
+        response.also {
+            if (it.code == 409 && runCatching { JSONObject(it.peekBody(4096).string()).optString("error") }.getOrDefault("") == "device_key_conflict") onDeviceKeyConflict(session)
+            if (it.code == 409 && runCatching { JSONObject(it.peekBody(4096).string()).optString("error") }.getOrDefault("") == "library_epoch_mismatch") {
+                onEpochMismatch(session)
+                epochs.remove(scopeId(session))
+            }
+            if (!it.isSuccessful) it.throwHttp()
+        }
     }
 
     private fun okhttp3.Response.throwHttp(): Nothing {
@@ -469,7 +526,9 @@ class PhoneCloudClient(
         publicKeySpki = optString("publicKeySpki"),
         keyVersion = optInt("keyVersion", 1),
         lastSequence = optLong("lastSequence"),
-        revokedAt = nullableString("revokedAt")
+        revokedAt = nullableString("revokedAt"),
+        attestation = nullableString("attestation"),
+        attestationKeyVersion = if (isNull("attestationKeyVersion")) null else optInt("attestationKeyVersion")
     )
 
     private fun JSONObject.keyEnvelope() = StoredCloudKeyEnvelope(
@@ -529,4 +588,4 @@ internal fun isRefreshableCloudDeviceSessionError(code: String): Boolean =
 
 internal class CloudDeviceAuthorizationException : IOException("设备身份需要重新验证，请前往账号页面完成验证")
 
-internal class CloudHttpException(val status: Int, val detail: String) : IOException("HTTP $status: $detail")
+internal class CloudHttpException(val status: Int, val detail: String) : IOException(if (status == 426) "请升级客户端后继续云同步" else if (status == 409 && runCatching { JSONObject(detail).optString("error") }.getOrDefault("") == "device_key_conflict") "本机设备身份冲突，请重新登记本机" else "HTTP $status: $detail")

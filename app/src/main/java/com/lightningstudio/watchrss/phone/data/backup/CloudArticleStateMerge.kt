@@ -76,7 +76,8 @@ internal fun com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity.merge
             readingPositionChangedAt,
             incoming.readingPositionChangedAt
         ),
-        isRead = isRead || incoming.isRead
+        isRead = mergeReadFlag(isRead, readingPositionChangedAt, updatedAt, sourceDeviceId,
+            incoming.isRead, incoming.readingPositionChangedAt, incoming.updatedAt, incoming.sourceDeviceId)
     )
 }
 
@@ -87,3 +88,17 @@ private fun stateWins(
     currentDevice: String
 ): Boolean = incomingAt > currentAt ||
     (incomingAt == currentAt && incomingDevice > currentDevice)
+
+/** Reading position and read/unread are one LWW register; old clients fall back to updatedAt. */
+internal fun mergeReadFlag(local: Boolean, localAt: Long, localUpdated: Long, localDevice: String,
+                           remote: Boolean, remoteAt: Long, remoteUpdated: Long, remoteDevice: String): Boolean {
+    val a = localAt.takeIf { it > 0 } ?: localUpdated
+    val b = remoteAt.takeIf { it > 0 } ?: remoteUpdated
+    return when {
+        b > a -> remote
+        a > b -> local
+        remoteDevice > localDevice -> remote
+        localDevice > remoteDevice -> local
+        else -> local && remote
+    }
+}

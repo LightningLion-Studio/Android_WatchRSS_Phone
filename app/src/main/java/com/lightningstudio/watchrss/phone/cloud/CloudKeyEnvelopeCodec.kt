@@ -20,6 +20,7 @@ data class CloudKeyEnvelope(
 )
 
 data class RecoveryKeySetup(
+    internal val pendingKey: ByteArray = ByteArray(0),
     val words: List<String>,
     val envelope: CloudKeyEnvelope
 )
@@ -170,7 +171,7 @@ object CloudKeyEnvelopeCodec {
 }
 
 internal fun ByteArray.base64(): String =
-    Base64.getEncoder().withoutPadding().encodeToString(this)
+    Base64.getEncoder().encodeToString(this)
 
 internal fun String.base64Bytes(): ByteArray = Base64.getDecoder().decode(this)
 

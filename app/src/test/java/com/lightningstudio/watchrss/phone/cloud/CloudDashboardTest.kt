@@ -28,10 +28,10 @@ class CloudDashboardTest {
         runCatching { gate.setPaused(true) }
         assertFalse(gate.state.value)
     }
-    @Test fun `missing key and expired membership are actionable`() {
+    @Test fun `missing key needs authorization and free accounts keep syncing`() {
         assertEquals("授权此手机", cloudDashboardPresentation(true, false, false, CloudSyncPhase.IDLE, member).actionLabel)
-        assertEquals("查看云会员", cloudDashboardPresentation(true, true, false, CloudSyncPhase.COMPLETE,
-            member.copy(writable = false)).actionLabel)
+        assertEquals("同步完成", cloudDashboardPresentation(true, true, false, CloudSyncPhase.COMPLETE,
+            member.copy(writable = false, active = false, quotaBytes = 15 * 1024 * 1024)).status)
         assertEquals("登录账号", cloudDashboardPresentation(false, true, false, CloudSyncPhase.COMPLETE, member).actionLabel)
     }
     @Test fun `pause distinguishes in flight transaction from stopped transfers`() {

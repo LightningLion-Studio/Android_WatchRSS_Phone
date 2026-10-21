@@ -49,17 +49,23 @@ internal object PhoneCloudRecordCodec {
             val progress = value.optDouble("readingProgress", 0.0).takeIf { it.isFinite() }?.coerceIn(0.0, 1.0) ?: 0.0
             normalized.put("readingProgress", kotlin.math.floor(progress * 1_000_000.0 + 0.5) / 1_000_000.0)
         }
-        return CloudSnapshotCodec.sha256("$kind:${canonical(normalized)}".toByteArray(Charsets.UTF_8))
+        return CloudSnapshotCodec.sha256("$kind:${canonical(if (kind in setOf("article", "source")) normalized else value)}".toByteArray(Charsets.UTF_8))
     }
     fun validate(kind: String, value: JSONObject) {
-        require(kind in setOf("article", "source"))
+        require(kind.isNotBlank())
+        if (kind !in setOf("article", "source")) return
         require(listOf("contentText", "contentHtml", "contentTextGzip", "contentHtmlGzip", "body", "chapters").none(value::has)) { "记录不得包含正文" }
         require(value.getString(if (kind == "article") "articleId" else "url").isNotBlank())
+        listOf("updatedAt", "deletedAt", "readingPositionChangedAt", "favoriteChangedAt", "watchLaterChangedAt", "independentChangedAt").forEach {
+            if (value.has(it)) require(value.get(it) is Number && value.getDouble(it).isFinite() && value.getDouble(it) >= 0)
+        }
+        listOf("deleted", "isRead", "favoriteSaved", "watchLaterSaved", "independentSaved").forEach { if (value.has(it)) require(value.get(it) is Boolean) }
+        if (value.has("readingProgress")) require(value.get("readingProgress") is Number && value.getDouble("readingProgress") in 0.0..1.0)
     }
     fun encrypt(accountKey: ByteArray, user: String, recordId: String, version: Int, kind: String, value: JSONObject,
-                nonce: ByteArray = ByteArray(12).also(SecureRandom()::nextBytes)): JSONObject {
+                nonce: ByteArray = ByteArray(12).also(SecureRandom()::nextBytes), idKey: ByteArray = accountKey): JSONObject {
         validate(kind, value)
-        require(id(accountKey, user, kind, value) == recordId)
+        require(id(idKey, user, kind, value) == recordId)
         val plaintext = canonical(JSONObject().put("format", "watchrss-rss-record").put("version", 1).put("kind", kind).put("value", value)).toByteArray(Charsets.UTF_8)
         require(plaintext.size + 16 <= 64 * 1024) { "单条云状态过大" }
         val derived = key(accountKey, user, "watchrss/cloud/record/v1")
@@ -72,7 +78,7 @@ internal object PhoneCloudRecordCodec {
                 .put("ciphertextBase64", Base64.getEncoder().encodeToString(cipher.doFinal(plaintext)))
         } finally { derived.fill(0); plaintext.fill(0) }
     }
-    fun decrypt(accountKey: ByteArray, user: String, recordId: String, envelope: JSONObject): Pair<String, JSONObject> {
+    fun decrypt(accountKey: ByteArray, user: String, recordId: String, envelope: JSONObject, idKeys: List<ByteArray> = listOf(accountKey)): Pair<String, JSONObject> {
         require(envelope.getString("algorithm") == "A256GCM")
         val version = envelope.getInt("keyVersion")
         val nonce = Base64.getDecoder().decode(envelope.getString("nonceBase64"))
@@ -92,7 +98,7 @@ internal object PhoneCloudRecordCodec {
             require(root.getString("format") == "watchrss-rss-record" && root.getInt("version") == 1)
             val kind = root.getString("kind"); val value = root.getJSONObject("value")
             validate(kind, value)
-            require(id(accountKey, user, kind, value) == recordId)
+            if (kind in setOf("article", "source")) require(idKeys.any { id(it, user, kind, value) == recordId })
             return kind to value
         } catch (_: Exception) {
             // JSON errors may quote decrypted data. Never attach the original

@@ -170,3 +170,9 @@ private fun JSONObject.toStringMap(): Map<String, String> =
 
 private fun JSONObject.toLongMap(): Map<String, Long> =
     keys().asSequence().associateWith { getLong(it) }
+
+internal fun validateCloudManifestHead(manifest: CloudSnapshotManifest, head: CloudSnapshotHead) {
+    require(manifest.snapshotId == head.id && manifest.sourceDeviceId == head.sourceDeviceId &&
+        manifest.deviceSequence == head.deviceSequence && manifest.keyVersion == head.keyVersion) { "云快照清单与头信息不一致" }
+    if (head.sourceDeviceId.startsWith("reader-migration-")) require(manifest.objects.all { it.name.startsWith("reader/") }) { "阅读投影含有非阅读对象" }
+}

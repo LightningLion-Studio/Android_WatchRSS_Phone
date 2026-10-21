@@ -9,6 +9,15 @@
         <exclude domain="sharedpref" path="watchrss_phone_privacy_consent.xml" />
         <exclude domain="sharedpref" path="watchrss_onboarding_profile.xml" />
         <exclude domain="sharedpref" path="watchrss_onboarding_draft.xml" />
+    <exclude domain="sharedpref" path="watchrss_cloud_keys.xml" />
+    <exclude domain="sharedpref" path="watchrss_cloud_keys_test.xml" />
+    <exclude domain="sharedpref" path="watchrss_cloud_state.xml" />
+    <exclude domain="sharedpref" path="watchrss_cloud_state_test.xml" />
+    <exclude domain="sharedpref" path="watchrss_tus_uploads.xml" />
+    <exclude domain="sharedpref" path="watchrss_tus_uploads_test.xml" />
+    <exclude domain="database" path="cloud-records-v1.db" />
+    <exclude domain="database" path="cloud-records-v1.db-wal" />
+    <exclude domain="database" path="cloud-records-v1.db-shm" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="watchrss_account_session.xml" />
@@ -19,5 +28,14 @@
         <exclude domain="sharedpref" path="watchrss_phone_privacy_consent.xml" />
         <exclude domain="sharedpref" path="watchrss_onboarding_profile.xml" />
         <exclude domain="sharedpref" path="watchrss_onboarding_draft.xml" />
+    <exclude domain="sharedpref" path="watchrss_cloud_keys.xml" />
+    <exclude domain="sharedpref" path="watchrss_cloud_keys_test.xml" />
+    <exclude domain="sharedpref" path="watchrss_cloud_state.xml" />
+    <exclude domain="sharedpref" path="watchrss_cloud_state_test.xml" />
+    <exclude domain="sharedpref" path="watchrss_tus_uploads.xml" />
+    <exclude domain="sharedpref" path="watchrss_tus_uploads_test.xml" />
+    <exclude domain="database" path="cloud-records-v1.db" />
+    <exclude domain="database" path="cloud-records-v1.db-wal" />
+    <exclude domain="database" path="cloud-records-v1.db-shm" />
     </device-transfer>
 </data-extraction-rules>

@@ -54,7 +54,7 @@ object RecoveryWords {
         val payload = ByteArray(ENTROPY_BYTES + 1)
         input.forEachIndexed { wordIndex, rawWord ->
             val word = rawWord.trim().lowercase()
-            val value = indices[word] ?: error("恢复词无效：$rawWord")
+            val value = indices[word] ?: error("恢复词无效")
             repeat(BITS_PER_WORD) { bitWithinWord ->
                 val bit = (value shr (BITS_PER_WORD - 1 - bitWithinWord)) and 1
                 val bitIndex = wordIndex * BITS_PER_WORD + bitWithinWord

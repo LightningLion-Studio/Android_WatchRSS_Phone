@@ -23,6 +23,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.security.SecureRandom
+import org.json.JSONObject
+import org.json.JSONArray
 
 enum class CloudSyncPhase {
     IDLE,
@@ -89,11 +91,250 @@ class PhoneCloudSyncService(
         backupService::cloudRecordPages, { session, kind, value ->
             backupService.applyCloudRecord(kind, value) { checkApprovalOwner(session) }
         },
-        keyManager::currentKeyVersion, keyManager::getAccountKey, ::checkApprovalOwner)
+        keyManager::currentKeyVersion, keyManager::getAccountKey, ::checkApprovalOwner,
+        anchorVersion = { trustedBootstrap?.keyCommitments?.minOfOrNull { it.keyVersion } ?: error("缺少锚定密钥") },
+        refreshKeys = { session -> validatedBootstrap(session) })
     private val noteTransfer = NoteImportExportService(context, noteRepository)
     private val syncMutex = CloudSyncSingleFlight()
     private val _state = MutableStateFlow(PhoneCloudSyncState())
     val state: StateFlow<PhoneCloudSyncState> = _state
+
+    private var trustedBootstrap: CloudBootstrap? = null
+    private val approvalMutex = Mutex()
+    private var pendingSetup: RecoveryKeySetup? = null
+    private var pendingSetupOwner: String? = null
+    private var pendingSetupEpoch: String? = null
+    private var pendingRotation: RecoveryKeySetup? = null
+    private var pendingRotationOwner: String? = null
+    private var pendingRotationEpoch: String? = null
+    private val approvalsDelegate = lazy { CloudApprovalV2(client, deviceId, ::requireSession,
+        { keyManager.devicePublicKeySpki(it.userId, deviceId) },
+        { session -> val bootstrap = validatedBootstrap(session); registerCurrentDevice(session, bootstrap.libraryEpoch) },
+        ::approvalPayload, ::acceptApprovalPayload) }
+    val approvals: CloudApprovalV2 get() = approvalsDelegate.value
+    private val _needsReapproval = MutableStateFlow<List<RegisteredCloudDevice>>(emptyList())
+    val needsReapproval: StateFlow<List<RegisteredCloudDevice>> = _needsReapproval
+    private val _keyWarning = MutableStateFlow<String?>(null)
+    val keyWarning: StateFlow<String?> = _keyWarning
+    private val _deviceRegistrationConflict = MutableStateFlow(false)
+    val deviceRegistrationConflict: StateFlow<Boolean> = _deviceRegistrationConflict
+    private val _recordError = MutableStateFlow<String?>(null)
+    val recordError: StateFlow<String?> = _recordError
+
+    init {
+        client.checkSession = ::checkApprovalOwner
+        client.currentDeviceId = deviceId
+        keyManager.bindBackend(client.backendBaseUrl)
+        accountRepository.session.value?.let { bindScope(it); settings.claimLegacyOwner(it.userId) }
+        accountRepository.onReleaseCloudAuthorization = ::releaseCloudAuthorization
+        accountRepository.onClearCloudState = ::discardSessionCloudState
+        client.onDeviceKeyConflict = { session -> checkApprovalOwner(session); _deviceRegistrationConflict.value = true }
+        client.onEpochMismatch = { session -> invalidateEpoch(session) }
+        client.onBootstrap = { session, bootstrap -> observeBootstrap(session, bootstrap) }
+        client.onRecordMetadata = { session, json ->
+            if (json.has("libraryEpoch")) {
+                val current = trustedBootstrap ?: error("请先读取云资料库")
+                observeBootstrap(session, current.copy(libraryEpoch = json.getString("libraryEpoch"),
+                    keyVersionFloor = json.getInt("keyVersionFloor"), keyCommitments = client.parseCommitments(json)))
+            }
+        }
+    }
+    internal suspend fun releaseCloudAuthorization(session: PhoneAccountSession) = releaseCloudDevice(
+        revokeRemote = {
+            val bootstrap = runCatching { client.bootstrap(session) }.getOrNull()
+            val expectedEpoch = bootstrap?.libraryEpoch ?: client.knownEpoch(session)
+            if (expectedEpoch != null) {
+                runCatching { client.revokeDevice(session, deviceId, expectedEpoch) }
+                legacyDeviceId?.takeIf { it != deviceId }?.let { legacy ->
+                    val remote = bootstrap?.devices?.firstOrNull { it.deviceId == legacy }
+                    if (remote != null && runCatching { remote.publicKeySpki.base64Bytes().contentEquals(keyManager.devicePublicKeySpki(session.userId, legacy).base64Bytes()) }.getOrDefault(false))
+                        runCatching { client.revokeDevice(session, legacy, expectedEpoch) }
+                }
+            }
+        }, clearDevicePrivateKey = {
+            keyManager.clearDeviceKey(session.userId, deviceId)
+            legacyDeviceId?.takeIf { it != deviceId }?.let { keyManager.clearDeviceKey(session.userId, it) }
+        })
+    internal fun discardSessionCloudState(session: PhoneAccountSession) = clearCloudScope(session)
+    private fun bindScope(session: PhoneAccountSession) {
+        checkApprovalOwner(session); settings.bindScope(client.backendBaseUrl, session.userId)
+    }
+    private fun clearCloudScope(session: PhoneAccountSession) {
+        settings.bindScope(client.backendBaseUrl, session.userId)
+        settings.claimLegacyOwner(session.userId)
+        keyManager.clearAccountKeys(session.userId); settings.clearScope()
+        recordStore.clear(client.scopeId(session)); cache.clear(client.scopeId(session))
+        recordStore.clear(session.userId); cache.clear(session.userId)
+        uploader.clearScope(client.scopeId(session))
+        synchronized(readingManifests) { readingManifests.clear() }
+        pendingSetup?.pendingKey?.fill(0); pendingSetup = null; pendingRotation?.pendingKey?.fill(0); pendingRotation = null
+        trustedBootstrap = null
+        _deviceRegistrationConflict.value = false
+        _keyWarning.value = null; _recordError.value = null; _needsReapproval.value = emptyList()
+        client.forgetEpoch(session)
+        pendingSetupOwner = null; pendingSetupEpoch = null
+        if (approvalsDelegate.isInitialized()) approvals.clear()
+    }
+    private fun invalidateEpoch(session: PhoneAccountSession) {
+        clearCloudScope(session)
+        update(CloudSyncPhase.NEEDS_RECOVERY, "云资料库已重置或密钥失效，请恢复或重新批准")
+    }
+    private fun localKeys(session: PhoneAccountSession): Map<Int, ByteArray> = keyManager.keyVersions(session.userId)
+        .associateWith { requireNotNull(keyManager.getAccountKey(session.userId, it)) }
+    private fun verifyKeys(session: PhoneAccountSession, bootstrap: CloudBootstrap, keys: Map<Int, ByteArray>) =
+        CloudKeyTrust.validate(session.userId, bootstrap.libraryEpoch, bootstrap.keyVersionFloor, bootstrap.keyCommitments, keys)
+    private fun verifyLocalKeys(session: PhoneAccountSession, bootstrap: CloudBootstrap) {
+        val keys = localKeys(session)
+        try { verifyKeys(session, bootstrap, keys) } finally { keys.values.forEach { it.fill(0) } }
+    }
+    private fun observeBootstrap(session: PhoneAccountSession, bootstrap: CloudBootstrap) {
+        bindScope(session)
+        require(bootstrap.libraryEpoch.isNotBlank()) { "云服务需要升级到同步协议 v2" }
+        val changed = settings.observeEpoch(bootstrap.libraryEpoch) { invalidateEpoch(session) }
+        client.useEpoch(session, bootstrap.libraryEpoch)
+        if (changed) throw CloudTrustException()
+        val keys = localKeys(session)
+        val remoteDevice = bootstrap.devices.firstOrNull { it.deviceId == deviceId }
+        if (remoteDevice == null || remoteDevice.revokedAt != null) keyManager.clearDeviceKey(session.userId, deviceId)
+        if (keys.isNotEmpty() && remoteDevice?.revokedAt != null) {
+            keys.values.forEach { it.fill(0) }; invalidateEpoch(session); throw CloudTrustException()
+        }
+        try {
+            if (keys.isNotEmpty() && bootstrap.keyCommitments.isNotEmpty()) {
+                val verified = CloudKeyTrust.verifiedSubset(session.userId, bootstrap.libraryEpoch,
+                    bootstrap.keyVersionFloor, bootstrap.keyCommitments, keys)
+                val rejected = keys.keys - verified.keys
+                if (rejected.isNotEmpty()) {
+                    // Same-epoch failure must not destroy other verified versions or device identity.
+                    if (verified.isEmpty()) {
+                        clearCloudScope(session)
+                        settings.observeEpoch(bootstrap.libraryEpoch) {}
+                        client.useEpoch(session, bootstrap.libraryEpoch)
+                    } else keyManager.replaceVerifiedKeys(session.userId, verified)
+                    rejected.forEach { settings.quarantineKey(it, "local_key_validation_failed") }
+                    _keyWarning.value = "部分密钥版本验证失败，已隔离；请恢复或重新批准"
+                    if (verified.isEmpty()) { update(CloudSyncPhase.NEEDS_RECOVERY, _keyWarning.value!!); throw CloudTrustException() }
+                }
+            }
+        } finally { keys.values.forEach { it.fill(0) } }
+        trustedBootstrap = bootstrap
+        _needsReapproval.value = if (keyManager.hasAccountKey(session.userId)) bootstrap.devices.filter { it.revokedAt == null && !it.deviceId.startsWith("reader-migration-") && !deviceAuthenticated(session, bootstrap, it) } else emptyList()
+    }
+    private suspend fun validatedBootstrap(session: PhoneAccountSession): CloudBootstrap {
+        var bootstrap = client.bootstrap(session)
+        val operationEpoch = bootstrap.libraryEpoch
+        // The first v2 writer claims every legacy key, in order. Conflicts are re-read and verified.
+        val keys = localKeys(session)
+        try {
+            if (keys.isNotEmpty() && bootstrap.keyCommitments.isEmpty()) {
+                if (!legacyMigrationHasCompleteKeySet(bootstrap, keys.keys)) {
+                    update(CloudSyncPhase.NEEDS_RECOVERY, "请等待持有全部密钥的设备迁移，或使用24词恢复")
+                    throw CloudLegacyMigrationPendingException()
+                }
+                // Legacy migration needs an existing server-authorized envelope. A reset
+                // removes it, so an unscoped pre-v2 key cannot claim the new empty epoch.
+                val ownerDevice = listOfNotNull(deviceId, legacyDeviceId).distinct().firstOrNull { id ->
+                    legacyMigrationAuthorized(bootstrap, id, keyManager.devicePublicKeySpki(session.userId, id), keys) {
+                        keyManager.unwrapDeviceEnvelope(session.userId, id, it)
+                    }
+                }
+                if (ownerDevice == null) throw CloudLegacyMigrationPendingException()
+                if (bootstrap.devices.none { it.deviceId == deviceId && it.revokedAt == null }) {
+                    client.registerDevice(session, deviceId, "手机 · ${Build.MODEL}", keyManager.devicePublicKeySpki(session.userId, deviceId), keys.keys.max(), expectedEpoch = bootstrap.libraryEpoch)
+                }
+                val rows = keys.toSortedMap().map { (version, key) ->
+                    val commitment = CloudProtocolV2.commitment(key, session.userId, bootstrap.libraryEpoch, version)
+                    val proof = if (version == keys.keys.min()) null else CloudProtocolV2.rotationProof(
+                        requireNotNull(keys[version - 1]), session.userId, bootstrap.libraryEpoch, version, commitment)
+                    CloudKeyCommitment(version, commitment, proof)
+                }
+                try { client.storeCommitments(session, deviceId, rows, bootstrap.libraryEpoch) }
+                catch (error: CloudHttpException) { if (error.status != 409) throw error }
+                bootstrap = client.bootstrap(session)
+                checkCloudEpoch(session, operationEpoch)
+            }
+            if (keys.isNotEmpty()) {
+                verifyKeys(session, bootstrap, keys)
+                val candidates = keys.toMutableMap()
+                try {
+                    deviceApprovalEnvelopes(bootstrap, deviceId).filter { it.envelope.keyVersion !in candidates }.forEach { stored ->
+                        val version = stored.envelope.keyVersion
+                        var unwrapped: ByteArray? = null
+                        try {
+                            unwrapped = keyManager.unwrapDeviceEnvelope(session.userId, deviceId, stored.envelope)
+                            verifyKeys(session, bootstrap, candidates + (version to unwrapped))
+                            candidates[version] = unwrapped; unwrapped = null
+                        } catch (error: Exception) {
+                            if (error is CancellationException) throw error
+                            settings.quarantineKey(version, "untrusted_device_envelope")
+                            _keyWarning.value = "新版本密钥已隔离，需要重新批准"
+                        } finally { unwrapped?.fill(0) }
+                    }
+                    checkApprovalOwner(session)
+                    keyManager.saveVerifiedKeys(session.userId, candidates)
+                } finally { candidates.filterKeys { it !in keys }.values.forEach { it.fill(0) } }
+            }
+            trustedBootstrap = bootstrap
+            return bootstrap
+        } finally { keys.values.forEach { it.fill(0) } }
+    }
+    private fun deviceAuthenticated(session: PhoneAccountSession, bootstrap: CloudBootstrap, target: RegisteredCloudDevice): Boolean {
+        val v = target.attestationKeyVersion ?: return false
+        val key = keyManager.getAccountKey(session.userId, v) ?: return false
+        return try { CloudProtocolV2.equal(target.attestation, CloudProtocolV2.attestation(key, session.userId,
+            bootstrap.libraryEpoch, target.deviceId, target.publicKeySpki.base64Bytes())) } catch (_: Exception) { false }
+        finally { key.fill(0) }
+    }
+    private suspend fun approvalPayload(session: PhoneAccountSession, targetId: String, targetSpki: String): String {
+        val bootstrap = validatedBootstrap(session); val keys = localKeys(session)
+        try {
+            verifyKeys(session, bootstrap, keys)
+            require(keys.keys == bootstrap.keyCommitments.map { it.keyVersion }.toSet()) { "缺少部分云密钥版本，请恢复后再批准新设备" }
+            val values = JSONArray()
+            keys.toSortedMap().forEach { (v, k) -> values.put(JSONObject().put("keyVersion", v).put("envelope",
+                CloudKeyEnvelopeCodec.createDeviceEnvelope(k, session.userId, targetId, CloudKeyEnvelopeCodec.decodeP256PublicKey(targetSpki), v).wireJson().put("recipientType", "device").put("recipientDeviceId", targetId).put("createdByDeviceId", deviceId))) }
+            val latest = keys.keys.max()
+            return JSONObject().put("envelopes", values).put("attestation", JSONObject().put("keyVersion", latest)
+                .put("mac", CloudProtocolV2.attestation(keys.getValue(latest), session.userId, bootstrap.libraryEpoch, targetId, targetSpki.base64Bytes()))).toString()
+        } finally { keys.values.forEach { it.fill(0) } }
+    }
+    private suspend fun acceptApprovalPayload(session: PhoneAccountSession, payload: String) {
+        val bootstrap = client.bootstrap(session); val data = JSONObject(payload); val envelopes = data.getJSONArray("envelopes")
+        val keys = linkedMapOf<Int, ByteArray>()
+        try {
+            for (i in 0 until envelopes.length()) {
+                val item = envelopes.getJSONObject(i); val envelope = item.getJSONObject("envelope").cloudEnvelope()
+                require(item.getInt("keyVersion") == envelope.keyVersion && envelope.keyVersion !in keys)
+                keys[envelope.keyVersion] = keyManager.unwrapDeviceEnvelope(session.userId, deviceId, envelope)
+            }
+            verifyKeys(session, bootstrap, keys)
+            require(keys.keys == bootstrap.keyCommitments.map { it.keyVersion }.toSet())
+            val attest = data.getJSONObject("attestation"); val v = attest.getInt("keyVersion")
+            require(v == keys.keys.max() && CloudProtocolV2.equal(attest.getString("mac"), CloudProtocolV2.attestation(keys.getValue(v),
+                session.userId, bootstrap.libraryEpoch, deviceId, keyManager.devicePublicKeySpki(session.userId, deviceId).base64Bytes())))
+            checkApprovalOwner(session)
+            keyManager.saveVerifiedKeys(session.userId, keys)
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            checkApprovalOwner(session)
+            keys.keys.forEach { settings.quarantineKey(it, "approval_validation_failed") }
+            _keyWarning.value = "授权密钥验证失败，已全部丢弃"
+            throw error
+        } finally { keys.values.forEach { it.fill(0) } }
+    }
+
+    /** True while the local private library belongs to another account; uploads stay blocked until resolved. */
+    fun libraryOwnerConflict(): Boolean {
+        val userId = accountRepository.session.value?.userId ?: return false
+        return settings.ownerUserId.let { it != null && it != userId }
+    }
+
+    /** Explicit user action only; the clear callback must remove the entire local private library. */
+    suspend fun resolveLibraryOwner(merge: Boolean) = syncMutex.withLock {
+        val session = requireSession()
+        if (!merge) { repository.clearLibrary(); noteRepository.clearForAccountSwitch() }
+        checkApprovalOwner(session); settings.ownerUserId = session.userId
+    }
 
     private val pauseGate = CloudSyncPauseGate(settings.syncPaused) { settings.syncPaused = it }
     val paused: StateFlow<Boolean> = pauseGate.state
@@ -120,7 +361,8 @@ class PhoneCloudSyncService(
     suspend fun loadMembership(): CloudMemberState = refreshDashboardMembership()
 
     fun hasLocalAccountKey(): Boolean =
-        accountRepository.session.value?.let { keyManager.hasAccountKey(it.userId) } == true
+        accountRepository.session.value?.let { session -> keyManager.hasAccountKey(session.userId) &&
+            trustedBootstrap?.keyEnvelopes?.any { it.recipientType == "recovery" && it.envelope.keyVersion == keyManager.currentKeyVersion(session.userId) } == true } == true
 
     fun rssInventoryMode(sourceUrl: String): CloudRssInventoryMode =
         rssInventoryPreferences.mode(sourceUrl)
@@ -131,6 +373,7 @@ class PhoneCloudSyncService(
 
     suspend fun estimateManualSync(): CloudTransferEstimate {
         val session = requireSession()
+        validatedBootstrap(session)
         require(keyManager.hasAccountKey(session.userId)) { "当前设备尚未获得云端解密密钥" }
         val heads = client.snapshotHeads(session)
         var downloadBytes = 0L
@@ -150,17 +393,9 @@ class PhoneCloudSyncService(
     }
 
     suspend fun loadBootstrap(): CloudBootstrap {
-        val session = requireSession()
-        val bootstrap = client.bootstrap(session)
-        checkApprovalOwner(session)
-        restoreLegacyDeviceEnvelopes(session, bootstrap)
+        val session = requireSession(); val bootstrap = validatedBootstrap(session)
         ensureApprovalIdentity(session, bootstrap)
-        return client.bootstrap(session).also {
-            checkApprovalOwner(session)
-            // Loading account/authorization information must not erase transfer or completion state.
-            val member = it.member
-            _state.update { current -> current.copy(member = member) }
-        }
+        return client.bootstrap(session).also { checkCloudEpoch(session, bootstrap.libraryEpoch); _state.update { current -> current.copy(member = it.member) } }
     }
 
     suspend fun listSnapshotHeads(): List<CloudSnapshotHead> =
@@ -203,7 +438,9 @@ class PhoneCloudSyncService(
         mode: BackupImportMode = BackupImportMode.MERGE
     ): CloudSnapshotRestoreResult = syncMutex.withLock {
         val session = requireSession()
+        val expectedEpoch = client.epoch(session)
         val decoded = downloadSnapshotObjects(session, snapshotId)
+        checkCloudEpoch(session, expectedEpoch)
         val privateArchive = decoded.objects[PRIVATE_LIBRARY_OBJECT]
         require(mode != BackupImportMode.REPLACE || privateArchive != null) {
             "该手表快照没有完整私有归档，不能执行覆盖恢复"
@@ -219,17 +456,17 @@ class PhoneCloudSyncService(
         val stateResult = decoded.objects[RSS_STATE_OBJECT]
             ?.let { backupService.applyCloudRssState(it, restoreAsNewChange = true) }
             ?: (0 to 0)
-        settings.markApplied(
+        checkApprovalOwner(session); settings.markApplied(
             decoded.download.head.sourceDeviceId,
             decoded.download.head.deviceSequence,
             full = true
         )
-        settings.markApplied(
+        checkApprovalOwner(session); settings.markApplied(
             decoded.download.head.sourceDeviceId,
             decoded.download.head.deviceSequence,
             full = false
         )
-        client.acknowledge(session, snapshotId, deviceId)
+        client.acknowledge(session, snapshotId, deviceId, expectedEpoch = expectedEpoch)
         update(
             CloudSyncPhase.COMPLETE,
             if (mode == BackupImportMode.REPLACE) {
@@ -251,7 +488,7 @@ class PhoneCloudSyncService(
     suspend fun deleteSnapshot(snapshotId: String) {
         val session = requireSession()
         client.deleteSnapshot(session, snapshotId)
-        cache.deleteSnapshot(session.userId, snapshotId)
+        cache.deleteSnapshot(client.scopeId(session), snapshotId)
     }
 
     suspend fun resetCloudLibrary(confirmationPhrase: String): CloudLibraryResetResult =
@@ -265,9 +502,11 @@ class PhoneCloudSyncService(
             try {
                 withContext(Dispatchers.IO) {
                     keyManager.clearAccountKeys(session.userId)
-                    settings.clearLibraryState()
-                    cache.clear(session.userId)
-                    recordStore.clear(session.userId)
+                    settings.clearScope()
+                    client.forgetEpoch(session)
+                    uploader.clearScope(client.scopeId(session))
+                    cache.clear(client.scopeId(session))
+                    recordStore.clear(client.scopeId(session))
                 }
             } catch (error: Exception) {
                 update(CloudSyncPhase.ERROR, "云端资料库已删除，但本机云状态清理失败")
@@ -280,229 +519,173 @@ class PhoneCloudSyncService(
             result
         }
 
-    suspend fun prepareFirstDevice(): RecoveryKeySetup {
-        val session = requireSession()
-        val bootstrap = client.bootstrap(session)
-        require(bootstrap.member.writable) { "当前会员状态不能启用云备份" }
-        require(bootstrap.keyEnvelopes.none { it.recipientType == "recovery" }) {
-            "账号已有恢复密钥，请使用原24词恢复"
+    suspend fun prepareFirstDevice(): RecoveryKeySetup = approvalMutex.withLock {
+        val session = requireSession(); val bootstrap = client.bootstrap(session)
+        require(bootstrap.keyCommitments.isEmpty() && bootstrap.keyEnvelopes.none { it.recipientType == "recovery" }) { "账号已有恢复密钥，请使用恢复或批准" }
+        keyManager.createRecoverySetup(session.userId, keyVersion = bootstrap.keyVersionFloor + 1).also {
+            pendingSetup?.pendingKey?.fill(0); pendingSetup = it; pendingSetupOwner = session.userId; pendingSetupEpoch = bootstrap.libraryEpoch
         }
-        return keyManager.createRecoverySetup(session.userId)
     }
-
-    suspend fun activateFirstDevice(
-        setup: RecoveryKeySetup,
-        confirmedWords: List<String>
-    ) {
-        require(setup.words.map { it.lowercase() } == confirmedWords.map { it.trim().lowercase() }) {
-            "24词恢复密钥确认不一致"
-        }
-        val session = requireSession()
-        val bootstrap = client.bootstrap(session)
-        require(bootstrap.member.writable) { "当前会员状态不能启用云备份" }
-        if (
-            isCloudKeySetupComplete(
-                envelopes = bootstrap.keyEnvelopes,
-                devices = bootstrap.devices,
-                deviceId = deviceId,
-                keyVersion = setup.envelope.keyVersion
-            )
-        ) {
-            return
-        }
-        require(bootstrap.keyEnvelopes.none { it.recipientType == "recovery" }) {
-            "账号已存在恢复密钥信封，不能覆盖"
-        }
-        registerCurrentDevice(session)
-        client.storeRecoveryEnvelope(session, deviceId, setup.envelope)
-        storeEnvelopeForCurrentDevice(session)
+    fun discardRecoverySetup() {
+        pendingSetup?.pendingKey?.fill(0); pendingSetup = null; pendingSetupOwner = null; pendingSetupEpoch = null
     }
-
-    suspend fun recoverWithWords(words: List<String>) {
-        val session = requireSession()
-        val bootstrap = client.bootstrap(session)
-        val recovery = bootstrap.keyEnvelopes
-            .filter { it.recipientType == "recovery" }
-            .map(StoredCloudKeyEnvelope::envelope)
-        keyManager.recoverWithWords(session.userId, words, recovery)
-        registerCurrentDevice(session)
-        storeEnvelopeForCurrentDevice(session)
+    private fun checkSetup(session: PhoneAccountSession, setup: RecoveryKeySetup, words: List<String>) {
+        check(pendingSetup === setup && pendingSetupOwner == session.userId && pendingSetupEpoch == client.epoch(session)) { "恢复词准备已失效，请重新开始" }
+        require(setup.pendingKey.size == 32 && setup.words.map { it.lowercase() } == words.map { it.trim().lowercase() }) { "24词恢复密钥确认不一致" }
+        settings.requireUploadOwner(session.userId)
     }
-
+    suspend fun activateFirstDevice(setup: RecoveryKeySetup, confirmedWords: List<String>) = approvalMutex.withLock {
+        val session = requireSession(); val bootstrap = client.bootstrap(session); checkSetup(session, setup, confirmedWords)
+        val key = setup.pendingKey; val version = setup.envelope.keyVersion
+        if (bootstrap.keyCommitments.isNotEmpty()) {
+            verifyKeys(session, bootstrap, mapOf(version to key))
+            require(isCloudKeySetupComplete(bootstrap.keyEnvelopes, bootstrap.devices, deviceId, version))
+            keyManager.saveAccountKey(session.userId, version, key, true); key.fill(0); pendingSetup = null
+            return@withLock
+        }
+        client.registerDevice(session, deviceId, "手机 · ${Build.MODEL}", keyManager.devicePublicKeySpki(session.userId, deviceId), version,
+            CloudProtocolV2.attestation(key, session.userId, bootstrap.libraryEpoch, deviceId, keyManager.devicePublicKeySpki(session.userId, deviceId).base64Bytes()), version, expectedEpoch = bootstrap.libraryEpoch)
+        client.rotate(session, rotationBody(session, bootstrap, setup, null), bootstrap.libraryEpoch)
+        checkApprovalOwner(session)
+        val accepted = client.bootstrap(session)
+        verifyKeys(session, accepted, mapOf(version to key))
+        keyManager.saveAccountKey(session.userId, version, key, true)
+        key.fill(0); pendingSetup = null
+    }
+    suspend fun recoverWithWords(words: List<String>) = approvalMutex.withLock {
+        val session = requireSession(); val bootstrap = client.bootstrap(session)
+        val recovery = bootstrap.keyEnvelopes.filter { it.recipientType == "recovery" }.map { it.envelope }
+        if (bootstrap.keyCommitments.isEmpty()) {
+            val entropy = RecoveryWords.decode(words)
+            val recovered = linkedMapOf<Int, ByteArray>()
+            try {
+                recovery.sortedBy { it.keyVersion }.forEach { recovered[it.keyVersion] = CloudKeyEnvelopeCodec.unwrapRecoveryEnvelope(it, session.userId, entropy) }
+                require(recovered.isNotEmpty()) { "账号没有恢复密钥" }
+                if (!legacyMigrationHasCompleteKeySet(bootstrap, recovered.keys)) throw CloudLegacyMigrationPendingException()
+                client.registerDevice(session, deviceId, "手机 · ${Build.MODEL}", keyManager.devicePublicKeySpki(session.userId, deviceId), recovered.keys.max(), expectedEpoch = bootstrap.libraryEpoch)
+                val rows = recovered.toSortedMap().map { (v,k) ->
+                    val commitment = CloudProtocolV2.commitment(k, session.userId, bootstrap.libraryEpoch, v)
+                    CloudKeyCommitment(v, commitment, if(v == recovered.keys.min()) null else CloudProtocolV2.rotationProof(requireNotNull(recovered[v-1]), session.userId, bootstrap.libraryEpoch, v, commitment))
+                }
+                try { client.storeCommitments(session, deviceId, rows, bootstrap.libraryEpoch) } catch(e: CloudHttpException) { if(e.status != 409) throw e }
+                val current = client.bootstrap(session); verifyKeys(session, current, recovered); checkApprovalOwner(session)
+                keyManager.saveVerifiedKeys(session.userId, recovered)
+            } finally { entropy.fill(0); recovered.values.forEach { it.fill(0) } }
+        } else keyManager.recoverWithWords(session.userId, words, recovery) { verifyKeys(session, bootstrap, it); checkApprovalOwner(session) }
+        checkCloudEpoch(session, bootstrap.libraryEpoch)
+        registerCurrentDevice(session, bootstrap.libraryEpoch); storeEnvelopeForCurrentDevice(session, bootstrap.libraryEpoch)
+    }
+    private fun checkCloudEpoch(session: PhoneAccountSession, epoch: String) {
+        checkApprovalOwner(session)
+        if (client.knownEpoch(session) != epoch) throw CloudTrustException()
+    }
     private fun checkApprovalOwner(session: PhoneAccountSession) {
-        val current=accountRepository.session.value
-        check(current?.userId==session.userId && current.accessToken==session.accessToken) { "账号已切换，请重新操作" }
+        check(accountRepository.session.value?.userId == session.userId) { "账号已切换，请重新操作" }
     }
-
-    suspend fun beginCodeApproval(): String {
-        val session=requireSession()
-        requestDeviceApproval();checkApprovalOwner(session)
-        return client.approvalRequest(session,deviceId).also { checkApprovalOwner(session) }
+    suspend fun requestDeviceApproval(expectedEpoch: String? = null): CloudBootstrap {
+        val session = requireSession(); val bootstrap = client.bootstrap(session)
+        checkCloudEpoch(session, expectedEpoch ?: bootstrap.libraryEpoch)
+        registerCurrentDevice(session, expectedEpoch ?: bootstrap.libraryEpoch)
+        update(CloudSyncPhase.NEEDS_RECOVERY, "请使用恢复词或设备审批 v2", bootstrap.member)
+        return bootstrap
     }
-
-    suspend fun redeemCodeApproval(id: String, code: String): Boolean {
-        require(code.matches(Regex("[0-9]{8}"))) { "请输入旧设备显示的 8 位配对码" }
-        val session=requireSession()
-        client.redeemApproval(session,id,deviceId,code);checkApprovalOwner(session)
-        return acceptDeviceApproval().also { checkApprovalOwner(session) }
-    }
-
-    suspend fun pendingCodeApprovals(): List<org.json.JSONObject> {
-        val session=requireSession()
-        if(!keyManager.hasAccountKey(session.userId))return emptyList()
-        if(!client.membership(session).writable)return emptyList()
-        checkApprovalOwner(session)
-        ensureApprovalIdentity(session, client.bootstrap(session))
-        return client.pendingApprovals(session,deviceId).also { checkApprovalOwner(session) }
-    }
-
-    suspend fun offerCodeApproval(target: org.json.JSONObject, code: String) = withContext(Dispatchers.IO) {
-        val session=requireSession()
-        val publicKey=CloudKeyEnvelopeCodec.decodeP256PublicKey(target.getString("publicKeySpki"))
-        val envelopes=keyManager.keyVersions(session.userId).map { version ->
-            val key=keyManager.getAccountKey(session.userId,version) ?: error("本机缺少云密钥")
-            try { CloudKeyEnvelopeCodec.createDeviceEnvelope(key,session.userId,target.getString("deviceId"),publicKey,version) }
-            finally { key.fill(0) }
-        }
-        checkApprovalOwner(session)
-        client.offerApproval(session,target.getString("id"),deviceId,code,envelopes)
-        checkApprovalOwner(session)
-    }
-
-    suspend fun requestDeviceApproval(): CloudBootstrap {
-        val session = requireSession()
-        val bootstrap = client.bootstrap(session)
-        require(bootstrap.member.readable) { "当前账号不能读取会员云空间" }
-        client.registerDevice(
-            session = session,
-            deviceId = deviceId,
-            displayName = "手机 · ${Build.MODEL}",
-            publicKeySpki = keyManager.devicePublicKeySpki(session.userId, deviceId),
-            keyVersion = deviceApprovalKeyVersion(bootstrap)
-        )
-        return client.bootstrap(session).also {
-            update(CloudSyncPhase.NEEDS_RECOVERY, "等待旧设备批准此手机", it.member)
-        }
-    }
-
     suspend fun acceptDeviceApproval(): Boolean {
-        val session = requireSession()
-        val bootstrap = client.bootstrap(session)
-        checkApprovalOwner(session)
-        restoreLegacyDeviceEnvelopes(session, bootstrap)
-        deviceApprovalEnvelopes(bootstrap, deviceId).forEach { stored ->
-            keyManager.unwrapDeviceEnvelope(session.userId, deviceId, stored.envelope)
-        }
-        val approved = keyManager.hasAccountKey(session.userId)
-        update(
-            if (approved) CloudSyncPhase.IDLE else CloudSyncPhase.NEEDS_RECOVERY,
-            if (approved) "旧设备批准成功，当前手机已获得解密能力" else "仍在等待旧设备批准",
-            bootstrap.member
-        )
-        return approved
+        val session = requireSession(); validatedBootstrap(session)
+        return keyManager.hasAccountKey(session.userId)
     }
-
     suspend fun approveDevice(recipientDeviceId: String) {
-        val session = requireSession()
-        val bootstrap = client.bootstrap(session)
-        val target = bootstrap.devices.firstOrNull {
-            it.deviceId == recipientDeviceId && it.revokedAt == null
-        } ?: error("待授权设备不存在或已撤销")
-        require(target.publicKeySpki.isNotBlank()) { "待授权设备没有有效公钥" }
-        val publicKey = CloudKeyEnvelopeCodec.decodeP256PublicKey(target.publicKeySpki)
-        keyManager.keyVersions(session.userId).forEach { version ->
-            val accountKey = keyManager.getAccountKey(session.userId, version)
-                ?: error("当前手机缺少第${version}版账号密钥")
-            client.storeDeviceEnvelope(
-                session,
-                recipientDeviceId,
-                deviceId,
-                CloudKeyEnvelopeCodec.createDeviceEnvelope(
-                    accountKey = accountKey,
-                    userId = session.userId,
-                    recipientDeviceId = recipientDeviceId,
-                    recipientPublicKey = publicKey,
-                    keyVersion = version
-                )
-            )
-        }
+        val session = requireSession(); val bootstrap = validatedBootstrap(session)
+        require(!recipientDeviceId.startsWith("reader-migration-")) { "阅读迁移虚拟设备不能审批" }
+        val target = bootstrap.devices.firstOrNull { it.deviceId == recipientDeviceId && it.revokedAt == null } ?: error("设备不存在")
+        require(deviceAuthenticated(session, bootstrap, target)) { "设备需要重新批准，请核对显示码" }
+        distributeMissing(session, bootstrap, listOf(target))
     }
-
-    suspend fun rotateAccountKey(words: List<String>): Int {
-        val session = requireSession()
-        registerCurrentDevice(session)
+    private suspend fun distributeMissing(session: PhoneAccountSession, bootstrap: CloudBootstrap, targets: List<RegisteredCloudDevice> = bootstrap.devices, expectedEpoch: String = bootstrap.libraryEpoch) {
+        checkCloudEpoch(session, expectedEpoch)
+        val rejected = mutableListOf<RegisteredCloudDevice>()
+        targets.filter { it.revokedAt == null && !it.deviceId.startsWith("reader-migration-") }.forEach { target ->
+            if (!deviceAuthenticated(session, bootstrap, target)) { rejected += target; return@forEach }
+            keyManager.keyVersions(session.userId).forEach { version ->
+                if (bootstrap.keyEnvelopes.any { it.recipientDeviceId == target.deviceId && it.envelope.keyVersion == version }) return@forEach
+                val key = requireNotNull(keyManager.getAccountKey(session.userId, version))
+                try { checkApprovalOwner(session); client.storeDeviceEnvelope(session, target.deviceId, deviceId,
+                    CloudKeyEnvelopeCodec.createDeviceEnvelope(key, session.userId, target.deviceId, CloudKeyEnvelopeCodec.decodeP256PublicKey(target.publicKeySpki), version), expectedEpoch) }
+                finally { key.fill(0) }
+            }
+        }
+        _needsReapproval.value = bootstrap.devices.filter { it.revokedAt == null && !it.deviceId.startsWith("reader-migration-") && !deviceAuthenticated(session, bootstrap, it) }
+    }
+    private fun rotationBody(session: PhoneAccountSession, bootstrap: CloudBootstrap, setup: RecoveryKeySetup, previous: ByteArray?): JSONObject {
+        val v = setup.envelope.keyVersion; val commitment = CloudProtocolV2.commitment(setup.pendingKey, session.userId, bootstrap.libraryEpoch, v)
+        return JSONObject().put("createdByDeviceId", deviceId).put("deviceId", deviceId).put("keyVersion", v).put("commitment", commitment)
+            .put("rotationProof", previous?.let { CloudProtocolV2.rotationProof(it, session.userId, bootstrap.libraryEpoch, v, commitment) } ?: JSONObject.NULL)
+            .put("recoveryEnvelope", setup.envelope.wireJson().put("recipientType", "recovery").put("recipientDeviceId", JSONObject.NULL).put("createdByDeviceId", deviceId)).put("deviceEnvelope", CloudKeyEnvelopeCodec.createDeviceEnvelope(setup.pendingKey,
+                session.userId, deviceId, CloudKeyEnvelopeCodec.decodeP256PublicKey(keyManager.devicePublicKeySpki(session.userId, deviceId)), v).wireJson().put("recipientType", "device").put("recipientDeviceId", deviceId).put("createdByDeviceId", deviceId))
+    }
+    /** R2: one recovery entropy covers every version; retry an interrupted atomic write in memory. */
+    suspend fun rotateAccountKey(words: List<String>): Int = approvalMutex.withLock {
+        val session = requireSession(); val initial = validatedBootstrap(session)
+        registerCurrentDevice(session, initial.libraryEpoch)
         val bootstrap = client.bootstrap(session)
-        require(bootstrap.member.writable) { "当前会员状态不能轮换密钥" }
-        val recoveryEnvelopes = bootstrap.keyEnvelopes
-            .filter { it.recipientType == "recovery" }
-            .map(StoredCloudKeyEnvelope::envelope)
-        require(recoveryEnvelopes.isNotEmpty()) { "账号没有恢复密钥信封" }
+        checkCloudEpoch(session, initial.libraryEpoch)
+        val latest = bootstrap.keyEnvelopes.filter { it.recipientType == "recovery" }.maxBy { it.envelope.keyVersion }.envelope
         val entropy = RecoveryWords.decode(words)
         try {
-            val latestRecovery = recoveryEnvelopes.maxBy(CloudKeyEnvelope::keyVersion)
-            val verified = CloudKeyEnvelopeCodec.unwrapRecoveryEnvelope(
-                latestRecovery,
-                session.userId,
-                entropy
-            )
-            try {
-                val localLatest = keyManager.getAccountKey(
-                    session.userId,
-                    latestRecovery.keyVersion
-                ) ?: error("当前手机缺少最新版账号密钥")
-                require(verified.contentEquals(localLatest)) { "恢复词与当前账号密钥不匹配" }
-            } finally {
-                verified.fill(0)
+            val recovered = CloudKeyEnvelopeCodec.unwrapRecoveryEnvelope(latest, session.userId, entropy)
+            val current = requireNotNull(keyManager.getAccountKey(session.userId, latest.keyVersion))
+            try { require(recovered.contentEquals(current)) { "恢复词不匹配" } } finally { recovered.fill(0); current.fill(0) }
+            distributeMissing(session, bootstrap)
+            checkApprovalOwner(session); settings.requireUploadOwner(session.userId)
+            var setup = pendingRotation?.takeIf { pendingRotationOwner == session.userId && pendingRotationEpoch == bootstrap.libraryEpoch }
+            if (setup == null) {
+                pendingRotation?.pendingKey?.fill(0)
+                val v = keyManager.currentKeyVersion(session.userId) + 1
+                val key = ByteArray(32).also(SecureRandom()::nextBytes)
+                setup = RecoveryKeySetup(pendingKey = key, words = words.toList(), envelope = CloudKeyEnvelopeCodec.createRecoveryEnvelope(key, session.userId, v, entropy))
+                pendingRotation = setup; pendingRotationOwner = session.userId; pendingRotationEpoch = bootstrap.libraryEpoch
             }
-
-            val newVersion = maxOf(
-                recoveryEnvelopes.maxOf(CloudKeyEnvelope::keyVersion),
-                keyManager.currentKeyVersion(session.userId)
-            ) + 1
-            val newKey = ByteArray(32).also(SecureRandom()::nextBytes)
-            client.storeRecoveryEnvelope(
-                session,
-                deviceId,
-                CloudKeyEnvelopeCodec.createRecoveryEnvelope(
-                    newKey,
-                    session.userId,
-                    newVersion,
-                    entropy
-                )
-            )
-            keyManager.saveAccountKey(
-                session.userId,
-                newVersion,
-                newKey,
-                makeCurrent = true
-            )
-            bootstrap.devices.filter { it.revokedAt == null && it.publicKeySpki.isNotBlank() }
-                .forEach { target ->
-                    client.storeDeviceEnvelope(
-                        session,
-                        target.deviceId,
-                        deviceId,
-                        CloudKeyEnvelopeCodec.createDeviceEnvelope(
-                            accountKey = newKey,
-                            userId = session.userId,
-                            recipientDeviceId = target.deviceId,
-                            recipientPublicKey = CloudKeyEnvelopeCodec.decodeP256PublicKey(
-                                target.publicKeySpki
-                            ),
-                            keyVersion = newVersion
-                        )
-                    )
+            val previous = requireNotNull(keyManager.getAccountKey(session.userId, setup.envelope.keyVersion - 1))
+            try {
+                val existing = bootstrap.keyCommitments.firstOrNull { it.keyVersion == setup.envelope.keyVersion }
+                if (existing == null) client.rotate(session, rotationBody(session, bootstrap, setup, previous), bootstrap.libraryEpoch)
+                else if (!CloudProtocolV2.equal(existing.commitment, CloudProtocolV2.commitment(setup.pendingKey, session.userId, bootstrap.libraryEpoch, setup.envelope.keyVersion))) {
+                    setup.pendingKey.fill(0); pendingRotation = null
+                    error("轮换版本已被其他设备使用，请重新开始")
                 }
-            registerCurrentDevice(session)
-            return newVersion
-        } finally {
-            entropy.fill(0)
-        }
+            } catch (e: CloudHttpException) {
+                if (e.status == 409) { setup.pendingKey.fill(0); pendingRotation = null }
+                throw e
+            } finally { previous.fill(0) }
+            checkApprovalOwner(session)
+            val keys = localKeys(session).toMutableMap(); keys[setup.envelope.keyVersion] = setup.pendingKey.copyOf()
+            try { verifyKeys(session, client.bootstrap(session), keys); keyManager.saveVerifiedKeys(session.userId, keys) }
+            finally { keys.values.forEach { it.fill(0) } }
+            setup.pendingKey.fill(0); pendingRotation = null
+            try { distributeMissing(session, client.bootstrap(session), expectedEpoch = bootstrap.libraryEpoch) }
+            catch (e: Exception) { if (e is CancellationException) throw e; _keyWarning.value = "密钥已轮换，设备信封等待补发" }
+            setup.envelope.keyVersion
+        } finally { entropy.fill(0) }
     }
+    suspend fun resumeKeyDistribution() { val session = requireSession(); distributeMissing(session, validatedBootstrap(session)) }
 
     suspend fun revokeDevice(deviceId: String) {
         require(deviceId != this.deviceId) { "不能在当前设备上撤销自己" }
         client.revokeDevice(requireSession(), deviceId)
+    }
+
+    suspend fun reregisterCurrentDevice() = approvalMutex.withLock {
+        check(_deviceRegistrationConflict.value) { "本机无需重新登记" }
+        val session = requireSession(); val expectedEpoch = client.epoch(session)
+        reregisterCloudDevice(
+            revokeRemote = { client.revokeDevice(session, deviceId, expectedEpoch); checkCloudEpoch(session, expectedEpoch) },
+            replaceIdentity = { keyManager.clearDeviceKey(session.userId, deviceId); clearCloudScope(session) },
+            registerReplacement = {
+                val bootstrap = client.bootstrap(session)
+                checkCloudEpoch(session, expectedEpoch)
+                registerCurrentDevice(session, bootstrap.libraryEpoch)
+            }
+        )
+        update(CloudSyncPhase.NEEDS_RECOVERY, "本机已重新登记，请使用恢复词或设备授权")
     }
 
     private val readingPriority = CloudReadingPriority()
@@ -521,6 +704,7 @@ class PhoneCloudSyncService(
             if ((!legacyFlatEpub && (article.contentText.isNotBlank() || !article.contentHtml.isNullOrBlank())) || article.deleted) return@withContext article
             if (!com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.isImportedContentUrl(article.url)) return@withContext article
             val session = requireSession()
+            validatedBootstrap(session)
             readingPriority.foreground {
                 try {
                     restoreArticleBody(session, article, readingHeads(session), foreground = true)
@@ -558,11 +742,12 @@ class PhoneCloudSyncService(
             val key = keyManager.getAccountKey(session.userId, head.keyVersion) ?: continue
             val cacheKey = "${session.userId}:${head.id}"
             val manifest = synchronized(readingManifests) { readingManifests[cacheKey] } ?: run {
-                val encrypted = cache.loadManifest(session.userId, head.id) ?: run {
+                val encrypted = cache.loadManifest(client.scopeId(session), head.id) ?: run {
                     val remote = client.snapshot(session, head.id, manifestOnly = true)
                     client.download(remote.manifestSignedUrl, head.manifestSizeBytes, head.manifestSha256)
                 }
                 codec.decryptManifest(key, head.id, encrypted).also {
+                    validateCloudManifestHead(it, head)
                     checkApprovalOwner(session)
                     synchronized(readingManifests) { readingManifests[cacheKey] = it }
                 }
@@ -576,7 +761,7 @@ class PhoneCloudSyncService(
                 if (!foreground) yieldToReading()
                 checkApprovalOwner(session)
                 require(chunk.ciphertextBytes in 1..(17 * 1024 * 1024))
-                val encrypted = cache.loadChunk(session.userId, chunk.ciphertextSha256) ?: run {
+                val encrypted = cache.loadChunk(client.scopeId(session), chunk.ciphertextSha256) ?: run {
                     val remote = client.snapshot(session, head.id, chunk = chunk.ciphertextSha256)
                         .chunks.single { it.sha256 == chunk.ciphertextSha256 }
                     require(remote.sizeBytes == chunk.ciphertextBytes.toLong())
@@ -617,19 +802,23 @@ class PhoneCloudSyncService(
                 update(CloudSyncPhase.CHECKING, "正在检查云端")
                 require(networkGate.isConnected()) { "当前没有可用网络" }
                 val session = requireSession()
-                cache.prune(session.userId)
-                var bootstrap = client.bootstrap(session)
+                cache.prune(client.scopeId(session))
+                var bootstrap = validatedBootstrap(session)
+                val syncEpoch = bootstrap.libraryEpoch
                 pausedResult()?.let { return@run it }
                 if (!keyManager.hasAccountKey(session.userId)) {
-                    bootstrap = requestDeviceApproval()
+                    bootstrap = requestDeviceApproval(syncEpoch)
                     if (!acceptDeviceApproval()) {
                         error("当前设备尚未获得云端解密密钥，请在旧设备批准后重试")
                     }
                     bootstrap = client.bootstrap(session)
+                    checkCloudEpoch(session, syncEpoch)
                 }
-                if (bootstrap.member.writable) {
-                    registerCurrentDevice(session)
+                run {
+                    val operationEpoch = bootstrap.libraryEpoch
+                    registerCurrentDevice(session, operationEpoch)
                     bootstrap = client.bootstrap(session)
+                    checkCloudEpoch(session, operationEpoch)
                 }
                 val fullTransfer = networkGate.allowsPrivateBodies(
                     settings.networkPolicy,
@@ -648,7 +837,16 @@ class PhoneCloudSyncService(
                     return@run PhoneCloudSyncResult(0, 0, 0, false, 0)
                 }
                 pausedResult()?.let { return@run it }
+                checkCloudEpoch(session, bootstrap.libraryEpoch)
                 settings.ensureFullBodyRestoreVersion(session.userId)
+                settings.requireUploadOwner(session.userId)
+                try { recordSync.sync(session, true, bootstrap.libraryEpoch); _recordError.value = null }
+                catch (e: CancellationException) { throw e }
+                catch (e: Exception) {
+                    checkCloudEpoch(session, bootstrap.libraryEpoch)
+                    if (e is CloudTrustException || (e is CloudHttpException && e.detail.contains("library_epoch_mismatch"))) throw e
+                    _recordError.value = if (e is CloudHttpException && e.detail.contains("count_limit")) "云记录条数达到上限" else if (e is CloudHttpException && e.status == 413) "云记录额度不足" else "记录通道暂不可用，快照继续同步"
+                }
                 val heads = client.snapshotHeads(session)
                 for (head in heads.sortedBy(CloudSnapshotHead::deviceSequence)) {
                     pausedResult()?.let { return@run it }
@@ -674,11 +872,11 @@ class PhoneCloudSyncService(
                     downloadedBytes += outcome.downloadedBytes
                     pendingStates += outcome.pendingStates
                     if (outcome.complete) {
-                        settings.markApplied(head.sourceDeviceId, head.deviceSequence, full = true)
-                        settings.markApplied(head.sourceDeviceId, head.deviceSequence, full = false)
-                        client.acknowledge(session, head.id, deviceId)
+                        checkCloudEpoch(session, bootstrap.libraryEpoch); settings.markApplied(head.sourceDeviceId, head.deviceSequence, full = true)
+                        checkCloudEpoch(session, bootstrap.libraryEpoch); settings.markApplied(head.sourceDeviceId, head.deviceSequence, full = false)
+                        client.acknowledge(session, head.id, deviceId, expectedEpoch = bootstrap.libraryEpoch)
                     } else if (outcome.stateApplied) {
-                        settings.markApplied(head.sourceDeviceId, head.deviceSequence, full = false)
+                        checkCloudEpoch(session, bootstrap.libraryEpoch); settings.markApplied(head.sourceDeviceId, head.deviceSequence, full = false)
                     }
                     if (outcome.changed) applied += 1
                 }
@@ -696,9 +894,8 @@ class PhoneCloudSyncService(
                 }
 
                 pausedResult()?.let { return@run it }
-                val compacted = repository.compactCloudExcerpts { checkApprovalOwner(session) }
+                val compacted = repository.compactCloudExcerpts { checkCloudEpoch(session, bootstrap.libraryEpoch) }
                 traceSync("metadata-compacted:$compacted")
-                recordSync.sync(session, bootstrap.member.writable)
                 if (fullTransfer) {
                     val missingBodies = repository.missingCloudBodyIds()
                     val bodyHeads = if (missingBodies.isEmpty()) emptyList() else readingHeads(session)
@@ -713,12 +910,13 @@ class PhoneCloudSyncService(
                     check(repository.missingCloudBodyIds().isEmpty()) { "仍有正文尚未恢复，后台将继续同步" }
                 }
                 pausedResult()?.let { return@run it }
-                if (bootstrap.member.writable) {
+                run {
+                    settings.requireUploadOwner(session.userId)
                     val currentKeyVersion = keyManager.currentKeyVersion(session.userId)
                     val accountKey = keyManager.getAccountKey(session.userId, currentKeyVersion)
                         ?: error("当前账号主密钥不存在")
                     val freshHeads = client.snapshotHeads(session)
-                    checkApprovalOwner(session)
+                    checkCloudEpoch(session, bootstrap.libraryEpoch)
                     check(freshHeads.filterNot { it.sourceDeviceId.startsWith("reader-migration-") }.all {
                         it.deviceSequence <= settings.appliedSequence(it.sourceDeviceId, fullTransfer)
                     }) { "云端资料仍有更新待合并，将继续同步" }
@@ -754,7 +952,7 @@ class PhoneCloudSyncService(
                     )
                     traceSync("sync-complete:pending=$pendingStates")
                 }
-                cache.prune(session.userId)
+                cache.prune(client.scopeId(session))
                 pausedResult()?.let { return@run it }
                 PhoneCloudSyncResult(
                     uploadedBytes = uploadedBytes,
@@ -771,6 +969,7 @@ class PhoneCloudSyncService(
                 traceSync("failure:${error.javaClass.simpleName}:status=${(error as? CloudHttpException)?.status ?: (error as? CloudObjectUploadException)?.status}:${error.stackTrace.firstOrNull { it.className.startsWith("com.lightningstudio.watchrss.phone") }}")
                 if (com.lightningstudio.watchrss.phone.BuildConfig.DEBUG) android.util.Log.w("WatchRssCloud", "sync failed phase=${_state.value.phase} type=${error.javaClass.simpleName} at=${error.stackTrace.firstOrNull { it.className.startsWith("com.lightningstudio.watchrss.phone") }}" + if (error is CloudHttpException) " status=${error.status}" else "")
                 if (error is CloudDeviceAuthorizationException) {
+                    invalidateEpoch(requireSession())
                     update(CloudSyncPhase.NEEDS_RECOVERY, "设备身份需要重新验证")
                 } else if (_state.value.phase != CloudSyncPhase.NEEDS_RECOVERY) {
                     update(CloudSyncPhase.ERROR, if (error is CloudHttpException && error.status == 413) {
@@ -804,16 +1003,16 @@ class PhoneCloudSyncService(
         head: CloudSnapshotHead,
         fullTransfer: Boolean
     ): PullOutcome {
+        val expectedEpoch = client.epoch(session)
         val download = client.snapshot(session, head.id)
-        val cachedManifest = cache.loadManifest(session.userId, head.id)
+        val cachedManifest = cache.loadManifest(client.scopeId(session), head.id)
         val encryptedManifest = cachedManifest
             ?: client.download(
                 download.manifestSignedUrl,
                 head.manifestSizeBytes,
                 head.manifestSha256
             ).also {
-                cache.storeManifest(
-                    session.userId,
+                cache.storeManifest(client.scopeId(session),
                     head.id,
                     it,
                     markAsLocalHead = false
@@ -824,9 +1023,8 @@ class PhoneCloudSyncService(
         } else {
             0L
         }
-        val manifest = codec.decryptManifest(accountKey, head.id, encryptedManifest)
-        cache.recordManifestReferences(
-            session.userId,
+        val manifest = codec.decryptManifest(accountKey, head.id, encryptedManifest).also { validateCloudManifestHead(it, head) }
+        cache.recordManifestReferences(client.scopeId(session),
             head.id,
             manifest.allChunks.map(CloudChunkDescriptor::ciphertextSha256)
         )
@@ -839,18 +1037,18 @@ class PhoneCloudSyncService(
             .distinctBy(CloudChunkDescriptor::ciphertextSha256)
             .forEach { descriptor ->
                 yieldToReading()
-                checkApprovalOwner(session)
-                if (cache.loadChunk(session.userId, descriptor.ciphertextSha256) == null) {
+                checkCloudEpoch(session, expectedEpoch)
+                if (cache.loadChunk(client.scopeId(session), descriptor.ciphertextSha256) == null) {
                     val remote = chunkUrls[descriptor.ciphertextSha256]
                         ?: error("云快照缺少加密块 ${descriptor.ciphertextSha256}")
                     client.download(remote.signedUrl, remote.sizeBytes, remote.sha256).also {
-                        cache.storeChunk(session.userId, remote.sha256, it)
+                        cache.storeChunk(client.scopeId(session), remote.sha256, it)
                         downloadedBytes += it.size
                     }
                 }
             }
         yieldToReading()
-        checkApprovalOwner(session)
+        checkCloudEpoch(session, expectedEpoch)
         update(CloudSyncPhase.MERGING, "正在合并远端快照")
         var changed = false
         var rssPending = 0
@@ -859,32 +1057,31 @@ class PhoneCloudSyncService(
         val restoreOrder = listOf(PRIVATE_LIBRARY_OBJECT, RELAY_LIBRARY_OBJECT, RSS_STATE_OBJECT, NOTES_STATE_OBJECT, NOTES_ARCHIVE_OBJECT)
         for (descriptor in selectedObjects.sortedBy { restoreOrder.indexOf(it.name) }) {
             yieldToReading()
-            checkApprovalOwner(session)
+            checkCloudEpoch(session, expectedEpoch)
             traceSync("object-start:${descriptor.name}")
             val bytes = codec.restoreObjects(accountKey, manifest.copy(objects = listOf(descriptor))) {
-                sha -> cache.loadChunk(session.userId, sha) ?: error("本地缺少加密块 $sha")
+                sha -> cache.loadChunk(client.scopeId(session), sha) ?: error("本地缺少加密块 $sha")
             }.getValue(descriptor.name)
             when (descriptor.name) {
                 PRIVATE_LIBRARY_OBJECT -> {
-                    val result = backupService.restorePrivateLibrary(bytes, BackupImportMode.MERGE) { checkApprovalOwner(session) }
+                    val result = backupService.restorePrivateLibrary(bytes, BackupImportMode.MERGE) { checkCloudEpoch(session, expectedEpoch) }
                     changed = changed || result.changedArticleCount > 0 || result.changedSourceCount > 0 || result.changedSavedItemCount > 0
                 }
-                RELAY_LIBRARY_OBJECT -> changed = backupService.restoreCloudRelayLibrary(bytes, { checkApprovalOwner(session) }, { yieldToReading() }) > 0 || changed
+                RELAY_LIBRARY_OBJECT -> changed = backupService.restoreCloudRelayLibrary(bytes, { checkCloudEpoch(session, expectedEpoch) }, { yieldToReading() }) > 0 || changed
                 RSS_STATE_OBJECT -> {
-                    val applied = backupService.applyCloudRssState(bytes, createMissing = true) { checkApprovalOwner(session) }
+                    val applied = backupService.applyCloudRssState(bytes, createMissing = true) { checkCloudEpoch(session, expectedEpoch) }
                     changed = changed || applied.first > 0
                     rssPending = applied.second
                 }
                 NOTES_STATE_OBJECT -> {
-                    NoteCloudStateCodec.decode(bytes).forEach { noteRepository.applyRemote(it, it.modifiedBy) }
+                    NoteCloudStateCodec.decode(bytes).forEach { checkCloudEpoch(session, expectedEpoch); noteRepository.applyRemote(it, it.modifiedBy) }
                     changed = true
                 }
                 NOTES_ARCHIVE_OBJECT -> noteTransfer.restoreAssetsZip(bytes)
             }
             traceSync("object-done:${descriptor.name}")
         }
-        cache.storeManifest(
-            session.userId,
+        cache.storeManifest(client.scopeId(session),
             head.id,
             encryptedManifest,
             markAsLocalHead = false
@@ -902,16 +1099,16 @@ class PhoneCloudSyncService(
         session: PhoneAccountSession,
         snapshotId: String
     ): DecodedSnapshotObjects {
+        validatedBootstrap(session)
         val download = client.snapshot(session, snapshotId)
-        val cachedManifest = cache.loadManifest(session.userId, snapshotId)
+        val cachedManifest = cache.loadManifest(client.scopeId(session), snapshotId)
         val encryptedManifest = cachedManifest
             ?: client.download(
                 download.manifestSignedUrl,
                 download.head.manifestSizeBytes,
                 download.head.manifestSha256
             ).also {
-                cache.storeManifest(
-                    session.userId,
+                cache.storeManifest(client.scopeId(session),
                     snapshotId,
                     it,
                     markAsLocalHead = false
@@ -919,24 +1116,23 @@ class PhoneCloudSyncService(
             }
         val accountKey = keyManager.getAccountKey(session.userId, download.head.keyVersion)
             ?: error("缺少第${download.head.keyVersion}版账号密钥")
-        val manifest = codec.decryptManifest(accountKey, snapshotId, encryptedManifest)
-        cache.recordManifestReferences(
-            session.userId,
+        val manifest = codec.decryptManifest(accountKey, snapshotId, encryptedManifest).also { validateCloudManifestHead(it, download.head) }
+        cache.recordManifestReferences(client.scopeId(session),
             snapshotId,
             manifest.allChunks.map(CloudChunkDescriptor::ciphertextSha256)
         )
         val remoteChunks = download.chunks.associateBy(CloudDownloadObject::sha256)
         manifest.allChunks.forEach { descriptor ->
-            if (cache.loadChunk(session.userId, descriptor.ciphertextSha256) == null) {
+            if (cache.loadChunk(client.scopeId(session), descriptor.ciphertextSha256) == null) {
                 val remote = remoteChunks[descriptor.ciphertextSha256]
                     ?: error("云快照缺少加密块 ${descriptor.ciphertextSha256}")
                 client.download(remote.signedUrl, remote.sizeBytes, remote.sha256).also {
-                    cache.storeChunk(session.userId, remote.sha256, it)
+                    cache.storeChunk(client.scopeId(session), remote.sha256, it)
                 }
             }
         }
         val objects = codec.restoreObjects(accountKey, manifest) { sha ->
-            cache.loadChunk(session.userId, sha) ?: error("本地缺少加密块 $sha")
+            cache.loadChunk(client.scopeId(session), sha) ?: error("本地缺少加密块 $sha")
         }
         return DecodedSnapshotObjects(download, objects)
     }
@@ -949,16 +1145,18 @@ class PhoneCloudSyncService(
         fullTransfer: Boolean,
         keyVersion: Int
     ): UploadOutcome {
-        val previous = loadLatestManifest(session.userId, accountKey, keyVersion)
+        settings.requireUploadOwner(session.userId)
+        verifyLocalKeys(session, requireNotNull(trustedBootstrap))
+        val previous = loadLatestManifest(client.scopeId(session), accountKey, keyVersion)
         val privateFingerprint = if (fullTransfer) backupService.privateCloudFingerprint() else null
-        val pendingManifest = cache.loadPendingManifest(session.userId)?.let { (id, bytes) ->
+        val pendingManifest = cache.loadPendingManifest(client.scopeId(session))?.let { (id, bytes) ->
             runCatching { codec.decryptManifest(accountKey, id, bytes) }.getOrNull()
                 ?.takeIf { it.keyVersion == keyVersion }
         }
         // A retry can carry an authenticated pending body when every block is still local.
         val bodySource = listOfNotNull(previous, pendingManifest).firstOrNull { candidate ->
             candidate.settings.optString("privateBodyFingerprintV1") == privateFingerprint &&
-                ((candidate === previous && heads.any { it.id == candidate.snapshotId }) || candidate.allChunks.all { cache.loadChunk(session.userId, it.ciphertextSha256) != null })
+                ((candidate === previous && heads.any { it.id == candidate.snapshotId }) || candidate.allChunks.all { cache.loadChunk(client.scopeId(session), it.ciphertextSha256) != null })
         }
         val priorBodies = bodySource?.objects.orEmpty().filter { it.name == PRIVATE_LIBRARY_OBJECT || it.name == RELAY_LIBRARY_OBJECT }
         val carryPrivate = fullTransfer && privateFingerprint != null &&
@@ -1015,8 +1213,8 @@ class PhoneCloudSyncService(
             ?.lastSequence
             ?: 0L
         val reusableManifests = heads.filter { it.keyVersion == keyVersion }.mapNotNull { head ->
-            cache.loadManifest(session.userId, head.id)?.let { bytes ->
-                runCatching { codec.decryptManifest(accountKey, head.id, bytes) }.getOrNull()
+            cache.loadManifest(client.scopeId(session), head.id)?.let { bytes ->
+                runCatching { codec.decryptManifest(accountKey, head.id, bytes).also { validateCloudManifestHead(it, head) } }.getOrNull()
             }
         }
         val snapshotSettings = if (!fullTransfer) org.json.JSONObject(previous?.settings?.toString() ?: "{}") else org.json.JSONObject()
@@ -1027,7 +1225,7 @@ class PhoneCloudSyncService(
             accountKey = accountKey,
             keyVersion = keyVersion,
             sourceDeviceId = deviceId,
-            deviceSequence = settings.nextSequence(serverSequence),
+            deviceSequence = run { checkCloudEpoch(session, bootstrap.libraryEpoch); settings.nextSequence(serverSequence) },
             logicalObjects = logicalObjects.map { it.copy(incrementalChunks = true) },
             parentHeads = parentHeads,
             observedHeads = observedHeads,
@@ -1036,20 +1234,20 @@ class PhoneCloudSyncService(
             reusableManifests = reusableManifests + listOfNotNull(pendingManifest),
             snapshotSettings = snapshotSettings,
             onReusedChunk = { descriptor, materialize ->
-                if (cache.loadChunk(session.userId, descriptor.ciphertextSha256) == null) {
-                    cache.storeChunk(session.userId, descriptor.ciphertextSha256, materialize())
+                if (cache.loadChunk(client.scopeId(session), descriptor.ciphertextSha256) == null) {
+                    cache.storeChunk(client.scopeId(session), descriptor.ciphertextSha256, materialize())
                 }
             }
         )
         encrypted.newCiphertextChunks.forEach { (sha, bytes) ->
-            cache.storeChunk(session.userId, sha, bytes)
+            cache.storeChunk(client.scopeId(session), sha, bytes)
         }
-        checkApprovalOwner(session)
-        cache.storePendingManifest(session.userId, encrypted.manifest.snapshotId, encrypted.encryptedManifest,
+        checkCloudEpoch(session, bootstrap.libraryEpoch)
+        cache.storePendingManifest(client.scopeId(session), encrypted.manifest.snapshotId, encrypted.encryptedManifest,
             encrypted.manifest.allChunks.map { it.ciphertextSha256 })
         traceSync("upload-chunks:new=${encrypted.newCiphertextChunks.size}:total=${encrypted.manifest.allChunks.size}:newBytes=${encrypted.newCiphertextChunks.values.sumOf { it.size.toLong() }}")
         update(CloudSyncPhase.UPLOADING, "正在预留云空间", bootstrap.member)
-        val reservation = client.reserveSnapshot(session, encrypted, settings.retentionDays)
+        val reservation = client.reserveSnapshot(session, encrypted, settings.retentionDays, bootstrap.libraryEpoch)
         traceSync("upload-plan:objects=${reservation.missingObjects.size}:bytes=${reservation.missingObjects.sumOf { it.sizeBytes }}")
         var uploadedBytes = 0L
         var uploadedObjects = 0
@@ -1057,22 +1255,22 @@ class PhoneCloudSyncService(
         val progressLock = Any()
         kotlinx.coroutines.coroutineScope {
         reservation.missingObjects.map { target -> async { uploadSlots.withPermit {
-            checkApprovalOwner(session)
+            checkCloudEpoch(session, bootstrap.libraryEpoch)
             val bytes = if (target.kind == "manifest") {
                 encrypted.encryptedManifest
             } else {
-                cache.loadChunk(session.userId, target.sha256)
+                cache.loadChunk(client.scopeId(session), target.sha256)
                     ?: error("本地缺少待上传加密块 ${target.sha256}")
             }
             var attempt = 0
             var sent = false
             while (true) {
-                checkApprovalOwner(session)
+                checkCloudEpoch(session, bootstrap.libraryEpoch)
                 try {
                     // Late blocks need a fresh URL on slow links.
-                    val fresh = if (bytes.size <= 2 * 1024 * 1024) client.refreshUpload(session, target) else target
+                    val fresh = client.refreshUpload(session, target, bootstrap.libraryEpoch)
                     if (!fresh.alreadyUploaded) {
-                        uploader.upload(fresh, bytes)
+                        client.uploadCiphertext(session, fresh, bytes, bootstrap.libraryEpoch)
                         sent = true
                     }
                     break
@@ -1098,30 +1296,28 @@ class PhoneCloudSyncService(
         }
         traceSync("upload-verify:start")
         update(CloudSyncPhase.UPLOADING, "正在完成同步", bootstrap.member, uploadedBytes)
-        client.completeSnapshot(session, encrypted)
+        client.completeSnapshot(session, encrypted, bootstrap.libraryEpoch)
         traceSync("upload-verify:done")
-        cache.storeManifest(
-            session.userId,
+        cache.storeManifest(client.scopeId(session),
             encrypted.manifest.snapshotId,
             encrypted.encryptedManifest,
             markAsLocalHead = true
         )
-        cache.recordManifestReferences(
-            session.userId,
+        cache.recordManifestReferences(client.scopeId(session),
             encrypted.manifest.snapshotId,
             encrypted.manifest.allChunks.map(CloudChunkDescriptor::ciphertextSha256)
         )
-        cache.clearPendingManifest(session.userId, encrypted.manifest.snapshotId)
-        cache.prune(session.userId)
-        settings.markApplied(deviceId, encrypted.manifest.deviceSequence, full = fullTransfer)
-        settings.markApplied(deviceId, encrypted.manifest.deviceSequence, full = false)
-        settings.markUploaded(contentHash, parentHeads, full = fullTransfer)
+        cache.clearPendingManifest(client.scopeId(session), encrypted.manifest.snapshotId)
+        cache.prune(client.scopeId(session))
+        checkCloudEpoch(session, bootstrap.libraryEpoch); settings.markApplied(deviceId, encrypted.manifest.deviceSequence, full = fullTransfer)
+        checkCloudEpoch(session, bootstrap.libraryEpoch); settings.markApplied(deviceId, encrypted.manifest.deviceSequence, full = false)
+        checkCloudEpoch(session, bootstrap.libraryEpoch); settings.markUploaded(contentHash, parentHeads, full = fullTransfer)
         if (fullTransfer) {
             val stateObjects = logicalObjects.filter { it.name == RSS_STATE_OBJECT || it.name == NOTES_STATE_OBJECT || it.name == NOTES_ARCHIVE_OBJECT }
             val bodyObjects = encrypted.manifest.objects.filter {
                 it.name == PRIVATE_LIBRARY_OBJECT || it.name == RELAY_LIBRARY_OBJECT
             }
-            settings.markUploaded(
+            checkCloudEpoch(session, bootstrap.libraryEpoch); settings.markUploaded(
                 snapshotContentHash(stateObjects, bodyObjects, keyVersion),
                 parentHeads,
                 full = false
@@ -1141,72 +1337,37 @@ class PhoneCloudSyncService(
                 ?.takeIf { it.keyVersion == keyVersion }
         }
 
-    // Keep the legacy installation's ECDH key and account keys available while
-    // moving cloud identity to the ID already bound to the app authorization.
-    private fun restoreLegacyDeviceEnvelopes(session: PhoneAccountSession, bootstrap: CloudBootstrap) {
-        val legacy = legacyDeviceId?.takeIf { it != deviceId } ?: return
-        if (keyManager.hasAccountKey(session.userId)) return
-        val device = bootstrap.devices.firstOrNull { it.deviceId == legacy && it.revokedAt == null }
-            ?: return
-        val envelopes = deviceApprovalEnvelopes(bootstrap, legacy)
-        if (envelopes.isEmpty()) return
-        if (device.publicKeySpki != keyManager.devicePublicKeySpki(session.userId, legacy)) return
-        envelopes.forEach { keyManager.unwrapDeviceEnvelope(session.userId, legacy, it.envelope) }
-    }
-
-    private val identityMigrationMutex = Mutex()
-
     private suspend fun ensureApprovalIdentity(session: PhoneAccountSession, bootstrap: CloudBootstrap) {
-        if (!bootstrap.member.writable || !keyManager.hasAccountKey(session.userId)) return
-        identityMigrationMutex.withLock {
-            checkApprovalOwner(session)
-            val device = bootstrap.devices.firstOrNull { it.deviceId == deviceId }
-            // An explicit server revocation must never be undone by migration.
-            if (device?.revokedAt != null) return@withLock
-            val versions = deviceApprovalEnvelopes(bootstrap, deviceId).map { it.envelope.keyVersion }
-            if (device != null && device.publicKeySpki == keyManager.devicePublicKeySpki(session.userId, deviceId)
-                && keyManager.keyVersions(session.userId).all { it in versions }) return@withLock
-            registerCurrentDevice(session)
-            checkApprovalOwner(session)
-            storeEnvelopeForCurrentDevice(session)
-            checkApprovalOwner(session)
-        }
+        if (!keyManager.hasAccountKey(session.userId)) return
+        val device = bootstrap.devices.firstOrNull { it.deviceId == deviceId }
+        if (device?.revokedAt != null) { invalidateEpoch(session); throw CloudTrustException() }
+        registerCurrentDevice(session, bootstrap.libraryEpoch)
+        storeEnvelopeForCurrentDevice(session, bootstrap.libraryEpoch)
     }
-
-    private suspend fun registerCurrentDevice(session: PhoneAccountSession) {
-        client.registerDevice(
-            session = session,
-            deviceId = deviceId,
-            displayName = "手机 · ${Build.MODEL}",
-            publicKeySpki = keyManager.devicePublicKeySpki(session.userId, deviceId),
-            keyVersion = keyManager.currentKeyVersion(session.userId)
-        )
+    private suspend fun registerCurrentDevice(session: PhoneAccountSession, expectedEpoch: String? = client.knownEpoch(session)) {
+        val bootstrap = trustedBootstrap ?: client.bootstrap(session)
+        val operationEpoch = expectedEpoch ?: bootstrap.libraryEpoch
+        checkCloudEpoch(session, operationEpoch)
+        val spki = keyManager.devicePublicKeySpki(session.userId, deviceId)
+        val version = if (keyManager.hasAccountKey(session.userId)) keyManager.currentKeyVersion(session.userId)
+            else bootstrap.keyCommitments.maxOfOrNull { it.keyVersion } ?: (bootstrap.keyVersionFloor + 1)
+        val key = keyManager.getAccountKey(session.userId, version)
+        try {
+            if (key != null) verifyLocalKeys(session, bootstrap)
+            client.registerDevice(session, deviceId, "手机 · ${Build.MODEL}", spki, version,
+                key?.let { CloudProtocolV2.attestation(it, session.userId, bootstrap.libraryEpoch, deviceId, spki.base64Bytes()) }, if (key == null) null else version, operationEpoch)
+        } finally { key?.fill(0) }
     }
-
-    private suspend fun storeEnvelopeForCurrentDevice(session: PhoneAccountSession) {
-        val publicKey = CloudKeyEnvelopeCodec.decodeP256PublicKey(
-            keyManager.devicePublicKeySpki(session.userId, deviceId)
-        )
-        keyManager.keyVersions(session.userId).forEach { version ->
-            val accountKey = keyManager.getAccountKey(session.userId, version)
-                ?: error("当前手机缺少第${version}版账号密钥")
-            client.storeDeviceEnvelope(
-                session = session,
-                recipientDeviceId = deviceId,
-                createdByDeviceId = deviceId,
-                envelope = CloudKeyEnvelopeCodec.createDeviceEnvelope(
-                    accountKey,
-                    session.userId,
-                    deviceId,
-                    publicKey,
-                    keyVersion = version
-                )
-            )
-        }
+    private suspend fun storeEnvelopeForCurrentDevice(session: PhoneAccountSession, expectedEpoch: String? = client.knownEpoch(session)) {
+        val bootstrap = validatedBootstrap(session)
+        checkCloudEpoch(session, expectedEpoch ?: bootstrap.libraryEpoch)
+        val own = bootstrap.devices.firstOrNull { it.deviceId == deviceId } ?: return
+        require(deviceAuthenticated(session, bootstrap, own)) { "设备需要重新批准" }
+        distributeMissing(session, bootstrap, listOf(own))
     }
 
     private fun requireSession(): PhoneAccountSession =
-        accountRepository.session.value ?: error("请先登录腕上RSS账号")
+        (accountRepository.session.value ?: error("请先登录腕上RSS账号")).also { bindScope(it); settings.claimLegacyOwner(it.userId) }
 
     private fun snapshotContentHash(
         objects: List<CloudLogicalObject>,

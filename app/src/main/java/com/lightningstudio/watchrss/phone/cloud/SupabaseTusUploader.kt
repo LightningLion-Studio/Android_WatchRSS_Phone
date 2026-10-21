@@ -24,26 +24,27 @@ class SupabaseTusUploader(
         Context.MODE_PRIVATE
     )
 
-    suspend fun upload(target: CloudUploadObject, bytes: ByteArray) =
+    suspend fun upload(target: CloudUploadObject, bytes: ByteArray, scope: String = "") =
         withContext(Dispatchers.IO) {
+            val uploadKey = "$scope:${target.sha256}"
             require(bytes.size.toLong() == target.sizeBytes) { "待上传云对象长度不匹配" }
             require(CloudSnapshotCodec.sha256(bytes) == target.sha256) { "待上传云对象哈希不匹配" }
             if (bytes.size <= 2 * 1024 * 1024) {
                 CloudSignedObjectUploader(http).upload(target, bytes)
-                preferences.edit().remove(target.sha256).apply()
+                preferences.edit().remove(uploadKey).apply()
                 return@withContext
             }
-            var uploadUrl = preferences.getString(target.sha256, null)
+            var uploadUrl = preferences.getString(uploadKey, null)
             val existingOffset = uploadUrl?.let { queryOffset(it, target.token) }
             var offset: Long
             if (existingOffset == null) {
                 uploadUrl = createUpload(target)
                 if (uploadUrl == null) {
-                    preferences.edit().remove(target.sha256).apply()
+                    preferences.edit().remove(uploadKey).apply()
                     return@withContext
                 }
                 offset = 0L
-                preferences.edit().putString(target.sha256, uploadUrl).commit()
+                preferences.edit().putString(uploadKey, uploadUrl).commit()
             } else {
                 offset = existingOffset
             }
@@ -59,8 +60,14 @@ class SupabaseTusUploader(
                 )
             }
             require(offset == bytes.size.toLong()) { "TUS上传未完成" }
-            preferences.edit().remove(target.sha256).apply()
+            preferences.edit().remove(uploadKey).apply()
         }
+
+    fun clearScope(scope: String) {
+        val editor = preferences.edit()
+        preferences.all.keys.filter { it.startsWith("$scope:") || it.matches(Regex("[a-f0-9]{64}")) }.forEach(editor::remove)
+        check(editor.commit())
+    }
 
     private fun createUpload(target: CloudUploadObject): String? {
         val metadata = listOf(

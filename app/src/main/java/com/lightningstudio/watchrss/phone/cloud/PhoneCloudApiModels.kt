@@ -23,7 +23,9 @@ data class RegisteredCloudDevice(
     val publicKeySpki: String,
     val keyVersion: Int,
     val lastSequence: Long,
-    val revokedAt: String?
+    val revokedAt: String?,
+    val attestation: String? = null,
+    val attestationKeyVersion: Int? = null
 )
 
 data class StoredCloudKeyEnvelope(
@@ -36,7 +38,10 @@ data class StoredCloudKeyEnvelope(
 data class CloudBootstrap(
     val member: CloudMemberState,
     val devices: List<RegisteredCloudDevice>,
-    val keyEnvelopes: List<StoredCloudKeyEnvelope>
+    val keyEnvelopes: List<StoredCloudKeyEnvelope>,
+    val libraryEpoch: String = "",
+    val keyVersionFloor: Int = 0,
+    val keyCommitments: List<CloudKeyCommitment> = emptyList()
 )
 
 data class CloudSnapshotHead(
@@ -58,11 +63,13 @@ data class CloudUploadObject(
     val sizeBytes: Long,
     val objectPath: String,
     val signedUrl: String,
-    val token: String,
-    val tusEndpoint: String,
-    val bucketName: String,
+    val token: String = "",
+    val tusEndpoint: String = "",
+    val bucketName: String = "",
     val reservationId: String? = null,
-    val alreadyUploaded: Boolean = false
+    val alreadyUploaded: Boolean = false,
+    val transport: String = "storage-signed",
+    val uploadMethod: String = "PUT"
 )
 
 data class CloudSnapshotReservation(

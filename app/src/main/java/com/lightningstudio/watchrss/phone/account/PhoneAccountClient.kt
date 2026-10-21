@@ -19,6 +19,20 @@ class PhoneAccountClient(
     private val deviceAccessToken: () -> String? = { null },
     private val httpClient: OkHttpClient = defaultHttpClient()
 ) {
+    suspend fun startPhoneChange(session: PhoneAccountSession, newPhone: String, verificationToken: String): PhoneChangeTransaction = withContext(Dispatchers.IO) {
+        require(verificationToken.isNotBlank()) { "请先验证当前账号身份" }
+        val request = Request.Builder().url(environment.backendBaseUrl + "/functions/v1/account/phone/change/start")
+            .header("apikey", environment.supabaseAnonKey).header("authorization", "Bearer ${session.accessToken}")
+            .header("x-watchrss-verification-token", verificationToken)
+            .post(JSONObject().put("newPhone", normalizeAccountPhone(newPhone)).toString().toRequestBody(JSON_MEDIA_TYPE)).build()
+        execute(request).use { it.jsonBody().let { json -> PhoneChangeTransaction(json.getString("transactionId"), json.getLong("expiresAt")) } }
+    }
+    suspend fun verifyPhoneChange(session: PhoneAccountSession, transactionId: String, code: String): String = withContext(Dispatchers.IO) {
+        require(code.matches(Regex("[0-9]{6}"))) { "请输入6位短信验证码" }
+        post("/functions/v1/account/phone/change/verify", JSONObject().put("transactionId", transactionId).put("code", code), session.accessToken)
+            .use { it.jsonBody().getString("phoneMasked") }
+    }
+
     suspend fun startLogin(phone: String): LoginProgress = withContext(Dispatchers.IO) {
         requireConfigured()
         post(
@@ -104,7 +118,7 @@ class PhoneAccountClient(
         session: PhoneAccountSession,
         action: String
     ): LoginProgress = withContext(Dispatchers.IO) {
-        require(action in setOf("refund-order", "delete-account")) { "不支持的安全验证用途" }
+        require(action in setOf("refund-order", "delete-account", "change-phone")) { "不支持的安全验证用途" }
         post(
             path = "/functions/v1/account/security-verification/$action/start",
             body = JSONObject(),

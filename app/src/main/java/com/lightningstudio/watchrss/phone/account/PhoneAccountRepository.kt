@@ -11,6 +11,8 @@ class PhoneAccountRepository(
     private val accountClient: PhoneAccountClient,
     private val phoneDeviceId: String
 ) {
+    internal var onReleaseCloudAuthorization: suspend (PhoneAccountSession) -> Unit = {}
+    internal var onClearCloudState: (PhoneAccountSession) -> Unit = {}
     val session: StateFlow<PhoneAccountSession?> = sessionStore.session
 
     val hasUsableSession: Boolean
@@ -21,6 +23,19 @@ class PhoneAccountRepository(
 
     suspend fun initialize() {
         sessionStore.load()
+    }
+
+    suspend fun startPhoneChangeVerification(): LoginProgress =
+        accountClient.startActionSecurityVerification(requireSession(), "change-phone")
+    suspend fun startPhoneChange(newPhone: String, verificationToken: String): PhoneChangeTransaction =
+        accountClient.startPhoneChange(requireSession(), newPhone, verificationToken)
+    suspend fun verifyPhoneChange(transactionId: String, code: String): String {
+        val expected = requireSession()
+        val masked = accountClient.verifyPhoneChange(expected, transactionId, code)
+        val current = requireSession()
+        check(current.userId == expected.userId) { "账号已切换" }
+        sessionStore.save(current.copy(phoneMasked = masked))
+        return masked
     }
 
     suspend fun startLogin(phone: String): LoginProgress = accountClient.startLogin(phone)
@@ -57,6 +72,7 @@ class PhoneAccountRepository(
         } finally {
             // The backend revokes all opaque sessions before attempting the
             // upstream credential update, including on an upstream failure.
+            session.value?.let(onClearCloudState)
             sessionStore.clear()
         }
     }
@@ -90,7 +106,7 @@ class PhoneAccountRepository(
             enabled,
             verificationToken
         )
-        if (enabled) sessionStore.clear()
+        if (enabled) { session.value?.let(onClearCloudState); sessionStore.clear() }
         return status
     }
 
@@ -151,11 +167,15 @@ class PhoneAccountRepository(
     }
 
     private suspend fun saveCompletedLogin(progress: LoginProgress) {
-        progress.session?.let { sessionStore.save(it) }
+        progress.session?.let { next ->
+            session.value?.takeIf { it.userId != next.userId }?.let(onClearCloudState)
+            sessionStore.save(next)
+        }
     }
 
     suspend fun logout() {
         val current = session.value
+        current?.let { runCatching { onReleaseCloudAuthorization(it) } }
         if (current != null && !current.isExpired) {
             val queued = runCatching { sessionStore.queueRevocation(current) }.isSuccess
             val revoked = runCatching { accountClient.logout(current) }.isSuccess
@@ -168,7 +188,7 @@ class PhoneAccountRepository(
                 sessionStore.schedulePendingRevocation()
             }
         }
-        sessionStore.clear()
+        try { current?.let(onClearCloudState) } finally { sessionStore.clear() }
     }
 
     suspend fun consumeActivationProof(expectedProof: String) {
@@ -219,6 +239,7 @@ class PhoneAccountRepository(
 
     suspend fun deleteAccount(verificationToken: String): AccountDeletionResult {
         val result = accountClient.deleteAccount(requireSession(), verificationToken)
+        session.value?.let(onClearCloudState)
         sessionStore.clear()
         return result
     }

@@ -99,6 +99,8 @@ import com.lightningstudio.watchrss.phone.account.AppAccessState
 import com.lightningstudio.watchrss.phone.account.AppPaymentOrder
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.account.PhonePasskeyCoordinator
+import com.lightningstudio.watchrss.phone.account.PhoneChangePhase
+import com.lightningstudio.watchrss.phone.account.PhoneChangeViewModel
 import com.lightningstudio.watchrss.phone.account.LoginProgress
 import com.lightningstudio.watchrss.phone.account.RegisteredPasskey
 import com.lightningstudio.watchrss.phone.account.TotpEnrollment
@@ -227,7 +229,8 @@ private enum class SecurityVerificationPurpose {
     DISABLE_TWO_FACTOR,
     UPDATE_PASSWORD,
     REFUND_ORDER,
-    DELETE_ACCOUNT
+    DELETE_ACCOUNT,
+    CHANGE_PHONE
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -309,6 +312,11 @@ internal fun AccountScreen(
     var securityVerificationInput by remember { mutableStateOf("") }
     var securityVerificationError by remember { mutableStateOf<String?>(null) }
     var securityVerificationPurpose by remember { mutableStateOf<SecurityVerificationPurpose?>(null) }
+    val phoneChange = remember(accountRepository) { PhoneChangeViewModel(accountRepository) }
+    val phoneChangeState by phoneChange.state.collectAsState()
+    var showPhoneChange by remember { mutableStateOf(false) }
+    var newPhone by remember { mutableStateOf("") }
+    var phoneChangeCode by remember { mutableStateOf("") }
     var passwordVerificationToken by remember { mutableStateOf<String?>(null) }
     var paymentOrders by remember(session?.userId) { mutableStateOf<List<AppPaymentOrder>>(emptyList()) }
     var paymentOrdersLoading by remember(session?.userId) { mutableStateOf(session != null) }
@@ -458,6 +466,12 @@ internal fun AccountScreen(
             }
             SecurityVerificationPurpose.DELETE_ACCOUNT -> {
                 deleteVerificationToken = token
+            }
+            SecurityVerificationPurpose.CHANGE_PHONE -> {
+                phoneChange.acceptVerification(progress)
+                newPhone = ""
+                phoneChangeCode = ""
+                showPhoneChange = true
             }
             null -> error("安全验证用途缺失")
         }
@@ -804,6 +818,33 @@ internal fun AccountScreen(
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth()
             ) { Text("设置或修改密码") }
+            OutlinedButton(
+                onClick = {
+                    runAction {
+                        busy = true
+                        securityVerificationError = null
+                        phoneChange.begin()
+                        val started = phoneChange.state.value
+                        when {
+                            started.phase == PhoneChangePhase.ENTER_PHONE -> {
+                                newPhone = ""
+                                phoneChangeCode = ""
+                                showPhoneChange = true
+                            }
+                            started.loginProgress != null -> {
+                                securityVerificationPurpose = SecurityVerificationPurpose.CHANGE_PHONE
+                                securityVerificationProgress = started.loginProgress
+                                securityVerificationMethod = null
+                                showDisableMethodDialog = true
+                            }
+                            else -> message = phoneChangeErrorMessage(started.error)
+                        }
+                        busy = false
+                    }
+                },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("更换手机号") }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1070,6 +1111,7 @@ internal fun AccountScreen(
                         SecurityVerificationPurpose.DISABLE_TWO_FACTOR -> "关闭两步验证"
                         SecurityVerificationPurpose.REFUND_ORDER -> "退款前验证身份"
                         SecurityVerificationPurpose.DELETE_ACCOUNT -> "注销账号前验证身份"
+                        SecurityVerificationPurpose.CHANGE_PHONE -> "更换手机号前验证身份"
                         null -> "验证身份"
                     }
                 )
@@ -1099,6 +1141,8 @@ internal fun AccountScreen(
                                                 accountRepository.startActionSecurityVerification("refund-order")
                                             SecurityVerificationPurpose.DELETE_ACCOUNT ->
                                                 accountRepository.startActionSecurityVerification("delete-account")
+                                            SecurityVerificationPurpose.CHANGE_PHONE ->
+                                                accountRepository.startPhoneChangeVerification()
                                             null -> error("安全验证用途缺失")
                                         }
                                         if (method == LoginMethod.PASSKEY) {
@@ -1242,6 +1286,25 @@ internal fun AccountScreen(
                     },
                     enabled = !busy
                 ) { Text("取消") }
+            }
+        )
+    }
+
+    if (showPhoneChange) {
+        PhoneChangeDialog(
+            state = phoneChangeState,
+            newPhone = newPhone,
+            onNewPhoneChange = { newPhone = it.filter(Char::isDigit).take(11) },
+            code = phoneChangeCode,
+            onCodeChange = { phoneChangeCode = it.filter(Char::isDigit).take(6) },
+            onSendCode = { runAction { phoneChange.sendCode(newPhone) } },
+            onVerify = { runAction { phoneChange.verifyCode(phoneChangeCode) } },
+            onDismiss = {
+                if (!phoneChangeState.busy) {
+                    if (phoneChangeState.phase == PhoneChangePhase.COMPLETE) message = "手机号已更换为 ${phoneChangeState.phoneMasked}"
+                    showPhoneChange = false
+                    phoneChange.reset()
+                }
             }
         )
     }

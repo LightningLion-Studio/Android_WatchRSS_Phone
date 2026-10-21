@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -18,6 +20,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.key
@@ -29,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
+import kotlinx.coroutines.CancellationException
 import com.lightningstudio.watchrss.phone.tips.TipIds
 import com.lightningstudio.watchrss.phone.tips.ui.tipAnchor
 
@@ -60,6 +64,8 @@ fun CloudAccountPanel(
     var showResetConfirmation by remember(userId) { mutableStateOf(false) }
     var resetConfirmationInput by remember(userId) { mutableStateOf("") }
     var resetError by remember(userId) { mutableStateOf<String?>(null) }
+    val registrationConflict by service.deviceRegistrationConflict.collectAsState()
+    var showReregisterConfirmation by remember(userId) { mutableStateOf(false) }
     var activationInFlight by remember(userId) { mutableStateOf(false) }
 
     fun refresh() {
@@ -78,6 +84,24 @@ fun CloudAccountPanel(
 
     LaunchedEffect(userId) { refresh() }
 
+    if (showReregisterConfirmation && registrationConflict) {
+        AlertDialog(
+            onDismissRequest = { showReregisterConfirmation = false },
+            title = { Text("重新登记本机") },
+            text = { Text("将撤销服务器上本机的旧身份并重新登记，之后需使用恢复词或其他设备授权。") },
+            confirmButton = { TextButton(enabled = !busy, onClick = {
+                showReregisterConfirmation = false
+                runAction {
+                    onBusyChange(true)
+                    try { service.reregisterCurrentDevice(); refresh(); onMessage("本机已重新登记，请恢复或授权") }
+                    catch (error: CancellationException) { throw error }
+                    catch (error: Exception) { onError(error.message ?: "重新登记失败") }
+                    finally { onBusyChange(false) }
+                }
+            }) { Text("确认重新登记") } },
+            dismissButton = { TextButton(onClick = { showReregisterConfirmation = false }) { Text("取消") } }
+        )
+    }
     if (showApprovalDialog) {
         key(userId) {
             CloudApprovalDialog(
@@ -91,6 +115,12 @@ fun CloudAccountPanel(
     val member = syncState.member
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("云空间", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        val keyWarning by service.keyWarning.collectAsState()
+        val needsReapproval by service.needsReapproval.collectAsState()
+        if (registrationConflict) {
+            OutlinedButton(enabled = !busy, onClick = { showReregisterConfirmation = true }) { Text("重新登记本机") }
+        }
+        keyWarning?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
         if (member == null) {
             Text("正在读取会员状态…")
         } else if (!member.readable) {
@@ -104,7 +134,7 @@ fun CloudAccountPanel(
             val used = member.usedBytes + member.reservedBytes
             val fraction = if (member.quotaBytes <= 0) 0f
             else (used.toDouble() / member.quotaBytes).toFloat().coerceIn(0f, 1f)
-            Text(if (member.writable) "会员 · 云备份可用" else "会员已到期 · 30天只读恢复期")
+            Text("云备份可用 · 按账号云空间额度同步")
             LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
             Text(
                 "${formatBytes(used)} / ${formatBytes(member.quotaBytes)}",
@@ -167,7 +197,9 @@ fun CloudAccountPanel(
             val recoveryEnvelopeExists =
                 bootstrap?.keyEnvelopes?.any { it.recipientType == "recovery" } == true
             val hasLocalKey = service.hasLocalAccountKey()
-            if (!recoveryEnvelopeExists && member.writable && !hasLocalKey && bootstrap != null) {
+            if (!recoveryEnvelopeExists && !hasLocalKey && bootstrap != null) {
+                // Leaving before activation must not keep an unbacked key around.
+                DisposableEffect(Unit) { onDispose { if (setup != null && !activationInFlight) service.discardRecoverySetup() } }
                 if (setup == null) {
                     Button(
                         onClick = {
@@ -195,13 +227,16 @@ fun CloudAccountPanel(
                             SelectionContainer {
                                 Text(setup!!.words.joinToString(" "))
                             }
-                            OutlinedTextField(
-                                value = recoveryInput,
-                                onValueChange = { recoveryInput = it },
-                                label = { Text("重新输入全部 24 词进行确认") },
-                                minLines = 3,
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                            RecoveryInputPrivacy {
+                                OutlinedTextField(
+                                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
+                                    value = recoveryInput,
+                                    onValueChange = { recoveryInput = it },
+                                    label = { Text("重新输入全部 24 词进行确认") },
+                                    minLines = 3,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
                             Button(
                                 onClick = activate@{
                                     if (activationInFlight) return@activate
@@ -235,6 +270,11 @@ fun CloudAccountPanel(
                                     RecoveryWords.parse(recoveryInput).size == 24,
                                 modifier = Modifier.fillMaxWidth()
                             ) { Text("我已安全保存，正式启用") }
+                            TextButton(
+                                onClick = { service.discardRecoverySetup(); setup = null; recoveryInput = "" },
+                                enabled = !activationInFlight,
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("取消") }
                         }
                     }
                 }
@@ -245,13 +285,16 @@ fun CloudAccountPanel(
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("请求旧设备批准") }
-                OutlinedTextField(
-                    value = recoveryInput,
-                    onValueChange = { recoveryInput = it },
-                    label = { Text("24词恢复密钥") },
-                    minLines = 3,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                RecoveryInputPrivacy {
+                    OutlinedTextField(
+                        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
+                        value = recoveryInput,
+                        onValueChange = { recoveryInput = it },
+                        label = { Text("24词恢复密钥") },
+                        minLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
                 Button(
                     onClick = {
                         runAction {
@@ -313,24 +356,27 @@ fun CloudAccountPanel(
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("频道云库存 ›") }
-                OutlinedTextField(
-                    value = recoveryInput,
-                    onValueChange = { recoveryInput = it },
-                    label = { Text("轮换密钥前输入原24词恢复密钥") },
-                    minLines = 2,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                RecoveryInputPrivacy {
+                    OutlinedTextField(
+                        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
+                        value = recoveryInput,
+                        onValueChange = { recoveryInput = it },
+                        label = { Text("轮换密钥前输入原24词恢复密钥") },
+                        minLines = 2,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
                 OutlinedButton(
                     onClick = {
                         runAction {
                             onBusyChange(true)
                             runCatching {
                                 service.rotateAccountKey(RecoveryWords.parse(recoveryInput))
-                                    .also { service.syncNow(manual = true) }
                             }.onSuccess { version ->
                                 recoveryInput = ""
-                                bootstrap = service.loadBootstrap()
-                                onMessage("账号密钥已轮换到第${version}版")
+                                onMessage("账号密钥已轮换到第${version}版，原24词恢复密钥继续有效")
+                                try { service.syncNow(manual = true) }
+                                catch (_: Exception) { onMessage("密钥已轮换，后续同步暂未完成，请稍后重试同步") }
                             }.onFailure { onError(it.message ?: "密钥轮换失败") }
                             onBusyChange(false)
                         }
@@ -369,7 +415,7 @@ fun CloudAccountPanel(
                     Text("设备授权", fontWeight = FontWeight.Medium)
                     TextButton(onClick = { refresh() }, enabled = !busy) { Text("刷新") }
                 }
-                bootstrap?.devices?.filter { it.revokedAt == null }?.forEach { device ->
+                bootstrap?.devices?.filter { it.revokedAt == null && !it.deviceId.startsWith("reader-migration-") }?.forEach { device ->
                     val hasEnvelope = bootstrap!!.keyEnvelopes.any {
                         it.recipientType == "device" && it.recipientDeviceId == device.deviceId
                     }
@@ -379,8 +425,11 @@ fun CloudAccountPanel(
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Text(device.displayName.ifBlank { device.deviceId }, fontWeight = FontWeight.Medium)
-                            Text("${device.platform} · ${if (hasEnvelope) "已授权" else "等待授权"}")
-                            if (!hasEnvelope && device.publicKeySpki.isNotBlank()) {
+                            val unattested = needsReapproval.any { it.deviceId == device.deviceId }
+                            Text("${device.platform} · ${when { unattested -> "需要重新授权"; hasEnvelope -> "已授权"; else -> "等待补发密钥" }}")
+                            if (unattested) Text("请在该设备上重新发起授权，并核对两台设备显示的 8 位码。",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            else if (!hasEnvelope && device.publicKeySpki.isNotBlank()) {
                                 Button(
                                     onClick = {
                                         runAction {
@@ -388,13 +437,13 @@ fun CloudAccountPanel(
                                             runCatching {
                                                 service.approveDevice(device.deviceId)
                                                 bootstrap = service.loadBootstrap()
-                                            }.onSuccess { onMessage("设备已授权") }
+                                            }.onSuccess { onMessage("已补发密钥") }
                                                 .onFailure { onError(it.message ?: "设备授权失败") }
                                             onBusyChange(false)
                                         }
                                     },
                                     enabled = !busy
-                                ) { Text("批准设备") }
+                                ) { Text("补发密钥") }
                             }
                             TextButton(
                                 onClick = {

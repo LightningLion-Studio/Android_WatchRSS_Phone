@@ -30,6 +30,7 @@ class CloudSessionRefreshTest {
                     true
                 })
             val session = PhoneAccountSession(userId = "user", phoneMasked = "***", accessToken = "test-session", refreshToken = "", expiresAtMillis = Long.MAX_VALUE)
+            client.useEpoch(session, "epoch")
             client.registerDevice(session, "device", "test", "public", 1)
             assertEquals(2, calls)
             assertEquals(1, refreshes)

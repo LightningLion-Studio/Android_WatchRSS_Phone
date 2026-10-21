@@ -140,7 +140,11 @@ class PhoneCompanionContainer(context: Context) {
                 }
             ),
             phoneDeviceId = deviceIdentity.deviceId
-        )
+        ).also { account ->
+            // Logging out must release cloud authorization even if the cloud panel was never opened.
+            account.onReleaseCloudAuthorization = { session -> cloudSyncService.releaseCloudAuthorization(session) }
+            account.onClearCloudState = { session -> cloudSyncService.discardSessionCloudState(session) }
+        }
     }
 
     val appAccessCoordinator: AppAccessCoordinator by lazy {

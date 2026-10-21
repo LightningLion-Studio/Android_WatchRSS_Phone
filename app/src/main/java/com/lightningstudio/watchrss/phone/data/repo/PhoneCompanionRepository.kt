@@ -373,6 +373,13 @@ class PhoneCompanionRepository(
             articleContentStore?.loadTextChunk(marker, chunkIndex, ARTICLE_TEXT_CHUNK_BYTES)
         }
 
+    suspend fun markArticleRead(articleId: String, read: Boolean) = withContext(Dispatchers.IO) {
+        val article = articleDao.getById(articleId) ?: return@withContext
+        val at = maxOf(System.currentTimeMillis(), article.readingPositionChangedAt + 1)
+        articleDao.upsert(article.copy(sourceDeviceId = deviceId, isRead = read, readingPositionChangedAt = at))
+        recordArticleChange(articleId, "readingState", at)
+    }
+
     suspend fun updateArticleReadingProgress(articleId: String, progress: Float) = withContext(Dispatchers.IO) {
         val article = articleDao.getById(articleId) ?: return@withContext
         val clamped = progress.coerceIn(0f, 1f)
@@ -1379,10 +1386,19 @@ class PhoneCompanionRepository(
     ) = withContext(Dispatchers.IO) {
         val articleIds = retainedArticleIds.toHashSet()
         val sourceUrls = retainedSourceUrls.toHashSet()
-        articleDao.getAllIds().filterNot(articleIds::contains).chunked(400).forEach { articleDao.deleteByIds(it) }
-        rssSourceDao.getAllUrls().filterNot(sourceUrls::contains).chunked(400).forEach { rssSourceDao.deleteByUrls(it) }
+        val removedAt = System.currentTimeMillis()
+        articleDao.getAllIds().filterNot(articleIds::contains).forEach { id ->
+            val article = articleDao.getById(id) ?: return@forEach
+            if (!article.deleted) { articleDao.upsert(article.markDeletedForStorage(removedAt)); recordArticleChange(id, "delete", removedAt) }
+        }
+        rssSourceDao.getAllUrls().filterNot(sourceUrls::contains).forEach { url ->
+            val source = rssSourceDao.getByUrl(url) ?: return@forEach
+            if (!source.deleted) {
+                rssSourceDao.upsert(source.copy(deleted = true, deletedAt = removedAt, updatedAt = removedAt))
+                recordRssSourceChange(url, "delete", removedAt)
+            }
+        }
         savedItemDao.deleteAll()
-        syncChangeLogDao.deleteAll()
         syncPeerStateDao.deleteAll()
         pruneUnreferencedArticleContent()
     }
@@ -1660,7 +1676,12 @@ class PhoneCompanionRepository(
             }
         }
         if (replaceExistingArticles) {
-            articleDao.deleteByRssSourceUrl(imported.url)
+            val incomingIds = articles.map { it.articleId }.toSet()
+            articleDao.getByRssSourceUrl(imported.url).filterNot { it.articleId in incomingIds || it.deleted }.forEach { old ->
+                val deleted = old.markDeletedForStorage(System.currentTimeMillis())
+                articleDao.upsert(deleted)
+                if (recordSyncChanges) recordArticleChange(deleted.articleId, "delete", deleted.deletedAt)
+            }
         }
         if (articles.isNotEmpty()) {
             articleDao.upsertAll(articles)
@@ -1944,7 +1965,8 @@ class PhoneCompanionRepository(
                 localReadingPositionNewer -> local.readingPositionChangedAt
                 else -> maxOf(local.readingPositionChangedAt, remote.readingPositionChangedAt)
             },
-            isRead = local.isRead || remote.isRead
+            isRead = com.lightningstudio.watchrss.phone.data.backup.mergeReadFlag(local.isRead, local.readingPositionChangedAt, local.updatedAt, local.sourceDeviceId,
+                remote.isRead, remote.readingPositionChangedAt, remote.updatedAt, remote.sourceDeviceId)
         )
     }
 
@@ -2028,7 +2050,8 @@ class PhoneCompanionRepository(
             } else {
                 local.readingPositionChangedAt
             },
-            isRead = local.isRead || remote.isRead
+            isRead = com.lightningstudio.watchrss.phone.data.backup.mergeReadFlag(local.isRead, local.readingPositionChangedAt, local.updatedAt, local.sourceDeviceId,
+                remote.isRead, remote.readingPositionChangedAt, remote.updatedAt, remote.sourceDeviceId)
         )
     }
 

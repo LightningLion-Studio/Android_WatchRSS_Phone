@@ -114,7 +114,9 @@ class CloudSnapshotCodec(
         require(encryptedManifest.size > MANIFEST_HEADER_BYTES + GCM_TAG_BYTES) {
             "云快照清单损坏"
         }
-        require(encryptedManifest.copyOfRange(0, MANIFEST_MAGIC.size).contentEquals(MANIFEST_MAGIC)) {
+        val magic = encryptedManifest.copyOfRange(0, MANIFEST_MAGIC.size)
+        val legacy = magic.contentEquals(LEGACY_MANIFEST_MAGIC)
+        require(legacy || magic.contentEquals(MANIFEST_MAGIC)) {
             "不是腕上RSS加密云快照"
         }
         val saltStart = MANIFEST_MAGIC.size
@@ -126,7 +128,7 @@ class CloudSnapshotCodec(
         val key = hkdfSha256(
             inputKey = accountKey,
             salt = salt,
-            info = MANIFEST_INFO,
+            info = if (legacy) LEGACY_MANIFEST_INFO else manifestInfo(snapshotId),
             length = KEY_BYTES
         )
         val plaintext = decryptAesGcm(
@@ -262,21 +264,16 @@ class CloudSnapshotCodec(
     ): ByteArray {
         val salt = randomBytes(SALT_BYTES)
         val nonce = randomBytes(NONCE_BYTES)
-        val key = hkdfSha256(accountKey, salt, MANIFEST_INFO, KEY_BYTES)
         val plaintext = manifest.toJson().toString().toByteArray(Charsets.UTF_8)
-        val ciphertext = encryptAesGcm(
-            key = key,
-            nonce = nonce,
-            plaintext = plaintext,
-            aad = manifestAad(manifest.snapshotId)
-        )
-        return ByteArrayOutputStream().use { output ->
-            output.write(MANIFEST_MAGIC)
-            output.write(salt)
-            output.write(nonce)
-            output.write(ciphertext)
-            output.toByteArray()
-        }
+        return encryptManifestBytes(accountKey, manifest.snapshotId, plaintext, salt, nonce)
+    }
+
+    internal fun encryptManifestBytes(accountKey: ByteArray, snapshotId: String, plaintext: ByteArray, salt: ByteArray, nonce: ByteArray): ByteArray {
+        require(accountKey.size == KEY_BYTES && salt.size == SALT_BYTES && nonce.size == NONCE_BYTES)
+        val key = hkdfSha256(accountKey, salt, manifestInfo(snapshotId), KEY_BYTES)
+        return try {
+            MANIFEST_MAGIC + salt + nonce + encryptAesGcm(key, nonce, plaintext, manifestAad(snapshotId))
+        } finally { key.fill(0) }
     }
 
     private fun randomBytes(size: Int): ByteArray =
@@ -289,9 +286,11 @@ class CloudSnapshotCodec(
         private const val GCM_TAG_BITS = 128
         private const val GCM_TAG_BYTES = GCM_TAG_BITS / 8
         private val CHUNK_MAGIC = "WRSSCC2".toByteArray(Charsets.US_ASCII)
-        private val MANIFEST_MAGIC = "WRSSCM2".toByteArray(Charsets.US_ASCII)
+        private val LEGACY_MANIFEST_MAGIC = "WRSSCM2".toByteArray(Charsets.US_ASCII)
+        private val MANIFEST_MAGIC = "WRSSCM3".toByteArray(Charsets.US_ASCII)
         private val CHUNK_INFO = "watchrss/cloud/chunk/v1".toByteArray(Charsets.UTF_8)
-        private val MANIFEST_INFO = "watchrss/cloud/manifest/v1".toByteArray(Charsets.UTF_8)
+        private val LEGACY_MANIFEST_INFO = "watchrss/cloud/manifest/v1".toByteArray(Charsets.UTF_8)
+        private fun manifestInfo(snapshotId: String) = "watchrss/cloud/manifest/v2/$snapshotId".toByteArray(Charsets.UTF_8)
         private val OBJECT_NAME_PATTERN = Regex("""[a-z0-9][a-z0-9._/-]{0,127}""")
         private val CHUNK_HEADER_BYTES = CHUNK_MAGIC.size + SALT_BYTES + NONCE_BYTES
         private val MANIFEST_HEADER_BYTES = MANIFEST_MAGIC.size + SALT_BYTES + NONCE_BYTES
@@ -397,7 +396,7 @@ class CloudSnapshotCodec(
         }
 
         private fun ByteArray.toBase64(): String =
-            Base64.getEncoder().withoutPadding().encodeToString(this)
+            Base64.getEncoder().encodeToString(this)
 
         private fun String.fromBase64(): ByteArray =
             Base64.getDecoder().decode(this)

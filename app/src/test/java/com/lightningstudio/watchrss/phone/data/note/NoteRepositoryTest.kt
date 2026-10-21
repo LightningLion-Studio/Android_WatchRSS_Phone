@@ -85,6 +85,10 @@ class NoteRepositoryTest {
         val assets = linkedMapOf<String, NoteAssetEntity>()
         private val noteFlow = MutableStateFlow<List<NoteEntity>>(emptyList())
 
+        override suspend fun clearConflicts() = Unit
+        override suspend fun clearAssets() { assets.clear() }
+        override suspend fun clearNotes() { notes.clear(); noteFlow.value = emptyList() }
+        override suspend fun clearFolders() = Unit
         override fun observeFolders(): Flow<List<NoteFolderEntity>> = MutableStateFlow(emptyList())
         override fun observeNotes(): Flow<List<NoteEntity>> = noteFlow
         override suspend fun note(noteId: String): NoteEntity? = notes[noteId]

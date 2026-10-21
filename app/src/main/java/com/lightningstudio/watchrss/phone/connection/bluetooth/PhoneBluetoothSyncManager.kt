@@ -1483,7 +1483,7 @@ class PhoneBluetoothSyncManager(
 
     private fun requireSuccess(response: JSONObject) {
         require(response.optBoolean("success")) {
-            response.optString("message").ifBlank { "手表返回蓝牙同步失败" }
+            watchBluetoothFailureMessage(response)
         }
     }
 
@@ -1538,4 +1538,10 @@ class PhoneBluetoothSyncManager(
         private const val PREVIEW_ACTIVE_FRAME_INTERVAL_MS = 30L
         private const val PREVIEW_ACTIVE_TAIL_MS = 250L
     }
+}
+
+internal fun watchBluetoothFailureMessage(response: JSONObject): String {
+    val code = response.optString("error").ifBlank { response.optString("errorCode") }
+    return if (code == "account_switch_requires_logout") "请先在手表上退出原账号"
+    else response.optString("message").ifBlank { "手表返回蓝牙同步失败" }
 }

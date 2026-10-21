@@ -47,6 +47,16 @@ import org.junit.Test
 import java.security.MessageDigest
 
 class PhoneCompanionRepositoryTest {
+    @Test fun explicitMarkUnreadAdvancesReadingClockAndSurvivesOlderReadState() = runBlocking {
+        val dao = FakePhoneArticleDao().apply { items = listOf(article("read").copy(isRead = true, readingPositionChangedAt = 10)) }
+        val repository = PhoneCompanionRepository(savedItemDao = FakePhoneSavedItemDao(), articleDao = dao, rssSourceDao = FakePhoneRssSourceDao(), deviceId = "phone")
+        repository.markArticleRead("read", false)
+        val unread = dao.items.single()
+        assertFalse(unread.isRead); assertTrue(unread.readingPositionChangedAt > 10)
+        val incoming = CloudRssStateCodec.decode(CloudRssStateCodec.encode(listOf(unread.copy(isRead = true, readingPositionChangedAt = 9)), 0)).single()
+        assertFalse(unread.mergeCloudState(incoming).isRead)
+    }
+
     @Test
     fun oversizedExcerptIsMovedToBodyWithoutLosingTextOrLocalState() = runBlocking {
         val original = "段落😀\n".repeat(20000)
@@ -1118,7 +1128,7 @@ class PhoneCompanionRepositoryTest {
     }
 
     @Test
-    fun authoritativeSnapshot_remoteWinsAndTargetOnlyArticleIsPruned() = runBlocking {
+    fun authoritativeSnapshot_remoteWinsAndTargetOnlyArticleBecomesTombstone() = runBlocking {
         val articleDao = FakePhoneArticleDao()
         val local = article(id = "keep", title = "手机较新标题").copy(updatedAt = 200L)
         val targetOnly = article(id = "remove", title = "仅手机存在")
@@ -1139,8 +1149,10 @@ class PhoneCompanionRepositoryTest {
             retainedSourceUrls = emptyList()
         )
 
-        assertEquals(listOf("keep"), articleDao.items.map { it.articleId })
-        assertEquals("手表权威标题", articleDao.items.single().title)
+        assertEquals(listOf("keep"), articleDao.items.filterNot { it.deleted }.map { it.articleId })
+        assertTrue(articleDao.items.single { it.articleId == "remove" }.deleted)
+        assertTrue(articleDao.items.single { it.articleId == "remove" }.deletedAt > 0)
+        assertEquals("手表权威标题", articleDao.items.single { it.articleId == "keep" }.title)
     }
 
     @Test

@@ -8,6 +8,7 @@ class NoteRepository(
     private val deviceId: String,
     private val now: () -> Long = System::currentTimeMillis
 ) {
+    suspend fun clearForAccountSwitch() = dao.clearForAccountSwitch()
     fun observeNotes(): Flow<List<NoteEntity>> = dao.observeNotes()
     fun observeFolders(): Flow<List<NoteFolderEntity>> = dao.observeFolders()
     fun observeConflicts(): Flow<List<NoteConflictEntity>> = dao.observeUnresolvedConflicts()

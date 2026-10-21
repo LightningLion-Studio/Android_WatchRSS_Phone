@@ -147,7 +147,7 @@ class CloudReviewRegressionTest {
 
     @Test fun low6AccountSwitchFailureUsesExplicitWatchLogoutGuidance() {
         for (field in listOf("errorCode", "error")) {
-            assertEquals("请先在手表上退出原账号", watchBluetoothFailureMessage(JSONObject()
+            assertEquals("这块手表已登录其他账号，请先在手表上退出", watchBluetoothFailureMessage(JSONObject()
                 .put(field, "account_switch_requires_logout").put("message", "generic failure")))
         }
         assertEquals("server detail", watchBluetoothFailureMessage(JSONObject().put("message", "server detail")))

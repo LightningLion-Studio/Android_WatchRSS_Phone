@@ -46,7 +46,9 @@ internal fun CloudApprovalDialog(service: PhoneCloudSyncService, onAuthorized: (
         } catch (e: CancellationException) { throw e } catch (_: Exception) { if (service.approvals.state.value.phase != CloudApprovalPhase.EXPIRED) error = "授权未完成，请重新发起" }
     }
     val finished = error != null || state.phase in setOf(CloudApprovalPhase.EXPIRED, CloudApprovalPhase.CANCELLED)
-    val comparing = !finished && state.code != null && !state.locallyConfirmed
+    // Once the keys are saved locally, cancelling would delete the server envelope behind them.
+    val received = state.phase == CloudApprovalPhase.DELIVERED
+    val comparing = !finished && !received && state.code != null && !state.locallyConfirmed
     AlertDialog(
         onDismissRequest = {},
         title = { Text("请求已登录设备授权") },
@@ -54,6 +56,7 @@ internal fun CloudApprovalDialog(service: PhoneCloudSyncService, onAuthorized: (
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 when {
                     error != null -> Text(error!!)
+                    received -> Text("已授权，正在读取云端资料…")
                     state.phase == CloudApprovalPhase.EXPIRED -> Text("请求已过期，请重新发起。")
                     state.phase == CloudApprovalPhase.CANCELLED -> Text("授权已取消。两边的码不一致时，请确认是你本人在操作后重新发起。")
                     state.code != null -> {
@@ -80,7 +83,7 @@ internal fun CloudApprovalDialog(service: PhoneCloudSyncService, onAuthorized: (
             else if (finished) TextButton(onClick = { service.approvals.clear(); onDismiss() }) { Text("关闭") }
         },
         dismissButton = {
-            if (!finished) TextButton(onClick = { scope.launch {
+            if (!finished && !received) TextButton(onClick = { scope.launch {
                 try { service.approvals.reject() } catch (e: CancellationException) { throw e } catch (_: Exception) { } finally { service.approvals.clear(); onDismiss() }
             } }) { Text(if (comparing) "不一致" else "取消") }
         }

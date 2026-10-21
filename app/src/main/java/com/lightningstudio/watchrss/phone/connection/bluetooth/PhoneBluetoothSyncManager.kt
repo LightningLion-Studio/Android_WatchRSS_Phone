@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 import android.annotation.SuppressLint
 import android.content.Context
 import com.lightningstudio.watchrss.phone.account.accountHttpErrorCode
+import com.lightningstudio.watchrss.phone.account.watchAccountConflictMessage
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageRepository
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
@@ -1542,6 +1543,5 @@ class PhoneBluetoothSyncManager(
 
 internal fun watchBluetoothFailureMessage(response: JSONObject): String {
     val code = response.optString("error").ifBlank { response.optString("errorCode") }
-    return if (code == "account_switch_requires_logout") "请先在手表上退出原账号"
-    else response.optString("message").ifBlank { "手表返回蓝牙同步失败" }
+    return watchAccountConflictMessage(code) ?: response.optString("message").ifBlank { "手表返回蓝牙同步失败" }
 }

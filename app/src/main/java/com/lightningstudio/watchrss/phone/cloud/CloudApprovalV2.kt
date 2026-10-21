@@ -9,6 +9,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.security.KeyPair
 import java.security.SecureRandom
 
@@ -176,7 +177,15 @@ class CloudApprovalV2 internal constructor(
         val pinned = requireNotNull(target)
         val payload = deliverPayload(s, pinned.getString("deviceId"), pinned.getString("publicKeySpki")); current()
         val signature = CloudProtocolV2.sign(requireNotNull(signingKey).private, requireNotNull(transcript), payload).base64()
-        post(s, path() + "/deliver", JSONObject().put("payload", payload).put("signature", signature)); current()
+        try { post(s, path() + "/deliver", JSONObject().put("payload", payload).put("signature", signature)) }
+        catch (error: IOException) {
+            if (!retryableCloudApprovalFailure(error)) throw error
+            // A committed delivery may lose its response. Reconcile this same request before reporting failure.
+            current()
+            val remote = get(s, path()); current()
+            if (remote.optString("status") != "delivered") throw error
+        }
+        current()
         mutable.value = state.value.copy(phase = CloudApprovalPhase.DELIVERED); signingKey = null; nonce?.fill(0)
     }
     private suspend fun acceptPendingDelivery(s: PhoneAccountSession) {
@@ -189,6 +198,8 @@ class CloudApprovalV2 internal constructor(
         pendingDelivery = null; nonce?.fill(0); signingKey = null
     }
     suspend fun reject() = mutex.withLock {
+        // N has already validated and installed the keys. Cancel would revoke its server authorization.
+        if (requester && state.value.phase == CloudApprovalPhase.DELIVERED) { clear(); return@withLock }
         val s = current()
         try { post(s, path() + "/cancel", JSONObject()) }
         finally {

@@ -12,7 +12,7 @@ internal enum class AccountLoginAction {
 internal class PhoneAccountHttpException(
     val statusCode: Int,
     val responseBody: String
-) : IOException("账号请求失败（HTTP $statusCode）")
+) : IOException(watchAccountConflictMessage(parseErrorResponse(responseBody).code) ?: "账号请求失败（HTTP $statusCode）")
 
 internal fun accountLoginErrorMessage(
     action: AccountLoginAction,

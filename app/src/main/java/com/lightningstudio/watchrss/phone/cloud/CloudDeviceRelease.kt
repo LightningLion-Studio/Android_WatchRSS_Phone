@@ -20,3 +20,8 @@ internal suspend fun reregisterCloudDevice(
     replaceIdentity()
     registerReplacement()
 }
+
+/** An absent device in an in-flight bootstrap can predate registration. Only explicit revocation deletes identity. */
+internal fun clearRevokedCloudDeviceIdentity(bootstrap: CloudBootstrap, deviceId: String, clear: () -> Unit) {
+    if (bootstrap.devices.any { it.deviceId == deviceId && it.revokedAt != null }) clear()
+}

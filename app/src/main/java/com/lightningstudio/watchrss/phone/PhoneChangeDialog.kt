@@ -30,7 +30,7 @@ internal fun PhoneChangeDialog(
     onVerify: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val restart = state.error == PhoneChangeError.MFA_EXPIRED || state.error == PhoneChangeError.ACCOUNT_CHANGED
+    val restart = state.phase == PhoneChangePhase.VERIFY_IDENTITY || state.error == PhoneChangeError.ACCOUNT_CHANGED
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (state.phase == PhoneChangePhase.COMPLETE) "手机号已更换" else "更换手机号") },
@@ -85,7 +85,8 @@ internal fun phoneChangeErrorMessage(error: PhoneChangeError?): String = when (e
     PhoneChangeError.RATE_LIMITED -> "操作太频繁，请稍后再试"
     PhoneChangeError.INVALID_CODE -> "验证码不正确"
     PhoneChangeError.MFA_EXPIRED -> "身份验证已过期，请关闭后重新开始"
-    PhoneChangeError.TRANSACTION_EXPIRED -> "验证码已过期，请重新发送"
+    PhoneChangeError.TRANSACTION_EXPIRED -> "交易已过期，请关闭后重新验证身份"
+    PhoneChangeError.TRANSACTION_USED -> "交易已使用，尚未确认改号成功，请关闭后重新验证身份"
     PhoneChangeError.ACCOUNT_CHANGED -> "账号已切换，请重新开始"
     PhoneChangeError.NETWORK, null -> "网络异常，请稍后重试"
 }

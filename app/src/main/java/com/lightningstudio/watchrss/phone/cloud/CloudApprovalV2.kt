@@ -1,6 +1,8 @@
 package com.lightningstudio.watchrss.phone.cloud
 
 import com.lightningstudio.watchrss.phone.account.PhoneAccountSession
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -66,16 +68,25 @@ class CloudApprovalV2 internal constructor(
     private suspend fun post(s: PhoneAccountSession, url: String, body: JSONObject): JSONObject =
         relay { client.v2Post(s, url, body, epoch) }
     private suspend fun get(s: PhoneAccountSession, url: String): JSONObject = relay { client.v2Get(s, url) }
-    suspend fun discover(): List<JSONObject> {
+    suspend fun discover(): List<JSONObject> = mutex.withLock {
+        if (state.value.phase !in setOf(CloudApprovalPhase.IDLE, CloudApprovalPhase.DISCOVERED)) return@withLock emptyList()
         val s = session(); prepare(s)
         val rows = get(s, "/functions/v1/cloud/approvals/v2/pending").getJSONArray("requests")
-        return (0 until rows.length()).map { rows.getJSONObject(it) }.filterNot { it.optString("deviceId").startsWith("reader-migration-") }.also {
+        (0 until rows.length()).map { rows.getJSONObject(it) }.filterNot { it.optString("deviceId").startsWith("reader-migration-") }.also {
             pending.value = it
             if (it.isNotEmpty() && state.value.phase in setOf(CloudApprovalPhase.IDLE, CloudApprovalPhase.DISCOVERED))
                 mutable.value = CloudApprovalState(CloudApprovalPhase.DISCOVERED, message = "有新设备请求授权")
         }
     }
-    suspend fun begin(): String = mutex.withLock {
+    suspend fun begin(): String = mutex.withLock { beginLocked() }
+    /** Activity recreation resumes exactly the existing requester nonce/transcript and request id. */
+    suspend fun beginOrResume(): String = mutex.withLock {
+        if (requester && owner?.userId == session().userId && epoch == client.knownEpoch(session()) &&
+            state.value.requestId.isNotBlank() && state.value.phase != CloudApprovalPhase.IDLE) return@withLock state.value.requestId
+        // A recreated view may cancel its waiter while create is in flight. Finish recording the request id.
+        withContext(NonCancellable) { beginLocked() }
+    }
+    private suspend fun beginLocked(): String {
         clear(); val s = session(); prepare(s); remember(s); requester = true
         val n = ByteArray(32).also(SecureRandom()::nextBytes); nonce = n
         val public = spki(s)
@@ -84,16 +95,24 @@ class CloudApprovalV2 internal constructor(
         current()
         target = JSONObject().put("deviceId", deviceId).put("publicKeySpki", public)
         mutable.value = CloudApprovalState(CloudApprovalPhase.WAITING, result.getString("requestId"), message = "等待已登录设备开始授权", isRequester = true)
-        state.value.requestId
+        return state.value.requestId
     }
     suspend fun start(targetRequest: JSONObject) = mutex.withLock {
         require(!targetRequest.getString("deviceId").startsWith("reader-migration-")) { "阅读迁移虚拟设备不能审批" }
-        clear(); val s = session(); prepare(s); remember(s); requester = false
         val id = targetRequest.optString("requestId", targetRequest.optString("id"))
+        if (!state.value.isRequester && state.value.requestId == id && state.value.phase in setOf(CloudApprovalPhase.WAITING, CloudApprovalPhase.COMPARE)) {
+            current(); return@withLock
+        }
+        check(state.value.phase !in setOf(CloudApprovalPhase.WAITING, CloudApprovalPhase.COMPARE)) { "已有授权正在核对" }
+        clear(); val s = session(); prepare(s); remember(s); requester = false
+        // Publish the busy state before any accept I/O, so discover cannot redisplay it.
+        mutable.value = CloudApprovalState(CloudApprovalPhase.WAITING, id, targetRequest.optString("displayName"), message = "正在开始核对")
         val key = CloudProtocolV2.signingKey(); signingKey = key
         val n = ByteArray(32).also(SecureRandom()::nextBytes); nonce = n
         // Freeze exactly the public key and commitment shown in the pending request.
-        target = JSONObject(targetRequest.toString()).put("approverSpki", key.public.encoded.base64())
+        target = JSONObject().apply { listOf("requestId", "deviceId", "publicKeySpki", "commitment").forEach { field ->
+            put(field, if (field == "requestId") id else targetRequest.getString(field))
+        } }.put("approverSpki", key.public.encoded.base64())
             .put("approverNonce", n.base64()).put("approverDeviceId", deviceId)
         post(s, path(id) + "/accept", JSONObject().put("approverDeviceId", deviceId)
             .put("approverSpki", key.public.encoded.base64()).put("approverNonce", n.base64()))
@@ -110,7 +129,7 @@ class CloudApprovalV2 internal constructor(
         }
         val pinned = requireNotNull(target)
         if (requester && remote.has("approverSpki") && !remote.isNull("approverSpki")) {
-            if (!pinned.has("approverSpki")) {
+            if (!pinned.hasValue("approverSpki")) {
                 listOf("approverSpki", "approverNonce", "approverDeviceId").forEach { pinned.put(it, remote.getString(it)) }
             } else listOf("approverSpki", "approverNonce", "approverDeviceId").forEach {
                 require(if(it == "approverSpki") pinned.getString(it).base64Bytes().contentEquals(remote.getString(it).base64Bytes()) else pinned.getString(it) == remote.getString(it))
@@ -132,7 +151,7 @@ class CloudApprovalV2 internal constructor(
             require(CloudProtocolV2.equal(pinned.getString("commitment"), CloudProtocolV2.approvalCommitment(
                 pinned.getString("publicKeySpki").base64Bytes(), pinned.getString("requesterNonce").base64Bytes()))) { "新设备承诺不匹配" }
         }
-        if (pinned.has("requesterNonce") && pinned.has("approverSpki")) {
+        if (pinned.hasValue("requesterNonce") && pinned.hasValue("approverSpki")) {
             val t = CloudProtocolV2.transcript(s.userId, requireNotNull(epoch), state.value.requestId, pinned.getString("deviceId"),
                 pinned.getString("publicKeySpki").base64Bytes(), pinned.getString("approverDeviceId"), pinned.getString("approverSpki").base64Bytes(),
                 pinned.getString("requesterNonce").base64Bytes(), pinned.getString("approverNonce").base64Bytes())
@@ -191,4 +210,14 @@ internal fun retryableCloudApprovalFailure(error: Exception): Boolean = when (er
     is CloudDeviceAuthorizationException -> false
     is java.io.IOException -> true
     else -> false
+}
+
+private fun JSONObject.hasValue(name: String): Boolean = has(name) && !isNull(name)
+
+/** Bounded consecutive transport failures; a successful poll restores the retry budget. */
+internal class CloudApprovalPollRetries(private val maximumRetries: Int = 3) {
+    private var failures = 0
+    fun succeeded() { failures = 0 }
+    fun retry(error: Exception): Boolean = retryableCloudApprovalFailure(error) && ++failures <= maximumRetries
+    val delayMillis: Long get() = (1500L * failures.coerceAtLeast(1)).coerceAtMost(6000L)
 }

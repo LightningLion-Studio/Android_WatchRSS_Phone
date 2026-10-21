@@ -66,7 +66,8 @@ class PhoneCloudClient(
             devices = json.getJSONArray("devices").objects { it.device() }.filterNot { it.deviceId.startsWith("reader-migration-") },
             keyEnvelopes = json.getJSONArray("keyEnvelopes").objects { it.keyEnvelope() },
             libraryEpoch = json.optString("libraryEpoch"), keyVersionFloor = json.optInt("keyVersionFloor"),
-            keyCommitments = parseCommitments(json))
+            keyCommitments = parseCommitments(json),
+            legacyKeyVersions = json.optJSONArray("legacyKeyVersions")?.let { versions -> (0 until versions.length()).map { versions.getInt(it) } } ?: emptyList())
         onBootstrap(session, result)
         return result
     }

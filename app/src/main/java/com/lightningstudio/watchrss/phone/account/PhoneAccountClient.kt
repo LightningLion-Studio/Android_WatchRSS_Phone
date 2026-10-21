@@ -33,6 +33,11 @@ class PhoneAccountClient(
             .use { it.jsonBody().getString("phoneMasked") }
     }
 
+    /** Reconcile a lost verify response against server identity, never a cached session label. */
+    suspend fun refreshPhoneChangeResult(session: PhoneAccountSession, requestedPhone: String): String? = withContext(Dispatchers.IO) {
+        reconcilePhoneChange(environment, session, requestedPhone, ::execute)
+    }
+
     suspend fun startLogin(phone: String): LoginProgress = withContext(Dispatchers.IO) {
         requireConfigured()
         post(

@@ -118,24 +118,29 @@ internal fun cloudQuotaBytes(bytes: Long): String = when {
     else -> "${bytes.coerceAtLeast(0)} B"
 }
 
-/** Merging is irreversible on the cloud side, so the safer choice is never preselected. */
+/** Both choices are irreversible, so each needs a second, explicit confirmation. */
 @Composable
 private fun LibraryOwnerDialog(onChoose: (merge: Boolean) -> Unit, onDismiss: () -> Unit) {
-    var confirmClear by remember { mutableStateOf(false) }
+    var pending by remember { mutableStateOf<Boolean?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (confirmClear) "清空本机资料？" else "本机资料属于另一个账号") },
+        title = { Text(when (pending) { true -> "合并到当前账号？"; false -> "清空本机资料？"; null -> "本机资料属于另一个账号" }) },
         text = {
-            Text(if (confirmClear) "本机的收藏、导入文章、订阅和阅读记录会被删除，之后从当前账号的云端重新同步。此操作不可撤销。"
-                else "这台手机上的资料是用另一个账号产生的。在你选择之前，不会上传到当前账号。\n\n合并：本机资料会上传并同步到当前账号的所有设备，无法撤回。\n清空：删除本机资料，改用当前账号的云端资料。")
+            Text(when (pending) {
+                true -> "本机资料会上传到当前账号，并同步到这个账号的所有设备，无法撤回。"
+                false -> "本机的收藏、导入文章、订阅和阅读记录会被删除，之后从当前账号的云端重新同步。此操作不可撤销。"
+                null -> "这台手机上的资料是用另一个账号产生的。在你选择之前，不会上传到当前账号。\n\n合并：本机资料会上传并同步到当前账号的所有设备。\n清空：删除本机资料，改用当前账号的云端资料。"
+            })
         },
         confirmButton = {
-            if (confirmClear) TextButton(onClick = { onChoose(false) }) { Text("清空") }
-            else TextButton(onClick = { confirmClear = true }) { Text("清空本机资料") }
+            when (val choice = pending) {
+                null -> TextButton(onClick = { pending = false }) { Text("清空本机资料") }
+                else -> TextButton(onClick = { onChoose(choice) }) { Text(if (choice) "合并" else "清空") }
+            }
         },
         dismissButton = {
-            if (confirmClear) TextButton(onClick = { confirmClear = false }) { Text("返回") }
-            else TextButton(onClick = { onChoose(true) }) { Text("合并到当前账号") }
+            if (pending == null) TextButton(onClick = { pending = true }) { Text("合并到当前账号") }
+            else TextButton(onClick = { pending = null }) { Text("返回") }
         }
     )
 }

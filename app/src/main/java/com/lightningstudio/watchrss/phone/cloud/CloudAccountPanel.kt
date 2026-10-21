@@ -27,6 +27,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -52,7 +53,7 @@ fun CloudAccountPanel(
     var networkPolicy by remember(userId) { mutableStateOf(service.settings.networkPolicy) }
     var bootstrap by remember(userId) { mutableStateOf<CloudBootstrap?>(null) }
     var setup by remember(userId) { mutableStateOf<RecoveryKeySetup?>(null) }
-    var showApprovalDialog by remember(userId) { mutableStateOf(false) }
+    var showApprovalDialog by rememberSaveable(userId) { mutableStateOf(false) }
     var recoveryInput by remember(userId) { mutableStateOf("") }
     var estimate by remember { mutableStateOf<CloudTransferEstimate?>(null) }
     var showHistory by remember(userId) { mutableStateOf(false) }

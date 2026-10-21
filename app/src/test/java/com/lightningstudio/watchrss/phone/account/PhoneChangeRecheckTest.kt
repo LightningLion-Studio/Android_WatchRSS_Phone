@@ -1,0 +1,99 @@
+package com.lightningstudio.watchrss.phone.account
+
+import kotlinx.coroutines.runBlocking
+import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
+import org.junit.Assert.*
+import org.junit.Test
+import java.io.IOException
+
+class PhoneChangeRecheckTest {
+    private val session = PhoneAccountSession("owner", "old-mask", "token", "refresh", Long.MAX_VALUE)
+    private val phone = "13800138000"
+    private fun proof() = LoginProgress("mfa", 1, listOf("sms"), true, null, "proof")
+    private fun failure(code: String, status: Int = 409) = PhoneAccountHttpException(status,"{\"error\":\"$code\"}")
+    private fun response(request: Request, body: String, status: Int = 200) = Response.Builder().request(request)
+        .protocol(Protocol.HTTP_1_1).code(status).message("test").body(body.toResponseBody("application/json".toMediaType())).build()
+
+    @Test fun localTransactionExpiryDiscardsConsumedProofAndRequiresFreshIdentityBeforeResending() = runBlocking {
+        var now = 100L; var starts = 0; var verifies = 0
+        val vm = PhoneChangeViewModel({"owner"}, {proof()}, {_,_->starts++;PhoneChangeTransaction("tx",200)}, {_,_->verifies++;"mask"}, {now})
+        vm.begin(); vm.sendCode(phone); now=201
+        vm.verifyCode("123456"); assertEquals(PhoneChangePhase.VERIFY_IDENTITY,vm.state.value.phase)
+        assertEquals(PhoneChangeError.TRANSACTION_EXPIRED,vm.state.value.error); assertNull(vm.state.value.loginProgress)
+        assertEquals(0,vm.state.value.expiresAt); vm.sendCode(phone)
+        assertEquals(1,starts); assertEquals(0,verifies)
+    }
+    @Test fun serverExpiredAndMissingTransactionsRequireNewIdentityInsteadOfReusingProof() = runBlocking {
+        for (code in listOf("phone_change_expired","phone_change_not_found")) {
+            var starts = 0
+            val vm=PhoneChangeViewModel({"owner"},{proof()},{_,_->starts++;PhoneChangeTransaction("tx",1000)}, {_,_->throw failure(code)},{100})
+            vm.begin();vm.sendCode(phone);vm.verifyCode("123456")
+            assertEquals(PhoneChangePhase.VERIFY_IDENTITY,vm.state.value.phase); assertEquals(PhoneChangeError.TRANSACTION_EXPIRED,vm.state.value.error)
+            vm.sendCode(phone);assertEquals(1,starts)
+        }
+    }
+    @Test fun usedTransactionReReadsServerAndReportsSuccessAfterLostVerifyResponse() = runBlocking {
+        var reads=0;var attempts=0
+        val vm=PhoneChangeViewModel({"owner"},{proof()},{_,_->PhoneChangeTransaction("tx",1000)}, {_,_->
+            if (++attempts==1) throw IOException("verify response lost") else throw failure("phone_change_used")
+        },{100}, refreshPhoneChangeResult={ requested -> assertEquals(phone,requested);reads++;"fresh-server-mask" })
+        vm.begin();vm.sendCode(phone);vm.verifyCode("123456")
+        assertEquals(PhoneChangeError.NETWORK,vm.state.value.error);assertEquals(PhoneChangePhase.ENTER_CODE,vm.state.value.phase)
+        vm.verifyCode("123456");assertEquals(PhoneChangePhase.COMPLETE,vm.state.value.phase)
+        assertEquals("fresh-server-mask",vm.state.value.phoneMasked);assertEquals(1,reads)
+    }
+    @Test fun usedTransactionWithoutMatchingServerPhoneIsNotSuccessOrAnExpiredCode() = runBlocking {
+        val vm=PhoneChangeViewModel({"owner"},{proof()},{_,_->PhoneChangeTransaction("tx",1000)}, {_,_->throw failure("phone_change_used")},
+            {100},refreshPhoneChangeResult={null})
+        vm.begin();vm.sendCode(phone);vm.verifyCode("123456")
+        assertEquals(PhoneChangePhase.VERIFY_IDENTITY,vm.state.value.phase);assertEquals(PhoneChangeError.TRANSACTION_USED,vm.state.value.error)
+    }
+    @Test fun usedTransactionRefreshFailureRemainsRetryableAndNeverClaimsSuccess() = runBlocking {
+        val vm=PhoneChangeViewModel({"owner"},{proof()},{_,_->PhoneChangeTransaction("tx",1000)}, {_,_->throw failure("phone_change_used")},
+            {100},refreshPhoneChangeResult={throw IOException("offline")})
+        vm.begin();vm.sendCode(phone);vm.verifyCode("123456")
+        assertEquals(PhoneChangePhase.ENTER_CODE,vm.state.value.phase);assertEquals(PhoneChangeError.NETWORK,vm.state.value.error)
+    }
+    @Test fun verify429InvalidatesTransactionAndRequiresNewIdentity() = runBlocking {
+        var verifies=0;var starts=0
+        val vm=PhoneChangeViewModel({"owner"},{proof()},{_,_->starts++;PhoneChangeTransaction("tx",1000)}, {_,_->verifies++;throw failure("phone_change_rate_limited",429)},{100})
+        vm.begin();vm.sendCode(phone);vm.verifyCode("123456")
+        assertEquals(PhoneChangePhase.VERIFY_IDENTITY,vm.state.value.phase);assertEquals(PhoneChangeError.RATE_LIMITED,vm.state.value.error)
+        assertEquals(0,vm.state.value.expiresAt);vm.verifyCode("123456")
+        assertEquals(PhoneChangeError.RATE_LIMITED,vm.state.value.error);vm.sendCode(phone)
+        assertEquals(1,starts);assertEquals(1,verifies)
+    }
+    @Test fun reconciliationReadsAuthenticatedIdentityAndRlsScopedProfileRatherThanCachedMask() {
+        val paths=mutableListOf<String>()
+        val result = reconcilePhoneChange(AccountEnvironment(backendBaseUrl="https://test.invalid/test",supabaseAnonKey="anon"),session,phone) { request ->
+            assertEquals("GET",request.method);assertEquals("Bearer token",request.header("authorization"));assertEquals("anon",request.header("apikey"))
+            paths+=request.url.encodedPath
+            if(request.url.encodedPath.endsWith("/user")) response(request,"{\"id\":\"owner\",\"phone\":\"8613800138000\"}")
+            else { assertEquals("eq.owner",request.url.queryParameter("user_id"));assertEquals("user_id,phone_masked",request.url.queryParameter("select"))
+                response(request,"[{\"user_id\":\"owner\",\"phone_masked\":\"server-mask\"}]") }
+        }
+        assertEquals("server-mask",result);assertEquals(listOf("/test/auth/v1/user","/test/rest/v1/profiles"),paths)
+        assertEquals("old-mask",session.phoneMasked) // Client reads never rewrite an unrelated cached session.
+    }
+    @Test fun reconciliationRejectsDifferentPhoneOrOwnerAndHttpFailures() {
+        var calls=0
+        assertNull(reconcilePhoneChange(AccountEnvironment(backendBaseUrl="https://test.invalid"),session,phone) { request ->
+            calls++; response(request,"{\"id\":\"owner\",\"phone\":\"13900139000\"}") })
+        assertEquals(1,calls)
+        assertThrows(IllegalStateException::class.java) {
+            reconcilePhoneChange(AccountEnvironment(backendBaseUrl="https://test.invalid"),session,phone) { request -> response(request,"{\"id\":\"other\",\"phone\":\"13800138000\"}") }
+        }
+        assertThrows(PhoneAccountHttpException::class.java) {
+            reconcilePhoneChange(AccountEnvironment(backendBaseUrl="https://test.invalid"),session,phone) { request -> response(request,"{}",403) }
+        }
+    }
+    @Test fun accountSwitchWhileReconcilingCannotFinishAnOldOwnersTransaction() = runBlocking {
+        var user="owner"
+        val vm=PhoneChangeViewModel({user},{proof()},{_,_->PhoneChangeTransaction("tx",1000)}, {_,_->throw failure("phone_change_used")},
+            {100},refreshPhoneChangeResult={user="other";"mask"})
+        vm.begin();vm.sendCode(phone);vm.verifyCode("123456")
+        assertEquals(PhoneChangeError.ACCOUNT_CHANGED,vm.state.value.error);assertNotEquals(PhoneChangePhase.COMPLETE,vm.state.value.phase)
+    }
+}

@@ -38,6 +38,15 @@ class PhoneAccountRepository(
         return masked
     }
 
+    suspend fun refreshPhoneChangeResult(requestedPhone: String): String? {
+        val expected = requireSession()
+        val masked = accountClient.refreshPhoneChangeResult(expected, requestedPhone) ?: return null
+        val current = requireSession()
+        check(current.userId == expected.userId) { "phone_change_account_changed" }
+        sessionStore.save(current.copy(phoneMasked = masked))
+        return masked
+    }
+
     suspend fun startLogin(phone: String): LoginProgress = accountClient.startLogin(phone)
 
     suspend fun loginWithPasswordFactor(transactionId: String, password: String): LoginProgress {

@@ -41,7 +41,8 @@ data class CloudBootstrap(
     val keyEnvelopes: List<StoredCloudKeyEnvelope>,
     val libraryEpoch: String = "",
     val keyVersionFloor: Int = 0,
-    val keyCommitments: List<CloudKeyCommitment> = emptyList()
+    val keyCommitments: List<CloudKeyCommitment> = emptyList(),
+    val legacyKeyVersions: List<Int> = emptyList()
 )
 
 data class CloudSnapshotHead(

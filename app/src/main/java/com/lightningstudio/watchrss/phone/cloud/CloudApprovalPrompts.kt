@@ -21,19 +21,26 @@ class CloudApprovalPrompts(private val service: () -> PhoneCloudSyncService, pri
     private var job: Job? = null
     private var dialog: AlertDialog? = null
     private var shown: String? = null
+    private var actionInFlight = false
+    private val pollRetries = CloudApprovalPollRetries()
     private val ignored = mutableSetOf<String>()
 
     fun resume(activity: Activity) {
         pause()
         job = scope.launch {
+            pollRetries.succeeded()
             while (isActive && !activity.isFinishing && !activity.isDestroyed) {
+                if (actionInFlight) { delay(250); continue }
                 val approvals = service().approvals
                 val state = approvals.state.value
                 val busy = state.phase in setOf(CloudApprovalPhase.WAITING, CloudApprovalPhase.COMPARE)
                 if (allowed() && owner() != null && !(state.isRequester && busy)) {
-                    try { if (busy) approvals.poll() else approvals.discover() }
+                    try { if (busy) approvals.poll() else approvals.discover(); pollRetries.succeeded() }
                     catch (e: CancellationException) { throw e }
-                    catch (_: Exception) { if (busy) fail(activity, approvals) }
+                    catch (e: Exception) {
+                        if (busy && pollRetries.retry(e)) { delay(pollRetries.delayMillis); continue }
+                        if (busy) fail(activity, approvals)
+                    }
                     render(activity, approvals)
                 } else if (!state.isRequester) close()
                 delay(if (busy) 1_500 else 15_000)
@@ -46,6 +53,7 @@ class CloudApprovalPrompts(private val service: () -> PhoneCloudSyncService, pri
     private fun close() { dialog?.setOnDismissListener(null); dialog?.dismiss(); dialog = null; shown = null }
 
     private fun render(activity: Activity, approvals: CloudApprovalV2) {
+        if (actionInFlight || activity.isFinishing || activity.isDestroyed) return
         val state = approvals.state.value
         if (state.isRequester) return
         when (state.phase) {
@@ -88,10 +96,14 @@ class CloudApprovalPrompts(private val service: () -> PhoneCloudSyncService, pri
     }
 
     private fun act(activity: Activity, approvals: CloudApprovalV2, step: suspend () -> Unit) {
+        if (actionInFlight) return
+        actionInFlight = true
+        close()
         scope.launch {
-            try { step(); render(activity, approvals) }
+            try { step(); pollRetries.succeeded() }
             catch (e: CancellationException) { throw e }
             catch (_: Exception) { fail(activity, approvals) }
+            finally { actionInFlight = false; render(activity, approvals) }
         }
     }
 

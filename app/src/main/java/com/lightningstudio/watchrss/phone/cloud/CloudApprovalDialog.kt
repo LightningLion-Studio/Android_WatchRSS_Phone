@@ -25,7 +25,7 @@ internal fun CloudApprovalDialog(service: PhoneCloudSyncService, onAuthorized: (
     var error by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(service) {
         try {
-            service.approvals.begin()
+            service.approvals.beginOrResume()
             while (true) {
                 try { service.approvals.poll() }
                 catch (e: CancellationException) { throw e }
@@ -35,7 +35,10 @@ internal fun CloudApprovalDialog(service: PhoneCloudSyncService, onAuthorized: (
                     continue
                 }
                 when (service.approvals.state.value.phase) {
-                    CloudApprovalPhase.DELIVERED -> { onAuthorized(service.loadBootstrap()); break }
+                    CloudApprovalPhase.DELIVERED -> {
+                        onAuthorized(service.loadBootstrap())
+                        service.approvals.clear(); onDismiss(); break
+                    }
                     CloudApprovalPhase.EXPIRED, CloudApprovalPhase.CANCELLED -> break
                     else -> delay(1500)
                 }
@@ -74,11 +77,11 @@ internal fun CloudApprovalDialog(service: PhoneCloudSyncService, onAuthorized: (
             if (comparing) TextButton(onClick = { scope.launch {
                 try { service.approvals.confirmMatches() } catch (e: CancellationException) { throw e } catch (_: Exception) { if (service.approvals.state.value.phase != CloudApprovalPhase.EXPIRED) error = "授权验证失败，请重新发起" }
             } }) { Text("一致") }
-            else if (finished) TextButton(onClick = onDismiss) { Text("关闭") }
+            else if (finished) TextButton(onClick = { service.approvals.clear(); onDismiss() }) { Text("关闭") }
         },
         dismissButton = {
             if (!finished) TextButton(onClick = { scope.launch {
-                try { service.approvals.reject() } catch (e: CancellationException) { throw e } catch (_: Exception) { } finally { onDismiss() }
+                try { service.approvals.reject() } catch (e: CancellationException) { throw e } catch (_: Exception) { } finally { service.approvals.clear(); onDismiss() }
             } }) { Text(if (comparing) "不一致" else "取消") }
         }
     )

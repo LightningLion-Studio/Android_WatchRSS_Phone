@@ -195,7 +195,7 @@ class PhoneCloudSyncService(
         if (changed) throw CloudTrustException()
         val keys = localKeys(session)
         val remoteDevice = bootstrap.devices.firstOrNull { it.deviceId == deviceId }
-        if (remoteDevice == null || remoteDevice.revokedAt != null) keyManager.clearDeviceKey(session.userId, deviceId)
+        clearRevokedCloudDeviceIdentity(bootstrap, deviceId) { keyManager.clearDeviceKey(session.userId, deviceId) }
         if (keys.isNotEmpty() && remoteDevice?.revokedAt != null) {
             keys.values.forEach { it.fill(0) }; invalidateEpoch(session); throw CloudTrustException()
         }
@@ -248,8 +248,7 @@ class PhoneCloudSyncService(
                         requireNotNull(keys[version - 1]), session.userId, bootstrap.libraryEpoch, version, commitment)
                     CloudKeyCommitment(version, commitment, proof)
                 }
-                try { client.storeCommitments(session, deviceId, rows, bootstrap.libraryEpoch) }
-                catch (error: CloudHttpException) { if (error.status != 409) throw error }
+                storeLegacyCommitments(client, session, deviceId, rows, bootstrap.libraryEpoch)
                 bootstrap = client.bootstrap(session)
                 checkCloudEpoch(session, operationEpoch)
             }
@@ -521,7 +520,7 @@ class PhoneCloudSyncService(
 
     suspend fun prepareFirstDevice(): RecoveryKeySetup = approvalMutex.withLock {
         val session = requireSession(); val bootstrap = client.bootstrap(session)
-        require(bootstrap.keyCommitments.isEmpty() && bootstrap.keyEnvelopes.none { it.recipientType == "recovery" }) { "账号已有恢复密钥，请使用恢复或批准" }
+        requireCloudFirstActivationAllowed(bootstrap)
         keyManager.createRecoverySetup(session.userId, keyVersion = bootstrap.keyVersionFloor + 1).also {
             pendingSetup?.pendingKey?.fill(0); pendingSetup = it; pendingSetupOwner = session.userId; pendingSetupEpoch = bootstrap.libraryEpoch
         }
@@ -543,6 +542,7 @@ class PhoneCloudSyncService(
             keyManager.saveAccountKey(session.userId, version, key, true); key.fill(0); pendingSetup = null
             return@withLock
         }
+        requireCloudFirstActivationAllowed(bootstrap)
         client.registerDevice(session, deviceId, "手机 · ${Build.MODEL}", keyManager.devicePublicKeySpki(session.userId, deviceId), version,
             CloudProtocolV2.attestation(key, session.userId, bootstrap.libraryEpoch, deviceId, keyManager.devicePublicKeySpki(session.userId, deviceId).base64Bytes()), version, expectedEpoch = bootstrap.libraryEpoch)
         client.rotate(session, rotationBody(session, bootstrap, setup, null), bootstrap.libraryEpoch)
@@ -567,7 +567,7 @@ class PhoneCloudSyncService(
                     val commitment = CloudProtocolV2.commitment(k, session.userId, bootstrap.libraryEpoch, v)
                     CloudKeyCommitment(v, commitment, if(v == recovered.keys.min()) null else CloudProtocolV2.rotationProof(requireNotNull(recovered[v-1]), session.userId, bootstrap.libraryEpoch, v, commitment))
                 }
-                try { client.storeCommitments(session, deviceId, rows, bootstrap.libraryEpoch) } catch(e: CloudHttpException) { if(e.status != 409) throw e }
+                storeLegacyCommitments(client, session, deviceId, rows, bootstrap.libraryEpoch)
                 val current = client.bootstrap(session); verifyKeys(session, current, recovered); checkApprovalOwner(session)
                 keyManager.saveVerifiedKeys(session.userId, recovered)
             } finally { entropy.fill(0); recovered.values.forEach { it.fill(0) } }
@@ -616,11 +616,8 @@ class PhoneCloudSyncService(
         _needsReapproval.value = bootstrap.devices.filter { it.revokedAt == null && !it.deviceId.startsWith("reader-migration-") && !deviceAuthenticated(session, bootstrap, it) }
     }
     private fun rotationBody(session: PhoneAccountSession, bootstrap: CloudBootstrap, setup: RecoveryKeySetup, previous: ByteArray?): JSONObject {
-        val v = setup.envelope.keyVersion; val commitment = CloudProtocolV2.commitment(setup.pendingKey, session.userId, bootstrap.libraryEpoch, v)
-        return JSONObject().put("createdByDeviceId", deviceId).put("deviceId", deviceId).put("keyVersion", v).put("commitment", commitment)
-            .put("rotationProof", previous?.let { CloudProtocolV2.rotationProof(it, session.userId, bootstrap.libraryEpoch, v, commitment) } ?: JSONObject.NULL)
-            .put("recoveryEnvelope", setup.envelope.wireJson().put("recipientType", "recovery").put("recipientDeviceId", JSONObject.NULL).put("createdByDeviceId", deviceId)).put("deviceEnvelope", CloudKeyEnvelopeCodec.createDeviceEnvelope(setup.pendingKey,
-                session.userId, deviceId, CloudKeyEnvelopeCodec.decodeP256PublicKey(keyManager.devicePublicKeySpki(session.userId, deviceId)), v).wireJson().put("recipientType", "device").put("recipientDeviceId", deviceId).put("createdByDeviceId", deviceId))
+        return cloudRotationBody(session.userId, bootstrap.libraryEpoch, deviceId,
+            keyManager.devicePublicKeySpki(session.userId, deviceId), setup, previous)
     }
     /** R2: one recovery entropy covers every version; retry an interrupted atomic write in memory. */
     suspend fun rotateAccountKey(words: List<String>): Int = approvalMutex.withLock {

@@ -1,0 +1,791 @@
+{
+  "articleCases": [
+    {
+      "articleId": "0f115db062b7c0dd030b16878c99dea5c354b49dc37b38eb8846179c7783e9d7",
+      "articleIdHash": "fcf4f37d6e6704bb2ea768ac8bf1037ddcadb20a24fb24c451c72af7611141cc",
+      "canonicalEntryLink": "https://example.com/",
+      "contentHash": null,
+      "dedupKey": "0f115db062b7c0dd030b16878c99dea5c354b49dc37b38eb8846179c7783e9d7",
+      "guid": null,
+      "input": "https://example.com",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://example.com/",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "561756a52bd8233a504c3196e0dacad5c8c6557cbd5f2c3aaa7d54dbb54cfa33",
+      "articleIdHash": "7f37cd83c37c0a597a622f8aa04b92a5e8642a43bbbaf3438f1a1500d28a4657",
+      "canonicalEntryLink": "https://www.example.com:8443/article?b=2&a=1",
+      "contentHash": null,
+      "dedupKey": "561756a52bd8233a504c3196e0dacad5c8c6557cbd5f2c3aaa7d54dbb54cfa33",
+      "guid": null,
+      "input": "https://www.Example.COM:8443/article?b=2&a=1#top",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://www.example.com:8443/article?b=2&a=1",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "349949a1537f8755165b96204603ce5318b53d2c9f9ccb4ac36455ecce016c50",
+      "articleIdHash": "5baa88ce07e592ab6ee50af71853fc89d5f68e60b79a036a2cc0af041b8c80ef",
+      "canonicalEntryLink": "http://example.com:8080/article",
+      "contentHash": null,
+      "dedupKey": "349949a1537f8755165b96204603ce5318b53d2c9f9ccb4ac36455ecce016c50",
+      "guid": null,
+      "input": "http://example.com:8080/article",
+      "name": "absolute-link",
+      "normalizedIdentity": "http://example.com:8080/article",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "632538290468e7a39c06323c9e3ae98f31072d641cbb37ea37917f56bbeb5539",
+      "articleIdHash": "9d9780581da41ffea54390016b34dad2092a04a57571814008ba3b61a231df2a",
+      "canonicalEntryLink": "https://example.com/article",
+      "contentHash": null,
+      "dedupKey": "632538290468e7a39c06323c9e3ae98f31072d641cbb37ea37917f56bbeb5539",
+      "guid": null,
+      "input": "https://example.com/a/../article",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://example.com/article",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "1b6427b0e9281257241a70879ef61b0979cc58c0714dcbc40810906831a7f23c",
+      "articleIdHash": "11c266b61c2ce5a7ecfe361318b18ce821fce8b5dfc753f3681d42837ca0944c",
+      "canonicalEntryLink": "https://example.com/article?x=%2F",
+      "contentHash": null,
+      "dedupKey": "1b6427b0e9281257241a70879ef61b0979cc58c0714dcbc40810906831a7f23c",
+      "guid": null,
+      "input": "https://example.com/article?x=%2F",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://example.com/article?x=%2F",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "632538290468e7a39c06323c9e3ae98f31072d641cbb37ea37917f56bbeb5539",
+      "articleIdHash": "9d9780581da41ffea54390016b34dad2092a04a57571814008ba3b61a231df2a",
+      "canonicalEntryLink": "https://example.com/article",
+      "contentHash": null,
+      "dedupKey": "632538290468e7a39c06323c9e3ae98f31072d641cbb37ea37917f56bbeb5539",
+      "guid": null,
+      "input": " https://example.com/article#fragment ",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://example.com/article",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "5999e75ea041cea1cdbc5d1376a271cf4a811157aef99b8da52da82d153f085e",
+      "articleIdHash": "cb63db2d7a690ab0fbc19b5820068d92d0cb161522aad3ae8e78216b87383504",
+      "canonicalEntryLink": "https://xn--fsqu00a.xn--0zwm56d/%E8%AE%A2%E9%98%85",
+      "contentHash": null,
+      "dedupKey": "5999e75ea041cea1cdbc5d1376a271cf4a811157aef99b8da52da82d153f085e",
+      "guid": null,
+      "input": "https://xn--fsqu00a.xn--0zwm56d/%E8%AE%A2%E9%98%85",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://xn--fsqu00a.xn--0zwm56d/%E8%AE%A2%E9%98%85",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "8dd785eed86b8cb6e25e8c8d390773f582fae9db3b2c275c737c7f71b086c6a2",
+      "articleIdHash": "40a0034205689363a21aa68e112dfb47785a4c859da5a3cdadc28b5563eecd8f",
+      "canonicalEntryLink": "https://example.com/feed?watchrss_entry=fixture-entry",
+      "contentHash": null,
+      "dedupKey": "8dd785eed86b8cb6e25e8c8d390773f582fae9db3b2c275c737c7f71b086c6a2",
+      "guid": null,
+      "input": "https://example.com/feed?watchrss_entry=fixture-entry",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://example.com/feed?watchrss_entry=fixture-entry",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "46a8af51b4821e4b62c16b3c1c76378870a07c7936b749ece4c06dcf674b513b",
+      "articleIdHash": "834522d69ac3deeb23cfdff31ffa2d2112f35cdb3eb4c196cd1cd7cbe58bd822",
+      "canonicalEntryLink": "https://xn--fsqu00a.xn--0zwm56d/%E8%AE%A2%E9%98%85?%E8%AF%AD%E8%A8%80=%E4%B8%AD%E6%96%87",
+      "contentHash": null,
+      "dedupKey": "46a8af51b4821e4b62c16b3c1c76378870a07c7936b749ece4c06dcf674b513b",
+      "guid": null,
+      "input": "https://例子.测试/文章/../订阅?语言=中文#标题",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://xn--fsqu00a.xn--0zwm56d/%E8%AE%A2%E9%98%85?%E8%AF%AD%E8%A8%80=%E4%B8%AD%E6%96%87",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "719c1daa3c80f3cff4ab4a48ee9ee959aded0e0ab0a122f9eede52d5b916b5f5",
+      "articleIdHash": "8824af3290d4b2f6ab5165d22d058e1e2e4839192ac74a3dc924a26e62f7a981",
+      "canonicalEntryLink": "https://xn--fa-hia.de/%E6%96%B0%E9%97%BB",
+      "contentHash": null,
+      "dedupKey": "719c1daa3c80f3cff4ab4a48ee9ee959aded0e0ab0a122f9eede52d5b916b5f5",
+      "guid": null,
+      "input": "https://faß.de/新闻",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://xn--fa-hia.de/%E6%96%B0%E9%97%BB",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "93d3015e6cb4e146e1a8d45f0ac5a563229bb0aafeacfac6311773e3b529ff1d",
+      "articleIdHash": "43440bddc1dbc9833d6b9d11e99f30a30f9753c9b2cf1db54cd840a660663fbd",
+      "canonicalEntryLink": "https://xn--wxaijb9b.gr/%CE%BD%CE%AD%CE%B1",
+      "contentHash": null,
+      "dedupKey": "93d3015e6cb4e146e1a8d45f0ac5a563229bb0aafeacfac6311773e3b529ff1d",
+      "guid": null,
+      "input": "https://Σόλος.gr/νέα",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://xn--wxaijb9b.gr/%CE%BD%CE%AD%CE%B1",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "d8286bb62d7336de6f09e666fffee8bd273eec45775f5c72aec4fbd1b3f4e3ff",
+      "articleIdHash": "904674cf69352dfa29ca3b7ca8e1d9e2a1252bc7c800b2aef73aba00dfbff1da",
+      "canonicalEntryLink": "https://example.com/a|b",
+      "contentHash": null,
+      "dedupKey": "d8286bb62d7336de6f09e666fffee8bd273eec45775f5c72aec4fbd1b3f4e3ff",
+      "guid": null,
+      "input": "https://example.com/a|b",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://example.com/a|b",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "b4d7ec697e33cef0429e2564ea148358522e5732705028d73643c0d52f756e82",
+      "articleIdHash": "ea51e984c24e3784db18986c20ec8acc392ab8436d213a56582a5795770753ee",
+      "canonicalEntryLink": "https://example.com/a^b",
+      "contentHash": null,
+      "dedupKey": "b4d7ec697e33cef0429e2564ea148358522e5732705028d73643c0d52f756e82",
+      "guid": null,
+      "input": "https://example.com/a^b",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://example.com/a^b",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "96dc4c499379b49bd53ddf917665118d36d1cd93b0949653241e52ddb751492c",
+      "articleIdHash": "743b58e34d6a297f34035c610f0e7ab7c705faa912d01a77cff5ca7d7fe3d796",
+      "canonicalEntryLink": "https://example.com/a%7Cb",
+      "contentHash": null,
+      "dedupKey": "96dc4c499379b49bd53ddf917665118d36d1cd93b0949653241e52ddb751492c",
+      "guid": null,
+      "input": "https://example.com/a%7Cb",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://example.com/a%7Cb",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "d375022420c8d553bc5ec32ee7316ba16ef3ae0ff99210a5847daaf28682f432",
+      "articleIdHash": "c789fd687af2effe617d1b3b2e726a1a41e81f47c348c41f88322da60caadadc",
+      "canonicalEntryLink": "https://example.com/a%5Eb",
+      "contentHash": null,
+      "dedupKey": "d375022420c8d553bc5ec32ee7316ba16ef3ae0ff99210a5847daaf28682f432",
+      "guid": null,
+      "input": "https://example.com/a%5Eb",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://example.com/a%5Eb",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "999274f901c9dad920fd5e6b4a8dae44c23a7de25fd93539f1b7ebae6c4ad193",
+      "articleIdHash": "08941cfed46394d05e220d629da3f96e4ff06ad1d4a24cefd3067df3b414d0b5",
+      "canonicalEntryLink": "https://example.com/feed?q=a`b",
+      "contentHash": null,
+      "dedupKey": "999274f901c9dad920fd5e6b4a8dae44c23a7de25fd93539f1b7ebae6c4ad193",
+      "guid": null,
+      "input": "https://example.com/feed?q=a`b",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://example.com/feed?q=a`b",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "93af8b909e44720ddba70f5fcdec27ceb6046d42d90f7c72f276a741cbc925e5",
+      "articleIdHash": "12eb039dd065ea119980e7e7351bdf145dce3be3b2860bed4518333bb8dce700",
+      "canonicalEntryLink": "https://example.com/%E6%96%87%E7%AB%A0",
+      "contentHash": null,
+      "dedupKey": "93af8b909e44720ddba70f5fcdec27ceb6046d42d90f7c72f276a741cbc925e5",
+      "guid": null,
+      "input": "https://example.com/a/%2e%2E/文章",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://example.com/%E6%96%87%E7%AB%A0",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "c9c680f9cd37e664bd912540a2636debd9157fa49b5a4412da364c7a246e3867",
+      "articleIdHash": "c555ec0b179250655a6dc40e936477388bedcd0744d799c4553504f5e70282bd",
+      "canonicalEntryLink": "http://[::ffff:808:808]/f",
+      "contentHash": null,
+      "dedupKey": "c9c680f9cd37e664bd912540a2636debd9157fa49b5a4412da364c7a246e3867",
+      "guid": null,
+      "input": "http://[0:0:0:0:0:ffff:808:808]/f",
+      "name": "absolute-link",
+      "normalizedIdentity": "http://[::ffff:808:808]/f",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "7aeceb60fdefe6621c0afac56f54c8852a1da23b1e5d6ae83bac593fd8266648",
+      "articleIdHash": "6e0ea1db18ebc584151411f7f101e7147655246852dd2315368b599d9553da76",
+      "canonicalEntryLink": "https://www.xn--fsqu00a.xn--0zwm56d:8443/%E6%96%87%E7%AB%A0/a|b^c?q=%E4%B8%AD%E6%96%87`&encoded=%7C%5E",
+      "contentHash": null,
+      "dedupKey": "7aeceb60fdefe6621c0afac56f54c8852a1da23b1e5d6ae83bac593fd8266648",
+      "guid": null,
+      "input": "https://www.例子.测试:8443/文章/a|b^c?q=中文`&encoded=%7C%5E#标题",
+      "name": "absolute-link",
+      "normalizedIdentity": "https://www.xn--fsqu00a.xn--0zwm56d:8443/%E6%96%87%E7%AB%A0/a|b^c?q=%E4%B8%AD%E6%96%87`&encoded=%7C%5E",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "3b97acffd5c638ce8414733dbaf4568690dcd651f182bcef2fe7623ee77f4121",
+      "articleIdHash": "4b54a215a41580b5eb948e13cea63af523ae05885fe7c8f1c80321b48872cb90",
+      "canonicalEntryLink": null,
+      "contentHash": null,
+      "dedupKey": "3b97acffd5c638ce8414733dbaf4568690dcd651f182bcef2fe7623ee77f4121",
+      "guid": " post-123 ",
+      "input": "",
+      "name": "guid-only",
+      "normalizedIdentity": "post-123",
+      "roundTripGroup": null,
+      "title": "Guid only"
+    },
+    {
+      "articleId": "fc89f2125d3f70fa29ade0f278294cc3e627b88693f44466c9162229cbb8df41",
+      "articleIdHash": "b0da8d47c84a3c507fcfcc1b8c590af797305108ea5fbb27609afb6d86574717",
+      "canonicalEntryLink": null,
+      "contentHash": null,
+      "dedupKey": "fc89f2125d3f70fa29ade0f278294cc3e627b88693f44466c9162229cbb8df41",
+      "guid": "tag:example.com,2026:post-1",
+      "input": "",
+      "name": "tag-guid",
+      "normalizedIdentity": "tag:example.com,2026:post-1",
+      "roundTripGroup": null,
+      "title": "Tag guid"
+    },
+    {
+      "articleId": "961c6ab5defb654a5bb67a4611a608174d096d27f1435a82ef888a9081b825ce",
+      "articleIdHash": "a0a1fdddfe215bf375537a27bef167059f4362d13d60fd22446185a52f041246",
+      "canonicalEntryLink": null,
+      "contentHash": null,
+      "dedupKey": "961c6ab5defb654a5bb67a4611a608174d096d27f1435a82ef888a9081b825ce",
+      "guid": "urn:uuid:1234",
+      "input": "",
+      "name": "urn-uuid-guid",
+      "normalizedIdentity": "urn:uuid:1234",
+      "roundTripGroup": null,
+      "title": "Urn guid"
+    },
+    {
+      "articleId": "fc89f2125d3f70fa29ade0f278294cc3e627b88693f44466c9162229cbb8df41",
+      "articleIdHash": "b0da8d47c84a3c507fcfcc1b8c590af797305108ea5fbb27609afb6d86574717",
+      "canonicalEntryLink": "https://example.com/post",
+      "contentHash": "230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5",
+      "dedupKey": "fc89f2125d3f70fa29ade0f278294cc3e627b88693f44466c9162229cbb8df41",
+      "guid": "tag:example.com,2026:post-1",
+      "input": "https://example.com/post",
+      "name": "guid-priority",
+      "normalizedIdentity": "tag:example.com,2026:post-1",
+      "roundTripGroup": null,
+      "title": "Priority"
+    },
+    {
+      "articleId": "666459075af465c1527f3ce032852b6e749f5785c4125d0b65b38136fa529c97",
+      "articleIdHash": "0ca4bc749bf64f1d53d3915aa41e5ae977a2d173027919e3d6e5bbe875f85c03",
+      "canonicalEntryLink": null,
+      "contentHash": null,
+      "dedupKey": "666459075af465c1527f3ce032852b6e749f5785c4125d0b65b38136fa529c97",
+      "guid": null,
+      "input": "tag:example.com,2026:post-1",
+      "name": "tag-link-is-not-guid",
+      "normalizedIdentity": "Tag fallback",
+      "roundTripGroup": null,
+      "title": "Tag fallback"
+    },
+    {
+      "articleId": "6289af13fb36fcb2b2bb9168c526527661a7879d6a65811d8229f9174f74e149",
+      "articleIdHash": "e84c5f1c6f110687655d1e273a92160321eca5ee16789691138c1cbd455613ca",
+      "canonicalEntryLink": null,
+      "contentHash": null,
+      "dedupKey": "6289af13fb36fcb2b2bb9168c526527661a7879d6a65811d8229f9174f74e149",
+      "guid": null,
+      "input": "urn:uuid:1234",
+      "name": "urn-link-is-not-guid",
+      "normalizedIdentity": "Urn fallback",
+      "roundTripGroup": null,
+      "title": "Urn fallback"
+    },
+    {
+      "articleId": "c75ebd29a0816481e15b932a1103aa61cb83c4d061d9e7459c5821defec92522",
+      "articleIdHash": "c9472b368cbe95a773e8754c61d3860eea2c2f235b8b341617a803db22f6dc51",
+      "canonicalEntryLink": null,
+      "contentHash": null,
+      "dedupKey": "c75ebd29a0816481e15b932a1103aa61cb83c4d061d9e7459c5821defec92522",
+      "guid": null,
+      "input": "example.com/post",
+      "name": "schemeless-link",
+      "normalizedIdentity": "No protocol",
+      "roundTripGroup": null,
+      "title": "No protocol"
+    },
+    {
+      "articleId": "86d8ed3241a9d232b5e5e0527d08f3e8bc36823830512e8b62ecff89667dfc75",
+      "articleIdHash": "7e37e4fd18f760247701c06975c0dc51c7399c20d8ce4096659d0d4cb3c4acde",
+      "canonicalEntryLink": null,
+      "contentHash": null,
+      "dedupKey": "86d8ed3241a9d232b5e5e0527d08f3e8bc36823830512e8b62ecff89667dfc75",
+      "guid": null,
+      "input": "/post/123",
+      "name": "relative-link",
+      "normalizedIdentity": "Relative fallback",
+      "roundTripGroup": null,
+      "title": "Relative fallback"
+    },
+    {
+      "articleId": "a3cfadc0b1ae167f704da300b692096c6dde5c486851249d4f287339a2c22d31",
+      "articleIdHash": "e1798767082f5eeabfb1b3d81a87d7741734ff460d9001deb47443e57e5182a4",
+      "canonicalEntryLink": null,
+      "contentHash": "24a225060015d36ac2507b199f561043ed5374faada4fb75c880c19017f40038",
+      "dedupKey": "a3cfadc0b1ae167f704da300b692096c6dde5c486851249d4f287339a2c22d31",
+      "guid": null,
+      "input": "",
+      "name": "empty-link-content-hash",
+      "normalizedIdentity": "24a225060015d36ac2507b199f561043ed5374faada4fb75c880c19017f40038",
+      "roundTripGroup": null,
+      "title": "Ignored title"
+    },
+    {
+      "articleId": "45937b7f2844297ec8e145a5c89fed21400cbec08fca199b84e5dcf315b83881",
+      "articleIdHash": "e94cc97f8a59603a2471be194f6593486390af253a2325cbcb39e1ddbcb5e22d",
+      "canonicalEntryLink": null,
+      "contentHash": null,
+      "dedupKey": "45937b7f2844297ec8e145a5c89fed21400cbec08fca199b84e5dcf315b83881",
+      "guid": " ",
+      "input": "",
+      "name": "empty-link-title",
+      "normalizedIdentity": "中文标题",
+      "roundTripGroup": null,
+      "title": " 中文标题 "
+    },
+    {
+      "articleId": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "articleIdHash": "cd372fb85148700fa88095e3492d3f9f5beb43e555e5ff26d95f5a6adc36f8e6",
+      "canonicalEntryLink": null,
+      "contentHash": null,
+      "dedupKey": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "guid": null,
+      "input": "",
+      "name": "all-empty",
+      "normalizedIdentity": "",
+      "roundTripGroup": null,
+      "title": ""
+    },
+    {
+      "articleId": "86f620345b6bbc28726c52a4aec873d7c04d082f16faba7e53dcda741d7b583a",
+      "articleIdHash": "2bbb3caa08bc9bb6e5a6e8a8fcae0f0f8bc05438bce0c706131362f02219cb42",
+      "canonicalEntryLink": "https://www.xn--fsqu00a.xn--0zwm56d:8443/%E6%96%B0%E9%97%BB?q=%E4%B8%AD%E6%96%87",
+      "contentHash": null,
+      "dedupKey": "86f620345b6bbc28726c52a4aec873d7c04d082f16faba7e53dcda741d7b583a",
+      "guid": null,
+      "input": "https://www.例子.测试:8443/文章/../新闻?q=中文#片段",
+      "name": "chinese-raw",
+      "normalizedIdentity": "https://www.xn--fsqu00a.xn--0zwm56d:8443/%E6%96%B0%E9%97%BB?q=%E4%B8%AD%E6%96%87",
+      "roundTripGroup": "chinese",
+      "title": "中文往返"
+    },
+    {
+      "articleId": "86f620345b6bbc28726c52a4aec873d7c04d082f16faba7e53dcda741d7b583a",
+      "articleIdHash": "2bbb3caa08bc9bb6e5a6e8a8fcae0f0f8bc05438bce0c706131362f02219cb42",
+      "canonicalEntryLink": "https://www.xn--fsqu00a.xn--0zwm56d:8443/%E6%96%B0%E9%97%BB?q=%E4%B8%AD%E6%96%87",
+      "contentHash": null,
+      "dedupKey": "86f620345b6bbc28726c52a4aec873d7c04d082f16faba7e53dcda741d7b583a",
+      "guid": null,
+      "input": "https://www.xn--fsqu00a.xn--0zwm56d:8443/%E6%96%B0%E9%97%BB?q=%E4%B8%AD%E6%96%87",
+      "name": "chinese-canonical",
+      "normalizedIdentity": "https://www.xn--fsqu00a.xn--0zwm56d:8443/%E6%96%B0%E9%97%BB?q=%E4%B8%AD%E6%96%87",
+      "roundTripGroup": "chinese",
+      "title": "中文往返"
+    }
+  ],
+  "articleIdRule": "articleId=backend dedup_key=SHA256(UTF8(non_empty(guid) ?? canonicalize_entry_link(link) ?? content_hash ?? trim(title))); articleIdHash=SHA256(UTF8(articleId))",
+  "backendUrlVersion": "2.5.8",
+  "legacyWebArticleCases": [
+    {
+      "articleId": "0f115db062b7c0dd030b16878c99dea5c354b49dc37b38eb8846179c7783e9d7",
+      "articleIdHash": "fcf4f37d6e6704bb2ea768ac8bf1037ddcadb20a24fb24c451c72af7611141cc",
+      "canonicalEntryLink": "https://example.com/",
+      "input": "https://example.com",
+      "normalizedIdentity": "https://example.com/"
+    },
+    {
+      "articleId": "9ae12370297a1b2f87d9f02eaa1b179610ee49b7b8b299985ce5e654badb0d7e",
+      "articleIdHash": "050dde92058502e2e2ea4e11cd6dfd417b6b3ddc328b4316b694f816af5b28c3",
+      "canonicalEntryLink": "https://www.example.com:8443/article?b=2&a=1",
+      "input": "https://www.Example.COM:8443/article?b=2&a=1#top",
+      "normalizedIdentity": "https://example.com/article?b=2&a=1"
+    },
+    {
+      "articleId": "fe4d187ebbd2235db23190c8022690f4ca8c67e29f8e48a86877b63efb7e6e70",
+      "articleIdHash": "da1db8b95eec8210dd879d4e1d711d8949474ae9d98536e6cfe015467f9c875b",
+      "canonicalEntryLink": "http://example.com:8080/article",
+      "input": "http://example.com:8080/article",
+      "normalizedIdentity": "http://example.com/article"
+    },
+    {
+      "articleId": "632538290468e7a39c06323c9e3ae98f31072d641cbb37ea37917f56bbeb5539",
+      "articleIdHash": "9d9780581da41ffea54390016b34dad2092a04a57571814008ba3b61a231df2a",
+      "canonicalEntryLink": "https://example.com/article",
+      "input": "https://example.com/a/../article",
+      "normalizedIdentity": "https://example.com/article"
+    },
+    {
+      "articleId": "1b6427b0e9281257241a70879ef61b0979cc58c0714dcbc40810906831a7f23c",
+      "articleIdHash": "11c266b61c2ce5a7ecfe361318b18ce821fce8b5dfc753f3681d42837ca0944c",
+      "canonicalEntryLink": "https://example.com/article?x=%2F",
+      "input": "https://example.com/article?x=%2F",
+      "normalizedIdentity": "https://example.com/article?x=%2F"
+    },
+    {
+      "articleId": "632538290468e7a39c06323c9e3ae98f31072d641cbb37ea37917f56bbeb5539",
+      "articleIdHash": "9d9780581da41ffea54390016b34dad2092a04a57571814008ba3b61a231df2a",
+      "canonicalEntryLink": "https://example.com/article",
+      "input": " https://example.com/article#fragment ",
+      "normalizedIdentity": "https://example.com/article"
+    },
+    {
+      "articleId": "5999e75ea041cea1cdbc5d1376a271cf4a811157aef99b8da52da82d153f085e",
+      "articleIdHash": "cb63db2d7a690ab0fbc19b5820068d92d0cb161522aad3ae8e78216b87383504",
+      "canonicalEntryLink": "https://xn--fsqu00a.xn--0zwm56d/%E8%AE%A2%E9%98%85",
+      "input": "https://xn--fsqu00a.xn--0zwm56d/%E8%AE%A2%E9%98%85",
+      "normalizedIdentity": "https://xn--fsqu00a.xn--0zwm56d/%E8%AE%A2%E9%98%85"
+    },
+    {
+      "articleId": "8dd785eed86b8cb6e25e8c8d390773f582fae9db3b2c275c737c7f71b086c6a2",
+      "articleIdHash": "40a0034205689363a21aa68e112dfb47785a4c859da5a3cdadc28b5563eecd8f",
+      "canonicalEntryLink": "https://example.com/feed?watchrss_entry=fixture-entry",
+      "input": "https://example.com/feed?watchrss_entry=fixture-entry",
+      "normalizedIdentity": "https://example.com/feed?watchrss_entry=fixture-entry"
+    },
+    {
+      "articleId": "46a8af51b4821e4b62c16b3c1c76378870a07c7936b749ece4c06dcf674b513b",
+      "articleIdHash": "834522d69ac3deeb23cfdff31ffa2d2112f35cdb3eb4c196cd1cd7cbe58bd822",
+      "canonicalEntryLink": "https://xn--fsqu00a.xn--0zwm56d/%E8%AE%A2%E9%98%85?%E8%AF%AD%E8%A8%80=%E4%B8%AD%E6%96%87",
+      "input": "https://例子.测试/文章/../订阅?语言=中文#标题",
+      "normalizedIdentity": "https://xn--fsqu00a.xn--0zwm56d/%E8%AE%A2%E9%98%85?%E8%AF%AD%E8%A8%80=%E4%B8%AD%E6%96%87"
+    },
+    {
+      "articleId": "719c1daa3c80f3cff4ab4a48ee9ee959aded0e0ab0a122f9eede52d5b916b5f5",
+      "articleIdHash": "8824af3290d4b2f6ab5165d22d058e1e2e4839192ac74a3dc924a26e62f7a981",
+      "canonicalEntryLink": "https://xn--fa-hia.de/%E6%96%B0%E9%97%BB",
+      "input": "https://faß.de/新闻",
+      "normalizedIdentity": "https://xn--fa-hia.de/%E6%96%B0%E9%97%BB"
+    },
+    {
+      "articleId": "93d3015e6cb4e146e1a8d45f0ac5a563229bb0aafeacfac6311773e3b529ff1d",
+      "articleIdHash": "43440bddc1dbc9833d6b9d11e99f30a30f9753c9b2cf1db54cd840a660663fbd",
+      "canonicalEntryLink": "https://xn--wxaijb9b.gr/%CE%BD%CE%AD%CE%B1",
+      "input": "https://Σόλος.gr/νέα",
+      "normalizedIdentity": "https://xn--wxaijb9b.gr/%CE%BD%CE%AD%CE%B1"
+    },
+    {
+      "articleId": "d8286bb62d7336de6f09e666fffee8bd273eec45775f5c72aec4fbd1b3f4e3ff",
+      "articleIdHash": "904674cf69352dfa29ca3b7ca8e1d9e2a1252bc7c800b2aef73aba00dfbff1da",
+      "canonicalEntryLink": "https://example.com/a|b",
+      "input": "https://example.com/a|b",
+      "normalizedIdentity": "https://example.com/a|b"
+    },
+    {
+      "articleId": "b4d7ec697e33cef0429e2564ea148358522e5732705028d73643c0d52f756e82",
+      "articleIdHash": "ea51e984c24e3784db18986c20ec8acc392ab8436d213a56582a5795770753ee",
+      "canonicalEntryLink": "https://example.com/a^b",
+      "input": "https://example.com/a^b",
+      "normalizedIdentity": "https://example.com/a^b"
+    },
+    {
+      "articleId": "96dc4c499379b49bd53ddf917665118d36d1cd93b0949653241e52ddb751492c",
+      "articleIdHash": "743b58e34d6a297f34035c610f0e7ab7c705faa912d01a77cff5ca7d7fe3d796",
+      "canonicalEntryLink": "https://example.com/a%7Cb",
+      "input": "https://example.com/a%7Cb",
+      "normalizedIdentity": "https://example.com/a%7Cb"
+    },
+    {
+      "articleId": "d375022420c8d553bc5ec32ee7316ba16ef3ae0ff99210a5847daaf28682f432",
+      "articleIdHash": "c789fd687af2effe617d1b3b2e726a1a41e81f47c348c41f88322da60caadadc",
+      "canonicalEntryLink": "https://example.com/a%5Eb",
+      "input": "https://example.com/a%5Eb",
+      "normalizedIdentity": "https://example.com/a%5Eb"
+    },
+    {
+      "articleId": "999274f901c9dad920fd5e6b4a8dae44c23a7de25fd93539f1b7ebae6c4ad193",
+      "articleIdHash": "08941cfed46394d05e220d629da3f96e4ff06ad1d4a24cefd3067df3b414d0b5",
+      "canonicalEntryLink": "https://example.com/feed?q=a`b",
+      "input": "https://example.com/feed?q=a`b",
+      "normalizedIdentity": "https://example.com/feed?q=a`b"
+    },
+    {
+      "articleId": "93af8b909e44720ddba70f5fcdec27ceb6046d42d90f7c72f276a741cbc925e5",
+      "articleIdHash": "12eb039dd065ea119980e7e7351bdf145dce3be3b2860bed4518333bb8dce700",
+      "canonicalEntryLink": "https://example.com/%E6%96%87%E7%AB%A0",
+      "input": "https://example.com/a/%2e%2E/文章",
+      "normalizedIdentity": "https://example.com/%E6%96%87%E7%AB%A0"
+    },
+    {
+      "articleId": "c9c680f9cd37e664bd912540a2636debd9157fa49b5a4412da364c7a246e3867",
+      "articleIdHash": "c555ec0b179250655a6dc40e936477388bedcd0744d799c4553504f5e70282bd",
+      "canonicalEntryLink": "http://[::ffff:808:808]/f",
+      "input": "http://[0:0:0:0:0:ffff:808:808]/f",
+      "normalizedIdentity": "http://[::ffff:808:808]/f"
+    },
+    {
+      "articleId": "ad7039d5a7513c749699badaf3c4b81973c69b5414766b2e39d91b90afead976",
+      "articleIdHash": "d89049d16c3516d8dd077f54bdea85b0aed771dce75002fc6f7ed4498d59276c",
+      "canonicalEntryLink": "https://www.xn--fsqu00a.xn--0zwm56d:8443/%E6%96%87%E7%AB%A0/a|b^c?q=%E4%B8%AD%E6%96%87`&encoded=%7C%5E",
+      "input": "https://www.例子.测试:8443/文章/a|b^c?q=中文`&encoded=%7C%5E#标题",
+      "normalizedIdentity": "https://xn--fsqu00a.xn--0zwm56d/%E6%96%87%E7%AB%A0/a|b^c?q=%E4%B8%AD%E6%96%87`&encoded=%7C%5E"
+    }
+  ],
+  "purpose": "SPEC R30/R37/R41; exact backend rss.rs source normalization and store_entry dedup_key rule",
+  "rejectedSources": [
+    {
+      "error": "invalid_rss_url",
+      "input": "ftp://example.com/feed"
+    },
+    {
+      "error": "invalid_rss_url",
+      "input": "https://user:pass@example.com/feed"
+    },
+    {
+      "error": "relative URL without a base",
+      "input": "example.com/feed"
+    },
+    {
+      "error": "rss_private_address_blocked",
+      "input": "http://127.0.0.1/feed"
+    },
+    {
+      "error": "rss_private_address_blocked",
+      "input": "http://192.168.1.1/rss"
+    },
+    {
+      "error": "rss_private_address_blocked",
+      "input": "http://192.0.2.1/rss"
+    },
+    {
+      "error": "rss_private_address_blocked",
+      "input": "https://[::1]/rss"
+    },
+    {
+      "error": "rss_private_address_blocked",
+      "input": "https://[2001:db8::1]/rss"
+    },
+    {
+      "error": "rss_private_address_blocked",
+      "input": "http://0177.0.0.1/feed"
+    },
+    {
+      "error": "rss_private_address_blocked",
+      "input": "http://[::ffff:127.0.0.1]/feed"
+    },
+    {
+      "error": "rss_private_address_blocked",
+      "input": "http://[::ffff:192.168.1.1]/feed"
+    },
+    {
+      "error": "invalid_rss_url",
+      "input": "https://user:@example.com/feed"
+    },
+    {
+      "error": "invalid international domain name",
+      "input": "https://a|b.example/feed"
+    },
+    {
+      "error": "invalid international domain name",
+      "input": "https://a^b.example/feed"
+    },
+    {
+      "error": "invalid IPv6 address",
+      "input": "http://[::ffff:8.8.8.008]/f"
+    },
+    {
+      "error": "invalid IPv6 address",
+      "input": "http://[8.8.8.8::]/f"
+    },
+    {
+      "error": "invalid IPv6 address",
+      "input": "http://[::ffff:-1:8]/f"
+    }
+  ],
+  "sourceCases": [
+    {
+      "canonicalUrl": "https://example.com/",
+      "input": "https://example.com",
+      "sourceKey": "0f115db062b7c0dd030b16878c99dea5c354b49dc37b38eb8846179c7783e9d7"
+    },
+    {
+      "canonicalUrl": "https://www.example.com/feed",
+      "input": " HTTPS://WWW.Example.COM:443/feed#top ",
+      "sourceKey": "673b9f48b5de2a2ee62407d3d865957c38cd408f2edd671e863926dcef639910"
+    },
+    {
+      "canonicalUrl": "http://example.com/rss?b=2&a=1",
+      "input": "http://Example.com:80/rss?b=2&a=1#frag",
+      "sourceKey": "abbf5bb71ca93f77d4c986ff0d34089659ce6c6e9f9786ba6e572179ab5de0e8"
+    },
+    {
+      "canonicalUrl": "https://example.com:8443/feed",
+      "input": "https://example.com:8443/a/../feed",
+      "sourceKey": "eb5b5d9ec47ce862ad4d85b8961b9bda84b09532e9946bb0b4bd218aea4c27fe"
+    },
+    {
+      "canonicalUrl": "https://example.com/a%2fb?x=%2F&x=2",
+      "input": "https://example.com/a%2fb?x=%2F&x=2",
+      "sourceKey": "30ca8c40c45b7741824cd3a1ace3b6eba6ea2988c1f7f89b2a956abc786a5595"
+    },
+    {
+      "canonicalUrl": "https://example.com/feed?",
+      "input": "https://example.com/feed?",
+      "sourceKey": "7048b9a6aee1d1dfdc592fceb7ed180bf57fcc86fcfa93d7abb3a67196c9d54d"
+    },
+    {
+      "canonicalUrl": "https://xn--fsqu00a.xn--0zwm56d/%E8%AE%A2%E9%98%85?%E8%AF%AD%E8%A8%80=%E4%B8%AD%E6%96%87",
+      "input": "https://例子.测试/订阅?语言=中文#标题",
+      "sourceKey": "46a8af51b4821e4b62c16b3c1c76378870a07c7936b749ece4c06dcf674b513b"
+    },
+    {
+      "canonicalUrl": "https://example.com/rss",
+      "input": "https://example.com/a/%2e%2E/rss",
+      "sourceKey": "157a72a2d301d759331e8b7400231102d3db9ccf9cec89047c73f63594524a01"
+    },
+    {
+      "canonicalUrl": "https://[2606:4700:4700::1111]/feed",
+      "input": "https://[2606:4700:4700::1111]:443/feed#top",
+      "sourceKey": "d2cacaaba41ba2afdb9fc5c3c494eb8b2e910f08950860c1cbf03dae5958de06"
+    },
+    {
+      "canonicalUrl": "https://8.8.8.8/feed",
+      "input": "https://8.8.8.8/feed",
+      "sourceKey": "8f653b4fd77055c3f58c747a100b1b73c5ce075f6637dda17b79e9b72ea35331"
+    },
+    {
+      "canonicalUrl": "https://example.com/a//b/",
+      "input": "https://example.com/a//b/",
+      "sourceKey": "cf104b9c27e37597875ac555d9825a242aeb8a5f5de42370307b688c9683acf6"
+    },
+    {
+      "canonicalUrl": "https://example.com/feed?q=a%20b",
+      "input": "https://example.com/feed?q=a b",
+      "sourceKey": "e66bb3a19a0499270dfd31f5a3ba49c8ebacfa50451e3e2ff2b95a75a6a7d34d"
+    },
+    {
+      "canonicalUrl": "https://xn--fa-hia.de/feed",
+      "input": "https://faß.de/feed",
+      "sourceKey": "f2f2e0450c790f50c17f605155c954efeed201b2beebb0e2f26c89c0dfd8344f"
+    },
+    {
+      "canonicalUrl": "https://xn--wxaijb9b.gr/feed",
+      "input": "https://Σόλος.gr/feed",
+      "sourceKey": "19d1a51390a32e9069f347af801e01d592cd434612908e66f8f3829663b8c91d"
+    },
+    {
+      "canonicalUrl": "http://8.8.8.8/feed",
+      "input": "http://134744072/feed",
+      "sourceKey": "a816fa692ea13f74b36173ad7093f2b7966aecf4f4331ec225f288792160f4ef"
+    },
+    {
+      "canonicalUrl": "http://8.8.8.8/feed",
+      "input": "http://0x08080808/feed",
+      "sourceKey": "a816fa692ea13f74b36173ad7093f2b7966aecf4f4331ec225f288792160f4ef"
+    },
+    {
+      "canonicalUrl": "http://8.8.8.8/feed",
+      "input": "http://010.010.010.010/feed",
+      "sourceKey": "a816fa692ea13f74b36173ad7093f2b7966aecf4f4331ec225f288792160f4ef"
+    },
+    {
+      "canonicalUrl": "https://example.com/a|b",
+      "input": "https://example.com/a|b",
+      "sourceKey": "d8286bb62d7336de6f09e666fffee8bd273eec45775f5c72aec4fbd1b3f4e3ff"
+    },
+    {
+      "canonicalUrl": "https://example.com/a^b",
+      "input": "https://example.com/a^b",
+      "sourceKey": "b4d7ec697e33cef0429e2564ea148358522e5732705028d73643c0d52f756e82"
+    },
+    {
+      "canonicalUrl": "https://example.com/a%7Cb",
+      "input": "https://example.com/a%7Cb",
+      "sourceKey": "96dc4c499379b49bd53ddf917665118d36d1cd93b0949653241e52ddb751492c"
+    },
+    {
+      "canonicalUrl": "https://example.com/a%5Eb",
+      "input": "https://example.com/a%5Eb",
+      "sourceKey": "d375022420c8d553bc5ec32ee7316ba16ef3ae0ff99210a5847daaf28682f432"
+    },
+    {
+      "canonicalUrl": "https://example.com/feed?q=a`b",
+      "input": "https://example.com/feed?q=a`b",
+      "sourceKey": "999274f901c9dad920fd5e6b4a8dae44c23a7de25fd93539f1b7ebae6c4ad193"
+    },
+    {
+      "canonicalUrl": "https://example.com/feed?q=a|b^c",
+      "input": "https://example.com/feed?q=a|b^c",
+      "sourceKey": "002b601597196585875aed7d617f416fa67ddf47fbba71e3978bb0c1e78bc68a"
+    },
+    {
+      "canonicalUrl": "https://example.com/feed?q=a%7Cb%5Ec",
+      "input": "https://example.com/feed?q=a%7Cb%5Ec",
+      "sourceKey": "c4db3a157626088790c6c5dec914761cb9b436958a24702eeda541e338436aed"
+    },
+    {
+      "canonicalUrl": "http://[::ffff:808:808]/f",
+      "input": "http://[0:0:0:0:0:ffff:808:808]/f",
+      "sourceKey": "c9c680f9cd37e664bd912540a2636debd9157fa49b5a4412da364c7a246e3867"
+    },
+    {
+      "canonicalUrl": "http://[::ffff:808:808]/f",
+      "input": "http://[::ffff:8.8.8.8]/f",
+      "sourceKey": "c9c680f9cd37e664bd912540a2636debd9157fa49b5a4412da364c7a246e3867"
+    },
+    {
+      "canonicalUrl": "http://[::808:808]/f",
+      "input": "http://[::8.8.8.8]/f",
+      "sourceKey": "01f5c241e34a367e2abbf73f5268c5d74202633021c7115d1dc62523d9abedd3"
+    },
+    {
+      "canonicalUrl": "https://xn--fsqu00a.xn--0zwm56d/%E8%AE%A2%E9%98%85/a|b^c?q=%E4%B8%AD%E6%96%87`&encoded=%7C%5E",
+      "input": "https://例子.测试/订阅/a|b^c?q=中文`&encoded=%7C%5E#标题",
+      "sourceKey": "c43ae8b058b754b51c7834254c269f82379240cb1736477782971541b91db03a"
+    },
+    {
+      "canonicalUrl": "https://xn--fsqu00a.xn--0zwm56d/rss",
+      "input": "https://%E4%BE%8B%E5%AD%90.%E6%B5%8B%E8%AF%95/rss",
+      "sourceKey": "c12299f552f309af6c2d184b95a904e10ec052a964ff38e9ef69664e15ba562c"
+    },
+    {
+      "canonicalUrl": "https://xn--xample-9ua.com/%E8%AE%A2%E9%98%85",
+      "input": "https://éxample.com/订阅",
+      "sourceKey": "ef9f3256cfa431a785f91e56b43f2e145852a0bb8fcb5351d382d60db206b6e0"
+    },
+    {
+      "canonicalUrl": "https://example.com/a%60b[1]%7B2%7D?q=%27[]{}\\^|`",
+      "input": "https://example.com/a`b[1]{2}?q='[]{}\\^|`",
+      "sourceKey": "f01d3c0376bfdfdda2b78cb1c3062cc6e1da3bfaa2fbb32c39141b97f8ec278f"
+    },
+    {
+      "canonicalUrl": "https://example.com/feed",
+      "input": "https://@example.com/feed",
+      "sourceKey": "92236c4e4c1108e7c39ad52278919a1a54d079a9b76133b0ede5c7a2467e4a26"
+    }
+  ],
+  "sourceKeyRule": "SHA256(UTF8(canonicalize_source_url(raw)))"
+}

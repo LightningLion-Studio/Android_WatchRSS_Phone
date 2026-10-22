@@ -20,7 +20,8 @@ class PhoneCloudClient(
     private val environment: AccountEnvironment,
     private val deviceAccessToken: () -> String? = { null },
     private val http: OkHttpClient = defaultHttpClient(),
-    private val refreshDeviceSession: suspend (String, String) -> Boolean = { _, _ -> false }
+    private val refreshDeviceSession: suspend (String, String) -> Boolean = { _, _ -> false },
+    private val downloadBackoff: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) }
 ) {
     val backendBaseUrl: String get() = environment.backendBaseUrl.trimEnd('/')
     private val epochs = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -316,18 +317,17 @@ class PhoneCloudClient(
         ).close()
     }
 
+    suspend fun resolveRssSource(session: PhoneAccountSession, sourceUrl: String): String =
+        post(session, "/functions/v1/rss/sources/resolve", JSONObject().put("url", sourceUrl)).use {
+            it.jsonBody().getJSONObject("source").getString("id").also { id -> require(id.matches(Regex("[A-Za-z0-9_-]+"))) }
+        }
+
     suspend fun rssInventory(
         session: PhoneAccountSession,
         sourceUrl: String,
         mode: CloudRssInventoryMode
     ): ImportedRssSource {
-        val sourceId = post(
-            session,
-            "/functions/v1/rss/sources/resolve",
-            JSONObject().apply { put("url", sourceUrl) }
-        ).use { response ->
-            response.jsonBody().getJSONObject("source").getString("id")
-        }
+        val sourceId = resolveRssSource(session, sourceUrl)
         val limit = if (mode == CloudRssInventoryMode.ALL) "all" else "128"
         return get(
             session,
@@ -337,6 +337,7 @@ class PhoneCloudClient(
             val source = json.getJSONObject("source")
             ImportedRssSource(
                 url = sourceUrl,
+                sourceId = sourceId,
                 title = source.optString("title"),
                 description = source.optString("description"),
                 siteUrl = source.nullableString("siteUrl"),
@@ -351,8 +352,10 @@ class PhoneCloudClient(
                         contentHtml = entry.nullableString("contentHtml"),
                         contentText = entry.nullableString("contentText").orEmpty(),
                         imageUrl = entry.nullableString("imageUrl"),
-                        guid = entry.nullableString("guid") ?: entryId,
-                        contentHash = entry.nullableString("contentHash")
+                        guid = entry.nullableString("guid"),
+                        contentHash = entry.nullableString("contentHash"),
+                        dedupKey = entry.nullableString("dedupKey"),
+                        identityLink = entry.nullableString("link")
                     )
                 }
             )
@@ -387,12 +390,13 @@ class PhoneCloudClient(
 
     suspend fun download(url: String, expectedSize: Long, expectedSha256: String): ByteArray =
         withContext(Dispatchers.IO) {
-            http.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
-                if (!response.isSuccessful) response.throwHttp()
-                val bytes = response.body?.bytes() ?: ByteArray(0)
-                require(bytes.size.toLong() == expectedSize) { "云对象长度不匹配" }
-                require(CloudSnapshotCodec.sha256(bytes) == expectedSha256) { "云对象哈希不匹配" }
-                bytes
+            retryCloudObjectDownload(downloadBackoff) {
+                http.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
+                    if (!response.isSuccessful) response.throwHttp()
+                    val bytes = response.body?.bytes() ?: ByteArray(0)
+                    if (bytes.size.toLong()!=expectedSize || CloudSnapshotCodec.sha256(bytes)!=expectedSha256) throw CloudDownloadIntegrityException()
+                    bytes
+                }
             }
         }
 

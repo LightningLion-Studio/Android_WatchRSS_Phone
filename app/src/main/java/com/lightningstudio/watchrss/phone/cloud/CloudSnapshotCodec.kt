@@ -233,8 +233,7 @@ class CloudSnapshotCodec(
         descriptor: CloudChunkDescriptor,
         blob: ByteArray
     ): ByteArray {
-        require(blob.size == descriptor.ciphertextBytes) { "加密块长度不匹配" }
-        require(sha256(blob) == descriptor.ciphertextSha256) { "加密块哈希不匹配" }
+        if (blob.size!=descriptor.ciphertextBytes || sha256(blob)!=descriptor.ciphertextSha256) throw CloudDownloadIntegrityException()
         require(blob.size > CHUNK_HEADER_BYTES + GCM_TAG_BYTES) { "加密块损坏" }
         require(blob.copyOfRange(0, CHUNK_MAGIC.size).contentEquals(CHUNK_MAGIC)) {
             "加密块格式无效"

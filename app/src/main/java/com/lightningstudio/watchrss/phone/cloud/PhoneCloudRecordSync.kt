@@ -16,19 +16,25 @@ internal class PhoneCloudRecordSync(
     private val accountKey: (String, Int) -> ByteArray?,
     private val checkOwner: (PhoneAccountSession) -> Unit,
     private val anchorVersion: (String) -> Int = { currentVersion(it) },
-    private val refreshKeys: suspend (PhoneAccountSession) -> Unit = {}
+    private val refreshKeys: suspend (PhoneAccountSession) -> Unit = {},
+    private val keepArticle: (suspend (JSONObject) -> Boolean)? = null,
+    private val afterPull: suspend (PhoneAccountSession) -> Unit = {},
+    private val canonicalArticleId: suspend (JSONObject) -> String = { it.getString("articleId") }
 ) {
-    suspend fun sync(session: PhoneAccountSession, allowUpload: Boolean, operationEpoch: String? = client.knownEpoch(session)) = withContext(Dispatchers.IO) {
+    suspend fun sync(session: PhoneAccountSession, allowUpload: Boolean, operationEpoch: String? = client.knownEpoch(session), requireAvailable: Boolean = false) = withContext(Dispatchers.IO) {
         expectedEpoch = operationEpoch
         try {
         replay(session)
-        if (!pull(session) || !allowUpload) return@withContext
+        if (!pull(session)) { if (requireAvailable) throw CloudRecordsUnavailableException(); return@withContext }
+        checkBoundOwner(session); afterPull(session)
+        if (!allowUpload) return@withContext
         for (attempt in 0..2) {
-            try { push(session); return@withContext }
+            try { push(session); cleanupRssIndexes(session,completedSavedIds=emptySet()); return@withContext }
             catch (error: CloudHttpException) {
                 if (error.status != 409 || !error.detail.contains("cloud_record_conflict") || attempt == 2) throw error
                 // Whole-batch conflict: merge winners, then regenerate candidates.
-                if (!pull(session)) return@withContext
+                if (!pull(session)) { if (requireAvailable) throw CloudRecordsUnavailableException(); return@withContext }
+                checkBoundOwner(session); afterPull(session)
             }
         }
         } finally { expectedEpoch = null }
@@ -89,15 +95,16 @@ internal class PhoneCloudRecordSync(
                     if (key == null) null else decode(session, key, id, envelope)
                 } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
                 finally { key?.fill(0) }
-                if (decoded == null || decoded.first !in setOf("article", "source")) {
+                if (decoded == null || decoded.first !in setOf("article", "source", "rss-state")) {
                     store.quarantine(client.scopeId(session), QuarantinedCloudRecord(id, rev, envelope.optInt("keyVersion"),
                         if (decoded != null) "unknown_kind" else if (key == null) "missing_key" else "invalid_record", envelope.toString(), item.optBoolean("tombstone")))
                     continue
                 }
                 val (kind, value) = decoded
                 val retired = item.optBoolean("tombstone") && !value.optBoolean("deleted")
-                if (!retired) {
+                if (!retired && !removedRssIndex(kind,value)) {
                     checkBoundOwner(session)
+                    if (kind == "rss-state") store.saveRssState(client.scopeId(session), value)
                     try { apply(session, kind, value) }
                     catch (_: org.json.JSONException) {
                         checkBoundOwner(session); store.quarantine(client.scopeId(session), QuarantinedCloudRecord(id, rev, envelope.optInt("keyVersion"), "invalid_fields", envelope.toString(), item.optBoolean("tombstone"))); continue
@@ -130,6 +137,8 @@ internal class PhoneCloudRecordSync(
                 checkBoundOwner(session); store.save(client.scopeId(session), id, rev, hashes.getValue(id))
                 val original = (0 until batch.length()).map { batch.getJSONObject(it) }.first { it.getString("recordId") == id }
                 store.saveRawEnvelope(client.scopeId(session), id, original.getJSONObject("envelope").toString())
+                val decoded = decode(session,key,id,original.getJSONObject("envelope"))
+                if (decoded.first == "rss-state") store.saveRssState(client.scopeId(session),decoded.second)
             }
             batch = JSONArray(); hashes = linkedMapOf()
         }
@@ -168,6 +177,68 @@ internal class PhoneCloudRecordSync(
             flush()
         } finally { key.fill(0); anchor.fill(0) }
     }
+    suspend fun retireSavedRssIndexes(session: PhoneAccountSession, operationEpoch: String, completedArticleIds: Set<String>) = withContext(Dispatchers.IO) {
+        expectedEpoch = operationEpoch
+        try { checkBoundOwner(session); cleanupRssIndexes(session,completedSavedIds=completedArticleIds) }
+        finally { expectedEpoch = null }
+    }
+
+    private fun removedRssIndex(kind: String, value: JSONObject): Boolean = kind == "article" && CloudContentPolicy.publicRss(value) &&
+        (value.optBoolean("rssIndexRetired") || (value.optBoolean("deleted") && !value.optBoolean("favoriteSaved") && !value.optBoolean("watchLaterSaved")))
+
+    /** Commit replacement interactions first; only then CAS-delete obsolete public index rows. */
+    private suspend fun cleanupRssIndexes(session: PhoneAccountSession, completedSavedIds: Set<String>) {
+        val keep=keepArticle ?: return
+        val owner=client.scopeId(session)
+        var after=""
+        var batch=JSONArray()
+        val saved=linkedMapOf<String,Pair<JSONObject,JSONObject>>()
+        suspend fun flush() {
+            if (batch.length()==0) return
+            checkBoundOwner(session)
+            val items=client.postRecords(session,batch,expectedEpoch).getJSONArray("items")
+            require(items.length()==saved.size)
+            require((0 until items.length()).map { items.getJSONObject(it).getString("recordId") }.toSet()==saved.keys)
+            for (i in 0 until items.length()) {
+                val result=items.getJSONObject(i);val id=result.getString("recordId")
+                val rev=result.getString("revision").also(::revision);val (value,env)=saved.getValue(id)
+                checkBoundOwner(session);store.save(owner,id,rev,PhoneCloudRecordCodec.hash("article",value));store.saveRawEnvelope(owner,id,env.toString())
+            }
+            batch=JSONArray();saved.clear()
+        }
+        while (true) {
+            val page=store.rawPage(owner,after,50)
+            if (page.isEmpty()) break
+            for ((id,raw) in page) {
+                checkBoundOwner(session)
+                val env=JSONObject(raw);val version=env.getInt("keyVersion")
+                val key=accountKey(session.userId,version) ?: error("缺少旧记录密钥")
+                val keys=idKeys(session)
+                try {
+                    val (kind,value)=PhoneCloudRecordCodec.decrypt(key,session.userId,id,env,keys)
+                    if (kind!="article" || !CloudContentPolicy.publicRss(value) || value.optBoolean("rssIndexRetired") || value.optBoolean("deleted")) continue
+                    val canonicalId=canonicalArticleId(value)
+                    if (keep(value) && canonicalId !in completedSavedIds) continue
+                    if (CloudContentPolicy.interacted(value)) {
+                        val sourceKey=runCatching { CloudRssSourceIdentity.sourceKey(value.getString("rssSourceUrl")) }.getOrNull() ?: continue
+                        val anchor=accountKey(session.userId,anchorVersion(session.userId)) ?: error("缺少锚定账号密钥")
+                        val replacement=try { PhoneCloudRecordCodec.id(anchor,session.userId,"rss-state",CloudContentPolicy.rssState(JSONObject(value.toString()).put("articleId",canonicalId),sourceKey)) } finally { anchor.fill(0) }
+                        if (store.record(owner,replacement)==null) continue
+                    }
+                    val identityKey=keys.first { PhoneCloudRecordCodec.id(it,session.userId,kind,value)==id }
+                    val clock=(CloudContentPolicy.interactionNumbers+listOf("updatedAt","importedAt","independentChangedAt","independentSortOrder")).maxOf { value.optLong(it) }
+                    val tombstone=JSONObject(value.toString()).put("deleted",true).put("favoriteSaved",false).put("watchLaterSaved",false)
+                        .put("rssIndexRetired",true).put("deletedAt",Math.addExact(maxOf(System.currentTimeMillis(),clock),1L))
+                    val encrypted=PhoneCloudRecordCodec.encrypt(key,session.userId,id,version,kind,tombstone,idKey=identityKey)
+                    val row=JSONObject().put("recordId",id).put("expectedRevision",store.record(owner,id)!!.first).put("tombstone",true).put("envelope",encrypted)
+                    if (batch.length()>=50 || batch.toString().toByteArray().size+row.toString().toByteArray().size>1000000) flush()
+                    batch.put(row);saved[id]=tombstone to encrypted
+                } finally { key.fill(0);keys.forEach { it.fill(0) } }
+            }
+            after=page.last().first
+        }
+        flush()
+    }
     private fun idKeys(session: PhoneAccountSession): List<ByteArray> =
         (anchorVersion(session.userId)..currentVersion(session.userId)).mapNotNull { accountKey(session.userId, it) }
     private fun decode(session: PhoneAccountSession, key: ByteArray, id: String, envelope: JSONObject): Pair<String, JSONObject> {
@@ -186,11 +257,13 @@ internal class PhoneCloudRecordSync(
             val decoded = try { decode(session, key, record.id, envelope) }
                 catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; continue }
                 finally { key.fill(0) }
-            if (decoded.first !in setOf("article", "source")) continue
+            if (decoded.first !in setOf("article", "source", "rss-state")) continue
             // A newer revision received since quarantine always wins.
             if ((store.record(owner, record.id)?.first?.toLong() ?: -1) <= record.revision.toLong()) {
                 val retired = record.tombstone && !decoded.second.optBoolean("deleted")
-                try { if (!retired) apply(session, decoded.first, decoded.second) }
+                try { if (!retired && !removedRssIndex(decoded.first,decoded.second)) {
+                    if (decoded.first == "rss-state") store.saveRssState(owner, decoded.second)
+                    apply(session, decoded.first, decoded.second) } }
                 catch (_: org.json.JSONException) { checkBoundOwner(session); continue }
                 catch (_: IllegalArgumentException) { checkBoundOwner(session); continue }
                 checkBoundOwner(session)

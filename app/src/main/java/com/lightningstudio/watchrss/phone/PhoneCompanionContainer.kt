@@ -236,6 +236,18 @@ class PhoneCompanionContainer(context: Context) {
         )
     }
 
+    private val publicRssClient by lazy { com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient(
+        environment = accountEnvironment,
+        deviceAccessToken = { appAccessCoordinator.deviceAccessToken },
+        refreshDeviceSession = { token, owner -> appAccessCoordinator.refreshRejectedDeviceSession(token, owner) }) }
+
+    private val rssChannelImporter by lazy {
+        com.lightningstudio.watchrss.phone.data.importer.RssChannelImporter(publicImport = { url ->
+            publicRssClient.rssInventory(accountRepository.session.value ?: error("请先登录后添加或刷新 RSS 频道"),
+                url, com.lightningstudio.watchrss.phone.cloud.CloudRssInventoryMode.ALL)
+        })
+    }
+
     val repository: PhoneCompanionRepository by lazy {
         PhoneCompanionRepository(
             savedItemDao = database.phoneSavedItemDao(),
@@ -245,8 +257,10 @@ class PhoneCompanionContainer(context: Context) {
             syncChangeLogDao = database.syncChangeLogDao(),
             syncPeerStateDao = database.syncPeerStateDao(),
             webArticleImporter = webArticleImporter::importUrl,
+            rssSourceImporter = rssChannelImporter::importUrl,
             articleContentStore = articleContentStore,
-            appMetaDao = database.appMetaDao()
+            appMetaDao = database.appMetaDao(),
+            cloudBackendBaseUrl = accountEnvironment.backendBaseUrl
         )
     }
 

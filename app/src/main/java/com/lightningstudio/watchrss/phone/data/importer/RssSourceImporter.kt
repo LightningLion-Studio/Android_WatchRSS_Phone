@@ -15,7 +15,8 @@ data class ImportedRssSource(
     val description: String,
     val siteUrl: String?,
     val imageUrl: String?,
-    val items: List<ImportedRssItem>
+    val items: List<ImportedRssItem>,
+    val sourceId: String? = null
 )
 
 data class ImportedRssItem(
@@ -26,7 +27,9 @@ data class ImportedRssItem(
     val contentText: String,
     val imageUrl: String?,
     val guid: String?,
-    val contentHash: String? = null
+    val contentHash: String? = null,
+    val dedupKey: String? = null,
+    val identityLink: String? = url
 )
 
 class RssSourceImporter(
@@ -127,15 +130,17 @@ private fun Element.toImportedRssItem(sourceUrl: String, index: Int): ImportedRs
         contentHtml = contentHtml,
         contentText = contentText.ifBlank { excerpt },
         imageUrl = media.imageUrl,
-        guid = guid
+        guid = guid,
+        identityLink = rawLink
     )
 }
 
 private fun Element.toImportedAtomItem(sourceUrl: String, index: Int): ImportedRssItem? {
     val guid = childTextAny("id").ifBlank { null }
-    val link = select("link[href]").firstOrNull { item ->
+    val rawLink = select("link[href]").firstOrNull { item ->
         item.attr("rel").isBlank() || item.attr("rel").equals("alternate", ignoreCase = true)
-    }?.absUrl("href")?.takeIf { it.isNotBlank() }
+    }?.attr("href")?.takeIf { it.isNotBlank() }
+    val link = rawLink?.let { resolveUrl(it,sourceUrl) }
     val url = link ?: syntheticItemUrl(sourceUrl, guid ?: childTextAny("title").ifBlank { index.toString() })
     val media = enclosureMedia(sourceUrl)
     val contentHtml = appendEnclosureMedia(
@@ -154,7 +159,8 @@ private fun Element.toImportedAtomItem(sourceUrl: String, index: Int): ImportedR
         contentHtml = contentHtml,
         contentText = contentText.ifBlank { excerpt },
         imageUrl = media.imageUrl ?: firstMediaUrl(sourceUrl),
-        guid = guid
+        guid = guid,
+        identityLink = rawLink
     )
 }
 

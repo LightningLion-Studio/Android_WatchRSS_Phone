@@ -106,6 +106,18 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
             preferences.getString(scoped(KEY_CONTENT_HASH), null)
         )
 
+    fun ensureRssChannelOnlyVersion(resetRecords: () -> Unit) {
+        val key = scoped("rss_channel_only_v1")
+        if (!preferences.getBoolean(key,false)) {
+            resetRecords()
+            check(preferences.edit().putBoolean(key,true).commit())
+        }
+    }
+
+    var lastSnapshotPublishedAt: Long
+        get() = preferences.getLong(scoped("last_snapshot_published_at_v3"), 0)
+        set(value) { check(preferences.edit().putLong(scoped("last_snapshot_published_at_v3"), value).commit()) }
+
     fun lastParentHeads(): String? = preferences.getString(scoped(KEY_PARENT_HEADS), null)
 
     fun markUploaded(
@@ -119,10 +131,50 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
             .apply()
     }
 
+    /** Revisit objects abandoned by the old generic-IllegalArgumentException classification. */
+    internal fun ensureRestoreFailureClassificationV2() {
+        val marker=scoped("restore_failure_rules_v2")
+        if (preferences.getBoolean(marker,false)) return
+        val edit=preferences.edit()
+        var removed=false
+        preferences.all.keys.filter { it.startsWith(scoped("abandoned_restore_v1:")) }.forEach { key ->
+            val rows=JSONObject(preferences.getString(key,"{}").orEmpty())
+            rows.keys().asSequence().toList().filter { rows.optString(it)=="private_object_unavailable" }.forEach {
+                rows.remove(it); removed=true
+            }
+            edit.putString(key,rows.toString())
+        }
+        if (removed) { edit.remove(scoped(KEY_APPLIED_FULL));edit.remove(scoped(KEY_APPLIED_STATE)) }
+        check(edit.putBoolean(marker,true).commit()) { "无法更新恢复校验状态" }
+    }
+
+    private fun abandonedRestoreKey(snapshotId: String): String = scoped("abandoned_restore_v1:" +
+        CloudSnapshotCodec.sha256(requireNotNull(libraryEpoch).toByteArray()) + ":" + snapshotId)
+
+    /** Permanent damage belongs to this immutable head, never to an article across future heads. */
+    @Synchronized
+    internal fun abandonRestore(snapshotId: String, warning: com.lightningstudio.watchrss.phone.data.backup.CloudRestoreWarning): Boolean {
+        require(warning.permanent)
+        val key=abandonedRestoreKey(snapshotId)
+        val rows=JSONObject(preferences.getString(key,"{}").orEmpty())
+        val id=warning.articleId.ifBlank { "unknown-private-entry" }
+        if (rows.has(id)) return false
+        rows.put(id,warning.reason)
+        check(preferences.edit().putString(key,rows.toString()).commit()) { "无法保存损坏条目跳过状态" }
+        return true
+    }
+
+    internal fun abandonedRestoreIds(snapshotId: String): Set<String> =
+        JSONObject(preferences.getString(abandonedRestoreKey(snapshotId),"{}").orEmpty()).keys().asSequence().toSet()
+
     fun clearLibraryState() {
+        val abandoned=preferences.edit()
+        preferences.all.keys.filter { it.startsWith(scoped("abandoned_restore_v1:")) }.forEach(abandoned::remove)
+        check(abandoned.commit())
         check(
             preferences.edit()
                 .remove(scoped(KEY_DEVICE_SEQUENCE))
+                .remove(scoped("last_snapshot_published_at_v3"))
                 .remove(scoped(KEY_APPLIED_FULL))
                 .remove(scoped(KEY_APPLIED_STATE))
                 .remove(scoped(KEY_CONTENT_HASH))

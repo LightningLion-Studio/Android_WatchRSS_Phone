@@ -1,0 +1,56 @@
+{
+  "description": "SPEC R37: rss.rs feed/entry normalization through anchor recordId and current-key encryption; synthetic inputs",
+  "backendUrlVersion": "2.5.8",
+  "feed": {
+    "canonicalUrl": "https://xn--fsqu00a.xn--0zwm56d/%E8%AE%A2%E9%98%85/a|b^c?q=%E4%B8%AD%E6%96%87`&encoded=%7C%5E",
+    "input": "https://例子.测试/订阅/a|b^c?q=中文`&encoded=%7C%5E#标题",
+    "sourceKey": "c43ae8b058b754b51c7834254c269f82379240cb1736477782971541b91db03a"
+  },
+  "entry": {
+    "articleId": "7aeceb60fdefe6621c0afac56f54c8852a1da23b1e5d6ae83bac593fd8266648",
+    "articleIdHash": "6e0ea1db18ebc584151411f7f101e7147655246852dd2315368b599d9553da76",
+    "canonicalEntryLink": "https://www.xn--fsqu00a.xn--0zwm56d:8443/%E6%96%87%E7%AB%A0/a|b^c?q=%E4%B8%AD%E6%96%87`&encoded=%7C%5E",
+    "contentHash": null,
+    "dedupKey": "7aeceb60fdefe6621c0afac56f54c8852a1da23b1e5d6ae83bac593fd8266648",
+    "guid": null,
+    "input": "https://www.例子.测试:8443/文章/a|b^c?q=中文`&encoded=%7C%5E#标题",
+    "name": "absolute-link",
+    "normalizedIdentity": "https://www.xn--fsqu00a.xn--0zwm56d:8443/%E6%96%87%E7%AB%A0/a|b^c?q=%E4%B8%AD%E6%96%87`&encoded=%7C%5E",
+    "roundTripGroup": null,
+    "title": ""
+  },
+  "userId": "rss-state-e2e-fixture",
+  "anchorKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "contentKeyHex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+  "keyVersion": 2,
+  "nonceHex": "000102030405060708090a0b",
+  "kind": "rss-state",
+  "value": {
+    "sourceId": "c43ae8b058b754b51c7834254c269f82379240cb1736477782971541b91db03a",
+    "articleIdHash": "6e0ea1db18ebc584151411f7f101e7147655246852dd2315368b599d9553da76",
+    "sourceDeviceId": "phone-e2e-fixture",
+    "isRead": true,
+    "readingProgress": 0.25,
+    "readingPositionBytes": 42,
+    "readingPositionContentHash": "e2e-body",
+    "readingPositionChangedAt": 1700000000000,
+    "favoriteSaved": true,
+    "favoriteChangedAt": 1700000000001,
+    "favoriteSortOrder": 1700000000001,
+    "watchLaterSaved": false,
+    "watchLaterChangedAt": 0,
+    "watchLaterSortOrder": 0,
+    "deleted": false,
+    "deletedAt": 0
+  },
+  "recordIdentityUtf8": "rss-state:c43ae8b058b754b51c7834254c269f82379240cb1736477782971541b91db03a:6e0ea1db18ebc584151411f7f101e7147655246852dd2315368b599d9553da76",
+  "recordId": "6f1748180df13b97c735894fa1e521795d35082a1ec6ab17f9d7b2cde8cdcb8a",
+  "aad": "watchrss-cloud-record-v1:rss-state-e2e-fixture:6f1748180df13b97c735894fa1e521795d35082a1ec6ab17f9d7b2cde8cdcb8a:2",
+  "plaintextUtf8": "{\"format\":\"watchrss-rss-record\",\"kind\":\"rss-state\",\"value\":{\"articleIdHash\":\"6e0ea1db18ebc584151411f7f101e7147655246852dd2315368b599d9553da76\",\"deleted\":false,\"deletedAt\":0,\"favoriteChangedAt\":1700000000001,\"favoriteSaved\":true,\"favoriteSortOrder\":1700000000001,\"isRead\":true,\"readingPositionBytes\":42,\"readingPositionChangedAt\":1700000000000,\"readingPositionContentHash\":\"e2e-body\",\"readingProgress\":0.25,\"sourceDeviceId\":\"phone-e2e-fixture\",\"sourceId\":\"c43ae8b058b754b51c7834254c269f82379240cb1736477782971541b91db03a\",\"watchLaterChangedAt\":0,\"watchLaterSaved\":false,\"watchLaterSortOrder\":0},\"version\":1}",
+  "envelope": {
+    "algorithm": "A256GCM",
+    "keyVersion": 2,
+    "nonceBase64": "AAECAwQFBgcICQoL",
+    "ciphertextBase64": "B1N6U7H7fPulnSoXBez4ZP5qiFoTs0qr3b1ck+couxUvCLPCSMDb5fSARxJQEDVCKJtS2Foq1pLknVF7Qyu6ROvqO7TPmAcZltk35s8koPXuVfK1SJB/wilSe+kLK1+7Q6Dc1DXmj37Q7gRw1slQLQlvUNc3TEzNPa/DIh+Y85wJ9sEzjPLmuxKhH48r+MO9PkzXZQy+1UKQzq1S+GQrLKJDKVaDTAEEMDBRogJQDoX3yOrNz2UcWcGDhWtnWp4WzgoaoJCKTnbBD4C8xDbWNV13w3hUIbshUZ15ShdhtMloZdqcG7v3WU5/+zE+CBCgO7cyKAKggzXGFsp9nIxw1NtN4RR9jCHtMZD+pelSkwbx+Bz5X5uqlW6eANdNeotIAUNpiaTYPsZ0VmqMokG3VWXtm1xaoybpkwko5qxGbFTNnUgPXJFGkXxlLF9xzVYisAm6TtDp7ef7LPtgkCgVoubwPk8MNd1uvIFffvsgpCE4/25+RwGcrnwSBZImezh5zTkE2cLmuSofI9/y8uLNf5/L7xlKqZAiOm/5UexpZvgfO3p9wWwsfxgbSQqfQ/XwKaUmhwMoxK3NYrxuS0bIsp5aOzs3ykGAviJGwyKlpFLU1fCbumJ0ODIjQ5ls7vrddzGGFOgOmXNgLPu6KGReidlLPotCSmrHKv/hhyvdqF9pk/EZd3JqEEq5ncy5j/IIWEIHJ8vcKjs/54kOI5WuM0UJ92u0VKjERJzB0yoL/WXEZotOUOFIumfJb/hgdH3HdqiWiahIAbpd8VBLrOwuWoUeFgR5/vMSNLAXQJCuxl6UQwhNsoJXHSBAE5s2FA=="
+  }
+}

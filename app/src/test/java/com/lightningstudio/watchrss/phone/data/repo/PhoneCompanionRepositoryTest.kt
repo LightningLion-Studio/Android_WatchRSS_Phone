@@ -421,9 +421,9 @@ class PhoneCompanionRepositoryTest {
         val result = repository.refreshRssSource("https://example.com/feed.xml")
 
         assertEquals(2, result.articleCount)
-        assertEquals("示例源更新", sourceDao.sources.single().title)
+        assertEquals("示例源", sourceDao.sources.single().title) // S8: subscription title is user-owned.
         val refreshedArticle = articleDao.items.first { it.url == "https://example.com/a" }
-        assertEquals("频道文章更新", refreshedArticle.title)
+        assertEquals("频道文章", refreshedArticle.title) // S8: retain the saved original.
         assertTrue(refreshedArticle.favoriteSaved)
         assertEquals(123L, refreshedArticle.favoriteChangedAt)
         assertTrue(articleDao.items.any { it.url == "https://example.com/b" })

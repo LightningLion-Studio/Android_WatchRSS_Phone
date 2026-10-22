@@ -7,6 +7,8 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetSnapshot
 import java.io.File
 
+data class CloudRestoreWarning(val articleId: String, val reason: String, val permanent: Boolean = false)
+
 enum class BackupImportMode {
     MERGE,
     REPLACE
@@ -39,7 +41,8 @@ data class BackupImportResult(
     val changedSourceCount: Int,
     val changedArticleCount: Int,
     val changedSavedItemCount: Int,
-    val changedAppMetaCount: Int
+    val changedAppMetaCount: Int,
+    val warnings: List<CloudRestoreWarning> = emptyList()
 )
 
 /**
@@ -63,7 +66,9 @@ internal data class WatchRssBackupSnapshot(
     val savedItems: List<PhoneSavedItemEntity>,
     val readerSnapshot: ReaderPresetSnapshot? = null,
     val readerResources: List<ReaderBackupResource> = emptyList(),
-    val appMeta: List<AppMetaEntity> = emptyList()
+    val appMeta: List<AppMetaEntity> = emptyList(),
+    val cloudContentOnly: Boolean = false,
+    val readWarnings: List<CloudRestoreWarning> = emptyList()
 ) {
     fun preview(): BackupPreview = BackupPreview(
         exportedAt = exportedAt,

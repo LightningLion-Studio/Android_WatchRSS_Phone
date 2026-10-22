@@ -57,6 +57,7 @@ fun DashboardCloudSyncBanner() {
             paused && state.phase in cloudActivePhases -> "当前传输完成后暂停，资料仍保留在本机与云端"
             paused -> "已停止后续自动同步，继续后立即检查更新"
             quotaFailed -> "云空间状态暂未更新，请稍后重试"
+            presentation.detail == null && state.pendingSnapshotUntil > System.currentTimeMillis() -> "资料变化已记下，稍后合并成一次备份"
             presentation.detail == null && recordError != null -> recordError
             else -> presentation.detail
         },

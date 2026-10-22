@@ -113,12 +113,9 @@ class WebArticleImporter(
         fun stableArticleId(url: String): String = sha256(normalizeForIdentity(url))
 
         fun normalizeForIdentity(url: String): String {
-            val uri = URI(normalizeUrl(url))
-            val scheme = uri.scheme.lowercase()
-            val host = uri.host.orEmpty().lowercase().removePrefix("www.")
-            val path = uri.rawPath.orEmpty().ifBlank { "/" }
-            val query = uri.rawQuery?.takeIf { it.isNotBlank() }?.let { "?$it" }.orEmpty()
-            return "$scheme://$host$path$query"
+            val trimmed = url.trim().removeSurrounding("<", ">").trim()
+            val withScheme = if (Regex("(?i)^https?://").containsMatchIn(trimmed)) trimmed else "https://$trimmed"
+            return com.lightningstudio.watchrss.phone.cloud.CloudRssSourceIdentity.articleIdentity(withScheme)
         }
 
         fun sha256(value: String): String {

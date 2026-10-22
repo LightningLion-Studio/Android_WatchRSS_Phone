@@ -1,0 +1,58 @@
+{
+  "purpose": "SPEC S8 rss-state v1 plaintext and anchored record identity",
+  "userId": "rss-state-fixture-user",
+  "keyVersion": 2,
+  "anchorKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "contentKeyHex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+  "nonceHex": "000102030405060708090a0b",
+  "value": {
+    "sourceId": "pool-fixture",
+    "articleIdHash": "07945af9b2c118f484f917b4f2421f358d3e5e6ab5154fb3f909c37c0b077ed9",
+    "sourceDeviceId": "fixture-reading-origin",
+    "isRead": true,
+    "readingProgress": 0.375,
+    "readingPositionBytes": 1234,
+    "readingPositionContentHash": "fixture-body-version",
+    "readingPositionChangedAt": 200,
+    "favoriteSaved": false,
+    "favoriteChangedAt": 101,
+    "favoriteSortOrder": 0,
+    "watchLaterSaved": true,
+    "watchLaterChangedAt": 150,
+    "watchLaterSortOrder": 120,
+    "deleted": false,
+    "deletedAt": 0
+  },
+  "document": {
+    "format": "watchrss-rss-record",
+    "kind": "rss-state",
+    "value": {
+      "articleIdHash": "07945af9b2c118f484f917b4f2421f358d3e5e6ab5154fb3f909c37c0b077ed9",
+      "deleted": false,
+      "deletedAt": 0,
+      "favoriteChangedAt": 101,
+      "favoriteSaved": false,
+      "favoriteSortOrder": 0,
+      "isRead": true,
+      "readingPositionBytes": 1234,
+      "readingPositionChangedAt": 200,
+      "readingPositionContentHash": "fixture-body-version",
+      "readingProgress": 0.375,
+      "sourceDeviceId": "fixture-reading-origin",
+      "sourceId": "pool-fixture",
+      "watchLaterChangedAt": 150,
+      "watchLaterSaved": true,
+      "watchLaterSortOrder": 120
+    },
+    "version": 1
+  },
+  "plaintextUtf8": "{\"format\":\"watchrss-rss-record\",\"kind\":\"rss-state\",\"value\":{\"articleIdHash\":\"07945af9b2c118f484f917b4f2421f358d3e5e6ab5154fb3f909c37c0b077ed9\",\"deleted\":false,\"deletedAt\":0,\"favoriteChangedAt\":101,\"favoriteSaved\":false,\"favoriteSortOrder\":0,\"isRead\":true,\"readingPositionBytes\":1234,\"readingPositionChangedAt\":200,\"readingPositionContentHash\":\"fixture-body-version\",\"readingProgress\":0.375,\"sourceDeviceId\":\"fixture-reading-origin\",\"sourceId\":\"pool-fixture\",\"watchLaterChangedAt\":150,\"watchLaterSaved\":true,\"watchLaterSortOrder\":120},\"version\":1}",
+  "recordId": "83695dc641f36e0ee969826d2596c2200d0716bcdcb7bc5230483c4ece2b91fe",
+  "aad": "watchrss-cloud-record-v1:rss-state-fixture-user:83695dc641f36e0ee969826d2596c2200d0716bcdcb7bc5230483c4ece2b91fe:2",
+  "envelope": {
+    "algorithm": "A256GCM",
+    "keyVersion": 2,
+    "nonceBase64": "AAECAwQFBgcICQoL",
+    "ciphertextBase64": "mq/XScFdo5dvWnqTzLKZEcum0LT28sK4vamOWTbObtEozJZwNx5x9KYDf5szlOJipLH0qcbEkH4ss2uvRKcTXfPV98vgD7H4pWb+ujWfSDPqQF3ueQ/tPFgEQ6Y21YLuRnob/PSlmyQ+gz9Fh7GGUibkv33wOVmVRMa/Nl3ZfNdSApqDMwb/+T8uMo3bnUu9QbqLKHqVBQfUr1ONckf+H7bKe96HW5vwLe3NWygUYngA1yPOUyk8QVTGhH9RQ+dWTUzrt80CSdZ1M93Gf/s0RW4NhOfXOPTVDfcCSiwpLRARcWhclcI6fEdMSPzNo5P6za0/8k61zu/Sd4YThADDV9JZaNqhv+CatNMSeIyQlrIk2FtH8iMdeem8Kyrp8TZ6afmMbd3H08aqPYkwn6PiBi8FSAitS4LPDlRCBvenpF09J0+hARP3tGVBaLHPy5D517F6ZpLvyx5PP+DtsZ5xSbw331+YQKyvrWxDX3athh5RLzhgBNa8xtIOJf89tFb7p55LKX7H2ptuXfqTeImMBUgD4ph/Wx07AnSdP6ydTEtYP7H9LP3BLLK/K2gvPEGXmzKJQA7jyWpgFZiRTEc8URbS8xTrcRjto7NsXE3FxSoIswat2jtuGjbhFQDaNNappAAW29q7cRK5Y6f9xZqmrYq4yW3IBWmeelrm/Dm29RV4j0owcQ4Mb5qkZKn89D1Uxx67QmPLlwxliczqhhtPKXVW0Vleu9lLKfn64JVgYvybbw=="
+  }
+}

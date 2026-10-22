@@ -14,8 +14,8 @@ internal object PhoneCloudRecordCodec {
     private fun key(accountKey: ByteArray, user: String, domain: String) =
         CloudSnapshotCodec.hkdfSha256(accountKey, user.toByteArray(Charsets.UTF_8), domain.toByteArray(Charsets.UTF_8), 32)
     fun id(accountKey: ByteArray, user: String, kind: String, value: JSONObject): String {
-        require(kind == "article" || kind == "source")
-        val identity = value.getString(if (kind == "article") "articleId" else "url")
+        require(kind in setOf("article", "source", "rss-state"))
+        val identity = if (kind == "rss-state") value.getString("sourceId") + ":" + value.getString("articleIdHash") else value.getString(if (kind == "article") "articleId" else "url")
         require(identity.isNotBlank())
         val derived = key(accountKey, user, "watchrss/cloud/record-id/v1")
         return try { Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(derived, "HmacSHA256")) }
@@ -31,12 +31,20 @@ internal object PhoneCloudRecordCodec {
         else -> value.toString()
     }
     fun hash(kind: String, value: JSONObject): String {
+        if (kind == "rss-state") {
+            val normalized = JSONObject(value.toString()).apply {
+                remove("sourceDeviceId")
+                put("readingProgress", kotlin.math.floor(optDouble("readingProgress",0.0).coerceIn(0.0,1.0) * 1_000_000.0 + 0.5) / 1_000_000.0)
+            }
+            return CloudSnapshotCodec.sha256("$kind:${canonical(normalized)}".toByteArray(Charsets.UTF_8))
+        }
         // Cross-client serializers omit nullable/default fields differently. Device
         // provenance and source creation time are not independently merged state.
         val normalized = JSONObject()
+        val privateSource = kind == "source" && com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.isImportedContentUrl(value.optString("url"))
         val strings = if (kind == "article") listOf("articleId", "url", "title", "siteName", "excerpt", "contentHash", "readingPositionContentHash")
-            else listOf("url", "title", "description")
-        val nullable = if (kind == "article") listOf("imageUrl", "rssSourceUrl", "rssSourceTitle") else listOf("siteUrl", "imageUrl")
+            else if (privateSource) listOf("url", "title", "description") else listOf("url", "sourceId", "title")
+        val nullable = if (kind == "article") listOf("imageUrl", "rssSourceUrl", "rssSourceTitle") else if (privateSource) listOf("siteUrl", "imageUrl") else emptyList()
         val numbers = if (kind == "article") listOf("importedAt", "updatedAt", "independentChangedAt", "independentSortOrder", "favoriteChangedAt", "favoriteSortOrder", "watchLaterChangedAt", "watchLaterSortOrder", "deletedAt", "readingPositionBytes", "readingPositionChangedAt")
             else listOf("updatedAt", "sortOrder", "deletedAt")
         val booleans = if (kind == "article") listOf("independentSaved", "favoriteSaved", "watchLaterSaved", "deleted", "isRead")
@@ -53,9 +61,13 @@ internal object PhoneCloudRecordCodec {
     }
     fun validate(kind: String, value: JSONObject) {
         require(kind.isNotBlank())
-        if (kind !in setOf("article", "source")) return
+        if (kind !in setOf("article", "source", "rss-state")) return
         require(listOf("contentText", "contentHtml", "contentTextGzip", "contentHtmlGzip", "body", "chapters").none(value::has)) { "记录不得包含正文" }
-        require(value.getString(if (kind == "article") "articleId" else "url").isNotBlank())
+        if (kind == "rss-state") {
+            require(value.getString("sourceId").isNotBlank())
+            require(value.getString("articleIdHash").matches(Regex("[0-9a-f]{64}")))
+            require(value.keys().asSequence().all { it in CloudContentPolicy.interactionNumbers + CloudContentPolicy.interactionBooleans + listOf("sourceId", "articleIdHash", "readingProgress", "readingPositionContentHash", "sourceDeviceId") })
+        } else require(value.getString(if (kind == "article") "articleId" else "url").isNotBlank())
         listOf("updatedAt", "deletedAt", "readingPositionChangedAt", "favoriteChangedAt", "watchLaterChangedAt", "independentChangedAt").forEach {
             if (value.has(it)) require(value.get(it) is Number && value.getDouble(it).isFinite() && value.getDouble(it) >= 0)
         }
@@ -98,7 +110,7 @@ internal object PhoneCloudRecordCodec {
             require(root.getString("format") == "watchrss-rss-record" && root.getInt("version") == 1)
             val kind = root.getString("kind"); val value = root.getJSONObject("value")
             validate(kind, value)
-            if (kind in setOf("article", "source")) require(idKeys.any { id(it, user, kind, value) == recordId })
+            if (kind in setOf("article", "source", "rss-state")) require(idKeys.any { id(it, user, kind, value) == recordId })
             return kind to value
         } catch (_: Exception) {
             // JSON errors may quote decrypted data. Never attach the original

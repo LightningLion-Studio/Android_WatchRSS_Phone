@@ -5,6 +5,11 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 /** Feed discovery must not reset user state or replace a cached full body with a summary. */
 internal fun PhoneArticleEntity.withRssLocalStateFrom(existing: PhoneArticleEntity?): PhoneArticleEntity {
     if (existing == null) return this
+    // A saved original is private content and outlives changes/expiry in the public pool.
+    if ((existing.favoriteSaved || existing.watchLaterSaved) && existing.articleId == articleId) {
+        return if (existing.rssSourceUrl == rssSourceUrl) existing else existing.copy(
+            rssSourceUrl = rssSourceUrl, rssSourceTitle = rssSourceTitle, updatedAt = updatedAt)
+    }
     val keepBody = contentHash == existing.contentHash &&
         (existing.contentText.isNotBlank() || !existing.contentHtml.isNullOrBlank())
     return copy(

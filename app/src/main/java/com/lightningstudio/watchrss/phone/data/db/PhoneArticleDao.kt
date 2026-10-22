@@ -4,13 +4,20 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface PhoneArticleDao {
-    @Query("""SELECT * FROM phone_articles WHERE articleId>:after AND
+    @Transaction
+    suspend fun upsertRssIdentityRows(articles: List<PhoneArticleEntity>, retiredIds: List<String>) {
+        upsertAll(articles)
+        if (retiredIds.isNotEmpty()) deleteByIds(retiredIds)
+    }
+
+    @Query("""SELECT * FROM phone_articles WHERE articleId>:after AND deleted=0 AND
         (url LIKE 'https://watchrss.local/import-%' OR rssSourceUrl LIKE 'https://watchrss.local/import-%'
-         OR (rssSourceUrl IS NULL OR rssSourceUrl=''))
+         OR (rssSourceUrl IS NULL OR rssSourceUrl='') OR favoriteSaved=1 OR watchLaterSaved=1)
         ORDER BY articleId LIMIT :limit""")
     suspend fun privateCloudBodyPage(after: String, limit: Int): List<PhoneArticleEntity>
 

@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
@@ -53,7 +55,16 @@ class PhoneCloudSyncWorker(
             )
         }
 
+        fun scheduleSnapshot(context: Context, delayMillis: Long) {
+            val request = OneTimeWorkRequestBuilder<PhoneCloudSyncWorker>()
+                .setInitialDelay(delayMillis.coerceAtLeast(1),TimeUnit.MILLISECONDS)
+                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                .build()
+            WorkManager.getInstance(context).enqueueUniqueWork("watchrss-cloud-snapshot-window",ExistingWorkPolicy.REPLACE,request)
+        }
+
         fun cancel(context: Context) {
+            WorkManager.getInstance(context).cancelUniqueWork("watchrss-cloud-snapshot-window")
             WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
         }
     }

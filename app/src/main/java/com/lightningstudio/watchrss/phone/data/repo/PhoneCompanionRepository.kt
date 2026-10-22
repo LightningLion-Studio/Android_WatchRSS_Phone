@@ -55,7 +55,8 @@ import kotlin.math.roundToLong
 
 data class PhoneRssSourceImportResult(
     val source: PhoneRssSourceEntity,
-    val articleCount: Int
+    val articleCount: Int,
+    val skippedArticleCount: Int = 0
 )
 
 data class PhoneLocalContentImportResult(
@@ -166,7 +167,8 @@ class PhoneCompanionRepository(
         LocalContentImporter().importFile(fileName, mimeType, bytes)
     },
     private val articleContentStore: ArticleContentStore? = null,
-    private val appMetaDao: AppMetaDao = NoopAppMetaDao
+    private val appMetaDao: AppMetaDao = NoopAppMetaDao,
+    private val cloudBackendBaseUrl: String = ""
 ) {
     /** 仅用于 instrumented screenshot tests 直接操作真实数据库。 */
     val testArticleDao: PhoneArticleDao get() = articleDao
@@ -220,6 +222,23 @@ class PhoneCompanionRepository(
             }
         }
 
+    private fun publicRssSourceMappingKey(url: String) = "public_rss_source:" +
+        com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec.sha256(cloudBackendBaseUrl.trimEnd('/').toByteArray()) + ":" + url
+
+    suspend fun publicRssSourceId(url: String): String? = appMetaDao.getString(publicRssSourceMappingKey(url))
+    suspend fun rememberPublicRssSource(url: String, id: String) {
+        require(id.isNotBlank())
+        appMetaDao.set(AppMetaEntity(publicRssSourceMappingKey(url), id))
+    }
+
+    private fun rssIdentityAliasPrefix() = "rss_identity_alias:" +
+        com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec.sha256(cloudBackendBaseUrl.trimEnd('/').toByteArray()) + ":"
+
+    internal suspend fun canonicalRssArticleId(id: String): String = appMetaDao.getString(rssIdentityAliasPrefix()+id) ?: id
+    internal suspend fun legacyRssArticleIds(): Map<String,List<String>> = appMetaDao.getAll()
+        .filter { it.key.startsWith(rssIdentityAliasPrefix()) }
+        .groupBy({ it.value },{ it.key.removePrefix(rssIdentityAliasPrefix()) })
+
     suspend fun mergeCloudRssInventory(imported: ImportedRssSource): PhoneRssSourceImportResult =
         withContext(Dispatchers.IO) {
             saveImportedSource(imported, recordSyncChanges = false)
@@ -269,7 +288,7 @@ class PhoneCompanionRepository(
         changed
     }
 
-    internal suspend fun privateCloudVersions(): Map<String,String> = withContext(Dispatchers.IO) {
+    internal suspend fun privateCloudVersions(layoutV3: Boolean = false): Map<String,String> = withContext(Dispatchers.IO) {
         val versions = mutableMapOf<String,String>()
         var after = ""
         while (true) {
@@ -277,7 +296,7 @@ class PhoneCompanionRepository(
             if (page.isEmpty()) break
             for (raw in page) {
                 val row = raw.hydrateExternalTextForBackup()
-                versions[row.articleId] = com.lightningstudio.watchrss.phone.cloud.CloudArchiveReuse.version(row.contentHash,row.deleted,row.contentText,row.contentHtml)
+                versions[row.articleId] = com.lightningstudio.watchrss.phone.cloud.CloudArchiveReuse.version(row.contentHash,row.deleted,row.contentText,row.contentHtml) + if (layoutV3) ":" + row.importedAt + ":" + com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec.sha256((row.url + "\n" + row.title + "\n" + row.rssSourceUrl + "\n" + listOf(row.independentSaved,row.favoriteSaved,row.watchLaterSaved).joinToString(":" )).toByteArray()) else ""
             }
             after = page.last().articleId
         }
@@ -298,6 +317,18 @@ class PhoneCompanionRepository(
         withContext(Dispatchers.IO) {
             rssSourceDao.getByUrl(sourceUrl)
         }
+
+    internal suspend fun getPrivateArticlesForCloudArchive(): List<PhoneArticleEntity> = withContext(Dispatchers.IO) {
+        val articles = mutableListOf<PhoneArticleEntity>()
+        var after = ""
+        while (true) {
+            val page = articleDao.privateCloudBodyPage(after,25)
+            if (page.isEmpty()) break
+            articles += page.map { it.hydrateExternalTextForBackup() }
+            after = page.last().articleId
+        }
+        articles
+    }
 
     suspend fun getArticlesForBackup(): List<PhoneArticleEntity> =
         withContext(Dispatchers.IO) {
@@ -1562,6 +1593,7 @@ class PhoneCompanionRepository(
         replaceExistingArticles: Boolean = false,
         recordSyncChanges: Boolean = true
     ): PhoneRssSourceImportResult {
+        imported.sourceId?.let { rememberPublicRssSource(imported.url, it) }
         val now = System.currentTimeMillis()
         val existing = rssSourceDao.getByUrl(imported.url)
         val existingArticles = articleDao.getByRssSourceUrl(imported.url)
@@ -1572,12 +1604,12 @@ class PhoneCompanionRepository(
         val candidateSource = PhoneRssSourceEntity(
             url = imported.url,
             sourceDeviceId = deviceId,
-            title = imported.title.ifBlank { hostLabel(imported.url) },
+            title = existing?.title ?: imported.title.ifBlank { hostLabel(imported.url) },
             description = imported.description,
             siteUrl = imported.siteUrl,
             imageUrl = imported.imageUrl,
             createdAt = existing?.createdAt ?: now,
-            updatedAt = now,
+            updatedAt = existing?.takeUnless { it.deleted }?.updatedAt ?: now,
             sortOrder = existing?.sortOrder?.takeIf { it > 0L } ?: now,
             isPinned = existing?.isPinned ?: false,
             deleted = false,
@@ -1605,19 +1637,31 @@ class PhoneCompanionRepository(
             recordRssSourceChange(source.url, "upsert", now)
         }
         val activeSourceUrls = rssSourceDao.getAllForSync().filterNot { it.deleted }.map { it.url }.toSet()
-        val articles = imported.items.mapIndexed { index, item ->
+        val rekeyed=mutableMapOf<String,String>()
+        var skippedArticleCount=0
+        val articles = imported.items.mapIndexedNotNull { index, item ->
             val timestamp = now - index
-            val canonicalId = WebArticleImporter.stableArticleId(item.url)
-            val existingArticle = existingByUrl[item.url]
-                ?: articleDao.getById(canonicalId)
-                ?: existingByContentHash[item.contentHash ?: WebArticleImporter.sha256(
+            val canonicalId = try {
+                if (ImportedContentIds.isImportedContentUrl(imported.url)) WebArticleImporter.stableArticleId(item.url)
+                else com.lightningstudio.watchrss.phone.cloud.CloudRssEntryIdentity.id(item.guid,item.identityLink,
+                    item.contentHash ?: (item.contentHtml?.takeIf { it.isNotEmpty() } ?: item.contentText.takeIf { it.isNotEmpty() })?.let(WebArticleImporter::sha256),
+                    item.title,item.dedupKey)
+            } catch (_: IllegalArgumentException) { skippedArticleCount++;return@mapIndexedNotNull null }
+            val legacy=existingByUrl[item.url]?.takeIf { old ->
+                old.rssSourceUrl==imported.url && old.articleId !in rekeyed &&
+                    runCatching { WebArticleImporter.stableArticleId(item.url)==old.articleId }.getOrDefault(false)
+            }
+            val existingArticle = articleDao.getById(canonicalId)
+                ?: legacy
+                ?: if (ImportedContentIds.isImportedContentUrl(imported.url)) existingByContentHash[item.contentHash ?: WebArticleImporter.sha256(
                     item.contentHtml ?: item.contentText.ifBlank { item.url }
-                )]
+                )] else null
             // One canonical URL has one local row. Another subscribed feed must not
             // steal it, reset its clocks, or erase its local read/saved state.
             if (existingArticle?.keepsOtherActiveRssOwner(source.url, activeSourceUrls) == true) {
-                return@mapIndexed existingArticle
+                return@mapIndexedNotNull existingArticle
             }
+            if (existingArticle!=null && existingArticle.articleId!=canonicalId) rekeyed[existingArticle.articleId]=canonicalId
             val candidate = PhoneArticleEntity(
                 articleId = canonicalId,
                 sourceDeviceId = deviceId,
@@ -1650,7 +1694,7 @@ class PhoneCompanionRepository(
                 // Normalize the feed preview before comparing against the stored row.
                 // Otherwise every refresh restores the long summary and stamps a new change.
                 .compactCloudExcerpt(timestamp, deviceId)
-                .withRssLocalStateFrom(existingArticle?.hydrateExternalText())
+                .withRssLocalStateFrom(existingArticle?.hydrateExternalText()?.copy(articleId=canonicalId))
                 .withCurrentSyncMetadata()
                 .externalizeLargeLocalContent()
             if (
@@ -1684,7 +1728,10 @@ class PhoneCompanionRepository(
             }
         }
         if (articles.isNotEmpty()) {
-            articleDao.upsertAll(articles)
+            // Persist identity aliases first; if interrupted, old rows still protect their saved original.
+            rekeyed.forEach { (oldId,newId) -> appMetaDao.set(AppMetaEntity(rssIdentityAliasPrefix()+oldId,newId)) }
+            // Store replacements and retire their legacy rows in one transaction.
+            articleDao.upsertRssIdentityRows(articles,rekeyed.keys.filter { old -> articles.none { it.articleId==old } })
             if (recordSyncChanges) {
                 articles.forEach { article ->
                     val previous = existingByUrl[article.url]
@@ -1694,7 +1741,7 @@ class PhoneCompanionRepository(
                 }
             }
         }
-        return PhoneRssSourceImportResult(source, articles.size)
+        return PhoneRssSourceImportResult(source, articles.size, skippedArticleCount)
     }
 
     private suspend fun recordArticleChange(

@@ -75,7 +75,8 @@ internal object WatchRssBackupArchive {
             zip.writeUtf8Entry(SAVED_ITEMS_ENTRY, snapshot.savedItems.toJsonArray { it.toBackupJson() }.toString())
             zip.writeUtf8Entry(ARTICLES_ENTRY, articleMetadata.toString())
             snapshot.readerSnapshot?.let {
-                zip.writeUtf8Entry(READER_ENTRY, ReaderPresetSyncPayload.snapshotJson(it).toString())
+                val reader = ReaderPresetSyncPayload.snapshotJson(it)
+                zip.writeUtf8Entry(READER_ENTRY, if (snapshot.cloudContentOnly) com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordCodec.canonical(reader) else reader.toString())
             }
             zip.writeUtf8Entry(APP_META_ENTRY, snapshot.appMeta.toJsonArray { it.toBackupJson() }.toString())
             snapshot.articles.forEach { article ->
@@ -95,14 +96,15 @@ internal object WatchRssBackupArchive {
 
     fun read(
         input: InputStream,
-        readerResourceStore: ReaderResourceStore? = null
+        readerResourceStore: ReaderResourceStore? = null,
+        tolerateCloudEntries: Boolean = false
     ): WatchRssBackupSnapshot {
         val entries = runCatching { readEntries(input) }
             .getOrElse { throwable ->
                 if (throwable is IllegalArgumentException) throw throwable
                 throw IllegalArgumentException("WRSS 文件损坏或无法读取", throwable)
             }
-        return runCatching { parseEntries(entries, readerResourceStore) }
+        return runCatching { parseEntries(entries, readerResourceStore, tolerateCloudEntries) }
             .getOrElse { throwable ->
                 if (throwable is IllegalArgumentException) throw throwable
                 if (throwable is BackupVersionTooHighException) throw throwable
@@ -151,7 +153,8 @@ internal object WatchRssBackupArchive {
 
     private fun parseEntries(
         entries: Map<String, ByteArray>,
-        readerResourceStore: ReaderResourceStore?
+        readerResourceStore: ReaderResourceStore?,
+        tolerateCloudEntries: Boolean
     ): WatchRssBackupSnapshot {
         REQUIRED_METADATA_ENTRIES.forEach { name ->
             require(name in entries) { "WRSS 缺少必要条目：$name" }
@@ -172,23 +175,41 @@ internal object WatchRssBackupArchive {
         val savedItems = JSONArray(entries.getValue(SAVED_ITEMS_ENTRY).toString(Charsets.UTF_8))
             .mapObjects(::savedItemFromBackupJson)
         val expectedBodyEntries = linkedSetOf<String>()
-        val articles = JSONArray(entries.getValue(ARTICLES_ENTRY).toString(Charsets.UTF_8))
-            .mapObjects { json ->
-                val articleId = json.getString("articleId")
-                val textEntry = json.getString("contentTextEntry")
-                val htmlEntry = json.nullableString("contentHtmlEntry")
-                require(textEntry == bodyTextEntry(articleId)) { "WRSS 文章正文路径不匹配" }
-                require(htmlEntry == null || htmlEntry == bodyHtmlEntry(articleId)) { "WRSS 文章 HTML 路径不匹配" }
-                expectedBodyEntries += textEntry
-                htmlEntry?.let(expectedBodyEntries::add)
-                val contentText = entries[textEntry]?.toString(Charsets.UTF_8)
-                    ?: throw IllegalArgumentException("WRSS 缺少文章正文：$articleId")
-                val contentHtml = htmlEntry?.let { entryName ->
-                    entries[entryName]?.toString(Charsets.UTF_8)
-                        ?: throw IllegalArgumentException("WRSS 缺少文章 HTML：$articleId")
+        val cloudContentOnly=manifest.optBoolean("cloudContentOnly")
+        val tolerateRows=cloudContentOnly || tolerateCloudEntries
+        val readWarnings=mutableListOf<CloudRestoreWarning>()
+        val articleRows=JSONArray(entries.getValue(ARTICLES_ENTRY).toString(Charsets.UTF_8))
+        val articles=buildList {
+            for (index in 0 until articleRows.length()) {
+                var articleId=""
+                try {
+                    val json=articleRows.getJSONObject(index)
+                    articleId=if (json.isNull("articleId")) "" else json.optString("articleId")
+                    if (tolerateRows) require(listOf("articleId","url","title","contentHash").all { json.has(it) && !json.isNull(it) }) { "missing_private_metadata" }
+                    val textEntry=json.getString("contentTextEntry")
+                    val htmlEntry=json.nullableString("contentHtmlEntry")
+                    require(textEntry==bodyTextEntry(articleId)) { "WRSS 文章正文路径不匹配" }
+                    require(htmlEntry==null || htmlEntry==bodyHtmlEntry(articleId)) { "WRSS 文章 HTML 路径不匹配" }
+                    expectedBodyEntries += textEntry; htmlEntry?.let(expectedBodyEntries::add)
+                    val text=entries[textEntry]?.toString(Charsets.UTF_8)
+                    val html=htmlEntry?.let { entries[it]?.toString(Charsets.UTF_8) }
+                    if (!tolerateRows) require(text!=null && (htmlEntry==null || html!=null)) { "WRSS 缺少文章正文" }
+                    if (tolerateRows && (text==null || (htmlEntry!=null && html==null))) {
+                        readWarnings += CloudRestoreWarning(articleId,"missing_body",permanent=true)
+                        continue
+                    }
+                    add(articleFromBackupJson(json,html,requireNotNull(text)))
+                } catch (error: Exception) {
+                    if (!tolerateRows || (error !is IllegalArgumentException && error !is org.json.JSONException)) throw error
+                    // Paths remain constrained by article identity even for a quarantined metadata row.
+                    if (articleId.isNotBlank()) {
+                        expectedBodyEntries += bodyTextEntry(articleId)
+                        expectedBodyEntries += bodyHtmlEntry(articleId)
+                    }
+                    readWarnings += CloudRestoreWarning(articleId.ifBlank { "articles.json#$index" },"invalid_metadata",permanent=true)
                 }
-                articleFromBackupJson(json, contentHtml, contentText)
             }
+        }
 
         // v2+ 备份包含 app_meta.json；v1 备份可能没有，此时视为空列表
         val appMeta = entries[APP_META_ENTRY]
@@ -196,9 +217,15 @@ internal object WatchRssBackupArchive {
             ?: emptyList()
 
         val actualBodyEntries = entries.keys.filterTo(linkedSetOf()) { BODY_ENTRY_PATTERN.matches(it) }
-        require(actualBodyEntries == expectedBodyEntries) { "WRSS 包含未引用或缺失的正文条目" }
+        if (tolerateRows) {
+            // An unidentifiable metadata row may leave a safe, hashed body path orphaned.
+            // Quarantine that body instead of discarding all healthy rows in the archive.
+            (actualBodyEntries-expectedBodyEntries).forEach { name ->
+                readWarnings += CloudRestoreWarning(name,"missing_metadata",permanent=true)
+            }
+        } else require(actualBodyEntries == expectedBodyEntries) { "WRSS 包含未引用或缺失的正文条目" }
         require(manifest.getInt("sourceCount") == sources.size) { "WRSS 的 RSS 源数量不匹配" }
-        require(manifest.getInt("articleCount") == articles.size) { "WRSS 的文章数量不匹配" }
+        require(manifest.getInt("articleCount") == articleRows.length()) { "WRSS 的文章数量不匹配" }
         require(manifest.getInt("savedItemCount") == savedItems.size) { "WRSS 的保存项数量不匹配" }
         if (version >= CURRENT_DATA_STRUCTURE_VERSION) {
             require(manifest.getInt("appMetaCount") == appMeta.size) { "WRSS 的元数据条目数量不匹配" }
@@ -225,7 +252,9 @@ internal object WatchRssBackupArchive {
             articles = articles,
             savedItems = savedItems,
             readerSnapshot = readerSnapshot,
-            appMeta = appMeta
+            appMeta = appMeta,
+            cloudContentOnly = cloudContentOnly,
+            readWarnings = readWarnings
         ).also(::validateSnapshot)
     }
 
@@ -251,7 +280,7 @@ internal object WatchRssBackupArchive {
         put("format", FORMAT)
         put("version", CURRENT_DATA_STRUCTURE_VERSION)
         put("exportedAt", exportedAt)
-        put("appVersion", appVersion)
+        if (cloudContentOnly) put("cloudContentOnly", true) else put("appVersion", appVersion)
         put("sourceCount", sources.size)
         put("articleCount", articles.size)
         put("savedItemCount", savedItems.size)

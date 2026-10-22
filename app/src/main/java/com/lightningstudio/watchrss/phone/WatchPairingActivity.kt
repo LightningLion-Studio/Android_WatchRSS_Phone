@@ -42,6 +42,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchQrNotOpenedReason
+import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchQrRequest
 import com.lightningstudio.watchrss.phone.pairing.PairingCameraPermission
 import com.lightningstudio.watchrss.phone.pairing.PairingQrAnalyzer
 import com.lightningstudio.watchrss.phone.pairing.WatchPairingState
@@ -86,6 +88,7 @@ class WatchPairingActivity : ComponentActivity() {
 @Composable
 private fun WatchPairingScreen(viewModel: WatchPairingViewModel, onClose: () -> Unit, onOpenCloudSync: () -> Unit) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val watchQr by viewModel.watchQrRequest.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val granted = { ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED }
     val activity = context as? ComponentActivity
@@ -115,7 +118,8 @@ private fun WatchPairingScreen(viewModel: WatchPairingViewModel, onClose: () -> 
         ) {
             when (val current = state) {
                 WatchPairingState.Idle -> {
-                    Lead("在手表上打开「连接手机 → 扫码绑定」，再扫描手表上的二维码。")
+                    Lead("扫描手表上的二维码")
+                    Muted("点开始后，手表会自动弹出二维码。如果没有弹出，请在手表上进入「我的 → 连接手机 → 扫码绑定」。")
                     Muted("绑定后，手表会登录当前账号，云同步立即可用。两台设备会显示同一组 8 位数字供你核对。")
                     Button(onClick = { viewModel.startScan(granted()) }, modifier = Modifier.fillMaxWidth()) { Text("开始扫码") }
                 }
@@ -129,7 +133,8 @@ private fun WatchPairingScreen(viewModel: WatchPairingViewModel, onClose: () -> 
                 is WatchPairingState.Scanning -> when (current.permission) {
                     PairingCameraPermission.GRANTED -> {
                         PairingCamera(viewModel)
-                        Muted("对准手表上的二维码。二维码只在当前配对页面有效，请勿分享。")
+                        WatchQrStatus(watchQr)
+                        Muted("二维码只在当前配对页面有效，请勿分享。")
                     }
                     PairingCameraPermission.DENIED -> {
                         Lead("需要相机权限才能扫码")
@@ -213,6 +218,24 @@ private fun PairingCamera(viewModel: WatchPairingViewModel) {
         Surface(color = androidx.compose.ui.graphics.Color.Transparent, shape = RoundedCornerShape(20.dp),
             border = BorderStroke(2.dp, MaterialTheme.colorScheme.primary),
             modifier = Modifier.align(Alignment.Center).fillMaxSize(0.7f)) {}
+    }
+}
+
+/** Whether the phone could make the watch open its pairing code; the manual path is always spelled out. */
+@Composable
+private fun WatchQrStatus(request: WatchQrRequest?) {
+    val manual = "请在手表上进入「我的 → 连接手机 → 扫码绑定」。"
+    when (request) {
+        WatchQrRequest.Sending -> Progress("正在让手表弹出二维码…")
+        WatchQrRequest.Opened -> Text("手表已弹出二维码，对准扫描即可。", style = MaterialTheme.typography.bodyLarge)
+        is WatchQrRequest.NotOpened -> Text(when (request.reason) {
+            WatchQrNotOpenedReason.NOT_PAIRED -> "没找到已配对的手表。"
+            WatchQrNotOpenedReason.BLUETOOTH_OFF -> "手机蓝牙未开启。"
+            WatchQrNotOpenedReason.NO_RESPONSE -> "手表没有响应，可能腕上RSS未在前台。"
+            WatchQrNotOpenedReason.UNSUPPORTED_WATCH -> "手表版本较旧，不能自动弹出二维码。"
+            WatchQrNotOpenedReason.PERMISSION_MISSING -> "没有蓝牙权限，无法通知手表。"
+        } + manual, style = MaterialTheme.typography.bodyLarge)
+        null -> Muted("如果手表没有弹出二维码，$manual")
     }
 }
 

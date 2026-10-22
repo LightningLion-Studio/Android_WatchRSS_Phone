@@ -13,3 +13,11 @@
 `Done(true, true)` 为绑定及交付均完成；`Done(true, false, cloudError=...)` 只能称“已绑定，云授权待完成”。联网 relay 的 close 尽力发送；账号已切换时不借新账号关闭旧会话，依靠后端 TTL 回收。
 
 待 Lead/设备验收：入口与文案、预览布局及无相机设备状态、拒绝/永久拒绝/设置返回、恢复词页面往返续接、前后台与旋转屏幕、真人 SAS 比码、真实 PodJS 与后端交付、弱网重试及过期说明。JVM 向量和 APK 编译不能替代这些验收。
+
+## 自动通知手表打开二维码
+
+`startScan()` 在用户点击开始时并行发一次蓝牙 `openPairing`，不等待该动作才准备云/启动扫码。进入页面、重组、恢复密钥和相机权限重试均不重复通知；再次显式 startScan 为新尝试。不得为此请求蓝牙权限；无权限、蓝牙关闭、未配对、旧版不支持或 6 秒内没有有效确认时，扫码仍继续。请求只通知显示二维码，不传账号/令牌/QR 内容，不算完成绑定。
+
+Lead 订阅独立的 `watchQrRequest: StateFlow<WatchQrRequest?>`：初始/取消为 null；Sending 显示通知中；Opened 表示手表已确认打开界面；NotOpened(reason) 使用 `reason.message` 显示可手动打开的提示。原因有 NOT_PAIRED、BLUETOOTH_OFF、NO_RESPONSE、UNSUPPORTED_WATCH、PERMISSION_MISSING。该状态不应遮挡相机、禁止扫码、触发蓝牙系统权限框或覆盖主配对结果；Opened 也不代表二维码已完成网络生成，更不代表账号/云授权成功。
+
+保持现有手动路径「我的 → 连接手机 → 扫码绑定」可见。cancel/离开页面同时取消可选通知并清其状态；账号变化或新的 startScan 会忽略旧通知回包。实际 PodJS openPairing 联调、蓝牙权限/关闭/未配对、连接超时和旋转屏幕仍需设备验收。

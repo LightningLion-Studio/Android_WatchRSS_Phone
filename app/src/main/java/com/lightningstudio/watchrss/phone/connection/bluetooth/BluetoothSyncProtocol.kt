@@ -13,6 +13,7 @@ object BluetoothSyncProtocol {
     val SERVICE_UUID: UUID = UUID.fromString("bb2f0b7d-8f2f-4a96-95b2-d2c91d58a861")
 
     const val ACTION_PING = "ping"
+    const val ACTION_OPEN_PAIRING = "openPairing"
     const val ACTION_REMOTE_INPUT = "remoteInput"
     const val ACTION_PULL_SAVED_ITEMS = "pullSavedItems"
     const val ACTION_SYNC_LIBRARY = "syncLibrary"

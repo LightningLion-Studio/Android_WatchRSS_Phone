@@ -2,6 +2,8 @@
 package com.lightningstudio.watchrss.phone.pairing
 
 import com.lightningstudio.watchrss.phone.account.*
+import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchQrRequest
+import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchQrNotOpenedReason
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.test.*
@@ -19,8 +21,15 @@ class WatchPairingViewModelTest {
         var hasKeys=true;var cloudFailure:Exception?=null;var keyReceiptFailure=false;var finishFailure=false
         var issueCalls=0;var cloudCalls=0;var opens=0;var closes=0;var invalidated=false
         var configureGate:CompletableDeferred<Unit>?=null
+        var qrRequests=0;var qrResult:WatchQrRequest=WatchQrRequest.Opened;var qrFailure:Exception?=null
+        var qrGate:CompletableDeferred<WatchQrRequest>?=null;var ignoreQrCancellation=false
         val calls=mutableListOf<String>();val messages=mutableListOf<JSONObject>()
         override fun currentOwner()=current
+        override suspend fun requestWatchQr():WatchQrRequest {
+            qrRequests++;qrFailure?.let {throw it}
+            val gate=qrGate?:return qrResult
+            return if(ignoreQrCancellation)withContext(NonCancellable){gate.await()}else gate.await()
+        }
         override suspend fun prepareCloud(owner:PairingOwner):PairingCloudPreparation {calls+="prepareCloud";return if(hasKeys)PairingCloudPreparation.Ready(data.epoch)else PairingCloudPreparation.NeedsKey(data.epoch,true)}
         override fun openChannel(qr:WatchPairingQr,owner:PairingOwner):WatchPairingChannel {opens++;return object:WatchPairingChannel {
             override suspend fun connect(){calls+="claim"}
@@ -45,6 +54,7 @@ class WatchPairingViewModelTest {
     @Test fun constructionNeverRequestsCameraAndNeedsKeyAutomaticallyResumesOnlyAfterRecovery()=runTest {
         val p=Ports();p.hasKeys=false;val vm=vm(p);runCurrent()
         assertEquals(WatchPairingState.Idle,vm.state.value);assertTrue(p.calls.isEmpty())
+        assertEquals(0,p.qrRequests);assertNull(vm.watchQrRequest.value)
         vm.startScan();runCurrent();assertEquals(WatchPairingState.NeedsKey(true),vm.state.value);assertEquals(0,p.opens)
         p.hasKeys=true;p.changes.emit(Unit);runCurrent()
         assertEquals(WatchPairingState.Scanning(PairingCameraPermission.REQUEST_REQUIRED),vm.state.value);assertEquals(0,p.opens)
@@ -116,5 +126,52 @@ class WatchPairingViewModelTest {
         vm.cancel();vm.startScan(true);runCurrent();oldCallback(d.raw);runCurrent()
         assertTrue(vm.state.value is WatchPairingState.Scanning);assertEquals(0,p.opens)
         vm.qrCallback()(d.raw);runCurrent();assertTrue(vm.state.value is WatchPairingState.Confirming);assertEquals(1,p.opens);vm.cancel()
+    }
+    @Test fun automaticQrRequestIsParallelAndNeverBlocksScanningOrCompletingThePairing()=runTest {
+        val p=Ports();p.qrGate=CompletableDeferred();val vm=vm(p)
+        vm.startScan(true);assertEquals(WatchQrRequest.Sending,vm.watchQrRequest.value);runCurrent()
+        assertTrue(vm.state.value is WatchPairingState.Scanning);assertEquals(WatchQrRequest.Sending,vm.watchQrRequest.value)
+        vm.onQrDecoded(d.raw);runCurrent();vm.confirmSas(true);runCurrent()
+        assertEquals(WatchPairingState.Done(true,true),vm.state.value);assertEquals(1,p.qrRequests)
+        p.qrGate!!.complete(WatchQrRequest.Opened);runCurrent();assertEquals(WatchQrRequest.Opened,vm.watchQrRequest.value);vm.cancel()
+    }
+    @Test fun everyNotOpenedReasonLeavesTheSameScanningAndPairingFlowUsable()=runTest {
+        for(reason in WatchQrNotOpenedReason.entries) {
+            val p=Ports();p.qrResult=WatchQrRequest.NotOpened(reason);val vm=vm(p)
+            scan(vm);assertEquals(WatchQrRequest.NotOpened(reason),vm.watchQrRequest.value)
+            vm.confirmSas(true);runCurrent();assertEquals(WatchPairingState.Done(true,true),vm.state.value);assertEquals(1,p.qrRequests);vm.cancel()
+        }
+    }
+    @Test fun optionalQrPortExceptionsNeverFailCloudPreparationOrScan()=runTest {
+        val p=Ports();p.qrFailure=IOException("raw platform details");val vm=vm(p)
+        vm.startScan();runCurrent();assertTrue(vm.state.value is WatchPairingState.Scanning)
+        assertEquals(WatchQrRequest.NotOpened(WatchQrNotOpenedReason.NO_RESPONSE),vm.watchQrRequest.value);vm.cancel()
+    }
+    @Test fun pendingQrPortTimesOutAtSixSecondsWithoutInterruptingTheScanner()=runTest {
+        val p=Ports();p.qrGate=CompletableDeferred();val vm=vm(p);vm.startScan(true);runCurrent()
+        advanceTimeBy(5_999);runCurrent();assertEquals(WatchQrRequest.Sending,vm.watchQrRequest.value)
+        advanceTimeBy(1);runCurrent();assertEquals(WatchQrRequest.NotOpened(WatchQrNotOpenedReason.NO_RESPONSE),vm.watchQrRequest.value)
+        assertTrue(vm.state.value is WatchPairingState.Scanning);assertEquals(1,p.qrRequests);vm.cancel()
+    }
+    @Test fun recoveringKeysAndRetryingCameraPermissionDoNotResendTheAutomaticRequest()=runTest {
+        val p=Ports();p.hasKeys=false;val vm=vm(p);vm.startScan();runCurrent()
+        assertTrue(vm.state.value is WatchPairingState.NeedsKey);assertEquals(1,p.qrRequests)
+        vm.retry();runCurrent();p.hasKeys=true;p.changes.emit(Unit);runCurrent();vm.retry();runCurrent()
+        assertTrue(vm.state.value is WatchPairingState.Scanning);assertEquals(1,p.qrRequests);vm.cancel()
+    }
+    @Test fun cancelOrOwnerChangeSuppressesLateQrReceiptsAndASecondStartOwnsItsOwnResult()=runTest {
+        for(change in listOf("cancel","owner","restart")) {
+            val p=Ports();val old=CompletableDeferred<WatchQrRequest>();p.qrGate=old;p.ignoreQrCancellation=true
+            val vm=vm(p);vm.startScan(true);runCurrent()
+            when(change) {
+                "owner"->{p.current=d.owner.copy(userId="other");p.changes.emit(Unit)}
+                "restart"->{p.qrGate=null;p.qrResult=WatchQrRequest.NotOpened(WatchQrNotOpenedReason.BLUETOOTH_OFF);vm.startScan(true)}
+                else->vm.cancel()
+            }
+            runCurrent();old.complete(WatchQrRequest.Opened);runCurrent()
+            if(change=="restart") {assertEquals(2,p.qrRequests);assertEquals(p.qrResult,vm.watchQrRequest.value)}
+            else assertNull(vm.watchQrRequest.value)
+            vm.cancel()
+        }
     }
 }

@@ -77,7 +77,7 @@ private data class LibraryResponseRead(
 )
 
 internal fun isSessionOperationSafeForTransparentReplay(action: String): Boolean =
-    action != BluetoothSyncProtocol.ACTION_SYNC_LIBRARY
+    action != BluetoothSyncProtocol.ACTION_SYNC_LIBRARY && action != BluetoothSyncProtocol.ACTION_OPEN_PAIRING
 
 private class PreviewStreamStats {
     private var windowStartedAt = SystemClock.elapsedRealtime()
@@ -309,6 +309,23 @@ class PhoneBluetoothSyncClient(
 
     fun capabilitiesFor(deviceAddress: String): PhoneWatchCapabilities? =
         synchronized(capabilitiesByAddress) { capabilitiesByAddress[deviceAddress] }
+
+    /** Inspect only: never launch a permission request or Bluetooth enable/pairing UI. */
+    @SuppressLint("MissingPermission")
+    internal fun pairingTarget(deviceAddress: String? = null): PhoneBluetoothWatchDevice {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && ContextCompat.checkSelfPermission(
+                context, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+            throw WatchQrUnavailable(WatchQrNotOpenedReason.PERMISSION_MISSING)
+        val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
+            ?: throw WatchQrUnavailable(WatchQrNotOpenedReason.BLUETOOTH_OFF)
+        if (!adapter.isEnabled) throw WatchQrUnavailable(WatchQrNotOpenedReason.BLUETOOTH_OFF)
+        val device = try {
+            selectBondedWatchDevice(adapter.bondedDevices.orEmpty(), deviceAddress, null)
+        } catch (_: IllegalStateException) {
+            throw WatchQrUnavailable(WatchQrNotOpenedReason.NOT_PAIRED)
+        }
+        return device.toWatchDevice()
+    }
     @SuppressLint("MissingPermission")
     internal suspend fun probeLibrarySyncDevices(
         deviceId: String,

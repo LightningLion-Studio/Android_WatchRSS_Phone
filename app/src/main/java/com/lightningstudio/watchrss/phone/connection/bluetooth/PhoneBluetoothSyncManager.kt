@@ -127,6 +127,19 @@ class PhoneBluetoothSyncManager(
     private val watchBackgroundTranscoder =
         WatchBackgroundTranscoder(context.applicationContext, readerPresetRepository)
 
+    /** No sync-binding gate here: an unbound watch is precisely the target of this optional action. */
+    internal suspend fun requestWatchPairingQr(reusableSession: PhoneSyncSession? = null): WatchQrRequest =
+        OpenPairingRequest(
+            selectTarget = { withContext(Dispatchers.IO) { client.pairingTarget(reusableSession?.device?.bluetoothAddress) } },
+            exchange = { target, request ->
+                withContext(Dispatchers.IO) {
+                    val sessionId = BluetoothDebugLog.newSessionId("openPairing")
+                    (reusableSession?.exchange(request, sessionId) ?: client.exchange(request,
+                        deviceAddress = target.address, sessionId = sessionId, rememberDeviceOnSuccess = false)).response
+                }
+            }
+        ).send()
+
     /** Read-only probe on the selected session/route, before sending library data or issuing watch tokens. */
     private suspend fun requireWatchBinding(sessionId: String, deviceAddress: String? = null,
         syncSession: PhoneSyncSession? = null): String? = checkWatchSyncBinding(currentPhoneUserId) {

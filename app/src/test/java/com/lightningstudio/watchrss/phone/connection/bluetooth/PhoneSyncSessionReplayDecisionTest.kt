@@ -6,6 +6,10 @@ import org.junit.Test
 
 class PhoneSyncSessionReplayDecisionTest {
     @Test
+    fun openingPairingUi_isNotTransparentlyReplayedAfterAnAmbiguousResponse() {
+        assertFalse(isSessionOperationSafeForTransparentReplay(BluetoothSyncProtocol.ACTION_OPEN_PAIRING))
+    }
+    @Test
     fun libraryExchange_isNotSafeForTransparentReplay() {
         assertFalse(
             isSessionOperationSafeForTransparentReplay(

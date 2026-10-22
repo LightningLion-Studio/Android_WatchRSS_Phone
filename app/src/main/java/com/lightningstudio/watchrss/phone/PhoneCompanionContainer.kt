@@ -268,7 +268,8 @@ class PhoneCompanionContainer(context: Context) {
     fun createWatchPairingViewModel(): com.lightningstudio.watchrss.phone.pairing.WatchPairingViewModel =
         com.lightningstudio.watchrss.phone.pairing.WatchPairingViewModel(
             com.lightningstudio.watchrss.phone.pairing.PhoneWatchPairingPorts(accountRepository, cloudSyncService, accountEnvironment,
-                { appAccessCoordinator.deviceAccessToken }, { token, owner -> appAccessCoordinator.refreshRejectedDeviceSession(token, owner) }))
+                { appAccessCoordinator.deviceAccessToken }, { token, owner -> appAccessCoordinator.refreshRejectedDeviceSession(token, owner) },
+                { bluetoothSyncManager.requestWatchPairingQr() }))
 
     val cloudSyncService: PhoneCloudSyncService by lazy {
         val storageSuffix = accountEnvironment.storageSuffix

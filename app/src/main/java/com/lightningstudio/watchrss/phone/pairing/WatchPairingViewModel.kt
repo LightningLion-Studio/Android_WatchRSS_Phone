@@ -3,6 +3,9 @@ package com.lightningstudio.watchrss.phone.pairing
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lightningstudio.watchrss.phone.account.WatchDeviceToken
+import com.lightningstudio.watchrss.phone.connection.bluetooth.OpenPairingRequest
+import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchQrRequest
+import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchQrNotOpenedReason
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import org.json.JSONArray
@@ -34,6 +37,7 @@ interface WatchPairingPorts {
     fun openChannel(qr:WatchPairingQr,owner:PairingOwner):WatchPairingChannel
     suspend fun issueCredentials(qr:WatchPairingQr,owner:PairingOwner):WatchDeviceToken
     suspend fun grantCloud(qr:WatchPairingQr,preparedSpki:String,owner:PairingOwner):PairingCloudGrant
+    suspend fun requestWatchQr():WatchQrRequest
 }
 
 /** Lead owns layout/launchers. No camera permission is requested by construction or page entry. */
@@ -42,8 +46,11 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
     private val workScope=scope?:viewModelScope
     private val mutable=MutableStateFlow<WatchPairingState>(WatchPairingState.Idle)
     val state:StateFlow<WatchPairingState> = mutable
+    private val mutableWatchQrRequest=MutableStateFlow<WatchQrRequest?>(null)
+    val watchQrRequest:StateFlow<WatchQrRequest?> = mutableWatchQrRequest.asStateFlow()
     private val generation=AtomicLong()
     private var work:Job?=null
+    private var watchQrJob:Job?=null
     private var owner:PairingOwner?=null
     private var qr:WatchPairingQr?=null
     private var channel:WatchPairingChannel?=null
@@ -80,7 +87,19 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
         cancel();cameraGranted=cameraPermissionGranted
         owner=ports.currentOwner()
         if(owner==null) {mutable.value=WatchPairingState.Failed("请先登录腕上RSS账号",false);return}
+        requestWatchQr()
         prepareScan()
+    }
+    private fun requestWatchQr() {
+        val ticket=generation.get()
+        mutableWatchQrRequest.value=WatchQrRequest.Sending
+        watchQrJob=workScope.launch {
+            val result=try { withTimeout(OpenPairingRequest.TIMEOUT_MS) { ports.requestWatchQr() } }
+            catch(_:TimeoutCancellationException) { WatchQrRequest.NotOpened(WatchQrNotOpenedReason.NO_RESPONSE) }
+            catch(cancelled:CancellationException) { throw cancelled }
+            catch(_:Exception) { WatchQrRequest.NotOpened(WatchQrNotOpenedReason.NO_RESPONSE) }
+            if(generation.get()==ticket && sameOwner()) mutableWatchQrRequest.value=result
+        }
     }
     private fun prepareScan()=launchWork { ticket ->
         mutable.value=WatchPairingState.PreparingCloud
@@ -183,7 +202,8 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
         if(old!=null)workScope.launch(NonCancellable) {runCatching {old.close()} }
     }
     fun cancel() {
-        generation.incrementAndGet();work?.cancel();work=null;release();owner=null
+        generation.incrementAndGet();work?.cancel();work=null;watchQrJob?.cancel();watchQrJob=null
+        mutableWatchQrRequest.value=null;release();owner=null
         bound=false;cloudReady=false;finished=false;sasConfirmed=false
         mutable.value=WatchPairingState.Idle
     }

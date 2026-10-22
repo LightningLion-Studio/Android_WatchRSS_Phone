@@ -25,7 +25,7 @@ internal fun WatchSyncBindingHost(viewModel: MainViewModel) {
         WatchSyncBindingEvent.RequireWatchBinding -> AlertDialog(
             onDismissRequest = viewModel::dismissWatchSyncBindingPrompt,
             title = { Text("先绑定手表") },
-            text = { Text("这块手表还没有登录腕上RSS账号。扫码绑定后，手表会登录当前账号并开启云同步，然后再同步。") },
+            text = { Text("这块手表还没有登录腕上RSS账号。点「扫码绑定」后手表会自动弹出二维码；如果没有弹出，请在手表上进入「我的 → 连接手机 → 扫码绑定」。绑定后手表会登录当前账号并开启云同步。") },
             confirmButton = { TextButton(onClick = viewModel::openWatchPairing) { Text("扫码绑定") } },
             dismissButton = { TextButton(onClick = viewModel::dismissWatchSyncBindingPrompt) { Text("取消") } }
         )

@@ -6,12 +6,15 @@ import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncService
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
+import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchQrRequest
 
 internal class PhoneWatchPairingPorts(
     private val account:PhoneAccountRepository,private val cloud:PhoneCloudSyncService,
     private val environment:AccountEnvironment,private val deviceAccessToken:()->String?,
-    private val refreshDeviceSession:suspend(String,String)->Boolean
+    private val refreshDeviceSession:suspend(String,String)->Boolean,
+    private val requestWatchQrAction:suspend()->WatchQrRequest
 ):WatchPairingPorts {
+    override suspend fun requestWatchQr():WatchQrRequest = requestWatchQrAction()
     override val changes:Flow<Unit> = merge(account.session.map {Unit},cloud.pairingChanges)
     override fun currentOwner():PairingOwner? = account.session.value?.let {
         PairingOwner(it.userId,cloud.pairingBackendBaseUrl,cloud.pairingEpoch(),it.phoneMasked)

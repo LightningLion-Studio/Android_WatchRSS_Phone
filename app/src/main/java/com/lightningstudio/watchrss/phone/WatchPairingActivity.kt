@@ -13,6 +13,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.camera.core.Camera
+import androidx.camera.core.FocusMeteringAction
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -106,6 +112,8 @@ private fun WatchPairingScreen(viewModel: WatchPairingViewModel, onClose: () -> 
             viewModel.onCameraPermissionResult(true)
     }
     BackHandler(onBack = onClose)
+    // Opening this page already asks the watch to show its code; the model ignores repeats on recreation.
+    LaunchedEffect(Unit) { viewModel.onPageEntered() }
 
     Scaffold(topBar = {
         TopAppBar(title = { Text("扫码绑定手表") }, navigationIcon = {
@@ -119,7 +127,7 @@ private fun WatchPairingScreen(viewModel: WatchPairingViewModel, onClose: () -> 
             when (val current = state) {
                 WatchPairingState.Idle -> {
                     Lead("扫描手表上的二维码")
-                    Muted("点开始后，手表会自动弹出二维码。如果没有弹出，请在手表上进入「我的 → 连接手机 → 扫码绑定」。")
+                    WatchQrStatus(watchQr, onAgain = { viewModel.requestWatchQrAgain() })
                     Muted("绑定后，手表会登录当前账号，云同步立即可用。两台设备会显示同一组 8 位数字供你核对。")
                     Button(onClick = { viewModel.startScan(granted()) }, modifier = Modifier.fillMaxWidth()) { Text("开始扫码") }
                 }
@@ -133,8 +141,8 @@ private fun WatchPairingScreen(viewModel: WatchPairingViewModel, onClose: () -> 
                 is WatchPairingState.Scanning -> when (current.permission) {
                     PairingCameraPermission.GRANTED -> {
                         PairingCamera(viewModel)
-                        WatchQrStatus(watchQr)
-                        Muted("二维码只在当前配对页面有效，请勿分享。")
+                        WatchQrStatus(watchQr, onAgain = { viewModel.requestWatchQrAgain() })
+                        Muted("双指缩放取景，点按画面对焦。二维码只在当前配对页面有效，请勿分享。")
                     }
                     PairingCameraPermission.DENIED -> {
                         Lead("需要相机权限才能扫码")
@@ -192,12 +200,13 @@ private fun WatchPairingScreen(viewModel: WatchPairingViewModel, onClose: () -> 
     }
 }
 
-/** Preview plus analyzer, bound only while this composable is on screen. */
+/** Preview plus analyzer, bound only while this composable is on screen. Pinch zooms, a tap focuses. */
 @Composable
 private fun PairingCamera(viewModel: WatchPairingViewModel) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
+    var camera by remember { mutableStateOf<Camera?>(null) }
     DisposableEffect(lifecycleOwner) {
         val analysisExecutor = Executors.newSingleThreadExecutor()
         val providerFuture = ProcessCameraProvider.getInstance(context)
@@ -208,22 +217,51 @@ private fun PairingCamera(viewModel: WatchPairingViewModel) {
                 // A fresh analyzer per binding: late frames from an old session cannot reach a new one.
                 val analysis = PairingQrAnalyzer.imageAnalysis(analysisExecutor, ContextCompat.getMainExecutor(context), viewModel.qrCallback())
                 it.unbindAll()
-                it.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                camera = it.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
             }
         }, ContextCompat.getMainExecutor(context))
-        onDispose { provider?.unbindAll(); analysisExecutor.shutdown() }
+        onDispose { camera = null; provider?.unbindAll(); analysisExecutor.shutdown() }
+    }
+    var zoomRatio by remember { mutableFloatStateOf(1f) }
+    DisposableEffect(camera, lifecycleOwner) {
+        val state = camera?.cameraInfo?.zoomState
+        val observer = androidx.lifecycle.Observer<androidx.camera.core.ZoomState> { zoomRatio = it.zoomRatio }
+        state?.observe(lifecycleOwner, observer)
+        onDispose { state?.removeObserver(observer) }
     }
     Box(modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(24.dp))) {
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
-        Surface(color = androidx.compose.ui.graphics.Color.Transparent, shape = RoundedCornerShape(20.dp),
+        Surface(color = Color.Transparent, shape = RoundedCornerShape(20.dp),
             border = BorderStroke(2.dp, MaterialTheme.colorScheme.primary),
             modifier = Modifier.align(Alignment.Center).fillMaxSize(0.7f)) {}
+        Box(modifier = Modifier.fillMaxSize()
+            .pointerInput(camera) {
+                detectTransformGestures { _, _, scale, _ ->
+                    val current = camera ?: return@detectTransformGestures
+                    val state = current.cameraInfo.zoomState.value ?: return@detectTransformGestures
+                    current.cameraControl.setZoomRatio((state.zoomRatio * scale).coerceIn(state.minZoomRatio, state.maxZoomRatio))
+                }
+            }
+            .pointerInput(camera) {
+                detectTapGestures { offset ->
+                    val current = camera ?: return@detectTapGestures
+                    val point = previewView.meteringPointFactory.createPoint(offset.x, offset.y)
+                    current.cameraControl.startFocusAndMetering(FocusMeteringAction.Builder(point).build())
+                }
+            })
+        if (zoomRatio > 1.05f) {
+            Surface(color = Color.Black.copy(alpha = 0.55f), shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)) {
+                Text(String.format(java.util.Locale.US, "%.1f×", zoomRatio), color = Color.White,
+                    style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
+            }
+        }
     }
 }
 
 /** Whether the phone could make the watch open its pairing code; the manual path is always spelled out. */
 @Composable
-private fun WatchQrStatus(request: WatchQrRequest?) {
+private fun WatchQrStatus(request: WatchQrRequest?, onAgain: () -> Unit) {
     val manual = "请在手表上进入「我的 → 连接手机 → 扫码绑定」。"
     when (request) {
         WatchQrRequest.Sending -> Progress("正在让手表弹出二维码…")
@@ -237,6 +275,7 @@ private fun WatchQrStatus(request: WatchQrRequest?) {
         } + manual, style = MaterialTheme.typography.bodyLarge)
         null -> Muted("如果手表没有弹出二维码，$manual")
     }
+    if (request is WatchQrRequest.NotOpened) TextButton(onClick = onAgain) { Text("重新让手表弹出二维码") }
 }
 
 @Composable private fun Lead(text: String) = Text(text, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)

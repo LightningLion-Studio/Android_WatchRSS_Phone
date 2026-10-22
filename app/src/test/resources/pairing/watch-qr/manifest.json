@@ -1,0 +1,109 @@
+{
+  "description": "Synthetic watch-like OLED captures, not camera/physical-device acceptance",
+  "payload": "wrss-pair:eyJwcm90b2NvbCI6IndhdGNocnNzLW9ubGluZS1zZXR1cC12MSIsInRyYW5zcG9ydCI6ImludGVybmV0Iiwic2Vzc2lvbklkIjoiQ0FnSUNBZ0lDQWdJQ0FnSUNBZ0lDQSIsInNlY3JldCI6IkJ3Y0hCd2NIQndjSEJ3Y0hCd2NIQndjSEJ3Y0hCd2NIQndjSEJ3Y0hCd2M9IiwiZGV2aWNlSWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpbnN0YWxsSWQiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJjbGFpbVRva2VuIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImV4cGlyZXNBdCI6MTgwMDAwMDMwMDAwMH0",
+  "ecc": "L",
+  "fixtures": [
+    {
+      "file": "oled-466.png",
+      "parameters": {
+        "screen": 466,
+        "qrSquare": 255,
+        "ecc": "L",
+        "quietZoneModules": 4
+      },
+      "sha256": "195bf1b5c37d5a8bf87921c2ee94b8c715cb1c2d58d8cba1e4daa9daae849e84"
+    },
+    {
+      "file": "scaled-350.png",
+      "parameters": {
+        "watchDiameter": 350,
+        "resample": "bilinear"
+      },
+      "sha256": "1fc4b7c11d13eb4f6412c030942c005b95c97fe56ef1ca5b6464cf2b4fc9de35"
+    },
+    {
+      "file": "scaled-300.png",
+      "parameters": {
+        "watchDiameter": 300,
+        "resample": "bilinear"
+      },
+      "sha256": "b3efc8a91997a4367d388b4ef2cca1157c4d1a9e867c1552eb18bd1d1d29ed31"
+    },
+    {
+      "file": "perspective.png",
+      "parameters": {
+        "screenCorners": [
+          [
+            62.0,
+            20.0
+          ],
+          [
+            440.0,
+            63.0
+          ],
+          [
+            455.0,
+            404.0
+          ],
+          [
+            10.0,
+            453.0
+          ]
+        ],
+        "interpolation": "linear"
+      },
+      "sha256": "514d448fe1d89f87beacdc701a07ae6958565f435e50b0c9cf447b64680f8fa4"
+    },
+    {
+      "file": "blur-060.png",
+      "parameters": {
+        "gaussianSigma": 0.6
+      },
+      "sha256": "b8e809c11437e2b00115797e7e10c8c8095e7b36410e9d785d5341040da8ba30"
+    },
+    {
+      "file": "dim.png",
+      "parameters": {
+        "gain": 0.44,
+        "offset": 14
+      },
+      "sha256": "f9a3e08a724624639cf37dce47e41cacfaa604023f4400beaf24eaeb35339ca5"
+    },
+    {
+      "file": "reflection.png",
+      "parameters": {
+        "gain": 0.78,
+        "glarePeak": 115,
+        "glareSigma": 34,
+        "glareLine": "x-.28*y-216",
+        "offset": 6
+      },
+      "sha256": "374fa3540125a9b9459c69e387cf9db1490280f69ed2b45a1071111a481ca7cb"
+    },
+    {
+      "file": "perspective-dim-blur.png",
+      "parameters": {
+        "perspective": "perspective.png",
+        "gaussianSigma": 0.45,
+        "gain": 0.68,
+        "offset": 12
+      },
+      "sha256": "2de3ec920e2d4867849ce18525affc922e52cda999394303d708c0ddaab2ddb2"
+    },
+    {
+      "file": "rotated-90.png",
+      "parameters": {
+        "rotation": 90
+      },
+      "sha256": "555864e3ee0fb3514e8c28f2ed39444c0dad5d705577f4d5c04b7642d83f0f2e"
+    },
+    {
+      "file": "inverted.png",
+      "parameters": {
+        "inverted": true,
+        "purpose": "tryInvert regression, not ordinary dark-on-white watch UI"
+      },
+      "sha256": "8c47e033eab176b00977c80279ffcf378fbbfbfb3ace798829e289261a55d361"
+    }
+  ]
+}

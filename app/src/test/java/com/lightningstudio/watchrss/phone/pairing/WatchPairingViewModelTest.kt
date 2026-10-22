@@ -11,6 +11,9 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.IOException
+import androidx.camera.core.ImageProxy
+import java.lang.reflect.Proxy
+import java.util.concurrent.Executor
 
 class WatchPairingViewModelTest {
     private val d=PairingTestData
@@ -49,8 +52,8 @@ class WatchPairingViewModelTest {
         override suspend fun issueCredentials(qr:WatchPairingQr,owner:PairingOwner):WatchDeviceToken {calls+="issue";issueCalls++;return WatchDeviceToken("watch-access",data.now+100000,"watch-refresh",data.now+200000,WatchEntitlementSnapshot())}
         override suspend fun grantCloud(qr:WatchPairingQr,preparedSpki:String,owner:PairingOwner):PairingCloudGrant {calls+="grant";cloudCalls++;cloudFailure?.let{throw it};return data.grant(qr)}
     }
-    private fun TestScope.vm(p:Ports)=WatchPairingViewModel(p,backgroundScope,{d.now})
-    private fun TestScope.scan(vm:WatchPairingViewModel) {vm.startScan(true);runCurrent();assertTrue(vm.state.value is WatchPairingState.Scanning);vm.onQrDecoded(d.raw);runCurrent();assertTrue(vm.state.value is WatchPairingState.Confirming)}
+    private fun TestScope.vm(p:Ports)=WatchPairingViewModel(p,backgroundScope,{d.now},{testScheduler.currentTime})
+    private fun TestScope.scan(vm:WatchPairingViewModel) {vm.onPageEntered();vm.startScan(true);runCurrent();assertTrue(vm.state.value is WatchPairingState.Scanning);vm.onQrDecoded(d.raw);runCurrent();assertTrue(vm.state.value is WatchPairingState.Confirming)}
     @Test fun constructionNeverRequestsCameraAndNeedsKeyAutomaticallyResumesOnlyAfterRecovery()=runTest {
         val p=Ports();p.hasKeys=false;val vm=vm(p);runCurrent()
         assertEquals(WatchPairingState.Idle,vm.state.value);assertTrue(p.calls.isEmpty())
@@ -123,13 +126,17 @@ class WatchPairingViewModelTest {
     }
     @Test fun queuedCameraCallbackFromAbandonedScanCannotClaimTheNextScan()=runTest {
         val p=Ports();val vm=vm(p);vm.startScan(true);runCurrent();val oldCallback=vm.qrCallback()
-        vm.cancel();vm.startScan(true);runCurrent();oldCallback(d.raw);runCurrent()
+        val queued=mutableListOf<Runnable>();var closes=0
+        val image=Proxy.newProxyInstance(ImageProxy::class.java.classLoader,arrayOf(ImageProxy::class.java)){_,method,_->if(method.name=="close")closes++;null} as ImageProxy
+        PairingQrAnalyzer(Executor{queued+=it},oldCallback,decode={d.raw}).analyze(image)
+        assertEquals(1,closes);assertEquals(1,queued.size)
+        vm.cancel();vm.startScan(true);runCurrent();queued.single().run();runCurrent()
         assertTrue(vm.state.value is WatchPairingState.Scanning);assertEquals(0,p.opens)
         vm.qrCallback()(d.raw);runCurrent();assertTrue(vm.state.value is WatchPairingState.Confirming);assertEquals(1,p.opens);vm.cancel()
     }
     @Test fun automaticQrRequestIsParallelAndNeverBlocksScanningOrCompletingThePairing()=runTest {
         val p=Ports();p.qrGate=CompletableDeferred();val vm=vm(p)
-        vm.startScan(true);assertEquals(WatchQrRequest.Sending,vm.watchQrRequest.value);runCurrent()
+        vm.onPageEntered();assertEquals(WatchQrRequest.Sending,vm.watchQrRequest.value);vm.startScan(true);runCurrent()
         assertTrue(vm.state.value is WatchPairingState.Scanning);assertEquals(WatchQrRequest.Sending,vm.watchQrRequest.value)
         vm.onQrDecoded(d.raw);runCurrent();vm.confirmSas(true);runCurrent()
         assertEquals(WatchPairingState.Done(true,true),vm.state.value);assertEquals(1,p.qrRequests)
@@ -144,34 +151,55 @@ class WatchPairingViewModelTest {
     }
     @Test fun optionalQrPortExceptionsNeverFailCloudPreparationOrScan()=runTest {
         val p=Ports();p.qrFailure=IOException("raw platform details");val vm=vm(p)
-        vm.startScan();runCurrent();assertTrue(vm.state.value is WatchPairingState.Scanning)
+        vm.onPageEntered();vm.startScan();runCurrent();assertTrue(vm.state.value is WatchPairingState.Scanning)
         assertEquals(WatchQrRequest.NotOpened(WatchQrNotOpenedReason.NO_RESPONSE),vm.watchQrRequest.value);vm.cancel()
     }
     @Test fun pendingQrPortTimesOutAtSixSecondsWithoutInterruptingTheScanner()=runTest {
-        val p=Ports();p.qrGate=CompletableDeferred();val vm=vm(p);vm.startScan(true);runCurrent()
+        val p=Ports();p.qrGate=CompletableDeferred();val vm=vm(p);vm.onPageEntered();vm.startScan(true);runCurrent()
         advanceTimeBy(5_999);runCurrent();assertEquals(WatchQrRequest.Sending,vm.watchQrRequest.value)
         advanceTimeBy(1);runCurrent();assertEquals(WatchQrRequest.NotOpened(WatchQrNotOpenedReason.NO_RESPONSE),vm.watchQrRequest.value)
         assertTrue(vm.state.value is WatchPairingState.Scanning);assertEquals(1,p.qrRequests);vm.cancel()
     }
     @Test fun recoveringKeysAndRetryingCameraPermissionDoNotResendTheAutomaticRequest()=runTest {
-        val p=Ports();p.hasKeys=false;val vm=vm(p);vm.startScan();runCurrent()
+        val p=Ports();p.hasKeys=false;val vm=vm(p);vm.onPageEntered();vm.startScan();runCurrent()
         assertTrue(vm.state.value is WatchPairingState.NeedsKey);assertEquals(1,p.qrRequests)
         vm.retry();runCurrent();p.hasKeys=true;p.changes.emit(Unit);runCurrent();vm.retry();runCurrent()
         assertTrue(vm.state.value is WatchPairingState.Scanning);assertEquals(1,p.qrRequests);vm.cancel()
     }
-    @Test fun cancelOrOwnerChangeSuppressesLateQrReceiptsAndASecondStartOwnsItsOwnResult()=runTest {
+    @Test fun cancelOrOwnerChangeSuppressesLateQrReceiptsButStartingScanKeepsThePageRequest()=runTest {
         for(change in listOf("cancel","owner","restart")) {
             val p=Ports();val old=CompletableDeferred<WatchQrRequest>();p.qrGate=old;p.ignoreQrCancellation=true
-            val vm=vm(p);vm.startScan(true);runCurrent()
+            val vm=vm(p);vm.onPageEntered();vm.startScan(true);runCurrent()
             when(change) {
                 "owner"->{p.current=d.owner.copy(userId="other");p.changes.emit(Unit)}
                 "restart"->{p.qrGate=null;p.qrResult=WatchQrRequest.NotOpened(WatchQrNotOpenedReason.BLUETOOTH_OFF);vm.startScan(true)}
                 else->vm.cancel()
             }
             runCurrent();old.complete(WatchQrRequest.Opened);runCurrent()
-            if(change=="restart") {assertEquals(2,p.qrRequests);assertEquals(p.qrResult,vm.watchQrRequest.value)}
+            if(change=="restart") {assertEquals(1,p.qrRequests);assertEquals(WatchQrRequest.Opened,vm.watchQrRequest.value)}
             else assertNull(vm.watchQrRequest.value)
             vm.cancel()
         }
+    }
+    @Test fun pageEntryIsOncePerRetainedViewModelAndDoesNotStartCameraOrCloudPreparation()=runTest {
+        val p=Ports();val vm=vm(p);vm.onPageEntered();runCurrent()
+        assertEquals(WatchPairingState.Idle,vm.state.value);assertTrue(p.calls.isEmpty());assertEquals(1,p.qrRequests)
+        repeat(3){vm.onPageEntered();runCurrent()};assertEquals(1,p.qrRequests)
+        vm.startScan(true);runCurrent();vm.onPageEntered();runCurrent();assertEquals(1,p.qrRequests)
+        vm.cancel();vm.onPageEntered();runCurrent();assertEquals(1,p.qrRequests)
+    }
+    @Test fun failedPageRequestCanRetryOnlyStrictlyAfterTenSecondsAndOpenedRequestsNeverRepeat()=runTest {
+        val p=Ports();p.qrResult=WatchQrRequest.NotOpened(WatchQrNotOpenedReason.NO_RESPONSE);val vm=vm(p)
+        vm.onPageEntered();runCurrent();assertFalse(vm.requestWatchQrAgain())
+        advanceTimeBy(10_000);assertFalse(vm.requestWatchQrAgain());assertEquals(1,p.qrRequests)
+        vm.startScan(true);runCurrent();assertEquals(1,p.qrRequests)
+        advanceTimeBy(1);p.qrResult=WatchQrRequest.Opened;vm.startScan(true);runCurrent();assertEquals(2,p.qrRequests)
+        advanceTimeBy(20_000);assertFalse(vm.requestWatchQrAgain());vm.startScan(true);runCurrent();assertEquals(2,p.qrRequests);vm.cancel()
+    }
+    @Test fun explicitRetryButtonUsesTheSameCooldownAndDoesNotPrepareCloudOrRequestCamera()=runTest {
+        val p=Ports();p.qrResult=WatchQrRequest.NotOpened(WatchQrNotOpenedReason.NO_RESPONSE);val vm=vm(p)
+        assertFalse(vm.requestWatchQrAgain());vm.onPageEntered();runCurrent();advanceTimeBy(10_001)
+        assertTrue(vm.requestWatchQrAgain());assertFalse(vm.requestWatchQrAgain());runCurrent()
+        assertEquals(2,p.qrRequests);assertEquals(WatchPairingState.Idle,vm.state.value);assertTrue(p.calls.isEmpty());vm.cancel()
     }
 }

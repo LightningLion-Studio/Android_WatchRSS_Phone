@@ -77,7 +77,7 @@ QR scanning is explicitly supported only for account binding and authenticated c
 - Package structure: `com.lightningstudio.watchrss.phone`
 - Activities use Jetpack Compose exclusively (no XML layouts).
 - Keep connection UI and ViewModel logic scoped to Bluetooth sync.
-- CameraX and ZXing support the user-requested watch-binding scanner only. Keep layout separate from phone/pairing protocol/ViewModel logic. Do not add record-audio, WiFi hotspot or direct watch HTTP client dependencies.
+- CameraX and zxing-cpp support the user-requested watch-binding scanner only; Java ZXing remains for QR generation. Keep layout separate from phone/pairing protocol/ViewModel logic. Do not add record-audio, WiFi hotspot or direct watch HTTP client dependencies.
 
 ## Important Notes
 

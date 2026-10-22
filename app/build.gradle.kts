@@ -52,8 +52,8 @@ android {
         applicationId = "com.lightningstudio.watchrss.phone"
         minSdk = 30
         targetSdk = 36
-        versionCode = 69
-        versionName = "1.3.0-14"
+        versionCode = 70
+        versionName = "1.3.0-15"
         buildConfigField(
             "String",
             "WATCHRSS_PRODUCTION_BACKEND_BASE_URL",
@@ -175,6 +175,7 @@ dependencies {
     implementation("io.coil-kt:coil-gif:2.5.0")
     implementation("io.coil-kt:coil-video:2.5.0")
     implementation("com.google.zxing:core:3.5.3")
+    implementation(libs.zxing.cpp.android)
     implementation(libs.androidx.camera.core)
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
@@ -200,6 +201,7 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.json)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.robolectric)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.junit.ktx)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -210,4 +212,18 @@ dependencies {
     androidTestImplementation(libs.kotlinx.coroutines.test)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
+}
+
+// Test the published Android BarcodeReader's JNI/Y-plane path with the same upstream core.
+// The host build is test-only; it never enters the APK.
+val prepareQrNativeTests by tasks.registering(Exec::class) {
+    val output = layout.buildDirectory.dir("qr-native-tests")
+    inputs.dir("src/test/native/qr")
+    outputs.file(output.map { it.file("libzxingcpp_android.so") })
+    commandLine("python3", file("src/test/native/qr/build.py"), output.get().asFile, System.getProperty("java.home"))
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(prepareQrNativeTests)
+    systemProperty("java.library.path", layout.buildDirectory.dir("qr-native-tests").get().asFile.absolutePath)
+    systemProperty("robolectric.dependency.repo.url", "https://repo.maven.apache.org/maven2")
 }

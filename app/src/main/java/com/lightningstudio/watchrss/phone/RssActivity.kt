@@ -122,6 +122,7 @@ class RssActivity : ComponentActivity() {
 
         setContent {
             WatchRssPhoneTheme {
+                WatchSyncBindingHost(viewModel)
                 val uiState by viewModel.uiState.collectAsState()
 
                 LaunchedEffect(Unit) {

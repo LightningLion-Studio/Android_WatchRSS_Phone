@@ -182,6 +182,7 @@ class HomeActivity : ComponentActivity() {
 
         setContent {
             WatchRssPhoneTheme {
+                WatchSyncBindingHost(viewModel)
                 ProvideReaderPreset(container.readerPresetRepository) {
                     val state by viewModel.uiState.collectAsState()
                     val updateState by appUpdateDownloader.state.collectAsState()

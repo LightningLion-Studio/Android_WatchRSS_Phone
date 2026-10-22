@@ -119,12 +119,20 @@ class PhoneBluetoothSyncManager(
     private val buildAccountSyncRequest: suspend (watchDeviceId: String, watchInstallId: String?, watchDisplayName: String?) -> JSONObject =
         { _, _, _ -> error("账号同步未配置") },
     private val canSyncAccount: () -> Boolean = { false },
-    private val onLibrarySyncCompleted: suspend () -> Unit = {}
+    private val onLibrarySyncCompleted: suspend () -> Unit = {},
+    private val currentPhoneUserId: () -> String? = { null }
 ) {
     private val appContext = context.applicationContext
     private val client = PhoneBluetoothSyncClient(appContext, debugLog)
     private val watchBackgroundTranscoder =
         WatchBackgroundTranscoder(context.applicationContext, readerPresetRepository)
+
+    /** Read-only probe on the selected session/route, before sending library data or issuing watch tokens. */
+    private suspend fun requireWatchBinding(sessionId: String, deviceAddress: String? = null,
+        syncSession: PhoneSyncSession? = null): String? = checkWatchSyncBinding(currentPhoneUserId) {
+        exchange(LibrarySyncPayload.buildProbeRequest(deviceId), sessionId = "$sessionId-binding",
+            deviceAddress = deviceAddress, syncSession = syncSession)
+    } ?: deviceAddress
 
     internal suspend fun probeLibrarySyncTargets(
         onProbe: (completed: Int, total: Int) -> Unit = { _, _ -> }
@@ -217,6 +225,7 @@ class PhoneBluetoothSyncManager(
             fields = mapOf("urlBytes" to url.toByteArray(Charsets.UTF_8).size)
         )
         return runCatching {
+            val targetAddress = requireWatchBinding(sessionId)
             val exchange = exchange(
                 JSONObject().apply {
                     put("version", 1)
@@ -224,7 +233,8 @@ class PhoneBluetoothSyncManager(
                     put("nonce", System.currentTimeMillis().toString())
                     put("url", url)
                 },
-                sessionId = sessionId
+                sessionId = sessionId,
+                deviceAddress = targetAddress
             )
             requireSuccess(exchange.response)
             debugLog.appendEvent(
@@ -271,6 +281,7 @@ class PhoneBluetoothSyncManager(
             )
         )
         val result = runCatching {
+            requireWatchBinding(sessionId, effectiveDevice.address, syncSession)
             val request = buildAccountSyncRequest(
                 watchDeviceId,
                 null,
@@ -354,7 +365,10 @@ class PhoneBluetoothSyncManager(
                     )
                 }
                     .onSuccess { accountSync = it.accountSync }
-                    .onFailure { accountSyncWarning = it.message ?: "账号授权同步失败" }
+                    .onFailure {
+                        if (it is WatchSyncBlocked) throw it
+                        accountSyncWarning = it.message ?: "账号授权同步失败"
+                    }
                 reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_ACCOUNT, 100)
             }
             val libraryResult = syncLibrary(
@@ -372,6 +386,7 @@ class PhoneBluetoothSyncManager(
                         reusableSession = syncSession
                     )
                 }.onFailure { throwable ->
+                    if (throwable is WatchSyncBlocked) throw throwable
                     tokenUsageSyncWarning = throwable.message ?: "词元用量同步失败"
                 }
             }
@@ -401,6 +416,7 @@ class PhoneBluetoothSyncManager(
             fields = mapOf("type" to type.name)
         )
         return runCatching {
+            val targetAddress = requireWatchBinding(sessionId)
             val exchange = exchange(
                 JSONObject().apply {
                     put("version", 1)
@@ -408,7 +424,8 @@ class PhoneBluetoothSyncManager(
                     put("nonce", System.currentTimeMillis().toString())
                     put("type", type.name)
                 },
-                sessionId = sessionId
+                sessionId = sessionId,
+                deviceAddress = targetAddress
             )
             requireSuccess(exchange.response)
             val items = exchange.response.optJSONArray("items") ?: JSONArray()
@@ -466,6 +483,8 @@ class PhoneBluetoothSyncManager(
             emptyMap()
         }
     ): PhoneBluetoothSyncResult {
+        val sessionId = BluetoothDebugLog.newSessionId("syncLibrary")
+        val targetAddress = requireWatchBinding(sessionId, deviceAddress, syncSession)
         reportProgress(onProgress, PhoneBluetoothSyncStage.CONNECTING, 0)
         repository.repairImportedContentSourceStates()
         reportProgress(onProgress, PhoneBluetoothSyncStage.CONNECTING, 8)
@@ -479,7 +498,6 @@ class PhoneBluetoothSyncManager(
         var conflictMergeResolutions = emptyMap<String, PhoneSyncConflictResolution>()
         var syncWindow: PhoneLibrarySyncWindow? = null
         var remoteFullManifest = emptyList<ArticleSyncManifestEntry>()
-        val sessionId = BluetoothDebugLog.newSessionId("syncLibrary")
         debugLog.appendEvent(
             event = "sync.library.start",
             sessionId = sessionId,
@@ -670,7 +688,7 @@ class PhoneBluetoothSyncManager(
                     }
                     frames
                 },
-                deviceAddress = deviceAddress,
+                deviceAddress = targetAddress,
                 syncSession = syncSession,
                 onProgress = onProgress,
                 sessionId = sessionId,
@@ -776,6 +794,7 @@ class PhoneBluetoothSyncManager(
                         )
                     }
                 }.exceptionOrNull()?.let { throwable ->
+                    if (throwable is WatchSyncBlocked) throw throwable
                     debugLog.appendEvent(
                         event = "sync.reader.failed",
                         sessionId = sessionId,
@@ -942,6 +961,7 @@ class PhoneBluetoothSyncManager(
         syncSession: PhoneSyncSession? = null,
         onResourceProgress: (completed: Int, total: Int) -> Unit = { _, _ -> }
     ) {
+        requireWatchBinding(parentSessionId, deviceAddress, syncSession)
         if (readerPresetRepository.exportSnapshot().backgrounds.any {
                 !it.deleted && readerPresetRepository.resourceStore.backgroundFile(it.masterFileName) != null
             }) {
@@ -1059,6 +1079,7 @@ class PhoneBluetoothSyncManager(
         sequence: Long,
         preset: ReaderPreset
     ): String {
+        requireWatchBinding(sessionId, deviceAddress)
         delay(READER_RECONNECT_DELAY_MS)
         val exchange = exchange(
             request = ReaderPresetPreviewPayload.update(sessionId, sequence, preset),
@@ -1085,6 +1106,7 @@ class PhoneBluetoothSyncManager(
         onApplied: (Long) -> Unit,
         onStage: (String) -> Unit = {}
     ) {
+        requireWatchBinding(sessionId, deviceAddress)
         try {
             streamPreparedReaderPresetPreview(deviceAddress, sessionId, initialPreset, updates, onConnected, onApplied, onStage)
         } catch (failure: Exception) {
@@ -1365,6 +1387,7 @@ class PhoneBluetoothSyncManager(
             fields = mapOf("targetAddress" to device.address)
         )
         return runCatching {
+            requireWatchBinding(sessionId, device.address, reusableSession)
             val request = JSONObject().apply {
                 put("version", 1)
                 put("action", BluetoothSyncProtocol.ACTION_SYNC_LLM_TOKEN_USAGE)

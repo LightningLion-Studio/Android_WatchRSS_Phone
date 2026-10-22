@@ -11,6 +11,7 @@ import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSessionRegist
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncDeleteConflict
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibrarySyncMode
+import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchSyncBindingEvent
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
 import com.lightningstudio.watchrss.phone.data.backup.BackupPreview
 import com.lightningstudio.watchrss.phone.data.backup.WatchRssBackupService
@@ -177,6 +178,12 @@ class MainViewModel(
     private var pendingLocalContentInspection: PhoneLocalContentImportInspection? = null
     private val _toastEvent = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val toastEvent: SharedFlow<String> = _toastEvent.asSharedFlow()
+    private val watchBindingPrompts = WatchSyncBindingPrompts()
+    val watchSyncBindingEvents: SharedFlow<WatchSyncBindingEvent> = watchBindingPrompts.events
+    val watchSyncBindingPrompt: StateFlow<WatchSyncBindingEvent?> = watchBindingPrompts.prompt
+    fun dismissWatchSyncBindingPrompt() = watchBindingPrompts.dismiss()
+    /** UI consumes OpenWatchPairing and opens WatchPairingActivity; no automatic navigation. */
+    fun openWatchPairing() = watchBindingPrompts.openWatchPairing()
 
     private val sessionState = MutableStateFlow(MainUiState())
     private var conflictResolutionDeferred: CompletableDeferred<PhoneSyncConflictResolution>? = null
@@ -1217,6 +1224,7 @@ class MainViewModel(
             usageTelemetry.recordSyncResult(true, "library")
             tipManager.recordEvent(TipEvents.SYNC_COMPLETED)
         }.onFailure { throwable ->
+            if (handleWatchSyncBindingFailure(throwable)) return@onFailure
             val error = syncFailureMessage(
                 throwable = throwable,
                 phase = verificationProgressTarget?.phase
@@ -1298,6 +1306,7 @@ class MainViewModel(
             usageTelemetry.recordSyncResult(true, "account")
             _toastEvent.tryEmit(message)
         }.onFailure { throwable ->
+            if (handleWatchSyncBindingFailure(throwable)) return@onFailure
             clearSmoothedSyncProgress()
             sessionState.value = sessionState.value.copy(
                 syncStatusMessage = null,
@@ -1472,6 +1481,7 @@ class MainViewModel(
         )
         runCatching { block() }
             .onFailure { throwable ->
+                if (handleWatchSyncBindingFailure(throwable)) return@onFailure
                 val error = throwable.message ?: "操作失败"
                 sessionState.value = sessionState.value.copy(
                     error = error,
@@ -1479,6 +1489,15 @@ class MainViewModel(
                 )
         }
         sessionState.value = sessionState.value.copy(isBusy = false, syncProgress = null)
+    }
+
+    private fun handleWatchSyncBindingFailure(throwable: Throwable): Boolean {
+        if (!watchBindingPrompts.handle(throwable)) return false
+        clearSmoothedSyncProgress()
+        sessionState.value = sessionState.value.copy(isBusy = false, message = null,
+            syncStatusMessage = null, syncStatusError = null, error = null,
+            conflictPrompt = null, bluetoothDevicePrompt = null)
+        return true
     }
 
     private fun updateLibrarySyncProgress(progress: PhoneBluetoothSyncProgress) {

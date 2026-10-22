@@ -358,6 +358,7 @@ class PhoneCompanionContainer(context: Context) {
                 )
             },
             canSyncAccount = { accountRepository.hasUsableSession },
+            currentPhoneUserId = { accountRepository.session.value?.userId },
             onLibrarySyncCompleted = {
                 if (accountRepository.hasUsableSession) {
                     runCatching { cloudSyncService.syncNow() }

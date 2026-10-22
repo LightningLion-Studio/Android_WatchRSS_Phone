@@ -52,8 +52,8 @@ android {
         applicationId = "com.lightningstudio.watchrss.phone"
         minSdk = 30
         targetSdk = 36
-        versionCode = 66
-        versionName = "1.3.0-11"
+        versionCode = 67
+        versionName = "1.3.0-12"
         buildConfigField(
             "String",
             "WATCHRSS_PRODUCTION_BACKEND_BASE_URL",
@@ -175,6 +175,10 @@ dependencies {
     implementation("io.coil-kt:coil-gif:2.5.0")
     implementation("io.coil-kt:coil-video:2.5.0")
     implementation("com.google.zxing:core:3.5.3")
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
     implementation(libs.nanohttpd)
     implementation(libs.nanohttpd.websocket)
     implementation(libs.okhttp)
@@ -195,6 +199,7 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.json)
+    testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.junit.ktx)
     androidTestImplementation(libs.androidx.espresso.core)

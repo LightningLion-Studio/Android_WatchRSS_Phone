@@ -1,5 +1,8 @@
 package com.lightningstudio.watchrss.phone.cloud
 
+import com.lightningstudio.watchrss.phone.pairing.*
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.sync.withPermit
@@ -99,6 +102,10 @@ class PhoneCloudSyncService(
     private val _state = MutableStateFlow(PhoneCloudSyncState())
     val state: StateFlow<PhoneCloudSyncState> = _state
 
+    private val pairingEpochState = MutableStateFlow<String?>(null)
+    val pairingChanges: kotlinx.coroutines.flow.Flow<Unit> = merge(keyManager.changes.map { Unit }, pairingEpochState.map { Unit })
+    fun pairingEpoch(): String? = accountRepository.session.value?.let { client.knownEpoch(it) }
+    val pairingBackendBaseUrl: String get() = client.backendBaseUrl
     private var trustedBootstrap: CloudBootstrap? = null
     private val approvalMutex = Mutex()
     private var pendingSetup: RecoveryKeySetup? = null
@@ -172,6 +179,7 @@ class PhoneCloudSyncService(
         _deviceRegistrationConflict.value = false
         _keyWarning.value = null; _recordError.value = null; _needsReapproval.value = emptyList()
         client.forgetEpoch(session)
+        pairingEpochState.value = null
         pendingSetupOwner = null; pendingSetupEpoch = null
         if (approvalsDelegate.isInitialized()) approvals.clear()
     }
@@ -192,6 +200,7 @@ class PhoneCloudSyncService(
         require(bootstrap.libraryEpoch.isNotBlank()) { "云服务需要升级到同步协议 v2" }
         val changed = settings.observeEpoch(bootstrap.libraryEpoch) { invalidateEpoch(session) }
         client.useEpoch(session, bootstrap.libraryEpoch)
+        pairingEpochState.value = bootstrap.libraryEpoch
         if (changed) throw CloudTrustException()
         val keys = localKeys(session)
         val remoteDevice = bootstrap.devices.firstOrNull { it.deviceId == deviceId }
@@ -320,6 +329,36 @@ class PhoneCloudSyncService(
             _keyWarning.value = "授权密钥验证失败，已全部丢弃"
             throw error
         } finally { keys.values.forEach { it.fill(0) } }
+    }
+
+    /** No new key is generated here: the caller must explicitly open/recover cloud keys first. */
+    suspend fun prepareWatchPairingCloud(expectedUserId: String): PairingCloudPreparation {
+        val session = requireSession(); check(session.userId == expectedUserId) { "账号已切换，请重新配对" }; val bootstrap = validatedBootstrap(session)
+        if (!keyManager.hasAccountKey(session.userId) || keyManager.keyVersions(session.userId).toSet() != bootstrap.keyCommitments.map { it.keyVersion }.toSet()) return PairingCloudPreparation.NeedsKey(bootstrap.libraryEpoch,
+            bootstrap.keyCommitments.isNotEmpty() || bootstrap.keyEnvelopes.isNotEmpty() || bootstrap.legacyKeyVersions.isNotEmpty())
+        verifyLocalKeys(session, bootstrap)
+        ensureApprovalIdentity(session, bootstrap)
+        checkCloudEpoch(session, bootstrap.libraryEpoch)
+        return PairingCloudPreparation.Ready(bootstrap.libraryEpoch)
+    }
+
+    suspend fun grantWatchPairingCloud(qr: WatchPairingQr, preparedSpki: String, expectedEpoch: String, expectedUserId: String): PairingCloudGrant {
+        val session = requireSession(); check(session.userId == expectedUserId) { "账号已切换，请重新配对" }; checkCloudEpoch(session, expectedEpoch)
+        val bootstrap = validatedBootstrap(session); checkCloudEpoch(session, expectedEpoch)
+        val keys = localKeys(session)
+        val grant = try { buildPairingCloudGrant(session.userId, deviceId, bootstrap, qr, preparedSpki, keys) }
+            finally { keys.values.forEach { it.fill(0) } }
+        checkCloudEpoch(session, expectedEpoch)
+        if (grant.registered.attestation != grant.attestation || grant.registered.attestationKeyVersion != grant.keyVersion) {
+            client.attestPairingWatch(session, grant.registered, grant.attestation, grant.keyVersion, expectedEpoch)
+            checkCloudEpoch(session, expectedEpoch)
+        }
+        for (envelope in grant.envelopes) {
+            val exists = bootstrap.keyEnvelopes.any { it.recipientType == "device" && it.recipientDeviceId == qr.deviceId && it.envelope.keyVersion == envelope.keyVersion }
+            if (!exists) client.storeDeviceEnvelope(session, qr.deviceId, deviceId, envelope, expectedEpoch)
+            checkCloudEpoch(session, expectedEpoch)
+        }
+        return grant
     }
 
     /** True while the local private library belongs to another account; uploads stay blocked until resolved. */
@@ -503,6 +542,7 @@ class PhoneCloudSyncService(
                     keyManager.clearAccountKeys(session.userId)
                     settings.clearScope()
                     client.forgetEpoch(session)
+                    pairingEpochState.value = null
                     uploader.clearScope(client.scopeId(session))
                     cache.clear(client.scopeId(session))
                     recordStore.clear(client.scopeId(session))

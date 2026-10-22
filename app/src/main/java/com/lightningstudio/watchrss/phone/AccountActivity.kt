@@ -939,6 +939,12 @@ internal fun AccountScreen(
                 enabled = !busy && appAccessState is AppAccessState.Authorized,
                 onClick = onCloudSyncClick
             )
+            val pairingContext = LocalContext.current
+            Button(
+                onClick = { pairingContext.startActivity(WatchPairingActivity.createIntent(pairingContext)) },
+                enabled = !busy && appAccessState is AppAccessState.Authorized,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("扫码绑定手表") }
             OutlinedButton(
                 onClick = {
                     runAction {

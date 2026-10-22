@@ -264,6 +264,12 @@ class PhoneCompanionContainer(context: Context) {
         )
     }
 
+    /** Lead uses this factory with a ViewModelStoreOwner; the factory never starts the camera. */
+    fun createWatchPairingViewModel(): com.lightningstudio.watchrss.phone.pairing.WatchPairingViewModel =
+        com.lightningstudio.watchrss.phone.pairing.WatchPairingViewModel(
+            com.lightningstudio.watchrss.phone.pairing.PhoneWatchPairingPorts(accountRepository, cloudSyncService, accountEnvironment,
+                { appAccessCoordinator.deviceAccessToken }, { token, owner -> appAccessCoordinator.refreshRejectedDeviceSession(token, owner) }))
+
     val cloudSyncService: PhoneCloudSyncService by lazy {
         val storageSuffix = accountEnvironment.storageSuffix
         PhoneCloudSyncService(

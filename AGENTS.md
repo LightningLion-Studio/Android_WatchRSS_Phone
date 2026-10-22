@@ -6,7 +6,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 WatchRSS Phone is an Android companion app for the OPPO Watch RSS reader. The app supports a single formal connection flow: Bluetooth sync over Android public RFCOMM APIs. The watch opens a short-lived RFCOMM server and the phone connects to the already paired watch to exchange the local article library, favorites, and watch-later data.
 
-Do not reintroduce QR scanning, manual IP/port WiFi connection, acoustic-guided WiFi, or pure-sound data transfer as app connection modes unless explicitly requested.
+QR scanning is explicitly supported only for account binding and authenticated cloud-key delivery to a watch using its internet watch_pairing QR. It is not an article-library connection mode. Request camera permission only after the user chooses “扫码绑定手表”. Do not add manual IP/port WiFi, acoustic-guided WiFi or pure-sound connection modes.
 
 ## Technology Stack
 
@@ -100,7 +100,7 @@ The app registers `application/octet-stream` in its intent-filters so that the s
 - Package structure: `com.lightningstudio.watchrss.phone`
 - Activities use Jetpack Compose exclusively (no XML layouts).
 - Keep connection UI and ViewModel logic scoped to Bluetooth sync.
-- Avoid adding camera, QR scanner, record-audio, WiFi hotspot, or direct watch HTTP client dependencies unless the product direction changes.
+- CameraX and ZXing support the user-requested watch-binding scanner only. Keep layout separate from phone/pairing protocol/ViewModel logic. Do not add record-audio, WiFi hotspot or direct watch HTTP client dependencies.
 
 ## Important Notes
 

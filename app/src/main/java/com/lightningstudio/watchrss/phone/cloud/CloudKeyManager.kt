@@ -17,6 +17,9 @@ class CloudKeyManager(
     private val storageSuffix: String = "",
     private val preferencesOverride: android.content.SharedPreferences? = null
 ) {
+    private val changeCounter = kotlinx.coroutines.flow.MutableStateFlow(0L)
+    internal val changes: kotlinx.coroutines.flow.StateFlow<Long> = changeCounter
+    private fun changed() { changeCounter.value = changeCounter.value + 1 }
     private val appContext = context?.applicationContext
     private var backendScope: String = ""
     fun bindBackend(baseUrl: String) { backendScope = CloudSnapshotCodec.sha256(baseUrl.trimEnd('/').toByteArray()).take(24) }
@@ -102,6 +105,7 @@ class CloudKeyManager(
             .putString(accountKeyName(userId, keyVersion), accountKey.base64())
         if (makeCurrent) editor.putInt(currentVersionName(userId), keyVersion)
         check(editor.commit()) { "账号密钥保存失败" }
+        changed()
     }
 
     @Synchronized
@@ -119,6 +123,7 @@ class CloudKeyManager(
         keys.forEach { (v, key) -> editor.putString(accountKeyName(userId, v), key.base64()) }
         if (keys.isNotEmpty()) editor.putInt(currentVersionName(userId), keys.keys.max())
         check(editor.commit()) { "账号密钥保存失败" }
+        changed()
     }
 
     @Synchronized
@@ -133,6 +138,7 @@ class CloudKeyManager(
             .filter { it.startsWith(prefix) }
             .forEach(editor::remove)
         check(editor.commit()) { "本机云端账号密钥清理失败" }
+        changed()
     }
 
     fun createRecoverySetup(

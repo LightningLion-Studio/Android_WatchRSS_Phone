@@ -259,6 +259,14 @@ class PhoneAccountRepository(
         return current
     }
 
+    suspend fun issuePairingWatchCredentials(watchDeviceId: String, watchInstallId: String, expectedUserId: String): WatchDeviceToken {
+        val owner = requireSession()
+        check(owner.userId == expectedUserId) { "账号已切换，请重新配对" }
+        val token = accountClient.issueWatchDeviceToken(owner, phoneDeviceId, watchDeviceId, watchInstallId, "手机扫码绑定的手表")
+        check(requireSession().userId == owner.userId) { "账号已切换，请重新配对" }
+        return token
+    }
+
     suspend fun buildAccountSyncRequest(
         watchDeviceId: String,
         watchInstallId: String? = null,

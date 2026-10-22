@@ -108,6 +108,15 @@ class PhoneCloudClient(
         ).close()
     }
 
+    /** R28: supplement a server-confirmed watch; omit displayName/capabilities, never create its identity. */
+    internal suspend fun attestPairingWatch(session: PhoneAccountSession, watch: RegisteredCloudDevice,
+        attestation: String, attestationKeyVersion: Int, expectedEpoch: String) {
+        require(watch.revokedAt == null && !watch.watchSelfRegisteredAt.isNullOrBlank()) { "手表尚未自行登记" }
+        post(session, "/functions/v1/cloud/devices/register", JSONObject().put("deviceId", watch.deviceId)
+            .put("platform", watch.platform).put("publicKeySpki", watch.publicKeySpki.base64Bytes().base64())
+            .put("keyVersion", watch.keyVersion).put("attestation", attestation).put("attestationKeyVersion", attestationKeyVersion), expectedEpoch).close()
+    }
+
     suspend fun storeRecoveryEnvelope(
         session: PhoneAccountSession,
         createdByDeviceId: String,
@@ -529,7 +538,8 @@ class PhoneCloudClient(
         lastSequence = optLong("lastSequence"),
         revokedAt = nullableString("revokedAt"),
         attestation = nullableString("attestation"),
-        attestationKeyVersion = if (isNull("attestationKeyVersion")) null else optInt("attestationKeyVersion")
+        attestationKeyVersion = if (isNull("attestationKeyVersion")) null else optInt("attestationKeyVersion"),
+        watchSelfRegisteredAt = nullableString("watchSelfRegisteredAt")
     )
 
     private fun JSONObject.keyEnvelope() = StoredCloudKeyEnvelope(

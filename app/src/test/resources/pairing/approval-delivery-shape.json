@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "sources": ["cloud_v2.rs::KeyEnvelope", "cloud_approval_v2.rs::{Payload,Entry,Attestation,deliver}"],
+  "payload": {"required": ["envelopes", "attestation"], "optional": []},
+  "entry": {"required": ["keyVersion", "envelope"], "optional": []},
+  "attestation": {"required": ["keyVersion", "mac"], "optional": []},
+  "envelope": {
+    "required": ["recipientType", "keyVersion", "algorithm", "wrappedKeyBase64", "nonceBase64"],
+    "optional": ["recipientDeviceId", "ephemeralPublicKeySpki", "createdByDeviceId"],
+    "nullable": ["recipientDeviceId", "ephemeralPublicKeySpki"],
+    "defaults": {"createdByDeviceId": ""},
+    "denyUnknownFields": true
+  },
+  "deliver": {"recipientType": "device", "recipientDeviceId": "requester deviceId", "versions": "exact committed set", "entryVersionEqualsEnvelopeVersion": true},
+  "miniOutput": {"createdByDeviceId": "physical approver deviceId", "recipientDeviceId": "requester deviceId"}
+}

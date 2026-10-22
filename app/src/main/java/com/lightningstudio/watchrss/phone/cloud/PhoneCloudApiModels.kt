@@ -25,7 +25,8 @@ data class RegisteredCloudDevice(
     val lastSequence: Long,
     val revokedAt: String?,
     val attestation: String? = null,
-    val attestationKeyVersion: Int? = null
+    val attestationKeyVersion: Int? = null,
+    val watchSelfRegisteredAt: String? = null
 )
 
 data class StoredCloudKeyEnvelope(

@@ -1,0 +1,201 @@
+package com.lightningstudio.watchrss.phone.pairing
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.lightningstudio.watchrss.phone.account.WatchDeviceToken
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicLong
+
+sealed interface PairingCloudPreparation {
+    val epoch:String
+    data class Ready(override val epoch:String):PairingCloudPreparation
+    data class NeedsKey(override val epoch:String,val existingCloud:Boolean):PairingCloudPreparation
+}
+data class PairingOwner(val userId:String,val backendBaseUrl:String,val epoch:String?,val phoneMasked:String="")
+enum class PairingCameraPermission { NOT_REQUESTED, REQUEST_REQUIRED, GRANTED, DENIED, BLOCKED }
+sealed interface WatchPairingState {
+    data object Idle:WatchPairingState
+    data object PreparingCloud:WatchPairingState
+    data class NeedsKey(val existingCloud:Boolean):WatchPairingState
+    data class Scanning(val permission:PairingCameraPermission):WatchPairingState
+    data object Connecting:WatchPairingState
+    data class Confirming(val sas:String):WatchPairingState
+    data class Configuring(val step:String):WatchPairingState
+    data class Done(val bound:Boolean,val cloudReady:Boolean,val cloudError:String?=null,val finishError:String?=null,val canRetry:Boolean=false):WatchPairingState
+    data class Failed(val message:String,val canRetry:Boolean=true):WatchPairingState
+}
+interface WatchPairingPorts {
+    val changes:Flow<Unit>
+    fun currentOwner():PairingOwner?
+    suspend fun prepareCloud(owner:PairingOwner):PairingCloudPreparation
+    fun openChannel(qr:WatchPairingQr,owner:PairingOwner):WatchPairingChannel
+    suspend fun issueCredentials(qr:WatchPairingQr,owner:PairingOwner):WatchDeviceToken
+    suspend fun grantCloud(qr:WatchPairingQr,preparedSpki:String,owner:PairingOwner):PairingCloudGrant
+}
+
+/** Lead owns layout/launchers. No camera permission is requested by construction or page entry. */
+class WatchPairingViewModel internal constructor(private val ports:WatchPairingPorts,
+    scope:CoroutineScope?=null,private val now:()->Long=System::currentTimeMillis):ViewModel() {
+    private val workScope=scope?:viewModelScope
+    private val mutable=MutableStateFlow<WatchPairingState>(WatchPairingState.Idle)
+    val state:StateFlow<WatchPairingState> = mutable
+    private val generation=AtomicLong()
+    private var work:Job?=null
+    private var owner:PairingOwner?=null
+    private var qr:WatchPairingQr?=null
+    private var channel:WatchPairingChannel?=null
+    private var cameraGranted=false
+    private var prepared:JSONObject?=null
+    private var issued:WatchDeviceToken?=null
+    private var configureMessage:JSONObject?=null
+    private var grant:PairingCloudGrant?=null
+    private var bound=false;private var cloudReady=false;private var finished=false;private var sasConfirmed=false
+    private val observer=workScope.launch {
+        ports.changes.collect {
+            if(owner!=null && !sameOwner()) { invalidate("账号或云资料库已变化，请重新开始扫码绑定");return@collect }
+            if(state.value is WatchPairingState.NeedsKey && work?.isActive!=true) prepareScan()
+        }
+    }
+    private fun sameOwner():Boolean {
+        val pinned=owner?:return false;val current=ports.currentOwner()?:return false
+        return current.userId==pinned.userId && current.backendBaseUrl.trimEnd('/')==pinned.backendBaseUrl.trimEnd('/') &&
+            (pinned.epoch==null || pinned.epoch==current.epoch)
+    }
+    private fun check(ticket:Long) { if(generation.get()!=ticket || !sameOwner()) throw PairingInvalidated() }
+    private fun launchWork(block:suspend (Long)->Unit) {
+        if(work?.isActive==true)return
+        val ticket=generation.get()
+        work=workScope.launch {
+            try { check(ticket);block(ticket) }
+            catch(error:CancellationException) { if(generation.get()==ticket && !sameOwner()) invalidate("账号或云资料库已变化，请重新开始扫码绑定") }
+            catch(error:Exception) { if(generation.get()==ticket) mutable.value=WatchPairingState.Failed(error.message?:"配对失败，请重试") }
+            finally { if(generation.get()==ticket)work=null }
+        }
+    }
+    /** Called only by the user's “扫码绑定” action; pass the existing OS permission, never request on entry. */
+    fun startScan(cameraPermissionGranted:Boolean=false) {
+        cancel();cameraGranted=cameraPermissionGranted
+        owner=ports.currentOwner()
+        if(owner==null) {mutable.value=WatchPairingState.Failed("请先登录腕上RSS账号",false);return}
+        prepareScan()
+    }
+    private fun prepareScan()=launchWork { ticket ->
+        mutable.value=WatchPairingState.PreparingCloud
+        val cloud=ports.prepareCloud(requireNotNull(owner));check(ticket)
+        owner=requireNotNull(owner).copy(epoch=cloud.epoch)
+        check(ticket)
+        mutable.value=when(cloud) {
+            is PairingCloudPreparation.NeedsKey -> WatchPairingState.NeedsKey(cloud.existingCloud)
+            is PairingCloudPreparation.Ready -> WatchPairingState.Scanning(if(cameraGranted)PairingCameraPermission.GRANTED else PairingCameraPermission.REQUEST_REQUIRED)
+        }
+    }
+    fun onCameraPermissionResult(granted:Boolean,canAskAgain:Boolean=true) {
+        if(state.value !is WatchPairingState.Scanning)return
+        cameraGranted=granted
+        mutable.value=WatchPairingState.Scanning(when {granted->PairingCameraPermission.GRANTED;canAskAgain->PairingCameraPermission.DENIED;else->PairingCameraPermission.BLOCKED})
+    }
+    /** Capture once per camera binding so queued frames from an abandoned scan cannot enter a new scan. */
+    fun qrCallback():(String)->Unit {
+        val ticket=generation.get()
+        return { raw -> if(generation.get()==ticket)onQrDecoded(raw) }
+    }
+    fun onQrDecoded(raw:String) {
+        if((state.value as? WatchPairingState.Scanning)?.permission!=PairingCameraPermission.GRANTED)return
+        launchWork { ticket ->
+            if(state.value !is WatchPairingState.Scanning)return@launchWork
+            val descriptor=WatchPairingQr.parse(raw,now());qr=descriptor
+            channel=ports.openChannel(descriptor,requireNotNull(owner))
+            connectAndPrepare(ticket)
+        }
+    }
+    private suspend fun connectAndPrepare(ticket:Long) {
+        val descriptor=requireNotNull(qr);val link=requireNotNull(channel)
+        mutable.value=WatchPairingState.Connecting
+        link.connect();check(ticket)
+        if(prepared==null) {
+            val receipt=link.request(JSONObject().put("action","prepare").put("userId",requireNotNull(owner).userId).put("phoneMasked",requireNotNull(owner).phoneMasked.ifBlank { "当前账号" }))
+            check(ticket)
+            require(receipt.optString("deviceId")==descriptor.deviceId && receipt.optString("userId")==requireNotNull(owner).userId) { "手表身份与配对码不一致，请重新扫码" }
+            val spki=receipt.getString("publicKeySpki")
+            com.lightningstudio.watchrss.phone.cloud.CloudKeyEnvelopeCodec.decodeP256PublicKey(spki)
+            prepared=receipt
+        }
+        mutable.value=WatchPairingState.Confirming(PairingWireCodec.sas(descriptor,requireNotNull(owner).userId))
+    }
+    fun confirmSas(matches:Boolean) {
+        if(state.value !is WatchPairingState.Confirming)return
+        if(!matches) {cancel();mutable.value=WatchPairingState.Failed("两端配对码不一致，已取消；请重新扫描",false);return}
+        sasConfirmed=true
+        launchWork { ticket -> configure(ticket) }
+    }
+    private suspend fun configure(ticket:Long) {
+        check(ticket);check(sasConfirmed)
+        val descriptor=requireNotNull(qr);val link=requireNotNull(channel);val pinned=requireNotNull(owner)
+        try {
+            if(!bound) {
+                mutable.value=WatchPairingState.Configuring("正在签发手表凭据")
+                if(issued==null) {val token=ports.issueCredentials(descriptor,pinned);check(ticket);require(token.accessToken.isNotBlank()&&token.refreshToken.isNotBlank()&&token.accessTokenExpiresAtMillis>now()){ "手表凭据未确认" };issued=token}
+                if(configureMessage==null)configureMessage=configureMessage(pinned,descriptor,requireNotNull(issued))
+                mutable.value=WatchPairingState.Configuring("正在让手表保存账号并自行登记")
+                val receipt=link.request(requireNotNull(configureMessage));check(ticket)
+                require(receipt.optBoolean("bound")&&receipt.optString("deviceId")==descriptor.deviceId&&receipt.optString("userId")==pinned.userId) { "手表尚未确认保存账号，请重试" }
+                bound=true;issued=null;configureMessage=null
+            }
+            if(!cloudReady) {
+                mutable.value=WatchPairingState.Configuring("正在核对手表自行登记并交付云密钥")
+                if(grant==null) {val value=ports.grantCloud(descriptor,requireNotNull(prepared).getString("publicKeySpki"),pinned);check(ticket);grant=value}
+                val keyGrant=requireNotNull(grant)
+                val receipt=link.request(keyGrant.message(pinned.userId,requireNotNull(pinned.epoch)));check(ticket)
+                require(receipt.optBoolean("cloudReady")&&receipt.optString("deviceId")==descriptor.deviceId&&receipt.optInt("keyVersion")==keyGrant.keyVersion) { "手表尚未确认云密钥保存，请重试授权" }
+                cloudReady=true;grant=null
+            }
+            if(!finished) {
+                mutable.value=WatchPairingState.Configuring("正在结束配对")
+                link.request(JSONObject().put("action","finish").put("cloudReady",true));check(ticket);finished=true
+            }
+            link.close();check(ticket);channel=null;qr=null;prepared=null
+            mutable.value=WatchPairingState.Done(true,true)
+        } catch(error:CancellationException) {throw error}
+        catch(error:Exception) {
+            check(ticket)
+            if(bound)mutable.value=WatchPairingState.Done(true,cloudReady,
+                cloudError=if(!cloudReady)error.message?:"云授权未完成，请重试"else null,
+                finishError=if(cloudReady)error.message?:"结束确认未送达，账号已保存"else null,
+                canRetry=now()<descriptor.expiresAt)
+            else throw error
+        }
+    }
+    fun retry() {
+        when(val current=state.value) {
+            is WatchPairingState.NeedsKey -> prepareScan()
+            is WatchPairingState.Scanning -> if(current.permission!=PairingCameraPermission.GRANTED)mutable.value=WatchPairingState.Scanning(PairingCameraPermission.REQUEST_REQUIRED)
+            is WatchPairingState.Done -> if(current.canRetry)launchWork {configure(it)}
+            is WatchPairingState.Failed -> if(qr!=null && current.canRetry)launchWork { if(sasConfirmed)configure(it)else connectAndPrepare(it) } else startScan(cameraGranted)
+            else -> Unit
+        }
+    }
+    private fun release() {
+        val old=channel;channel=null
+        old?.invalidate();qr?.destroy();qr=null;prepared=null;issued=null;configureMessage=null;grant=null
+        if(old!=null)workScope.launch(NonCancellable) {runCatching {old.close()} }
+    }
+    fun cancel() {
+        generation.incrementAndGet();work?.cancel();work=null;release();owner=null
+        bound=false;cloudReady=false;finished=false;sasConfirmed=false
+        mutable.value=WatchPairingState.Idle
+    }
+    private fun invalidate(message:String) {cancel();mutable.value=WatchPairingState.Failed(message,false)}
+    override fun onCleared() {cancel();observer.cancel();super.onCleared()}
+}
+
+/** Only watch credentials are transported; phone login/app-access tokens are never included. */
+internal fun configureMessage(owner:PairingOwner,qr:WatchPairingQr,token:WatchDeviceToken):JSONObject = JSONObject()
+    .put("action","configure").put("account",JSONObject().put("userId",owner.userId).put("phoneMasked",owner.phoneMasked).put("installId",qr.installId)
+        .put("watchAccessToken",token.accessToken).put("accessTokenExpiresAt",token.accessTokenExpiresAtMillis)
+        .put("watchRefreshToken",token.refreshToken).put("refreshTokenExpiresAt",token.refreshTokenExpiresAtMillis)
+        .put("backendBaseUrl",owner.backendBaseUrl).put("posthogHost","").put("posthogProjectApiKey",""))
+    .put("entitlement",JSONObject().put("plan",token.entitlement.plan).put("active",token.entitlement.active).put("expiresAt",token.entitlement.expiresAtMillis).put("features",JSONArray(token.entitlement.features)))
+    .put("telemetry",JSONObject().put("anonymousEnabled",false).put("diagnosticsEnabled",false).put("sampleRate",1))

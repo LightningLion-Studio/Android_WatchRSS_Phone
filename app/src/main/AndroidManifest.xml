@@ -3,6 +3,9 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Requested only after the user starts watch binding; never an article-library connection mode. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -191,6 +194,10 @@
             android:theme="@style/Theme.WatchRSS" />
         <activity
             android:name=".ProfileActivity"
+            android:exported="false"
+            android:theme="@style/Theme.WatchRSS" />
+        <activity
+            android:name=".WatchPairingActivity"
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />
         <activity

@@ -6,6 +6,8 @@ import android.content.SharedPreferences
 class MemoryPreferences : SharedPreferences {
     private val values = linkedMapOf<String, Any>()
     var failCommit = false
+    var commitCount = 0
+        private set
     override fun getAll(): MutableMap<String, *> = values.toMutableMap()
     override fun getString(key: String?, defValue: String?) = values[key] as? String ?: defValue
     @Suppress("UNCHECKED_CAST")
@@ -29,6 +31,7 @@ class MemoryPreferences : SharedPreferences {
         override fun remove(key: String?) = set(key,null)
         override fun clear(): SharedPreferences.Editor { clear=true;return this }
         override fun commit(): Boolean {
+            commitCount++
             if(failCommit)return false
             if(clear)values.clear()
             changed.forEach { (key,value) -> if(value==null) values.remove(key) else values[key]=value }

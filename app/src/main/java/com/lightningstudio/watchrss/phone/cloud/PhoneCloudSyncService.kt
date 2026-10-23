@@ -411,8 +411,10 @@ class PhoneCloudSyncService(
     suspend fun loadMembership(): CloudMemberState = refreshDashboardMembership()
 
     fun hasLocalAccountKey(): Boolean =
-        accountRepository.session.value?.let { session -> keyManager.hasAccountKey(session.userId) &&
-            trustedBootstrap?.keyEnvelopes?.any { it.recipientType == "recovery" && it.envelope.keyVersion == keyManager.currentKeyVersion(session.userId) } == true } == true
+        // Local possession survives process recreation/offline startup. First activation only
+        // persists after the server confirms its recovery envelope; every sync still validates
+        // the epoch and commitments before using any key.
+        accountRepository.session.value?.let { keyManager.hasAccountKey(it.userId) } == true
 
     fun rssInventoryMode(sourceUrl: String): CloudRssInventoryMode =
         rssInventoryPreferences.mode(sourceUrl)

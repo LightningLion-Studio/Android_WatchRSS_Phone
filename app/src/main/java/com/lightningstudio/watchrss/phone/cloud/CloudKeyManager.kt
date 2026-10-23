@@ -42,21 +42,34 @@ class CloudKeyManager(
         if (loadedPreferences == null || backendScope.isBlank()) return
         val claimed = preferences.getString("legacy_backend_scope", null)
         if (claimed != null && claimed != backendScope) return
+        val entries = legacyEntries(userId)
+        if (entries.isEmpty()) return
         val oldHash = CloudSnapshotCodec.sha256(userId.toByteArray()).take(24)
         val newHash = CloudSnapshotCodec.sha256("$backendScope:$userId".toByteArray()).take(24)
-        val oldPrefix = "account_key_${oldHash}"
-        val editor = preferences.edit().putString("legacy_backend_scope", backendScope)
-        preferences.all.forEach { (name, value) ->
-            if (name == oldPrefix || name.startsWith("${oldPrefix}_v") || name == "account_key_current_$oldHash") {
-                val newName = name.replace(oldHash, newHash)
-                if (!preferences.contains(newName)) when (value) {
-                    is String -> editor.putString(newName, value)
-                    is Int -> editor.putInt(newName, value)
-                }
-                editor.remove(name)
+        val missing = entries.filterKeys { !preferences.contains(it.replace(oldHash, newHash)) }
+        if (missing.isEmpty() && claimed == backendScope) return
+        val editor = preferences.edit()
+        if (claimed == null) editor.putString("legacy_backend_scope", backendScope)
+        missing.forEach { (name, value) ->
+            val newName = name.replace(oldHash, newHash)
+            when (value) {
+                is String -> editor.putString(newName, value)
+                is Int -> editor.putInt(newName, value)
             }
         }
-        check(editor.commit())
+        // Stage a copy only. R8/R19 verification must succeed before retiring the old entries.
+        check(editor.commit()) { "旧账号密钥暂存失败" }
+    }
+
+    private fun legacyEntries(userId: String): Map<String, *> {
+        if (backendScope.isBlank()) return emptyMap<String, Any>()
+        val claimed = preferences.getString("legacy_backend_scope", null)
+        if (claimed != null && claimed != backendScope) return emptyMap<String, Any>()
+        val hash = CloudSnapshotCodec.sha256(userId.toByteArray()).take(24)
+        val prefix = "account_key_$hash"
+        return preferences.all.filterKeys {
+            it == prefix || it.startsWith("${prefix}_v") || it == "account_key_current_$hash"
+        }
     }
     fun hasAccountKey(userId: String): Boolean =
         keyVersions(userId).isNotEmpty()
@@ -70,7 +83,6 @@ class CloudKeyManager(
             ?: if (keyVersion == 1) {
                 preferences.getString(legacyAccountKeyName(userId), null)
                     ?.base64Bytes()
-                    ?.also { saveAccountKey(userId, 1, it, makeCurrent = true) }
             } else {
                 null
             }
@@ -89,10 +101,13 @@ class CloudKeyManager(
         val versions = preferences.all.keys.mapNotNull { key ->
             key.removePrefix(prefix).takeIf { key.startsWith(prefix) }?.toIntOrNull()
         }.sorted()
-        if (versions.isNotEmpty()) return versions
-        return if (preferences.contains(legacyAccountKeyName(userId))) listOf(1) else emptyList()
+        // Pre-versioned v1 may coexist with a later rotation. Omitting it loses the
+        // commitment-chain anchor and can make every otherwise valid key fail trust.
+        return (versions + if (preferences.contains(legacyAccountKeyName(userId))) listOf(1) else emptyList())
+            .distinct().sorted()
     }
 
+    @Synchronized
     fun saveAccountKey(
         userId: String,
         keyVersion: Int,
@@ -101,8 +116,11 @@ class CloudKeyManager(
     ) {
         require(accountKey.size == 32) { "账号主密钥必须为256位" }
         require(keyVersion > 0) { "账号密钥版本无效" }
+        val encoded = accountKey.base64()
+        if (preferences.getString(accountKeyName(userId, keyVersion), null) == encoded &&
+            (!makeCurrent || preferences.getInt(currentVersionName(userId), 0) == keyVersion)) return
         val editor = preferences.edit()
-            .putString(accountKeyName(userId, keyVersion), accountKey.base64())
+            .putString(accountKeyName(userId, keyVersion), encoded)
         if (makeCurrent) editor.putInt(currentVersionName(userId), keyVersion)
         check(editor.commit()) { "账号密钥保存失败" }
         changed()
@@ -118,10 +136,22 @@ class CloudKeyManager(
     internal fun replaceVerifiedKeys(userId: String, keys: Map<Int, ByteArray>) {
         require(keys.all { it.key > 0 && it.value.size == 32 })
         migrateLegacy(userId)
-        val editor = preferences.edit().remove(legacyAccountKeyName(userId)).remove(currentVersionName(userId))
-        preferences.all.keys.filter { it.startsWith(accountKeyPrefix(userId)) }.forEach(editor::remove)
-        keys.forEach { (v, key) -> editor.putString(accountKeyName(userId, v), key.base64()) }
-        if (keys.isNotEmpty()) editor.putInt(currentVersionName(userId), keys.keys.max())
+        val desired = linkedMapOf<String, Any>()
+        keys.forEach { (v, key) -> desired[accountKeyName(userId, v)] = key.base64() }
+        if (keys.isNotEmpty()) desired[currentVersionName(userId)] = keys.keys.max()
+        val existing = preferences.all.filterKeys {
+            it == legacyAccountKeyName(userId) || it == currentVersionName(userId) || it.startsWith(accountKeyPrefix(userId))
+        }
+        val oldEntries = legacyEntries(userId)
+        if (existing == desired && oldEntries.isEmpty()) return
+        val editor = preferences.edit()
+        (existing.keys + oldEntries.keys).filter { it !in desired }.forEach(editor::remove)
+        desired.forEach { (name, value) ->
+            if (existing[name] != value) when (value) {
+                is String -> editor.putString(name, value)
+                is Int -> editor.putInt(name, value)
+            }
+        }
         check(editor.commit()) { "账号密钥保存失败" }
         changed()
     }
@@ -130,13 +160,12 @@ class CloudKeyManager(
     fun clearAccountKeys(userId: String) {
         if (loadedPreferences == null) return
         migrateLegacy(userId)
-        val prefix = accountKeyPrefix(userId)
+        val names = preferences.all.keys.filter {
+            it == currentVersionName(userId) || it == legacyAccountKeyName(userId) || it.startsWith(accountKeyPrefix(userId))
+        } + legacyEntries(userId).keys
+        if (names.isEmpty()) return
         val editor = preferences.edit()
-            .remove(currentVersionName(userId))
-            .remove(legacyAccountKeyName(userId))
-        preferences.all.keys
-            .filter { it.startsWith(prefix) }
-            .forEach(editor::remove)
+        names.forEach(editor::remove)
         check(editor.commit()) { "本机云端账号密钥清理失败" }
         changed()
     }

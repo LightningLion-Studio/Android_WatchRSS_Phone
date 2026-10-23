@@ -23,6 +23,11 @@ class WatchPairingViewModelTest {
         var current:PairingOwner?=data.owner
         var hasKeys=true;var cloudFailure:Exception?=null;var keyReceiptFailure=false;var finishFailure=false
         var issueCalls=0;var cloudCalls=0;var opens=0;var closes=0;var invalidated=false
+        var claimGate:CompletableDeferred<Unit>?=null
+        var prepareGate:CompletableDeferred<Unit>?=null
+        var prepareReceipt:JSONObject?=null
+        var ignorePrepareCancellation=false
+        var channelFactory:((WatchPairingQr)->WatchPairingChannel)?=null
         var configureGate:CompletableDeferred<Unit>?=null
         var qrRequests=0;var qrResult:WatchQrRequest=WatchQrRequest.Opened;var qrFailure:Exception?=null
         var qrGate:CompletableDeferred<WatchQrRequest>?=null;var ignoreQrCancellation=false
@@ -34,12 +39,15 @@ class WatchPairingViewModelTest {
             return if(ignoreQrCancellation)withContext(NonCancellable){gate.await()}else gate.await()
         }
         override suspend fun prepareCloud(owner:PairingOwner):PairingCloudPreparation {calls+="prepareCloud";return if(hasKeys)PairingCloudPreparation.Ready(data.epoch)else PairingCloudPreparation.NeedsKey(data.epoch,true)}
-        override fun openChannel(qr:WatchPairingQr,owner:PairingOwner):WatchPairingChannel {opens++;return object:WatchPairingChannel {
-            override suspend fun connect(){calls+="claim"}
+        override fun openChannel(qr:WatchPairingQr,owner:PairingOwner):WatchPairingChannel {opens++;channelFactory?.let { return it(qr) };return object:WatchPairingChannel {
+            override suspend fun connect(){calls+="claim";claimGate?.await()}
             override suspend fun request(message:JSONObject):JSONObject {
                 val action=message.getString("action");calls+=action;messages+=JSONObject(message.toString())
                 return when(action) {
-                    "prepare"->JSONObject().put("success",true).put("userId",data.user).put("deviceId",data.device).put("publicKeySpki",data.spki)
+                    "prepare"->{
+                        if(ignorePrepareCancellation)withContext(NonCancellable){prepareGate?.await()}else prepareGate?.await()
+                        prepareReceipt?:JSONObject().put("success",true).put("userId",data.user).put("deviceId",data.device).put("publicKeySpki",data.spki)
+                    }
                     "configure"->{configureGate?.await();JSONObject().put("success",true).put("bound",true).put("userId",data.user).put("deviceId",data.device)}
                     "key"->{if(keyReceiptFailure)throw IOException("key response lost");JSONObject().put("success",true).put("cloudReady",true).put("keyVersion",1).put("deviceId",data.device)}
                     "finish"->{if(finishFailure)throw IOException("finish response lost");JSONObject().put("success",true)}
@@ -54,6 +62,110 @@ class WatchPairingViewModelTest {
     }
     private fun TestScope.vm(p:Ports)=WatchPairingViewModel(p,backgroundScope,{d.now},{testScheduler.currentTime})
     private fun TestScope.scan(vm:WatchPairingViewModel) {vm.onPageEntered();vm.startScan(true);runCurrent();assertTrue(vm.state.value is WatchPairingState.Scanning);vm.onQrDecoded(d.raw);runCurrent();assertTrue(vm.state.value is WatchPairingState.Confirming)}
+    @Test fun claimThenLocalSasIsVisibleBeforeWatchPrepareReturnsAndPhoneCannotConfirmEarly()=runTest {
+        val p=Ports();p.claimGate=CompletableDeferred();p.prepareGate=CompletableDeferred()
+        val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent()
+        assertEquals(WatchPairingState.Connecting,vm.state.value);assertFalse(p.calls.contains("prepare"))
+        p.claimGate!!.complete(Unit);runCurrent()
+        val waiting=vm.state.value as WatchPairingState.AwaitingWatchConfirm
+        assertEquals(d.fixture.getString("sas"),waiting.sas)
+        assertEquals("核对一致后，先在手表上点‘一致，绑定’",waiting.message)
+        assertEquals(listOf("prepareCloud","claim","prepare"),p.calls)
+        vm.confirmSas(true);runCurrent()
+        assertEquals(waiting,vm.state.value);assertEquals(0,p.issueCalls);assertEquals(0,p.cloudCalls)
+        p.prepareGate!!.complete(Unit);runCurrent()
+        assertEquals(WatchPairingState.Confirming(waiting.sas),vm.state.value)
+        assertTrue(vm.state.value is WatchPairingState.Confirming.Phone);assertEquals(0,p.issueCalls)
+        vm.confirmSas(true);runCurrent()
+        assertEquals(WatchPairingState.Done(true,true),vm.state.value);assertEquals(1,p.issueCalls);vm.cancel()
+    }
+    @Test fun realEncryptedRelayCanPollNullWhileBothScreensAlreadyHaveTheSameSas()=runTest {
+        val p=Ports();var watchConfirmed=false;var polls=0;var prepares=0;var claims=0
+        p.channelFactory={qr -> WatchPairingRelay(qr,object:PairingHttp {
+            override suspend fun call(method:String,path:String,body:String?,capability:String?,timeoutMillis:Long):JSONObject=when {
+                path.endsWith("/claim")->{claims++;JSONObject().put("claimed",true)}
+                path.endsWith("/request")->{
+                    prepares++
+                    val envelope=JSONObject(body!!)
+                    val request=PairingWireCodec.open(qr,"phone",0,envelope.getJSONObject("wire"))
+                    assertEquals("prepare",request.getString("action"));assertEquals(d.user,request.getString("userId"))
+                    assertEquals(d.fixture.getString("sas"),PairingWireCodec.sas(qr,request.getString("userId")))
+                    JSONObject().put("accepted",true)
+                }
+                path.contains("/response?")->{
+                    polls++
+                    JSONObject().put("wire",if(!watchConfirmed)JSONObject.NULL else PairingWireCodec.seal(qr,"watch",0,
+                        JSONObject().put("success",true).put("userId",d.user).put("deviceId",d.device).put("publicKeySpki",d.spki)))
+                }
+                else->JSONObject().put("closed",true)
+            }
+        },{},{true},{d.now+testScheduler.currentTime}) }
+        val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent()
+        val waiting=vm.state.value as WatchPairingState.AwaitingWatchConfirm
+        assertEquals(d.fixture.getString("sas"),waiting.sas)
+        assertEquals(1,claims);assertEquals(1,prepares);assertEquals(1,polls)
+        advanceTimeBy(3600);runCurrent();assertTrue(polls>=4)
+        assertEquals(waiting,vm.state.value);assertEquals(0,p.issueCalls)
+        watchConfirmed=true;advanceTimeBy(1200);runCurrent()
+        assertEquals(WatchPairingState.Confirming(waiting.sas),vm.state.value)
+        assertEquals(1,prepares);assertEquals(0,p.issueCalls);vm.cancel();runCurrent()
+    }
+    @Test fun claimAndPrepareEachHaveATwoMinuteErrorExitAndTimeoutCanRetrySameSession()=runTest {
+        for(stage in listOf("claim","prepare")) {
+            val p=Ports();val gate=CompletableDeferred<Unit>()
+            if(stage=="claim")p.claimGate=gate else p.prepareGate=gate
+            val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent()
+            advanceTimeBy(119_999);runCurrent()
+            assertFalse(vm.state.value is WatchPairingState.Failed)
+            advanceTimeBy(1);runCurrent()
+            val failed=vm.state.value as WatchPairingState.Failed
+            assertTrue(failed.message.contains("超时"));assertTrue(failed.canRetry);assertEquals(0,p.issueCalls)
+            gate.complete(Unit);vm.retry();runCurrent()
+            assertTrue(vm.state.value is WatchPairingState.Confirming.Phone)
+            assertEquals(1,p.opens);assertEquals(0,p.issueCalls);vm.cancel()
+        }
+    }
+    @Test fun cancellationAndOwnerChangeDuringWatchConfirmationRejectLateReceipts()=runTest {
+        for(change in listOf("cancel","user","logout","backend","epoch")) {
+            val p=Ports();p.prepareGate=CompletableDeferred();p.ignorePrepareCancellation=true
+            val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent()
+            assertTrue(vm.state.value is WatchPairingState.AwaitingWatchConfirm)
+            if(change=="cancel")vm.cancel()else {
+                p.current=when(change){"user"->d.owner.copy(userId="other");"backend"->d.owner.copy(backendBaseUrl="https://other.invalid");"epoch"->d.owner.copy(epoch="new");else->null}
+                p.changes.emit(Unit)
+            }
+            runCurrent();p.prepareGate!!.complete(Unit);runCurrent()
+            if(change=="cancel")assertEquals(WatchPairingState.Idle,vm.state.value)
+            else assertTrue(vm.state.value is WatchPairingState.Failed)
+            assertEquals(0,p.issueCalls);assertTrue(p.invalidated);vm.cancel()
+        }
+    }
+    @Test fun rejectionOrMismatchingPrepareIdentityAndSasNeverAllowsPhoneConfirmation()=runTest {
+        for(kind in listOf("user","device","sas","sas-null","sas-number","success","spki")) {
+            val p=Ports();p.prepareGate=CompletableDeferred()
+            p.prepareReceipt=JSONObject().put("success",true).put("userId",d.user).put("deviceId",d.device).put("publicKeySpki",d.spki).apply {
+                when(kind) {
+                    "user"->put("userId","other");"device"->put("deviceId","other");"sas"->put("sas","00000000")
+                    "sas-null"->put("sas",JSONObject.NULL);"sas-number"->put("sas",61099432)
+                    "success"->put("success",false);else->put("publicKeySpki","broken")
+                }
+            }
+            val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent()
+            assertTrue(vm.state.value is WatchPairingState.AwaitingWatchConfirm)
+            p.prepareGate!!.complete(Unit);runCurrent()
+            assertTrue(vm.state.value is WatchPairingState.Failed)
+            vm.confirmSas(true);runCurrent();assertEquals(0,p.issueCalls);assertEquals(0,p.cloudCalls);vm.cancel()
+        }
+    }
+    @Test fun optionalEchoedSasMustMatchLocalCodeAndDisagreeingWhileWaitingCancels()=runTest {
+        val p=Ports();p.prepareGate=CompletableDeferred()
+        p.prepareReceipt=JSONObject().put("success",true).put("userId",d.user).put("deviceId",d.device).put("publicKeySpki",d.spki).put("sas",d.fixture.getString("sas"))
+        val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent()
+        vm.confirmSas(false);runCurrent();assertTrue(vm.state.value is WatchPairingState.Failed)
+        p.prepareGate!!.complete(Unit);runCurrent();assertEquals(0,p.issueCalls);assertTrue(p.invalidated)
+        vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent()
+        assertTrue(vm.state.value is WatchPairingState.Confirming.Phone);vm.cancel()
+    }
     @Test fun constructionNeverRequestsCameraAndNeedsKeyAutomaticallyResumesOnlyAfterRecovery()=runTest {
         val p=Ports();p.hasKeys=false;val vm=vm(p);runCurrent()
         assertEquals(WatchPairingState.Idle,vm.state.value);assertTrue(p.calls.isEmpty())

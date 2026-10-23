@@ -168,8 +168,15 @@ private fun WatchPairingScreen(viewModel: WatchPairingViewModel, onClose: () -> 
                             modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp)
                         )
                     }
-                    Muted("手表上显示同样的数字才点“一致”，然后在手表上确认绑定。不一致说明扫错了手表或有人冒充，请点“不一致”。")
-                    Button(onClick = { viewModel.confirmSas(true) }, modifier = Modifier.fillMaxWidth()) { Text("一致") }
+                    val waitingForWatch = current is WatchPairingState.AwaitingWatchConfirm
+                    if (waitingForWatch) {
+                        // The watch answers only after its own user confirms; until then the phone just shows the digits.
+                        Text("数字一致的话，先在手表上点「一致，绑定」。", style = MaterialTheme.typography.bodyLarge)
+                        Progress("等待手表确认…")
+                    } else {
+                        Muted("手表已确认。手机上的数字与手表一致才点“一致”；不一致说明扫错了手表或有人冒充，请点“不一致”。")
+                    }
+                    Button(onClick = { viewModel.confirmSas(true) }, enabled = !waitingForWatch, modifier = Modifier.fillMaxWidth()) { Text("一致") }
                     OutlinedButton(onClick = { viewModel.confirmSas(false) }, modifier = Modifier.fillMaxWidth()) { Text("不一致") }
                 }
                 is WatchPairingState.Configuring -> {

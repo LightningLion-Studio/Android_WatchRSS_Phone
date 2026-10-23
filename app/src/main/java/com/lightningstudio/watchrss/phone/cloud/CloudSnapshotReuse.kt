@@ -16,6 +16,12 @@ internal object CloudSnapshotReuse {
             (0 until ids.length()).map { ids.getString(it) }
         }.toSet()
 
+    fun completedBookIds(manifests: List<CloudSnapshotManifest>, user: String, epoch: String, version: Int, fingerprint: String?): Set<String> =
+        manifests.filter { canCarry(it,user,epoch,version,fingerprint) }.flatMap { manifest ->
+            val ids=manifest.settings.optJSONArray("privateBodyBookIds") ?: return@flatMap emptyList<String>()
+            (0 until ids.length()).map {ids.getString(it)}
+        }.toSet()
+
     fun canCarry(manifest: CloudSnapshotManifest, user: String, epoch: String, version: Int, fingerprint: String?): Boolean =
         fingerprint != null && manifest.keyVersion == version && manifest.settings.optInt("snapshotContentLayout") == 3 &&
             manifest.settings.optString("ownerUserId") == user && manifest.settings.optString("libraryEpoch") == epoch &&

@@ -168,7 +168,8 @@ class PhoneCompanionRepository(
     },
     private val articleContentStore: ArticleContentStore? = null,
     private val appMetaDao: AppMetaDao = NoopAppMetaDao,
-    private val cloudBackendBaseUrl: String = ""
+    private val cloudBackendBaseUrl: String = "",
+    val books:com.lightningstudio.watchrss.phone.data.book.ImportedBookStore?=null
 ) {
     /** 仅用于 instrumented screenshot tests 直接操作真实数据库。 */
     val testArticleDao: PhoneArticleDao get() = articleDao
@@ -289,12 +290,14 @@ class PhoneCompanionRepository(
     }
 
     internal suspend fun privateCloudVersions(layoutV3: Boolean = false): Map<String,String> = withContext(Dispatchers.IO) {
+        val excluded=books?.chapterIds().orEmpty()
         val versions = mutableMapOf<String,String>()
         var after = ""
         while (true) {
             val page = articleDao.privateCloudBodyPage(after,25)
             if (page.isEmpty()) break
             for (raw in page) {
+                if(raw.articleId in excluded)continue
                 val row = raw.hydrateExternalTextForBackup()
                 versions[row.articleId] = com.lightningstudio.watchrss.phone.cloud.CloudArchiveReuse.version(row.contentHash,row.deleted,row.contentText,row.contentHtml) + if (layoutV3) ":" + row.importedAt + ":" + com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec.sha256((row.url + "\n" + row.title + "\n" + row.rssSourceUrl + "\n" + listOf(row.independentSaved,row.favoriteSaved,row.watchLaterSaved).joinToString(":" )).toByteArray()) else ""
             }
@@ -319,12 +322,13 @@ class PhoneCompanionRepository(
         }
 
     internal suspend fun getPrivateArticlesForCloudArchive(): List<PhoneArticleEntity> = withContext(Dispatchers.IO) {
+        val excluded=books?.chapterIds().orEmpty()
         val articles = mutableListOf<PhoneArticleEntity>()
         var after = ""
         while (true) {
             val page = articleDao.privateCloudBodyPage(after,25)
             if (page.isEmpty()) break
-            articles += page.map { it.hydrateExternalTextForBackup() }
+            articles += page.filterNot {it.articleId in excluded}.map { it.hydrateExternalTextForBackup() }
             after = page.last().articleId
         }
         articles
@@ -492,6 +496,7 @@ class PhoneCompanionRepository(
                 imported = imported.source,
                 replaceExistingArticles = imported.kind != LocalContentImportKind.TXT
             )
+            books?.ensureRegistered()
             PhoneLocalContentImportResult(
                 source = result.source,
                 articleCount = result.articleCount,
@@ -597,11 +602,15 @@ class PhoneCompanionRepository(
         inspection: PhoneLocalContentImportInspection,
         replaceArticleId: String?
     ): PhoneLocalContentImportResult = withContext(Dispatchers.IO) {
-        if (replaceArticleId == null || inspection.imported.kind != LocalContentImportKind.TXT) {
+        books?.ensureRegistered()
+        val replacingBook=replaceArticleId?.let { books?.bookForArticle(it) }
+        if(replacingBook!=null)deleteArticle(requireNotNull(replaceArticleId))
+        if (replaceArticleId == null || replacingBook!=null || inspection.imported.kind != LocalContentImportKind.TXT) {
             val result = saveImportedSource(
                 imported = inspection.imported.source,
                 replaceExistingArticles = inspection.imported.kind != LocalContentImportKind.TXT
             )
+            books?.ensureRegistered()
             return@withContext PhoneLocalContentImportResult(
                 source = result.source,
                 articleCount = result.articleCount,
@@ -862,6 +871,7 @@ class PhoneCompanionRepository(
     }
 
     suspend fun deleteRssSource(sourceUrl: String) = withContext(Dispatchers.IO) {
+        books?.ensureRegistered()
         val source = rssSourceDao.getByUrl(sourceUrl) ?: return@withContext
         val now = System.currentTimeMillis()
         if (ImportedContentIds.isImportedContentUrl(sourceUrl)) {
@@ -885,14 +895,18 @@ class PhoneCompanionRepository(
     }
 
     suspend fun deleteArticle(articleId: String) = withContext(Dispatchers.IO) {
+        books?.ensureRegistered()
         val current = articleDao.getById(articleId) ?: return@withContext
         val now = System.currentTimeMillis()
+        val mapping=books?.bookForArticle(articleId)
         val deleted = current.markDeletedForStorage(now)
         articleDao.upsert(deleted)
         recordArticleChange(deleted.articleId, "delete", now)
+        if(mapping!=null && ImportedContentIds.isImportedTextArticleUrl(current.url))books?.markDeleted(mapping.bookId,now)
     }
 
     suspend fun clearImportedContent(): Int = withContext(Dispatchers.IO) {
+        books?.ensureRegistered()
         val importedArticles = articleDao.getByRssSourceUrl(ImportedContentIds.ROOT_SOURCE_URL)
             .filterNot { it.deleted }
         val now = System.currentTimeMillis()
@@ -900,8 +914,89 @@ class PhoneCompanionRepository(
             val deleted = article.markDeletedForStorage(now + index)
             articleDao.upsert(deleted)
             recordArticleChange(deleted.articleId, "delete", now + index)
+            books?.bookForArticle(article.articleId)?.let{books?.markDeleted(it.bookId,now+index)}
         }
         importedArticles.size
+    }
+
+    internal suspend fun bluetoothIdentityModeChanged(peer:String,canonical:Boolean):Boolean =
+        appMetaDao.getString("ble_identity_mode:"+WebArticleImporter.sha256(peer)) != canonical.toString()
+
+    private val bleIdentityMigrationKey="ble_rss_identity_dedup_v2"
+    internal suspend fun bluetoothIdentityProjection(canonical:Boolean):com.lightningstudio.watchrss.phone.connection.bluetooth.BluetoothArticleIdentityProjection {
+        val aliases=legacyRssArticleIds().flatMap { (id,old)->old.map { it to id } }.toMap()
+        return com.lightningstudio.watchrss.phone.connection.bluetooth.BluetoothArticleIdentityProjection(articleDao.getAllMetadataForSync(),aliases,canonical)
+    }
+
+    /** Retire only a provable URL-hash alias. Distinct real guid IDs sharing a URL stay distinct. */
+    internal suspend fun repairBluetoothRssDuplicates():Int=withContext(Dispatchers.IO) {
+        if(appMetaDao.getString(bleIdentityMigrationKey)=="done")return@withContext 0
+        var changed=0
+        val groups=articleDao.getAllMetadataForSync().filter { !it.rssSourceUrl.isNullOrBlank() &&
+            !ImportedContentIds.isImportedContentUrl(it.rssSourceUrl) && !ImportedContentIds.isImportedContentUrl(it.url) }
+            .groupBy { it.rssSourceUrl to it.url }
+        for((_,rows) in groups) {
+            if(rows.size<2)continue
+            val legacy=WebArticleImporter.stableArticleId(rows.first().url)
+            val candidates=rows.filter { it.articleId!=legacy }
+            if(candidates.size!=1)continue
+            val old=rows.firstOrNull { it.articleId==legacy }?:continue
+            migrateBluetoothAlias(old.articleId,candidates.single().articleId);changed++
+        }
+        appMetaDao.set(AppMetaEntity(bleIdentityMigrationKey,"done"));changed
+    }
+
+    internal suspend fun acceptBluetoothAliases(manifest:List<ArticleSyncManifestEntry>) {
+        val owners=manifest.flatMap { entry -> entry.legacyArticleIds.distinct().map { it to entry.articleId } }.groupBy({it.first},{it.second})
+        require(owners.values.none { it.distinct().size>1 }) { "RSS身份别名指向多个条目" }
+        for(entry in manifest)for(old in entry.legacyArticleIds.distinct()) {
+            require(entry.articleId.matches(Regex("[0-9a-f]{64}")) && old.matches(Regex("[0-9a-f]{64}"))) { "RSS身份别名无效" }
+            if(old==entry.articleId)continue
+            val local=articleDao.getById(old)?:continue
+            if(local.rssSourceUrl.isNullOrBlank() || ImportedContentIds.isImportedContentUrl(local.rssSourceUrl) ||
+                WebArticleImporter.stableArticleId(local.url)!=old)continue
+            migrateBluetoothAlias(old,entry.articleId)
+        }
+    }
+
+    private suspend fun migrateBluetoothAlias(oldId:String,id:String) {
+        val old=articleDao.getById(oldId)?.hydrateExternalText()?:return
+        val current=articleDao.getById(id)?.hydrateExternalText()
+        require(current==null || current.url==old.url && current.rssSourceUrl==old.rssSourceUrl) { "RSS别名指向不同条目" }
+        val rekeyed=old.copy(articleId=id,syncMetadataHash="")
+        val merged=(if(current==null)rekeyed else mergeArticleByLatest(rekeyed,current)).withCurrentSyncMetadata()
+        articleDao.upsertRssIdentityRows(listOf(merged.externalizeLargeLocalContent()),listOf(oldId))
+        appMetaDao.set(AppMetaEntity(rssIdentityAliasPrefix()+oldId,id))
+        recordArticleChange(id,"bluetoothIdentityMigration",merged.latestOperationAt())
+    }
+
+    private fun echoPrefix(peer:String)="ble_echo_v2:"+WebArticleImporter.sha256(peer)+":"
+    private fun articleSignature(article:PhoneArticleEntity)=WebArticleImporter.sha256(listOf(ArticleSyncBody.metadataHashFor(article),article.syncBodyHash,
+        article.syncBodyByteCount,article.syncChunkSize,article.syncChunkHashesJson,article.readingPositionChangedAt,article.readingProgress,
+        article.isRead,article.readingPositionBytes,article.readingPositionContentHash).joinToString("\n"))
+    internal suspend fun rememberBluetoothReceipts(peer:String,manifest:List<ArticleSyncManifestEntry>) {
+        for(entry in manifest) {
+            val local=articleDao.getById(entry.articleId)?:continue
+            if(local.sourceDeviceId!=peer)continue
+            // A conflicting merge cannot be acknowledged as an exact replica of the sender.
+            if(entry.metadataHash.isBlank() || local.syncMetadataHash!=entry.metadataHash || local.readingProgress!=entry.readingProgress ||
+                local.readingPositionBytes!=entry.readingPositionBytes || local.readingPositionContentHash!=entry.readingPositionContentHash ||
+                local.contentHash!=entry.contentHash || local.updatedAt!=entry.updatedAt || local.favoriteChangedAt!=entry.favoriteChangedAt ||
+                local.watchLaterChangedAt!=entry.watchLaterChangedAt || local.independentChangedAt!=entry.independentChangedAt || local.deleted!=entry.deleted ||
+                local.readingPositionChangedAt!=entry.readingPositionChangedAt || local.isRead!=entry.isRead || local.syncBodyHash!=entry.bodyHash ||
+                local.syncBodyByteCount!=entry.bodyByteCount || local.syncChunkSize!=entry.chunkSize || local.syncChunkHashesJson.toStringList()!=entry.chunkHashes)continue
+            val key=echoPrefix(peer)+local.articleId;val signature=articleSignature(local)
+            if(appMetaDao.getString(key)!=signature)appMetaDao.set(AppMetaEntity(key,signature))
+        }
+    }
+
+    private suspend fun suppressPeerEcho(peer:String,entries:List<ArticleSyncManifestEntry>):List<ArticleSyncManifestEntry> {
+        val retained=mutableListOf<ArticleSyncManifestEntry>()
+        for(entry in entries) {
+            val local=articleDao.getById(entry.articleId)
+            if(local==null || local.sourceDeviceId!=peer || appMetaDao.getString(echoPrefix(peer)+entry.articleId)!=articleSignature(local))retained+=entry
+        }
+        return retained
     }
 
     suspend fun getArticlesForSync(): List<PhoneArticleEntity> = withContext(Dispatchers.IO) {
@@ -971,7 +1066,13 @@ class PhoneCompanionRepository(
             val peerState = syncPeerStateDao.get(normalizedPeerId)
             val now = System.currentTimeMillis()
             val fullArticleManifest = getArticleManifestsForSync()
-            repairMissingArticleChangeLogEntries(fullArticleManifest)
+            val repairKey="ble_repair_watermark_v2"
+            val watermark=appMetaDao.getString(repairKey)?.toLongOrNull()?:0L
+            val scanFull=peerState==null || peerState.lastFullSyncAt<=0 || now-peerState.lastFullSyncAt>=FULL_SNAPSHOT_INTERVAL_MS || peerAppliedLocalSeq==0L
+            val repairCandidates=if(scanFull)fullArticleManifest else fullArticleManifest.filter { it.updatedAt>watermark }
+            repairMissingArticleChangeLogEntries(repairCandidates)
+            val nextWatermark=maxOf(watermark,fullArticleManifest.maxOfOrNull { it.updatedAt }?:0L)
+            if(nextWatermark!=watermark)appMetaDao.set(AppMetaEntity(repairKey,nextWatermark.toString()))
             val maxSeq = syncChangeLogDao.maxSeq()
             val cachedPeerAckedSeq = peerState?.lastLocalSeqAckedByPeer ?: 0L
             val peerAckedSeq = peerAppliedLocalSeq?.coerceAtLeast(0L) ?: cachedPeerAckedSeq
@@ -1006,7 +1107,7 @@ class PhoneCompanionRepository(
                 afterSeq = peerAckedSeq
             )
             PhoneLibrarySyncWindow(
-                articleManifest = getArticleManifestsForSync(changedArticleIds),
+                articleManifest = suppressPeerEcho(normalizedPeerId,getArticleManifestsForSync(changedArticleIds)),
                 fullArticleManifest = fullArticleManifest,
                 rssSources = getRssSourcesForSync(changedSourceUrls),
                 fullSnapshot = false,
@@ -1022,8 +1123,13 @@ class PhoneCompanionRepository(
         localSeqToInclusive: Long,
         remoteSeqToInclusive: Long,
         remoteProtocolVersion: Int,
-        fullSnapshot: Boolean
+        fullSnapshot: Boolean,
+        canonicalIds: Boolean? = null
     ) = withContext(Dispatchers.IO) {
+        canonicalIds?.let {
+            val key="ble_identity_mode:"+WebArticleImporter.sha256(peerDeviceId)
+            if(appMetaDao.getString(key)!=it.toString())appMetaDao.set(AppMetaEntity(key,it.toString()))
+        }
         val normalizedPeerId = peerDeviceId.ifBlank { DEFAULT_LIBRARY_PEER_ID }
         val now = System.currentTimeMillis()
         val current = syncPeerStateDao.get(normalizedPeerId)
@@ -1246,7 +1352,8 @@ class PhoneCompanionRepository(
         authoritative: Boolean = false
     ): Int = withContext(Dispatchers.IO) {
         var merged = 0
-        incoming.forEach { remote ->
+        incoming.forEach { candidate ->
+            val remote=books?.canonicalArticle(candidate)?:candidate
             val local = articleDao.getById(remote.articleId)
             val localHydrated = local?.hydrateExternalText()
             val retainsLocalBody =
@@ -1282,9 +1389,12 @@ class PhoneCompanionRepository(
                     conflictResolution = conflictResolutions[remote.articleId]
                 )
             }
-            val verifiedNext = next.withCurrentSyncMetadata()
-            if (local != verifiedNext) {
-                articleDao.upsert(verifiedNext.externalizeLargeLocalContent())
+            val verifiedNext = (books?.constrainDeletion(next) ?: next).withCurrentSyncMetadata()
+            if(localHydrated==verifiedNext)return@forEach
+            val storedNext=verifiedNext.reuseStoredBody(local,localHydrated).externalizeLargeLocalContent()
+            if (local != storedNext) {
+                articleDao.upsert(storedNext)
+                recordArticleChange(storedNext.articleId,"merge",storedNext.latestOperationAt(),storedNext.sourceDeviceId)
                 merged += 1
             }
         }
@@ -1297,13 +1407,14 @@ class PhoneCompanionRepository(
         authoritative: Boolean = false
     ): Int =
         withContext(Dispatchers.IO) {
+            val projected=incoming.map{payload->payload.copy(article=books?.canonicalArticle(payload.article)?:payload.article)}
             val localByArticleId = mutableMapOf<String, PhoneArticleEntity?>()
-            incoming.forEach { payload ->
+            projected.forEach { payload ->
                 if (!localByArticleId.containsKey(payload.article.articleId)) {
                     localByArticleId[payload.article.articleId] = articleDao.getById(payload.article.articleId)
                 }
             }
-            incoming.filter { it.metadataOnly }.forEach { payload ->
+            projected.filter { it.metadataOnly }.forEach { payload ->
                 val local = localByArticleId[payload.article.articleId]
                     ?: error("同步正文仅元数据响应缺少本地正文：${payload.article.articleId}")
                 val hydrated = local.hydrateExternalTextForSync()
@@ -1313,7 +1424,7 @@ class PhoneCompanionRepository(
                 requireMetadataOnlyLocalBody(payload, hydrated.article)
             }
             var merged = 0
-            incoming.forEach { payload ->
+            projected.forEach { payload ->
                 val local = localByArticleId[payload.article.articleId]
                 val hydratedLocal = local?.hydrateExternalTextForSync()
                 val localHydrated = hydratedLocal?.article?.takeIf { hydratedLocal.bodyAvailable }
@@ -1351,17 +1462,21 @@ class PhoneCompanionRepository(
                         conflictResolution = conflictResolutions[payload.article.articleId]
                     )
                 }
+                val constrained=books?.constrainDeletion(mergedArticle) ?: mergedArticle
                 val next = if (
                     explicitUnavailableTombstone &&
                     !retainsLocalDeletedBody &&
-                    mergedArticle.deleted
+                    constrained.deleted
                 ) {
-                    mergedArticle.withUnavailableTombstoneBodyMetadata(clearBody = true)
+                    constrained.withUnavailableTombstoneBodyMetadata(clearBody = true)
                 } else {
-                    mergedArticle.withCurrentSyncMetadata()
+                    constrained.withCurrentSyncMetadata()
                 }
-                if (local != next) {
-                    articleDao.upsert(next.externalizeLargeLocalContent())
+                if(localHydrated==next)return@forEach
+                val storedNext=next.reuseStoredBody(local,localHydrated).externalizeLargeLocalContent()
+                if (local != storedNext) {
+                    articleDao.upsert(storedNext)
+                    recordArticleChange(storedNext.articleId,"merge",storedNext.latestOperationAt(),storedNext.sourceDeviceId)
                     merged += 1
                 }
             }
@@ -1403,8 +1518,9 @@ class PhoneCompanionRepository(
 
     suspend fun mergeAuthoritativeRssSources(incoming: List<PhoneRssSourceEntity>): Int =
         withContext(Dispatchers.IO) {
-            incoming.forEach { rssSourceDao.upsert(it) }
-            incoming.size
+            var changed=0
+            incoming.forEach { if(rssSourceDao.getByUrl(it.url)!=it) {rssSourceDao.upsert(it);changed++} }
+            changed
         }
 
     /**
@@ -1418,23 +1534,27 @@ class PhoneCompanionRepository(
         val articleIds = retainedArticleIds.toHashSet()
         val sourceUrls = retainedSourceUrls.toHashSet()
         val removedAt = System.currentTimeMillis()
+        var removedArticles=0;var removedSources=0
         articleDao.getAllIds().filterNot(articleIds::contains).forEach { id ->
             val article = articleDao.getById(id) ?: return@forEach
-            if (!article.deleted) { articleDao.upsert(article.markDeletedForStorage(removedAt)); recordArticleChange(id, "delete", removedAt) }
+            if (!article.deleted) { articleDao.upsert(article.markDeletedForStorage(removedAt)); recordArticleChange(id, "delete", removedAt);removedArticles++ }
         }
         rssSourceDao.getAllUrls().filterNot(sourceUrls::contains).forEach { url ->
             val source = rssSourceDao.getByUrl(url) ?: return@forEach
             if (!source.deleted) {
                 rssSourceDao.upsert(source.copy(deleted = true, deletedAt = removedAt, updatedAt = removedAt))
                 recordRssSourceChange(url, "delete", removedAt)
+                removedSources++
             }
         }
         savedItemDao.deleteAll()
         syncPeerStateDao.deleteAll()
         pruneUnreferencedArticleContent()
+        removedArticles to removedSources
     }
 
     suspend fun clearLibrary() = withContext(Dispatchers.IO) {
+        books?.clear()
         articleDao.deleteAll()
         rssSourceDao.deleteAll()
         savedItemDao.deleteAll()
@@ -1747,7 +1867,8 @@ class PhoneCompanionRepository(
     private suspend fun recordArticleChange(
         articleId: String,
         reason: String,
-        changedAt: Long = System.currentTimeMillis()
+        changedAt: Long = System.currentTimeMillis(),
+        origin: String = deviceId
     ) {
         if (articleId.isBlank()) return
         syncChangeLogDao.insert(
@@ -1755,7 +1876,7 @@ class PhoneCompanionRepository(
                 kind = SYNC_KIND_ARTICLE,
                 entityId = articleId,
                 changedAt = changedAt,
-                originDeviceId = deviceId,
+                originDeviceId = origin.ifBlank { deviceId },
                 reason = reason,
                 createdAt = System.currentTimeMillis()
             )
@@ -2402,6 +2523,7 @@ class PhoneCompanionRepository(
             favoriteChangedAt = favoriteChangedAt,
             watchLaterChangedAt = watchLaterChangedAt,
             deletedAt = deletedAt,
+            deleted = deleted,
             bodyHash = metadata?.bodyHash ?: syncBodyHash.ifBlank { contentHash },
             bodyByteCount = metadata?.bodyByteCount ?: syncBodyByteCount,
             chunkSize = metadata?.chunkSize ?: syncChunkSize,
@@ -2451,6 +2573,12 @@ class PhoneCompanionRepository(
             independentChangedAt > 0L ||
             favoriteChangedAt > 0L ||
             watchLaterChangedAt > 0L
+    }
+
+    private fun PhoneArticleEntity.reuseStoredBody(stored:PhoneArticleEntity?,hydrated:PhoneArticleEntity?):PhoneArticleEntity {
+        if(stored==null || hydrated==null)return this
+        return copy(contentHtml=if(contentHtml==hydrated.contentHtml)stored.contentHtml else contentHtml,
+            contentText=if(contentText==hydrated.contentText)stored.contentText else contentText)
     }
 
     private fun PhoneArticleEntity.externalizeLargeLocalContent(): PhoneArticleEntity {

@@ -13,6 +13,7 @@ class NoteRepository(
     fun observeFolders(): Flow<List<NoteFolderEntity>> = dao.observeFolders()
     fun observeConflicts(): Flow<List<NoteConflictEntity>> = dao.observeUnresolvedConflicts()
     suspend fun allNotes(): List<NoteEntity> = dao.allNotes()
+    suspend fun note(noteId:String):NoteEntity? = dao.note(noteId)
     suspend fun assets(noteId: String): List<NoteAssetEntity> = dao.assets(noteId)
     suspend fun registerAsset(asset: NoteAssetEntity): NoteAssetEntity {
         dao.assetByHash(asset.sha256)?.let { return it }
@@ -101,6 +102,14 @@ class NoteRepository(
 
     suspend fun applyRemote(remote: NoteEntity, remoteDeviceId: String): MarkdownMergeResult {
         val local = dao.note(remote.noteId)
+        if(local==remote)return MarkdownMergeResult.Merged(local.markdown)
+        if(local!=null && local.markdown==remote.markdown && local.contentHash==remote.contentHash) {
+            val order=compareValuesBy(remote,local,{maxOf(it.updatedAt,it.deletedAt)},{it.modifiedBy},{it.deleted},{it.title},{it.folderId!=null},{it.folderId.orEmpty()},{it.pinned},{it.createdAt},{it.baseContentHash},{it.baseMarkdown})
+            if(order>0)dao.upsertNotes(listOf(remote))
+            return MarkdownMergeResult.Merged(local.markdown)
+        }
+        if(local!=null && maxOf(remote.updatedAt,remote.deletedAt)<maxOf(local.updatedAt,local.deletedAt) && (local.deleted || remote.deleted))
+            return MarkdownMergeResult.Merged(local.markdown)
         if (local == null || local.deleted || remote.updatedAt > local.updatedAt && local.contentHash == local.baseContentHash) {
             dao.upsertNotes(listOf(remote))
             return MarkdownMergeResult.Merged(remote.markdown)
@@ -112,7 +121,7 @@ class NoteRepository(
             }
         } else {
             dao.upsertConflicts(listOf(NoteConflictEntity(
-                conflictId = UUID.randomUUID().toString(), noteId = local.noteId,
+                conflictId = MarkdownNoteCodec.sha256(listOf(local.noteId,local.baseMarkdown,local.markdown,remote.markdown,remoteDeviceId).joinToString("\u0000")), noteId = local.noteId,
                 baseMarkdown = local.baseMarkdown, localMarkdown = local.markdown,
                 remoteMarkdown = remote.markdown, remoteDeviceId = remoteDeviceId, createdAt = now()
             )))

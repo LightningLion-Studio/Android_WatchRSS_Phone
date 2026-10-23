@@ -1,0 +1,222 @@
+{
+  "protocol": "R44-book-v1",
+  "cases": [
+    {
+      "name": "unicode-crlf",
+      "chapters": [
+        {
+          "title": "第一章 😀",
+          "contentText": "甲\r\n乙\r丙",
+          "contentHtml": "<p>甲<br>乙<br>丙</p>"
+        },
+        {
+          "title": "  二  ",
+          "contentText": " x\n\n中文 é é ",
+          "contentHtml": null
+        }
+      ],
+      "chapterHashes": [
+        "f150c73d5656074adce89b58215b56853af7438bf6baee97dc11fe4333e3d25d",
+        "56f084588b671d881af665f4cd2f43bf83a6edbab557b7456e105ae2423b8159"
+      ],
+      "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+      "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+      "articleIds": [
+        "6a0cce18b4990a2aef2a5c43d499c9b765bb792e45f4d3fb02718f166f683aa8",
+        "4fbd83728f48a8725dc83adeab108de542cfbdff6202ba42895fe20482586673"
+      ]
+    },
+    {
+      "name": "equivalent-lf",
+      "chapters": [
+        {
+          "title": "第一章 😀",
+          "contentText": "甲\n乙\n丙",
+          "contentHtml": "<b>different markup</b>"
+        },
+        {
+          "title": "  二  ",
+          "contentText": " x\n\n中文 é é ",
+          "contentHtml": "<b>different markup</b>"
+        }
+      ],
+      "chapterHashes": [
+        "f150c73d5656074adce89b58215b56853af7438bf6baee97dc11fe4333e3d25d",
+        "56f084588b671d881af665f4cd2f43bf83a6edbab557b7456e105ae2423b8159"
+      ],
+      "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+      "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+      "articleIds": [
+        "6a0cce18b4990a2aef2a5c43d499c9b765bb792e45f4d3fb02718f166f683aa8",
+        "4fbd83728f48a8725dc83adeab108de542cfbdff6202ba42895fe20482586673"
+      ]
+    },
+    {
+      "name": "reordered",
+      "chapters": [
+        {
+          "title": "  二  ",
+          "contentText": " x\n\n中文 é é ",
+          "contentHtml": null
+        },
+        {
+          "title": "第一章 😀",
+          "contentText": "甲\r\n乙\r丙",
+          "contentHtml": "<p>甲<br>乙<br>丙</p>"
+        }
+      ],
+      "chapterHashes": [
+        "df21b9951ed2cee2d81bb52d395000aec80757615ec3ddc6c462e605830b095b",
+        "55424881f63995f3b7320b07915a895050471108137b41e3c96e218df41e7e89"
+      ],
+      "fingerprint": "2bc215ea4d849569ca90f98192bdcde9f20502c68333f4b857d4add92f4e2302",
+      "bookId": "c144090c41af3104068cd26cea5e43c7d9319ca81ec61136b3c430bbfe133e03",
+      "articleIds": [
+        "ff2dd2d13c0807cb9a8b21fb585f78f8f134218ea55b3a1a0d5dd318cf5ac780",
+        "f8ed3cc668ff946c7754bbeb034255700dac727b8dbbb2e28639d74f16bca19e"
+      ]
+    },
+    {
+      "name": "title-changed",
+      "chapters": [
+        {
+          "title": "new",
+          "contentText": "甲\r\n乙\r丙",
+          "contentHtml": "<p>甲<br>乙<br>丙</p>"
+        },
+        {
+          "title": "  二  ",
+          "contentText": " x\n\n中文 é é ",
+          "contentHtml": null
+        }
+      ],
+      "chapterHashes": [
+        "b04321464899a2871d2f746195f95f0300bd820e0102a4066042fd1aec124194",
+        "56f084588b671d881af665f4cd2f43bf83a6edbab557b7456e105ae2423b8159"
+      ],
+      "fingerprint": "3cdeba26c72d824a807a046097addfb865fa42a3459a00ee7e29c7931e577e06",
+      "bookId": "fec16f3a6eb06a906b471d4a1234d91abc74bf1a7ad7c974eb52d3f063345f40",
+      "articleIds": [
+        "6dfa2694c9bdb473d192372284ee60e72d935fcc12e4844b2e2bd92eb7ec66b5",
+        "77b35e56587e1444d90435b6692dd209ed0634baa545d6e7bee51c32260f78be"
+      ]
+    },
+    {
+      "name": "one-empty",
+      "chapters": [
+        {
+          "title": "",
+          "contentText": "",
+          "contentHtml": null
+        }
+      ],
+      "chapterHashes": [
+        "b1ce188b1bbacba19660e2543c9785b804f007591c075ca8c0d610b09c49439a"
+      ],
+      "fingerprint": "dab90193ebcfab0fc5f92981a118e702f89a031c8ea16d39440e96d9f3ad1481",
+      "bookId": "8c4ad15a626a8827b39222d639d372dee5f996a47028b3f7e8a9bed2e072c7ee",
+      "articleIds": [
+        "bd3cf8c5d2de6f0c3efe079691cc5f379d345207805be54993ff720e1f2d25b3"
+      ]
+    }
+  ],
+  "mergeCases": [
+    {
+      "name": "deletions-union",
+      "left": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "book",
+        "chapterCount": 2,
+        "deletedChapters": [
+          1
+        ],
+        "deletionClock": 20,
+        "deleted": false,
+        "deletedAt": 0,
+        "updatedAt": 10,
+        "sourceDeviceId": "phone",
+        "sourceUrl": "https://watchrss.local/import-epub/vector",
+        "kind": "epub"
+      },
+      "right": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "book",
+        "chapterCount": 2,
+        "deletedChapters": [
+          2
+        ],
+        "deletionClock": 30,
+        "deleted": false,
+        "deletedAt": 0,
+        "updatedAt": 10,
+        "sourceDeviceId": "watch",
+        "sourceUrl": "https://watchrss.local/import-epub/vector",
+        "kind": "epub"
+      },
+      "expected": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "book",
+        "chapterCount": 2,
+        "deletedChapters": [
+          1,
+          2
+        ],
+        "deletionClock": 30,
+        "deleted": false,
+        "deletedAt": 0,
+        "updatedAt": 10,
+        "sourceDeviceId": "watch",
+        "sourceUrl": "https://watchrss.local/import-epub/vector",
+        "kind": "epub"
+      }
+    },
+    {
+      "name": "whole-tombstone-wins-stale-body",
+      "left": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "book",
+        "chapterCount": 2,
+        "deletedChapters": [],
+        "deletionClock": 40,
+        "deleted": true,
+        "deletedAt": 40,
+        "updatedAt": 10,
+        "sourceDeviceId": "phone",
+        "sourceUrl": "https://watchrss.local/import-epub/vector",
+        "kind": "epub"
+      },
+      "right": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "book",
+        "chapterCount": 2,
+        "deletedChapters": [],
+        "deletionClock": 0,
+        "deleted": false,
+        "deletedAt": 0,
+        "updatedAt": 10,
+        "sourceDeviceId": "phone",
+        "sourceUrl": "https://watchrss.local/import-epub/vector",
+        "kind": "epub"
+      },
+      "expected": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "book",
+        "chapterCount": 2,
+        "deletedChapters": [],
+        "deletionClock": 40,
+        "deleted": true,
+        "deletedAt": 40,
+        "updatedAt": 10,
+        "sourceDeviceId": "phone",
+        "sourceUrl": "https://watchrss.local/import-epub/vector",
+        "kind": "epub"
+      }
+    }
+  ]
+}

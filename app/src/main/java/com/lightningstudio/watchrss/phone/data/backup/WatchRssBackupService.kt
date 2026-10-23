@@ -53,7 +53,8 @@ class WatchRssBackupService(
 
     /** Actual private bytes/configuration only; read/favorite/progress clocks travel in RSS state. */
     internal suspend fun privateCloudFingerprint(): String = withContext(Dispatchers.IO) {
-        val state = JSONObject()
+        val bookVersions=repository.books?.availableBooks().orEmpty().associate{it.first.getString("bookId") to it.first.getString("fingerprint")}
+        val state = JSONObject().put("books",JSONObject(bookVersions))
             .put("versions", JSONObject(repository.privateCloudVersions(layoutV3 = true)))
             .put("reader", com.lightningstudio.watchrss.phone.connection.bluetooth.ReaderPresetSyncPayload.snapshotJson(CloudPrivateArchive.reader(readerPresetRepository.exportSnapshot())))
             .put("appMeta", JSONObject(database.appMetaDao().getAll().filter { CloudContentPolicy.privateAppMeta(it.key) }.associate { it.key to it.value }))
@@ -67,8 +68,12 @@ class WatchRssBackupService(
             database.appMetaDao().getAll().associate { it.key to it.value }, reason)
     }
 
-    internal suspend fun privateCloudBodyIds(): Set<String> = repository.getPrivateArticlesForCloudArchive()
-        .filter { CloudContentPolicy.privateBody(it) && (it.contentText.isNotBlank() || !it.contentHtml.isNullOrBlank()) }.map { it.articleId }.toSet()
+    internal suspend fun privateCloudBodyIds(): Set<String> {
+        val ids=repository.getPrivateArticlesForCloudArchive().filter { CloudContentPolicy.privateBody(it) && (it.contentText.isNotBlank() || !it.contentHtml.isNullOrBlank()) }.mapTo(hashSetOf()){it.articleId}
+        val store=repository.books
+        if(store!=null) for((state,_) in store.availableBooks())ids+=database.bookDao().chapters(state.getString("bookId")).map{it.articleId}
+        return ids
+    }
 
     suspend fun createCloudPrivateArchive(): ByteArray = withContext(Dispatchers.IO) {
         val file=createCloudPrivateArchiveFile()
@@ -77,7 +82,7 @@ class WatchRssBackupService(
 
     suspend fun createCloudPrivateArchiveFile(): File = createCloudPrivateArchiveExport().file
 
-    internal data class PrivateArchiveExport(val file: File, val articleIds: Set<String>)
+    internal data class PrivateArchiveExport(val file: File, val articleIds: Set<String>, val bookIds: Set<String> = emptySet())
     internal suspend fun createCloudPrivateArchiveExport(): PrivateArchiveExport = withContext(Dispatchers.IO) {
         // Real snapshot time lives in the authenticated cloud manifest. Do not churn body chunks.
         val allArticles = repository.getPrivateArticlesForCloudArchive()
@@ -91,7 +96,10 @@ class WatchRssBackupService(
             articles = privateArticles,
             savedItems = emptyList(),
             readerSnapshot = readerPresetRepository.exportSnapshot(),
-            appMeta = database.appMetaDao().getAll().sortedBy { it.key }
+            appMeta = database.appMetaDao().getAll().sortedBy { it.key },
+            bookPackages = repository.books?.availableBooks().orEmpty().map{(state,file)->BookArchiveContent(
+                JSONObject().put("bookId",state.getString("bookId")).put("fingerprint",state.getString("fingerprint")).put("title",state.getString("title"))
+                    .put("chapterCount",state.getInt("chapterCount")).put("sourceUrl",state.optString("sourceUrl")).put("kind",state.optString("kind")).put("packagePath","books/${state.getString("bookId")}.jsonl"),file)}
         ).let {
             it.copy(readerResources = readerResources(requireNotNull(it.readerSnapshot)))
         }
@@ -101,7 +109,8 @@ class WatchRssBackupService(
         archive.outputStream().buffered().use { output ->
             WatchRssBackupArchive.write(projected, output)
         }
-        PrivateArchiveExport(archive,projected.articles.map { it.articleId }.toSet())
+        PrivateArchiveExport(archive, projected.articles.mapTo(hashSetOf()){it.articleId},
+            projected.bookPackages.mapTo(hashSetOf()){it.metadata.getString("bookId")})
     }
 
     /** Optional pool warming only. Never resolve removed subscriptions or gate records on a fetch UUID. */
@@ -122,6 +131,10 @@ class WatchRssBackupService(
     /** Keyset pages contain metadata only; never hydrate article bodies. */
     internal suspend fun cloudRecordPages(consume: suspend (String, JSONObject) -> Unit) = withContext(Dispatchers.IO) {
         unresolvedRssStateUrls.clear()
+        val bookStore=repository.books
+        val bookIds=bookStore?.chapterIds().orEmpty();val bookSources=bookStore?.sourceUrls().orEmpty()
+        bookStore?.states()?.forEach {consume("book",it)}
+        bookStore?.readingStates()?.forEach {consume("book-reading",it)}
         var after = ""
         while (true) {
             val page = database.phoneRssSourceDao().cloudRecordPage(after, 25)
@@ -129,6 +142,7 @@ class WatchRssBackupService(
             val json = JSONObject(CloudRssStateCodec.encode(emptyList(), 0, page).toString(Charsets.UTF_8)).getJSONArray("sources")
             for (i in 0 until json.length()) {
                 val value = json.getJSONObject(i)
+                if(value.getString("url") in bookSources || (bookStore!=null && value.getString("url")==ImportedContentIds.ROOT_SOURCE_URL))continue
                 if (ImportedContentIds.isImportedContentUrl(value.getString("url"))) { consume("source",value); continue }
                 val fields = listOf("url", "title", "sortOrder", "isPinned", "updatedAt", "deleted", "deletedAt", "useOriginalContent", "continuePlaybackInBackground")
                 val subscription = JSONObject()
@@ -145,6 +159,7 @@ class WatchRssBackupService(
             val json = JSONObject(CloudRssStateCodec.encode(page, 0).toString(Charsets.UTF_8)).getJSONArray("articles")
             for (i in 0 until json.length()) {
                 val value = json.getJSONObject(i)
+                if(value.getString("articleId") in bookIds)continue
                 if (!CloudContentPolicy.publicRss(value)) consume("article", value)
                 else {
                     if (CloudContentPolicy.interacted(value)) {
@@ -161,6 +176,9 @@ class WatchRssBackupService(
 
     internal suspend fun applyCloudRecord(kind: String, value: JSONObject, checkOwner: () -> Unit = {}) = withContext(Dispatchers.IO) {
         checkOwner()
+        if(kind=="book") {requireNotNull(repository.books).merge(value,checkOwner);return@withContext}
+        if(kind=="book-reading") {requireNotNull(repository.books).mergeReading(value,checkOwner);return@withContext}
+        if(kind=="article" && value.optBoolean("bookIndexRetired"))return@withContext
         if (kind == "rss-state") { applyRssInteraction(value, checkOwner); return@withContext }
         if (kind == "article" && CloudContentPolicy.publicRss(value) && CloudRssSourceIdentity.isLocalOnly(value.getString("rssSourceUrl"))) return@withContext
         if (kind == "source" && value.optString("sourceId").isNotBlank()) repository.rememberPublicRssSource(value.getString("url"), value.getString("sourceId"))
@@ -170,16 +188,37 @@ class WatchRssBackupService(
         if (kind == "source") {
             repository.mergeRssSourcesFromSync(CloudRssStateCodec.decodeSources(root.toString().toByteArray()))
         } else {
-            val incoming = CloudRssStateCodec.decode(root.toString().toByteArray()).single()
+            val decoded = CloudRssStateCodec.decode(root.toString().toByteArray()).single()
+            val incoming = repository.books?.bookForArticle(decoded.articleId,decoded.url)?.let{decoded.copy(articleId=it.articleId)}?:decoded
             database.withTransaction {
                 val current = database.phoneArticleDao().getById(incoming.articleId)
                 val merged = current?.mergeCloudState(incoming)
                     ?: LibrarySyncPayload.parseArticles(root).single().copy(imageUrl = incoming.imageUrl,
                         rssSourceUrl = incoming.rssSourceUrl, rssSourceTitle = incoming.rssSourceTitle)
                 checkOwner()
-                database.phoneArticleDao().upsert(merged)
+                database.phoneArticleDao().upsert(repository.books?.constrainDeletion(merged) ?: merged)
             }
         }
+    }
+
+    internal suspend fun restorePrivateBook(value:JSONObject,bytes:ByteArray,checkOwner:()->Unit={}) {
+        checkOwner();val id=value.getString("bookId")
+        require(id==com.lightningstudio.watchrss.phone.data.book.BookSync.id(value.getString("fingerprint")) && value.getString("packagePath")=="books/$id.jsonl")
+        val temp=File.createTempFile("book-object-",".jsonl",appContext.cacheDir)
+        try{temp.writeBytes(bytes)
+            val header=temp.bufferedReader().use {JSONObject(requireNotNull(it.readLine()))}
+            require(com.lightningstudio.watchrss.phone.data.book.BookSync.integer(value,"chapterCount")==com.lightningstudio.watchrss.phone.data.book.BookSync.integer(header,"chapterCount"))
+            requireNotNull(repository.books).receivePackage(id,temp,checkOwner)}finally{temp.delete()}
+        checkOwner()
+    }
+
+    internal suspend fun bookRecordForLegacyArticle(value:JSONObject):Pair<JSONObject,JSONObject?>? {
+        val store=repository.books?:return null
+        if(!ImportedContentIds.isImportedContentUrl(value.optString("url")))return null
+        val mapping=store.bookForArticle(value.getString("articleId"),value.optString("url"))?:return null
+        val state=database.bookDao().get(mapping.bookId)?.let{JSONObject(it.stateJson)}?:return null
+        val reading=database.bookDao().reading(mapping.bookId,mapping.chapterIndex)?.let{JSONObject(it.stateJson)}
+        return state to reading
     }
 
     internal suspend fun canonicalCloudArticleId(value: JSONObject): String = repository.canonicalRssArticleId(value.getString("articleId"))
@@ -284,19 +323,19 @@ class WatchRssBackupService(
             val privateSnapshot = WatchRssBackupArchive.read(
                 ByteArrayInputStream(payload.privateLibraryArchive)
             )
-            CloudRestorePreview(
+            try { CloudRestorePreview(
                 sourceCount = privateSnapshot.sources.size,
                 privateArticleCount = privateSnapshot.articles.size,
                 rssStateCount = CloudRssStateCodec.decode(payload.rssStateJson).size,
                 exportedAt = privateSnapshot.exportedAt
-            )
+            ) } finally { privateSnapshot.bookPackages.forEach {it.file.delete()} }
         }
 
     fun inspectCloudRssState(payload: ByteArray): Pair<Int, Int> =
         CloudRssStateCodec.decodeSources(payload).size to CloudRssStateCodec.decode(payload).size
 
     fun inspectCloudPrivateLibrary(payload: ByteArray): BackupPreview =
-        WatchRssBackupArchive.read(ByteArrayInputStream(payload),tolerateCloudEntries=true).preview()
+        WatchRssBackupArchive.read(ByteArrayInputStream(payload),tolerateCloudEntries=true).let{snapshot->try{snapshot.preview()}finally{snapshot.bookPackages.forEach{it.file.delete()}}}
 
     fun inspectCloudRelayLibrary(payload: ByteArray): Pair<Int, Int> {
         val json = org.json.JSONObject(payload.toString(Charsets.UTF_8))
@@ -400,7 +439,7 @@ class WatchRssBackupService(
         input.use(::inspect)
     }
 
-    fun inspect(input: InputStream): BackupPreview = WatchRssBackupArchive.read(input).preview()
+    fun inspect(input: InputStream): BackupPreview = WatchRssBackupArchive.read(input).let{snapshot->try{snapshot.preview()}finally{snapshot.bookPackages.forEach{it.file.delete()}}}
 
     suspend fun importFrom(uriString: String, mode: BackupImportMode): BackupImportResult =
         withContext(Dispatchers.IO) {
@@ -423,6 +462,7 @@ class WatchRssBackupService(
                 readerPresetRepository.resourceStore,
                 tolerateCloudEntries=cloudRestore
             )
+            try {
             val warnings=snapshot.readWarnings.toMutableList()
             val restoredArticles = if (!snapshot.cloudContentOnly && !cloudRestore) snapshot.articles else snapshot.articles.mapNotNull { body ->
                 if (body.deleted) return@mapNotNull null
@@ -489,6 +529,16 @@ class WatchRssBackupService(
                 backgrounds = it.backgrounds,
                 deletions = it.deletions
             ) }
+            for(book in snapshot.bookPackages)try {
+                checkOwner()
+                val header=book.file.bufferedReader().use{JSONObject(requireNotNull(it.readLine()))}
+                require(com.lightningstudio.watchrss.phone.data.book.BookSync.integer(book.metadata,"chapterCount")==com.lightningstudio.watchrss.phone.data.book.BookSync.integer(header,"chapterCount"))
+                changedArticleCount+=requireNotNull(repository.books).receivePackage(book.metadata.getString("bookId"),book.file,checkOwner)
+            }catch(e:kotlinx.coroutines.CancellationException){throw e}
+            catch(e:IllegalArgumentException){checkOwner();warnings+=CloudRestoreWarning(book.metadata.getString("bookId"),"invalid_book_package",permanent=true)}
+            catch(e:org.json.JSONException){checkOwner();warnings+=CloudRestoreWarning(book.metadata.getString("bookId"),"invalid_book_package",permanent=true)}
+            finally {book.file.delete()}
+            repository.books?.ensureRegistered()
             repository.pruneUnreferencedArticleContent()
 
             BackupImportResult(
@@ -503,6 +553,7 @@ class WatchRssBackupService(
                 changedAppMetaCount = changedAppMetaCount,
                 warnings = warnings
             )
+            } finally {snapshot.bookPackages.forEach{it.file.delete()}}
         }
 
     private suspend fun readerResources(

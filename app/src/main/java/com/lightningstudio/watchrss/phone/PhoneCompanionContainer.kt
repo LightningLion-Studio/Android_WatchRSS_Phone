@@ -71,7 +71,10 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_11_12,
             PhoneCompanionDatabase.MIGRATION_12_13,
             PhoneCompanionDatabase.MIGRATION_13_14,
-            PhoneCompanionDatabase.MIGRATION_14_15
+            PhoneCompanionDatabase.MIGRATION_14_15,
+            PhoneCompanionDatabase.MIGRATION_15_16,
+            PhoneCompanionDatabase.MIGRATION_16_17,
+            PhoneCompanionDatabase.MIGRATION_17_18
         )
             .build()
     }
@@ -248,6 +251,9 @@ class PhoneCompanionContainer(context: Context) {
         })
     }
 
+    private val bookStore by lazy {com.lightningstudio.watchrss.phone.data.book.ImportedBookStore(database,
+        java.io.File(appContext.filesDir,"imported_books"),articleContentStore,deviceIdentity.deviceId)}
+
     val repository: PhoneCompanionRepository by lazy {
         PhoneCompanionRepository(
             savedItemDao = database.phoneSavedItemDao(),
@@ -260,7 +266,8 @@ class PhoneCompanionContainer(context: Context) {
             rssSourceImporter = rssChannelImporter::importUrl,
             articleContentStore = articleContentStore,
             appMetaDao = database.appMetaDao(),
-            cloudBackendBaseUrl = accountEnvironment.backendBaseUrl
+            cloudBackendBaseUrl = accountEnvironment.backendBaseUrl,
+            books = bookStore
         )
     }
 
@@ -374,11 +381,20 @@ class PhoneCompanionContainer(context: Context) {
             },
             canSyncAccount = { accountRepository.hasUsableSession },
             currentPhoneUserId = { accountRepository.session.value?.userId },
+            onSyncActiveChanged = {cloudChangeScheduler.setBluetoothSyncActive(it)},
             onLibrarySyncCompleted = {
-                if (accountRepository.hasUsableSession) {
-                    runCatching { cloudSyncService.syncNow() }
+                cloudChangeScheduler.acknowledgeBluetoothChanges()
+                val trace = BluetoothDebugLog.newSessionId("bleCloud")
+                bluetoothDebugLog.appendEvent("sync.cloud.enqueued", trace)
+                appScope.launch {
+                    bluetoothDebugLog.appendEvent("sync.cloud.started", trace,
+                        mapOf("hasUsableSession" to accountRepository.hasUsableSession))
+                    if (accountRepository.hasUsableSession)runCatching { cloudSyncService.syncNow() }
+                        .onSuccess { bluetoothDebugLog.appendEvent("sync.cloud.complete", trace) }
+                        .onFailure { bluetoothDebugLog.appendEvent("sync.cloud.failed", trace,
+                            mapOf("errorClass" to it.javaClass.simpleName)) }
+                    oppoReviewCoordinator.onSyncSucceeded()
                 }
-                oppoReviewCoordinator.onSyncSucceeded()
             }
         )
     }

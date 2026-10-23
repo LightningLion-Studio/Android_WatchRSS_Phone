@@ -82,17 +82,19 @@ class CloudSlimSnapshotRegressionTest {
                 response=JSONObject().put("items",result)
             }
             Response.Builder().request(req).protocol(Protocol.HTTP_1_1).code(status).message("test").body(response.toString().toResponseBody("application/json".toMediaType())).build()
-        }.build()).also { it.useEpoch(session,"epoch") }
+        }.build()).also { it.useEpoch(session,"epoch");it.useContentGeneration(session,"22222222-2222-4222-8222-222222222222") }
     }
-    private inner class Fixture(val server: Server, val backend: String="https://test.invalid") {
+    private inner class Fixture(val server: Server, val backend: String="https://test.invalid", bookMode:Boolean=false) {
         val context: Context = RuntimeEnvironment.getApplication()
         val db = Room.inMemoryDatabaseBuilder(context,PhoneCompanionDatabase::class.java).allowMainThreadQueries().build()
         val scope = CoroutineScope(SupervisorJob()+Dispatchers.Default)
-        val repository=PhoneCompanionRepository(db.phoneSavedItemDao(),db.phoneArticleDao(),db.phoneRssSourceDao(),"phone",appMetaDao=db.appMetaDao(),cloudBackendBaseUrl=backend)
+        val bookDirectory=java.io.File.createTempFile("cloud-book-test-","",context.cacheDir).apply{delete();mkdirs()}
+        val books=if(bookMode)com.lightningstudio.watchrss.phone.data.book.ImportedBookStore(db,bookDirectory,null,"phone")else null
+        val repository=PhoneCompanionRepository(db.phoneSavedItemDao(),db.phoneArticleDao(),db.phoneRssSourceDao(),"phone",appMetaDao=db.appMetaDao(),cloudBackendBaseUrl=backend,books=books)
         val reader=ReaderPresetRepository(context,db,db.readerPresetDao(),"phone",scope)
         val backup=WatchRssBackupService(context,db,repository,reader,"phone")
         val state=State()
-        val sync=PhoneCloudRecordSync(server.client,state,backup::cloudRecordPages,{ _,kind,value -> if(kind != "rss-state") backup.applyCloudRecord(kind,value) },{1},{_,_->key.copyOf()},{},keepArticle=backup::keepCloudArticle,canonicalArticleId=backup::canonicalCloudArticleId,afterPull={ backup.applyRssInteractions(state.rssStates("")) })
+        val sync=PhoneCloudRecordSync(server.client,state,backup::cloudRecordPages,{ _,kind,value -> if(kind != "rss-state") backup.applyCloudRecord(kind,value) },{1},{_,_->key.copyOf()},{},keepArticle=backup::keepCloudArticle,canonicalArticleId=backup::canonicalCloudArticleId,afterPull={ backup.applyRssInteractions(state.rssStates("")) },bookForArticle=backup::bookRecordForLegacyArticle)
         suspend fun records() = sync.sync(session,true,"epoch",requireAvailable=true)
         suspend fun subscription() {
             repository.rememberPublicRssSource("https://feed.test/rss","public-source")
@@ -109,8 +111,8 @@ class CloudSlimSnapshotRegressionTest {
                     .put("privateBodyFingerprintV2",fingerprint).put("snapshotContentHashV3",hash))
         }
     }
-    private fun fixture(server: Server=Server()) = Fixture(server).also { fixtures+=it }
-    @After fun close() { fixtures.forEach { it.scope.cancel();it.db.close() } }
+    private fun fixture(server: Server=Server(),bookMode:Boolean=false) = Fixture(server,bookMode=bookMode).also { fixtures+=it }
+    @After fun close() { fixtures.forEach { it.scope.cancel();it.db.close();it.bookDirectory.deleteRecursively() } }
     private fun article(id:String="rss-1",body:String="RSS original",private:Boolean=false)=PhoneArticleEntity(id,"phone",
         if(private) "https://watchrss.local/import-txt/$id" else "https://entry.test/$id", "Title $id","Feed","summary",null,body,null,
         CloudSnapshotCodec.sha256(body.toByteArray()),10,10,private,if(private)10 else 0,0,if(private)null else "https://feed.test/rss",null,
@@ -733,6 +735,46 @@ class CloudSlimSnapshotRegressionTest {
         val restored=f.backup.restorePrivateLibrary(bytes)
         assertEquals("first body",f.repository.getArticle(first.articleId)!!.contentText)
         assertEquals("bad",restored.warnings.single().articleId)
+    }
+
+    @Test fun legacyBookChaptersRetireOnlyAfterBookReadingAndServerCompletedBookPackage()=runBlocking<Unit> {
+        val f=fixture(bookMode=true)
+        val source=com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.txtNovelSourceUrl("migration")
+        f.db.phoneRssSourceDao().upsert(PhoneRssSourceEntity(source,"phone","book","",null,null,1,10,0,false,false,0))
+        val row=article("legacy-chapter","original",true).copy(url=com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.txtNovelChapterUrl("migration",0,"a"),rssSourceUrl=source,favoriteSaved=true,favoriteChangedAt=20)
+        f.db.phoneArticleDao().upsert(row)
+        val value=JSONObject(CloudRssStateCodec.encode(listOf(row),0).toString(Charsets.UTF_8)).getJSONArray("articles").getJSONObject(0)
+        val legacy=PhoneCloudRecordCodec.id(key,session.userId,"article",value)
+        f.server.records[legacy]=JSONObject().put("recordId",legacy).put("revision","1").put("envelope",PhoneCloudRecordCodec.encrypt(key,session.userId,legacy,1,"article",value));f.server.revision=1
+        f.records()
+        assertFalse(f.server.records.getValue(legacy).optBoolean("tombstone"))
+        assertEquals(1,f.server.events.count{it.first=="book"});assertEquals(1,f.server.events.count{it.first=="book-reading"})
+        val exported=f.backup.createCloudPrivateArchiveExport()
+        assertTrue(exported.articleIds.isEmpty());assertEquals(1,exported.bookIds.size)
+        val image=try{codec.create(key,1,"phone",1,listOf(CloudLogicalObject("private-library.wrss",exported.file.readBytes())),snapshotSettings=JSONObject()
+            .put("snapshotContentLayout",3).put("ownerUserId",session.userId).put("libraryEpoch","epoch").put("privateBodyFingerprintV2",f.backup.privateCloudFingerprint())
+            .put("privateBodyBookIds",JSONArray(exported.bookIds.toList())))}finally{exported.file.delete()}
+        val fp=f.backup.privateCloudFingerprint()
+        f.sync.retireSavedRssIndexes(session,"epoch",emptySet(),CloudSnapshotReuse.completedBookIds(emptyList(),session.userId,"epoch",1,fp))
+        assertFalse(f.server.records.getValue(legacy).optBoolean("tombstone"))
+        val confirmed=CloudSnapshotReuse.completedBookIds(listOf(image.manifest),session.userId,"epoch",1,fp)
+        f.sync.retireSavedRssIndexes(session,"epoch",emptySet(),confirmed)
+        assertTrue(f.server.records.getValue(legacy).getBoolean("tombstone"))
+        val decoded=PhoneCloudRecordCodec.decrypt(key,session.userId,legacy,f.server.records.getValue(legacy).getJSONObject("envelope")).second
+        assertTrue(decoded.getBoolean("bookIndexRetired"));assertTrue(decoded.getLong("deletedAt")>20)
+        f.records();assertFalse(f.repository.getArticle(row.articleId)!!.deleted);assertTrue(f.repository.getArticle(row.articleId)!!.favoriteSaved)
+        val writes=f.server.writes;f.records();assertEquals(writes,f.server.writes)
+    }
+    @Test fun committedWholeBookTombstoneRetiresLegacyChapterWithoutUploadingDeletedBody()=runBlocking<Unit> {
+        val f=fixture(bookMode=true);val source=com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.txtNovelSourceUrl("deleted")
+        f.db.phoneRssSourceDao().upsert(PhoneRssSourceEntity(source,"phone","book","",null,null,1,10,0,false,false,0))
+        val row=article("delete-legacy","body",true).copy(url=com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.txtNovelChapterUrl("deleted",0,"a"),rssSourceUrl=source)
+        f.db.phoneArticleDao().upsert(row);f.books!!.ensureRegistered();f.repository.deleteRssSource(source)
+        val value=JSONObject(CloudRssStateCodec.encode(listOf(row),0).toString(Charsets.UTF_8)).getJSONArray("articles").getJSONObject(0)
+        val legacy=PhoneCloudRecordCodec.id(key,session.userId,"article",value)
+        f.server.records[legacy]=JSONObject().put("recordId",legacy).put("revision","1").put("envelope",PhoneCloudRecordCodec.encrypt(key,session.userId,legacy,1,"article",value));f.server.revision=1
+        f.records();assertTrue(f.server.records.getValue(legacy).getBoolean("tombstone"));assertTrue(f.books.availableBooks().isEmpty())
+        assertTrue(f.repository.getArticle(row.articleId)!!.deleted)
     }
 
 }

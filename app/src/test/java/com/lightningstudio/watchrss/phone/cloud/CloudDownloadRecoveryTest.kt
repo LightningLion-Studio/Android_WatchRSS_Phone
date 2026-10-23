@@ -48,7 +48,7 @@ class CloudDownloadRecoveryTest {
             if (request.method=="POST") { acks++;200 to "{}".toByteArray() }
             else 200 to if (++gets<=3) ByteArray(good.size) else good
         }
-        val session=PhoneAccountSession("owner","***","session","",Long.MAX_VALUE);c.useEpoch(session,"epoch")
+        val session=PhoneAccountSession("owner","***","session","",Long.MAX_VALUE);c.useEpoch(session,"epoch");c.useContentGeneration(session,"22222222-2222-4222-8222-222222222222")
         val root=Files.createTempDirectory("cloud-download-retry-test").toFile()
         try {
             val cache=CloudLocalCache(root);val settings=state()

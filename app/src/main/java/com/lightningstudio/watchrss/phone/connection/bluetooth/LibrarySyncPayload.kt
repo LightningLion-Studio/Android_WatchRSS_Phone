@@ -44,7 +44,8 @@ data class ArticleSyncManifestEntry(
     val readingPositionBytes: Long = 0L,
     val readingPositionContentHash: String = "",
     val readingPositionChangedAt: Long = 0L,
-    val isRead: Boolean = false
+    val isRead: Boolean = false,
+    val legacyArticleIds: List<String> = emptyList()
 )
 
 data class LibraryChangeSequence(
@@ -88,6 +89,7 @@ object LibrarySyncPayload {
     ): JSONObject = JSONObject().apply {
         put("version", PROTOCOL_VERSION)
         put("action", BluetoothSyncProtocol.ACTION_SYNC_LIBRARY)
+        advertiseBleSyncV2()
         put("phase", PHASE_CURSOR)
         put(FIELD_SUPPORTS_MANIFEST_BATCHES, true)
         put("deviceId", deviceId)
@@ -106,6 +108,7 @@ object LibrarySyncPayload {
         return JSONObject().apply {
             put("version", PROTOCOL_VERSION)
             put("action", BluetoothSyncProtocol.ACTION_SYNC_LIBRARY)
+            advertiseBleSyncV2()
             put("phase", PHASE_PROBE)
             put("supportsArticleBatches", true)
             put(FIELD_SUPPORTS_MANIFEST_BATCHES, true)
@@ -145,6 +148,7 @@ object LibrarySyncPayload {
         return JSONObject().apply {
             put("version", PROTOCOL_VERSION)
             put("action", BluetoothSyncProtocol.ACTION_SYNC_LIBRARY)
+            advertiseBleSyncV2()
             put("phase", PHASE_MANIFEST)
             put("supportsArticleBatches", true)
             put(FIELD_SUPPORTS_MANIFEST_BATCHES, true)
@@ -171,6 +175,7 @@ object LibrarySyncPayload {
         return JSONObject().apply {
             put("version", PROTOCOL_VERSION)
             put("action", BluetoothSyncProtocol.ACTION_SYNC_LIBRARY)
+            advertiseBleSyncV2()
             put("phase", PHASE_MANIFEST)
             put("supportsArticleBatches", true)
             put(FIELD_SUPPORTS_MANIFEST_BATCHES, true)
@@ -199,6 +204,7 @@ object LibrarySyncPayload {
             put("success", true)
             put("version", PROTOCOL_VERSION)
             put("action", BluetoothSyncProtocol.ACTION_SYNC_LIBRARY)
+            advertiseBleSyncV2()
             put("phase", PHASE_MANIFEST)
             put("supportsArticleBatches", true)
             put(FIELD_SUPPORTS_MANIFEST_BATCHES, true)
@@ -333,12 +339,17 @@ object LibrarySyncPayload {
         return combined
     }
 
+    private fun JSONObject.withAliases(aliases:Map<String,List<String>>):JSONObject=apply {
+        aliases[optString("articleId")]?.takeIf { it.isNotEmpty() }?.let { put("legacyArticleIds",JSONArray(it)) }
+    }
+
     fun buildArticlesRequest(
         deviceId: String,
         articles: List<PhoneArticleEntity>,
         batchIndex: Int? = null,
         batchCount: Int? = null,
-        totalArticles: Int? = null
+        totalArticles: Int? = null,
+        articleAliases: Map<String,List<String>> = emptyMap()
     ): JSONObject {
         return JSONObject().apply {
             put("version", PROTOCOL_VERSION)
@@ -346,7 +357,7 @@ object LibrarySyncPayload {
             put("phase", PHASE_ARTICLES)
             put("deviceId", deviceId)
             put("sentAt", System.currentTimeMillis())
-            put("articles", articles.toJsonArray())
+            put("articles", JSONArray().apply { articles.forEach { put(it.toJson().withAliases(articleAliases)) } })
             putBatchFields(batchIndex, batchCount, totalArticles)
         }
     }
@@ -354,13 +365,14 @@ object LibrarySyncPayload {
     fun buildArticleRequestFrames(
         deviceId: String,
         articles: List<PhoneArticleEntity>,
-        useBatches: Boolean
+        useBatches: Boolean,
+        articleAliases: Map<String,List<String>> = emptyMap()
     ): List<JSONObject> {
         if (!useBatches) {
-            return listOf(buildArticlesRequest(deviceId, articles))
+            return listOf(buildArticlesRequest(deviceId, articles,articleAliases=articleAliases))
         }
         return buildArticleFrames(
-            articleItems = articles.asSequence().map { it.toJson() },
+            articleItems = articles.asSequence().map { it.toJson().withAliases(articleAliases) },
             totalArticles = articles.size
         ) { array, batchIndex, batchCount, totalArticles ->
             JSONObject().apply {
@@ -380,11 +392,12 @@ object LibrarySyncPayload {
         articles: List<PhoneArticleEntity>,
         articleRequests: List<ArticleBodyRequest>,
         bodyRequests: List<ArticleBodyRequest>,
-        useBatches: Boolean
+        useBatches: Boolean,
+        articleAliases: Map<String,List<String>> = emptyMap()
     ): List<JSONObject> {
         val requestById = articleRequests.associateBy { it.articleId }
         val articleItems = articles.asSequence().flatMap { article ->
-            article.toChunkedJsonItemSequence(requestById[article.articleId])
+            article.toChunkedJsonItemSequence(requestById[article.articleId]).map { it.withAliases(articleAliases) }
         }
         if (!useBatches) {
             return listOf(buildChunkedArticlesRequest(deviceId, articleItems.toList(), bodyRequests))
@@ -530,6 +543,7 @@ object LibrarySyncPayload {
                 add(
                     ArticleSyncManifestEntry(
                         articleId = articleId,
+                        legacyArticleIds = item.optJSONArray("legacyArticleIds")?.let { ids -> (0 until ids.length()).map { ids.getString(it) } }.orEmpty(),
                         sourceDeviceId = item.optString("sourceDeviceId").trim(),
                         contentHash = item.optString("contentHash").trim(),
                         updatedAt = item.optLong("updatedAt"),
@@ -573,7 +587,8 @@ object LibrarySyncPayload {
         localManifest: List<ArticleSyncManifestEntry>,
         remoteManifest: List<ArticleSyncManifestEntry>,
         maxBodyRequestChunks: Int = Int.MAX_VALUE,
-        supportsMetadataOnlyArticles: Boolean = false
+        supportsMetadataOnlyArticles: Boolean = false,
+        supportsFullMetadataOnlyArticles: Boolean = false
     ): List<ArticleBodyRequest> {
         val localById = localManifest.associateBy { it.articleId }
         return remoteManifest.mapNotNull { remote ->
@@ -607,7 +622,8 @@ object LibrarySyncPayload {
             val hasReusableLocalBody = local?.canReuseLocalBodyFor(remote) == true
             val shouldRequestMetadataOnlyBody = hasReusableLocalBody &&
                 remote.shouldRequestMetadataOnlyBody(
-                    supportsMetadataOnlyArticles = supportsMetadataOnlyArticles
+                    supportsMetadataOnlyArticles = supportsMetadataOnlyArticles,
+                    supportsFullMetadataOnlyArticles = supportsFullMetadataOnlyArticles
                 )
             val metadataOnly = needsMetadata && shouldRequestMetadataOnlyBody
             if (!remote.deleted && !remote.bodyAvailable && !hasReusableLocalBody) {
@@ -640,12 +656,13 @@ object LibrarySyncPayload {
     }
 
     private fun ArticleSyncManifestEntry.shouldRequestMetadataOnlyBody(
-        supportsMetadataOnlyArticles: Boolean
+        supportsMetadataOnlyArticles: Boolean,
+        supportsFullMetadataOnlyArticles: Boolean
     ): Boolean {
         return supportsMetadataOnlyArticles &&
             !deleted &&
             bodyAvailable &&
-            bodySyncMode == ARTICLE_BODY_SYNC_MODE_SAVED
+            (bodySyncMode == ARTICLE_BODY_SYNC_MODE_SAVED || supportsFullMetadataOnlyArticles)
     }
 
     private fun ArticleSyncManifestEntry.canReuseLocalBodyFor(
@@ -1190,6 +1207,7 @@ object LibrarySyncPayload {
     private fun ArticleSyncManifestEntry.toJson(): JSONObject {
         return JSONObject().apply {
             put("articleId", articleId)
+            if(legacyArticleIds.isNotEmpty())put("legacyArticleIds",JSONArray(legacyArticleIds))
             put("sourceDeviceId", sourceDeviceId)
             put("contentHash", contentHash)
             put("updatedAt", updatedAt)

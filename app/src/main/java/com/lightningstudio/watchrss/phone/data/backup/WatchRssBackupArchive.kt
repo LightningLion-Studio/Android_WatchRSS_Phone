@@ -42,6 +42,7 @@ internal object WatchRssBackupArchive {
     private const val MAX_ENTRY_COUNT = 100_000
     private const val MAX_ENTRY_BYTES = 512L * 1024L * 1024L
     private const val MAX_EXPANDED_BYTES = 4L * 1024L * 1024L * 1024L
+    private val BOOK_ENTRY_PATTERN=Regex("books/[0-9a-f]{64}\\.jsonl")
     private val BODY_ENTRY_PATTERN = Regex("""bodies/[0-9a-f]{64}\.(html|txt)""")
     private val READER_RESOURCE_PATTERN =
         Regex("""reader/(fonts|backgrounds|variants)/[0-9a-f]{64}\.bin""")
@@ -55,7 +56,7 @@ internal object WatchRssBackupArchive {
     )
 
     /** v2+ 必须包含、v1 中可能缺失的条目。 */
-    private val OPTIONAL_METADATA_ENTRIES = setOf(APP_META_ENTRY, READER_ENTRY)
+    private val OPTIONAL_METADATA_ENTRIES = setOf(APP_META_ENTRY, READER_ENTRY,"books.json")
 
     /** 所有已知的元数据条目名（用于条目名白名单校验）。 */
     private val ALL_KNOWN_METADATA_ENTRIES = REQUIRED_METADATA_ENTRIES + OPTIONAL_METADATA_ENTRIES
@@ -85,6 +86,10 @@ internal object WatchRssBackupArchive {
                     zip.writeUtf8Entry(bodyHtmlEntry(article.articleId), html)
                 }
             }
+            if(snapshot.bookPackages.isNotEmpty()) {
+                zip.writeUtf8Entry("books.json",com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordCodec.canonical(JSONArray(snapshot.bookPackages.sortedBy{it.metadata.getString("bookId")}.map{it.metadata})))
+                snapshot.bookPackages.sortedBy{it.metadata.getString("bookId")}.forEach {zip.writeFileEntry(it.metadata.getString("packagePath"),it.file)}
+            }
             snapshot.readerResources.sortedWith(compareBy({ it.kind }, { it.fileName })).forEach { resource ->
                 require(resource.file.isFile && resource.file.length() == resource.byteCount) {
                     "阅读器备份资源无效：${resource.fileName}"
@@ -99,23 +104,25 @@ internal object WatchRssBackupArchive {
         readerResourceStore: ReaderResourceStore? = null,
         tolerateCloudEntries: Boolean = false
     ): WatchRssBackupSnapshot {
-        val entries = runCatching { readEntries(input) }
+        val (entries,bookFiles) = runCatching { readEntries(input) }
             .getOrElse { throwable ->
                 if (throwable is IllegalArgumentException) throw throwable
                 throw IllegalArgumentException("WRSS 文件损坏或无法读取", throwable)
             }
-        return runCatching { parseEntries(entries, readerResourceStore, tolerateCloudEntries) }
+        return runCatching { parseEntries(entries, readerResourceStore, tolerateCloudEntries,bookFiles) }
             .getOrElse { throwable ->
+                bookFiles.values.forEach {it.delete()}
                 if (throwable is IllegalArgumentException) throw throwable
                 if (throwable is BackupVersionTooHighException) throw throwable
                 throw IllegalArgumentException("WRSS 数据格式无效", throwable)
             }
     }
 
-    private fun readEntries(input: InputStream): Map<String, ByteArray> {
+    private fun readEntries(input: InputStream): Pair<Map<String, ByteArray>,Map<String,File>> {
+        val bookFiles=linkedMapOf<String,File>()
         val entries = linkedMapOf<String, ByteArray>()
         var expandedBytes = 0L
-        ZipInputStream(BufferedInputStream(input)).use { zip ->
+        try { ZipInputStream(BufferedInputStream(input)).use { zip ->
             while (true) {
                 val entry = zip.nextEntry ?: break
                 require(!entry.isDirectory) { "WRSS 中不允许目录条目" }
@@ -124,17 +131,18 @@ internal object WatchRssBackupArchive {
                 require(
                     name in ALL_KNOWN_METADATA_ENTRIES ||
                         BODY_ENTRY_PATTERN.matches(name) ||
-                        READER_RESOURCE_PATTERN.matches(name)
+                        READER_RESOURCE_PATTERN.matches(name) || BOOK_ENTRY_PATTERN.matches(name)
                 ) {
                     "WRSS 包含未知条目：$name"
                 }
-                require(name !in entries) { "WRSS 包含重复条目：$name" }
-                require(entries.size < MAX_ENTRY_COUNT) { "WRSS 条目数量过多" }
+                require(name !in entries && name !in bookFiles) { "WRSS 包含重复条目：$name" }
+                require(entries.size+bookFiles.size < MAX_ENTRY_COUNT) { "WRSS 条目数量过多" }
 
-                val output = ByteArrayOutputStream()
+                val bookFile=if(BOOK_ENTRY_PATTERN.matches(name))File.createTempFile("wrss-book-",".jsonl").also{bookFiles[name]=it} else null
+                val output:OutputStream=bookFile?.outputStream()?:ByteArrayOutputStream()
                 val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                 var entryBytes = 0L
-                while (true) {
+                output.use { while (true) {
                     val read = zip.read(buffer)
                     if (read < 0) break
                     entryBytes += read
@@ -142,19 +150,21 @@ internal object WatchRssBackupArchive {
                     require(entryBytes <= MAX_ENTRY_BYTES) { "WRSS 单个条目过大：$name" }
                     require(expandedBytes <= MAX_EXPANDED_BYTES) { "WRSS 解压后内容过大" }
                     output.write(buffer, 0, read)
-                }
-                entries[name] = output.toByteArray()
+                } }
+                if(output is ByteArrayOutputStream)entries[name] = output.toByteArray()
                 zip.closeEntry()
             }
         }
+        } catch(error:Throwable) {bookFiles.values.forEach{it.delete()};throw error}
         require(entries.isNotEmpty()) { "不是有效的 WRSS 备份" }
-        return entries
+        return entries to bookFiles
     }
 
     private fun parseEntries(
         entries: Map<String, ByteArray>,
         readerResourceStore: ReaderResourceStore?,
-        tolerateCloudEntries: Boolean
+        tolerateCloudEntries: Boolean,
+        bookFiles:Map<String,File>
     ): WatchRssBackupSnapshot {
         REQUIRED_METADATA_ENTRIES.forEach { name ->
             require(name in entries) { "WRSS 缺少必要条目：$name" }
@@ -244,6 +254,23 @@ internal object WatchRssBackupArchive {
             }
         }
 
+        val books=mutableListOf<BookArchiveContent>()
+        val seenBooks=hashSetOf<String>()
+        val bookRows=entries["books.json"]?.let{JSONArray(it.toString(Charsets.UTF_8))}?:JSONArray()
+        for(i in 0 until bookRows.length()) {
+            val row=bookRows.optJSONObject(i)
+            try {
+                requireNotNull(row);val id=row.getString("bookId")
+                require(id==com.lightningstudio.watchrss.phone.data.book.BookSync.id(row.getString("fingerprint")) && id.matches(Regex("[0-9a-f]{64}")))
+                require(row.getString("packagePath")=="books/$id.jsonl" && seenBooks.add(id))
+                val packageFile=requireNotNull(bookFiles[row.getString("packagePath")])
+                val header=packageFile.bufferedReader().use{JSONObject(requireNotNull(it.readLine()))}
+                require(com.lightningstudio.watchrss.phone.data.book.BookSync.integer(row,"chapterCount")==com.lightningstudio.watchrss.phone.data.book.BookSync.integer(header,"chapterCount"))
+                books+=BookArchiveContent(row,requireNotNull(bookFiles[row.getString("packagePath")]))
+            }catch(error:Exception) {if(!tolerateRows)throw error;readWarnings+=CloudRestoreWarning(row?.optString("bookId")?:"books.json#$i","missing_book_body",permanent=true)}
+        }
+        bookFiles.values.filterNot{f->books.any{it.file==f}}.forEach{it.delete()}
+
         return WatchRssBackupSnapshot(
             exportedAt = manifest.getLong("exportedAt"),
             appVersion = manifest.optString("appVersion"),
@@ -254,7 +281,8 @@ internal object WatchRssBackupArchive {
             readerSnapshot = readerSnapshot,
             appMeta = appMeta,
             cloudContentOnly = cloudContentOnly,
-            readWarnings = readWarnings
+            readWarnings = readWarnings,
+            bookPackages = books
         ).also(::validateSnapshot)
     }
 

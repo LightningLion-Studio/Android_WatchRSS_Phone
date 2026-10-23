@@ -30,7 +30,7 @@ class PhoneCloudHistoryClientTest {
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("ok")
                 .body("{\"uploadUrl\":\"https://test.invalid/functions/v1/cloud/uploads/$id\",\"uploadMethod\":\"PUT\",\"transport\":\"epoch-proxy\"}".toResponseBody("application/json".toMediaType())).build()
         }.build()
-        val client = PhoneCloudClient(AccountEnvironment(backendBaseUrl = "https://test.invalid"), http = http).also { it.useEpoch(session, "epoch") }
+        val client = PhoneCloudClient(AccountEnvironment(backendBaseUrl = "https://test.invalid"), http = http).also { it.useEpoch(session, "epoch");it.useContentGeneration(session,"22222222-2222-4222-8222-222222222222") }
         val target = CloudUploadObject("chunk", "a".repeat(64), 123, "owner/path", "https://storage.invalid/expired", "token", "https://storage.invalid/tus", "private", id)
         assertEquals(target.copy(signedUrl="https://test.invalid/functions/v1/cloud/uploads/$id", transport="epoch-proxy", uploadMethod="PUT"), client.refreshUpload(session, target))
         assertEquals(target.copy(reservationId=null), client.refreshUpload(session, target.copy(reservationId=null)))
@@ -43,7 +43,7 @@ class PhoneCloudHistoryClientTest {
                 .body("{\"alreadyUploaded\":true}".toResponseBody("application/json".toMediaType())).build()
         }.build()
         val target = CloudUploadObject("chunk", "a".repeat(64), 1, "path", "https://storage.invalid/expired", "token", "https://storage.invalid/tus", "private", "11111111-1111-4111-8111-111111111111")
-        val result = PhoneCloudClient(AccountEnvironment(backendBaseUrl="https://test.invalid"), http=http).also { it.useEpoch(session, "epoch") }.refreshUpload(session,target)
+        val result = PhoneCloudClient(AccountEnvironment(backendBaseUrl="https://test.invalid"), http=http).also { it.useEpoch(session, "epoch");it.useContentGeneration(session,"22222222-2222-4222-8222-222222222222") }.refreshUpload(session,target)
         assertTrue(result.alreadyUploaded)
         assertEquals(target.sha256,result.sha256)
     }
@@ -57,7 +57,7 @@ class PhoneCloudHistoryClientTest {
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("ok")
                 .body(body.toString().toResponseBody("application/json".toMediaType())).build()
         }.build()
-        val client = PhoneCloudClient(AccountEnvironment(backendBaseUrl = "https://test.invalid"), http = http).also { it.useEpoch(session, "epoch") }
+        val client = PhoneCloudClient(AccountEnvironment(backendBaseUrl = "https://test.invalid"), http = http).also { it.useEpoch(session, "epoch");it.useContentGeneration(session,"22222222-2222-4222-8222-222222222222") }
         client.snapshot(session, "snapshot", manifestOnly = true)
         client.snapshot(session, "snapshot", chunk = "a".repeat(64))
         assertEquals(listOf("manifestOnly=true", "chunk=" + "a".repeat(64)), queries)

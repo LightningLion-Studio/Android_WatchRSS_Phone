@@ -49,7 +49,8 @@ data class BluetoothSyncExchange(
     val deviceName: String,
     val deviceAddress: String,
     val request: JSONObject,
-    val response: JSONObject
+    val response: JSONObject,
+    val appliedAckWritten: Boolean = false
 )
 
 data class BluetoothLibrarySyncExchange(
@@ -77,7 +78,7 @@ private data class LibraryResponseRead(
 )
 
 internal fun isSessionOperationSafeForTransparentReplay(action: String): Boolean =
-    action != BluetoothSyncProtocol.ACTION_SYNC_LIBRARY && action != BluetoothSyncProtocol.ACTION_OPEN_PAIRING
+    action != BluetoothSyncProtocol.ACTION_SYNC_LIBRARY && action != BluetoothSyncProtocol.ACTION_OPEN_PAIRING && action != "syncBooks"
 
 private class PreviewStreamStats {
     private var windowStartedAt = SystemClock.elapsedRealtime()
@@ -239,6 +240,9 @@ internal class PhoneSyncSession internal constructor(
 
     suspend fun exchange(request: JSONObject, sessionId: String): BluetoothSyncExchange =
         client.exchangeInSession(this, request, sessionId)
+
+    internal suspend fun exchangeApplied(request:JSONObject,sessionId:String,validate:(JSONObject)->Unit):BluetoothSyncExchange =
+        client.exchangeAppliedInSession(this,request,sessionId,validate)
 
     suspend fun exchangeLibrary(
         cursorRequest: JSONObject,
@@ -662,6 +666,28 @@ class PhoneBluetoothSyncClient(
         }
     }
 
+    /** R46 windows are connection-bound. Never transparently replay or ACK invalid commit data. */
+    internal suspend fun exchangeAppliedInSession(session:PhoneSyncSession,request:JSONObject,sessionId:String,
+        validate:(JSONObject)->Unit):BluetoothSyncExchange {
+        check(!session.legacyFallback && session.isPersistent){"阅读增量需要持久同步连接"}
+        return executeSessionOperation(session,sessionId,request.optString("action"),allowTransparentReplay=false) {
+            connectionMutex.withLock {
+                val transport=session.transport ?: error("持久同步连接已关闭")
+                writeFrameLogged(transport.outputStream,sessionId,"sessionRequest",session.requestForExchange(request))
+                val response=readFrameLogged(transport.inputStream,sessionId,"sessionResponse")
+                val acked=try {
+                    validateAndWriteAppliedAck(response,validate) {
+                        writeResponseAck(transport.outputStream,sessionId,success=true,applied=true)
+                    }
+                } catch(failure:Throwable) {
+                    session.close()
+                    throw failure
+                }
+                BluetoothSyncExchange(session.device.name,session.device.address,request,response,appliedAckWritten=acked)
+            }
+        }
+    }
+
     internal suspend fun exchangeLibraryInSession(
         session: PhoneSyncSession,
         cursorRequest: JSONObject,
@@ -714,6 +740,7 @@ class PhoneBluetoothSyncClient(
             session.close()
             return@withContext
         }
+        val cancellationHandle = installSessionCancellationLogger(session, sessionId, BluetoothSyncProtocol.ACTION_SYNC_SESSION)
         try {
             connectionMutex.withLock {
                 val transport = session.transport ?: return@withLock
@@ -739,7 +766,11 @@ class PhoneBluetoothSyncClient(
                 writeResponseAck(transport.outputStream, sessionId, success = true, applied = true)
                 session.recordNegotiation(response)
             }
+        } catch (failure: Throwable) {
+            currentCoroutineContext().ensureActive()
+            throw failure
         } finally {
+            cancellationHandle?.dispose()
             debugLog.appendEvent(
                 event = "sync.session.closed",
                 sessionId = sessionId,
@@ -760,6 +791,8 @@ class PhoneBluetoothSyncClient(
         try {
             return block()
         } catch (throwable: Throwable) {
+            // Socket close caused by cancellation must retain the timeout/cancel cause.
+            currentCoroutineContext().ensureActive()
             if (
                 throwable is CancellationException ||
                 !allowTransparentReplay ||

@@ -77,7 +77,9 @@ fun DashboardCloudSyncBanner() {
         },
         onTogglePause = {
             actionFailed = runCatching { container.setCloudSyncPaused(!paused) }.isFailure
-        }
+        },
+        // The whole card opens cloud sync management; its buttons keep their own actions.
+        onOpen = { context.startActivity(AccountActivity.createIntent(context, section = AccountSection.CLOUD_SYNC)) }
     )
     if (showOwnerChoice) LibraryOwnerDialog(
         onChoose = { merge ->

@@ -27,7 +27,7 @@ class PhoneCloudRecordSyncTest {
     private fun client(handle: (Request) -> Pair<Int, JSONObject>) = PhoneCloudClient(AccountEnvironment(backendBaseUrl = "https://test.invalid"), http = OkHttpClient.Builder().addInterceptor { chain ->
         val (status, json) = handle(chain.request())
         Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(status).message("test").body(json.toString().toResponseBody("application/json".toMediaType())).build()
-    }.build()).also { it.useEpoch(session, "epoch") }
+    }.build()).also { it.useEpoch(session, "epoch");it.useContentGeneration(session,"22222222-2222-4222-8222-222222222222") }
     private fun posted(request: Request): JSONArray { val buffer = okio.Buffer(); request.body!!.writeTo(buffer); return JSONObject(buffer.readUtf8()).getJSONArray("items") }
     private fun sync(client: PhoneCloudClient, state: State, values: List<JSONObject> = emptyList(), apply: suspend (String, JSONObject) -> Unit = { _, _ -> }, owner: (PhoneAccountSession) -> Unit = {}) =
         PhoneCloudRecordSync(client, state, { consume -> values.forEach { consume("article", it) } }, { _, kind, value -> apply(kind, value) }, { 1 }, { _, _ -> key.copyOf() }, owner)

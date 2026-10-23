@@ -167,13 +167,28 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
     internal fun abandonedRestoreIds(snapshotId: String): Set<String> =
         JSONObject(preferences.getString(abandonedRestoreKey(snapshotId),"{}").orEmpty()).keys().asSequence().toSet()
 
-    fun clearLibraryState() {
+    var contentGeneration: String?
+        get() = preferences.getString(scoped("content_generation"), null)
+        private set(value) { check(preferences.edit().putString(scoped("content_generation"), value).commit()) }
+
+    /** Commit the generation only after every cache was cleared; a crash repeats cleanup safely. */
+    @Synchronized
+    internal fun observeContentGeneration(generation: String, contentEmpty: Boolean, reset: () -> Unit): Boolean {
+        require(java.util.UUID.fromString(generation).toString() == generation)
+        val previous = contentGeneration
+        val rebuild = (previous != null && previous != generation) || (previous == null && contentEmpty)
+        if (rebuild) reset()
+        if (previous != generation) contentGeneration = generation
+        return rebuild
+    }
+
+    fun clearLibraryState(preserveDeviceSequence: Boolean = false) {
         val abandoned=preferences.edit()
         preferences.all.keys.filter { it.startsWith(scoped("abandoned_restore_v1:")) }.forEach(abandoned::remove)
         check(abandoned.commit())
         check(
             preferences.edit()
-                .remove(scoped(KEY_DEVICE_SEQUENCE))
+                .apply { if (!preserveDeviceSequence) remove(scoped(KEY_DEVICE_SEQUENCE)) }
                 .remove(scoped("last_snapshot_published_at_v3"))
                 .remove(scoped(KEY_APPLIED_FULL))
                 .remove(scoped(KEY_APPLIED_STATE))

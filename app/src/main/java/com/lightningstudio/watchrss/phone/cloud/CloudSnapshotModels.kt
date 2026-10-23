@@ -75,7 +75,8 @@ data class CloudObjectDescriptor(
     val encodedBytes: Long,
     val chunks: List<CloudChunkDescriptor>,
     val readerKeyEnvelope: JSONObject? = null,
-    val privateArticle: JSONObject? = null
+    val privateArticle: JSONObject? = null,
+    val privateBook: JSONObject? = null
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("name", name)
@@ -84,6 +85,7 @@ data class CloudObjectDescriptor(
         put("encodedBytes", encodedBytes)
         readerKeyEnvelope?.let { put("readerKeyEnvelope", it) }
         privateArticle?.let { put("privateArticle", it) }
+        privateBook?.let { put("privateBook",it) }
         put("chunks", JSONArray().apply { chunks.forEach { put(it.toJson()) } })
     }
 
@@ -96,7 +98,8 @@ data class CloudObjectDescriptor(
                 encodedBytes = json.getLong("encodedBytes"),
                 chunks = json.getJSONArray("chunks").toObjectList(CloudChunkDescriptor::fromJson),
                 readerKeyEnvelope = json.optJSONObject("readerKeyEnvelope"),
-                privateArticle = json.optJSONObject("privateArticle")
+                privateArticle = json.optJSONObject("privateArticle"),
+                privateBook = json.optJSONObject("privateBook")
             )
     }
 }

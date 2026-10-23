@@ -58,6 +58,7 @@ fun CloudAccountPanel(
     var estimate by remember { mutableStateOf<CloudTransferEstimate?>(null) }
     var showHistory by remember(userId) { mutableStateOf(false) }
     var snapshotHeads by remember(userId) { mutableStateOf<List<CloudSnapshotHead>>(emptyList()) }
+    var historyLoading by remember(userId) { mutableStateOf(false) }
     var restorePreview by remember { mutableStateOf<CloudSnapshotRestorePreview?>(null) }
     var overwriteConfirm by remember { mutableStateOf<CloudSnapshotRestorePreview?>(null) }
     var deleteCandidate by remember { mutableStateOf<CloudSnapshotHead?>(null) }
@@ -71,15 +72,20 @@ fun CloudAccountPanel(
 
     fun refresh() {
         runAction {
-            runCatching {
-                val member = service.loadMembership()
-                bootstrap = if (member.readable) service.loadBootstrap() else null
-                snapshotHeads = if (showHistory && member.readable) {
-                    service.listSnapshotHistory()
-                } else {
-                    emptyList()
-                }
-            }.onFailure { onError(it.message ?: "会员状态读取失败") }
+            historyLoading = showHistory
+            try {
+                runCatching {
+                    val member = service.loadMembership()
+                    bootstrap = if (member.readable) service.loadBootstrap() else null
+                    snapshotHeads = if (showHistory && member.readable) {
+                        service.listSnapshotHistory()
+                    } else {
+                        emptyList()
+                    }
+                }.onFailure { onError(it.message ?: "会员状态读取失败") }
+            } finally {
+                historyLoading = false
+            }
         }
     }
 
@@ -132,7 +138,7 @@ fun CloudAccountPanel(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         } else {
-            val used = member.usedBytes + member.reservedBytes
+            val used = member.usedBytes
             val fraction = if (member.quotaBytes <= 0) 0f
             else (used.toDouble() / member.quotaBytes).toFloat().coerceIn(0f, 1f)
             Text("云备份可用 · 按账号云空间额度同步")
@@ -154,7 +160,12 @@ fun CloudAccountPanel(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                if (snapshotHeads.isEmpty()) Text("暂无可恢复的历史快照")
+                if (historyLoading && snapshotHeads.isEmpty()) {
+                    Text("正在读取历史快照…", style = MaterialTheme.typography.bodySmall)
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                } else if (snapshotHeads.isEmpty()) {
+                    Text("暂无可恢复的历史快照")
+                }
                 snapshotHeads.forEach { head ->
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Column(

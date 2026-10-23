@@ -41,7 +41,7 @@ interface NoteDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAssets(items: List<NoteAssetEntity>)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun upsertConflicts(items: List<NoteConflictEntity>)
 
     @Query("UPDATE note_conflicts SET resolvedAt = :resolvedAt WHERE conflictId = :conflictId")

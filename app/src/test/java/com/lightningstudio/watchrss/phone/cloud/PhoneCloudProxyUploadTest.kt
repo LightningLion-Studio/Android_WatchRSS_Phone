@@ -20,7 +20,7 @@ class PhoneCloudProxyUploadTest {
         deviceAccessToken={"app-access"},http=OkHttpClient.Builder().addInterceptor { chain ->
             val (status,body)=handler(chain.request())
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(status).message("test").body(body.toString().toResponseBody("application/json".toMediaType())).build()
-        }.build()).also{it.useEpoch(session,"epoch");it.currentDeviceId="phone"}
+        }.build()).also{it.useEpoch(session,"epoch");it.useContentGeneration(session,"22222222-2222-4222-8222-222222222222");it.currentDeviceId="phone"}
     @Test fun rawPutCarriesAccountDeviceAndEpochHeadersAndExactCiphertext()=runBlocking {
         var calls=0
         val c=client { request ->

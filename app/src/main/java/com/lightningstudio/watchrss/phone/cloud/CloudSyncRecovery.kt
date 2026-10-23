@@ -11,6 +11,7 @@ internal class CloudRecordsUnavailableException : IOException("记录通道暂�
 
 internal fun recoverableCloudRestoreFailure(error: Exception): Boolean =
     error !is CancellationException && error !is CloudTrustException &&
+        !(error is CloudHttpException && discardedCloudTransfer(error)) &&
         !(error is CloudHttpException && error.status in setOf(401, 403, 409, 426)) &&
         (error is IOException || error is IllegalArgumentException || error is org.json.JSONException)
 
@@ -52,7 +53,7 @@ internal class CloudSnapshotMergeProgress {
 internal fun permanentCloudRestoreFailure(error: Exception): Boolean =
     error is CloudObjectDecryptionException || error is CloudObjectParseException ||
         (error is javax.crypto.BadPaddingException || error is javax.crypto.IllegalBlockSizeException) || error is org.json.JSONException ||
-        (error is CloudHttpException && error.status in setOf(404,410))
+        (error is CloudHttpException && error.status in setOf(404,410) && !discardedCloudTransfer(error))
 
 internal data class CloudRestoreSettlement(val visible: List<CloudRestoreWarning>, val pending: List<CloudRestoreWarning>)
 

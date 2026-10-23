@@ -1,0 +1,295 @@
+{
+  "version": 1,
+  "algorithm": "LP-u32be-UTF8-question-SHA256",
+  "capability": "supportsBookReadingDeltaV1",
+  "cases": [
+    {
+      "name": "empty",
+      "states": [],
+      "leaves": [],
+      "books": [],
+      "root": "01a5f5d54e921bc417ba792147d22a74d5d63ec48518c351b69185968453a731"
+    },
+    {
+      "name": "absent-list-fields",
+      "states": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "chapterIndex": 2,
+          "isRead": true,
+          "readingProgress": 0.123456789,
+          "readingPositionBytes": 42,
+          "readingPositionContentHash": "\u6b63\u6587\n\ud83d\ude00",
+          "readingPositionChangedAt": 10,
+          "sourceDeviceId": "watch"
+        }
+      ],
+      "leaves": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "chapterIndex": 2,
+          "hash": "8825a4b310373bab3155a9db12d9e7860c8cd8049c33633ccca260aeb825c452"
+        }
+      ],
+      "books": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "count": 1,
+          "root": "996b709750427ddcff9166831076c15656b3b598da5a5d3eb4379275e5412492"
+        }
+      ],
+      "root": "da2d6973be17babdbf4083d5c63d5cc0b817370ea3fd3b6318288a78aaa455cc"
+    },
+    {
+      "name": "float-normalizes-to-millionths",
+      "states": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "chapterIndex": 2,
+          "isRead": true,
+          "readingProgress": 0.123457,
+          "readingPositionBytes": 42,
+          "readingPositionContentHash": "\u6b63\u6587\n\ud83d\ude00",
+          "readingPositionChangedAt": 10,
+          "sourceDeviceId": "watch"
+        }
+      ],
+      "leaves": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "chapterIndex": 2,
+          "hash": "8825a4b310373bab3155a9db12d9e7860c8cd8049c33633ccca260aeb825c452"
+        }
+      ],
+      "books": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "count": 1,
+          "root": "996b709750427ddcff9166831076c15656b3b598da5a5d3eb4379275e5412492"
+        }
+      ],
+      "root": "da2d6973be17babdbf4083d5c63d5cc0b817370ea3fd3b6318288a78aaa455cc"
+    },
+    {
+      "name": "present-false-zero-differs-from-absent",
+      "states": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "chapterIndex": 2,
+          "isRead": true,
+          "readingProgress": 0.123456789,
+          "readingPositionBytes": 42,
+          "readingPositionContentHash": "\u6b63\u6587\n\ud83d\ude00",
+          "readingPositionChangedAt": 10,
+          "sourceDeviceId": "watch",
+          "favoriteSaved": false,
+          "favoriteChangedAt": 0,
+          "favoriteSortOrder": 0
+        }
+      ],
+      "leaves": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "chapterIndex": 2,
+          "hash": "6ab67758cd88bc99bb65ff0e93116510a9880722ed53a8e9d2fc4eb4cfd70f5b"
+        }
+      ],
+      "books": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "count": 1,
+          "root": "084c052706b3f525c6cf0ad834655ee30a16f1c1490b139e3e41d3e67e50b4df"
+        }
+      ],
+      "root": "7103f34998058f35800e2a7fc7e2d25ba58e681097859deea37894f52ade6080"
+    },
+    {
+      "name": "explicit-unread-and-independent-list-clocks",
+      "states": [
+        {
+          "bookId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "chapterIndex": 1,
+          "isRead": false,
+          "readingProgress": 0,
+          "readingPositionBytes": 42,
+          "readingPositionContentHash": "\u6b63\u6587\n\ud83d\ude00",
+          "readingPositionChangedAt": 20,
+          "sourceDeviceId": "phone",
+          "favoriteSaved": false,
+          "favoriteChangedAt": 80,
+          "favoriteSortOrder": 0,
+          "favoriteSourceDeviceId": "watch",
+          "watchLaterSaved": true,
+          "watchLaterChangedAt": 70,
+          "watchLaterSortOrder": 2,
+          "watchLaterSourceDeviceId": "phone"
+        }
+      ],
+      "leaves": [
+        {
+          "bookId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "chapterIndex": 1,
+          "hash": "e2d7c448389399b3937e346232c52c369b7c76c0d273c8798a63572d6069bb8b"
+        }
+      ],
+      "books": [
+        {
+          "bookId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "count": 1,
+          "root": "2b9d995241a6fafc2c6f276eac6dfdf7c575656639480515506f953cf673fa03"
+        }
+      ],
+      "root": "063e974b64733261b5906fb8ebba3d795e3a7da78ab04588d2fd799c8aceb6f2"
+    },
+    {
+      "name": "unordered-input-multiple-books",
+      "states": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "chapterIndex": 2,
+          "isRead": true,
+          "readingProgress": 0.123456789,
+          "readingPositionBytes": 42,
+          "readingPositionContentHash": "\u6b63\u6587\n\ud83d\ude00",
+          "readingPositionChangedAt": 10,
+          "sourceDeviceId": "watch"
+        },
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "chapterIndex": 12,
+          "isRead": true,
+          "readingProgress": 0.123456789,
+          "readingPositionBytes": 42,
+          "readingPositionContentHash": "\u6b63\u6587\n\ud83d\ude00",
+          "readingPositionChangedAt": 10,
+          "sourceDeviceId": "watch"
+        },
+        {
+          "bookId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "chapterIndex": 1,
+          "isRead": false,
+          "readingProgress": 0,
+          "readingPositionBytes": 42,
+          "readingPositionContentHash": "\u6b63\u6587\n\ud83d\ude00",
+          "readingPositionChangedAt": 20,
+          "sourceDeviceId": "phone",
+          "favoriteSaved": false,
+          "favoriteChangedAt": 80,
+          "favoriteSortOrder": 0,
+          "favoriteSourceDeviceId": "watch",
+          "watchLaterSaved": true,
+          "watchLaterChangedAt": 70,
+          "watchLaterSortOrder": 2,
+          "watchLaterSourceDeviceId": "phone"
+        }
+      ],
+      "leaves": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "chapterIndex": 2,
+          "hash": "8825a4b310373bab3155a9db12d9e7860c8cd8049c33633ccca260aeb825c452"
+        },
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "chapterIndex": 12,
+          "hash": "cb301e0cf805b55c193434e4f49cc9b7a593a1d37e7bac42b1bb658e79d7b4c4"
+        },
+        {
+          "bookId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "chapterIndex": 1,
+          "hash": "e2d7c448389399b3937e346232c52c369b7c76c0d273c8798a63572d6069bb8b"
+        }
+      ],
+      "books": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "count": 2,
+          "root": "5adfd9645dbe5d2109f384213846e29193ff90653177dd4f67f2db299e125c6e"
+        },
+        {
+          "bookId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "count": 1,
+          "root": "2b9d995241a6fafc2c6f276eac6dfdf7c575656639480515506f953cf673fa03"
+        }
+      ],
+      "root": "d3dd24c38ce728f7c134816a72cd8ebc49795a093feee0a6d7f8eb18f02ac9f6"
+    },
+    {
+      "name": "lone-surrogate-question",
+      "states": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "chapterIndex": 2,
+          "isRead": true,
+          "readingProgress": 0.123456789,
+          "readingPositionBytes": 42,
+          "readingPositionContentHash": "\u6b63\u6587\n\ud83d\ude00",
+          "readingPositionChangedAt": 10,
+          "sourceDeviceId": "x\ud800y"
+        }
+      ],
+      "leaves": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "chapterIndex": 2,
+          "hash": "fcfe7f45a7c620a1732510a6af62dab81f5682761dbdbbebf8e5fe0306e20b38"
+        }
+      ],
+      "books": [
+        {
+          "bookId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "count": 1,
+          "root": "3f0cc91d1620224491b220924e6eb8ed239d877439979940372a96ce33e2b1a4"
+        }
+      ],
+      "root": "074a5dd3face97f14a27c94cfa65811e726560facbdfe3adf6edb5b063f4dfe1"
+    }
+  ],
+  "exchangeCases": [
+    {
+      "name": "equal-root-different-counters",
+      "localSeq": 8,
+      "remoteSeq": 15,
+      "equal": true,
+      "entries": 0,
+      "commitBeforeAppliedAck": false
+    },
+    {
+      "name": "conservative-prefix",
+      "storedLocalAck": 7,
+      "peerKnownSeq": 5,
+      "expectedFromSeq": 5
+    },
+    {
+      "name": "epoch-changed",
+      "storedLocalAck": 7,
+      "peerKnownSeq": 5,
+      "sameEpoch": false,
+      "expectedFromSeq": 0
+    },
+    {
+      "name": "root-mismatch-but-both-cursors-at-end",
+      "equal": false,
+      "localSeq": 8,
+      "remoteSeq": 15,
+      "localFrom": 8,
+      "remoteFrom": 15,
+      "expectedFromSeq": 0,
+      "expectedRemoteFromSeq": 0
+    },
+    {
+      "name": "lost-final-applied-ack",
+      "expectedCursorAdvance": false
+    },
+    {
+      "name": "new-local-seq-after-open",
+      "windowTo": 8,
+      "newSeq": 9,
+      "expectedAckedSeq": 8
+    },
+    {
+      "name": "missing-page-is-not-delete",
+      "expectedDeletedKeys": 0
+    }
+  ]
+}

@@ -26,7 +26,7 @@ class PhoneCloudSyncWorker(
             Result.success()
         }.getOrElse { error ->
             if (error is CancellationException) throw error
-            if (runAttemptCount < 3 && error !is IllegalArgumentException) {
+            if (runAttemptCount < 3 && error !is IllegalArgumentException && !(error is CloudHttpException && error.status == 426)) {
                 Result.retry()
             } else {
                 Result.failure()
@@ -63,7 +63,16 @@ class PhoneCloudSyncWorker(
             WorkManager.getInstance(context).enqueueUniqueWork("watchrss-cloud-snapshot-window",ExistingWorkPolicy.REPLACE,request)
         }
 
+        fun scheduleFollowUp(context: Context) {
+            val request=OneTimeWorkRequestBuilder<PhoneCloudSyncWorker>()
+                .setInitialDelay(30,TimeUnit.SECONDS)
+                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).build()
+            // Append after a currently running follow-up instead of cancelling its own worker.
+            WorkManager.getInstance(context).enqueueUniqueWork("watchrss-cloud-follow-up",ExistingWorkPolicy.APPEND_OR_REPLACE,request)
+        }
+
         fun cancel(context: Context) {
+            WorkManager.getInstance(context).cancelUniqueWork("watchrss-cloud-follow-up")
             WorkManager.getInstance(context).cancelUniqueWork("watchrss-cloud-snapshot-window")
             WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
         }

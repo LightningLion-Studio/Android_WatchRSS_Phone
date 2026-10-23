@@ -1,0 +1,50 @@
+{
+  "protocol": "BLE-SYNC-V2",
+  "source": "rss-source-key.json articleCases from backend rss.rs dedup_key",
+  "cases": [
+    {
+      "name": "r41-http-0",
+      "url": "https://example.com/",
+      "canonicalArticleId": "0f115db062b7c0dd030b16878c99dea5c354b49dc37b38eb8846179c7783e9d7",
+      "legacyArticleId": "0f115db062b7c0dd030b16878c99dea5c354b49dc37b38eb8846179c7783e9d7",
+      "legacyArticleIds": []
+    },
+    {
+      "name": "r41-http-1",
+      "url": "https://www.example.com:8443/article?b=2&a=1",
+      "canonicalArticleId": "561756a52bd8233a504c3196e0dacad5c8c6557cbd5f2c3aaa7d54dbb54cfa33",
+      "legacyArticleId": "9ae12370297a1b2f87d9f02eaa1b179610ee49b7b8b299985ce5e654badb0d7e",
+      "legacyArticleIds": [
+        "9ae12370297a1b2f87d9f02eaa1b179610ee49b7b8b299985ce5e654badb0d7e"
+      ]
+    },
+    {
+      "name": "r41-guid-priority",
+      "url": "https://example.com/post",
+      "canonicalArticleId": "fc89f2125d3f70fa29ade0f278294cc3e627b88693f44466c9162229cbb8df41",
+      "legacyArticleId": "061128ccde4ce4703519b9b2e51c036d85b137886dedcd2908fd11da004ab8c7",
+      "legacyArticleIds": [
+        "061128ccde4ce4703519b9b2e51c036d85b137886dedcd2908fd11da004ab8c7"
+      ]
+    }
+  ],
+  "ambiguousCases": [
+    {
+      "name": "same-url-distinct-real-guids",
+      "url": "https://example.com/post",
+      "canonicalArticleIds": [
+        "fc89f2125d3f70fa29ade0f278294cc3e627b88693f44466c9162229cbb8df41",
+        "961c6ab5defb654a5bb67a4611a608174d096d27f1435a82ef888a9081b825ce"
+      ],
+      "legacyArticleId": "061128ccde4ce4703519b9b2e51c036d85b137886dedcd2908fd11da004ab8c7",
+      "legacyArticleIds": [
+        [],
+        []
+      ],
+      "legacyWireArticleIds": [
+        "fc89f2125d3f70fa29ade0f278294cc3e627b88693f44466c9162229cbb8df41",
+        "961c6ab5defb654a5bb67a4611a608174d096d27f1435a82ef888a9081b825ce"
+      ]
+    }
+  ]
+}

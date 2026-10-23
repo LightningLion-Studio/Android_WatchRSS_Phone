@@ -85,11 +85,15 @@ class PhoneCloudSyncService(
     private val legacyDeviceId: String? = null
 ) {
     private val appContext = context.applicationContext
+    private val traceLog = com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog(context.applicationContext)
     private val debugTrace = java.io.File(context.cacheDir, "cloud-sync-debug.trace")
     private fun traceSync(stage: String) {
-        if (com.lightningstudio.watchrss.phone.BuildConfig.DEBUG) runCatching {
+        val safe = safeCloudTrace(stage)
+        runCatching {
             if (debugTrace.length() > 65536) debugTrace.writeText("")
-            debugTrace.appendText("${System.currentTimeMillis()} $stage\n")
+            debugTrace.appendText("${System.currentTimeMillis()} $safe\n")
+            android.util.Log.i("WatchRSSCloud", safe)
+            traceLog.appendEvent("cloud.sync",fields=mapOf("stage" to safe))
         }
     }
     private val recordStore = PhoneCloudRecordStore(context.applicationContext)
@@ -102,6 +106,7 @@ class PhoneCloudSyncService(
         refreshKeys = { session -> validatedBootstrap(session) },
         keepArticle = backupService::keepCloudArticle,
         canonicalArticleId = backupService::canonicalCloudArticleId,
+        bookForArticle = backupService::bookRecordForLegacyArticle,
         afterPull = { session -> backupService.applyRssInteractions(recordStore.rssStates(client.scopeId(session))) { checkApprovalOwner(session) } })
     private val noteTransfer = NoteImportExportService(context, noteRepository)
     private val syncMutex = CloudSyncSingleFlight()
@@ -140,6 +145,7 @@ class PhoneCloudSyncService(
     val recordError: StateFlow<String?> = _recordError
 
     init {
+        client.onUploadTransportEvent = { traceSync("upload-transport:$it") }
         client.checkSession = ::checkApprovalOwner
         client.currentDeviceId = deviceId
         keyManager.bindBackend(client.backendBaseUrl)
@@ -149,6 +155,13 @@ class PhoneCloudSyncService(
         client.onDeviceKeyConflict = { session -> checkApprovalOwner(session); _deviceRegistrationConflict.value = true }
         client.onEpochMismatch = { session -> invalidateEpoch(session) }
         client.onBootstrap = { session, bootstrap -> observeBootstrap(session, bootstrap) }
+        client.onContentMetadata = { session, metadata ->
+            bindScope(session)
+            if (settings.observeContentGeneration(metadata.generation, metadata.empty) { clearContentSyncState(session) }) {
+                traceSync("content-rebuild:metadata")
+                _state.update { it.copy(pendingSnapshotUntil = 0) }
+            }
+        }
         client.onRecordMetadata = { session, json ->
             if (json.has("libraryEpoch")) {
                 val current = trustedBootstrap ?: error("请先读取云资料库")
@@ -173,9 +186,19 @@ class PhoneCloudSyncService(
             keyManager.clearDeviceKey(session.userId, deviceId)
             legacyDeviceId?.takeIf { it != deviceId }?.let { keyManager.clearDeviceKey(session.userId, it) }
         })
+    /** R45 clears synchronization bookkeeping, never local data, login or key trust. */
+    private fun clearContentSyncState(session: PhoneAccountSession) {
+        checkApprovalOwner(session)
+        settings.clearLibraryState(preserveDeviceSequence = true)
+        recordStore.clear(client.scopeId(session))
+        cache.clear(client.scopeId(session))
+        uploader.clearScope(client.scopeId(session))
+        synchronized(readingManifests) { readingManifests.clear() }
+    }
     internal fun discardSessionCloudState(session: PhoneAccountSession) = clearCloudScope(session)
     private fun bindScope(session: PhoneAccountSession) {
         checkApprovalOwner(session); settings.bindScope(client.backendBaseUrl, session.userId)
+        settings.contentGeneration?.let { client.useContentGeneration(session, it) }
     }
     private fun clearCloudScope(session: PhoneAccountSession) {
         settings.bindScope(client.backendBaseUrl, session.userId)
@@ -512,6 +535,10 @@ class PhoneCloudSyncService(
         backupService.applyRssInteractions(recordStore.rssStates(client.scopeId(session))) { checkCloudEpoch(session, expectedEpoch) }
         decoded.manifest.objects.filter { it.name.startsWith("reader/") && it.privateArticle != null }.forEach { descriptor ->
             restoreReaderObject(session,expectedEpoch,snapshotId,descriptor,decoded.objects.getValue(descriptor.name))?.let { _restoreWarnings.value += it }
+        }
+        decoded.manifest.objects.filter{it.privateBook!=null}.forEach{descriptor->
+            require(descriptor.name==requireNotNull(descriptor.privateBook).getString("packagePath"))
+            backupService.restorePrivateBook(requireNotNull(descriptor.privateBook),decoded.objects.getValue(descriptor.name)){checkCloudEpoch(session,expectedEpoch)}
         }
         backupService.applyRssInteractions(recordStore.rssStates(client.scopeId(session))) { checkCloudEpoch(session, expectedEpoch) }
         val relayChanged = decoded.objects[RELAY_LIBRARY_OBJECT]
@@ -863,6 +890,47 @@ class PhoneCloudSyncService(
     suspend fun syncNow(manual: Boolean = false): PhoneCloudSyncResult = withContext(Dispatchers.IO) {
         traceSync("sync-request")
         syncMutex.run(manual, { PhoneCloudSyncResult(0, 0, 0, false, 0) }) {
+            var retryingTransfer = false
+            try {
+                retryDiscardedCloudTransfer(rebuild = { failure ->
+                    val session = requireSession()
+                    if (failure.status == 409) clearContentSyncState(session)
+                    // A current-generation expired plan keeps authenticated immutable bytes for
+                    // reuse only. The new reserve's missingObjects are the sole upload authority.
+                    retryingTransfer = true
+                    traceSync("transfer-rebuild:server-discarded")
+                    update(CloudSyncPhase.CHECKING,"云端内容已清理，正在从本机重建同步")
+                    client.bootstrap(session)
+                }, attempt = {
+                    if (paused.value || !networkGate.isConnected()) syncOnePass(manual, retryingTransfer)
+                    else {
+                        val session = requireSession()
+                        client.bootstrap(session)
+                        client.inContentGeneration(session) { syncOnePass(manual, retryingTransfer) }
+                    }
+                })
+            } catch (error: Exception) {
+                if (error is CancellationException) {
+                    update(if (paused.value) CloudSyncPhase.PAUSED else CloudSyncPhase.IDLE, "等待继续同步")
+                    throw error
+                }
+                val transientRebuildFailure = retryingTransfer && error is java.io.IOException &&
+                    (error !is CloudHttpException || error.status in setOf(408,429,500,502,503,504))
+                if (transientRebuildFailure || error is CloudHttpException && (discardedCloudTransfer(error) || cloudErrorCode(error) == "cloud_storage_cleanup_pending")) {
+                    update(CloudSyncPhase.IDLE, "云端内容正在重建，已排队重试；本机资料已保留")
+                    PhoneCloudSyncWorker.scheduleFollowUp(appContext)
+                } else if (error is CloudDeviceAuthorizationException && _state.value.phase != CloudSyncPhase.NEEDS_RECOVERY) {
+                    invalidateEpoch(requireSession())
+                    update(CloudSyncPhase.NEEDS_RECOVERY, "设备身份需要重新验证")
+                } else if (_state.value.phase !in setOf(CloudSyncPhase.NEEDS_RECOVERY,CloudSyncPhase.ERROR)) {
+                    update(CloudSyncPhase.ERROR, error.message ?: "云同步失败")
+                }
+                throw error
+            }
+        }
+    }
+
+    private suspend fun syncOnePass(manual: Boolean, retryingTransfer: Boolean = false): PhoneCloudSyncResult = run {
             traceSync("sync-lock")
             _restoreWarnings.value=emptyList(); _rssRefreshWarnings.value=emptyList()
             var uploadedBytes = 0L
@@ -878,7 +946,6 @@ class PhoneCloudSyncService(
             }
             pausedResult()?.let { return@run it }
             try {
-                val localSequenceAtStart = repository.getLibrarySyncCursor(null).localMaxSeq
                 update(CloudSyncPhase.CHECKING, "正在检查云端")
                 require(networkGate.isConnected()) { "当前没有可用网络" }
                 val session = requireSession()
@@ -922,7 +989,9 @@ class PhoneCloudSyncService(
                 settings.ensureFullBodyRestoreVersion(session.userId)
                 settings.requireUploadOwner(session.userId)
                 settings.ensureRssChannelOnlyVersion { recordStore.clear(client.scopeId(session)) }
+                traceSync("records-pull:start")
                 readRecordsForRestore(session, bootstrap.libraryEpoch)
+                traceSync("records-pull:done")
                 val mergeProgress = CloudSnapshotMergeProgress()
                 val heads = client.snapshotHeads(session)
                 for (head in heads.sortedBy(CloudSnapshotHead::deviceSequence)) {
@@ -968,7 +1037,9 @@ class PhoneCloudSyncService(
                         uploadedBytes,
                         downloadedBytes
                     )
+                    traceSync("rss-refresh:start")
                     refreshRssInventory(session)
+                    traceSync("rss-refresh:done")
                 }
 
                 pausedResult()?.let { return@run it }
@@ -995,11 +1066,21 @@ class PhoneCloudSyncService(
                             restoreArticleBody(session, article, bodyHeads)
                         }?.let { _restoreWarnings.value += it }
                     }
+                    val missingBooks=repository.books?.missingBookIds().orEmpty()
+                    _restoreWarnings.value=_restoreWarnings.value.filterNot{it.reason=="missing_book_body"}+
+                        missingBooks.map{CloudRestoreWarning(it,"missing_book_body")}
                     pendingStates=maxOf(pendingStates,_restoreWarnings.value.count { !it.permanent })
                 }
                 pausedResult()?.let { return@run it }
+                traceSync("books-register:start")
+                repository.books?.ensureRegistered()
+                traceSync("books-register:done")
+                // Compare against the publication window, after this pass's own restore/RSS work.
+                val localSequenceAtPublish = repository.getLibrarySyncCursor(null).localMaxSeq
+                traceSync("records-push:start")
                 try { recordSync.sync(session, true, bootstrap.libraryEpoch, requireAvailable = true); _recordError.value = null }
                 catch (e: Exception) { _recordError.value = "记录尚未同步，请稍后重试"; throw e }
+                traceSync("records-push:done")
                 run {
                     settings.requireUploadOwner(session.userId)
                     val currentKeyVersion = keyManager.currentKeyVersion(session.userId)
@@ -1016,13 +1097,18 @@ class PhoneCloudSyncService(
                         mergedHeads = mergeProgress.appliedHeads(freshHeads) { settings.appliedSequence(it, fullTransfer) },
                         fullTransfer = fullTransfer,
                         keyVersion = currentKeyVersion,
-                        manual = manual
+                        manual = manual || retryingTransfer
                     )
                     uploadedBytes += uploadResult.bytes
                     uploaded = uploadResult.uploaded
                     snapshotDeferredUntil = uploadResult.deferredUntil
-                    if (uploadResult.confirmedArticleIds.isNotEmpty()) recordSync.retireSavedRssIndexes(session,bootstrap.libraryEpoch,uploadResult.confirmedArticleIds)
+                    if (uploadResult.confirmedArticleIds.isNotEmpty() || uploadResult.confirmedBookIds.isNotEmpty()) recordSync.retireSavedRssIndexes(session,bootstrap.libraryEpoch,uploadResult.confirmedArticleIds,uploadResult.confirmedBookIds)
                 }
+                bootstrap = try { client.bootstrap(session) } catch (error: java.io.IOException) {
+                    if (error is CloudHttpException && error.status !in setOf(408,429,500,502,503,504)) throw error
+                    bootstrap
+                }
+                checkCloudEpoch(session,syncEpoch)
                 _rssRefreshWarnings.value=(_rssRefreshWarnings.value + backupService.unresolvedRssStateUrls).distinct()
                 if (pendingStates>0) {
                     update(CloudSyncPhase.IDLE,"已恢复可用资料；${pendingStates} 项正文待重试",bootstrap.member,uploadedBytes,downloadedBytes)
@@ -1037,11 +1123,14 @@ class PhoneCloudSyncService(
                 } else if (snapshotDeferredUntil > 0) {
                     update(CloudSyncPhase.IDLE, "阅读状态已同步；私有快照等待合并窗口", bootstrap.member, uploadedBytes, downloadedBytes)
                     _state.update { it.copy(pendingSnapshotUntil=snapshotDeferredUntil) }
-                } else if (pendingStates > 0 || localSequenceAtStart != repository.getLibrarySyncCursor(null).localMaxSeq) {
-                    update(CloudSyncPhase.DOWNLOADING, "仍有本机改动待合并，将继续同步", bootstrap.member, uploadedBytes, downloadedBytes)
+                } else if (localSequenceAtPublish != repository.getLibrarySyncCursor(null).localMaxSeq) {
+                    val completion = cloudPassCompletion(true)
+                    update(completion.first, completion.second, bootstrap.member, uploadedBytes, downloadedBytes)
+                    PhoneCloudSyncWorker.scheduleFollowUp(appContext)
+                    traceSync("follow-up:scheduled")
                 } else {
                     update(
-                        CloudSyncPhase.COMPLETE,
+                        cloudPassCompletion(false).first,
                         if (_restoreWarnings.value.any { it.permanent }) "云同步完成；${_restoreWarnings.value.count { it.permanent }} 项损坏资料已跳过" else if (_rssRefreshWarnings.value.isEmpty()) "云同步完成" else "资料已同步；${_rssRefreshWarnings.value.size} 个频道暂未入池或刷新失败",
                         bootstrap.member,
                         uploadedBytes,
@@ -1066,6 +1155,7 @@ class PhoneCloudSyncService(
             } catch (error: Throwable) {
                 traceSync("failure:${error.javaClass.simpleName}:status=${(error as? CloudHttpException)?.status ?: (error as? CloudObjectUploadException)?.status}:${error.stackTrace.firstOrNull { it.className.startsWith("com.lightningstudio.watchrss.phone") }}")
                 if (com.lightningstudio.watchrss.phone.BuildConfig.DEBUG) android.util.Log.w("WatchRssCloud", "sync failed phase=${_state.value.phase} type=${error.javaClass.simpleName} at=${error.stackTrace.firstOrNull { it.className.startsWith("com.lightningstudio.watchrss.phone") }}" + if (error is CloudHttpException) " status=${error.status}" else "")
+                if (error is CloudHttpException && discardedCloudTransfer(error)) throw error
                 if (error is CloudDeviceAuthorizationException) {
                     invalidateEpoch(requireSession())
                     update(CloudSyncPhase.NEEDS_RECOVERY, "设备身份需要重新验证")
@@ -1076,8 +1166,6 @@ class PhoneCloudSyncService(
                 }
                 throw error
             }
-        }
-
     }
 
     private suspend fun readRecordsForRestore(session: PhoneAccountSession, epoch: String) {
@@ -1143,7 +1231,7 @@ class PhoneCloudSyncService(
         )
         val selectedObjects = manifest.objects.filter { descriptor ->
             descriptor.name == RSS_STATE_OBJECT || descriptor.name == NOTES_STATE_OBJECT || descriptor.name == NOTES_ARCHIVE_OBJECT ||
-                (fullTransfer && (descriptor.name in setOf(PRIVATE_LIBRARY_OBJECT, RELAY_LIBRARY_OBJECT) || (descriptor.name.startsWith("reader/") && descriptor.privateArticle != null)))
+                (fullTransfer && (descriptor.name in setOf(PRIVATE_LIBRARY_OBJECT, RELAY_LIBRARY_OBJECT) || (descriptor.name.startsWith("reader/") && descriptor.privateArticle != null) || descriptor.privateBook!=null))
         }
         val chunkUrls = download.chunks.associateBy(CloudDownloadObject::sha256)
         yieldToReading()
@@ -1159,7 +1247,7 @@ class PhoneCloudSyncService(
             yieldToReading()
             checkCloudEpoch(session, expectedEpoch)
             traceSync("object-start:${descriptor.name}")
-            val isPrivate=descriptor.name==PRIVATE_LIBRARY_OBJECT || descriptor.privateArticle!=null
+            val isPrivate=descriptor.name==PRIVATE_LIBRARY_OBJECT || descriptor.privateArticle!=null || descriptor.privateBook!=null
             if (isPrivate && cloudObjectDiagnosticId(head.id,descriptor.name) in settings.abandonedRestoreIds(head.id)) continue
             try {
             for (chunk in descriptor.chunks.distinctBy { it.ciphertextSha256 }) {
@@ -1174,6 +1262,12 @@ class PhoneCloudSyncService(
                 codec.restoreObjects(accountKey, manifest.copy(objects = listOf(descriptor))) {
                     sha -> cache.loadChunk(client.scopeId(session), sha) ?: throw java.io.IOException("本地加密块暂不可用，请稍后重试")
                 }.getValue(descriptor.name)
+            }
+            if(descriptor.privateBook!=null) {
+                val value=requireNotNull(descriptor.privateBook)
+                require(descriptor.name==value.getString("packagePath"))
+                decodeCloudObject(head.id,descriptor.name) {backupService.restorePrivateBook(value,bytes){checkCloudEpoch(session,expectedEpoch)}}
+                changed=true
             }
             if (descriptor.name.startsWith("reader/") && descriptor.privateArticle != null) {
                 restoreReaderObject(session,expectedEpoch,head.id,descriptor,bytes)?.let(privateWarnings::add)
@@ -1307,11 +1401,14 @@ class PhoneCloudSyncService(
         }
         val priorBodies = bodySource?.objects.orEmpty().filter { it.name == PRIVATE_LIBRARY_OBJECT }
         if (!fullTransfer && priorBodies.isEmpty()) return UploadOutcome(false,0)
+        traceSync("private-archive:start")
         val createdArchive=if (priorBodies.isEmpty() && fullTransfer) backupService.createCloudPrivateArchiveExport() else null
+        traceSync("private-archive:done:bytes=${createdArchive?.file?.length() ?: 0}:carried=${priorBodies.size}")
+        val notes = noteRepository.allNotes()
         val logicalObjects = buildList {
             createdArchive?.let { add(CloudLogicalObject(PRIVATE_LIBRARY_OBJECT,it.file,false)) }
-            add(CloudLogicalObject(NOTES_STATE_OBJECT, NoteCloudStateCodec.encode(noteRepository.allNotes())))
-            add(CloudLogicalObject(NOTES_ARCHIVE_OBJECT, noteTransfer.exportZip()))
+            add(CloudLogicalObject(NOTES_STATE_OBJECT, NoteCloudStateCodec.encode(notes)))
+            if (notes.any { !it.deleted }) add(CloudLogicalObject(NOTES_ARCHIVE_OBJECT, noteTransfer.exportZip()))
         }
         val carried = priorBodies
         val parentHeads = mergedHeads.associate { it.sourceDeviceId to it.id }
@@ -1325,7 +1422,7 @@ class PhoneCloudSyncService(
             val due = if (contentChanged && !manual) lastPublished + CloudContentPolicy.MIN_SNAPSHOT_INTERVAL_MS else 0L
             createdArchive?.file?.delete()
             if (due > 0) PhoneCloudSyncWorker.scheduleSnapshot(appContext,due-System.currentTimeMillis())
-            return UploadOutcome(false,0,confirmedArticleIds=if (fullTransfer) CloudSnapshotReuse.completedArticleIds(currentManifests,session.userId,bootstrap.libraryEpoch,keyVersion,privateFingerprint) else emptySet(),deferredUntil=due)
+            return UploadOutcome(false,0,confirmedArticleIds=if (fullTransfer) CloudSnapshotReuse.completedArticleIds(currentManifests,session.userId,bootstrap.libraryEpoch,keyVersion,privateFingerprint) else emptySet(),deferredUntil=due,confirmedBookIds=if(fullTransfer) CloudSnapshotReuse.completedBookIds(currentManifests,session.userId,bootstrap.libraryEpoch,keyVersion,privateFingerprint) else emptySet())
         }
         val serverSequence = bootstrap.devices
             .firstOrNull { it.deviceId == deviceId }
@@ -1335,7 +1432,10 @@ class PhoneCloudSyncService(
         val bodyIds=createdArchive?.articleIds ?: bodySource?.settings?.optJSONArray("privateBodyArticleIds")?.let { ids ->
             (0 until ids.length()).map { ids.getString(it) }.toSet()
         }.orEmpty()
-        val snapshotSettings = org.json.JSONObject().put("snapshotContentLayout",3).put("libraryEpoch",bootstrap.libraryEpoch)
+        val bookIds=createdArchive?.bookIds ?: bodySource?.settings?.optJSONArray("privateBodyBookIds")?.let { ids ->
+            (0 until ids.length()).map {ids.getString(it)}.toSet()
+        }.orEmpty()
+        val snapshotSettings = org.json.JSONObject().put("privateBodyBookIds",JSONArray(bookIds.sorted())).put("snapshotContentLayout",3).put("libraryEpoch",bootstrap.libraryEpoch)
             .put("ownerUserId",session.userId).put("snapshotContentHashV3",contentHash).put("privateBodyArticleIds",JSONArray(bodyIds.sorted()))
         if (privateFingerprint != null && (!fullTransfer || privateFingerprint == backupService.privateCloudFingerprint())) {
             snapshotSettings.put("privateBodyFingerprintV2",privateFingerprint)
@@ -1434,7 +1534,8 @@ class PhoneCloudSyncService(
         checkCloudEpoch(session, bootstrap.libraryEpoch)
         settings.markUploaded(contentHash,parentHeads,full = false)
         settings.lastSnapshotPublishedAt = System.currentTimeMillis()
-        return UploadOutcome(true, uploadedBytes, confirmedArticleIds=if (fullTransfer && privateFingerprint == backupService.privateCloudFingerprint()) bodyIds else emptySet())
+        return UploadOutcome(true, uploadedBytes, confirmedArticleIds=if (fullTransfer && privateFingerprint == backupService.privateCloudFingerprint()) bodyIds else emptySet(),
+            confirmedBookIds=if (fullTransfer && privateFingerprint == backupService.privateCloudFingerprint()) bookIds else emptySet())
     }
 
     private fun loadLatestManifest(
@@ -1510,7 +1611,7 @@ class PhoneCloudSyncService(
         val warningsOnly: Boolean
     )
 
-    private data class UploadOutcome(val uploaded: Boolean, val bytes: Long, val confirmedArticleIds: Set<String> = emptySet(), val deferredUntil: Long = 0)
+    private data class UploadOutcome(val uploaded: Boolean, val bytes: Long, val confirmedArticleIds: Set<String> = emptySet(), val deferredUntil: Long = 0, val confirmedBookIds: Set<String> = emptySet())
 
     private data class DecodedSnapshotObjects(
         val download: CloudSnapshotDownload,

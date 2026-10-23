@@ -32,12 +32,26 @@ import com.lightningstudio.watchrss.phone.data.note.NoteFolderEntity
         NoteAssetEntity::class,
         NoteConflictEntity::class,
         AppMetaEntity::class,
-        PhoneLlmTokenUsageEntity::class
+        PhoneLlmTokenUsageEntity::class,
+        PhoneTokenUsageSyncState::class,
+        com.lightningstudio.watchrss.phone.data.book.BookEntity::class,
+        com.lightningstudio.watchrss.phone.data.book.BookChapterEntity::class,
+        com.lightningstudio.watchrss.phone.data.book.BookReadingEntity::class,
+        com.lightningstudio.watchrss.phone.data.book.BookReadingMetaEntity::class,
+        com.lightningstudio.watchrss.phone.data.book.BookReadingVersionEntity::class,
+        com.lightningstudio.watchrss.phone.data.book.BookReadingJournalEntity::class,
+        com.lightningstudio.watchrss.phone.data.book.BookReadingRootEntity::class,
+        com.lightningstudio.watchrss.phone.data.book.BookReadingHashDirtyEntity::class,
+        com.lightningstudio.watchrss.phone.data.book.BookReadingDirtyEntity::class,
+        com.lightningstudio.watchrss.phone.data.book.BookReadingPeerEntity::class,
+        com.lightningstudio.watchrss.phone.data.book.BookCaptureMetaEntity::class
     ],
-    version = 15,
+    version = 18,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
+    abstract fun bookReadingDao():com.lightningstudio.watchrss.phone.data.book.BookReadingDao
+    abstract fun bookDao():com.lightningstudio.watchrss.phone.data.book.BookDao
     abstract fun phoneSavedItemDao(): PhoneSavedItemDao
     abstract fun phoneArticleDao(): PhoneArticleDao
     abstract fun phoneRssSourceDao(): PhoneRssSourceDao
@@ -255,6 +269,29 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
         val MIGRATION_13_14 = object : Migration(13, 14) {
             override fun migrate(database: SupportSQLiteDatabase) {
                 database.createNoteTables()
+            }
+        }
+
+        val MIGRATION_17_18 = object:Migration(17,18) {
+            override fun migrate(database:SupportSQLiteDatabase) {
+                com.lightningstudio.watchrss.phone.data.book.BookReadingSchema.create(database)
+            }
+        }
+
+        val MIGRATION_16_17 = object:Migration(16,17) {
+            override fun migrate(database:SupportSQLiteDatabase) {
+                database.execSQL("CREATE TABLE IF NOT EXISTS imported_books (bookId TEXT NOT NULL PRIMARY KEY,stateJson TEXT NOT NULL,packageSha256 TEXT NOT NULL,packageBytes INTEGER NOT NULL)")
+                database.execSQL("CREATE TABLE IF NOT EXISTS imported_book_chapters (bookId TEXT NOT NULL,chapterIndex INTEGER NOT NULL,articleId TEXT NOT NULL,PRIMARY KEY(bookId,chapterIndex))")
+                database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_imported_book_chapters_articleId ON imported_book_chapters(articleId)")
+                database.execSQL("CREATE TABLE IF NOT EXISTS imported_book_reading (bookId TEXT NOT NULL,chapterIndex INTEGER NOT NULL,stateJson TEXT NOT NULL,PRIMARY KEY(bookId,chapterIndex))")
+            }
+        }
+
+        val MIGRATION_15_16 = object : Migration(15,16) {
+            override fun migrate(database:SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE llm_token_usage ADD COLUMN remoteKey TEXT")
+                database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_llm_token_usage_remoteKey ON llm_token_usage(remoteKey)")
+                database.execSQL("CREATE TABLE IF NOT EXISTS llm_token_usage_sync_state (peerDeviceId TEXT NOT NULL PRIMARY KEY, usageEpoch TEXT NOT NULL, afterId INTEGER NOT NULL)")
             }
         }
 

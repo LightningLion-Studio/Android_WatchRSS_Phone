@@ -25,6 +25,27 @@ class PhoneCloudClient(
 ) {
     val backendBaseUrl: String get() = environment.backendBaseUrl.trimEnd('/')
     private val epochs = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val contentGenerations = java.util.concurrent.ConcurrentHashMap<String, String>()
+    @Volatile private var http1Uploads = false
+    internal var onUploadTransportEvent: (String) -> Unit = {}
+    internal var onContentMetadata: (PhoneAccountSession, CloudContentMetadata) -> Unit = { _, _ -> }
+    internal fun useContentGeneration(session: PhoneAccountSession, generation: String) {
+        require(java.util.UUID.fromString(generation).toString() == generation)
+        contentGenerations[scopeId(session)] = generation
+    }
+    internal fun knownContentGeneration(session: PhoneAccountSession): String? = contentGenerations[scopeId(session)]
+    private suspend fun observeContentMetadata(session: PhoneAccountSession, json: JSONObject, requestGeneration: CloudContentRequestGeneration?) {
+        val metadata = CloudContentMetadata.fromJson(json) ?: return
+        val current = knownContentGeneration(session)
+        // An older foreground/bootstrap response must not roll a generation back after a newer response.
+        if (requestGeneration != null && current != requestGeneration.value && current != metadata.generation) throw cloudContentRebuildRequired()
+        onContentMetadata(session, metadata)
+        useContentGeneration(session, metadata.generation)
+        val fence = kotlinx.coroutines.currentCoroutineContext()[CloudContentGenerationFence]
+        if (fence?.scope == scopeId(session) && fence.generation != metadata.generation) throw cloudContentRebuildRequired()
+    }
+    internal suspend fun <T> inContentGeneration(session: PhoneAccountSession, operation: suspend () -> T): T =
+        kotlinx.coroutines.withContext(CloudContentGenerationFence(scopeId(session), knownContentGeneration(session))) { operation() }
     internal var checkSession: (PhoneAccountSession) -> Unit = {}
     internal var onDeviceKeyConflict: (PhoneAccountSession) -> Unit = {}
     internal var onEpochMismatch: (PhoneAccountSession) -> Unit = {}
@@ -48,8 +69,8 @@ class PhoneCloudClient(
 
     internal suspend fun recordPage(session: PhoneAccountSession, cursor: String): JSONObject? {
         require(cursor.matches(Regex("[0-9]+")))
-        return try { get(session, "/functions/v1/cloud/records?after=$cursor&limit=50" + (currentDeviceId?.let { "&deviceId=${java.net.URLEncoder.encode(it, "UTF-8")}" } ?: "")).use { it.jsonBody() }.also { onRecordMetadata(session, it) } }
-        catch (error: CloudHttpException) { if (error.status == 404) null else throw error }
+        return try { get(session, "/functions/v1/cloud/records?after=$cursor&limit=50" + (currentDeviceId?.let { "&deviceId=${java.net.URLEncoder.encode(it, "UTF-8")}" } ?: "")).use { response -> response.jsonBody().also { onRecordMetadata(session, it); observeContentMetadata(session, it, response.request.tag(CloudContentRequestGeneration::class.java)) } } }
+        catch (error: CloudHttpException) { if (error.status == 404 && !discardedCloudTransfer(error)) null else throw error }
     }
 
     internal suspend fun postRecords(session: PhoneAccountSession, items: JSONArray, expectedEpoch: String? = knownEpoch(session)): JSONObject =
@@ -61,15 +82,18 @@ class PhoneCloudClient(
         }
 
     suspend fun bootstrap(session: PhoneAccountSession): CloudBootstrap {
-        val json = post(session, "/functions/v1/cloud/bootstrap", JSONObject()).use { it.jsonBody() }
+        val (json, requestedGeneration) = post(session, "/functions/v1/cloud/bootstrap", JSONObject()).use { it.jsonBody() to it.request.tag(CloudContentRequestGeneration::class.java) }
         val result = CloudBootstrap(
             member = json.getJSONObject("member").memberState(),
             devices = json.getJSONArray("devices").objects { it.device() }.filterNot { it.deviceId.startsWith("reader-migration-") },
             keyEnvelopes = json.getJSONArray("keyEnvelopes").objects { it.keyEnvelope() },
             libraryEpoch = json.optString("libraryEpoch"), keyVersionFloor = json.optInt("keyVersionFloor"),
             keyCommitments = parseCommitments(json),
-            legacyKeyVersions = json.optJSONArray("legacyKeyVersions")?.let { versions -> (0 until versions.length()).map { versions.getInt(it) } } ?: emptyList())
+            legacyKeyVersions = json.optJSONArray("legacyKeyVersions")?.let { versions -> (0 until versions.length()).map { versions.getInt(it) } } ?: emptyList(),
+            contentGeneration = json.nullableString("contentGeneration"), contentClearedAt = json.nullableString("contentClearedAt"),
+            contentEmpty = json.optBoolean("contentEmpty"))
         onBootstrap(session, result)
+        observeContentMetadata(session, json, requestedGeneration)
         return result
     }
 
@@ -164,6 +188,7 @@ class PhoneCloudClient(
             "/functions/v1/cloud/snapshots/reserve",
             JSONObject().apply {
                 put("snapshotId", snapshot.manifest.snapshotId)
+                put("contentLayout", 3)
                 put("sourceDeviceId", snapshot.manifest.sourceDeviceId)
                 put("deviceSequence", snapshot.manifest.deviceSequence)
                 put("keyVersion", snapshot.manifest.keyVersion)
@@ -219,7 +244,15 @@ class PhoneCloudClient(
         require(java.util.UUID.fromString(id).toString() == id)
         val url = backendBaseUrl + "/functions/v1/cloud/uploads/$id"
         require(target.signedUrl == url) { "云上传地址不匹配" }
-        request(session, Request.Builder().url(url).put(bytes.toRequestBody("application/octet-stream".toMediaType())), expectedEpoch).close()
+        val attempt = CloudUploadAttempt(id, onUploadTransportEvent)
+        try {
+            request(session, Request.Builder().url(url).put(bytes.toRequestBody("application/octet-stream".toMediaType())), expectedEpoch, attempt).close()
+        } catch (error: IOException) {
+            // Keep the existing service retry budget. Only its next PUT changes transport;
+            // control requests, immutable bytes and both content fences remain unchanged.
+            if (attempt.shouldUseHttp1(error)) http1Uploads = true
+            throw error
+        }
     }
 
     suspend fun completeSnapshot(
@@ -246,7 +279,7 @@ class PhoneCloudClient(
 
     suspend fun snapshotHeads(session: PhoneAccountSession): List<CloudSnapshotHead> =
         get(session, "/functions/v1/cloud/snapshots/heads").use { response ->
-            response.jsonBody().getJSONArray("heads").objects { it.snapshotHead() }
+            response.jsonBody().also { observeContentMetadata(session, it, response.request.tag(CloudContentRequestGeneration::class.java)) }.getJSONArray("heads").objects { it.snapshotHead() }
         }
 
     suspend fun snapshotHistory(session: PhoneAccountSession): List<CloudSnapshotHead> {
@@ -255,6 +288,7 @@ class PhoneCloudClient(
         do {
             val next = get(session, "/functions/v1/cloud/snapshots/heads?history=true&limit=100&offset=$offset").use { response ->
                 val json = response.jsonBody()
+                observeContentMetadata(session, json, response.request.tag(CloudContentRequestGeneration::class.java))
                 check(json.has("nextOffset")) { "历史快照功能需要更新云服务" }
                 result += json.getJSONArray("heads").objects { it.snapshotHead() }
                 if (json.isNull("nextOffset")) null else json.getLong("nextOffset")
@@ -447,12 +481,17 @@ class PhoneCloudClient(
     private suspend fun request(
         session: PhoneAccountSession,
         builder: Request.Builder,
-        expectedEpoch: String? = null
+        expectedEpoch: String? = null,
+        uploadAttempt: CloudUploadAttempt? = null
     ): okhttp3.Response = withContext(Dispatchers.IO) {
         checkSession(session)
         require(environment.backendBaseUrl.isNotBlank()) { "云服务地址未配置" }
         require(!session.isExpired) { "登录已过期，请重新登录" }
+        // Capture once, including an authentication refresh. Never retag stale work with a new generation.
+        val fence = kotlinx.coroutines.currentCoroutineContext()[CloudContentGenerationFence]
+        val expectedGeneration = if (fence?.scope == scopeId(session)) fence.generation else knownContentGeneration(session)
         fun buildRequest() = builder
+            .tag(CloudContentRequestGeneration::class.java, CloudContentRequestGeneration(expectedGeneration))
             .also { checkSession(session) }
             .withWatchRssAppVersionHeader()
             .header("authorization", "Bearer ${session.accessToken}")
@@ -468,6 +507,13 @@ class PhoneCloudClient(
                     header("x-watchrss-library-epoch", requireNotNull(expectedEpoch) { "请先读取云资料库纪元" })
                 }
             }
+            .apply {
+                val request = build()
+                if (isCloudContentWrite(request.method, request.url.encodedPath)) {
+                    header("x-watchrss-content-generation", expectedGeneration
+                        ?: throw CloudHttpException(426, "{\"error\":\"client_upgrade_required\"}"))
+                }
+            }
             .apply { currentDeviceId?.let { header("x-watchrss-cloud-device-id", it) } }
             .header("apikey", environment.supabaseAnonKey)
             .header("accept", "application/json")
@@ -475,6 +521,13 @@ class PhoneCloudClient(
         val firstRequest = buildRequest()
         // Reserve/complete may verify hundreds of stored immutable blocks.
         val requestHttp = http.newBuilder().followRedirects(false).followSslRedirects(false).apply {
+            if (uploadAttempt != null) {
+                // OkHttp otherwise replays a 408 before our refresh/integrity-aware
+                // retry loop can observe it, doubling slow body attempts invisibly.
+                retryOnConnectionFailure(false)
+                eventListener(uploadAttempt)
+                if (http1Uploads) protocols(listOf(okhttp3.Protocol.HTTP_1_1))
+            }
             if (firstRequest.url.encodedPath in setOf("/functions/v1/cloud/snapshots/reserve", "/functions/v1/cloud/snapshots/complete") ||
                 (firstRequest.method == "PUT" && firstRequest.url.encodedPath.startsWith("/functions/v1/cloud/uploads/"))) {
                 readTimeout(180, TimeUnit.SECONDS); writeTimeout(180, TimeUnit.SECONDS)
@@ -569,7 +622,8 @@ class PhoneCloudClient(
         parentHeads = getJSONObject("parentHeads").stringMap(),
         observedHeads = getJSONObject("observedHeads").longMap(),
         completedAt = nullableString("completedAt"),
-        totalSizeBytes = optLong("totalSizeBytes", getLong("manifestSizeBytes"))
+        totalSizeBytes = optLong("totalSizeBytes", getLong("manifestSizeBytes")),
+        contentLayout = if (has("contentLayout") && !isNull("contentLayout")) getInt("contentLayout") else null
     )
 
     private fun JSONObject.nullableString(name: String): String? =

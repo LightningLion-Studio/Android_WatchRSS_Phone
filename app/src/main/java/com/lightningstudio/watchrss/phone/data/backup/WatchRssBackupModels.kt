@@ -68,7 +68,8 @@ internal data class WatchRssBackupSnapshot(
     val readerResources: List<ReaderBackupResource> = emptyList(),
     val appMeta: List<AppMetaEntity> = emptyList(),
     val cloudContentOnly: Boolean = false,
-    val readWarnings: List<CloudRestoreWarning> = emptyList()
+    val readWarnings: List<CloudRestoreWarning> = emptyList(),
+    val bookPackages:List<BookArchiveContent> = emptyList()
 ) {
     fun preview(): BackupPreview = BackupPreview(
         exportedAt = exportedAt,
@@ -101,3 +102,5 @@ const val WATCHRSS_BACKUP_MIME_TYPE = "application/vnd.watchrss.backup"
 const val WATCHRSS_BACKUP_EXTENSION = ".wrss"
 const val WATCHRSS_HUMAN_READABLE_EXTENSION = ".json"
 const val GITHUB_RELEASES_URL = "https://github.com/LightningLion-Studio/Android_WatchRSS_Phone/releases"
+
+internal data class BookArchiveContent(val metadata:org.json.JSONObject,val file:java.io.File)

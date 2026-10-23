@@ -36,10 +36,13 @@ fun CloudSyncStatusCard(
     canPause: Boolean,
     actionLabel: String?,
     onAction: () -> Unit,
-    onTogglePause: () -> Unit
+    onTogglePause: () -> Unit,
+    onOpen: (() -> Unit)? = null
 ) {
     val mutedColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f)
     ElevatedCard(
+        onClick = { onOpen?.invoke() },
+        enabled = onOpen != null,
         modifier = Modifier
             .fillMaxWidth()
             .testTag("dashboard_cloud_sync_banner"),
@@ -48,7 +51,7 @@ fun CloudSyncStatusCard(
         )
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(start = 20.dp, top = 14.dp, end = 20.dp, bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Row(

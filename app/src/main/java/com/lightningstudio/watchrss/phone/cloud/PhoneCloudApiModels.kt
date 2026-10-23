@@ -43,7 +43,10 @@ data class CloudBootstrap(
     val libraryEpoch: String = "",
     val keyVersionFloor: Int = 0,
     val keyCommitments: List<CloudKeyCommitment> = emptyList(),
-    val legacyKeyVersions: List<Int> = emptyList()
+    val legacyKeyVersions: List<Int> = emptyList(),
+    val contentGeneration: String? = null,
+    val contentClearedAt: String? = null,
+    val contentEmpty: Boolean = false
 )
 
 data class CloudSnapshotHead(
@@ -56,7 +59,8 @@ data class CloudSnapshotHead(
     val parentHeads: Map<String, String>,
     val observedHeads: Map<String, Long>,
     val completedAt: String? = null,
-    val totalSizeBytes: Long = manifestSizeBytes
+    val totalSizeBytes: Long = manifestSizeBytes,
+    val contentLayout: Int? = null
 )
 
 data class CloudUploadObject(

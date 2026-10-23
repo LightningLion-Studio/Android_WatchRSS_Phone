@@ -38,7 +38,7 @@ class PhoneCloudRecordV2Test {
         val buffer=okio.Buffer();chain.request().body?.writeTo(buffer)
         val (status,body)=handle(chain.request(),if(buffer.size==0L)JSONObject() else JSONObject(buffer.readUtf8()))
         Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(status).message("test").body(body.toString().toResponseBody("application/json".toMediaType())).build()
-    }.build()).also { it.useEpoch(session, "epoch") }
+    }.build()).also { it.useEpoch(session, "epoch");it.useContentGeneration(session,"22222222-2222-4222-8222-222222222222") }
     private fun customRecord(kind: String, value: JSONObject, rev: Int): JSONObject {
         val id = PhoneCloudRecordCodec.id(k1,session.userId,"article",value)
         val derived = CloudSnapshotCodec.hkdfSha256(k1,session.userId.toByteArray(),"watchrss/cloud/record/v1".toByteArray(),32)

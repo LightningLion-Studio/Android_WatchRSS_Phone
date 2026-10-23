@@ -47,6 +47,18 @@ import org.junit.Test
 import java.security.MessageDigest
 
 class PhoneCompanionRepositoryTest {
+    @Test
+    fun liveLegacyCancellationWithResidualDeleteClockDoesNotAdvertiseArticleDeletion() = runBlocking {
+        val dao = FakePhoneArticleDao().apply { items = listOf(article("cancelled", favoriteChangedAt = 200, deleted = false, deletedAt = 100)) }
+        val repository = PhoneCompanionRepository(FakePhoneSavedItemDao(), dao, FakePhoneRssSourceDao(), "test-phone")
+        repeat(3) {
+            val manifest = repository.getArticleManifestsForSync().single()
+            assertFalse(manifest.deleted)
+            assertEquals(200L, manifest.favoriteChangedAt)
+            assertTrue(repository.findDeleteConflicts(listOf(manifest)).isEmpty())
+        }
+    }
+
     @Test fun explicitMarkUnreadAdvancesReadingClockAndSurvivesOlderReadState() = runBlocking {
         val dao = FakePhoneArticleDao().apply { items = listOf(article("read").copy(isRead = true, readingPositionChangedAt = 10)) }
         val repository = PhoneCompanionRepository(savedItemDao = FakePhoneSavedItemDao(), articleDao = dao, rssSourceDao = FakePhoneRssSourceDao(), deviceId = "phone")
@@ -2509,6 +2521,15 @@ class PhoneCompanionRepositoryTest {
     }
 
     private class FakePhoneArticleDao : PhoneArticleDao {
+        override suspend fun bookMetadata(ids:List<String>)=items.filter{it.articleId in ids}.map{it.copy(contentText="",contentHtml=null)}
+        override suspend fun unregisteredBookMetadata()=items.filter{ImportedContentIds.isImportedContentUrl(it.url)}
+        override suspend fun projectBookReading(id:String,source:String,read:Boolean,progress:Float,bytes:Long,hash:String,clock:Long,
+            favorite:Boolean,favoriteClock:Long,favoriteOrder:Long,later:Boolean,laterClock:Long,laterOrder:Long) {
+            items=items.map{if(it.articleId!=id)it else it.copy(sourceDeviceId=source,isRead=read,readingProgress=progress,
+                readingPositionBytes=bytes,readingPositionContentHash=hash,readingPositionChangedAt=clock,
+                favoriteSaved=favorite,favoriteChangedAt=favoriteClock,favoriteSortOrder=favoriteOrder,
+                watchLaterSaved=later,watchLaterChangedAt=laterClock,watchLaterSortOrder=laterOrder,syncMetadataHash="")}
+        }
         var items: List<PhoneArticleEntity> = emptyList()
         override suspend fun privateCloudBodyPage(after: String, limit: Int) = items.filter { it.articleId>after && (ImportedContentIds.isImportedContentUrl(it.url) || ImportedContentIds.isImportedContentUrl(it.rssSourceUrl) || it.rssSourceUrl.isNullOrBlank()) }.sortedBy { it.articleId }.take(limit)
         override suspend fun longCloudExcerpts() = items.filter { it.excerpt.codePointCount(0,it.excerpt.length)>280 }

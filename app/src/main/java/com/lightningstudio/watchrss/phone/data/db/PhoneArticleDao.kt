@@ -15,6 +15,14 @@ interface PhoneArticleDao {
         if (retiredIds.isNotEmpty()) deleteByIds(retiredIds)
     }
 
+    @Query("""UPDATE phone_articles SET sourceDeviceId=:source,isRead=:read,readingProgress=:progress,
+        readingPositionBytes=:bytes,readingPositionContentHash=:hash,readingPositionChangedAt=:clock,
+        favoriteSaved=:favorite,favoriteChangedAt=:favoriteClock,favoriteSortOrder=:favoriteOrder,
+        watchLaterSaved=:later,watchLaterChangedAt=:laterClock,watchLaterSortOrder=:laterOrder,syncMetadataHash=''
+        WHERE articleId=:id""")
+    suspend fun projectBookReading(id:String,source:String,read:Boolean,progress:Float,bytes:Long,hash:String,clock:Long,
+        favorite:Boolean,favoriteClock:Long,favoriteOrder:Long,later:Boolean,laterClock:Long,laterOrder:Long)
+
     @Query("""SELECT * FROM phone_articles WHERE articleId>:after AND deleted=0 AND
         (url LIKE 'https://watchrss.local/import-%' OR rssSourceUrl LIKE 'https://watchrss.local/import-%'
          OR (rssSourceUrl IS NULL OR rssSourceUrl='') OR favoriteSaved=1 OR watchLaterSaved=1)
@@ -248,6 +256,34 @@ interface PhoneArticleDao {
 
     @Query("SELECT articleId FROM phone_articles")
     suspend fun getAllIds(): List<String>
+
+    @Query("""SELECT articleId, sourceDeviceId, url, title, siteName, excerpt,
+               NULL AS contentHtml,
+               '' AS contentText,
+               imageUrl, contentHash, importedAt, updatedAt, independentSaved,
+               independentChangedAt, independentSortOrder, rssSourceUrl, rssSourceTitle,
+               favoriteSaved, favoriteChangedAt, favoriteSortOrder,
+               watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
+               deleted, deletedAt, syncBodyHash, syncBodyByteCount,
+               syncChunkSize, syncChunkHashesJson, syncMetadataHash, readingProgress, isRead,
+               readingPositionBytes, readingPositionContentHash, readingPositionChangedAt
+        FROM phone_articles WHERE articleId IN (:ids)""")
+    suspend fun bookMetadata(ids:List<String>):List<PhoneArticleEntity>
+
+    @Query("""SELECT articleId, sourceDeviceId, url, title, siteName, excerpt,
+               NULL AS contentHtml,
+               '' AS contentText,
+               imageUrl, contentHash, importedAt, updatedAt, independentSaved,
+               independentChangedAt, independentSortOrder, rssSourceUrl, rssSourceTitle,
+               favoriteSaved, favoriteChangedAt, favoriteSortOrder,
+               watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder,
+               deleted, deletedAt, syncBodyHash, syncBodyByteCount,
+               syncChunkSize, syncChunkHashesJson, syncMetadataHash, readingProgress, isRead,
+               readingPositionBytes, readingPositionContentHash, readingPositionChangedAt
+        FROM phone_articles WHERE lower(trim(url)) LIKE 'https://watchrss.local/import-%'
+        AND NOT EXISTS(SELECT 1 FROM imported_book_chapters c WHERE c.articleId=phone_articles.articleId)
+        ORDER BY articleId""")
+    suspend fun unregisteredBookMetadata():List<PhoneArticleEntity>
 
     @Query(
         """

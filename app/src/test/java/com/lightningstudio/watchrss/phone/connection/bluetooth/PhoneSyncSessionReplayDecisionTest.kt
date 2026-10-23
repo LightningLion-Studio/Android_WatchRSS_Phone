@@ -19,6 +19,11 @@ class PhoneSyncSessionReplayDecisionTest {
     }
 
     @Test
+    fun bookWindowsAreNeverTransparentlyReplayedOnANewConnection() {
+        assertFalse(isSessionOperationSafeForTransparentReplay("syncBooks"))
+    }
+
+    @Test
     fun ordinarySessionAction_remainsSafeForTransparentReplay() {
         assertTrue(
             isSessionOperationSafeForTransparentReplay(

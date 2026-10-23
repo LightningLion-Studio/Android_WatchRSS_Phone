@@ -27,7 +27,7 @@ internal object CloudContentPolicy {
             }
     }
     fun privateBody(row: PhoneArticleEntity): Boolean = !row.deleted && (!publicRss(JSONObject().put("url", row.url).put("rssSourceUrl", row.rssSourceUrl)) || row.favoriteSaved || row.watchLaterSaved)
-    fun privateAppMeta(key: String) = key != "first_use_at" && !key.startsWith("public_rss_source:") && !key.startsWith("rss_identity_alias:")
+    fun privateAppMeta(key: String) = key != "first_use_at" && !key.startsWith("public_rss_source:") && !key.startsWith("rss_identity_alias:") && !key.startsWith("ble_") && !key.startsWith("book_identity_alias:")
     fun shouldPublish(changed: Boolean, manual: Boolean, lastPublished: Long, now: Long): Boolean =
         changed && (manual || lastPublished == 0L || now - lastPublished >= MIN_SNAPSHOT_INTERVAL_MS)
 }

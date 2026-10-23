@@ -1503,9 +1503,9 @@ class MainViewModel(
     private fun updateLibrarySyncProgress(progress: PhoneBluetoothSyncProgress) {
         val percent = progress.percent.coerceIn(0, 100)
         val uiProgress = MainSyncProgressUi(
-            phase = progress.stage.displayName,
+            phase = if (progress.reconnectAttempt > 0) "连接中断，正在重连（第 ${progress.reconnectAttempt} 次）" else progress.stage.displayName,
             percent = percent,
-            indeterminate = progress.stage == PhoneBluetoothSyncStage.VERIFYING,
+            indeterminate = progress.stage == PhoneBluetoothSyncStage.VERIFYING || progress.stage == PhoneBluetoothSyncStage.RECONNECTING,
             bytesTransferred = progress.bytesTransferred,
             bytesPerSecond = progress.bytesPerSecond
         )

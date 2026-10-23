@@ -14,8 +14,8 @@ internal object PhoneCloudRecordCodec {
     private fun key(accountKey: ByteArray, user: String, domain: String) =
         CloudSnapshotCodec.hkdfSha256(accountKey, user.toByteArray(Charsets.UTF_8), domain.toByteArray(Charsets.UTF_8), 32)
     fun id(accountKey: ByteArray, user: String, kind: String, value: JSONObject): String {
-        require(kind in setOf("article", "source", "rss-state"))
-        val identity = if (kind == "rss-state") value.getString("sourceId") + ":" + value.getString("articleIdHash") else value.getString(if (kind == "article") "articleId" else "url")
+        require(kind in setOf("article", "source", "rss-state", "book", "book-reading"))
+        val identity = if(kind=="book")value.getString("bookId") else if(kind=="book-reading")value.getString("bookId")+":"+value.getInt("chapterIndex") else if (kind == "rss-state") value.getString("sourceId") + ":" + value.getString("articleIdHash") else value.getString(if (kind == "article") "articleId" else "url")
         require(identity.isNotBlank())
         val derived = key(accountKey, user, "watchrss/cloud/record-id/v1")
         return try { Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(derived, "HmacSHA256")) }
@@ -61,8 +61,10 @@ internal object PhoneCloudRecordCodec {
     }
     fun validate(kind: String, value: JSONObject) {
         require(kind.isNotBlank())
-        if (kind !in setOf("article", "source", "rss-state")) return
+        if (kind !in setOf("article", "source", "rss-state", "book", "book-reading")) return
         require(listOf("contentText", "contentHtml", "contentTextGzip", "contentHtmlGzip", "body", "chapters").none(value::has)) { "记录不得包含正文" }
+        if(kind=="book") {com.lightningstudio.watchrss.phone.data.book.BookSync.validate(value);return}
+        if(kind=="book-reading") {com.lightningstudio.watchrss.phone.data.book.BookSync.validateReading(value);return}
         if (kind == "rss-state") {
             require(value.getString("sourceId").isNotBlank())
             require(value.getString("articleIdHash").matches(Regex("[0-9a-f]{64}")))
@@ -110,7 +112,7 @@ internal object PhoneCloudRecordCodec {
             require(root.getString("format") == "watchrss-rss-record" && root.getInt("version") == 1)
             val kind = root.getString("kind"); val value = root.getJSONObject("value")
             validate(kind, value)
-            if (kind in setOf("article", "source", "rss-state")) require(idKeys.any { id(it, user, kind, value) == recordId })
+            if (kind in setOf("article", "source", "rss-state", "book", "book-reading")) require(idKeys.any { id(it, user, kind, value) == recordId })
             return kind to value
         } catch (_: Exception) {
             // JSON errors may quote decrypted data. Never attach the original

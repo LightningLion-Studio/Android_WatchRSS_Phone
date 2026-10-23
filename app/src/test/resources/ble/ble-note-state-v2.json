@@ -1,0 +1,82 @@
+{
+  "protocol": "BLE-SYNC-V2",
+  "algorithm": "sha256-u32be-utf8-lp",
+  "cases": [
+    {
+      "name": "null-folder",
+      "note": {
+        "noteId": "note-中文-😀",
+        "folderId": null,
+        "title": "标题\n含空行",
+        "markdown": "# 内容\n\n![图片](assets/a.png)\n",
+        "baseMarkdown": "# 祖先\n",
+        "pinned": false,
+        "createdAt": 123,
+        "updatedAt": 456,
+        "modifiedBy": "watch-甲",
+        "deleted": false,
+        "deletedAt": 0,
+        "contentHash": "39aa5c7c39cc57f77db8c46e6a7bd8bde6a2152fe567cc27889a93d902c9ccc9",
+        "baseContentHash": "3cb3a94d340010f3fc586cb176b56642b09bff08ed5f4fec2200d9562f6a9b1a"
+      },
+      "stateHash": "66aab961c0bdbe0695f3b0bc04c55a6c219902b5ea960eadee5c0971e287cded"
+    },
+    {
+      "name": "empty-folder",
+      "note": {
+        "noteId": "note-中文-😀",
+        "folderId": "",
+        "title": "标题\n含空行",
+        "markdown": "# 内容\n\n![图片](assets/a.png)\n",
+        "baseMarkdown": "# 祖先\n",
+        "pinned": false,
+        "createdAt": 123,
+        "updatedAt": 456,
+        "modifiedBy": "watch-甲",
+        "deleted": false,
+        "deletedAt": 0,
+        "contentHash": "39aa5c7c39cc57f77db8c46e6a7bd8bde6a2152fe567cc27889a93d902c9ccc9",
+        "baseContentHash": "3cb3a94d340010f3fc586cb176b56642b09bff08ed5f4fec2200d9562f6a9b1a"
+      },
+      "stateHash": "c9c990dadf13b1bce8b5fc4245a9fdb86fa2c3c45c9ba436658a575e91f5dac8"
+    },
+    {
+      "name": "pinned-folder",
+      "note": {
+        "noteId": "note-中文-😀",
+        "folderId": "目录",
+        "title": "标题\n含空行",
+        "markdown": "# 内容\n\n![图片](assets/a.png)\n",
+        "baseMarkdown": "# 祖先\n",
+        "pinned": true,
+        "createdAt": 123,
+        "updatedAt": 456,
+        "modifiedBy": "watch-甲",
+        "deleted": false,
+        "deletedAt": 0,
+        "contentHash": "39aa5c7c39cc57f77db8c46e6a7bd8bde6a2152fe567cc27889a93d902c9ccc9",
+        "baseContentHash": "3cb3a94d340010f3fc586cb176b56642b09bff08ed5f4fec2200d9562f6a9b1a"
+      },
+      "stateHash": "a0ce56aa2b9f6cf1cc0e07c960e0220c892e134daff5d2d915b50b0525f9fd22"
+    },
+    {
+      "name": "tombstone",
+      "note": {
+        "noteId": "note-中文-😀",
+        "folderId": null,
+        "title": "标题\n含空行",
+        "markdown": "# 内容\n\n![图片](assets/a.png)\n",
+        "baseMarkdown": "# 祖先\n",
+        "pinned": false,
+        "createdAt": 123,
+        "updatedAt": 789,
+        "modifiedBy": "watch-甲",
+        "deleted": true,
+        "deletedAt": 789,
+        "contentHash": "39aa5c7c39cc57f77db8c46e6a7bd8bde6a2152fe567cc27889a93d902c9ccc9",
+        "baseContentHash": "3cb3a94d340010f3fc586cb176b56642b09bff08ed5f4fec2200d9562f6a9b1a"
+      },
+      "stateHash": "181a9b38cb56fd1b6fd743f8cabec1926000f56b5c61d443cf6d4bb148616718"
+    }
+  ]
+}

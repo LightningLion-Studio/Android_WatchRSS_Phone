@@ -25,16 +25,19 @@ sealed interface WatchPairingState {
     data class NeedsKey(val existingCloud:Boolean):WatchPairingState
     data class Scanning(val permission:PairingCameraPermission):WatchPairingState
     data object Connecting:WatchPairingState
-    /** Both stages expose the local SAS; only Phone permits credential issuance.
-     * Existing SAS presenters remain source compatible. Lead should render AwaitingWatchConfirm first. */
+    /** SAS is independently available before claim/prepare completes. Phone may confirm now. */
     sealed class Confirming(open val sas:String):WatchPairingState {
         data class Phone(override val sas:String):Confirming(sas)
         companion object { operator fun invoke(sas:String):Confirming = Phone(sas) }
     }
-    data class AwaitingWatchConfirm(override val sas:String):Confirming(sas) {
-        val message:String get() = "核对一致后，先在手表上点‘一致，绑定’"
+    sealed class Configuring(open val step:String):WatchPairingState {
+        data class Progress(override val step:String):Configuring(step)
+        companion object { operator fun invoke(step:String):Configuring = Progress(step) }
     }
-    data class Configuring(val step:String):WatchPairingState
+    data class WaitingForPrepareAfterPhone(val sas:String):Configuring("已确认配对码，正在等待手表响应")
+    data class WaitingWatchConfirmAfterPhone(val sas:String):Configuring("请在手表上点一致，绑定") {
+        val message:String get() = step
+    }
     data class Done(val bound:Boolean,val cloudReady:Boolean,val cloudError:String?=null,val finishError:String?=null,val canRetry:Boolean=false):WatchPairingState
     data class Failed(val message:String,val canRetry:Boolean=true):WatchPairingState
 }
@@ -92,7 +95,14 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
         work=workScope.launch {
             try { check(ticket);block(ticket) }
             catch(error:CancellationException) { if(generation.get()==ticket && !sameOwner()) invalidate("账号或云资料库已变化，请重新开始扫码绑定") }
-            catch(error:Exception) { if(generation.get()==ticket) mutable.value=WatchPairingState.Failed(error.message?:"配对失败，请重试") }
+            catch(error:Exception) {
+                if(generation.get()==ticket) {
+                    val ended=(error is PairingException && error.code in setOf("watch_rejected","pairing_expired")) ||
+                        (error is PairingHttpException && error.status in setOf(404,410))
+                    if(ended)this@WatchPairingViewModel.cancel()
+                    mutable.value=WatchPairingState.Failed(error.message?:"配对失败，请重试",canRetry=!ended)
+                }
+            }
             finally { if(generation.get()==ticket)work=null }
         }
     }
@@ -165,20 +175,18 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
     }
     private suspend fun connectAndPrepare(ticket:Long) {
         val descriptor=requireNotNull(qr);val link=requireNotNull(channel)
+        val localSas=PairingWireCodec.sas(descriptor,requireNotNull(owner).userId)
+        // R43: neither claim nor a delayed prepare receipt blocks the phone's user.
+        mutable.value=if(sasConfirmed) WatchPairingState.WaitingForPrepareAfterPhone(localSas)
+            else WatchPairingState.Confirming(localSas)
         try {
-            // A wall-clock jump, a stalled claim or an unresponsive watch must not leave
-            // Connecting/AwaitingWatchConfirm indefinitely. Coroutine time is monotonic.
             withTimeout(CONNECT_PREPARE_TIMEOUT_MS) {
-                mutable.value=WatchPairingState.Connecting
                 link.connect();check(ticket)
-                val localSas=PairingWireCodec.sas(descriptor,requireNotNull(owner).userId)
                 if(prepared==null) {
-                    // PodJS waits for the watch user's SAS confirmation before replying.
-                    // Publish our independently computed SAS before sending prepare.
-                    mutable.value=WatchPairingState.AwaitingWatchConfirm(localSas)
                     val receipt=link.request(JSONObject().put("action","prepare").put("userId",requireNotNull(owner).userId).put("phoneMasked",requireNotNull(owner).phoneMasked.ifBlank { "当前账号" }))
                     check(ticket)
-                    require(receipt.optBoolean("success") && receipt.optString("deviceId")==descriptor.deviceId && receipt.optString("userId")==requireNotNull(owner).userId) { "手表身份与配对码不一致，请重新扫码" }
+                    require(receipt.optBoolean("success") && receipt.optString("deviceId")==descriptor.deviceId && receipt.optString("userId")==requireNotNull(owner).userId &&
+                        (!receipt.has("installId") || receipt.get("installId")==descriptor.installId)) { "手表身份与配对码不一致，请重新扫码" }
                     val receiptSas=PairingWireCodec.sas(descriptor,receipt.getString("userId"))
                     require(receiptSas==localSas && (!receipt.has("sas") || receipt.get("sas")==localSas)) { "手表配对码不一致，请重新扫码" }
                     val spki=receipt.getString("publicKeySpki")
@@ -186,32 +194,45 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
                     prepared=receipt
                 }
                 check(ticket)
-                mutable.value=WatchPairingState.Confirming(localSas)
             }
         } catch(error:TimeoutCancellationException) {
             check(ticket)
-            throw PairingException("pairing_timeout","等待手表确认超时，请重试；若配对码过期请重新扫描")
+            throw PairingException("pairing_timeout","等待手表响应超时，请重试；若配对码过期请重新扫描")
         }
+        if(!sasConfirmed) mutable.value=WatchPairingState.Confirming(localSas)
+        // If the click arrived while prepare was in flight, this same worker continues;
+        // do not start a second claim/request or lose the click to launchWork's busy guard.
+        if(sasConfirmed) configure(ticket)
     }
     fun confirmSas(matches:Boolean) {
-        val confirmation=state.value as? WatchPairingState.Confirming?:return
+        val current=state.value
+        if(current !is WatchPairingState.Confirming && current !is WatchPairingState.WaitingForPrepareAfterPhone &&
+            current !is WatchPairingState.WaitingWatchConfirmAfterPhone)return
         if(!matches) {cancel();mutable.value=WatchPairingState.Failed("两端配对码不一致，已取消；请重新扫描",false);return}
-        // A presenter may still show its generic SAS controls during the watch stage.
-        // Ignore premature positive clicks; never issue before the authenticated receipt.
-        if(confirmation !is WatchPairingState.Confirming.Phone)return
+        if(current !is WatchPairingState.Confirming || sasConfirmed)return
         sasConfirmed=true
+        if(prepared==null) {
+            mutable.value=WatchPairingState.WaitingForPrepareAfterPhone(current.sas)
+            return
+        }
         launchWork { ticket -> configure(ticket) }
     }
     private suspend fun configure(ticket:Long) {
-        check(ticket);check(sasConfirmed)
+        check(ticket);check(sasConfirmed && prepared!=null)
         val descriptor=requireNotNull(qr);val link=requireNotNull(channel);val pinned=requireNotNull(owner)
         try {
             if(!bound) {
                 mutable.value=WatchPairingState.Configuring("正在签发手表凭据")
                 if(issued==null) {val token=ports.issueCredentials(descriptor,pinned);check(ticket);require(token.accessToken.isNotBlank()&&token.refreshToken.isNotBlank()&&token.accessTokenExpiresAtMillis>now()){ "手表凭据未确认" };issued=token}
                 if(configureMessage==null)configureMessage=configureMessage(pinned,descriptor,requireNotNull(issued))
-                mutable.value=WatchPairingState.Configuring("正在让手表保存账号并自行登记")
-                val receipt=link.request(requireNotNull(configureMessage));check(ticket)
+                mutable.value=WatchPairingState.WaitingWatchConfirmAfterPhone(PairingWireCodec.sas(descriptor,pinned.userId))
+                val receipt=try {
+                    withTimeout(WATCH_BOUND_TIMEOUT_MS) { link.request(requireNotNull(configureMessage)) }
+                } catch(error:TimeoutCancellationException) {
+                    check(ticket)
+                    throw PairingException("pairing_timeout","等待手表绑定确认超时，请重试；若配对码过期请重新扫描")
+                }
+                check(ticket)
                 require(receipt.optBoolean("bound")&&receipt.optString("deviceId")==descriptor.deviceId&&receipt.optString("userId")==pinned.userId) { "手表尚未确认保存账号，请重试" }
                 bound=true;issued=null;configureMessage=null
             }
@@ -244,7 +265,7 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
             is WatchPairingState.NeedsKey -> prepareScan()
             is WatchPairingState.Scanning -> if(current.permission!=PairingCameraPermission.GRANTED)mutable.value=WatchPairingState.Scanning(PairingCameraPermission.REQUEST_REQUIRED)
             is WatchPairingState.Done -> if(current.canRetry)launchWork {configure(it)}
-            is WatchPairingState.Failed -> if(qr!=null && current.canRetry)launchWork { if(sasConfirmed)configure(it)else connectAndPrepare(it) } else startScan(cameraGranted)
+            is WatchPairingState.Failed -> if(qr!=null && current.canRetry)launchWork { if(sasConfirmed && prepared!=null)configure(it)else connectAndPrepare(it) } else startScan(cameraGranted)
             else -> Unit
         }
     }
@@ -265,7 +286,10 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
     fun cancel() {resetPairing();clearWatchQrRequest()}
     private fun invalidate(message:String) {cancel();mutable.value=WatchPairingState.Failed(message,false)}
     override fun onCleared() {cancel();observer.cancel();super.onCleared()}
-    internal companion object { const val CONNECT_PREPARE_TIMEOUT_MS=120_000L }
+    internal companion object {
+        const val CONNECT_PREPARE_TIMEOUT_MS=120_000L
+        const val WATCH_BOUND_TIMEOUT_MS=120_000L
+    }
 }
 
 /** Only watch credentials are transported; phone login/app-access tokens are never included. */

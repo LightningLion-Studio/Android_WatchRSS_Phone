@@ -36,7 +36,11 @@ internal class PhoneIpSyncSession(
         get() = closed.get()
 
     fun acceptBinary(bytes: ByteArray) {
-        if (!closed.get()) incomingWriter.write(bytes)
+        if (!closed.get()) {
+            incomingWriter.write(bytes)
+            // PipedOutputStream.write does not wake a reader waiting on an empty pipe.
+            incomingWriter.flush()
+        }
     }
 
     override fun close() {

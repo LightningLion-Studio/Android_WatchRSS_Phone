@@ -15,7 +15,7 @@ import java.util.UUID
 /** Technical tables, deliberately independent of cloud cursors. Business triggers share the writer's transaction. */
 class BleDomainStore(
     private val database:PhoneCompanionDatabase, private val files:File,
-    private val encoderVersions:Map<String,Int> = DOMAINS.associateWith { if (it == "library") 2 else 1 },
+    private val encoderVersions:Map<String,Int> = DOMAINS.associateWith { if (it == "library") 3 else 1 },
     private val now:()->Long = System::currentTimeMillis,
     private val nativeProtocolVersion:Int = LibrarySyncPayload.PROTOCOL_VERSION
 ) {

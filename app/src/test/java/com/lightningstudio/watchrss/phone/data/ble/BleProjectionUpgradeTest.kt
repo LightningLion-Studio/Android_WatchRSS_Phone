@@ -202,4 +202,19 @@ class BleProjectionUpgradeTest {
         assertNotEquals(old.projectionDefinition,next.projectionDefinition)
     }
 
+    @Test fun phone86CompactProjectionBumpInvalidatesOnlyTechnicalLibraryState()=runBlocking<Unit> {
+        val old=store(2);val r=repo(old);old.initialize();db.phoneArticleDao().upsert(row())
+        val window=r.prepareLibrarySyncWindow("watch",0,true)
+        r.markLibrarySyncSuccess("watch",window.toSeqInclusive,0,14,true,true,window.projectionDefinition)
+        val before=old.roots("account");old.publish("scope","watch",mapOf("library" to (before.getValue("library") to "b".repeat(64))))
+        val business=db.phoneArticleDao().getById("a")!!
+        val next=BleDomainStore(db,directory);assertEquals(3,next.projectionVersions().getValue("library").encoder)
+        val upgraded=repo(next).prepareLibrarySyncWindow("watch",window.toSeqInclusive,true)
+        assertTrue(upgraded.fullSnapshot);assertEquals("projectionChanged",upgraded.fallbackReason)
+        assertTrue(next.receipts("scope","watch").isEmpty());assertEquals(business.contentText,db.phoneArticleDao().getById("a")!!.contentText)
+        assertEquals(business.updatedAt,db.phoneArticleDao().getById("a")!!.updatedAt)
+        assertNotEquals(before["library"],next.roots("account")["library"])
+        assertEquals(before.filterKeys{it!="library"},next.roots("account").filterKeys{it!="library"})
+    }
+
 }

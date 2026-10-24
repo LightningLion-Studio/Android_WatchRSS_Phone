@@ -670,6 +670,7 @@ class PhoneBluetoothSyncManager(
         val sessionId = BluetoothDebugLog.newSessionId("syncLibrary")
         val activeBinding=bindingSnapshot(sessionId,deviceAddress,syncSession,binding)
         val targetAddress = activeBinding.address
+        val compactManifest=LibrarySyncPayload.compactManifestEnabled(activeBinding.capabilities,syncSession?.isPersistent==true)
         reportProgress(onProgress, PhoneBluetoothSyncStage.CONNECTING, 0)
         repository.repairImportedContentSourceStates()
         repository.repairBluetoothRssDuplicates()
@@ -779,7 +780,8 @@ class PhoneBluetoothSyncManager(
                                 localMaxSeq = localCursor.localMaxSeq,
                                 lastRemoteSeqApplied = localCursor.lastRemoteSeqApplied,
                                 lastLocalSeqAckedByPeer = localCursor.lastLocalSeqAckedByPeer
-                            )
+                            ),
+                            compactDefaults = compactManifest
                         ).apply {
                             put("forceFull", forceFull || mode != LibrarySyncMode.MERGE)
                             put("libraryMode", mode.protocolValue)
@@ -973,7 +975,8 @@ class PhoneBluetoothSyncManager(
                             deviceId = deviceId,
                             articleManifest = repository.getArticleManifestsForSync(conflictMergeResolutions.keys.toList()).map(identityProjection::manifest),
                             rssSources = emptyList(),
-                            changeSequence = LibraryChangeSequence(0L, 0L, false, "conflictDecision")
+                            changeSequence = LibraryChangeSequence(0L, 0L, false, "conflictDecision"),
+                            compactDefaults = compactManifest
                         )
                     },
                     buildArticleRequests = { response, batches ->

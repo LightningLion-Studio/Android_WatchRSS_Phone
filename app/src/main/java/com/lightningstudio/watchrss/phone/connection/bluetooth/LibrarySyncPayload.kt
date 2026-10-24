@@ -170,7 +170,8 @@ object LibrarySyncPayload {
         articleManifest: List<ArticleSyncManifestEntry>,
         rssSources: List<PhoneRssSourceEntity> = emptyList(),
         changeSequence: LibraryChangeSequence? = null,
-        cursor: LibrarySyncCursor? = null
+        cursor: LibrarySyncCursor? = null,
+        compactDefaults: Boolean = false
     ): JSONObject {
         return JSONObject().apply {
             put("version", PROTOCOL_VERSION)
@@ -185,7 +186,7 @@ object LibrarySyncPayload {
             put(FIELD_SUPPORTS_TRANSFER_BYTE_PROGRESS, true)
             put("deviceId", deviceId)
             put("sentAt", System.currentTimeMillis())
-            put("articleManifest", articleManifest.toEntryJsonArray())
+            put("articleManifest", articleManifest.toEntryJsonArray(compactDefaults))
             put("rssSources", rssSources.toSourceJsonArray())
             putChangeSequence(changeSequence)
             putCursor(cursor)
@@ -1196,15 +1197,31 @@ object LibrarySyncPayload {
         }
     }
 
-    private fun List<ArticleSyncManifestEntry>.toEntryJsonArray(): JSONArray {
+    private fun List<ArticleSyncManifestEntry>.toEntryJsonArray(compactDefaults:Boolean=false): JSONArray {
         return JSONArray().also { array ->
             forEach { entry ->
-                array.put(entry.toJson())
+                array.put(encodeManifestEntry(entry,compactDefaults))
             }
         }
     }
 
-    internal fun encodeManifestEntry(entry:ArticleSyncManifestEntry):JSONObject=entry.toJson()
+    internal fun compactManifestEnabled(capabilities:BleSyncCapabilities,persistent:Boolean):Boolean =
+        capabilities.domainFastPath && persistent
+
+    internal fun encodeManifestEntry(entry:ArticleSyncManifestEntry,compactDefaults:Boolean=false):JSONObject = entry.toJson().apply {
+        if(compactDefaults) {
+            for(key in listOf("independentChangedAt","favoriteChangedAt","watchLaterChangedAt","deletedAt","readingProgress","readingPositionBytes","readingPositionChangedAt")) {
+                if((get(key) as Number).toDouble()==0.0)remove(key)
+            }
+            // The v14 parser infers deletion from deletedAt only when deleted is absent.
+            // A live keep decision with a retained deletion clock must remain explicit.
+            if(entry.deleted==(entry.deletedAt>0L))remove("deleted")
+            if(entry.bodyAvailable)remove("bodyAvailable")
+            if(entry.bodySyncMode==ARTICLE_BODY_SYNC_MODE_FULL)remove("bodySyncMode")
+            if(entry.readingPositionContentHash.isEmpty())remove("readingPositionContentHash")
+            if(!entry.isRead)remove("isRead")
+        }
+    }
 
     private fun ArticleSyncManifestEntry.toJson(): JSONObject {
         return JSONObject().apply {

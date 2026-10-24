@@ -42,4 +42,17 @@ class PhoneCloudRecordClientTest {
         catch (error: CloudHttpException) { failed = true; assertEquals(409, error.status); assertTrue(error.detail.contains("cloud_record_conflict")) }
         assertTrue(failed)
     }
+    @Test fun r48CapabilityProbeIsReadOnlyAndLegacy404DoesNotEnableAnyWriter()=runBlocking {
+        assertNull(client(404,"{}").formatCapabilities(session))
+        val response=client(200,"{\"protocol\":\"watchrss-content-evolution\",\"version\":1}"){request->
+            assertEquals("GET",request.method);assertTrue(request.url.encodedPath.endsWith("/cloud/format-capabilities"))
+        }.formatCapabilities(session)
+        assertEquals(1,response!!.getInt("version"))
+        client(200,"{}"){request->
+            val data=org.json.JSONObject(okio.Buffer().also{request.body!!.writeTo(it)}.readUtf8()).getJSONObject("capabilities")
+            assertEquals(CloudFormatR48.readV1,data.getBoolean("cloudFormatR48ReadV1"))
+            assertFalse(data.getBoolean("cloudFormatR48WriteV1"));assertFalse(data.getBoolean("cloudFormatMigrationR48V1"))
+        }.registerDevice(session,"device","phone","spki",1)
+    }
+
 }

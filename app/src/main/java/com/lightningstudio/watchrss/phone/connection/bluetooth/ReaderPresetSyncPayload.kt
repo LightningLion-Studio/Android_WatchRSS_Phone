@@ -46,6 +46,23 @@ object ReaderPresetSyncPayload {
             )
         }
 
+    /** Counts only; never log theme JSON, names, asset paths or account data. */
+    fun backgroundInventory(response: JSONObject): Map<String, Any> {
+        val backgrounds = parseBackgrounds(response.optJSONArray("backgrounds"))
+        val removed = backgrounds.filter { it.deleted }.mapTo(hashSetOf()) { it.id }
+        val presets = parsePresets(response.optJSONArray("presets")).filterNot { it.deleted }
+        var dangling = 0
+        var unreadable = 0
+        presets.forEach { record ->
+            val preset = runCatching { com.lightningstudio.watchrss.phone.data.reader.ReaderPresetCodec.decode(record.payloadJson) }.getOrNull()
+            if (preset == null) unreadable++
+            else if (preset.background.assetId in removed || preset.background.posterAssetId in removed) dangling++
+        }
+        return mapOf("watchBackgroundsActive" to backgrounds.count { !it.deleted },
+            "watchBackgroundsDeleted" to removed.size, "watchDeletedBackgroundReferences" to dangling,
+            "watchUnreadablePresets" to unreadable)
+    }
+
     suspend fun locallyMissing(repository: ReaderPresetRepository): List<ResourceDescriptor> {
         val snapshot = repository.exportSnapshot()
         return buildList {

@@ -48,6 +48,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import org.json.JSONArray
+import org.json.JSONObject
 import java.lang.Long.max
 import java.net.URI
 import java.text.Normalizer
@@ -100,7 +101,8 @@ data class PhoneLibrarySyncWindow(
     val fromSeqExclusive: Long,
     val toSeqInclusive: Long,
     val peerAckedSeq: Long,
-    val fallbackReason: String
+    val fallbackReason: String,
+    val projectionDefinition:String? = null
 )
 
 data class PhoneLibrarySyncCursorSnapshot(
@@ -121,6 +123,7 @@ private data class SyncHydratedArticle(
 )
 
 private object NoopSyncChangeLogDao : SyncChangeLogDao {
+    override suspend fun lastConflictResolution(articleId: String): Long? = null
     override suspend fun insert(change: SyncChangeLogEntity): Long = 0L
     override suspend fun maxSeq(): Long = 0L
     override fun observeMaxSeq(): Flow<Long> = flowOf(0L)
@@ -169,7 +172,8 @@ class PhoneCompanionRepository(
     private val articleContentStore: ArticleContentStore? = null,
     private val appMetaDao: AppMetaDao = NoopAppMetaDao,
     private val cloudBackendBaseUrl: String = "",
-    val books:com.lightningstudio.watchrss.phone.data.book.ImportedBookStore?=null
+    val books:com.lightningstudio.watchrss.phone.data.book.ImportedBookStore?=null,
+    internal val bleDomains:com.lightningstudio.watchrss.phone.data.ble.BleDomainStore?=null
 ) {
     /** 仅用于 instrumented screenshot tests 直接操作真实数据库。 */
     val testArticleDao: PhoneArticleDao get() = articleDao
@@ -925,7 +929,8 @@ class PhoneCompanionRepository(
     private val bleIdentityMigrationKey="ble_rss_identity_dedup_v2"
     internal suspend fun bluetoothIdentityProjection(canonical:Boolean):com.lightningstudio.watchrss.phone.connection.bluetooth.BluetoothArticleIdentityProjection {
         val aliases=legacyRssArticleIds().flatMap { (id,old)->old.map { it to id } }.toMap()
-        return com.lightningstudio.watchrss.phone.connection.bluetooth.BluetoothArticleIdentityProjection(articleDao.getAllMetadataForSync(),aliases,canonical)
+        val indexed=if(canonical)bleDomains?.identities() else null
+        return com.lightningstudio.watchrss.phone.connection.bluetooth.BluetoothArticleIdentityProjection(indexed?.rows?:articleDao.getAllMetadataForSync(),aliases,canonical,indexed?.legacy.orEmpty())
     }
 
     /** Retire only a provable URL-hash alias. Distinct real guid IDs sharing a URL stay distinct. */
@@ -946,7 +951,8 @@ class PhoneCompanionRepository(
         appMetaDao.set(AppMetaEntity(bleIdentityMigrationKey,"done"));changed
     }
 
-    internal suspend fun acceptBluetoothAliases(manifest:List<ArticleSyncManifestEntry>) {
+    internal suspend fun acceptBluetoothAliases(manifest:List<ArticleSyncManifestEntry>):Map<String,String> {
+        val migrated=linkedMapOf<String,String>()
         val owners=manifest.flatMap { entry -> entry.legacyArticleIds.distinct().map { it to entry.articleId } }.groupBy({it.first},{it.second})
         require(owners.values.none { it.distinct().size>1 }) { "RSS身份别名指向多个条目" }
         for(entry in manifest)for(old in entry.legacyArticleIds.distinct()) {
@@ -956,7 +962,9 @@ class PhoneCompanionRepository(
             if(local.rssSourceUrl.isNullOrBlank() || ImportedContentIds.isImportedContentUrl(local.rssSourceUrl) ||
                 WebArticleImporter.stableArticleId(local.url)!=old)continue
             migrateBluetoothAlias(old,entry.articleId)
+            migrated[old]=entry.articleId
         }
+        return migrated
     }
 
     private suspend fun migrateBluetoothAlias(oldId:String,id:String) {
@@ -967,7 +975,15 @@ class PhoneCompanionRepository(
         val merged=(if(current==null)rekeyed else mergeArticleByLatest(rekeyed,current)).withCurrentSyncMetadata()
         articleDao.upsertRssIdentityRows(listOf(merged.externalizeLargeLocalContent()),listOf(oldId))
         appMetaDao.set(AppMetaEntity(rssIdentityAliasPrefix()+oldId,id))
+        appMetaDao.getString(conflictDecisionKey(oldId))?.let { receipt ->
+            val oldClock = runCatching { JSONObject(receipt).optLong("clock") }.getOrDefault(0L)
+            val currentClock = conflictDecisionClock(id) ?: 0L
+            if (oldClock > currentClock) appMetaDao.set(AppMetaEntity(conflictDecisionKey(id), receipt))
+        }
         recordArticleChange(id,"bluetoothIdentityMigration",merged.latestOperationAt())
+        if (merged.sourceDeviceId == deviceId && syncChangeLogDao.lastConflictResolution(oldId) == merged.latestOperationAt()) {
+            recordArticleChange(id, "conflictResolution", merged.latestOperationAt())
+        }
     }
 
     private fun echoPrefix(peer:String)="ble_echo_v2:"+WebArticleImporter.sha256(peer)+":"
@@ -975,8 +991,9 @@ class PhoneCompanionRepository(
         article.syncBodyByteCount,article.syncChunkSize,article.syncChunkHashesJson,article.readingPositionChangedAt,article.readingProgress,
         article.isRead,article.readingPositionBytes,article.readingPositionContentHash).joinToString("\n"))
     internal suspend fun rememberBluetoothReceipts(peer:String,manifest:List<ArticleSyncManifestEntry>) {
+        val rows=articleMetadataForSync(manifest.mapTo(hashSetOf()){it.articleId}).associateBy{it.articleId}
         for(entry in manifest) {
-            val local=articleDao.getById(entry.articleId)?:continue
+            val local=rows[entry.articleId]?:continue
             if(local.sourceDeviceId!=peer)continue
             // A conflicting merge cannot be acknowledged as an exact replica of the sender.
             if(entry.metadataHash.isBlank() || local.syncMetadataHash!=entry.metadataHash || local.readingProgress!=entry.readingProgress ||
@@ -992,8 +1009,9 @@ class PhoneCompanionRepository(
 
     private suspend fun suppressPeerEcho(peer:String,entries:List<ArticleSyncManifestEntry>):List<ArticleSyncManifestEntry> {
         val retained=mutableListOf<ArticleSyncManifestEntry>()
+        val rows=articleMetadataForSync(entries.mapTo(hashSetOf()){it.articleId}).associateBy{it.articleId}
         for(entry in entries) {
-            val local=articleDao.getById(entry.articleId)
+            val local=rows[entry.articleId]
             if(local==null || local.sourceDeviceId!=peer || appMetaDao.getString(echoPrefix(peer)+entry.articleId)!=articleSignature(local))retained+=entry
         }
         return retained
@@ -1003,6 +1021,40 @@ class PhoneCompanionRepository(
         articleDao.getAllMetadataForSync()
             .filter { it.shouldSyncThroughLibrary() }
             .mapNotNull { it.articleForBodyExport() }
+    }
+
+    /** Only dirty entities are hydrated/hashed. Cache publication cannot overtake a business write. */
+    private suspend fun cachedBluetoothManifests(ids:Collection<String>?=null):List<ArticleSyncManifestEntry> {
+        val cache=requireNotNull(bleDomains)
+        val definition=cache.libraryDefinition()
+        val selected=ids?.toSet()
+        for((id,seq,bodyDirty) in cache.pending().filter{selected==null||it.first in selected}) {
+            val row=if(cache.mapped(id))null else articleMetadataForSync(setOf(id)).firstOrNull()
+            val previous=if(!bodyDirty)cache.manifests(listOf(id)).firstOrNull() else null
+            val entry=row?.takeIf {it.shouldSyncThroughLibrary()}?.let {
+                if(previous!=null && previous.bodyAvailable && previous.contentHash==it.contentHash) {
+                    val hash=ArticleSyncBody.metadataHashFor(it)
+                    articleDao.updateSyncMetadata(it.copy(syncBodyHash=previous.bodyHash,syncBodyByteCount=previous.bodyByteCount,syncChunkSize=previous.chunkSize,syncChunkHashesJson=previous.chunkHashes.toJsonString(),syncMetadataHash=hash))
+                    previous.copy(sourceDeviceId=it.sourceDeviceId,contentHash=it.contentHash,updatedAt=it.updatedAt,
+                        independentChangedAt=it.independentChangedAt,favoriteChangedAt=it.favoriteChangedAt,watchLaterChangedAt=it.watchLaterChangedAt,
+                        deletedAt=it.deletedAt,deleted=it.deleted,metadataHash=hash,bodySyncMode=it.bodySyncModeForSync(),
+                        readingProgress=it.readingProgress,readingPositionBytes=it.readingPositionBytes,readingPositionContentHash=it.readingPositionContentHash,readingPositionChangedAt=it.readingPositionChangedAt,isRead=it.isRead)
+                } else it.syncManifestEntryForExport()
+            }
+            if(cache.publishManifest(id,seq,entry,row,definition) && entry!=null && seq>0L) {
+                // SQL-observed changes can have equal clocks (explicit unread/cancel), or bypass the repository.
+                recordArticleChange(id,"bleProjection",entry.latestOperationAt())
+            }
+        }
+        return cache.manifests(ids)
+    }
+
+    internal suspend fun bluetoothManifestsForRequests(ids:Collection<String>,witness:com.lightningstudio.watchrss.phone.data.ble.BleDomainStore.RootWindow?=null):List<ArticleSyncManifestEntry> = withContext(Dispatchers.IO) {
+        if(ids.isEmpty())return@withContext emptyList()
+        val cache=bleDomains?:return@withContext getArticleManifestsForSync(ids)
+        // Recheck existence witnesses after the remote round trip; never reuse a body removed meanwhile.
+        cache.refreshBodyInventory(ids,witness)
+        cache.frozenWindow {cachedBluetoothManifests(ids)}
     }
 
     suspend fun getArticleManifestsForSync(): List<ArticleSyncManifestEntry> = withContext(Dispatchers.IO) {
@@ -1057,15 +1109,30 @@ class PhoneCompanionRepository(
             )
         }
 
+    /** The fast path must never bypass old cursor/protocol/periodic-full admission. */
+    internal suspend fun libraryFastPathAllowed(peer:String,time:Long=System.currentTimeMillis()):Boolean {
+        val state=syncPeerStateDao.get(peer) ?: return false
+        return state.lastProtocolVersion>=CHANGE_SEQUENCE_PROTOCOL_VERSION && state.lastFullSyncAt>0 &&
+            time>=state.lastFullSyncAt && time-state.lastFullSyncAt<FULL_SNAPSHOT_INTERVAL_MS &&
+            bleDomains?.libraryBaselineMatches(peer)!=false && !bluetoothIdentityModeChanged(peer,true)
+    }
+
     suspend fun prepareLibrarySyncWindow(
-        peerDeviceId: String,
-        peerAppliedLocalSeq: Long? = null
-    ): PhoneLibrarySyncWindow =
-        withContext(Dispatchers.IO) {
+        peerDeviceId:String,peerAppliedLocalSeq:Long?=null,excludeRegisteredBooks:Boolean=false
+    ):PhoneLibrarySyncWindow=withContext(Dispatchers.IO) {
+        if(excludeRegisteredBooks && bleDomains!=null)bleDomains.frozenWindow {
+            prepareLibrarySyncWindowFrozen(peerDeviceId,peerAppliedLocalSeq,true)
+        } else prepareLibrarySyncWindowFrozen(peerDeviceId,peerAppliedLocalSeq,false)
+    }
+
+    private suspend fun prepareLibrarySyncWindowFrozen(
+        peerDeviceId:String,peerAppliedLocalSeq:Long?,excludeRegisteredBooks:Boolean
+    ):PhoneLibrarySyncWindow {
             val normalizedPeerId = peerDeviceId.ifBlank { DEFAULT_LIBRARY_PEER_ID }
             val peerState = syncPeerStateDao.get(normalizedPeerId)
             val now = System.currentTimeMillis()
-            val fullArticleManifest = getArticleManifestsForSync()
+            val projectionDefinition=bleDomains?.libraryDefinition()
+            val fullArticleManifest = if(excludeRegisteredBooks && bleDomains!=null)cachedBluetoothManifests() else getArticleManifestsForSync()
             val repairKey="ble_repair_watermark_v2"
             val watermark=appMetaDao.getString(repairKey)?.toLongOrNull()?:0L
             val scanFull=peerState==null || peerState.lastFullSyncAt<=0 || now-peerState.lastFullSyncAt>=FULL_SNAPSHOT_INTERVAL_MS || peerAppliedLocalSeq==0L
@@ -1082,11 +1149,12 @@ class PhoneCompanionRepository(
                 peerAppliedLocalSeq != null && peerAckedSeq < cachedPeerAckedSeq -> "peerCursorBehind"
                 peerAppliedLocalSeq != null && peerAckedSeq > maxSeq -> "peerCursorAhead"
                 peerState.lastFullSyncAt <= 0L -> "noFullSnapshot"
-                now - peerState.lastFullSyncAt >= FULL_SNAPSHOT_INTERVAL_MS -> "periodicFull"
+                now < peerState.lastFullSyncAt || now - peerState.lastFullSyncAt >= FULL_SNAPSHOT_INTERVAL_MS -> "periodicFull"
+                projectionDefinition!=null && !bleDomains!!.libraryBaselineMatches(normalizedPeerId) -> "projectionChanged"
                 else -> ""
             }
             if (fullSnapshotReason.isNotBlank()) {
-                return@withContext PhoneLibrarySyncWindow(
+                return PhoneLibrarySyncWindow(
                     articleManifest = fullArticleManifest,
                     fullArticleManifest = fullArticleManifest,
                     rssSources = getRssSourcesForSync(),
@@ -1094,7 +1162,8 @@ class PhoneCompanionRepository(
                     fromSeqExclusive = 0L,
                     toSeqInclusive = maxSeq,
                     peerAckedSeq = peerAckedSeq,
-                    fallbackReason = fullSnapshotReason
+                    fallbackReason = fullSnapshotReason,
+                    projectionDefinition = projectionDefinition
                 )
             }
 
@@ -1106,15 +1175,16 @@ class PhoneCompanionRepository(
                 kind = SYNC_KIND_RSS_SOURCE,
                 afterSeq = peerAckedSeq
             )
-            PhoneLibrarySyncWindow(
-                articleManifest = suppressPeerEcho(normalizedPeerId,getArticleManifestsForSync(changedArticleIds)),
+            return PhoneLibrarySyncWindow(
+                articleManifest = suppressPeerEcho(normalizedPeerId,if(excludeRegisteredBooks && bleDomains!=null)bleDomains.manifests(changedArticleIds) else getArticleManifestsForSync(changedArticleIds)),
                 fullArticleManifest = fullArticleManifest,
                 rssSources = getRssSourcesForSync(changedSourceUrls),
                 fullSnapshot = false,
                 fromSeqExclusive = peerAckedSeq,
                 toSeqInclusive = maxSeq,
                 peerAckedSeq = peerAckedSeq,
-                fallbackReason = ""
+                fallbackReason = "",
+                projectionDefinition = projectionDefinition
             )
         }
 
@@ -1124,7 +1194,8 @@ class PhoneCompanionRepository(
         remoteSeqToInclusive: Long,
         remoteProtocolVersion: Int,
         fullSnapshot: Boolean,
-        canonicalIds: Boolean? = null
+        canonicalIds: Boolean? = null,
+        projectionDefinition:String?=null
     ) = withContext(Dispatchers.IO) {
         canonicalIds?.let {
             val key="ble_identity_mode:"+WebArticleImporter.sha256(peerDeviceId)
@@ -1149,6 +1220,7 @@ class PhoneCompanionRepository(
                 updatedAt = now
             )
         )
+        if(fullSnapshot && projectionDefinition!=null)bleDomains?.acknowledgeLibraryDefinition(normalizedPeerId,projectionDefinition)
     }
 
     private suspend fun repairMissingArticleChangeLogEntries(
@@ -1206,10 +1278,17 @@ class PhoneCompanionRepository(
         repaired
     }
 
+    private var repairedBluetoothLibraryVersion:String?=null
     suspend fun repairImportedContentSourceStates(): Int = withContext(Dispatchers.IO) {
+        val revision=bleDomains?.libraryVersion()
+        if(revision!=null && revision==repairedBluetoothLibraryVersion)return@withContext 0
         var repaired = 0
         val sources = rssSourceDao.getAllForSync()
-        val articleMetadata = articleDao.getAllMetadataForSync()
+        if(bleDomains!=null && sources.any{it.url==ImportedContentIds.ROOT_SOURCE_URL} && sources.none{it.deleted&&ImportedContentIds.isImportedContentUrl(it.url)}) {
+            repairedBluetoothLibraryVersion=bleDomains.libraryVersion()
+            return@withContext 0
+        }
+        val articleMetadata = if(bleDomains!=null)articleDao.unregisteredBookMetadata() else articleDao.getAllMetadataForSync()
         repaired += if (repairMissingImportedTextSourceIfNeeded(sources, articleMetadata)) 1 else 0
         val importedSources = sources
             .filter { ImportedContentIds.isImportedContentUrl(it.url) }
@@ -1233,6 +1312,7 @@ class PhoneCompanionRepository(
             recordRssSourceChange(repairedSource.url, "sourceState", repairedSource.updatedAt)
             repaired += 1
         }
+        repairedBluetoothLibraryVersion=bleDomains?.libraryVersion()
         repaired
     }
 
@@ -1286,7 +1366,7 @@ class PhoneCompanionRepository(
         withContext(Dispatchers.IO) {
             remoteManifest.mapNotNull { remote ->
                 val local = articleDao.getById(remote.articleId) ?: return@mapNotNull null
-                buildDeleteConflict(local, remote)
+                buildDeleteConflict(local, remote)?.takeUnless { rememberedConflictResolution(local, remote) != null }
             }
         }
 
@@ -1302,23 +1382,43 @@ class PhoneCompanionRepository(
         remoteManifest.forEachIndexed { index, remote ->
             val local = articleDao.getById(remote.articleId)?.hydrateExternalText() ?: return@forEachIndexed
             if (buildDeleteConflict(local, remote) == null) return@forEachIndexed
-            val resolution = resolutions[remote.articleId] ?: PhoneSyncConflictResolution.KEEP_LATEST
+            val remembered = rememberedConflictResolution(local, remote)
+            // No UI answer is not consent. Only an explicit answer or a durable decision
+            // for exactly these input states may resolve a deletion conflict.
+            val resolution = checkNotNull(resolutions[remote.articleId] ?: remembered) {
+                "删除冲突尚未确认，请重新同步并选择处理方式"
+            }
+            if (remembered != null && conflictDecision(local.articleId)?.optString("after") == conflictState(local)) {
+                outgoingArticleIds += local.articleId
+                suppressedRemoteArticleIds += local.articleId
+                return@forEachIndexed
+            }
+            val timestamp = maxOf(now + index, local.latestOperationAt(), remote.latestOperationAt()) + 1L
+            val previous = conflictDecision(local.articleId)
+            val consumed = previous?.optJSONArray("consumed")?.let { a -> (0 until a.length()).map(a::getString) }.orEmpty()
+            val receipt = JSONObject().put("resolution", resolution.name).put("clock", timestamp)
+                .put("before", conflictState(local)).put("remote", conflictState(remote))
+                .put("consumed", JSONArray((consumed + listOfNotNull(previous?.optString("remote")) + conflictState(remote)).distinct()))
+            appMetaDao.set(AppMetaEntity(conflictDecisionKey(local.articleId), receipt.toString()))
             when (deleteConflictAction(local, remote, resolution)) {
                 ConflictAction.PHONE -> {
-                    val updated = local.stampKeptByConflict(now + index)
+                    val updated = local.stampKeptByConflict(timestamp)
                     articleDao.upsert(updated.withCurrentSyncMetadata().externalizeLargeLocalContent())
-                    recordArticleChange(updated.articleId, "conflictResolution", now + index)
+                    recordArticleChange(updated.articleId, "conflictResolution", timestamp)
+                    rememberAppliedConflict(updated)
                     outgoingArticleIds += updated.articleId
                     suppressedRemoteArticleIds += updated.articleId
                 }
                 ConflictAction.WATCH -> {
                     suppressedRemoteArticleIds += remote.articleId
                     if (remote.deleted) {
-                        val updated = local.applyRemoteDelete(remote)
-                        if (updated != local) {
-                            articleDao.upsert(updated.withCurrentSyncMetadata().externalizeLargeLocalContent())
-                        }
+                        val updated = local.applyRemoteDelete(remote).markDeletedByConflict(timestamp)
+                        articleDao.upsert(updated.withCurrentSyncMetadata().externalizeLargeLocalContent())
+                        recordArticleChange(updated.articleId, "conflictResolution", timestamp)
+                        rememberAppliedConflict(updated)
+                        outgoingArticleIds += updated.articleId
                     } else {
+                        require(remote.bodyAvailable) { "手表保留的文章正文不可用，请在手表补回正文后重试同步" }
                         if (remote.bodyAvailable) {
                             forcedRemoteRequests += remote.toFullBodyRequest()
                             mergeResolutions[remote.articleId] = if (resolution == PhoneSyncConflictResolution.MERGE_CONTENT) {
@@ -1330,9 +1430,10 @@ class PhoneCompanionRepository(
                     }
                 }
                 ConflictAction.DELETE -> {
-                    val updated = local.markDeletedByUser(now + index)
+                    val updated = local.markDeletedByConflict(timestamp)
                     articleDao.upsert(updated.withCurrentSyncMetadata().externalizeLargeLocalContent())
-                    recordArticleChange(updated.articleId, "conflictResolution", now + index)
+                    recordArticleChange(updated.articleId, "conflictResolution", timestamp)
+                    rememberAppliedConflict(updated)
                     outgoingArticleIds += updated.articleId
                     suppressedRemoteArticleIds += updated.articleId
                 }
@@ -1386,17 +1487,22 @@ class PhoneCompanionRepository(
                 mergeArticle(
                     local = requireNotNull(localHydrated),
                     remote = preparedRemote,
-                    conflictResolution = conflictResolutions[remote.articleId]
+                    conflictResolution = conflictResolutions[remote.articleId],
+                    decisionClock = conflictDecisionClock(remote.articleId)
                 )
             }
             val verifiedNext = (books?.constrainDeletion(next) ?: next).withCurrentSyncMetadata()
-            if(localHydrated==verifiedNext)return@forEach
+            if(localHydrated==verifiedNext) {
+                if (remote.articleId in conflictResolutions) rememberAppliedConflict(verifiedNext)
+                return@forEach
+            }
             val storedNext=verifiedNext.reuseStoredBody(local,localHydrated).externalizeLargeLocalContent()
             if (local != storedNext) {
                 articleDao.upsert(storedNext)
                 recordArticleChange(storedNext.articleId,"merge",storedNext.latestOperationAt(),storedNext.sourceDeviceId)
                 merged += 1
             }
+            if (remote.articleId in conflictResolutions) rememberAppliedConflict(verifiedNext)
         }
         merged
     }
@@ -1453,13 +1559,16 @@ class PhoneCompanionRepository(
                     contentHtml = contentHtml,
                     contentText = contentText,
                 )
-                val mergedArticle = if (authoritative || localHydrated == null) {
+                val conflictResolution = conflictResolutions[payload.article.articleId]
+                val localForMerge = localHydrated ?: local?.takeIf { conflictResolution != null }
+                val mergedArticle = if (authoritative || localForMerge == null) {
                     preparedRemote
                 } else {
                     mergeArticle(
-                        local = localHydrated,
+                        local = localForMerge,
                         remote = preparedRemote,
-                        conflictResolution = conflictResolutions[payload.article.articleId]
+                        conflictResolution = conflictResolution,
+                        decisionClock = conflictDecisionClock(payload.article.articleId)
                     )
                 }
                 val constrained=books?.constrainDeletion(mergedArticle) ?: mergedArticle
@@ -1472,13 +1581,17 @@ class PhoneCompanionRepository(
                 } else {
                     constrained.withCurrentSyncMetadata()
                 }
-                if(localHydrated==next)return@forEach
+                if(localHydrated==next) {
+                    if (conflictResolution != null) rememberAppliedConflict(next)
+                    return@forEach
+                }
                 val storedNext=next.reuseStoredBody(local,localHydrated).externalizeLargeLocalContent()
                 if (local != storedNext) {
                     articleDao.upsert(storedNext)
                     recordArticleChange(storedNext.articleId,"merge",storedNext.latestOperationAt(),storedNext.sourceDeviceId)
                     merged += 1
                 }
+                if (conflictResolution != null) rememberAppliedConflict(next)
             }
             merged
         }
@@ -2006,19 +2119,21 @@ class PhoneCompanionRepository(
     private fun mergeArticle(
         local: PhoneArticleEntity,
         remote: PhoneArticleEntity,
-        conflictResolution: PhoneSyncConflictResolution? = null
+        conflictResolution: PhoneSyncConflictResolution? = null,
+        decisionClock: Long? = null
     ): PhoneArticleEntity {
+        val clock = maxOf(decisionClock ?: 0L, maxOf(local.latestOperationAt(), remote.latestOperationAt()) + 1L)
         return when (conflictResolution) {
             null,
             PhoneSyncConflictResolution.KEEP_LATEST -> mergeArticleByLatest(local, remote)
             PhoneSyncConflictResolution.KEEP_PHONE -> local.stampKeptByConflict(
-                timestamp = maxOf(local.latestOperationAt(), remote.latestOperationAt()) + 1L
+                timestamp = clock
             )
-            PhoneSyncConflictResolution.KEEP_WATCH -> remote
-            PhoneSyncConflictResolution.DELETE_CONTENT -> mergeArticleByLatest(local, remote).markDeletedByUser(
-                timestamp = maxOf(local.latestOperationAt(), remote.latestOperationAt()) + 1L
+            PhoneSyncConflictResolution.KEEP_WATCH -> remote.stampKeptByConflict(clock)
+            PhoneSyncConflictResolution.DELETE_CONTENT -> mergeArticleByLatest(local, remote).markDeletedByConflict(
+                timestamp = clock
             )
-            PhoneSyncConflictResolution.MERGE_CONTENT -> mergeArticleContent(local, remote)
+            PhoneSyncConflictResolution.MERGE_CONTENT -> mergeArticleContent(local, remote).stampKeptByConflict(clock)
         }
     }
 
@@ -2223,6 +2338,46 @@ class PhoneCompanionRepository(
         )
     }
 
+    private fun conflictDecisionKey(id: String) = "article_conflict_decision_v1:$id"
+    private suspend fun conflictDecision(id: String): JSONObject? =
+        appMetaDao.getString(conflictDecisionKey(id))?.let { runCatching { JSONObject(it) }.getOrNull() }
+    private suspend fun conflictDecisionClock(id: String): Long? = conflictDecision(id)?.optLong("clock")
+
+    // A content refresh/read position does not undo a save/delete decision. Receipts
+    // compare the independently clocked save/delete state, not encoding/body metadata.
+    private fun conflictState(article: PhoneArticleEntity): String = listOf(article.url, article.rssSourceUrl.orEmpty(),
+        article.independentSaved, article.independentChangedAt,
+        article.favoriteSaved, article.favoriteChangedAt, article.watchLaterSaved, article.watchLaterChangedAt,
+        article.deleted, article.deletedAt).joinToString("\n").let(WebArticleImporter::sha256)
+    private fun conflictState(article: ArticleSyncManifestEntry): String = listOf(article.independentChangedAt,
+        article.favoriteChangedAt, article.watchLaterChangedAt, article.deleted, article.deletedAt).joinToString("\n").let(WebArticleImporter::sha256)
+
+    private suspend fun rememberedConflictResolution(local: PhoneArticleEntity, remote: ArticleSyncManifestEntry): PhoneSyncConflictResolution? {
+        val receipt = conflictDecision(local.articleId)
+        if (receipt == null) {
+            // Upgrade existing installs: the business journal already proves an explicit
+            // decision. Only the unchanged winning row can consume an older alias replay.
+            if (local.sourceDeviceId == deviceId && local.latestOperationAt() > remote.latestOperationAt() &&
+                syncChangeLogDao.lastConflictResolution(local.articleId) == local.latestOperationAt()) {
+                return if (local.deleted) PhoneSyncConflictResolution.DELETE_CONTENT else PhoneSyncConflictResolution.KEEP_PHONE
+            }
+            return null
+        }
+        val state = conflictState(local)
+        if (state != receipt.optString("before") && state != receipt.optString("after")) return null
+        val remoteState = conflictState(remote)
+        val consumed = receipt.optJSONArray("consumed")
+        if (remoteState != receipt.optString("remote") && !(state == receipt.optString("after") && consumed != null &&
+                (0 until consumed.length()).any { consumed.optString(it) == remoteState })) return null
+        return runCatching { PhoneSyncConflictResolution.valueOf(receipt.getString("resolution")) }.getOrNull()
+    }
+
+    private suspend fun rememberAppliedConflict(article: PhoneArticleEntity) {
+        val receipt = conflictDecision(article.articleId) ?: return
+        receipt.put("after", conflictState(article)).put("clock", article.latestOperationAt())
+        appMetaDao.set(AppMetaEntity(conflictDecisionKey(article.articleId), receipt.toString()))
+    }
+
     private fun buildDeleteConflict(
         local: PhoneArticleEntity,
         remote: ArticleSyncManifestEntry
@@ -2271,23 +2426,11 @@ class PhoneCompanionRepository(
         return copy(
             sourceDeviceId = deviceId,
             updatedAt = timestamp,
-            independentChangedAt = if (independentSaved || independentChangedAt > 0L) {
-                timestamp
-            } else {
-                independentChangedAt
-            },
+            independentChangedAt = timestamp,
             independentSortOrder = if (independentSaved) timestamp else independentSortOrder,
-            favoriteChangedAt = if (favoriteSaved || favoriteChangedAt > 0L) {
-                timestamp
-            } else {
-                favoriteChangedAt
-            },
+            favoriteChangedAt = timestamp,
             favoriteSortOrder = if (favoriteSaved) timestamp else favoriteSortOrder,
-            watchLaterChangedAt = if (watchLaterSaved || watchLaterChangedAt > 0L) {
-                timestamp
-            } else {
-                watchLaterChangedAt
-            },
+            watchLaterChangedAt = timestamp,
             watchLaterSortOrder = if (watchLaterSaved) timestamp else watchLaterSortOrder,
             deleted = false,
             deletedAt = 0L
@@ -2364,30 +2507,22 @@ class PhoneCompanionRepository(
         return copy(deleted = true, deletedAt = timestamp)
     }
 
+    private fun PhoneArticleEntity.markDeletedByConflict(timestamp: Long): PhoneArticleEntity =
+        markDeletedByUser(timestamp).copy(independentChangedAt = timestamp,
+            favoriteChangedAt = timestamp, watchLaterChangedAt = timestamp)
+
     private fun PhoneArticleEntity.markDeletedByUser(timestamp: Long): PhoneArticleEntity {
         return copy(
             sourceDeviceId = deviceId,
             updatedAt = timestamp,
             independentSaved = false,
-            independentChangedAt = if (independentSaved || independentChangedAt > 0L) {
-                timestamp
-            } else {
-                independentChangedAt
-            },
+            independentChangedAt = if (independentSaved || independentChangedAt > 0L) timestamp else independentChangedAt,
             independentSortOrder = 0L,
             favoriteSaved = false,
-            favoriteChangedAt = if (favoriteSaved || favoriteChangedAt > 0L) {
-                timestamp
-            } else {
-                favoriteChangedAt
-            },
+            favoriteChangedAt = if (favoriteSaved || favoriteChangedAt > 0L) timestamp else favoriteChangedAt,
             favoriteSortOrder = 0L,
             watchLaterSaved = false,
-            watchLaterChangedAt = if (watchLaterSaved || watchLaterChangedAt > 0L) {
-                timestamp
-            } else {
-                watchLaterChangedAt
-            },
+            watchLaterChangedAt = if (watchLaterSaved || watchLaterChangedAt > 0L) timestamp else watchLaterChangedAt,
             watchLaterSortOrder = 0L,
             deleted = true,
             deletedAt = timestamp
@@ -2930,7 +3065,7 @@ class PhoneCompanionRepository(
     companion object {
         private const val CHANGE_SEQUENCE_PROTOCOL_VERSION = 13
         private const val DEFAULT_LIBRARY_PEER_ID = "watch"
-        private const val FULL_SNAPSHOT_INTERVAL_MS = 7L * 24L * 60L * 60L * 1000L
+        private const val FULL_SNAPSHOT_INTERVAL_MS = com.lightningstudio.watchrss.phone.data.ble.BleDomainStore.RECEIPT_MAX_AGE_MS
         private const val SYNC_KIND_ARTICLE = "article"
         private const val SYNC_KIND_RSS_SOURCE = "rssSource"
         private const val SYNC_DB_TEXT_CHUNK_CHARACTERS = 64 * 1024

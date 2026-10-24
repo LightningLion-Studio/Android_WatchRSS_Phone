@@ -102,6 +102,12 @@ class PhoneCloudClient(
             CloudKeyCommitment(it.getInt("keyVersion"), it.getString("commitment"), it.nullableString("rotationProof"))
         }
 
+    suspend fun formatCapabilities(session:PhoneAccountSession):JSONObject? = try {
+        v2Get(session,"/functions/v1/cloud/format-capabilities").also {
+            require(it.getString("protocol")=="watchrss-content-evolution"&&it.getInt("version")==1)
+        }
+    } catch(error:CloudHttpException){if(error.status==404)null else throw error}
+
     suspend fun registerDevice(
         session: PhoneAccountSession,
         deviceId: String,
@@ -123,6 +129,9 @@ class PhoneCloudClient(
                 put("publicKeySpki", publicKeySpki)
                 put("keyVersion", keyVersion)
                 put("capabilities", JSONObject().apply {
+                    put("cloudFormatR48ReadV1", CloudFormatR48.readV1)
+                    put("cloudFormatR48WriteV1", false)
+                    put("cloudFormatMigrationR48V1", false)
                     put("snapshotSchema", 2)
                     put("rssRecordsVersion", 1)
                     put("cloudRelay", true)

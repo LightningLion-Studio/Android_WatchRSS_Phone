@@ -78,7 +78,7 @@ private data class LibraryResponseRead(
 )
 
 internal fun isSessionOperationSafeForTransparentReplay(action: String): Boolean =
-    action != BluetoothSyncProtocol.ACTION_SYNC_LIBRARY && action != BluetoothSyncProtocol.ACTION_OPEN_PAIRING && action != "syncBooks"
+    action != BluetoothSyncProtocol.ACTION_SYNC_LIBRARY && action != BluetoothSyncProtocol.ACTION_OPEN_PAIRING && action != "syncBooks" && action != "syncDomains"
 
 private class PreviewStreamStats {
     private var windowStartedAt = SystemClock.elapsedRealtime()
@@ -231,6 +231,7 @@ internal class PhoneSyncSession internal constructor(
         }
     }
 
+    internal var bindingProbe:JSONObject?=null
     internal var legacyFallback: Boolean = false
     internal val recoveryGate = SingleSessionRecoveryGate()
     private var closed: Boolean = false
@@ -275,6 +276,7 @@ internal class PhoneSyncSession internal constructor(
     }
 
     internal fun recordNegotiation(response: JSONObject) {
+        if(response.optString("action")=="syncLibrary"&&response.optString("phase")=="probe")bindingProbe=JSONObject(response.toString())
         if (!negotiationPending) return
         negotiationPending = false
         persistentAccepted = BluetoothSyncProtocol.acceptsPersistentSession(response)
@@ -292,6 +294,7 @@ internal class PhoneSyncSession internal constructor(
         persistentAccepted = replacement.persistentAccepted
         negotiationPending = replacement.negotiationPending
         legacyFallback = replacement.legacyFallback
+        bindingProbe=replacement.bindingProbe
         ipUpgradeExpected = replacement.ipUpgradeExpected
         device = replacement.device
     }
@@ -2118,7 +2121,7 @@ class PhoneBluetoothSyncClient(
             persistentAccepted = true,
             negotiationPending = false,
             ipUpgradeExpected = response.optBoolean(FIELD_IP_UPGRADE_ACCEPTED, false)
-        )
+        ).also {it.bindingProbe=JSONObject(response.toString())}
     }
 
     @SuppressLint("MissingPermission")
@@ -2710,16 +2713,18 @@ class PhoneBluetoothSyncClient(
     ) {
         val startedAt = SystemClock.elapsedRealtime()
         val fields = payloadFields(label, payload)
+        var wireBytes=0L
         debugLog.appendEvent("bt.frame.write.start", sessionId, mapOf("label" to label) + fields)
         try {
             BluetoothSyncProtocol.writeFrame(outputStream, payload) { bytes ->
+                wireBytes+=bytes
                 byteTracker?.add(bytes)
                 onBytesTransferred?.invoke(bytes)
             }
             debugLog.appendEvent(
                 event = "bt.frame.write.success",
                 sessionId = sessionId,
-                fields = mapOf("label" to label, "elapsedMs" to elapsedSince(startedAt)) + fields
+                fields = mapOf("label" to label, "elapsedMs" to elapsedSince(startedAt),"wireBytes" to wireBytes) + fields
             )
         } catch (throwable: Throwable) {
             debugLog.appendEvent(
@@ -2760,15 +2765,17 @@ class PhoneBluetoothSyncClient(
     ): JSONObject {
         val startedAt = SystemClock.elapsedRealtime()
         debugLog.appendEvent("bt.frame.read.start", sessionId, mapOf("label" to label))
+        var wireBytes=0L
         return try {
             BluetoothSyncProtocol.readFrame(inputStream) { bytes ->
+                wireBytes+=bytes
                 byteTracker?.add(bytes)
                 onBytesTransferred?.invoke(bytes)
             }.also { payload ->
                 debugLog.appendEvent(
                     event = "bt.frame.read.success",
                     sessionId = sessionId,
-                    fields = mapOf("label" to label, "elapsedMs" to elapsedSince(startedAt)) +
+                    fields = mapOf("label" to label, "elapsedMs" to elapsedSince(startedAt),"wireBytes" to wireBytes) +
                         payloadFields(label, payload)
                 )
             }

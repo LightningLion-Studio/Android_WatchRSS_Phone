@@ -164,6 +164,26 @@ class BookReadingPersistenceTest {
         original.writeBytes(bytes);s.ensureRegistered();assertEquals(1,db.bookDao().all().size);assertTrue(s.migrationWarnings.isEmpty())
         originalDir.deleteRecursively();directory.deleteRecursively()
     }
+    @Test fun failedPackageRepairDoesNotInvalidateFrozenBookDirectoryWitness()=runBlocking<Unit> {
+        val db=db();val files=File(context.cacheDir,"stable-books-${System.nanoTime()}").apply{mkdirs()}
+        val directory=File(files,"imported_books").apply{mkdirs()}
+        mapped(db);db.phoneArticleDao().upsert(article().copy(contentText=""))
+        val books=ImportedBookStore(db,directory,null,"phone")
+        books.ensureRegistered()
+        val domains=com.lightningstudio.watchrss.phone.data.ble.BleDomainStore(db,files)
+        val before=domains.beginRootWindow("account")
+        repeat(3){books.manifests()}
+        assertEquals(before.initial["books"],before.current("account")["books"])
+        assertEquals(emptyList<String>(),directory.list()!!.toList())
+    }
+    @Test fun wholeBookTombstoneNeverTriesToRebuildMissingImmutablePackage()=runBlocking<Unit> {
+        val db=db();mapped(db);val book=db.bookDao().get(id)!!
+        db.bookDao().put(book.copy(stateJson=JSONObject(book.stateJson).put("deleted",true).put("deletedAt",300).toString()))
+        val directory=File(context.cacheDir,"deleted-book-${System.nanoTime()}")
+        val books=ImportedBookStore(db,directory,null,"phone")
+        repeat(3){books.manifests()}
+        assertFalse(directory.exists());assertTrue(books.migrationWarnings.isEmpty())
+    }
     @Test fun bookDeletionClampsExistingLogicalSavedStateAndCannotBeRevivedByReadingDelta()=runBlocking<Unit> {
         val db=db();mapped(db);val s=store(db);s.readingSummary()
         val saved=state().put("favoriteSaved",true).put("favoriteChangedAt",100).put("favoriteSortOrder",5)

@@ -6,6 +6,19 @@ internal fun validateCloudManifestHeadIdentity(expected: CloudSnapshotHead, actu
 }
 
 internal object CloudSnapshotReuse {
+    fun scopeCompatible(manifest:CloudSnapshotManifest,settings:org.json.JSONObject,allowMissing:Boolean=false):Boolean =
+        listOf("backendScope","ownerUserId","libraryEpoch","contentGeneration").all {key->
+            val a=manifest.settings.optString(key,"");val b=settings.optString(key,"")
+            a==b || allowMissing&&(a.isEmpty()||b.isEmpty())
+        }
+    fun preserveObjects(manifests:List<CloudSnapshotManifest>,replaced:Set<String>,explicit:List<CloudObjectDescriptor>):List<CloudObjectDescriptor> {
+        manifests.forEach{it.requireReadable()}
+        val values=(explicit+manifests.flatMap{it.objects}.filter{it.name !in replaced&&it.name !in explicit.map{d->d.name}}).groupBy{it.name}
+        return values.map {(_,rows)->
+            if(rows.map{it.toRawString()}.distinct().size>1)throw CloudFormatUpgradeRequired("unknown_object_conflicting_heads")
+            rows.first()
+        }
+    }
     fun authenticate(codec: CloudSnapshotCodec, key: ByteArray, head: CloudSnapshotHead, bytes: ByteArray): CloudSnapshotManifest {
         if (bytes.size.toLong()!=head.manifestSizeBytes || CloudSnapshotCodec.sha256(bytes)!=head.manifestSha256) throw CloudDownloadIntegrityException()
         return codec.decryptManifest(key,head.id,bytes).also { validateCloudManifestHead(it,head) }
@@ -26,7 +39,7 @@ internal object CloudSnapshotReuse {
         fingerprint != null && manifest.keyVersion == version && manifest.settings.optInt("snapshotContentLayout") == 3 &&
             manifest.settings.optString("ownerUserId") == user && manifest.settings.optString("libraryEpoch") == epoch &&
             manifest.settings.optString("privateBodyFingerprintV2") == fingerprint &&
-            manifest.objects.any { it.name == "private-library.wrss" && it.readerKeyEnvelope == null }
+            manifest.objects.any { it.name == "private-library.wrss" && it.access !in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED) }
 }
 
 internal fun validatePrivateReaderArticle(descriptor: CloudObjectDescriptor) {

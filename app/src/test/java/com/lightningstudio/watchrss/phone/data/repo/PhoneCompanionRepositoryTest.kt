@@ -6,6 +6,8 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncBody
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncManifestEntry
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ChunkedArticlePayload
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
+import com.lightningstudio.watchrss.phone.data.db.AppMetaDao
+import com.lightningstudio.watchrss.phone.data.db.AppMetaEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceDao
@@ -955,6 +957,168 @@ class PhoneCompanionRepositoryTest {
         assertFalse(manifest.bodyAvailable)
         assertEquals(ArticleSyncBody.metadataHashFor(articleDao.items.single()), manifest.metadataHash)
         assertEquals(emptyList<PhoneArticleEntity>(), repository.getArticlesForSync(listOf(manifest.articleId)))
+    }
+
+    @Test fun conflictDecisionDominatesFuturePeerClockAndIsDurableAcrossFullReplayAndUpgrade() = runBlocking {
+        for (resolution in PhoneSyncConflictResolution.entries) for (phoneDeleted in listOf(false, true)) {
+            val future = 9_000_000_000_000L
+            val local = article("conflict", favoriteSaved = !phoneDeleted, favoriteChangedAt = future - 100,
+                deleted = phoneDeleted, deletedAt = if (phoneDeleted) future - 50 else 0)
+            val remote = local.copy(sourceDeviceId = "watch", updatedAt = future, favoriteSaved = phoneDeleted,
+                favoriteChangedAt = future, deleted = !phoneDeleted, deletedAt = if (!phoneDeleted) future else 0)
+            val dao = FakePhoneArticleDao().apply { items = listOf(local) }
+            val meta = ConflictMetaDao()
+            fun repo() = PhoneCompanionRepository(FakePhoneSavedItemDao(), dao, FakePhoneRssSourceDao(), "test-phone", appMetaDao = meta)
+            val repository = repo()
+            assertEquals(1, repository.findDeleteConflicts(listOf(remote.toManifestEntry())).size)
+            val plan = repository.prepareDeleteConflictResolutions(listOf(remote.toManifestEntry()), mapOf("conflict" to resolution))
+            if (plan.forcedRemoteRequests.isNotEmpty()) {
+                // The pending user choice also survives process loss before the body response.
+                assertTrue(repo().findDeleteConflicts(listOf(remote.toManifestEntry())).isEmpty())
+                val retry = repo().prepareDeleteConflictResolutions(listOf(remote.toManifestEntry()), emptyMap())
+                assertEquals(plan.mergeResolutions, retry.mergeResolutions)
+                repository.mergeArticlesFromSync(listOf(remote), plan.mergeResolutions)
+            } else assertEquals(setOf("conflict"), plan.outgoingArticleIds)
+            val decided = dao.items.single()
+            assertTrue("$resolution/$phoneDeleted", decided.updatedAt > future)
+            assertEquals(decided.updatedAt, decided.favoriteChangedAt)
+            assertEquals(decided.updatedAt, decided.watchLaterChangedAt)
+            assertEquals(decided.updatedAt, decided.independentChangedAt)
+            val expectedDeleted = when(resolution) {
+                PhoneSyncConflictResolution.DELETE_CONTENT -> true
+                PhoneSyncConflictResolution.MERGE_CONTENT -> false
+                PhoneSyncConflictResolution.KEEP_PHONE -> phoneDeleted
+                else -> !phoneDeleted
+            }
+            assertEquals(expectedDeleted, decided.deleted)
+            // Real native encoder/decoder, not an in-memory direct assignment to the peer.
+            val frame = LibrarySyncPayload.buildChunkedArticleRequestFrames("test-phone", listOf(decided), emptyList(), emptyList(), true)
+            val payload = LibrarySyncPayload.parseChunkedArticles(frame.single()).single()
+            assertEquals(decided.updatedAt, payload.article.updatedAt)
+            assertEquals(decided.deleted, payload.article.deleted)
+            repeat(3) { // reconnect, forced full snapshot, projection-cache rebuild / new repository instance
+                val next = repo()
+                assertTrue(next.findDeleteConflicts(listOf(remote.toManifestEntry())).isEmpty())
+                val replay = next.prepareDeleteConflictResolutions(listOf(remote.toManifestEntry()), emptyMap())
+                if (decided.deleted != remote.deleted) assertEquals(setOf("conflict"), replay.outgoingArticleIds)
+                assertEquals(decided, dao.items.single())
+                assertTrue(next.findDeleteConflicts(listOf(payload.article.toManifestEntry())).isEmpty())
+            }
+            // A genuinely new remote user decision is never hidden by the old receipt.
+            val newer = remote.copy(updatedAt = decided.updatedAt + 10, favoriteChangedAt = decided.updatedAt + 10,
+                deleted = !decided.deleted, deletedAt = if (!decided.deleted) decided.updatedAt + 10 else 0)
+            assertEquals(1, repo().findDeleteConflicts(listOf(newer.toManifestEntry())).size)
+        }
+    }
+
+    @Test fun sharedConflictVectorsProducePersistedAndEncodedDecisions() = runBlocking {
+        val fixture = JSONObject(requireNotNull(javaClass.getResourceAsStream("/ble/conflict-resolution-v1.json")).bufferedReader().readText())
+        val cases = fixture.getJSONArray("cases")
+        for (i in 0 until cases.length()) {
+            val c = cases.getJSONObject(i)
+            fun parse(key: String): PhoneArticleEntity {
+                val value = JSONObject(c.getJSONObject(key).toString())
+                value.keys().asSequence().toList().filter { value.isNull(it) }.forEach(value::remove)
+                return LibrarySyncPayload.parseArticles(JSONObject().put("articles", JSONArray().put(value))).single()
+                    .copy(contentText = value.getString("contentText"))
+            }
+            val phone = parse("phone"); val watch = parse("watch"); val expected = parse("expected")
+            val dao = FakePhoneArticleDao().apply { items = listOf(phone) }
+            val meta = ConflictMetaDao()
+            val repository = PhoneCompanionRepository(FakePhoneSavedItemDao(), dao, FakePhoneRssSourceDao(), "test-phone", appMetaDao = meta)
+            val plan = repository.prepareDeleteConflictResolutions(listOf(watch.toManifestEntry()),
+                mapOf(phone.articleId to PhoneSyncConflictResolution.valueOf(c.getString("resolution"))))
+            assertEquals(c.getBoolean("expectBodyFetch"), plan.forcedRemoteRequests.isNotEmpty())
+            if (plan.forcedRemoteRequests.isNotEmpty()) repository.mergeArticlesFromSync(listOf(watch), plan.mergeResolutions)
+            val decided = dao.items.single()
+            assertEquals(expected.deleted, decided.deleted)
+            assertEquals(expected.deletedAt, decided.deletedAt)
+            assertEquals(expected.updatedAt, decided.updatedAt)
+            assertEquals(expected.favoriteSaved, decided.favoriteSaved)
+            assertEquals(expected.favoriteChangedAt, decided.favoriteChangedAt)
+            assertEquals(expected.watchLaterChangedAt, decided.watchLaterChangedAt)
+            assertEquals(expected.independentChangedAt, decided.independentChangedAt)
+            val frames = LibrarySyncPayload.buildChunkedArticleRequestFrames("test-phone", listOf(decided), emptyList(), emptyList(), true)
+            val received = LibrarySyncPayload.parseChunkedArticles(frames.single()).single()
+            assertEquals("fixture body", ArticleSyncBody.rebuildBody(null, received).second)
+            assertEquals(decided.updatedAt, received.article.updatedAt)
+            val dir = java.io.File("build/conflict-vectors").apply { mkdirs() }
+            java.io.File(dir, c.getString("name")+".json").writeText(frames.single().toString(2))
+        }
+    }
+
+    @Test fun conflictReceiptMigratesWithLegacyAliasAndSurvivesEncoderMetadataChange() = runBlocking {
+        val url = "https://example.com/alias-conflict"
+        val legacy = WebArticleImporter.stableArticleId(url)
+        val canonical = WebArticleImporter.sha256("canonical-guid")
+        val local = article(legacy, url=url, rssSourceUrl="https://example.com/feed", favoriteSaved=true)
+        val remote = local.copy(sourceDeviceId="watch", deleted=true, deletedAt=100)
+        val dao=FakePhoneArticleDao().apply { items=listOf(local) }; val meta=ConflictMetaDao()
+        fun repo()=PhoneCompanionRepository(FakePhoneSavedItemDao(),dao,FakePhoneRssSourceDao(),"test-phone",appMetaDao=meta)
+        repo().prepareDeleteConflictResolutions(listOf(remote.toManifestEntry()),mapOf(legacy to PhoneSyncConflictResolution.KEEP_PHONE))
+        val remoteCanonical=remote.toManifestEntry().copy(articleId=canonical,legacyArticleIds=listOf(legacy),metadataHash="new-encoder")
+        repo().acceptBluetoothAliases(listOf(remoteCanonical))
+        assertEquals(canonical,dao.items.single().articleId)
+        assertTrue(repo().findDeleteConflicts(listOf(remoteCanonical)).isEmpty())
+        val before=dao.items.single()
+        assertEquals(setOf(canonical),repo().prepareDeleteConflictResolutions(listOf(remoteCanonical),emptyMap()).outgoingArticleIds)
+        assertEquals(before,dao.items.single())
+    }
+
+    @Test fun consumedAliasDecisionsSurviveMetadataRefreshWithoutHidingNewUserOperations() = runBlocking {
+        val future=9_000_000_000_000L
+        val local=article("multi-alias",favoriteSaved=true,favoriteChangedAt=future)
+        val dao=FakePhoneArticleDao().apply{items=listOf(local)};val meta=ConflictMetaDao()
+        fun repo()=PhoneCompanionRepository(FakePhoneSavedItemDao(),dao,FakePhoneRssSourceDao(),"test-phone",appMetaDao=meta)
+        val first=local.copy(sourceDeviceId="watch",favoriteSaved=false,favoriteChangedAt=100,deleted=true,deletedAt=100,updatedAt=100).toManifestEntry()
+        val second=first.copy(deletedAt=200,favoriteChangedAt=200,updatedAt=200)
+        for(remote in listOf(first,second))repo().prepareDeleteConflictResolutions(listOf(remote),mapOf(local.articleId to PhoneSyncConflictResolution.KEEP_PHONE))
+        val decision=dao.items.single()
+        // Body/RSS refresh provenance is not a new save/delete operation.
+        dao.items=listOf(decision.copy(sourceDeviceId="watch",updatedAt=future+100,contentHash="refreshed-body"))
+        assertTrue(repo().findDeleteConflicts(listOf(first,second)).isEmpty())
+        val before=dao.items.single()
+        assertEquals(setOf(local.articleId),repo().prepareDeleteConflictResolutions(listOf(first,second),emptyMap()).outgoingArticleIds)
+        assertEquals(before,dao.items.single())
+        assertEquals(1,repo().findDeleteConflicts(listOf(first.copy(favoriteChangedAt=future+200,deletedAt=future+200))).size)
+    }
+
+    @Test fun aliasMigrationNeverReplacesNewerCanonicalDecisionWithOlderLegacyReceipt() = runBlocking {
+        val url="https://example.com/receipt-order";val legacy=WebArticleImporter.stableArticleId(url);val canonical=WebArticleImporter.sha256("real-guid")
+        val future=9_000_000_000_000L
+        val old=article(legacy,url=url,rssSourceUrl="https://example.com/feed",favoriteSaved=true,favoriteChangedAt=future)
+        val dao=FakePhoneArticleDao().apply{items=listOf(old)};val meta=ConflictMetaDao()
+        fun repo()=PhoneCompanionRepository(FakePhoneSavedItemDao(),dao,FakePhoneRssSourceDao(),"test-phone",appMetaDao=meta)
+        val deletion=old.copy(sourceDeviceId="watch",deleted=true,deletedAt=100)
+        repo().prepareDeleteConflictResolutions(listOf(deletion.toManifestEntry()),mapOf(legacy to PhoneSyncConflictResolution.KEEP_PHONE))
+        val next=old.copy(articleId=canonical,updatedAt=future+100,favoriteChangedAt=future+100)
+        dao.items=dao.items+next
+        val canonicalDelete=next.copy(sourceDeviceId="watch",deleted=true,deletedAt=future+200)
+        repo().prepareDeleteConflictResolutions(listOf(canonicalDelete.toManifestEntry()),mapOf(canonical to PhoneSyncConflictResolution.KEEP_PHONE))
+        val receipt=meta.getString("article_conflict_decision_v1:$canonical")
+        repo().acceptBluetoothAliases(listOf(canonicalDelete.toManifestEntry().copy(legacyArticleIds=listOf(legacy))))
+        assertEquals(receipt,meta.getString("article_conflict_decision_v1:$canonical"))
+        assertTrue(repo().findDeleteConflicts(listOf(canonicalDelete.toManifestEntry())).isEmpty())
+    }
+
+    @Test fun missingConflictAnswerDoesNotSilentlyChooseLatest() = runBlocking {
+        val local = article("unanswered", favoriteSaved = true)
+        val dao = FakePhoneArticleDao().apply { items = listOf(local) }
+        val remote = local.copy(deleted = true, deletedAt = 200).toManifestEntry()
+        val repository = PhoneCompanionRepository(FakePhoneSavedItemDao(), dao, FakePhoneRssSourceDao(), "phone", appMetaDao = ConflictMetaDao())
+        assertTrue(runCatching { repository.prepareDeleteConflictResolutions(listOf(remote), emptyMap()) }.isFailure)
+        assertEquals(local, dao.items.single())
+        assertEquals(1, repository.findDeleteConflicts(listOf(remote)).size)
+    }
+
+    private class ConflictMetaDao : AppMetaDao {
+        private val values = linkedMapOf<String, String>()
+        override suspend fun getString(key: String) = values[key]
+        override fun observeString(key: String): Flow<String?> = flowOf(values[key])
+        override suspend fun set(entity: AppMetaEntity) { values[entity.key] = entity.value }
+        override suspend fun setIfAbsent(entity: AppMetaEntity) { values.putIfAbsent(entity.key, entity.value) }
+        override suspend fun getAll() = values.map { AppMetaEntity(it.key, it.value) }
+        override suspend fun deleteAll() { values.clear() }
     }
 
     @Test
@@ -2451,7 +2615,10 @@ class PhoneCompanionRepositoryTest {
     private class FakeSyncChangeLogDao(
         private var maxSeq: Long
     ) : SyncChangeLogDao {
+        private val changes = mutableListOf<SyncChangeLogEntity>()
+        override suspend fun lastConflictResolution(articleId: String) = changes.filter { it.entityId == articleId && it.reason == "conflictResolution" }.maxOfOrNull { it.changedAt }
         override suspend fun insert(change: SyncChangeLogEntity): Long {
+            changes += change
             maxSeq += 1L
             return maxSeq
         }
@@ -2468,6 +2635,7 @@ class PhoneCompanionRepositoryTest {
         ): List<SyncChangeLogEntityState> = emptyList()
 
         override suspend fun deleteAll() {
+            changes.clear()
             maxSeq = 0L
         }
     }

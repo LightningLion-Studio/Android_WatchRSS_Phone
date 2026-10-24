@@ -371,6 +371,50 @@ class ReaderPresetRepository(
     suspend fun inspectBackground(uri: Uri): ReaderBackgroundImportInspection =
         resourceStore.inspectBackground(uri)
 
+    /** A missing original is still deletable: sync metadata and its tombstone, never open it. */
+    suspend fun deleteBackground(id: String) = database.withTransaction {
+        val current = dao.backgroundById(id) ?: return@withTransaction
+        if (!current.deleted) {
+            val timestamp = nextTimestamp(maxOf(
+                current.updatedAt,
+                dao.allPresetRecords().maxOfOrNull { it.updatedAt } ?: 0L,
+                dao.allDeletions().filter { it.kind == DELETION_KIND_BACKGROUND && it.entityId == id }
+                    .maxOfOrNull { it.deletedAt } ?: 0L
+            ))
+            dao.upsertBackground(current.copy(updatedAt = timestamp, modifiedBy = deviceId, deleted = true))
+            dao.upsertDeletion(ReaderDeletionEntity(DELETION_KIND_BACKGROUND, id, timestamp, deviceId))
+        }
+        reconcileDeletedBackgrounds()
+    }
+
+    /** Also handles a peer's tombstone without an accompanying asset/preset entity. */
+    private suspend fun reconcileDeletedBackgrounds() {
+        val deletions = dao.allDeletions().filter { it.kind == DELETION_KIND_BACKGROUND }
+            .associateBy { it.entityId }
+        val assets = dao.allBackgroundRecords().associateBy { it.id }
+        val removed = mutableMapOf<String, Long>()
+        assets.values.forEach { asset ->
+            val deletion = deletions[asset.id]
+            if (asset.deleted) removed[asset.id] = maxOf(asset.updatedAt, deletion?.deletedAt ?: 0L)
+            else if (deletion != null && deletion.deletedAt >= asset.updatedAt) {
+                dao.upsertBackground(asset.copy(deleted = true, updatedAt = deletion.deletedAt, modifiedBy = deletion.deletedBy))
+                removed[asset.id] = deletion.deletedAt
+            }
+        }
+        deletions.values.filter { it.entityId !in assets }.forEach { removed[it.entityId] = it.deletedAt }
+        if (removed.isEmpty()) return
+        dao.allPresetRecords().filterNot { it.deleted }.forEach { record ->
+            val preset = runCatching { ReaderPresetCodec.decode(record.payloadJson) }.getOrNull() ?: return@forEach
+            val ids = listOfNotNull(preset.background.assetId, preset.background.posterAssetId).filter { it in removed }
+            if (ids.isEmpty()) return@forEach
+            val cleared = ids.fold(preset) { value, id -> value.withoutBackground(id) }
+            dao.upsertPreset(cleared.copy(
+                updatedAt = nextTimestamp(maxOf(record.updatedAt, ids.maxOf { removed.getValue(it) })),
+                modifiedBy = deviceId
+            ).toEntity())
+        }
+    }
+
     suspend fun importBackground(
         uri: Uri,
         mode: ReaderBackgroundImportMode = ReaderBackgroundImportMode.KEEP_ORIGINAL,
@@ -521,7 +565,14 @@ class ReaderPresetRepository(
                 val local = dao.backgroundById(incoming.id)
                 if (local == null || incoming.winsOver(local)) dao.upsertBackground(incoming)
             }
-            dao.upsertDeletions(deletions)
+            val existingDeletions = dao.allDeletions().associateBy { it.kind to it.entityId }
+            dao.upsertDeletions(deletions.filter { incoming ->
+                val old = existingDeletions[incoming.kind to incoming.entityId]
+                incoming.kind != DELETION_KIND_BACKGROUND || old == null ||
+                    incoming.deletedAt > old.deletedAt ||
+                    (incoming.deletedAt == old.deletedAt && incoming.deletedBy > old.deletedBy)
+            })
+            reconcileDeletedBackgrounds()
         }
     }
 
@@ -948,6 +999,12 @@ internal fun ReaderPreset.referencesFont(id: String): Boolean =
         listOf(title, subtitle, quote, code, link).any {
             it.useOwnFont && it.fontAssetId == id
         }
+
+internal fun ReaderPreset.withoutBackground(id: String): ReaderPreset = when {
+    background.assetId == id -> copy(background = ReaderBackground(colorArgb = background.colorArgb))
+    background.posterAssetId == id -> copy(background = background.copy(posterAssetId = null))
+    else -> this
+}
 
 internal fun ReaderPreset.withoutFont(id: String): ReaderPreset {
     fun ReaderTextStyleOverride.cleared(): ReaderTextStyleOverride =

@@ -882,6 +882,8 @@ class MainViewModel(
     ) {
         viewModelScope.launch {
             if (sessionState.value.isBusy) return@launch
+            bluetoothSyncManager.foregroundSyncStarted()
+            try {
             val startMessage = when (mode) {
                 LibrarySyncMode.PHONE_TO_WATCH_REPLACE -> "正在准备让手机覆盖手表"
                 LibrarySyncMode.WATCH_TO_PHONE_REPLACE -> "正在准备让手表覆盖手机"
@@ -964,6 +966,7 @@ class MainViewModel(
                     )
                 }
             }
+            } finally {bluetoothSyncManager.foregroundSyncFinished()}
         }
     }
 
@@ -1182,7 +1185,7 @@ class MainViewModel(
             val readerWarning = result.readerSyncWarning
             val accountWarning = result.accountSyncWarning
             val tokenWarning = result.tokenUsageSyncWarning
-            completeSmoothedSyncProgress()
+            clearSmoothedSyncProgress()
             val message = if (
                 readerWarning == null && accountWarning == null && tokenWarning == null
             ) {
@@ -1246,7 +1249,7 @@ class MainViewModel(
                 errorDetails = error
             )
         }
-        conflictResolutionDeferred?.complete(PhoneSyncConflictResolution.KEEP_LATEST)
+        conflictResolutionDeferred?.cancel()
         conflictResolutionDeferred = null
         sessionState.value = sessionState.value.copy(isBusy = false, conflictPrompt = null)
     }
@@ -1435,7 +1438,7 @@ class MainViewModel(
     private suspend fun resolveDeleteConflicts(
         conflicts: List<PhoneSyncDeleteConflict>
     ): Map<String, PhoneSyncConflictResolution> {
-        conflictResolutionDeferred?.complete(PhoneSyncConflictResolution.KEEP_LATEST)
+        conflictResolutionDeferred?.cancel()
         val deferred = CompletableDeferred<PhoneSyncConflictResolution>()
         conflictResolutionDeferred = deferred
         clearSmoothedSyncProgress()

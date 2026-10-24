@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.data.reader
 import androidx.room.Dao
 import androidx.room.Entity
 import androidx.room.Index
+import androidx.room.Upsert
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
@@ -141,10 +142,10 @@ interface ReaderPresetDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertBackgrounds(entities: List<ReaderBackgroundAssetEntity>)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertDeletion(entity: ReaderDeletionEntity)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertDeletions(entities: List<ReaderDeletionEntity>)
 
     @Query("DELETE FROM reader_deletions WHERE kind = :kind AND entityId = :entityId")

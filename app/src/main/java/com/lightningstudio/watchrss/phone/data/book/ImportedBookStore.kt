@@ -28,6 +28,11 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
     private class IncompleteOriginal(message:String):IllegalArgumentException(message)
     val migrationWarnings=linkedSetOf<String>()
     private fun file(id:String)=File(directory,"$id.jsonl")
+    // Failed registration/verification is not a change to the immutable package domain.
+    private fun temporary(prefix:String):File {
+        val staging=File(directory.absoluteFile.parentFile,".${directory.name}-staging").apply { mkdirs() }
+        return File.createTempFile(prefix,".part",staging)
+    }
     private fun hydrate(row:PhoneArticleEntity):PhoneArticleEntity {
         fun load(value:String):String=if(contentStore?.isMarker(value)==true)contentStore.loadText(value)?:error("导入书正文暂不可用") else value
         return row.copy(contentText=load(row.contentText),contentHtml=row.contentHtml?.let(::load))
@@ -58,7 +63,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             }
             diagnostic("registration:unmapped=${rows.size}:ms=${(System.nanoTime()-started)/1_000_000}")
         }
-        for(book in dao.all().filterNot(::available))try {
+        for(book in dao.all().filter { !available(it) && !JSONObject(it.stateJson).getBoolean("deleted") })try {
             val mappings=dao.chapters(book.bookId);val state=JSONObject(book.stateJson)
             if(mappings.size!=state.getInt("chapterCount"))continue
             val original=mappings.map {requireNotNull(articles.getById(it.articleId))}
@@ -75,7 +80,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         }
         val sourceRow=db.phoneRssSourceDao().getByUrl(metadata.first().rssSourceUrl.orEmpty())
         val title=sourceRow?.takeUnless {it.url==ImportedContentIds.ROOT_SOURCE_URL}?.title?:metadata.first().title
-        directory.mkdirs();val temporary=File.createTempFile("book-",".part",directory)
+        val temporary=temporary("book-")
         val hashes=mutableListOf<String>()
         try {
             temporary.bufferedWriter(Charsets.UTF_8).use {out->
@@ -99,11 +104,11 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             check(db.bookReadingDao().registration()?.registrationRevision==registrationRevision){"书籍在登记期间发生变化，请重试"}
             val existing=dao.get(id)
             if(existing==null) {
-                Files.move(temporary.toPath(),file(id).toPath(),StandardCopyOption.REPLACE_EXISTING)
+                directory.mkdirs();Files.move(temporary.toPath(),file(id).toPath(),StandardCopyOption.REPLACE_EXISTING)
                 db.withTransaction {dao.put(BookEntity(id,BookSync.canonical(state),sha(file(id)),file(id).length()));dao.putChapters(metadata.mapIndexed {i,row->BookChapterEntity(id,i+1,row.articleId)})}
             } else {
                 // Same immutable sequence imported under a new filename: one identity, merge deletion state.
-                if(!available(existing)){Files.move(temporary.toPath(),file(id).toPath(),StandardCopyOption.REPLACE_EXISTING);dao.put(existing.copy(packageSha256=sha(file(id)),packageBytes=file(id).length()))}
+                if(!available(existing)){directory.mkdirs();Files.move(temporary.toPath(),file(id).toPath(),StandardCopyOption.REPLACE_EXISTING);dao.put(existing.copy(packageSha256=sha(file(id)),packageBytes=file(id).length()))}
                 merge(state)
                 val mappings=dao.chapters(id)
                 if(mappings.isEmpty())dao.putChapters(metadata.mapIndexed{i,row->BookChapterEntity(id,i+1,row.articleId)})
@@ -121,6 +126,10 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
     }
     suspend fun manifests():List<JSONObject> {ensureRegistered();return dao.all().map{JSONObject(it.stateJson).put("contentAvailable",available(it))}}
     suspend fun states():List<JSONObject> {ensureRegistered();return dao.all().map{JSONObject(it.stateJson)}}
+    /** Caller has already captured the R46 dirty journal for this window. Do not prepare it twice. */
+    internal suspend fun bluetoothExclusions():Pair<Set<String>,Set<String>> =
+        dao.chapters().mapTo(hashSetOf()){it.articleId} to
+            (dao.all().map{JSONObject(it.stateJson).optString("sourceUrl")}+dao.sourceUrls()).filter{it.isNotBlank()}.toHashSet()
     suspend fun chapterIds():Set<String> {ensureRegistered();return dao.chapters().mapTo(hashSetOf()){it.articleId}}
     suspend fun bookForArticle(id:String,url:String?=null):BookChapterEntity? {
         dao.chapterByArticle(id)?.let{return it}
@@ -343,8 +352,8 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         }
         val h=requireNotNull(header);val state=existing?.let{JSONObject(it.stateJson)}?:JSONObject().put("bookId",id).put("fingerprint",fingerprint).put("title",h.getString("title")).put("chapterCount",hashes.size).put("sourceUrl",h.getString("sourceUrl")).put("kind",h.getString("kind")).put("deletedChapters",JSONArray()).put("deletionClock",0).put("deleted",false).put("deletedAt",0).put("updatedAt",0).put("sourceDeviceId",deviceId)
         require(ImportedContentIds.isImportedContentUrl(h.getString("sourceUrl")))
-        directory.mkdirs();val tmp=File.createTempFile("received-",".part",directory);input.copyTo(tmp,true)
-        val packageHash=sha(tmp);val bytes=tmp.length();Files.move(tmp.toPath(),file(id).toPath(),StandardCopyOption.REPLACE_EXISTING)
+        val tmp=temporary("received-");input.copyTo(tmp,true)
+        val packageHash=sha(tmp);val bytes=tmp.length();directory.mkdirs();Files.move(tmp.toPath(),file(id).toPath(),StandardCopyOption.REPLACE_EXISTING)
         var changed=0
         db.withTransaction {
             checkOwner()

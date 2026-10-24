@@ -86,6 +86,7 @@ internal inline fun <T> decodeCloudObject(snapshotId: String, name: String, deco
     catch (_: org.json.JSONException) { throw CloudObjectParseException(cloudObjectDiagnosticId(snapshotId,name)) }
     catch (_: java.util.zip.ZipException) { throw CloudObjectParseException(cloudObjectDiagnosticId(snapshotId,name)) }
     catch (_: java.io.EOFException) { throw CloudObjectParseException(cloudObjectDiagnosticId(snapshotId,name)) }
+    catch (isolation:CloudFormatIsolationException) { throw CloudFormatUpgradeRequired(isolation.reason) }
     catch (_: IllegalArgumentException) { throw CloudObjectParseException(cloudObjectDiagnosticId(snapshotId,name)) }
 
 internal fun cloudPrivateObjectWarning(snapshotId: String, name: String, error: Exception): CloudRestoreWarning {

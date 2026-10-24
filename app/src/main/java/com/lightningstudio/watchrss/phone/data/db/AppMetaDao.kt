@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.data.db
 
 import androidx.room.Dao
+import androidx.room.Upsert
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
@@ -14,7 +15,7 @@ interface AppMetaDao {
     @Query("SELECT value FROM app_meta WHERE key = :key LIMIT 1")
     fun observeString(key: String): Flow<String?>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun set(entity: AppMetaEntity)
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)

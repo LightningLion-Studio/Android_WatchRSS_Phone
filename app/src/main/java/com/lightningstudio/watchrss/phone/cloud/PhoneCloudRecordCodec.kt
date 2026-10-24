@@ -10,7 +10,35 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /** Wire domains are shared with the mini program; no plaintext body is accepted. */
+internal data class DecodedCloudRecord(val kind:String,val value:JSONObject,val document:CloudRawDocument,val access:CloudFormatAccess) {
+    val first get()=kind
+    val second get()=value
+}
 internal object PhoneCloudRecordCodec {
+    val kinds=setOf("article","source","rss-state","book","book-reading")
+    val rootFields=setOf("format","version","kind","value","features")
+    fun knownFields(kind:String):Set<String> = when(kind) {
+        "rss-state"->CloudContentPolicy.interactionNumbers.toSet()+CloudContentPolicy.interactionBooleans+setOf("sourceId","articleIdHash","readingProgress","readingPositionContentHash","sourceDeviceId")
+        "book"->setOf("bookId","fingerprint","title","chapterCount","deletedChapters","deletionClock","deleted","deletedAt","updatedAt","sourceDeviceId","sourceUrl","kind")
+        "book-reading"->setOf("bookId","chapterIndex","isRead","readingProgress","readingPositionBytes","readingPositionContentHash","readingPositionChangedAt","sourceDeviceId","favoriteSaved","favoriteChangedAt","favoriteSortOrder","favoriteSourceDeviceId","watchLaterSaved","watchLaterChangedAt","watchLaterSortOrder","watchLaterSourceDeviceId")
+        "source"->setOf("url","sourceId","title","description","siteUrl","imageUrl","createdAt","updatedAt","sortOrder","isPinned","deleted","deletedAt","sourceDeviceId","useOriginalContent","continuePlaybackInBackground","localOnly","titleBinding")
+        else->setOf("articleId","sourceDeviceId","url","title","siteName","excerpt","imageUrl","contentHash","importedAt","updatedAt","independentSaved","independentChangedAt","independentSortOrder","rssSourceUrl","rssSourceTitle","favoriteSaved","favoriteChangedAt","favoriteSortOrder","watchLaterSaved","watchLaterChangedAt","watchLaterSortOrder","deleted","deletedAt","readingProgress","isRead","readingPositionBytes","readingPositionContentHash","readingPositionChangedAt","rssIndexRetired","bookIndexRetired","titleBinding")
+    }
+    fun knownValue(kind:String,value:JSONObject)=JSONObject().also {out->knownFields(kind).filter(value::has).forEach{out.put(it,value.get(it))}}
+    fun documentAccess(document:CloudRawDocument):CloudFormatAccess {
+        val kind=document.json().optString("kind")
+        if(kind !in kinds)return CloudFormatAccess.OPAQUE
+        return CloudFormatR48.access(document,unknownBytes=document.unknownBytes(emptyList(),rootFields)+document.unknownBytes(listOf("value"),knownFields(kind)))
+    }
+    fun patchDocument(kind:String,value:JSONObject,baseline:CloudRawDocument?):CloudRawDocument {
+        if(baseline==null)return CloudRawDocument.parse(canonical(JSONObject().put("format","watchrss-rss-record").put("version",1).put("kind",kind).put("value",value)))
+        if(documentAccess(baseline)!=CloudFormatAccess.WRITABLE)throw CloudFormatUpgradeRequired("record_read_only")
+        require(baseline.json().getString("kind")==kind)
+        val patch=knownValue(kind,value)
+        val features=baseline.json().optJSONObject("features")?.optJSONArray("roCompat")
+        if(features!=null&&(0 until features.length()).any{features.getString(it)=="r48.title-bound.v1"})patch.put("titleBinding",CloudFormatR48.titleBinding(value))
+        return baseline.merge(listOf("value"),patch)
+    }
     private fun key(accountKey: ByteArray, user: String, domain: String) =
         CloudSnapshotCodec.hkdfSha256(accountKey, user.toByteArray(Charsets.UTF_8), domain.toByteArray(Charsets.UTF_8), 32)
     fun id(accountKey: ByteArray, user: String, kind: String, value: JSONObject): String {
@@ -30,7 +58,8 @@ internal object PhoneCloudRecordCodec {
         null, JSONObject.NULL -> "null"
         else -> value.toString()
     }
-    fun hash(kind: String, value: JSONObject): String {
+    fun hash(kind: String, input: JSONObject): String {
+        val value=knownValue(kind,input)
         if (kind == "rss-state") {
             val normalized = JSONObject(value.toString()).apply {
                 remove("sourceDeviceId")
@@ -66,9 +95,9 @@ internal object PhoneCloudRecordCodec {
         if(kind=="book") {com.lightningstudio.watchrss.phone.data.book.BookSync.validate(value);return}
         if(kind=="book-reading") {com.lightningstudio.watchrss.phone.data.book.BookSync.validateReading(value);return}
         if (kind == "rss-state") {
+            require(listOf("title","url","excerpt","imageUrl","rssSourceUrl","contentHash","updatedAt").none(value::has)) { "交互记录不得携带公共索引字段" }
             require(value.getString("sourceId").isNotBlank())
             require(value.getString("articleIdHash").matches(Regex("[0-9a-f]{64}")))
-            require(value.keys().asSequence().all { it in CloudContentPolicy.interactionNumbers + CloudContentPolicy.interactionBooleans + listOf("sourceId", "articleIdHash", "readingProgress", "readingPositionContentHash", "sourceDeviceId") })
         } else require(value.getString(if (kind == "article") "articleId" else "url").isNotBlank())
         listOf("updatedAt", "deletedAt", "readingPositionChangedAt", "favoriteChangedAt", "watchLaterChangedAt", "independentChangedAt").forEach {
             if (value.has(it)) require(value.get(it) is Number && value.getDouble(it).isFinite() && value.getDouble(it) >= 0)
@@ -77,10 +106,10 @@ internal object PhoneCloudRecordCodec {
         if (value.has("readingProgress")) require(value.get("readingProgress") is Number && value.getDouble("readingProgress") in 0.0..1.0)
     }
     fun encrypt(accountKey: ByteArray, user: String, recordId: String, version: Int, kind: String, value: JSONObject,
-                nonce: ByteArray = ByteArray(12).also(SecureRandom()::nextBytes), idKey: ByteArray = accountKey): JSONObject {
+                nonce: ByteArray = ByteArray(12).also(SecureRandom()::nextBytes), idKey: ByteArray = accountKey, baseline:CloudRawDocument? = null): JSONObject {
         validate(kind, value)
         require(id(idKey, user, kind, value) == recordId)
-        val plaintext = canonical(JSONObject().put("format", "watchrss-rss-record").put("version", 1).put("kind", kind).put("value", value)).toByteArray(Charsets.UTF_8)
+        val plaintext = patchDocument(kind,value,baseline).source.toByteArray(Charsets.UTF_8)
         require(plaintext.size + 16 <= 64 * 1024) { "单条云状态过大" }
         val derived = key(accountKey, user, "watchrss/cloud/record/v1")
         return try {
@@ -93,6 +122,11 @@ internal object PhoneCloudRecordCodec {
         } finally { derived.fill(0); plaintext.fill(0) }
     }
     fun decrypt(accountKey: ByteArray, user: String, recordId: String, envelope: JSONObject, idKeys: List<ByteArray> = listOf(accountKey)): Pair<String, JSONObject> {
+        val decoded=decryptDocument(accountKey,user,recordId,envelope,idKeys)
+        if(decoded.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED))throw CloudFormatUpgradeRequired("record_opaque")
+        return decoded.kind to decoded.value
+    }
+    fun decryptDocument(accountKey: ByteArray, user: String, recordId: String, envelope: JSONObject, idKeys: List<ByteArray> = listOf(accountKey)): DecodedCloudRecord {
         require(envelope.getString("algorithm") == "A256GCM")
         val version = envelope.getInt("keyVersion")
         val nonce = Base64.getDecoder().decode(envelope.getString("nonceBase64"))
@@ -108,12 +142,19 @@ internal object PhoneCloudRecordCodec {
             }
         } finally { derived.fill(0) }
         try {
-            val root = JSONObject(plaintext.toString(Charsets.UTF_8))
+            val document=CloudRawDocument.parse(plaintext)
+            val root = document.json()
             require(root.getString("format") == "watchrss-rss-record" && root.getInt("version") == 1)
-            val kind = root.getString("kind"); val value = root.getJSONObject("value")
-            validate(kind, value)
-            if (kind in setOf("article", "source", "rss-state", "book", "book-reading")) require(idKeys.any { id(it, user, kind, value) == recordId })
-            return kind to value
+            val kind = root.getString("kind");val access=documentAccess(document)
+            val value = root.optJSONObject("value") ?: JSONObject()
+            if(access !in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED)) {
+                validate(kind, value)
+                require(idKeys.any { id(it, user, kind, value) == recordId })
+                val ro=root.optJSONObject("features")?.optJSONArray("roCompat")
+                if(ro!=null&&(0 until ro.length()).any{ro.getString(it)=="r48.title-bound.v1"})require(value.getJSONObject("titleBinding").getString("sha256")==CloudFormatR48.titleBinding(value).getString("sha256"))
+            }
+            return DecodedCloudRecord(kind,value,document,access)
+        } catch (isolation:CloudFormatIsolationException) { throw isolation
         } catch (_: Exception) {
             // JSON errors may quote decrypted data. Never attach the original
             // message/cause to an exception observed by global telemetry.

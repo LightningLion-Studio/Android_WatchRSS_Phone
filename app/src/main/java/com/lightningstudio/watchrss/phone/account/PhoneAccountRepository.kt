@@ -178,6 +178,7 @@ class PhoneAccountRepository(
     private suspend fun saveCompletedLogin(progress: LoginProgress) {
         progress.session?.let { next ->
             session.value?.takeIf { it.userId != next.userId }?.let(onClearCloudState)
+            sessionStore.clearBluetoothGrants()
             sessionStore.save(next)
         }
     }
@@ -267,12 +268,43 @@ class PhoneAccountRepository(
         return token
     }
 
+    private fun bluetoothGrantKey(watch:String)=com.lightningstudio.watchrss.phone.data.ble.BleDomainStore.hash("${environment.backendBaseUrl}\n${session.value?.userId}\n$watch")
+    private suspend fun validBluetoothGrant(watch:String):JSONObject? {
+        val current=session.value?:return null
+        return sessionStore.bluetoothGrant(bluetoothGrantKey(watch))?.takeIf {
+            val a=it.optJSONObject("account")
+            a?.optString("userId")==current.userId && a.optString("phoneMasked")==current.phoneMasked &&
+                a.optLong("accessTokenExpiresAt")>System.currentTimeMillis()+300_000
+        }
+    }
+    // A cached token may only be replayed while the peer still has the state acknowledged with it.
+    // A watch can refresh/revoke its own credentials independently of this phone.
+    internal suspend fun prepareBluetoothAccount(watch:String,remoteRoot:String?) {
+        val key=bluetoothGrantKey(watch)
+        val marker=sessionStore.bluetoothGrant("$key:peer")
+        val grant=sessionStore.bluetoothGrant(key)
+        if(grant!=null && (remoteRoot==null || marker?.optString("root")!=remoteRoot || marker?.optString("grant")!=com.lightningstudio.watchrss.phone.data.ble.BleDomainStore.hash(grant.toString())))
+            sessionStore.removeBluetoothGrant(key)
+    }
+    internal suspend fun acknowledgeBluetoothAccount(watch:String,remoteRoot:String) {
+        val key=bluetoothGrantKey(watch);val grant=validBluetoothGrant(watch)?:return
+        sessionStore.saveBluetoothGrant("$key:peer",JSONObject().put("root",remoteRoot).put("grant",com.lightningstudio.watchrss.phone.data.ble.BleDomainStore.hash(grant.toString())))
+    }
+
+    internal suspend fun bluetoothAccountWitness(watch:String):String? {
+        val current=session.value?:return null
+        if(!hasUsableSession)return null
+        val grant=validBluetoothGrant(watch)
+        return com.lightningstudio.watchrss.phone.data.ble.BleDomainStore.hash("${current.userId}\n${current.phoneMasked}\n${grant?.toString()?:"unissued"}")
+    }
+
     suspend fun buildAccountSyncRequest(
         watchDeviceId: String,
         watchInstallId: String? = null,
         watchDisplayName: String? = null
     ): JSONObject {
         val session = session.value ?: error("请先在手机端登录腕上RSS账号")
+        validBluetoothGrant(watchDeviceId)?.let{return it}
         val token = accountClient.issueWatchDeviceToken(
             session = session,
             phoneDeviceId = phoneDeviceId,
@@ -280,7 +312,7 @@ class PhoneAccountRepository(
             watchInstallId = watchInstallId,
             displayName = watchDisplayName
         )
-        return JSONObject().apply {
+        val request=JSONObject().apply {
             put("version", 1)
             put("action", "syncAccount")
             put("deviceId", phoneDeviceId)
@@ -310,5 +342,8 @@ class PhoneAccountRepository(
                 put("sampleRate", 1.0)
             })
         }
+        check(this.session.value?.userId==session.userId){"手机账号已变化，请重新同步"}
+        sessionStore.saveBluetoothGrant(bluetoothGrantKey(watchDeviceId),request)
+        return request
     }
 }

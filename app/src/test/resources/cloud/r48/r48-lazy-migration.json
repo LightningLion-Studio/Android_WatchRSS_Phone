@@ -1,0 +1,36 @@
+{
+  "protocol": "watchrss-r48",
+  "vectorVersion": 1,
+  "warning": "PUBLIC SYNTHETIC TEST SECRETS. NEVER USE IN PRODUCTION.",
+  "readOnlyFormats": [
+    "WRSSCM2",
+    "WRSSCM3",
+    "WRSSCC2",
+    "wrss-1",
+    "wrss-2",
+    "wrss-3",
+    "relay-13",
+    "relay-14",
+    "rss-state-1",
+    "book-1",
+    "notes-1",
+    "reader-key-1"
+  ],
+  "zeroMigrationEvents": [
+    "startup",
+    "cache-loss",
+    "ADD-COLUMN",
+    "local-schema-version",
+    "R47-definition-change"
+  ],
+  "editedObjectsOnly": true,
+  "missingUnknownDoesNotDelete": true,
+  "destructiveChangeRequiresRuling": true,
+  "preserve": [
+    "bookId",
+    "originalFingerprint",
+    "chapterDirectory",
+    "deletedChapters",
+    "readingClocks"
+  ]
+}

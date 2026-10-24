@@ -104,7 +104,7 @@ internal object WatchRssBackupArchive {
         readerResourceStore: ReaderResourceStore? = null,
         tolerateCloudEntries: Boolean = false
     ): WatchRssBackupSnapshot {
-        val (entries,bookFiles) = runCatching { readEntries(input) }
+        val (entries,bookFiles) = runCatching { readEntries(input,tolerateCloudEntries) }
             .getOrElse { throwable ->
                 if (throwable is IllegalArgumentException) throw throwable
                 throw IllegalArgumentException("WRSS 文件损坏或无法读取", throwable)
@@ -118,28 +118,51 @@ internal object WatchRssBackupArchive {
             }
     }
 
-    private fun readEntries(input: InputStream): Pair<Map<String, ByteArray>,Map<String,File>> {
+    private fun isKnownEntry(name:String)=name in ALL_KNOWN_METADATA_ENTRIES||BODY_ENTRY_PATTERN.matches(name)||READER_RESOURCE_PATTERN.matches(name)||BOOK_ENTRY_PATTERN.matches(name)
+
+    /** A real edit to a legacy WRSS object may replace known entries, never future entries. */
+    internal fun preserveUnknownEntries(original:ByteArray,replacement:File) {
+        val temporary=File.createTempFile("wrss-compatible-",".part",replacement.parentFile)
+        val seen=hashSetOf<String>();var total=0L
+        fun copy(zip:ZipInputStream,out:ZipOutputStream,entry:ZipEntry,emit:Boolean) {
+            require(isSafeEntryName(entry.name)&&!entry.isDirectory)
+            if(emit){require(seen.add(entry.name)&&seen.size<=MAX_ENTRY_COUNT);out.putNextEntry(ZipEntry(entry.name).apply{time=0})}
+            val buffer=ByteArray(8192);var length=0L
+            while(true){val count=zip.read(buffer);if(count<0)break;length+=count;total+=count
+                require(length<=MAX_ENTRY_BYTES&&total<=MAX_EXPANDED_BYTES);if(emit)out.write(buffer,0,count)}
+            zip.closeEntry();if(emit)out.closeEntry()
+        }
+        try {
+            ZipOutputStream(temporary.outputStream().buffered()).use{out->
+                ZipInputStream(replacement.inputStream().buffered()).use{zip->while(true){val e=zip.nextEntry?:break;copy(zip,out,e,true)}}
+                ZipInputStream(original.inputStream()).use{zip->val originalSeen=hashSetOf<String>();while(true){val e=zip.nextEntry?:break;require(originalSeen.add(e.name))
+                    if(!isKnownEntry(e.name)&&e.name in seen)throw com.lightningstudio.watchrss.phone.cloud.CloudFormatUpgradeRequired("archive_unknown_entry_conflict")
+                    copy(zip,out,e,!isKnownEntry(e.name))}}
+            }
+            java.nio.file.Files.move(temporary.toPath(),replacement.toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        }finally{temporary.delete()}
+    }
+
+    private fun readEntries(input: InputStream, allowUnknown:Boolean=false): Pair<Map<String, ByteArray>,Map<String,File>> {
         val bookFiles=linkedMapOf<String,File>()
         val entries = linkedMapOf<String, ByteArray>()
         var expandedBytes = 0L
+        val seen=hashSetOf<String>()
         try { ZipInputStream(BufferedInputStream(input)).use { zip ->
             while (true) {
                 val entry = zip.nextEntry ?: break
                 require(!entry.isDirectory) { "WRSS 中不允许目录条目" }
                 val name = entry.name
                 require(isSafeEntryName(name)) { "WRSS 包含不安全路径：$name" }
-                require(
-                    name in ALL_KNOWN_METADATA_ENTRIES ||
-                        BODY_ENTRY_PATTERN.matches(name) ||
-                        READER_RESOURCE_PATTERN.matches(name) || BOOK_ENTRY_PATTERN.matches(name)
-                ) {
+                val known=isKnownEntry(name)
+                require(known || allowUnknown) {
                     "WRSS 包含未知条目：$name"
                 }
-                require(name !in entries && name !in bookFiles) { "WRSS 包含重复条目：$name" }
-                require(entries.size+bookFiles.size < MAX_ENTRY_COUNT) { "WRSS 条目数量过多" }
+                require(seen.add(name)) { "WRSS 包含重复条目：$name" }
+                require(seen.size < MAX_ENTRY_COUNT) { "WRSS 条目数量过多" }
 
                 val bookFile=if(BOOK_ENTRY_PATTERN.matches(name))File.createTempFile("wrss-book-",".jsonl").also{bookFiles[name]=it} else null
-                val output:OutputStream=bookFile?.outputStream()?:ByteArrayOutputStream()
+                val output:OutputStream=if(!known)object:OutputStream(){override fun write(b:Int)=Unit;override fun write(b:ByteArray,off:Int,len:Int)=Unit}else bookFile?.outputStream()?:ByteArrayOutputStream()
                 val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                 var entryBytes = 0L
                 output.use { while (true) {

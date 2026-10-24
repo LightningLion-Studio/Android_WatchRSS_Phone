@@ -1204,6 +1204,8 @@ object LibrarySyncPayload {
         }
     }
 
+    internal fun encodeManifestEntry(entry:ArticleSyncManifestEntry):JSONObject=entry.toJson()
+
     private fun ArticleSyncManifestEntry.toJson(): JSONObject {
         return JSONObject().apply {
             put("articleId", articleId)

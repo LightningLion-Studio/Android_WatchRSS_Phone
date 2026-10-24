@@ -18,7 +18,7 @@ data class BookSourceRef(val bookId:String,val sourceUrl:String)
     @Query("SELECT c.bookId,a.rssSourceUrl AS sourceUrl FROM imported_book_chapters c JOIN phone_articles a ON a.articleId=c.articleId WHERE a.rssSourceUrl IS NOT NULL GROUP BY c.bookId,a.rssSourceUrl") suspend fun mappedSources():List<BookSourceRef>
     @Query("SELECT * FROM imported_books ORDER BY bookId") suspend fun all():List<BookEntity>
     @Query("SELECT * FROM imported_books WHERE bookId=:id") suspend fun get(id:String):BookEntity?
-    @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun put(value:BookEntity)
+    @Upsert suspend fun put(value:BookEntity)
     @Query("SELECT * FROM imported_book_chapters ORDER BY bookId,chapterIndex") suspend fun chapters():List<BookChapterEntity>
     @Query("SELECT * FROM imported_book_chapters WHERE bookId=:id ORDER BY chapterIndex") suspend fun chapters(id:String):List<BookChapterEntity>
     @Query("SELECT * FROM imported_book_chapters WHERE articleId=:id LIMIT 1") suspend fun chapterByArticle(id:String):BookChapterEntity?
@@ -33,7 +33,7 @@ data class BookSourceRef(val bookId:String,val sourceUrl:String)
     @Query("SELECT * FROM imported_book_reading WHERE bookId=:id ORDER BY chapterIndex") suspend fun readingForBook(id:String):List<BookReadingEntity>
     @Query("SELECT * FROM imported_book_reading ORDER BY bookId,chapterIndex") suspend fun reading():List<BookReadingEntity>
     @Query("SELECT * FROM imported_book_reading WHERE bookId=:id AND chapterIndex=:index") suspend fun reading(id:String,index:Int):BookReadingEntity?
-    @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun putReading(row:BookReadingEntity)
+    @Upsert suspend fun putReading(row:BookReadingEntity)
     @Query("DELETE FROM imported_book_reading") suspend fun clearReading()
     @Query("DELETE FROM imported_book_chapters") suspend fun clearChapters()
     @Query("DELETE FROM imported_books") suspend fun clearBooks()

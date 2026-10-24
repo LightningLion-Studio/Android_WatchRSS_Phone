@@ -551,5 +551,30 @@ class BleSyncV2RegressionTest {
         manager.syncAll(device,reusableSession=first)
         assertEquals(listOf("manifest","delta"),payloads().filter{it.optString("action")=="syncNotes"}.map{it.getString("phase")})
     }
+    @Test fun readerPullsRecoverableOriginalBeforePushingOtherResources()=runBlocking<Unit> {
+        val a="peer font".toByteArray();val b="phone font".toByteArray()
+        fun font(bytes:ByteArray):com.lightningstudio.watchrss.phone.data.reader.ReaderFontAssetEntity {
+            val sha=CloudSnapshotCodec.sha256(bytes)
+            return com.lightningstudio.watchrss.phone.data.reader.ReaderFontAssetEntity(sha,sha,"font","font","$sha.ttf","font/ttf",bytes.size.toLong(),1,"{}",1,"phone",false)
+        }
+        val fa=font(a);val fb=font(b);db.readerPresetDao().upsertFonts(listOf(fa,fb));reader.resourceStore.targetFontFile(fb.fileName).writeBytes(b)
+
+        val snapshot=reader.exportSnapshot()
+        fun reply(missing:Boolean)=ReaderPresetSyncPayload.buildManifest(snapshot,"watch").put("success",true).put("missingResources",JSONArray().apply{if(missing)put(JSONObject().put("kind","font").put("fileName",fb.fileName).put("sha256",fb.sha256).put("byteCount",fb.byteCount))})
+        val pull=ok("syncReader","pullResource").put("kind","font").put("fileName",fa.fileName).put("totalBytes",a.size).put("chunkIndex",0).put("chunkCount",1).put("chunkSha256",fa.sha256).put("data",java.util.Base64.getEncoder().encodeToString(a))
+        val push=ok("syncReader","pushResource").put("received",true).put("chunkSha256",fb.sha256).put("applied",true)
+        val s=session(reply(true),pull,push,reply(false));var applied=0
+        assertTrue(manager.syncReaderPresets(device.address,"reader-recovery",s,BleSyncBindingSnapshot(device.address,"owner",s,ok("syncLibrary").advertiseBleSyncV2()),onLocalApplied={applied+=it}))
+        assertEquals(listOf("manifest","pullResource","pushResource","manifest"),payloads().map{it.getString("phase")});assertArrayEquals(a,reader.resourceStore.fontFile(fa.fileName)!!.readBytes());assertEquals(1,applied);s.close()
+    }
+    @Test fun missingOriginalOnBothPeersIsPreservedWithActionableWarning()=runBlocking<Unit> {
+        val sha="a".repeat(64)
+        val font=com.lightningstudio.watchrss.phone.data.reader.ReaderFontAssetEntity(sha,sha,"missing","font","$sha.ttf","font/ttf",4,1,"{}",1,"phone",false)
+        db.readerPresetDao().upsertFont(font)
+        val reply=ReaderPresetSyncPayload.buildManifest(reader.exportSnapshot(),"watch").put("success",true).put("missingResources",JSONArray().put(JSONObject().put("kind","font").put("fileName",font.fileName).put("sha256",sha).put("byteCount",4)))
+        val s=session(reply)
+        val failure=runCatching{manager.syncReaderPresets(device.address,"reader-missing",s,BleSyncBindingSnapshot(device.address,"owner",s,ok("syncLibrary")))}.exceptionOrNull()
+        assertTrue(failure?.message.orEmpty().contains("两端均缺少字体"));assertTrue(failure?.message.orEmpty().contains("aaaaaaaa"));assertTrue(failure?.message.orEmpty().contains("重新导入"));assertEquals(1,payloads().size);assertFalse(db.readerPresetDao().fontById(sha)!!.deleted);s.close()
+    }
 
 }

@@ -118,6 +118,19 @@ class CloudSlimSnapshotRegressionTest {
         CloudSnapshotCodec.sha256(body.toByteArray()),10,10,private,if(private)10 else 0,0,if(private)null else "https://feed.test/rss",null,
         false,0,0,false,0,0,false,0)
 
+    @Test fun r48LazyFormatFixtureRetainsRealRelay13And14ReadersWithoutCloudWrites()=runBlocking<Unit> {
+        val shared=JSONObject(requireNotNull(javaClass.getResource("/cloud/r48/r48-lazy-migration.json")).readText())
+        val formats=shared.getJSONArray("readOnlyFormats")
+        for(version in listOf(13,14)) {
+            assertTrue((0 until formats.length()).any{formats.getString(it)=="relay-$version"})
+            val f=fixture();val row=article("relay-$version",private=true)
+            val payload=com.lightningstudio.watchrss.phone.connection.bluetooth.LibrarySyncPayload.buildResponse("watch",listOf(row)).put("version",version).toString().toByteArray()
+            assertEquals(1,f.backup.restoreCloudRelayLibrary(payload))
+            assertEquals(row.contentText,f.repository.getArticle(row.articleId)!!.contentText);assertEquals(0,f.server.writes)
+            val rss=CloudRssStateCodec.encode(listOf(row),0)
+            assertEquals(row.articleId,CloudRssStateCodec.decode(rss).single().articleId)
+        }
+    }
     @Test fun backendDedupCasesUseOneLocalIdAndRecordIdentityIncludingGuidOnlyAndMalformedPeerRow()=runBlocking<Unit> {
         val vectors=JSONObject(requireNotNull(javaClass.getResource("/cloud/rss-source-key.json")).readText()).getJSONArray("articleCases")
         fun JSONObject.nullable(name: String): String?=if (!has(name) || isNull(name)) null else getString(name)

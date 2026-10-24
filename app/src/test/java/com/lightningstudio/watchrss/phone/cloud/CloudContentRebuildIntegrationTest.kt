@@ -108,6 +108,8 @@ class CloudContentRebuildIntegrationTest {
         val plans=mutableListOf<JSONObject>()
         val objects=linkedMapOf<String,JSONObject>()
         val uploaded=mutableSetOf<String>()
+        val r48Blobs=linkedMapOf<String,ByteArray>()
+        val r48BlobReads=mutableListOf<String>()
         val latestObjectIds=mutableSetOf<String>()
         val ready=mutableListOf<JSONObject>()
         val recordRows=linkedMapOf<String,JSONObject>()
@@ -119,6 +121,10 @@ class CloudContentRebuildIntegrationTest {
         val client=PhoneCloudClient(env,http=OkHttpClient.Builder().addInterceptor { chain ->
             synchronized(this) {
                 val request=chain.request();val path=request.url.encodedPath
+                if(path.startsWith("/r48-fixture-blob/")) {
+                    val sha=path.substringAfterLast('/');r48BlobReads+=sha
+                    return@addInterceptor Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("fixture").body(r48Blobs.getValue(sha).toResponseBody()).build()
+                }
                 val buffer=okio.Buffer();request.body?.writeTo(buffer)
                 val body=if(request.method=="POST")JSONObject(buffer.readUtf8())else JSONObject()
                 var code=200
@@ -139,6 +145,17 @@ class CloudContentRebuildIntegrationTest {
                         JSONObject().put("items",result)
                     }
                     path.endsWith("/heads") -> JSONObject().put("heads",JSONArray(ready)).put("nextOffset",JSONObject.NULL).put("contentGeneration",generation).put("contentEmpty",ready.isEmpty()&&recordRows.isEmpty())
+                    request.method=="GET" && path.contains("/cloud/snapshots/") -> {
+                        val plan=plans.single{it.getString("snapshotId")==path.substringAfterLast('/')}
+                        val head=JSONObject(ready.single{it.getString("id")==plan.getString("snapshotId")}.toString())
+                        head.put("manifestSignedUrl","https://test.invalid/r48-fixture-blob/"+head.getString("manifestSha256"))
+                        val chunks=JSONArray()
+                        if(request.url.queryParameter("manifestOnly")!="true")for(i in 0 until plan.getJSONArray("chunks").length()) {
+                            val c=plan.getJSONArray("chunks").getJSONObject(i)
+                            chunks.put(JSONObject(c.toString()).put("signedUrl","https://test.invalid/r48-fixture-blob/"+c.getString("sha256")))
+                        }
+                        JSONObject().put("snapshot",head).put("chunks",chunks)
+                    }
                     path.endsWith("/reserve") -> {
                         assertEquals(3,body.getInt("contentLayout"));assertEquals(generation,request.header("x-watchrss-content-generation"));assertTrue(body.getLong("deviceSequence")>sequence)
                         sequence=body.getLong("deviceSequence");plans+=body
@@ -163,7 +180,7 @@ class CloudContentRebuildIntegrationTest {
                         else if(request.header("x-watchrss-content-generation")!=generation){code=409;JSONObject().put("error","cloud_content_rebuild_required")}
                         else {
                             val id=path.substringAfterLast('/');val bytes=buffer.readByteArray();val target=objects.getValue(id)
-                            assertEquals(target.getLong("sizeBytes"),bytes.size.toLong());assertEquals(target.getString("sha256"),CloudSnapshotCodec.sha256(bytes));uploaded+=id
+                            assertEquals(target.getLong("sizeBytes"),bytes.size.toLong());assertEquals(target.getString("sha256"),CloudSnapshotCodec.sha256(bytes));uploaded+=id;r48Blobs[target.getString("sha256")]=bytes
                             if(mutateDuringUpload&&!mutatedDuringUpload){mutatedDuringUpload=true;runBlocking{repository.setRssSourcePinned("http://127.0.0.1/rss",true)}}
                             JSONObject()
                         }
@@ -247,6 +264,35 @@ class CloudContentRebuildIntegrationTest {
         f.service.syncNow();assertEquals(CloudSyncPhase.IDLE,f.service.state.value.phase)
         assertTrue(androidx.work.WorkManager.getInstance(f.context).getWorkInfosForUniqueWork("watchrss-cloud-follow-up").get(5,java.util.concurrent.TimeUnit.SECONDS).any{!it.state.isFinished})
         val second=f.service.syncNow(manual=true);assertFalse(second.snapshotUploaded);assertEquals(1,f.plans.size);assertEquals(CloudSyncPhase.COMPLETE,f.service.state.value.phase)
+    }
+    @Test fun r48CacheLossAndAddColumnDoNotReencryptOrDownloadUnchangedPrivateBody()=runBlocking {
+        val f=fixture();assertTrue(f.service.syncNow().snapshotUploaded)
+        val originalId=f.plans.single().getString("snapshotId");val original=f.cache.loadManifest(f.client.scopeId(session),originalId)!!
+        val puts=f.putCount;val keyBefore=f.keys.getAccountKey(session.userId,1)
+        f.cache.clear(f.client.scopeId(session))
+        f.db.openHelper.writableDatabase.execSQL("ALTER TABLE phone_articles ADD COLUMN r48_test_optional TEXT")
+        f.recordStore.close()
+        f.service=PhoneCloudSyncService(f.context,f.account,f.backup,f.repository,NoteRepository(f.db.noteDao(),"phone"),"phone",f.client,keyManager=f.keys,settings=f.state,cache=f.cache)
+        val next=f.service.syncNow(manual=true)
+        assertFalse(next.snapshotUploaded);assertEquals(0L,next.uploadedBytes);assertEquals(puts,f.putCount);assertEquals(1,f.completed)
+        assertEquals(listOf(CloudSnapshotCodec.sha256(original)),f.r48BlobReads)
+        assertEquals(CloudSyncPhase.COMPLETE,f.service.state.value.phase);assertEquals(epoch,f.state.libraryEpoch);assertEquals(after,f.state.contentGeneration)
+        assertArrayEquals(keyBefore,f.keys.getAccountKey(session.userId,1));assertEquals(0,FixtureKeyStore.deleted)
+    }
+    @Test fun r48ReadonlyManifestDoesNotInventAPendingEditUntilTheUserActuallyChangesContent()=runBlocking {
+        val f=fixture();f.service.syncNow()
+        val head=f.ready.single();val id=head.getString("id");val codec=CloudSnapshotCodec()
+        val old=codec.decryptManifest(key,id,f.cache.loadManifest(f.client.scopeId(session),id)!!)
+        val doc=CloudRawDocument.parse(old.toRawString()).patch(listOf("features"),"{\"roCompat\":[\"future.manifest.v1\"]}")
+        val bytes=codec.encryptManifestBytes(key,id,doc.source.toByteArray(),ByteArray(16),ByteArray(12));val sha=CloudSnapshotCodec.sha256(bytes)
+        head.put("manifestSha256",sha).put("manifestSizeBytes",bytes.size);f.r48Blobs[sha]=bytes
+        f.cache.clear(f.client.scopeId(session))
+        val unchanged=f.service.syncNow(manual=true)
+        assertFalse(unchanged.snapshotUploaded);assertEquals(0,f.service.formatStatus.value.editPending);assertEquals(1,f.service.formatStatus.value.readOnly)
+        NoteRepository(f.db.noteDao(),"phone").save(title="local draft",markdown="preserve local edit")
+        try{f.service.syncNow(manual=true);fail("readonly manifest written")}catch(_:CloudFormatUpgradeRequired){}
+        assertEquals(1,f.completed);assertEquals(1,f.service.formatStatus.value.editPending)
+        assertEquals("preserve local edit",f.db.noteDao().allNotes().single().markdown);assertEquals(sha,head.getString("manifestSha256"))
     }
     @Test fun repeatedPlanExpiryStopsAfterOneRebuildAndSchedulesRetryWithoutTouchingLocalData()=runBlocking {
         val f=fixture("expired",true)

@@ -37,6 +37,9 @@ interface SyncChangeLogDao {
     )
     suspend fun maxChangedAtByEntityIds(kind: String, entityIds: List<String>): List<SyncChangeLogEntityState>
 
+    @Query("SELECT MAX(changedAt) FROM sync_change_log WHERE kind='article' AND entityId=:articleId AND reason='conflictResolution'")
+    suspend fun lastConflictResolution(articleId: String): Long?
+
     @Query("DELETE FROM sync_change_log")
     suspend fun deleteAll()
 }

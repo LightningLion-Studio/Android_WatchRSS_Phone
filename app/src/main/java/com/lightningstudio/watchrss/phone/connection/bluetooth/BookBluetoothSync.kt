@@ -13,6 +13,7 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
     private val staging:File,private val exchange:suspend(JSONObject)->JSONObject) {
     private var deltaPeer:String?=null
     private var appliedExchange:(suspend(JSONObject,(JSONObject)->Unit)->BluetoothSyncExchange)?=null
+    var domainFastPath=false
     var onApplied:(Int)->Unit={}
     var trace:(String)->Unit={}
     fun enableReadingDelta(peer:String,exchange:suspend(JSONObject,(JSONObject)->Unit)->BluetoothSyncExchange):BookBluetoothSync {
@@ -23,21 +24,25 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
     private suspend fun send(request:JSONObject):JSONObject=exchange(request).also {
         require(it.optBoolean("success")&&it.optString("action")=="syncBooks"&&it.optInt("version")==1) {"手表书籍同步失败"}
     }
-    suspend fun sync():Int {
+    suspend fun sync(syncBooks:Boolean=true,syncReading:Boolean=true):Int {
         val previous=store.onDiagnostic
         store.onDiagnostic={trace(it)}
-        return try { syncWindow() } finally {store.onDiagnostic=previous}
+        return try { syncWindow(syncBooks,syncReading) } finally {store.onDiagnostic=previous}
     }
-    private suspend fun syncWindow():Int {
+    private suspend fun syncWindow(syncBooks:Boolean,syncReading:Boolean):Int {
+        var applied=0
+        var peerReadingDelta=true
+        if(syncBooks) {
         var started=System.nanoTime()
         val local=store.manifests()
         trace("manifest-prepared:books=${local.size}:ms=${(System.nanoTime()-started)/1_000_000}")
         val response=send(request("manifest").put("books",JSONArray(local)).put("supportsBookSyncV1",true).put("supportsBookReadingDeltaV1",true))
+        peerReadingDelta=response.opt("supportsBookReadingDeltaV1")!=false && response.opt("supportsBookSyncV1")!=false
         started=System.nanoTime()
         require(response.getString("phase")=="manifest")
         val remote=response.getJSONArray("books").let {a->(0 until a.length()).map{a.getJSONObject(it).also(BookSync::validate)}}
         require(remote.map{it.getString("bookId")}.distinct().size==remote.size)
-        var applied=0;remote.forEach{val count=store.merge(it);applied+=count;recordApplied(count)}
+        remote.forEach{val count=store.merge(it);applied+=count;recordApplied(count)}
         trace("manifest-merged:books=${remote.size}:ms=${(System.nanoTime()-started)/1_000_000}")
         started=System.nanoTime()
         val byId=local.associateBy{it.getString("bookId")}
@@ -71,7 +76,13 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
             } finally {tmp.delete()}
         }
         trace("packages-ready:ms=${(System.nanoTime()-started)/1_000_000}")
-        if(deltaPeer!=null && response.opt("supportsBookReadingDeltaV1")!=false && response.opt("supportsBookSyncV1")!=false) {
+        if(domainFastPath && missing.length()>0) {
+            val confirmed=send(request("manifest").put("books",JSONArray(store.manifests())).put("supportsBookSyncV1",true).put("supportsBookReadingDeltaV1",true))
+            require(confirmed.optString("phase")=="manifest"&&confirmed.getJSONArray("missingBookIds").length()==0){"手表未确认书籍落盘"}
+        }
+        }
+        if(!syncReading)return applied
+        if(deltaPeer!=null && peerReadingDelta) {
             return applied+BookReadingDeltaSync(store,deviceId,requireNotNull(deltaPeer),::send,requireNotNull(appliedExchange),onApplied,trace).sync()
         }
         val localReading=store.readingStates();var localOffset=0;var remoteOffset=0L;var more=true

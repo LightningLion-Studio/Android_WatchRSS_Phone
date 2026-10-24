@@ -31,7 +31,8 @@ class CloudSnapshotCodec(
         createdAtMillis: Long = System.currentTimeMillis(),
         reusableManifests: List<CloudSnapshotManifest> = emptyList(),
         onReusedChunk: ((CloudChunkDescriptor, () -> ByteArray) -> Unit)? = null,
-        snapshotSettings: JSONObject = JSONObject()
+        snapshotSettings: JSONObject = JSONObject(),
+        authenticatedObjectHashes:Map<String,String> = emptyMap()
     ): EncryptedCloudSnapshot {
         require(accountKey.size == KEY_BYTES) { "账号主密钥必须为256位" }
         require(keyVersion > 0) { "账号密钥版本无效" }
@@ -42,19 +43,31 @@ class CloudSnapshotCodec(
             "云快照对象名称重复"
         }
 
+        previousManifest?.requireWritable()
+        reusableManifests.forEach { it.requireWritable() }
+        for (descriptor in carryForwardObjects) {
+            if(descriptor.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED)) {
+                val rawChunks=descriptor.rawDocument?.node(listOf("chunks"))?.elements
+                if(rawChunks==null||rawChunks.size!=descriptor.chunks.size)throw CloudFormatUpgradeRequired("opaque_chunk_references")
+            }
+            if(descriptor.entryRef!=null||descriptor.objectKeyEnvelope!=null)require(descriptor.rawDocument!=null) { "新R48引用写入尚未放行" }
+        }
         // Only account-root ciphertext from this key version is interchangeable.
         // Reader projections can use a separate wrapped root despite identical plaintext hashes.
         val reusableByPlaintextHash = (reusableManifests + listOfNotNull(previousManifest))
-            .filter { it.keyVersion == keyVersion }
+            .filter { it.keyVersion == keyVersion && CloudSnapshotReuse.scopeCompatible(it,snapshotSettings) }
             .flatMap { it.objects }
-            .filter { it.readerKeyEnvelope == null }
-            .flatMap { it.chunks }
-            .associateBy(CloudChunkDescriptor::plaintextSha256).toMutableMap()
+            .filter { it.accountRoot && it.access==CloudFormatAccess.WRITABLE }
+            .flatMap { d->d.chunks.map { "${d.encoding}:${it.plaintextSha256}" to it } }
+            .toMap().toMutableMap()
         val newChunks = linkedMapOf<String, ByteArray>()
         val objectDescriptors = logicalObjects.map { logicalObject ->
             require(logicalObject.name.matches(OBJECT_NAME_PATTERN)) {
                 "云快照对象名称无效：${logicalObject.name}"
             }
+            val prior=(listOfNotNull(previousManifest)+reusableManifests).filter {it.keyVersion==keyVersion&&CloudSnapshotReuse.scopeCompatible(it,snapshotSettings,authenticatedObjectHashes.containsKey(logicalObject.name))}.flatMap{it.objects}.firstOrNull{it.name==logicalObject.name}
+            if(prior!=null&&authenticatedObjectHashes[prior.name]==logicalObject.sha256()&&prior.originalBytes==logicalObject.originalBytes)return@map prior
+            if(prior!=null&&prior.access!=CloudFormatAccess.WRITABLE)throw CloudFormatUpgradeRequired("object_read_only")
             val descriptors = mutableListOf<CloudChunkDescriptor>()
             var encodedBytes = 0L
             logicalObject.openStream().use { input ->
@@ -64,7 +77,8 @@ class CloudSnapshotCodec(
                     val plaintext = if (logicalObject.compress) gzip(raw) else raw
                     encodedBytes += plaintext.size
                     val plaintextHash = sha256(plaintext)
-                    val reused = reusableByPlaintextHash[plaintextHash]
+                    val reuseKey="${if(logicalObject.compress)"gzip-chunks-v1" else "identity"}:$plaintextHash"
+                    val reused = reusableByPlaintextHash[reuseKey]
                     if (reused != null) onReusedChunk?.invoke(reused) {
                         encryptChunk(accountKey, plaintext, plaintextHash, reused).second
                     }
@@ -75,15 +89,26 @@ class CloudSnapshotCodec(
                     ).also { encrypted ->
                         newChunks[encrypted.first.ciphertextSha256] = encrypted.second
                     }.first
-                    reusableByPlaintextHash[plaintextHash] = descriptors.last()
+                    reusableByPlaintextHash[reuseKey] = descriptors.last()
                 }
+            }
+            // Changing an accepted output/ref writes account-root bytes. Retire only the
+            // understood root/reference fields; authenticated compatible extensions survive.
+            var patched=prior?.rawDocument
+            if(patched!=null) {
+                for(field in listOf("readerKeyEnvelope","objectKeyEnvelope","entryRef"))patched=patched!!.remove(listOf(field))
+                val incompat=patched!!.json().optJSONObject("features")?.optJSONArray("incompat")
+                if(incompat!=null)patched=patched!!.patch(listOf("features","incompat"),org.json.JSONArray((0 until incompat.length()).map{incompat.getString(it)}.filter{it !in setOf("r48.object-key.v1","r48.entry-ref.v1")}).toString())
             }
             CloudObjectDescriptor(
                 name = logicalObject.name,
                 encoding = if (logicalObject.compress) "gzip-chunks-v1" else "identity",
                 originalBytes = logicalObject.originalBytes,
                 encodedBytes = encodedBytes,
-                chunks = descriptors
+                chunks = descriptors,
+                privateArticle = prior?.privateArticle,
+                privateBook = prior?.privateBook,
+                rawDocument = patched
             )
         }
         val manifest = CloudSnapshotManifest(
@@ -95,8 +120,10 @@ class CloudSnapshotCodec(
             parentHeads = parentHeads,
             observedHeads = observedHeads,
             objects = carryForwardObjects + objectDescriptors,
-            settings = snapshotSettings
+            settings = snapshotSettings,
+            rawDocument=previousManifest?.rawDocument
         )
+        validateReferences(manifest)
         val encryptedManifest = encryptManifest(accountKey, manifest)
         return EncryptedCloudSnapshot(
             manifest = manifest,
@@ -131,60 +158,108 @@ class CloudSnapshotCodec(
             info = if (legacy) LEGACY_MANIFEST_INFO else manifestInfo(snapshotId),
             length = KEY_BYTES
         )
-        val plaintext = decryptAesGcm(
+        val plaintext = try { decryptAesGcm(
             key = key,
             nonce = nonce,
             ciphertext = ciphertext,
             aad = manifestAad(snapshotId)
-        )
-        return CloudSnapshotManifest.fromJson(JSONObject(plaintext.toString(Charsets.UTF_8))).also {
+        ) } finally {key.fill(0)}
+        return try { CloudSnapshotManifest.fromRaw(CloudRawDocument.parse(plaintext).source).also {
             require(it.snapshotId == snapshotId) { "云快照标识不匹配" }
-        }
+            validateReferences(it)
+        }} finally {plaintext.fill(0);key.fill(0)}
     }
 
-    fun restoreObjects(
-        accountKey: ByteArray,
-        manifest: CloudSnapshotManifest,
-        ciphertextChunk: (String) -> ByteArray
-    ): Map<String, ByteArray> =
-        manifest.objects.associate { descriptor ->
-            val objectKey = unwrapReaderKey(accountKey, descriptor)
-            val encodedChunks = descriptor.chunks.map { chunk ->
-                decryptChunk(
-                    accountKey = objectKey,
-                    descriptor = chunk,
-                    blob = ciphertextChunk(chunk.ciphertextSha256)
-                )
+    fun restoreObjects(accountKey:ByteArray,manifest:CloudSnapshotManifest,ciphertextChunk:(String)->ByteArray):Map<String,ByteArray> {
+        manifest.requireReadable();validateReferences(manifest)
+        val restored=linkedMapOf<String,ByteArray>()
+        fun restore(descriptor:CloudObjectDescriptor):ByteArray {
+            restored[descriptor.name]?.let{return it}
+            if(descriptor.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED))throw CloudFormatUpgradeRequired("object_opaque")
+            val ref=descriptor.entryRef
+            val bytes=if(ref!=null) {
+                val archive=manifest.objects.single{it.name==ref.getString("object")}
+                readArchiveEntry(restore(archive),ref.getString("entryPath"),descriptor.originalBytes)
+            } else {
+                val key=unwrapReaderKey(accountKey,descriptor)
+                val chunks=try {descriptor.chunks.map{decryptChunk(key,it,ciphertextChunk(it.ciphertextSha256))}}finally{if(key!==accountKey)key.fill(0)}
+                require(chunks.sumOf{it.size.toLong()}==descriptor.encodedBytes){"云快照对象长度不匹配"}
+                when(descriptor.encoding){"identity"->chunks.join();"gzip"->gunzip(chunks.join());"gzip-chunks-v1"->ByteArrayOutputStream().use{out->chunks.forEach{out.write(gunzip(it))};out.toByteArray()};else->throw CloudFormatUpgradeRequired("object_encoding")}
             }
-            require(encodedChunks.sumOf { it.size.toLong() } == descriptor.encodedBytes) {
-                "云快照对象长度不匹配：${descriptor.name}"
-            }
-            val restored = when (descriptor.encoding) {
-                "gzip-chunks-v1" -> ByteArrayOutputStream().use { output ->
-                    encodedChunks.forEach { output.write(gunzip(it)) }
-                    output.toByteArray()
-                }
-                "gzip" -> gunzip(encodedChunks.join())
-                "identity" -> encodedChunks.join()
-                else -> error("不支持的云快照编码：${descriptor.encoding}")
-            }
-            require(restored.size.toLong() == descriptor.originalBytes) {
-                "云快照对象恢复长度不匹配：${descriptor.name}"
-            }
-            descriptor.name to restored
+            require(bytes.size.toLong()==descriptor.originalBytes){"云快照对象恢复长度不匹配"}
+            restored[descriptor.name]=bytes;return bytes
         }
+        for(descriptor in manifest.objects)if(descriptor.access !in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED))restore(descriptor)
+        return restored
+    }
+
+    internal fun validateReferences(manifest:CloudSnapshotManifest) {
+        if(manifest.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED))return
+        require(manifest.objects.map{it.name}.distinct().size==manifest.objects.size)
+        for(d in manifest.objects) {
+            require(safePath(d.name)&&d.name.matches(OBJECT_NAME_PATTERN)) { "云快照对象路径无效" }
+            if(d.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED))continue
+            require(d.originalBytes in 0..536870912L&&d.encodedBytes in 0..536870912L)
+            require(d.readerKeyEnvelope==null||d.objectKeyEnvelope==null){"对象根封套冲突"}
+            if(d.objectKeyEnvelope!=null)require(hasFeature(d,"r48.object-key.v1"))
+            if(d.entryRef!=null) {
+                require(hasFeature(d,"r48.entry-ref.v1"))
+                val ref=d.entryRef
+                require(ref.keys().asSequence().toSet()==setOf("object","entryPath","encoding"))
+                require(ref.getString("encoding")=="identity"&&d.encoding=="identity"&&safePath(ref.getString("entryPath")))
+                require(d.chunks.isEmpty()&&d.rawDocument?.node(listOf("chunks"))==null&&d.readerKeyEnvelope==null&&d.objectKeyEnvelope==null)
+                val target=manifest.objects.singleOrNull{it.name==ref.getString("object")}?:error("归档引用缺失")
+                require(target.entryRef==null&&target.chunks.isNotEmpty()&&target.name!=d.name){"归档引用不得循环或串联"}
+            }
+        }
+    }
+    private fun hasFeature(d:CloudObjectDescriptor,feature:String):Boolean {
+        val a=d.rawDocument?.json()?.optJSONObject("features")?.optJSONArray("incompat")?:return false
+        return (0 until a.length()).any{a.optString(it)==feature}
+    }
+    internal fun safePath(path:String)=path.isNotEmpty()&&!path.startsWith('/')&&!path.contains('\\')&&!path.contains('\u0000')&&path.split('/').all{it.isNotEmpty()&&it!="."&&it!=".."}
+    private fun readArchiveEntry(archive:ByteArray,path:String,expected:Long):ByteArray {
+        require(safePath(path));var selected:ByteArray?=null;var total=0L;val seen=hashSetOf<String>()
+        val temporary=java.io.File.createTempFile("cloud-entry-ref-",".zip")
+        try {
+            temporary.writeBytes(archive)
+            java.util.zip.ZipFile(temporary).use {zip->val entries=zip.entries();while(entries.hasMoreElements()){
+                val entry=entries.nextElement()
+                require(seen.add(entry.name)&&seen.size<=100000&&safePath(entry.name.removeSuffix("/")))
+                val keep=entry.name==path&&!entry.isDirectory
+                val output=if(keep)ByteArrayOutputStream()else null;val buffer=ByteArray(8192);var size=0L;val crc=java.util.zip.CRC32()
+                zip.getInputStream(entry).use {input->while(true){val count=input.read(buffer);if(count<0)break;size+=count;total+=count;crc.update(buffer,0,count)
+                    require(size<=536870912L&&total<=4L*1024*1024*1024);if(keep){require(size<=expected);output!!.write(buffer,0,count)}}}
+                require(size==entry.size&&crc.value==entry.crc){"归档条目长度或CRC不匹配"}
+                if(keep)selected=output!!.toByteArray().also{require(it.size.toLong()==expected)}
+            }}
+            return requireNotNull(selected){"归档引用条目不存在"}
+        }finally{temporary.delete()}
+    }
 
     private fun unwrapReaderKey(accountKey: ByteArray, descriptor: CloudObjectDescriptor): ByteArray {
-        val envelope = descriptor.readerKeyEnvelope ?: return accountKey
+        val objectEnvelope=descriptor.objectKeyEnvelope
+        require(objectEnvelope==null||descriptor.readerKeyEnvelope==null)
+        val envelope = objectEnvelope ?: descriptor.readerKeyEnvelope ?: return accountKey
+        if(objectEnvelope!=null) {
+            require(envelope.keys().asSequence().toSet()==setOf("version","scope","saltBase64","nonceBase64","ciphertextBase64"))
+            require(envelope.getString("scope").matches(Regex("migration:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")))
+        }
         require(envelope.getInt("version") == 1)
         val salt = Base64.getDecoder().decode(envelope.getString("saltBase64"))
         val nonce = Base64.getDecoder().decode(envelope.getString("nonceBase64"))
         require(salt.size == 16 && nonce.size == 12)
-        val wrappingKey = hkdfSha256(accountKey, salt, "watchrss/cloud/reader-key/v1".toByteArray(), 32)
+        val info=if(objectEnvelope!=null)"watchrss/cloud/object-key/v1" else "watchrss/cloud/reader-key/v1"
+        val ciphertext=envelope.getString("ciphertextBase64").fromBase64()
+        if(objectEnvelope!=null) {
+            require(ciphertext.size==48)
+            for(field in listOf("saltBase64","nonceBase64","ciphertextBase64"))require(Base64.getEncoder().encodeToString(envelope.getString(field).fromBase64())==envelope.getString(field))
+        }
+        val wrappingKey = hkdfSha256(accountKey, salt, info.toByteArray(), 32)
         return try {
             decryptAesGcm(wrappingKey, nonce,
                 Base64.getDecoder().decode(envelope.getString("ciphertextBase64")),
-                "watchrss-reader-key-v1:${envelope.optString("scope", descriptor.name)}".toByteArray())
+                "${if(objectEnvelope!=null)"watchrss-object-key-v1" else "watchrss-reader-key-v1"}:${envelope.optString("scope", descriptor.name)}".toByteArray())
                 .also { require(it.size == 32) }
         } finally { wrappingKey.fill(0) }
     }
@@ -222,7 +297,8 @@ class CloudSnapshotCodec(
             plaintextBytes = plaintext.size,
             ciphertextBytes = blob.size,
             saltBase64 = salt.toBase64(),
-            nonceBase64 = nonce.toBase64()
+            nonceBase64 = nonce.toBase64(),
+            rawDocument = reused?.rawDocument
         )
         require(reused == null || reused == descriptor) { "复用块校验失败" }
         return descriptor to blob
@@ -263,7 +339,7 @@ class CloudSnapshotCodec(
     ): ByteArray {
         val salt = randomBytes(SALT_BYTES)
         val nonce = randomBytes(NONCE_BYTES)
-        val plaintext = manifest.toJson().toString().toByteArray(Charsets.UTF_8)
+        val plaintext = manifest.toRawString().toByteArray(Charsets.UTF_8)
         return encryptManifestBytes(accountKey, manifest.snapshotId, plaintext, salt, nonce)
     }
 

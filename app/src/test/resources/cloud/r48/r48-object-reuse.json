@@ -1,0 +1,232 @@
+{
+  "protocol": "watchrss-r48",
+  "vectorVersion": 1,
+  "warning": "PUBLIC SYNTHETIC TEST SECRETS. NEVER USE IN PRODUCTION.",
+  "description": "Synthetic 16-version legacy monolith benchmark, NOT production byte measurements",
+  "legacyHistory": [
+    {
+      "sequence": 1,
+      "legacyMonolithPlainBytes": 156,
+      "legacyNewCiphertextBytes": 207,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 113,
+      "recordsOrMetadataOnly": false
+    },
+    {
+      "sequence": 2,
+      "legacyMonolithPlainBytes": 156,
+      "legacyNewCiphertextBytes": 207,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    },
+    {
+      "sequence": 3,
+      "legacyMonolithPlainBytes": 156,
+      "legacyNewCiphertextBytes": 207,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    },
+    {
+      "sequence": 4,
+      "legacyMonolithPlainBytes": 156,
+      "legacyNewCiphertextBytes": 207,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    },
+    {
+      "sequence": 5,
+      "legacyMonolithPlainBytes": 156,
+      "legacyNewCiphertextBytes": 207,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    },
+    {
+      "sequence": 6,
+      "legacyMonolithPlainBytes": 156,
+      "legacyNewCiphertextBytes": 207,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    },
+    {
+      "sequence": 7,
+      "legacyMonolithPlainBytes": 156,
+      "legacyNewCiphertextBytes": 207,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    },
+    {
+      "sequence": 8,
+      "legacyMonolithPlainBytes": 156,
+      "legacyNewCiphertextBytes": 207,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    },
+    {
+      "sequence": 9,
+      "legacyMonolithPlainBytes": 156,
+      "legacyNewCiphertextBytes": 207,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    },
+    {
+      "sequence": 10,
+      "legacyMonolithPlainBytes": 156,
+      "legacyNewCiphertextBytes": 207,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    },
+    {
+      "sequence": 11,
+      "legacyMonolithPlainBytes": 157,
+      "legacyNewCiphertextBytes": 208,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    },
+    {
+      "sequence": 12,
+      "legacyMonolithPlainBytes": 157,
+      "legacyNewCiphertextBytes": 208,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    },
+    {
+      "sequence": 13,
+      "legacyMonolithPlainBytes": 157,
+      "legacyNewCiphertextBytes": 208,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    },
+    {
+      "sequence": 14,
+      "legacyMonolithPlainBytes": 157,
+      "legacyNewCiphertextBytes": 208,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    },
+    {
+      "sequence": 15,
+      "legacyMonolithPlainBytes": 157,
+      "legacyNewCiphertextBytes": 208,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    },
+    {
+      "sequence": 16,
+      "legacyMonolithPlainBytes": 157,
+      "legacyNewCiphertextBytes": 208,
+      "unchangedBodyCiphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+      "r48NewBodyCiphertextBytes": 0,
+      "recordsOrMetadataOnly": true
+    }
+  ],
+  "zeroBodyWriteCases": [
+    {
+      "id": "one-read-record",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "400-public-rss-entries",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "source-title",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "source-sort",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "app-version",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "cache-loss",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "local-db-add-column",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "gzip-profile-diff-carry",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "cdc-profile-diff-carry",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "book-reading",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "book-chapter-deletion",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "unknown-descriptor",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "unknown-record-kind",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "old-wrss-entry-ref",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "old-reader-root-read-only",
+      "newBodyCiphertextBytes": 0
+    },
+    {
+      "id": "restart-no-business-change",
+      "newBodyCiphertextBytes": 0
+    }
+  ],
+  "legacyTotalNewCiphertextBytes": 3318,
+  "r48TotalNewBodyCiphertextBytes": 113,
+  "inputDescriptor": {
+    "name": "private/article-1.txt",
+    "encoding": "identity",
+    "originalBytes": 62,
+    "encodedBytes": 62,
+    "chunks": [
+      {
+        "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+        "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+        "plaintextBytes": 62,
+        "ciphertextBytes": 113,
+        "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+        "nonceBase64": "Ef3mv4Hun1y2WqmK"
+      }
+    ]
+  },
+  "inputChunkBlobHex": "575253534343322a48810ff5be780c09364368c5be2c6711fde6bf81ee9f5cb65aa98a8bdb80664817c006e37657eff1e0eb28e998fa9d191f9c338c56908c68deb90828c5a17de9ba3737883cbf13c1d9597778cd0bc757156058816bc3dc2898dba1f5da0ff7716bbb75c7051fbfcca5",
+  "baselineRootHex": "6eb4bf875c82988bba229a7c055917b12fee7ef472b6ffe0dd8e42e4c6fc18dc",
+  "rejectReuseScopeMismatches": [
+    "backend",
+    "user",
+    "libraryEpoch",
+    "contentGeneration",
+    "keyVersion",
+    "rootIdentity"
+  ],
+  "outputRootReadOnly": true,
+  "newContentRoot": "account"
+}

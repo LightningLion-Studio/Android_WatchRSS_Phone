@@ -42,9 +42,20 @@ class EncryptedAccountSessionStore(
 
     suspend fun clear() = withContext(Dispatchers.IO) {
         withPrefs { prefs ->
-            prefs.edit().remove(KEY_SESSION).apply()
+            prefs.edit().apply {remove(KEY_SESSION);prefs.all.keys.filter{it.startsWith("ble_grant:")}.forEach{remove(it)}}.apply()
         }
         _session.value = null
+    }
+
+    internal suspend fun bluetoothGrant(key:String):JSONObject?=withContext(Dispatchers.IO) {
+        withPrefs {it.getString("ble_grant:$key",null)?.let {raw->runCatching{JSONObject(raw)}.getOrNull()}}
+    }
+    internal suspend fun removeBluetoothGrant(key:String)=withContext(Dispatchers.IO) {withPrefs{check(it.edit().remove("ble_grant:$key").commit())}}
+    internal suspend fun saveBluetoothGrant(key:String,value:JSONObject)=withContext(Dispatchers.IO) {
+        withPrefs {val raw=value.toString();if(it.getString("ble_grant:$key",null)!=raw)check(it.edit().putString("ble_grant:$key",raw).commit())}
+    }
+    internal suspend fun clearBluetoothGrants()=withContext(Dispatchers.IO) {
+        withPrefs {prefs->prefs.edit().apply {prefs.all.keys.filter{it.startsWith("ble_grant:")}.forEach{remove(it)}}.commit()}
     }
 
     suspend fun queueRevocation(session: PhoneAccountSession) = withContext(Dispatchers.IO) {

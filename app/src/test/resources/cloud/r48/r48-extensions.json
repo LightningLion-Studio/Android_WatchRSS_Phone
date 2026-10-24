@@ -1,0 +1,252 @@
+{
+  "protocol": "watchrss-r48",
+  "vectorVersion": 1,
+  "warning": "PUBLIC SYNTHETIC TEST SECRETS. NEVER USE IN PRODUCTION.",
+  "cases": [
+    {
+      "id": "compat-implicit-unknown",
+      "features": {
+        "incompat": [],
+        "roCompat": []
+      },
+      "known": [],
+      "expected": {
+        "read": "known-fields",
+        "write": "known-field-patch",
+        "preserve": "raw-tokens"
+      }
+    },
+    {
+      "id": "unknown-incompat",
+      "features": {
+        "incompat": [
+          "future.codec.v1"
+        ],
+        "roCompat": []
+      },
+      "known": [],
+      "expected": {
+        "read": "opaque",
+        "write": "blocked",
+        "preserve": "original-ciphertext-and-descriptor"
+      }
+    },
+    {
+      "id": "unknown-roCompat",
+      "features": {
+        "incompat": [],
+        "roCompat": [
+          "future.title-bound.v1"
+        ]
+      },
+      "known": [],
+      "expected": {
+        "read": "known-fields",
+        "write": "pending-upgrade",
+        "preserve": "raw-tokens"
+      }
+    },
+    {
+      "id": "known-object-envelope",
+      "features": {
+        "incompat": [
+          "r48.object-key.v1"
+        ],
+        "roCompat": []
+      },
+      "known": [
+        "r48.object-key.v1"
+      ],
+      "expected": {
+        "read": "known-fields",
+        "write": "known-field-patch",
+        "preserve": "raw-tokens"
+      }
+    },
+    {
+      "id": "nested-descriptor-roCompat",
+      "features": {
+        "incompat": [],
+        "roCompat": [
+          "future.title-bound.v1"
+        ]
+      },
+      "known": [],
+      "scope": "descriptor",
+      "expected": {
+        "read": "known-fields",
+        "write": "pending-upgrade",
+        "preserve": "raw-tokens"
+      }
+    },
+    {
+      "id": "record-unknown-over-16KiB",
+      "features": {
+        "incompat": [],
+        "roCompat": []
+      },
+      "known": [],
+      "withinLimits": false,
+      "expected": {
+        "read": "isolated",
+        "write": "blocked",
+        "preserve": "original-ciphertext-and-descriptor"
+      }
+    },
+    {
+      "id": "manifest-incompat-opaque",
+      "features": {
+        "incompat": [
+          "future.manifest.v1"
+        ],
+        "roCompat": []
+      },
+      "known": [],
+      "scope": "manifest",
+      "expected": {
+        "read": "opaque",
+        "write": "blocked",
+        "preserve": "original-ciphertext-and-descriptor"
+      }
+    },
+    {
+      "id": "incompat-precedes-roCompat",
+      "features": {
+        "incompat": [
+          "future.codec.v1"
+        ],
+        "roCompat": [
+          "future.title-bound.v1"
+        ]
+      },
+      "known": [],
+      "expected": {
+        "read": "opaque",
+        "write": "blocked",
+        "preserve": "original-ciphertext-and-descriptor"
+      }
+    },
+    {
+      "id": "known-title-dependency",
+      "features": {
+        "incompat": [],
+        "roCompat": [
+          "r48.title-bound.v1"
+        ]
+      },
+      "known": [
+        "r48.title-bound.v1"
+      ],
+      "expected": {
+        "read": "known-fields",
+        "write": "known-field-patch",
+        "preserve": "raw-tokens"
+      }
+    }
+  ],
+  "implicitCompat": {
+    "originalUtf8": "{\"format\":\"watchrss-rss-record\",\"version\":1,\"kind\":\"article\",\"features\":{\"incompat\":[],\"roCompat\":[]},\"value\":{\"articleId\":\"synthetic-a\",\"title\":\"old\",\"x-extension\":{ \"wide\":9007199254740993, \"escaped\":\"\\u4e2d\", \"array\":[3, 2, 1], \"minusZero\":-0 }}}",
+    "patch": {
+      "value.title": "new"
+    },
+    "expectedUtf8": "{\"format\":\"watchrss-rss-record\",\"version\":1,\"kind\":\"article\",\"features\":{\"incompat\":[],\"roCompat\":[]},\"value\":{\"articleId\":\"synthetic-a\",\"title\":\"new\",\"x-extension\":{ \"wide\":9007199254740993, \"escaped\":\"\\u4e2d\", \"array\":[3, 2, 1], \"minusZero\":-0 }}}",
+    "unknownPropertyRawUtf8": "\"x-extension\":{ \"wide\":9007199254740993, \"escaped\":\"\\u4e2d\", \"array\":[3, 2, 1], \"minusZero\":-0 }",
+    "unknownPropertyRawHex": "22782d657874656e73696f6e223a7b202277696465223a393030373139393235343734303939332c202265736361706564223a225c7534653264222c20226172726179223a5b332c20322c20315d2c20226d696e75735a65726f223a2d30207d",
+    "expectedUnknownPropertyRawHex": "22782d657874656e73696f6e223a7b202277696465223a393030373139393235343734303939332c202265736361706564223a225c7534653264222c20226172726179223a5b332c20322c20315d2c20226d696e75735a65726f223a2d30207d"
+  },
+  "limits": {
+    "depth": 32,
+    "recordUnknownBytes": 16384,
+    "descriptorUnknownBytes": 4096,
+    "manifestUnknownBytes": 1048576,
+    "featureListCount": 16
+  },
+  "boundaryCases": [
+    {
+      "kind": "depth",
+      "actual": 32,
+      "expected": "allow"
+    },
+    {
+      "kind": "depth",
+      "actual": 33,
+      "expected": "read-only-isolate"
+    },
+    {
+      "kind": "recordUnknownBytes",
+      "actual": 16384,
+      "expected": "allow"
+    },
+    {
+      "kind": "recordUnknownBytes",
+      "actual": 16385,
+      "expected": "read-only-isolate"
+    },
+    {
+      "kind": "descriptorUnknownBytes",
+      "actual": 4096,
+      "expected": "allow"
+    },
+    {
+      "kind": "descriptorUnknownBytes",
+      "actual": 4097,
+      "expected": "read-only-isolate"
+    },
+    {
+      "kind": "manifestUnknownBytes",
+      "actual": 1048576,
+      "expected": "allow"
+    },
+    {
+      "kind": "manifestUnknownBytes",
+      "actual": 1048577,
+      "expected": "read-only-isolate"
+    }
+  ],
+  "knownTitleBindingPatch": {
+    "oldTitle": "old",
+    "oldBindingSha256": "cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4",
+    "newTitle": "new",
+    "newBindingSha256": "11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437",
+    "mustUpdateTogether": true
+  },
+  "invalidFeatures": [
+    {
+      "incompat": [
+        "UPPER"
+      ]
+    },
+    {
+      "incompat": [
+        "dup",
+        "dup"
+      ]
+    },
+    {
+      "incompat": [
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x"
+      ]
+    }
+  ],
+  "entryRef": {
+    "object": "private-library.wrss",
+    "entryPath": "bodies/synthetic.txt",
+    "encoding": "identity"
+  }
+}

@@ -31,8 +31,11 @@ class BluetoothDebugLog(context: Context) {
         fields: Map<String, Any?> = emptyMap(),
         throwable: Throwable? = null
     ) {
+        val elapsedNanos=android.os.SystemClock.elapsedRealtimeNanos()
         val entry = buildString {
             append(Instant.now().toString())
+            append(" monotonicNanos=")
+            append(elapsedNanos)
             append(" event=")
             append(event.escapeValue())
             if (!sessionId.isNullOrBlank()) {
@@ -50,6 +53,15 @@ class BluetoothDebugLog(context: Context) {
                 append(Log.getStackTraceString(throwable))
                 appendLine()
             }
+        }
+        // Release timing evidence without exporting bodies, tokens, account IDs or Bluetooth addresses.
+        val timingKeys=setOf("action","phase","label","elapsedMs","wireBytes","prepareMs","bookPrepareMs","rootCount","remoteRootCount","missingRemote","retryDomains","localChanged","remoteChanged","errorClass","readerError","phoneMissing","watchMissing","skipped","domains","actualChanges","stage","deltaArticles","fullArticles","deltaSources","fullSnapshot","fallbackReason","sentArticles","sentSources","merged","mergedSources","received","sourcesReceived","applied","count","success","attempt","delayMs","elapsedNanos")
+        if(event.startsWith("sync.") || event.startsWith("bt.frame.") || event.startsWith("bt.socket.") || event.startsWith("bt.library.probe.")) {
+            Log.i("WatchRSSBluetooth",buildString {
+                append("monotonicNanos=$elapsedNanos event=$event")
+                if(sessionId!=null)append(" session=$sessionId")
+                fields.filterKeys{it in timingKeys||it.endsWith("Action")||it.endsWith("Phase")||it.endsWith("Version")}.forEach{(key,value)->append(" $key=${value.formatValue()}")}
+            })
         }
         synchronized(lock) {
             runCatching {

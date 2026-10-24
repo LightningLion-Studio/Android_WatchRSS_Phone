@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.data.db
 
 import androidx.room.Dao
+import androidx.room.Upsert
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
@@ -29,10 +30,10 @@ interface PhoneRssSourceDao {
     @Query("SELECT url FROM phone_rss_sources")
     suspend fun getAllUrls(): List<String>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsert(source: PhoneRssSourceEntity)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertAll(sources: List<PhoneRssSourceEntity>)
 
     @Query("DELETE FROM phone_rss_sources WHERE url IN (:urls)")

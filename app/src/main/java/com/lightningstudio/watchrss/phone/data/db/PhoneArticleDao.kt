@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.data.db
 
 import androidx.room.Dao
+import androidx.room.Upsert
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
@@ -390,10 +391,10 @@ interface PhoneArticleDao {
         positionChangedAt: Long
     )
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsert(article: PhoneArticleEntity)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertAll(articles: List<PhoneArticleEntity>)
 
     @Query("DELETE FROM phone_articles WHERE rssSourceUrl = :rssSourceUrl")

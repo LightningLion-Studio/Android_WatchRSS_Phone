@@ -1,0 +1,925 @@
+[
+  {
+    "phone": {
+      "articleId": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+      "hash_url": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+      "hash_feed": "d65f147bdeacbc85ea3ea5f2009369584be800f92ce00cb5262eced2ecce426e",
+      "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+      "deleted": "0",
+      "deletedAt": "0",
+      "updatedAt": "1792756780416",
+      "importedAt": "1792441632687",
+      "independentSaved": "0",
+      "independentChangedAt": "0",
+      "favoriteSaved": "0",
+      "favoriteChangedAt": "1792756780416",
+      "watchLaterSaved": "0",
+      "watchLaterChangedAt": "0",
+      "readingPositionChangedAt": "0",
+      "syncBodyHash": "e2f4f33663d35cd5cb1041da1481bd7ddd1eb1e7ec3ca2b9eec02c3859836cb5",
+      "syncMetadataHash": "3e2995e968f5bfa7c705413def0b59384df491d7f7b426a14b2e15520330ea7a"
+    },
+    "phoneAlias": {
+      "old": "2b9c7e662101beb65355fb4b7fb10fccc1cb5e9eee6ed078b7ac78ea6941bd9b",
+      "canonical": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3"
+    },
+    "phoneOperations": [
+      {
+        "seq": "5631",
+        "kind": "article",
+        "entityId": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+        "changedAt": "1792732081562",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792732077377"
+      },
+      {
+        "seq": "5638",
+        "kind": "article",
+        "entityId": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+        "changedAt": "1792734833396",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792734829268"
+      },
+      {
+        "seq": "5661",
+        "kind": "article",
+        "entityId": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+        "changedAt": "1792742473499",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792742469276"
+      },
+      {
+        "seq": "5662",
+        "kind": "article",
+        "entityId": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+        "changedAt": "1792742473502",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792742469281"
+      },
+      {
+        "seq": "5673",
+        "kind": "article",
+        "entityId": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+        "changedAt": "1792743418554",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792743414365"
+      },
+      {
+        "seq": "5674",
+        "kind": "article",
+        "entityId": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+        "changedAt": "1792743418557",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792743414368"
+      },
+      {
+        "seq": "8494",
+        "kind": "article",
+        "entityId": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+        "changedAt": "1792756780416",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792756778806"
+      }
+    ],
+    "watchProjection": {
+      "articleId": "2b9c7e662101beb65355fb4b7fb10fccc1cb5e9eee6ed078b7ac78ea6941bd9b",
+      "hash_sourceDeviceId": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b",
+      "hash_url": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+      "hash_rssSourceUrl": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "hash_title": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+      "updatedAt": 1788102905067,
+      "independentSaved": false,
+      "independentChangedAt": 1788102905067,
+      "favoriteSaved": false,
+      "favoriteChangedAt": 1788102905067,
+      "watchLaterSaved": false,
+      "watchLaterChangedAt": 0,
+      "deleted": true,
+      "deletedAt": 1788102905067,
+      "readingPositionChangedAt": 0,
+      "manifest_articleId": "2b9c7e662101beb65355fb4b7fb10fccc1cb5e9eee6ed078b7ac78ea6941bd9b",
+      "manifest_deleted": true,
+      "manifest_deletedAt": 1788102905067,
+      "manifest_updatedAt": 1788102905067,
+      "manifest_independentChangedAt": 1788102905067,
+      "manifest_favoriteChangedAt": 1788102905067,
+      "manifest_watchLaterChangedAt": 0,
+      "manifest_bodyHash": "4be05c80bc3407f570bac4640e7512a982050aaf1ec28af6fac14315214a5898",
+      "manifest_metadataHash": "7a0bd57638e9387f67b7f85990560036f973288cbfc34d4b53f9edbd353c862e"
+    },
+    "watchOtherProjections": [
+      {
+        "scope": ":canonical:books-v1",
+        "article_id": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+        "source_item": "6455",
+        "project_state": {
+          "articleId": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+          "hash_sourceDeviceId": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+          "hash_url": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+          "hash_rssSourceUrl": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+          "hash_title": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+          "updatedAt": 1792756780416,
+          "independentSaved": false,
+          "independentChangedAt": 0,
+          "favoriteSaved": false,
+          "favoriteChangedAt": 1792756780416,
+          "watchLaterSaved": false,
+          "watchLaterChangedAt": 0,
+          "deleted": false,
+          "deletedAt": 0,
+          "readingPositionChangedAt": 0,
+          "manifest_articleId": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+          "manifest_deleted": false,
+          "manifest_deletedAt": 0,
+          "manifest_updatedAt": 1792756780416,
+          "manifest_independentChangedAt": 0,
+          "manifest_favoriteChangedAt": 1792756780416,
+          "manifest_watchLaterChangedAt": 0,
+          "manifest_bodyHash": "9fa75db3abd1ffafc5dd94b99f6882985feccec5d940be0b23900fdf06ad6f4c",
+          "manifest_metadataHash": "f696a47c61d165d67bb720956a03aa91f8c13fa02b143990b479f1a2fa6ea301"
+        }
+      }
+    ],
+    "watchSaved": [
+      {
+        "article_id": "2b9c7e662101beb65355fb4b7fb10fccc1cb5e9eee6ed078b7ac78ea6941bd9b",
+        "save_type": "favorite",
+        "item_id": null,
+        "saved": "0",
+        "changed_at": "1788102905067",
+        "hash_source": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b",
+        "hash_url": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+        "actual_delete_clock": "1788102905067",
+        "cloud_id": ""
+      },
+      {
+        "article_id": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+        "save_type": "favorite",
+        "item_id": "6455",
+        "saved": "0",
+        "changed_at": "1792756780416",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "hash_url": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+        "actual_delete_clock": "0",
+        "cloud_id": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3"
+      }
+    ],
+    "watchActualTombstones": [
+      {
+        "article_id": "2b9c7e662101beb65355fb4b7fb10fccc1cb5e9eee6ed078b7ac78ea6941bd9b",
+        "hash_url": "4a7b6264afc83d9ad22e5537251c8a8b97f817f9d29df0e3638a00fd5eca02b3",
+        "changed_at": "1788102905067",
+        "hash_source": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b"
+      }
+    ]
+  },
+  {
+    "phone": {
+      "articleId": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+      "hash_url": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+      "hash_feed": "d65f147bdeacbc85ea3ea5f2009369584be800f92ce00cb5262eced2ecce426e",
+      "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+      "deleted": "0",
+      "deletedAt": "0",
+      "updatedAt": "1792794644551",
+      "importedAt": "1792470915050",
+      "independentSaved": "0",
+      "independentChangedAt": "0",
+      "favoriteSaved": "0",
+      "favoriteChangedAt": "1792794644551",
+      "watchLaterSaved": "0",
+      "watchLaterChangedAt": "0",
+      "readingPositionChangedAt": "0",
+      "syncBodyHash": "37e1bb46871032fe72b61f6bf7ede8182ba812a623fe4359a4961dab2731c34b",
+      "syncMetadataHash": "bbbe45b842235b9b2441e60fb59776e76e3c2d58f590fd69ce521fbc61460f05"
+    },
+    "phoneAlias": {
+      "old": "32a918e04dca935e9c705b1c5d329c24168257ceb9f349bfc18663a72b674dd9",
+      "canonical": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35"
+    },
+    "phoneOperations": [
+      {
+        "seq": "5632",
+        "kind": "article",
+        "entityId": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+        "changedAt": "1792732081563",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792732077380"
+      },
+      {
+        "seq": "5639",
+        "kind": "article",
+        "entityId": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+        "changedAt": "1792734833397",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792734829271"
+      },
+      {
+        "seq": "5660",
+        "kind": "article",
+        "entityId": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+        "changedAt": "1792742473498",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792742469271"
+      },
+      {
+        "seq": "5663",
+        "kind": "article",
+        "entityId": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+        "changedAt": "1792742473503",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792742469284"
+      },
+      {
+        "seq": "5672",
+        "kind": "article",
+        "entityId": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+        "changedAt": "1792743418553",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792743414361"
+      },
+      {
+        "seq": "5675",
+        "kind": "article",
+        "entityId": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+        "changedAt": "1792743418558",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792743414370"
+      },
+      {
+        "seq": "8495",
+        "kind": "article",
+        "entityId": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+        "changedAt": "1792756780417",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792756778809"
+      },
+      {
+        "seq": "8913",
+        "kind": "article",
+        "entityId": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+        "changedAt": "1792794618811",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792794618819"
+      },
+      {
+        "seq": "8914",
+        "kind": "article",
+        "entityId": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+        "changedAt": "1792794644551",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792794644560"
+      }
+    ],
+    "watchProjection": {
+      "articleId": "32a918e04dca935e9c705b1c5d329c24168257ceb9f349bfc18663a72b674dd9",
+      "hash_sourceDeviceId": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b",
+      "hash_url": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+      "hash_rssSourceUrl": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "hash_title": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+      "updatedAt": 1788102905071,
+      "independentSaved": false,
+      "independentChangedAt": 1788102905071,
+      "favoriteSaved": false,
+      "favoriteChangedAt": 1788102905071,
+      "watchLaterSaved": false,
+      "watchLaterChangedAt": 0,
+      "deleted": true,
+      "deletedAt": 1788102905071,
+      "readingPositionChangedAt": 0,
+      "manifest_articleId": "32a918e04dca935e9c705b1c5d329c24168257ceb9f349bfc18663a72b674dd9",
+      "manifest_deleted": true,
+      "manifest_deletedAt": 1788102905071,
+      "manifest_updatedAt": 1788102905071,
+      "manifest_independentChangedAt": 1788102905071,
+      "manifest_favoriteChangedAt": 1788102905071,
+      "manifest_watchLaterChangedAt": 0,
+      "manifest_bodyHash": "4be05c80bc3407f570bac4640e7512a982050aaf1ec28af6fac14315214a5898",
+      "manifest_metadataHash": "396258ad003e72f1aa0ae92b0ca247f7d9a28d94daf8b433e41fbcdfba8d4b9c"
+    },
+    "watchOtherProjections": [
+      {
+        "scope": ":canonical:books-v1",
+        "article_id": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+        "source_item": "6459",
+        "project_state": {
+          "articleId": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+          "hash_sourceDeviceId": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+          "hash_url": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+          "hash_rssSourceUrl": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+          "hash_title": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+          "updatedAt": 1792794644551,
+          "independentSaved": false,
+          "independentChangedAt": 0,
+          "favoriteSaved": false,
+          "favoriteChangedAt": 1792794644551,
+          "watchLaterSaved": false,
+          "watchLaterChangedAt": 0,
+          "deleted": false,
+          "deletedAt": 0,
+          "readingPositionChangedAt": 0,
+          "manifest_articleId": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+          "manifest_deleted": false,
+          "manifest_deletedAt": 0,
+          "manifest_updatedAt": 1792794644551,
+          "manifest_independentChangedAt": 0,
+          "manifest_favoriteChangedAt": 1792794644551,
+          "manifest_watchLaterChangedAt": 0,
+          "manifest_bodyHash": "132af5124b0fa8e736f599fe8fae9309e3daa243a2b2824cbe7d3345648ab3e6",
+          "manifest_metadataHash": "4dbcdaf7bc634029518f799d6b4e9b787393d965ea574ea6b317bf2d7238394d"
+        }
+      }
+    ],
+    "watchSaved": [
+      {
+        "article_id": "32a918e04dca935e9c705b1c5d329c24168257ceb9f349bfc18663a72b674dd9",
+        "save_type": "favorite",
+        "item_id": null,
+        "saved": "0",
+        "changed_at": "1788102905071",
+        "hash_source": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b",
+        "hash_url": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+        "actual_delete_clock": "1788102905071",
+        "cloud_id": ""
+      },
+      {
+        "article_id": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+        "save_type": "favorite",
+        "item_id": "6459",
+        "saved": "0",
+        "changed_at": "1792794644551",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "hash_url": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+        "actual_delete_clock": "0",
+        "cloud_id": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35"
+      }
+    ],
+    "watchActualTombstones": [
+      {
+        "article_id": "32a918e04dca935e9c705b1c5d329c24168257ceb9f349bfc18663a72b674dd9",
+        "hash_url": "33e98a24200c1d0e2386d0782714ffc61bb46f061cfeb81c72e89df5de956a35",
+        "changed_at": "1788102905071",
+        "hash_source": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b"
+      }
+    ]
+  },
+  {
+    "phone": {
+      "articleId": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+      "hash_url": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+      "hash_feed": "d65f147bdeacbc85ea3ea5f2009369584be800f92ce00cb5262eced2ecce426e",
+      "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+      "deleted": "0",
+      "deletedAt": "0",
+      "updatedAt": "1792756780418",
+      "importedAt": "1792441632685",
+      "independentSaved": "0",
+      "independentChangedAt": "0",
+      "favoriteSaved": "0",
+      "favoriteChangedAt": "1792756780418",
+      "watchLaterSaved": "0",
+      "watchLaterChangedAt": "0",
+      "readingPositionChangedAt": "0",
+      "syncBodyHash": "292a5b40c89c6f6aa4b319ab550b53adec107c822e8a711c16c1a697c5154f34",
+      "syncMetadataHash": "8d4a3c84f2a74f44834e8e0c14f1bcad5b64cf11ed5d86d508c7435adebe0857"
+    },
+    "phoneAlias": {
+      "old": "52a6ad7ea6d00ccdcaee90c5905a7881f08bdb659654ac1cafaea8aa5ed1de6e",
+      "canonical": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43"
+    },
+    "phoneOperations": [
+      {
+        "seq": "5633",
+        "kind": "article",
+        "entityId": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+        "changedAt": "1792732081564",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792732077382"
+      },
+      {
+        "seq": "5640",
+        "kind": "article",
+        "entityId": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+        "changedAt": "1792734833398",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792734829281"
+      },
+      {
+        "seq": "5659",
+        "kind": "article",
+        "entityId": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+        "changedAt": "1792742473497",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792742469267"
+      },
+      {
+        "seq": "5664",
+        "kind": "article",
+        "entityId": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+        "changedAt": "1792742473504",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792742469286"
+      },
+      {
+        "seq": "5671",
+        "kind": "article",
+        "entityId": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+        "changedAt": "1792743418552",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792743414360"
+      },
+      {
+        "seq": "5676",
+        "kind": "article",
+        "entityId": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+        "changedAt": "1792743418559",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792743414372"
+      },
+      {
+        "seq": "8496",
+        "kind": "article",
+        "entityId": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+        "changedAt": "1792756780418",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792756778810"
+      }
+    ],
+    "watchProjection": {
+      "articleId": "52a6ad7ea6d00ccdcaee90c5905a7881f08bdb659654ac1cafaea8aa5ed1de6e",
+      "hash_sourceDeviceId": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b",
+      "hash_url": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+      "hash_rssSourceUrl": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "hash_title": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+      "updatedAt": 1788102905069,
+      "independentSaved": false,
+      "independentChangedAt": 1788102905069,
+      "favoriteSaved": false,
+      "favoriteChangedAt": 1788102905069,
+      "watchLaterSaved": false,
+      "watchLaterChangedAt": 0,
+      "deleted": true,
+      "deletedAt": 1788102905069,
+      "readingPositionChangedAt": 0,
+      "manifest_articleId": "52a6ad7ea6d00ccdcaee90c5905a7881f08bdb659654ac1cafaea8aa5ed1de6e",
+      "manifest_deleted": true,
+      "manifest_deletedAt": 1788102905069,
+      "manifest_updatedAt": 1788102905069,
+      "manifest_independentChangedAt": 1788102905069,
+      "manifest_favoriteChangedAt": 1788102905069,
+      "manifest_watchLaterChangedAt": 0,
+      "manifest_bodyHash": "4be05c80bc3407f570bac4640e7512a982050aaf1ec28af6fac14315214a5898",
+      "manifest_metadataHash": "20093963715c478eaea1e213a64c7e84cd928c5d653862e8e5c76af2fc957122"
+    },
+    "watchOtherProjections": [
+      {
+        "scope": ":canonical:books-v1",
+        "article_id": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+        "source_item": "6457",
+        "project_state": {
+          "articleId": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+          "hash_sourceDeviceId": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+          "hash_url": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+          "hash_rssSourceUrl": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+          "hash_title": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+          "updatedAt": 1792756780418,
+          "independentSaved": false,
+          "independentChangedAt": 0,
+          "favoriteSaved": false,
+          "favoriteChangedAt": 1792756780418,
+          "watchLaterSaved": false,
+          "watchLaterChangedAt": 0,
+          "deleted": false,
+          "deletedAt": 0,
+          "readingPositionChangedAt": 0,
+          "manifest_articleId": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+          "manifest_deleted": false,
+          "manifest_deletedAt": 0,
+          "manifest_updatedAt": 1792756780418,
+          "manifest_independentChangedAt": 0,
+          "manifest_favoriteChangedAt": 1792756780418,
+          "manifest_watchLaterChangedAt": 0,
+          "manifest_bodyHash": "bdf76352e405f2773d0e684ff5af7a834cf29eeaaaf6f0c27d52f62b74fbad66",
+          "manifest_metadataHash": "b8e957769fca569390d83988db64073529254f4ea7d7bd86d0b31f0a250cb894"
+        }
+      }
+    ],
+    "watchSaved": [
+      {
+        "article_id": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+        "save_type": "favorite",
+        "item_id": "6457",
+        "saved": "0",
+        "changed_at": "1792756780418",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "hash_url": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+        "actual_delete_clock": "0",
+        "cloud_id": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43"
+      },
+      {
+        "article_id": "52a6ad7ea6d00ccdcaee90c5905a7881f08bdb659654ac1cafaea8aa5ed1de6e",
+        "save_type": "favorite",
+        "item_id": null,
+        "saved": "0",
+        "changed_at": "1788102905069",
+        "hash_source": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b",
+        "hash_url": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+        "actual_delete_clock": "1788102905069",
+        "cloud_id": ""
+      }
+    ],
+    "watchActualTombstones": [
+      {
+        "article_id": "52a6ad7ea6d00ccdcaee90c5905a7881f08bdb659654ac1cafaea8aa5ed1de6e",
+        "hash_url": "4180ca856eb8c06323aa82a517849669aef311fa86875bde2e010cb8e40eea43",
+        "changed_at": "1788102905069",
+        "hash_source": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b"
+      }
+    ]
+  },
+  {
+    "phone": {
+      "articleId": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+      "hash_url": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+      "hash_feed": "d65f147bdeacbc85ea3ea5f2009369584be800f92ce00cb5262eced2ecce426e",
+      "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+      "deleted": "0",
+      "deletedAt": "0",
+      "updatedAt": "1792756780422",
+      "importedAt": "1792441632686",
+      "independentSaved": "0",
+      "independentChangedAt": "0",
+      "favoriteSaved": "0",
+      "favoriteChangedAt": "1792756780422",
+      "watchLaterSaved": "0",
+      "watchLaterChangedAt": "0",
+      "readingPositionChangedAt": "0",
+      "syncBodyHash": "e911d91cae7f3f8c7399ea090ba933df4b33cea94266d6cd5a64289aa93cb8d9",
+      "syncMetadataHash": "03e5fcc7f5cb9dc4a4a13de4ba136272f786e14269338df2f6d8aac5b2211137"
+    },
+    "phoneAlias": {
+      "old": "b548f9b60920d81ba99befece9123174590bde19c2c3985a8637b076d7d8cc30",
+      "canonical": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b"
+    },
+    "phoneOperations": [
+      {
+        "seq": "5634",
+        "kind": "article",
+        "entityId": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+        "changedAt": "1792732081568",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792732077385"
+      },
+      {
+        "seq": "5641",
+        "kind": "article",
+        "entityId": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+        "changedAt": "1792734833402",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792734829285"
+      },
+      {
+        "seq": "5658",
+        "kind": "article",
+        "entityId": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+        "changedAt": "1792742473496",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792742469243"
+      },
+      {
+        "seq": "5665",
+        "kind": "article",
+        "entityId": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+        "changedAt": "1792742473508",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792742469289"
+      },
+      {
+        "seq": "5670",
+        "kind": "article",
+        "entityId": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+        "changedAt": "1792743418551",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792743414358"
+      },
+      {
+        "seq": "5677",
+        "kind": "article",
+        "entityId": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+        "changedAt": "1792743418563",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792743414374"
+      },
+      {
+        "seq": "8497",
+        "kind": "article",
+        "entityId": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+        "changedAt": "1792756780422",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792756778814"
+      }
+    ],
+    "watchProjection": {
+      "articleId": "b548f9b60920d81ba99befece9123174590bde19c2c3985a8637b076d7d8cc30",
+      "hash_sourceDeviceId": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b",
+      "hash_url": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+      "hash_rssSourceUrl": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "hash_title": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+      "updatedAt": 1788102905068,
+      "independentSaved": false,
+      "independentChangedAt": 1788102905068,
+      "favoriteSaved": false,
+      "favoriteChangedAt": 1788102905068,
+      "watchLaterSaved": false,
+      "watchLaterChangedAt": 0,
+      "deleted": true,
+      "deletedAt": 1788102905068,
+      "readingPositionChangedAt": 0,
+      "manifest_articleId": "b548f9b60920d81ba99befece9123174590bde19c2c3985a8637b076d7d8cc30",
+      "manifest_deleted": true,
+      "manifest_deletedAt": 1788102905068,
+      "manifest_updatedAt": 1788102905068,
+      "manifest_independentChangedAt": 1788102905068,
+      "manifest_favoriteChangedAt": 1788102905068,
+      "manifest_watchLaterChangedAt": 0,
+      "manifest_bodyHash": "4be05c80bc3407f570bac4640e7512a982050aaf1ec28af6fac14315214a5898",
+      "manifest_metadataHash": "a2678586f11a6192109adabb70b71b4175105439faf4a13061607efbd2513caf"
+    },
+    "watchOtherProjections": [
+      {
+        "scope": ":canonical:books-v1",
+        "article_id": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+        "source_item": "6456",
+        "project_state": {
+          "articleId": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+          "hash_sourceDeviceId": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+          "hash_url": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+          "hash_rssSourceUrl": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+          "hash_title": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+          "updatedAt": 1792756780422,
+          "independentSaved": false,
+          "independentChangedAt": 0,
+          "favoriteSaved": false,
+          "favoriteChangedAt": 1792756780422,
+          "watchLaterSaved": false,
+          "watchLaterChangedAt": 0,
+          "deleted": false,
+          "deletedAt": 0,
+          "readingPositionChangedAt": 0,
+          "manifest_articleId": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+          "manifest_deleted": false,
+          "manifest_deletedAt": 0,
+          "manifest_updatedAt": 1792756780422,
+          "manifest_independentChangedAt": 0,
+          "manifest_favoriteChangedAt": 1792756780422,
+          "manifest_watchLaterChangedAt": 0,
+          "manifest_bodyHash": "dc5a5498db616a11c25a6ed54633c7c4067669e1732ec23cc46af340527719c2",
+          "manifest_metadataHash": "e6b683f76352b90327e5c29233cbe016dc03c6162518bf687c5f735dd48c85e8"
+        }
+      }
+    ],
+    "watchSaved": [
+      {
+        "article_id": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+        "save_type": "favorite",
+        "item_id": "6456",
+        "saved": "0",
+        "changed_at": "1792756780422",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "hash_url": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+        "actual_delete_clock": "0",
+        "cloud_id": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b"
+      },
+      {
+        "article_id": "b548f9b60920d81ba99befece9123174590bde19c2c3985a8637b076d7d8cc30",
+        "save_type": "favorite",
+        "item_id": null,
+        "saved": "0",
+        "changed_at": "1788102905068",
+        "hash_source": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b",
+        "hash_url": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+        "actual_delete_clock": "1788102905068",
+        "cloud_id": ""
+      }
+    ],
+    "watchActualTombstones": [
+      {
+        "article_id": "b548f9b60920d81ba99befece9123174590bde19c2c3985a8637b076d7d8cc30",
+        "hash_url": "7a47b22872b709d97f0bd50d14ae097f70ae70677a12ff218d4591a01775e39b",
+        "changed_at": "1788102905068",
+        "hash_source": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b"
+      }
+    ]
+  },
+  {
+    "phone": {
+      "articleId": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+      "hash_url": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+      "hash_feed": "d65f147bdeacbc85ea3ea5f2009369584be800f92ce00cb5262eced2ecce426e",
+      "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+      "deleted": "0",
+      "deletedAt": "0",
+      "updatedAt": "1792756780423",
+      "importedAt": "1792441632684",
+      "independentSaved": "0",
+      "independentChangedAt": "0",
+      "favoriteSaved": "0",
+      "favoriteChangedAt": "1792756780423",
+      "watchLaterSaved": "0",
+      "watchLaterChangedAt": "0",
+      "readingPositionChangedAt": "0",
+      "syncBodyHash": "f9e9656a1fc3c73c3ab4318f97edb30a9df2085424f3185ca7590a0dc6d62af6",
+      "syncMetadataHash": "12bf693d1bd79253167b51233b6e259bd9337a71faa5f86d4e3e7f75ec082945"
+    },
+    "phoneAlias": {
+      "old": "fc3c8586b743dcb03444d7f5532e4edcf77138aac6649f749ccfe5d7edb5eb7c",
+      "canonical": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d"
+    },
+    "phoneOperations": [
+      {
+        "seq": "5635",
+        "kind": "article",
+        "entityId": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+        "changedAt": "1792732081569",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792732077388"
+      },
+      {
+        "seq": "5642",
+        "kind": "article",
+        "entityId": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+        "changedAt": "1792734833403",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792734829289"
+      },
+      {
+        "seq": "5657",
+        "kind": "article",
+        "entityId": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+        "changedAt": "1792742473495",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792742469239"
+      },
+      {
+        "seq": "5666",
+        "kind": "article",
+        "entityId": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+        "changedAt": "1792742473509",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792742469290"
+      },
+      {
+        "seq": "5669",
+        "kind": "article",
+        "entityId": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+        "changedAt": "1792743418550",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792743414356"
+      },
+      {
+        "seq": "5678",
+        "kind": "article",
+        "entityId": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+        "changedAt": "1792743418564",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792743414376"
+      },
+      {
+        "seq": "8498",
+        "kind": "article",
+        "entityId": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+        "changedAt": "1792756780423",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "reason": "conflictResolution",
+        "createdAt": "1792756778816"
+      }
+    ],
+    "watchProjection": {
+      "articleId": "fc3c8586b743dcb03444d7f5532e4edcf77138aac6649f749ccfe5d7edb5eb7c",
+      "hash_sourceDeviceId": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b",
+      "hash_url": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+      "hash_rssSourceUrl": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "hash_title": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+      "updatedAt": 1788102905070,
+      "independentSaved": false,
+      "independentChangedAt": 1788102905070,
+      "favoriteSaved": false,
+      "favoriteChangedAt": 1788102905070,
+      "watchLaterSaved": false,
+      "watchLaterChangedAt": 0,
+      "deleted": true,
+      "deletedAt": 1788102905070,
+      "readingPositionChangedAt": 0,
+      "manifest_articleId": "fc3c8586b743dcb03444d7f5532e4edcf77138aac6649f749ccfe5d7edb5eb7c",
+      "manifest_deleted": true,
+      "manifest_deletedAt": 1788102905070,
+      "manifest_updatedAt": 1788102905070,
+      "manifest_independentChangedAt": 1788102905070,
+      "manifest_favoriteChangedAt": 1788102905070,
+      "manifest_watchLaterChangedAt": 0,
+      "manifest_bodyHash": "4be05c80bc3407f570bac4640e7512a982050aaf1ec28af6fac14315214a5898",
+      "manifest_metadataHash": "894809bf1b69590b3a420dfe6444b841c6fdb4e0c873bff0ba09bdf519eccaff"
+    },
+    "watchOtherProjections": [
+      {
+        "scope": ":canonical:books-v1",
+        "article_id": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+        "source_item": "6458",
+        "project_state": {
+          "articleId": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+          "hash_sourceDeviceId": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+          "hash_url": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+          "hash_rssSourceUrl": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+          "hash_title": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+          "updatedAt": 1792756780423,
+          "independentSaved": false,
+          "independentChangedAt": 0,
+          "favoriteSaved": false,
+          "favoriteChangedAt": 1792756780423,
+          "watchLaterSaved": false,
+          "watchLaterChangedAt": 0,
+          "deleted": false,
+          "deletedAt": 0,
+          "readingPositionChangedAt": 0,
+          "manifest_articleId": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+          "manifest_deleted": false,
+          "manifest_deletedAt": 0,
+          "manifest_updatedAt": 1792756780423,
+          "manifest_independentChangedAt": 0,
+          "manifest_favoriteChangedAt": 1792756780423,
+          "manifest_watchLaterChangedAt": 0,
+          "manifest_bodyHash": "e7ab3963967ddbff8175688817e9d19c020677cfb1ca6997248bb26127693e58",
+          "manifest_metadataHash": "36316b299eeac3d556a0329b5deed02f427360a41e9d871b8563c7f336b14c10"
+        }
+      }
+    ],
+    "watchSaved": [
+      {
+        "article_id": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+        "save_type": "favorite",
+        "item_id": "6458",
+        "saved": "0",
+        "changed_at": "1792756780423",
+        "hash_source": "1b2b2e74ace751d5529cc7fd375b87c34b22775cd539d0e67ff8498f49304c92",
+        "hash_url": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+        "actual_delete_clock": "0",
+        "cloud_id": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d"
+      },
+      {
+        "article_id": "fc3c8586b743dcb03444d7f5532e4edcf77138aac6649f749ccfe5d7edb5eb7c",
+        "save_type": "favorite",
+        "item_id": null,
+        "saved": "0",
+        "changed_at": "1788102905070",
+        "hash_source": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b",
+        "hash_url": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+        "actual_delete_clock": "1788102905070",
+        "cloud_id": ""
+      }
+    ],
+    "watchActualTombstones": [
+      {
+        "article_id": "fc3c8586b743dcb03444d7f5532e4edcf77138aac6649f749ccfe5d7edb5eb7c",
+        "hash_url": "f8c6223c2a4d8e0fe4ce8538cb4d49a51a3e110d3c8eb1f01497a5bae3aaf49d",
+        "changed_at": "1788102905070",
+        "hash_source": "87dfe27473f7ae4102c8db33599bf7d573412fdd059c9dbfc49e36839504346b"
+      }
+    ]
+  }
+]

@@ -28,7 +28,7 @@ class CloudSnapshotCodecTest {
         val descriptor = encrypted.manifest.objects.single().copy(readerKeyEnvelope = envelope)
         val projected = encrypted.manifest.copy(objects = listOf(CloudObjectDescriptor.fromJson(descriptor.toJson())))
         assertArrayEquals(source, codec.restoreObjects(key, projected) { encrypted.newCiphertextChunks.getValue(it) }.getValue(name))
-        envelope.put("scope", "batch:wrong")
+        projected.objects.single().readerKeyEnvelope!!.put("scope", "batch:wrong")
         org.junit.Assert.assertThrows(AEADBadTagException::class.java) {
             codec.restoreObjects(key, projected) { encrypted.newCiphertextChunks.getValue(it) }
         }

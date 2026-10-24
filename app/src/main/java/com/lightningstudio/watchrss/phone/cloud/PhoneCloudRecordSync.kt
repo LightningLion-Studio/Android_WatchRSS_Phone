@@ -25,6 +25,7 @@ internal class PhoneCloudRecordSync(
     suspend fun sync(session: PhoneAccountSession, allowUpload: Boolean, operationEpoch: String? = client.knownEpoch(session), requireAvailable: Boolean = false) = withContext(Dispatchers.IO) {
         expectedEpoch = operationEpoch
         try {
+        stageRestrictedEdits(session)
         replay(session)
         if (!pull(session)) { if (requireAvailable) throw CloudRecordsUnavailableException(); return@withContext }
         checkBoundOwner(session); afterPull(session)
@@ -50,7 +51,7 @@ internal class PhoneCloudRecordSync(
     } catch (error: CloudHttpException) {
         if (error.status != 400 || runCatching { JSONObject(error.detail).optString("error") }.getOrDefault("") != "cloud_record_cursor_invalid") throw error
         checkBoundOwner(session)
-        store.clear(client.scopeId(session))
+        store.resetCursor(client.scopeId(session))
         // Exactly one recovery attempt; only the records cache is reset.
         pullPages(session)
     }
@@ -64,7 +65,7 @@ internal class PhoneCloudRecordSync(
             val page = client.recordPage(session, cursor) ?: return false
             checkBoundOwner(session)
             if (page.getInt("formatVersion") == 0) {
-                checkBoundOwner(session); store.clear(client.scopeId(session))
+                checkBoundOwner(session); store.resetCursor(client.scopeId(session))
                 return false
             }
             require(page.getInt("formatVersion") == 1)
@@ -92,21 +93,27 @@ internal class PhoneCloudRecordSync(
                     tryRefreshKeys(session); checkBoundOwner(session)
                     key = accountKey(session.userId, envelope.optInt("keyVersion"))
                 }
+                var isolated=false
                 val decoded = try {
                     if (key == null) null else decode(session, key, id, envelope)
+                } catch(e:CloudFormatIsolationException) {isolated=true;null
                 } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
                 finally { key?.fill(0) }
-                if (decoded == null || decoded.first !in setOf("article", "source", "rss-state", "book", "book-reading")) {
+                if(decoded!=null) {
+                    store.saveDocument(client.scopeId(session),id,rev,decoded.document.source,decoded.access)
+                    store.saveRawEnvelope(client.scopeId(session),id,envelope.toString())
+                }
+                if (decoded == null || decoded.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED)) {
                     store.quarantine(client.scopeId(session), QuarantinedCloudRecord(id, rev, envelope.optInt("keyVersion"),
-                        if (decoded != null) "unknown_kind" else if (key == null) "missing_key" else "invalid_record", envelope.toString(), item.optBoolean("tombstone")))
+                        if(isolated) "r48_isolated" else if (decoded != null && decoded.kind !in PhoneCloudRecordCodec.kinds) "unknown_kind" else if(decoded!=null) "r48_${decoded.access.name.lowercase()}" else if (key == null) "missing_key" else "invalid_record", envelope.toString(), item.optBoolean("tombstone")))
                     continue
                 }
                 val (kind, value) = decoded
                 val retired = item.optBoolean("tombstone") && !value.optBoolean("deleted")
-                if (!retired && !removedRssIndex(kind,value)) {
+                if (!retired && !removedRssIndex(kind,value) && store.pendingValue(client.scopeId(session),id)==null) {
                     checkBoundOwner(session)
                     if (kind == "rss-state") store.saveRssState(client.scopeId(session), value)
-                    try { apply(session, kind, value) }
+                    try { apply(session, kind, PhoneCloudRecordCodec.knownValue(kind,value)) }
                     catch (_: org.json.JSONException) {
                         checkBoundOwner(session); store.quarantine(client.scopeId(session), QuarantinedCloudRecord(id, rev, envelope.optInt("keyVersion"), "invalid_fields", envelope.toString(), item.optBoolean("tombstone"))); continue
                     } catch (_: IllegalArgumentException) {
@@ -122,10 +129,21 @@ internal class PhoneCloudRecordSync(
             cursor = next
         }
     }
+    private suspend fun stageRestrictedEdits(session:PhoneAccountSession) {
+        val owner=client.scopeId(session);val ids=store.restrictedRecordIds(owner)
+        if(ids.isEmpty())return
+        val anchor=accountKey(session.userId,anchorVersion(session.userId))?:return
+        try {pages {kind,value->
+            checkBoundOwner(session)
+            val id=PhoneCloudRecordCodec.id(anchor,session.userId,kind,value)
+            if(id in ids)store.pending(owner,id,value.toString().takeIf{store.record(owner,id)?.second!=PhoneCloudRecordCodec.hash(kind,value)})
+        }}finally{anchor.fill(0)}
+    }
     private suspend fun push(session: PhoneAccountSession) {
         val version = currentVersion(session.userId)
         val key = accountKey(session.userId, version) ?: error("缺少当前账号密钥")
         val anchor = accountKey(session.userId, anchorVersion(session.userId)) ?: error("缺少锚定账号密钥")
+        val protected=store.quarantined(client.scopeId(session)).mapTo(hashSetOf()){it.id}
         var batch = JSONArray(); var hashes = linkedMapOf<String, String>()
         suspend fun flush() {
             if (batch.length() == 0) return
@@ -139,6 +157,8 @@ internal class PhoneCloudRecordSync(
                 val original = (0 until batch.length()).map { batch.getJSONObject(it) }.first { it.getString("recordId") == id }
                 store.saveRawEnvelope(client.scopeId(session), id, original.getJSONObject("envelope").toString())
                 val decoded = decode(session,key,id,original.getJSONObject("envelope"))
+                store.saveDocument(client.scopeId(session),id,rev,decoded.document.source,decoded.access)
+                store.pending(client.scopeId(session),id,null)
                 if (decoded.first == "rss-state") store.saveRssState(client.scopeId(session),decoded.second)
             }
             batch = JSONArray(); hashes = linkedMapOf()
@@ -149,22 +169,29 @@ internal class PhoneCloudRecordSync(
                 val owner = client.scopeId(session)
                 val id = PhoneCloudRecordCodec.id(anchor, session.userId, kind, value)
                 val hash = PhoneCloudRecordCodec.hash(kind, value)
+                if(id in protected) {store.pending(owner,id,value.toString());return@pages}
+                val baseline=baseline(session,id)
+                if(baseline!=null&&PhoneCloudRecordCodec.documentAccess(baseline)!=CloudFormatAccess.WRITABLE) {
+                    if(store.record(owner,id)?.second!=hash)store.pending(owner,id,value.toString())
+                    return@pages
+                }
                 val legacy = (anchorVersion(session.userId) + 1..version).mapNotNull { v ->
                     val oldKey = accountKey(session.userId, v) ?: return@mapNotNull null
                     val oldId = try { PhoneCloudRecordCodec.id(oldKey, session.userId, kind, value) } finally { oldKey.fill(0) }
                     val old = store.record(owner, oldId)
                     val envelope = store.rawEnvelope(owner, oldId)
-                    if (oldId == id || old == null || old.second == "retired" || envelope == null) null
+                    if (oldId == id || old == null || old.second == "retired" || envelope == null || baseline(session,oldId)?.let{PhoneCloudRecordCodec.documentAccess(it)!=CloudFormatAccess.WRITABLE}==true) null
                     else JSONObject().put("recordId", oldId).put("expectedRevision", old.first)
                         .put("tombstone", true).put("envelope", JSONObject(envelope))
                 }
                 val previous = store.record(owner, id)
+                if(previous?.second==hash&&legacy.isEmpty())store.pending(owner,id,null)
                 if (previous?.second != hash || legacy.isNotEmpty()) {
                     val groups = if (legacy.isEmpty()) listOf(emptyList()) else legacy.chunked(49)
                     for ((index, aliases) in groups.withIndex()) {
                         if (index > 0) flush()
                         val current = store.record(owner, id)
-                        val envelope = PhoneCloudRecordCodec.encrypt(key, session.userId, id, version, kind, value, idKey = anchor)
+                        val envelope = PhoneCloudRecordCodec.encrypt(key, session.userId, id, version, kind, value, idKey = anchor,baseline=baseline)
                         val item = JSONObject().put("recordId", id).put("expectedRevision", current?.first ?: "0")
                             .put("tombstone", value.optBoolean("deleted")).put("envelope", envelope)
                         val groupBytes = (aliases + item).sumOf { it.toString().toByteArray().size }
@@ -211,12 +238,15 @@ internal class PhoneCloudRecordSync(
             val page=store.rawPage(owner,after,50)
             if (page.isEmpty()) break
             for ((id,raw) in page) {
+                if(store.quarantined(owner).any{it.id==id})continue
                 checkBoundOwner(session)
                 val env=JSONObject(raw);val version=env.getInt("keyVersion")
                 val key=accountKey(session.userId,version) ?: error("缺少旧记录密钥")
                 val keys=idKeys(session)
                 try {
-                    val (kind,value)=PhoneCloudRecordCodec.decrypt(key,session.userId,id,env,keys)
+                    val document=PhoneCloudRecordCodec.decryptDocument(key,session.userId,id,env,keys)
+                    if(document.access!=CloudFormatAccess.WRITABLE)continue
+                    val (kind,value)=document
                     if (kind!="article" || !CloudContentPolicy.publicRss(value) || value.optBoolean("rssIndexRetired") || value.optBoolean("deleted")) continue
                     val canonicalId=canonicalArticleId(value)
                     if (keep(value) && canonicalId !in completedSavedIds) continue
@@ -230,7 +260,7 @@ internal class PhoneCloudRecordSync(
                     val clock=(CloudContentPolicy.interactionNumbers+listOf("updatedAt","importedAt","independentChangedAt","independentSortOrder")).maxOf { value.optLong(it) }
                     val tombstone=JSONObject(value.toString()).put("deleted",true).put("favoriteSaved",false).put("watchLaterSaved",false)
                         .put("rssIndexRetired",true).put("deletedAt",Math.addExact(maxOf(System.currentTimeMillis(),clock),1L))
-                    val encrypted=PhoneCloudRecordCodec.encrypt(key,session.userId,id,version,kind,tombstone,idKey=identityKey)
+                    val encrypted=PhoneCloudRecordCodec.encrypt(key,session.userId,id,version,kind,tombstone,idKey=identityKey,baseline=document.document)
                     val row=JSONObject().put("recordId",id).put("expectedRevision",store.record(owner,id)!!.first).put("tombstone",true).put("envelope",encrypted)
                     if (batch.length()>=50 || batch.toString().toByteArray().size+row.toString().toByteArray().size>1000000) flush()
                     batch.put(row);saved[id]=tombstone to encrypted
@@ -255,9 +285,12 @@ internal class PhoneCloudRecordSync(
         while(true) {
             val page=store.rawPage(owner,after,50);if(page.isEmpty())break
             for((id,raw) in page) {
+                if(store.quarantined(owner).any{it.id==id})continue
                 checkBoundOwner(session);val env=JSONObject(raw);val key=accountKey(session.userId,env.getInt("keyVersion"))?:error("缺少旧记录密钥");val keys=idKeys(session)
                 try {
-                    val (kind,value)=PhoneCloudRecordCodec.decrypt(key,session.userId,id,env,keys)
+                    val document=PhoneCloudRecordCodec.decryptDocument(key,session.userId,id,env,keys)
+                    if(document.access!=CloudFormatAccess.WRITABLE)continue
+                    val (kind,value)=document
                     if(kind!="article"||value.optBoolean("bookIndexRetired"))continue
                     val (book,reading)=lookup(value)?:continue
                     if(!book.getBoolean("deleted") && value.getString("articleId") !in completed && book.getString("bookId") !in completedBooks)continue
@@ -271,7 +304,7 @@ internal class PhoneCloudRecordSync(
                     val clock=value.keys().asSequence().filter{it.endsWith("At")}.maxOfOrNull{value.optLong(it)}?:0L
                     val tombstone=JSONObject(value.toString()).put("bookIndexRetired",true).put("deleted",true).put("independentSaved",false).put("favoriteSaved",false).put("watchLaterSaved",false)
                         .put("deletedAt",Math.addExact(maxOf(System.currentTimeMillis(),clock,book.getLong("deletedAt"),book.getLong("deletionClock")),1L))
-                    val encrypted=PhoneCloudRecordCodec.encrypt(key,session.userId,id,env.getInt("keyVersion"),kind,tombstone,idKey=idKey)
+                    val encrypted=PhoneCloudRecordCodec.encrypt(key,session.userId,id,env.getInt("keyVersion"),kind,tombstone,idKey=idKey,baseline=document.document)
                     val row=JSONObject().put("recordId",id).put("expectedRevision",store.record(owner,id)!!.first).put("tombstone",true).put("envelope",encrypted)
                     if(batch.length()>=50||batch.toString().toByteArray().size+row.toString().toByteArray().size>1000000)flush()
                     batch.put(row);hashes[id]=PhoneCloudRecordCodec.hash(kind,tombstone);envelopes[id]=encrypted
@@ -281,11 +314,18 @@ internal class PhoneCloudRecordSync(
         };flush()
     }
 
+    private fun baseline(session:PhoneAccountSession,id:String):CloudRawDocument? {
+        val owner=client.scopeId(session)
+        store.document(owner,id)?.let{return CloudRawDocument.parse(it)}
+        val envelope=store.rawEnvelope(owner,id)?.let(::JSONObject)?:return null
+        val key=accountKey(session.userId,envelope.getInt("keyVersion"))?:throw CloudFormatUpgradeRequired("missing_record_baseline_key")
+        return try {decode(session,key,id,envelope).document}finally{key.fill(0)}
+    }
     private fun idKeys(session: PhoneAccountSession): List<ByteArray> =
         (anchorVersion(session.userId)..currentVersion(session.userId)).mapNotNull { accountKey(session.userId, it) }
-    private fun decode(session: PhoneAccountSession, key: ByteArray, id: String, envelope: JSONObject): Pair<String, JSONObject> {
+    private fun decode(session: PhoneAccountSession, key: ByteArray, id: String, envelope: JSONObject): DecodedCloudRecord {
         val candidates = idKeys(session)
-        return try { PhoneCloudRecordCodec.decrypt(key, session.userId, id, envelope, candidates) }
+        return try { PhoneCloudRecordCodec.decryptDocument(key, session.userId, id, envelope, candidates) }
         finally { candidates.forEach { it.fill(0) } }
     }
     private suspend fun replay(session: PhoneAccountSession) {
@@ -299,13 +339,14 @@ internal class PhoneCloudRecordSync(
             val decoded = try { decode(session, key, record.id, envelope) }
                 catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; continue }
                 finally { key.fill(0) }
-            if (decoded.first !in setOf("article", "source", "rss-state", "book", "book-reading")) continue
+            store.saveDocument(owner,record.id,record.revision,decoded.document.source,decoded.access)
+            if(decoded.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED))continue
             // A newer revision received since quarantine always wins.
             if ((store.record(owner, record.id)?.first?.toLong() ?: -1) <= record.revision.toLong()) {
                 val retired = record.tombstone && !decoded.second.optBoolean("deleted")
-                try { if (!retired && !removedRssIndex(decoded.first,decoded.second)) {
+                try { if (!retired && !removedRssIndex(decoded.first,decoded.second) && store.pendingValue(owner,record.id)==null) {
                     if (decoded.first == "rss-state") store.saveRssState(owner, decoded.second)
-                    apply(session, decoded.first, decoded.second) } }
+                    apply(session, decoded.first, PhoneCloudRecordCodec.knownValue(decoded.first,decoded.second)) } }
                 catch (_: org.json.JSONException) { checkBoundOwner(session); continue }
                 catch (_: IllegalArgumentException) { checkBoundOwner(session); continue }
                 checkBoundOwner(session)

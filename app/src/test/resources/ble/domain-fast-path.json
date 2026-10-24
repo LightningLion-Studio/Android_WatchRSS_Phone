@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "algorithm": "sha256-utf8-domain-version-v1",
+  "cases": [
+    {
+      "domain": "library",
+      "epoch": "00000000000000000000000000000000",
+      "revision": 0,
+      "utf8Hex": "77617463687273732e626c652e646f6d61696e2d76657273696f6e2e76310a6c6962726172790a30303030303030303030303030303030303030303030303030303030303030300a30",
+      "root": "29173da9863354d10678b44098ed6c5dacab9f0e953871a02d728b33e25920a0"
+    },
+    {
+      "domain": "books",
+      "epoch": "0123456789abcdef0123456789abcdef",
+      "revision": 42,
+      "utf8Hex": "77617463687273732e626c652e646f6d61696e2d76657273696f6e2e76310a626f6f6b730a30313233343536373839616263646566303132333435363738396162636465660a3432",
+      "root": "20e803a4ca8e551c40bae675935f807f865d040aca684ce21fa0c18cab33e87c"
+    },
+    {
+      "domain": "bookReading",
+      "epoch": "ffffffffffffffffffffffffffffffff",
+      "revision": 9007199254740991,
+      "utf8Hex": "77617463687273732e626c652e646f6d61696e2d76657273696f6e2e76310a626f6f6b52656164696e670a66666666666666666666666666666666666666666666666666666666666666660a39303037313939323534373430393931",
+      "root": "7b0c3f624aa0fb01336597148958410f3a27e5f7b2b08a705424fb2c1b96758d"
+    },
+    {
+      "domain": "reader",
+      "epoch": "11111111111111111111111111111111",
+      "revision": 1,
+      "utf8Hex": "77617463687273732e626c652e646f6d61696e2d76657273696f6e2e76310a7265616465720a31313131313131313131313131313131313131313131313131313131313131310a31",
+      "root": "9addba3f49184590c2c6bcf2fd45b20672274ae596d8250fe7ea281533907670"
+    },
+    {
+      "domain": "notes",
+      "epoch": "22222222222222222222222222222222",
+      "revision": 7,
+      "utf8Hex": "77617463687273732e626c652e646f6d61696e2d76657273696f6e2e76310a6e6f7465730a32323232323232323232323232323232323232323232323232323232323232320a37",
+      "root": "d50fb4706c235d6479df2a23054a07a2758a2c4856abb710668475aa8c348c5a"
+    },
+    {
+      "domain": "account",
+      "epoch": "33333333333333333333333333333333",
+      "revision": 12,
+      "utf8Hex": "77617463687273732e626c652e646f6d61696e2d76657273696f6e2e76310a6163636f756e740a33333333333333333333333333333333333333333333333333333333333333330a3132",
+      "root": "d11a69e14fe9391aa7804b41b92465b1d8073af1770c2e329e71193f1deb4d2f"
+    },
+    {
+      "domain": "usage",
+      "epoch": "44444444444444444444444444444444",
+      "revision": 3,
+      "utf8Hex": "77617463687273732e626c652e646f6d61696e2d76657273696f6e2e76310a75736167650a34343434343434343434343434343434343434343434343434343434343434340a33",
+      "root": "6d115461d71528efef3db512bf200d5e8a3cd8ee47c472cc2ffa40ea46f31c46"
+    }
+  ],
+  "receiptCases": [
+    {
+      "name": "bilateral-unchanged",
+      "localRoot": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "remoteRoot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "saved": {
+        "localRoot": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "remoteRoot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "known": {
+        "localRoot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "remoteRoot": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "skip": true
+    },
+    {
+      "name": "only-remote-changed",
+      "localRoot": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "remoteRoot": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "saved": {
+        "localRoot": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "remoteRoot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "known": {
+        "localRoot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "remoteRoot": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "skip": false
+    },
+    {
+      "name": "only-one-ack-side",
+      "localRoot": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "remoteRoot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "saved": {
+        "localRoot": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "remoteRoot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "known": null,
+      "skip": false
+    }
+  ]
+}

@@ -11,19 +11,19 @@ import java.security.MessageDigest
 internal data class BleSyncCapabilities(
     val noteManifest: Boolean=false, val noteAssets: Boolean=false,
     val canonicalRssIds: Boolean=false, val fullMetadataOnly: Boolean=false,
-    val tokenCursor: Boolean=false, val books:Boolean=false, val bookReadingDelta:Boolean=false
+    val tokenCursor: Boolean=false, val books:Boolean=false, val bookReadingDelta:Boolean=false, val domainFastPath:Boolean=false
 ) {
     fun withDeclarations(value:JSONObject):BleSyncCapabilities {
         fun flag(key:String,previous:Boolean)=if(value.has(key))value.opt(key)==true else previous
         return BleSyncCapabilities(flag("supportsNoteManifestV2",noteManifest),flag("supportsNoteAssetInventory",noteAssets),
             flag("supportsRssCanonicalIds",canonicalRssIds),flag("supportsFullMetadataOnlyArticles",fullMetadataOnly),
-            flag("supportsTokenUsageCursor",tokenCursor),flag("supportsBookSyncV1",books),flag("supportsBookReadingDeltaV1",bookReadingDelta))
+            flag("supportsTokenUsageCursor",tokenCursor),flag("supportsBookSyncV1",books),flag("supportsBookReadingDeltaV1",bookReadingDelta),flag("supportsDomainFastPathV2",domainFastPath))
     }
     companion object { fun read(value:JSONObject)=BleSyncCapabilities().withDeclarations(value) }
 }
 internal fun JSONObject.advertiseBleSyncV2():JSONObject=apply {
     listOf("supportsNoteManifestV2","supportsNoteAssetInventory","supportsRssCanonicalIds",
-        "supportsFullMetadataOnlyArticles","supportsTokenUsageCursor","supportsBookSyncV1","supportsBookReadingDeltaV1").forEach { put(it,true) }
+        "supportsFullMetadataOnlyArticles","supportsTokenUsageCursor","supportsBookSyncV1","supportsBookReadingDeltaV1","supportsDomainFastPathV2").forEach { put(it,true) }
 }
 
 internal data class NoteAssetInventoryEntry(val storageKey:String,val sha256:String,val size:Long) {

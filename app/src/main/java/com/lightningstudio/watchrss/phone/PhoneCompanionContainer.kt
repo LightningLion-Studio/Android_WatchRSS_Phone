@@ -254,6 +254,8 @@ class PhoneCompanionContainer(context: Context) {
     private val bookStore by lazy {com.lightningstudio.watchrss.phone.data.book.ImportedBookStore(database,
         java.io.File(appContext.filesDir,"imported_books"),articleContentStore,deviceIdentity.deviceId)}
 
+    private val bleDomains by lazy {com.lightningstudio.watchrss.phone.data.ble.BleDomainStore(database,appContext.filesDir)}
+
     val repository: PhoneCompanionRepository by lazy {
         PhoneCompanionRepository(
             savedItemDao = database.phoneSavedItemDao(),
@@ -267,7 +269,8 @@ class PhoneCompanionContainer(context: Context) {
             articleContentStore = articleContentStore,
             appMetaDao = database.appMetaDao(),
             cloudBackendBaseUrl = accountEnvironment.backendBaseUrl,
-            books = bookStore
+            books = bookStore,
+            bleDomains = bleDomains
         )
     }
 
@@ -362,6 +365,7 @@ class PhoneCompanionContainer(context: Context) {
         )
     }
 
+    private var bluetoothCloudResumeJob:kotlinx.coroutines.Job?=null
     val bluetoothSyncManager: PhoneBluetoothSyncManager by lazy {
         PhoneBluetoothSyncManager(
             context = appContext,
@@ -381,7 +385,22 @@ class PhoneCompanionContainer(context: Context) {
             },
             canSyncAccount = { accountRepository.hasUsableSession },
             currentPhoneUserId = { accountRepository.session.value?.userId },
-            onSyncActiveChanged = {cloudChangeScheduler.setBluetoothSyncActive(it)},
+            onSyncActiveChanged = {active->
+                cloudChangeScheduler.setBluetoothSyncActive(active);cloudSyncService.setBluetoothSyncActive(active)
+                if(active){bluetoothCloudResumeJob?.cancel();bluetoothCloudResumeJob=null}
+                else if(cloudSyncService.hasDeferredBluetoothSync && bluetoothCloudResumeJob?.isActive!=true)bluetoothCloudResumeJob=appScope.launch {
+                    kotlinx.coroutines.delay(250)
+                    // An actual-change callback can consume the pending job first. Do not queue it twice.
+                    if(cloudSyncService.hasDeferredBluetoothSync) {
+                        bluetoothDebugLog.appendEvent("sync.cloud.resumed",BluetoothDebugLog.newSessionId("bleCloudResume"))
+                        runCatching{cloudSyncService.syncNow()}
+                    }
+                }
+            },
+            domainScope = {bleDomains.scope(accountEnvironment.backendBaseUrl,accountRepository.session.value?.userId)},
+            accountDomainWitness = {accountRepository.bluetoothAccountWitness(it)},
+            prepareAccountDomain = {peer,root->accountRepository.prepareBluetoothAccount(peer,root)},
+            acknowledgeAccountDomain = {peer,root->accountRepository.acknowledgeBluetoothAccount(peer,root)},
             onLibrarySyncCompleted = {
                 cloudChangeScheduler.acknowledgeBluetoothChanges()
                 val trace = BluetoothDebugLog.newSessionId("bleCloud")

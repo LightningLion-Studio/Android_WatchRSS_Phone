@@ -135,6 +135,33 @@ class WatchRssBackupArchiveTest {
         assertEquals(WatchRssBackupArchive.CURRENT_DATA_STRUCTURE_VERSION, error.currentVersion)
     }
 
+    @Test fun cloudReadAndWriteTimePatchPreserveUnknownZipEntries() {
+        val before=ByteArrayOutputStream().also{WatchRssBackupArchive.write(sampleSnapshot(),it)}.toByteArray()
+        val entries=readZipEntries(before).toMutableMap()
+        val future="future raw bytes\n9007199254740993".toByteArray();entries["future/attachment.bin"]=future
+        val original=writeZipEntries(entries)
+        assertThrows(IllegalArgumentException::class.java){WatchRssBackupArchive.read(original.inputStream())}
+        val restored=WatchRssBackupArchive.read(original.inputStream(),tolerateCloudEntries=true)
+        assertEquals(sampleSnapshot().articles.single().title,restored.articles.single().title)
+        val replacement=java.io.File.createTempFile("r48-private-",".wrss")
+        try {
+            replacement.writeBytes(ByteArrayOutputStream().also {WatchRssBackupArchive.write(sampleSnapshot().copy(articles=sampleSnapshot().articles.map{it.copy(title="edited")}),it)}.toByteArray())
+            WatchRssBackupArchive.preserveUnknownEntries(original,replacement)
+            org.junit.Assert.assertArrayEquals(future,readZipEntries(replacement.readBytes()).getValue("future/attachment.bin"))
+            assertEquals("edited",WatchRssBackupArchive.read(replacement.inputStream(),tolerateCloudEntries=true).articles.single().title)
+        }finally{replacement.delete()}
+    }
+    @Test fun wrssOneTwoThreeRemainReadableWithoutStartupRewrite() {
+        val output=ByteArrayOutputStream().also{WatchRssBackupArchive.write(sampleSnapshot(),it)}.toByteArray()
+        for(version in 1..3) {
+            val entries=readZipEntries(output).toMutableMap();val manifest=org.json.JSONObject(entries.getValue("manifest.json").toString(Charsets.UTF_8))
+            manifest.put("version",version);entries["manifest.json"]=manifest.toString().toByteArray()
+            val restored=WatchRssBackupArchive.read(writeZipEntries(entries).inputStream())
+            assertEquals(version,restored.dataStructureVersion)
+            assertEquals(sampleSnapshot().articles.single().contentText,restored.articles.single().contentText)
+        }
+    }
+
     private fun sampleSnapshot(): WatchRssBackupSnapshot = WatchRssBackupSnapshot(
         exportedAt = 1_725_000_000_000L,
         appVersion = "1.0-test",

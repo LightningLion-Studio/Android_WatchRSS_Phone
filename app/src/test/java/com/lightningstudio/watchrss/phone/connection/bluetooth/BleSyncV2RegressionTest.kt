@@ -431,6 +431,59 @@ class BleSyncV2RegressionTest {
         assertEquals(1,cloudCalls);assertEquals(1,result.noteStats!!.appliedOnPhone);assertTrue(transportClosed)
         assertEquals("complete",payloads().last().getString("phase"))
     }
+    @Test fun forcedFullReceivingOneUnchangedArticleAndSixteenSourcesDoesNotEnqueueCloud()=runBlocking<Unit> {
+        repo.mergeArticlesFromSync(listOf(row()))
+        val remote=repo.getArticlesForSync().single()
+        val sources=(0 until 16).map {PhoneRssSourceEntity("https://feed.test/$it","watch","feed$it","",null,null,1,1,1,false,false,0)}
+        sources.forEach{db.phoneRssSourceDao().upsert(it)}
+        repeat(2) {
+            val manifest=LibrarySyncPayload.buildManifestRequest("watch",listOf(remote),sources)
+                .put("success",true).put("supportsReaderPresets",false).put("supportsNoteManifestV2",false).put("supportsNoteAssetInventory",false)
+            val body=LibrarySyncPayload.buildChunkedResponseFrames("watch",listOf(remote),emptyList(),useBatches=false).single()
+            val s=session(bindingResponse(),ok("syncAccount"),ok("syncLibrary","cursor"),manifest,body,
+                noteResponse(null),ok("syncLlmTokenUsage").put("records",JSONArray()),finishResponse())
+            val result=manager.syncAll(device,forceFull=true,reusableSession=s)
+            assertEquals(1,result.libraryStats!!.received);assertEquals(16,result.libraryStats.sourcesReceived)
+            assertEquals(0,result.libraryStats.merged);assertEquals(0,result.libraryStats.sourcesMerged)
+            assertEquals(0,cloudCalls)
+        }
+    }
+    @Test fun sourceRefreshMetadataWinsOnceAndStaleWatchReplayDoesNotChangeItAgain()=runBlocking<Unit> {
+        val clock=System.currentTimeMillis()+60_000
+        val old=PhoneRssSourceEntity("https://feed.test/rss","watch","feed","old description",null,null,1,clock,-100,false,false,0)
+        db.phoneRssSourceDao().upsert(old)
+        repo.markLibrarySyncSuccess("watch",0,0,14,true,canonicalIds=false)
+        val fresh=com.lightningstudio.watchrss.phone.data.importer.ImportedRssSource(old.url,old.title,"public metadata",null,null,emptyList())
+        val updated=repo.mergeCloudRssInventory(fresh).source
+        assertTrue("changed metadata must advance the LWW clock",updated.updatedAt>clock)
+        val seq=db.syncChangeLogDao().maxSeq();assertTrue(seq>0)
+        val delta=repo.prepareLibrarySyncWindow("watch",0)
+        assertFalse(delta.fullSnapshot);assertEquals(listOf(updated),delta.rssSources)
+        repeat(3) {
+            assertEquals(0,repo.mergeRssSourcesFromSync(listOf(old)))
+            assertEquals(updated,repo.mergeCloudRssInventory(fresh).source)
+            assertEquals(seq,db.syncChangeLogDao().maxSeq())
+        }
+    }
+    @Test fun unchangedPublicSourceRefreshPreservesSignedOrderAndProvenance()=runBlocking<Unit> {
+        val source=PhoneRssSourceEntity("https://feed.test/rss","watch","feed","description",null,null,1,100,-100,false,false,0)
+        db.phoneRssSourceDao().upsert(source)
+        val fresh=com.lightningstudio.watchrss.phone.data.importer.ImportedRssSource(source.url,source.title,source.description,null,null,emptyList())
+        assertEquals(source,repo.mergeCloudRssInventory(fresh).source)
+    }
+    @Test fun delayedPublicInventoryCannotRestoreADeletedSubscriptionWithANewerClock()=runBlocking<Unit> {
+        val source=PhoneRssSourceEntity("https://feed.test/rss","watch","feed","description",null,null,1,100,-100,false,true,System.currentTimeMillis()+60_000)
+        db.phoneRssSourceDao().upsert(source)
+        val fresh=com.lightningstudio.watchrss.phone.data.importer.ImportedRssSource(source.url,source.title,"new metadata",null,null,emptyList())
+        assertEquals(source,repo.mergeCloudRssInventory(fresh).source)
+        assertEquals(source,db.phoneRssSourceDao().getByUrl(source.url));assertEquals(0L,db.syncChangeLogDao().maxSeq())
+    }
+    @Test fun realWatchNullSourceUrlsAreNotTheLiteralStringNull() {
+        val source=JSONObject().put("url","https://feed.test/rss").put("title","feed")
+            .put("siteUrl",JSONObject.NULL).put("imageUrl",JSONObject.NULL)
+        val parsed=LibrarySyncPayload.parseRssSources(JSONArray().put(source)).single()
+        assertNull(parsed.siteUrl);assertNull(parsed.imageUrl)
+    }
     private fun bindingResponse() = ok("syncLibrary").put("account", JSONObject().put("bound", true)
         .put("userIdHash", CloudSnapshotCodec.sha256("owner".toByteArray())))
     private fun emptyManifest() = LibrarySyncPayload.buildManifestRequestFromEntries("watch", emptyList(), emptyList())
@@ -459,6 +512,28 @@ class BleSyncV2RegressionTest {
         assertEquals(0, manifest.getJSONArray("articleManifest").length())
         assertEquals(seq, db.syncPeerStateDao().get("watch")!!.lastLocalSeqAckedByPeer)
         assertEquals(seq, db.syncChangeLogDao().maxSeq())
+    }
+
+    @Test fun stalledIpReadClosesThePipeAndResumesTheSameOperationOverBluetooth()=runBlocking<Unit> {
+        val sent=ByteArrayOutputStream()
+        val ip=com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSession(
+            "watch","stalled",com.lightningstudio.watchrss.phone.connection.ip.IpTransportKind.WIFI_LAN,"192.0.2.1",
+            {sent.write(it)},{transportClosed=true},readIdleTimeoutMs=100)
+        val wire=ByteArrayOutputStream().also {out->listOf(bindingResponse(),ok("syncAccount")).forEach{BluetoothSyncProtocol.writeFrame(out,it)}}
+        ip.acceptBinary(wire.toByteArray()) // cursor never arrives; there is no manual Wi-Fi toggle.
+        val first=PhoneSyncSession(PhoneBluetoothSyncClient(context,log),device,"phone",
+            PhoneSyncSession.Transport(ip.inputStream,ip.outputStream,"ip:wifiLan",false,ip::close),true,false,false)
+        val waits=mutableListOf<Long>();var opens=0
+        manager.reconnectDelay={waits+=it}
+        manager.reconnectSession={_,_->
+            assertTrue(ip.isClosed);opens++
+            session(bindingResponse(),ok("syncLibrary","cursor"),emptyManifest(),emptyComplete(),
+                noteResponse(null),ok("syncLlmTokenUsage").put("records",JSONArray()),finishResponse())
+        }
+        try {
+            manager.syncAll(device,reusableSession=first)
+            assertEquals(1,opens);assertEquals(listOf(2000L),waits);assertEquals(0,cloudCalls)
+        }finally{first.close();ip.close()}
     }
 
     @Test fun lostAppliedAckReplaysIdempotentlyWithoutAnotherDatabaseWrite() = runBlocking<Unit> {

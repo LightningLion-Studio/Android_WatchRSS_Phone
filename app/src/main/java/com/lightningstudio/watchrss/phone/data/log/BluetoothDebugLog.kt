@@ -55,7 +55,7 @@ class BluetoothDebugLog(context: Context) {
             }
         }
         // Release timing evidence without exporting bodies, tokens, account IDs or Bluetooth addresses.
-        val timingKeys=setOf("action","phase","label","elapsedMs","wireBytes","prepareMs","bookPrepareMs","rootCount","remoteRootCount","missingRemote","retryDomains","localChanged","remoteChanged","errorClass","readerError","phoneMissing","watchMissing","skipped","domains","actualChanges","stage","deltaArticles","fullArticles","deltaSources","fullSnapshot","fallbackReason","sentArticles","sentSources","merged","mergedSources","received","sourcesReceived","applied","count","success","attempt","delayMs","elapsedNanos")
+        val timingKeys=setOf("action","phase","label","elapsedMs","wireBytes","prepareMs","bookPrepareMs","rootCount","remoteRootCount","missingRemote","retryDomains","localChanged","remoteChanged","errorClass","readerError","phoneMissing","watchMissing","skipped","domains","actualChanges","sourceTag","changedFields","localClock","remoteClock","localOrder","remoteOrder","articlesMerged","sourcesMerged","booksApplied","localApplied","notesPhone","notesWatch","appliedOnWatch","appliedOnPhone","bluetoothOnly","stage","deltaArticles","fullArticles","deltaSources","fullSnapshot","fallbackReason","sentArticles","sentSources","merged","mergedSources","received","sourcesReceived","applied","count","success","attempt","delayMs","elapsedNanos")
         if(event.startsWith("sync.") || event.startsWith("bt.frame.") || event.startsWith("bt.socket.") || event.startsWith("bt.library.probe.")) {
             Log.i("WatchRSSBluetooth",buildString {
                 append("monotonicNanos=$elapsedNanos event=$event")

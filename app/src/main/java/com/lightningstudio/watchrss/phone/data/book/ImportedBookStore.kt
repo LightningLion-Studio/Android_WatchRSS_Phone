@@ -161,7 +161,14 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         previous=dao.get(id)
         state=BookSync.merge(previous?.let{JSONObject(it.stateJson)},remote);json=BookSync.canonical(state)
         var changed=0
-        if(previous?.stateJson!=json){dao.put(previous?.copy(stateJson=json)?:BookEntity(id,json));changed++}
+        if(previous?.stateJson!=json){
+            val before=previous?.stateJson?.let(::JSONObject)
+            val fields=(state.keys().asSequence().toSet()+before?.keys()?.asSequence().orEmpty().toSet()).filter {
+                com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordCodec.canonical(before?.opt(it))!=com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordCodec.canonical(state.opt(it))
+            }
+            diagnostic("book-merge:id=${id.take(8)}:fields=${fields.sorted().joinToString(",")}")
+            dao.put(previous?.copy(stateJson=json)?:BookEntity(id,json));changed++
+        }
         changed+applyDeletions(state)
     }
     private suspend fun applyDeletions(state:JSONObject):Int {

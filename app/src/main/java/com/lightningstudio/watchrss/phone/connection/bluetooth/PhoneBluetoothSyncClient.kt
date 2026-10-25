@@ -22,6 +22,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
+import com.lightningstudio.watchrss.phone.connection.ip.IpReadDeadline
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -507,7 +508,8 @@ class PhoneBluetoothSyncClient(
     internal suspend fun openPersistentSession(
         device: PhoneBluetoothWatchDevice,
         localDeviceId: String,
-        sessionId: String = BluetoothDebugLog.newSessionId("sync-session-open")
+        sessionId: String = BluetoothDebugLog.newSessionId("sync-session-open"),
+        allowIpUpgrade:Boolean=true
     ): PhoneSyncSession? {
         if (!device.supportsPersistentSession) return null
         requireBluetoothConnectPermission()
@@ -527,11 +529,12 @@ class PhoneBluetoothSyncClient(
             probeDirectWithPersistentSessionSdpRecovery(
                 device = bluetoothDevice,
                 deviceId = localDeviceId,
-                sessionId = sessionId
+                sessionId = sessionId,
+                allowIpUpgrade = allowIpUpgrade
             )
         } ?: return null
         val rfcommSession = identity.session ?: return null
-        val ipSession = identity.takeIf { it.ipUpgradeAccepted && it.deviceId.isNotBlank() }
+        val ipSession = identity.takeIf { allowIpUpgrade && it.ipUpgradeAccepted && it.deviceId.isNotBlank() }
             ?.let { awaitIpSession(it.deviceId, IP_UPGRADE_WAIT_MS) }
         val session = if (ipSession != null) {
             runCatching { rfcommSession.complete("$sessionId-rfcomm-upgrade") }
@@ -556,7 +559,9 @@ class PhoneBluetoothSyncClient(
 
     internal suspend fun promoteLateIpSession(
         session: PhoneSyncSession,
-        sessionId: String
+        sessionId: String,
+        descriptorProvider:(String)->JSONObject? = {watchId->(context.applicationContext as? PhoneCompanionApplication)?.currentIpEndpointDescriptorForSync(watchId)},
+        awaitSession:suspend(String,Long)->PhoneIpSyncSession? = ::awaitIpSession
     ): PhoneSyncSession {
         val remoteDeviceId = pendingLateIpUpgradeDeviceId(
             ipUpgradeExpected = session.ipUpgradeExpected,
@@ -572,7 +577,20 @@ class PhoneBluetoothSyncClient(
                 "waitMs" to LATE_IP_UPGRADE_WAIT_MS
             )
         )
-        val ipSession = awaitIpSession(remoteDeviceId, LATE_IP_UPGRADE_WAIT_MS)
+        var ipSession = awaitSession(remoteDeviceId, LATE_IP_UPGRADE_WAIT_MS)
+        if(ipSession==null && session.isPersistent && session.bindingProbe?.opt("supportsDomainFastPathV2")==true) {
+            val descriptor=descriptorProvider(remoteDeviceId)
+            if(descriptor!=null && descriptor.optJSONArray("endpoints")?.length()?.let{it>0}==true) {
+                // Re-offer once on the already authenticated RFCOMM session. A Wi-Fi transition
+                // can invalidate the first signed address before the asynchronous watch dial.
+                debugLog.appendEvent("sync.session.ip-upgrade.refresh",sessionId)
+                val refreshed=withTimeout(DIRECT_PROBE_TIMEOUT_MS) {
+                    session.exchange(LibrarySyncPayload.buildProbeRequest(session.localDeviceId).put(FIELD_IP_ENDPOINT_DESCRIPTOR,descriptor),"$sessionId-refresh")
+                }.response
+                require(refreshed.opt("success")==true && refreshed.optString("deviceId")==remoteDeviceId) {"IP 路由刷新返回了其他设备"}
+                if(refreshed.opt(FIELD_IP_UPGRADE_ACCEPTED)==true)ipSession=awaitSession(remoteDeviceId,IP_UPGRADE_WAIT_MS)
+            }
+        }
         if (ipSession == null) {
             debugLog.appendEvent(
                 event = "sync.session.ip-upgrade.recheck-miss",
@@ -584,14 +602,15 @@ class PhoneBluetoothSyncClient(
             )
             return session
         }
+        val confirmedIp=ipSession
         debugLog.appendEvent(
             event = "sync.session.ip-upgrade.late-takeover",
             sessionId = sessionId,
             fields = mapOf(
                 "bluetoothAddress" to session.device.bluetoothAddress,
                 "remoteDeviceId" to remoteDeviceId,
-                "route" to ipSession.routeKind.wireName,
-                "remoteAddress" to ipSession.remoteAddress
+                "route" to confirmedIp.routeKind.wireName,
+                "remoteAddress" to confirmedIp.remoteAddress
             )
         )
         runCatching { session.complete("$sessionId-rfcomm-upgrade") }
@@ -611,10 +630,10 @@ class PhoneBluetoothSyncClient(
             createIpPhoneSyncSession(
                 device = session.device,
                 localDeviceId = session.localDeviceId,
-                ipSession = ipSession
+                ipSession = confirmedIp
             )
         } catch (throwable: Throwable) {
-            ipSession.close()
+            confirmedIp.close()
             throw throwable
         }
     }
@@ -1491,7 +1510,8 @@ class PhoneBluetoothSyncClient(
             val manifestResponse = readManifestFrames(
                 ipSession.inputStream,
                 sessionId,
-                tracker
+                tracker,
+                initialIdleTimeoutMs=if(request.optBoolean("fullSnapshot",true))90_000 else 20_000
             )
             if (!manifestResponse.optBoolean("success", true)) {
                 writeResponseAck(
@@ -1673,7 +1693,7 @@ class PhoneBluetoothSyncClient(
             )
         }
         report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
-        val manifestResponse = readManifestFrames(transport.inputStream, sessionId, tracker)
+        val manifestResponse = readManifestFrames(transport.inputStream, sessionId, tracker,initialIdleTimeoutMs=if(request.optBoolean("fullSnapshot",true))90_000 else 20_000)
         if (!manifestResponse.optBoolean("success", true)) {
             writeResponseAck(transport.outputStream, sessionId, success = true, applied = true)
             return BluetoothLibrarySyncExchange(
@@ -1919,7 +1939,8 @@ class PhoneBluetoothSyncClient(
     private suspend fun probeDirectWithPersistentSessionSdpRecovery(
         device: BluetoothDevice,
         deviceId: String,
-        sessionId: String
+        sessionId: String,
+        allowIpUpgrade:Boolean=true
     ): ProbeIdentity? {
         var fastFailureRetries = 0
         while (true) {
@@ -1932,7 +1953,7 @@ class PhoneBluetoothSyncClient(
             }
             val result = runCatching {
                 withTimeout(DIRECT_PROBE_TIMEOUT_MS) {
-                    probeDirectPersistentOnce(device, deviceId, attemptSessionId)
+                    probeDirectPersistentOnce(device, deviceId, attemptSessionId,allowIpUpgrade)
                 }
             }
             if (result.isSuccess) return result.getOrThrow()
@@ -1968,7 +1989,8 @@ class PhoneBluetoothSyncClient(
     private fun probeDirectPersistentOnce(
         device: BluetoothDevice,
         deviceId: String,
-        sessionId: String
+        sessionId: String,
+        allowIpUpgrade:Boolean=true
     ): ProbeIdentity? {
         var socket: BluetoothSocket? = null
         return try {
@@ -1977,7 +1999,7 @@ class PhoneBluetoothSyncClient(
             val request = BluetoothSyncProtocol.withPersistentSessionRequest(
                 LibrarySyncPayload.buildProbeRequest(deviceId)
             ).apply {
-                (context.applicationContext as? PhoneCompanionApplication)
+                if(allowIpUpgrade)(context.applicationContext as? PhoneCompanionApplication)
                     ?.currentIpEndpointDescriptorForSync()
                     ?.let { put(FIELD_IP_ENDPOINT_DESCRIPTOR, it) }
             }
@@ -2271,6 +2293,16 @@ class PhoneBluetoothSyncClient(
     }
 
     private fun readManifestFrames(
+        inputStream: InputStream,
+        sessionId: String,
+        byteTracker: ByteTransferTracker,
+        initialIdleTimeoutMs:Long=90_000
+    ): JSONObject {
+        val guarded=inputStream as? IpReadDeadline
+        return if(guarded==null)readManifestFramesBody(inputStream,sessionId,byteTracker)
+        else guarded.withBudget(initialIdleTimeoutMs){readManifestFramesBody(inputStream,sessionId,byteTracker)}
+    }
+    private fun readManifestFramesBody(
         inputStream: InputStream,
         sessionId: String,
         byteTracker: ByteTransferTracker

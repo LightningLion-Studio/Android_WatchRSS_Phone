@@ -414,6 +414,7 @@ class PhoneBluetoothSyncManager(
             roots
         }
         fun skipped(domain:String)=fastPath?.skipped?.contains(domain)==true
+        var bluetoothOnlyRecovery=false
         var booksApplied = 0
         var locallyApplied = false
         suspend fun connect() {
@@ -421,7 +422,7 @@ class PhoneBluetoothSyncManager(
             syncSession = null
             check(currentPhoneUserId() == owner) { "手机账号已变化，请重新同步" }
             syncSession = reconnectSession?.invoke(device, "$sessionId-open")
-                ?: if (reconnectSession == null) client.openPersistentSession(device, deviceId, "$sessionId-open") else null
+                ?: if (reconnectSession == null) client.openPersistentSession(device, deviceId, "$sessionId-open",allowIpUpgrade=!bluetoothOnlyRecovery) else null
             // All recovery for this operation uses the visible, bounded manager budget.
             syncSession?.recoveryGate?.tryAcquire()
             effectiveDevice = syncSession?.device ?: device
@@ -435,9 +436,10 @@ class PhoneBluetoothSyncManager(
             return sharedBinding ?: bindingSnapshot(sessionId, effectiveDevice.address, syncSession).also { sharedBinding = it }
         }
         val recovery = BluetoothSyncRecovery(reconnectDelay, ::connect) { attempt, wait, failure ->
+            if(syncSession?.transport?.owner?.startsWith("ip:")==true)bluetoothOnlyRecovery=true
             syncSession?.close()
             debugLog.appendEvent("sync.reconnect", sessionId,
-                fields = failureFields(failure) + mapOf("attempt" to attempt, "delayMs" to wait), throwable = failure)
+                fields = failureFields(failure) + mapOf("attempt" to attempt, "delayMs" to wait,"bluetoothOnly" to bluetoothOnlyRecovery), throwable = failure)
             onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.RECONNECTING, 0, reconnectAttempt = attempt))
         }
         var accountSync: AccountSyncResult? = null
@@ -578,7 +580,7 @@ class PhoneBluetoothSyncManager(
         }
         onSyncActiveChanged(false) // The physical session is closed before any asynchronous cloud enqueue.
         val changed = completed.hasActualLibraryChanges() || locallyApplied || booksApplied > 0
-        debugLog.appendEvent("sync.cloud.decision", sessionId, mapOf("actualChanges" to changed))
+        debugLog.appendEvent("sync.cloud.decision", sessionId, mapOf("actualChanges" to changed,"articlesMerged" to (completed.libraryStats?.merged?:0),"sourcesMerged" to (completed.libraryStats?.sourcesMerged?:0),"booksApplied" to booksApplied,"localApplied" to locallyApplied,"notesPhone" to (completed.noteStats?.appliedOnPhone?:0),"notesWatch" to (completed.noteStats?.appliedOnWatch?:0)))
         if (changed) runCatching { onLibrarySyncCompleted() }.onFailure {
             debugLog.appendEvent("sync.cloud.schedule.failed", sessionId, fields = failureFields(it), throwable = it)
         }
@@ -943,7 +945,20 @@ class PhoneBluetoothSyncManager(
                     mergedSources = when (mode) {
                         LibrarySyncMode.PHONE_TO_WATCH_REPLACE -> 0
                         LibrarySyncMode.WATCH_TO_PHONE_REPLACE -> repository.mergeAuthoritativeRssSources(receivedSources)
-                        LibrarySyncMode.MERGE -> repository.mergeRssSourcesFromSync(receivedSources)
+                        LibrarySyncMode.MERGE -> repository.mergeRssSourcesFromSync(receivedSources) { before,after ->
+                            val fields=listOf(
+                                "sourceDeviceId" to (before?.sourceDeviceId!=after.sourceDeviceId),"title" to (before?.title!=after.title),
+                                "description" to (before?.description!=after.description),"siteUrl" to (before?.siteUrl!=after.siteUrl),
+                                "imageUrl" to (before?.imageUrl!=after.imageUrl),"createdAt" to (before?.createdAt!=after.createdAt),
+                                "updatedAt" to (before?.updatedAt!=after.updatedAt),"sortOrder" to (before?.sortOrder!=after.sortOrder),
+                                "isPinned" to (before?.isPinned!=after.isPinned),"deleted" to (before?.deleted!=after.deleted),
+                                "deletedAt" to (before?.deletedAt!=after.deletedAt),"useOriginalContent" to (before?.useOriginalContent!=after.useOriginalContent),
+                                "continuePlaybackInBackground" to (before?.continuePlaybackInBackground!=after.continuePlaybackInBackground)
+                            ).filter{it.second}.joinToString(","){it.first}
+                            debugLog.appendEvent("sync.source.merge",sessionId,mapOf("sourceTag" to com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec.sha256(after.url.toByteArray()).take(12),
+                                "changedFields" to fields,"localClock" to (before?.updatedAt?:0),"remoteClock" to after.updatedAt,
+                                "localOrder" to (before?.sortOrder?:0),"remoteOrder" to after.sortOrder))
+                        }
                     }
                     if (mode == LibrarySyncMode.WATCH_TO_PHONE_REPLACE) {
                         val pruned=repository.finalizeAuthoritativeLibrarySnapshot(

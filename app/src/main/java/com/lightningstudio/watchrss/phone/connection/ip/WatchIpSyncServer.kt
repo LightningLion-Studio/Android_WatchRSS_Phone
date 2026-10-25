@@ -74,6 +74,8 @@ internal class WatchIpSyncServer(
 
         override fun onException(exception: IOException) {
             Log.w(TAG, "IP WebSocket exception", exception)
+            // Transport death must wake any active protocol consumer immediately.
+            authenticatedSession?.close()
         }
 
         private fun authenticate(json: JSONObject) {
@@ -112,9 +114,13 @@ internal class WatchIpSyncServer(
                 routeKind = routeKind,
                 remoteAddress = handshakeRequest.remoteIpAddress.orEmpty(),
                 sendBinary = { bytes -> send(bytes) },
+                trace = {event,fields->Log.i(TAG,"IP pipe $event "+fields.entries.joinToString(" "){"${it.key}=${it.value}"})},
                 closeSocket = {
+                    // NanoWSD.close(OPEN) only sends a close frame and waits for the peer.
+                    // A stalled peer must not retain its native stream/active route until TCP timeout.
+                    runCatching { handshakeRequest.inputStream.close() }
                     runCatching {
-                        close(WebSocketFrame.CloseCode.NormalClosure, "session replaced", false)
+                        close(WebSocketFrame.CloseCode.NormalClosure, "session ended", false)
                     }
                 }
             )

@@ -42,8 +42,9 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
         require(response.getString("phase")=="manifest")
         val remote=response.getJSONArray("books").let {a->(0 until a.length()).map{a.getJSONObject(it).also(BookSync::validate)}}
         require(remote.map{it.getString("bookId")}.distinct().size==remote.size)
-        remote.forEach{val count=store.merge(it);applied+=count;recordApplied(count)}
-        trace("manifest-merged:books=${remote.size}:ms=${(System.nanoTime()-started)/1_000_000}")
+        var metadataApplied=0
+        remote.forEach{val count=store.merge(it);metadataApplied+=count;applied+=count;recordApplied(count)}
+        trace("manifest-merged:books=${remote.size}:applied=$metadataApplied:ms=${(System.nanoTime()-started)/1_000_000}")
         started=System.nanoTime()
         val byId=local.associateBy{it.getString("bookId")}
         val missing=response.getJSONArray("missingBookIds")

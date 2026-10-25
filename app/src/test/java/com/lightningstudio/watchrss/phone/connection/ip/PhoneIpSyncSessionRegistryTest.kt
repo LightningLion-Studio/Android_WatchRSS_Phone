@@ -67,4 +67,22 @@ class PhoneIpSyncSessionRegistryTest {
         assertEquals(session, PhoneIpSyncSessionRegistry.session("ip:watch-device-id"))
         assertNull(PhoneIpSyncSessionRegistry.session("AA:BB:CC:DD:EE:FF"))
     }
+    @Test
+    fun resumedReplacementWakesTheOldReaderAndKeepsTheNewPhysicalConnectionRegistered() {
+        fun session()=PhoneIpSyncSession("watch","resumed-session",IpTransportKind.WIFI_LAN,"192.0.2.1",{}, {})
+        val old=session();PhoneIpSyncSessionRegistry.register(old)
+        val pending=java.util.concurrent.FutureTask {try{old.inputStream.read();true}catch(_:java.io.IOException){true}}
+        val reader=Thread(pending).apply{start()}
+        val replacement=session()
+        try {
+            PhoneIpSyncSessionRegistry.register(replacement)
+            assertTrue(pending.get(1,java.util.concurrent.TimeUnit.SECONDS));assertTrue(old.isClosed)
+            assertEquals(replacement,PhoneIpSyncSessionRegistry.session("watch"))
+            org.junit.Assert.assertNotEquals(old.diagnostics()["connection"],replacement.diagnostics()["connection"])
+            assertEquals(old.diagnostics()["protocolSession"],replacement.diagnostics()["protocolSession"])
+            replacement.acceptBinary(byteArrayOf(7));assertEquals(7,replacement.inputStream.read())
+            old.close();assertEquals(replacement,PhoneIpSyncSessionRegistry.session("watch"))
+        }finally{old.close();replacement.close();reader.join(1000)}
+    }
+
 }

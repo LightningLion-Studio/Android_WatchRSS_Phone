@@ -7,6 +7,9 @@ import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.security.MessageDigest
+import java.util.UUID
 
 internal class PhoneIpSyncSession(
     val watchDeviceId: String,
@@ -14,13 +17,21 @@ internal class PhoneIpSyncSession(
     val routeKind: IpTransportKind,
     val remoteAddress: String,
     private val sendBinary: (ByteArray) -> Unit,
-    private val closeSocket: () -> Unit
+    private val closeSocket: () -> Unit,
+    private val trace:(String,Map<String,Any>)->Unit = {_,_->},
+    readIdleTimeoutMs:Long=30_000
 ) : Closeable {
     private val closed = AtomicBoolean(false)
     private val incoming = PipedInputStream(PIPE_BUFFER_BYTES)
     private val incomingWriter = PipedOutputStream(incoming)
 
-    val inputStream: InputStream = incoming
+    private val received=AtomicLong();private val consumed=AtomicLong();private val sent=AtomicLong()
+    private val connectionTag=UUID.randomUUID().toString().take(8)
+    private val sessionTag=MessageDigest.getInstance("SHA-256").digest(sessionId.toByteArray()).take(6).joinToString(""){"%02x".format(it)}
+    fun diagnostics():Map<String,Any> = mapOf("connection" to connectionTag,"protocolSession" to sessionTag,"receivedBytes" to received.get(),"consumedBytes" to consumed.get(),"sentBytes" to sent.get(),"closed" to closed.get(),"route" to routeKind.wireName)
+    val inputStream: InputStream = IpReadDeadline(incoming,readIdleTimeoutMs,{consumed.addAndGet(it.toLong())}) {limit->
+        close();trace("read-idle",diagnostics()+mapOf("timeoutMs" to limit))
+    }
     val outputStream: OutputStream = object : OutputStream() {
         override fun write(value: Int) {
             write(byteArrayOf(value.toByte()))
@@ -29,6 +40,7 @@ internal class PhoneIpSyncSession(
         override fun write(bytes: ByteArray, offset: Int, length: Int) {
             check(!closed.get()) { "IP 同步连接已关闭" }
             sendBinary(bytes.copyOfRange(offset, offset + length))
+            sent.addAndGet(length.toLong());trace("send",diagnostics()+mapOf("frameBytes" to length))
         }
     }
 
@@ -37,6 +49,7 @@ internal class PhoneIpSyncSession(
 
     fun acceptBinary(bytes: ByteArray) {
         if (!closed.get()) {
+            received.addAndGet(bytes.size.toLong());trace("receive",diagnostics()+mapOf("frameBytes" to bytes.size))
             incomingWriter.write(bytes)
             // PipedOutputStream.write does not wake a reader waiting on an empty pipe.
             incomingWriter.flush()
@@ -49,6 +62,7 @@ internal class PhoneIpSyncSession(
         runCatching { incomingWriter.close() }
         runCatching { incoming.close() }
         runCatching { closeSocket() }
+        trace("closed",diagnostics())
     }
 
     companion object {

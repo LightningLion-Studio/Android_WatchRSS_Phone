@@ -1596,7 +1596,8 @@ class PhoneCompanionRepository(
             merged
         }
 
-    suspend fun mergeRssSourcesFromSync(incoming: List<PhoneRssSourceEntity>): Int =
+    suspend fun mergeRssSourcesFromSync(incoming: List<PhoneRssSourceEntity>,
+        onMerged:(PhoneRssSourceEntity?,PhoneRssSourceEntity)->Unit = {_,_->}): Int =
         withContext(Dispatchers.IO) {
             var merged = 0
             incoming.forEach { remote ->
@@ -1623,6 +1624,7 @@ class PhoneCompanionRepository(
                             }
                     }
                     rssSourceDao.upsert(next)
+                    runCatching { onMerged(local,next) }
                     merged += 1
                 }
             }
@@ -1829,6 +1831,8 @@ class PhoneCompanionRepository(
         imported.sourceId?.let { rememberPublicRssSource(imported.url, it) }
         val now = System.currentTimeMillis()
         val existing = rssSourceDao.getByUrl(imported.url)
+        // A delayed public-pool response is cache refresh, never explicit re-subscription.
+        if(!recordSyncChanges && existing?.deleted==true)return PhoneRssSourceImportResult(existing,0)
         val existingArticles = articleDao.getByRssSourceUrl(imported.url)
         val existingByContentHash = existingArticles
             .filter { it.contentHash.isNotBlank() }
@@ -1843,7 +1847,8 @@ class PhoneCompanionRepository(
             imageUrl = imported.imageUrl,
             createdAt = existing?.createdAt ?: now,
             updatedAt = existing?.takeUnless { it.deleted }?.updatedAt ?: now,
-            sortOrder = existing?.sortOrder?.takeIf { it > 0L } ?: now,
+            // Signed order is shared with the watch; refreshing a feed is not a reorder.
+            sortOrder = existing?.sortOrder ?: now,
             isPinned = existing?.isPinned ?: false,
             deleted = false,
             deletedAt = 0L,
@@ -1863,11 +1868,16 @@ class PhoneCompanionRepository(
                 updatedAt = existing.updatedAt
             )
         } else {
-            candidateSource
+            // A metadata edit with the old clock loses again to a lexically larger peer.
+            // Also outrank a future tombstone when explicitly restoring a subscription.
+            candidateSource.copy(updatedAt = if(existing==null) now else
+                maxOf(now,existing.updatedAt+1,existing.deletedAt+1))
         }
         rssSourceDao.upsert(source)
-        if (recordSyncChanges && source != existing) {
-            recordRssSourceChange(source.url, "upsert", now)
+        // Only public article cache rows are local-only. A changed subscription must
+        // reach the next Bluetooth delta as well as records/full snapshots.
+        if (source != existing) {
+            recordRssSourceChange(source.url, "upsert", source.updatedAt)
         }
         val activeSourceUrls = rssSourceDao.getAllForSync().filterNot { it.deleted }.map { it.url }.toSet()
         val rekeyed=mutableMapOf<String,String>()

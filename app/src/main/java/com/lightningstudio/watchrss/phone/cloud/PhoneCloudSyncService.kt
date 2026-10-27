@@ -82,7 +82,9 @@ class PhoneCloudSyncService(
     private val rssInventoryPreferences: CloudRssInventoryPreferences =
         CloudRssInventoryPreferences(context),
     private val codec: CloudSnapshotCodec = CloudSnapshotCodec(),
-    private val legacyDeviceId: String? = null
+    private val legacyDeviceId: String? = null,
+    private val formatWritePolicy:CloudFormatWritePolicy = CloudFormatWritePolicy(),
+    private val migrationWorkerTrust:CloudWorkerTrust = CloudWorkerTrust.bundled
 ) {
     private val appContext = context.applicationContext
     private val traceLog = com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog(context.applicationContext)
@@ -138,6 +140,143 @@ class PhoneCloudSyncService(
     private var pendingRotation: RecoveryKeySetup? = null
     private var pendingRotationOwner: String? = null
     private var pendingRotationEpoch: String? = null
+    private fun migrationContext():CloudMigrationContext {
+        val session=requireSession()
+        return CloudMigrationContext(client.scopeId(session),session.userId,deviceId,client.epoch(session),requireNotNull(client.knownContentGeneration(session)))
+    }
+    private val _migrationState=MutableStateFlow(CloudMigrationUiState("unavailable",errorCode="migration_feature_disabled"))
+    val formatMigrationState:StateFlow<CloudMigrationUiState> = _migrationState
+    private var currentMigration:Pair<CloudMigrationContext,CloudMigrationInitiator>?=null
+    val formatMigration:CloudMigrationInitiator get() = synchronized(this) {
+        val frozen=migrationContext()
+        currentMigration?.takeIf{it.first==frozen}?.let{return@synchronized it.second}
+        fun fence() { require(migrationContext()==frozen) { "migration_scope_changed" };checkApprovalOwner(requireSession()) }
+        val initiator=CloudMigrationInitiator(::migrationContext,PhoneCloudMigrationApi(client,::requireSession,::fence),CloudMigrationPreferences(appContext),migrationWorkerTrust,
+            inputKey={ input -> fence();requireNotNull(keyManager.getAccountKey(frozen.userId,input.keyVersion)) },
+            publisher=object:CloudMigrationPublisher {
+                override suspend fun retryPublication(draft:CloudMigrationDraft,intent:JSONObject) = retryMigrationPublication(draft,intent)
+                override suspend fun publish(draft:CloudMigrationDraft,jobId:String,receiptHash:String,batchId:String,outputs:List<CloudMigrationOutput>,root:ByteArray,validation:JSONObject,beforeComplete:(String,JSONObject)->Unit):String? =
+                    publishMigration(draft,jobId,receiptHash,batchId,outputs,root,validation,beforeComplete)
+            },policy=formatWritePolicy,stateOverride=_migrationState,observer=CloudMigrationObserver { event ->
+                traceLog.appendEvent("cloud.r48",fields=event.fields())
+                android.util.Log.i("WatchRSSCloudR48",org.json.JSONObject(event.fields()).toString())
+            })
+        currentMigration=frozen to initiator
+        initiator
+    }
+
+    /** UI supplies only selected authenticated logical names, never arbitrary descriptors or keys. */
+    suspend fun prepareFormatMigration(snapshotId:String,names:Set<String>,transform:JSONObject,mode:String="sample"):CloudMigrationDraft = withContext(Dispatchers.IO) {
+        val session=requireSession();val bootstrap=validatedBootstrap(session);checkCloudEpoch(session,bootstrap.libraryEpoch)
+        val frozen=migrationContext()
+        fun fence() { require(migrationContext()==frozen) { "migration_scope_changed" };checkApprovalOwner(session) }
+        fence()
+        val remote=client.snapshot(session,snapshotId);fence()
+        val encrypted=client.download(remote.manifestSignedUrl,remote.head.manifestSizeBytes,remote.head.manifestSha256);fence()
+        val key=requireNotNull(keyManager.getAccountKey(session.userId,remote.head.keyVersion))
+        try {
+            val manifest=CloudSnapshotReuse.authenticate(codec,key,remote.head,encrypted)
+            manifest.requireReadable()
+            require(names.isNotEmpty() && names.all{n->manifest.objects.any{it.name==n}})
+            val selected=manifest.objects.filter{it.name in names}
+            require(selected.sumOf{it.chunks.sumOf{c->c.ciphertextBytes.toLong()}}<=8_388_608) { "migration_not_suitable" }
+            cache.storeManifest(client.scopeId(session),snapshotId,encrypted,markAsLocalHead=false)
+            val inputs=selected.map { descriptor ->
+                require(descriptor.access==CloudFormatAccess.WRITABLE && descriptor.entryRef==null && descriptor.originalBytes<=8_388_608)
+                val type=when {
+                    descriptor.name.startsWith("private/articles/") -> "private-article-body"
+                    descriptor.privateBook!=null -> "private-book"
+                    descriptor.privateArticle!=null && descriptor.name.startsWith("reader/") -> "private-article-body"
+                    else -> error("migration_not_suitable") // Unknown app_meta/Cookie scope is never granted.
+                }
+                val bytes=materializeObject(session,key,manifest,descriptor,listOf(remote.head));fence()
+                if(descriptor.name.startsWith("private/articles/")) {
+                    val index=manifest.objects.single{it.name==CloudPrivateOverlay.NAME}
+                    val entry=CloudPrivateOverlay.decode(materializeObject(session,key,manifest,index,listOf(remote.head))).single{it.objectName==descriptor.name}
+                    backupService.validatePrivateOverlayArticle(bytes,entry.id)
+                }
+                val categories=if(type=="private-book")setOf("book-original","book-directory")else if(descriptor.name.endsWith(".wrss"))setOf("article-metadata","article-txt","article-html")else setOf("article-txt")
+                CloudMigrationInput(snapshotId,remote.head.manifestSha256,descriptor,CloudSnapshotCodec.sha256(bytes),type,categories,true,remote.head.keyVersion)
+            }
+            fence()
+            CloudMigrationPlanBuilder.create(frozen.userId,frozen.installationId,frozen.epoch,frozen.generation,transform,inputs,System.currentTimeMillis(),mode)
+        } finally {key.fill(0)}
+    }
+
+    private suspend fun publishMigration(draft:CloudMigrationDraft,jobId:String,receiptHash:String,batchId:String,outputs:List<CloudMigrationOutput>,root:ByteArray,validation:JSONObject,beforeComplete:(String,JSONObject)->Unit):String? = syncMutex.withLock {
+        val session=requireSession();val bootstrap=validatedBootstrap(session)
+        require(migrationContext().let{it.userId==draft.plan.getString("userId")&&it.epoch==draft.plan.getString("libraryEpoch")&&it.generation==draft.plan.getString("contentGeneration")})
+        require(formatWritePolicy.canMigrate(client.formatCapabilities(session))) { "migration_feature_disabled" }
+        val keyVersion=keyManager.currentKeyVersion(session.userId);val key=requireNotNull(keyManager.getAccountKey(session.userId,keyVersion))
+        try {
+            val heads=client.snapshotHeads(session)
+            val manifests=heads.filter{it.keyVersion==keyVersion && !it.sourceDeviceId.startsWith("reader-migration-")}.map { head ->
+                val download=client.snapshot(session,head.id,manifestOnly=true);validateCloudManifestHeadIdentity(head,download.head)
+                val bytes=client.download(download.manifestSignedUrl,head.manifestSizeBytes,head.manifestSha256)
+                CloudSnapshotReuse.authenticate(codec,key,head,bytes)
+            }
+            val base=manifests.firstOrNull{it.sourceDeviceId==deviceId} ?: return@withLock null
+            // A concurrent head holding any different descriptor wins. Never flatten newer user work.
+            val eligible=outputs.filter { output -> manifests.flatMap{it.objects}.filter{it.name==output.input.descriptor.name}.all{it.toRawString()==output.input.descriptor.toRawString()} }
+            val rebased=CloudMigrationResult.rebase(base,eligible,key,root,draft.plan.getString("planId"))
+            val changed=rebased.filterIndexed{index,d->d.toRawString()!=base.objects[index].toRawString()}
+            if(changed.isEmpty())return@withLock null
+            if(changed.size!=outputs.size && validation.getString("mode")!="full")return@withLock null
+            val actualValidation=if(changed.size==outputs.size)validation else JSONObject().put("mode","full").put("verifiedObjects",changed.size).put("totalObjects",changed.size)
+            val carried=CloudSnapshotReuse.preserveObjects(manifests,changed.map{it.name}.toSet(),changed)
+            val snapshot=codec.create(key,keyVersion,deviceId,settings.nextSequence(bootstrap.devices.firstOrNull{it.deviceId==deviceId}?.lastSequence ?: 0),emptyList(),
+                parentHeads=heads.associate{it.sourceDeviceId to it.id},observedHeads=heads.associate{it.sourceDeviceId to it.deviceSequence},previousManifest=base,
+                carryForwardObjects=carried,snapshotSettings=base.settings)
+            val migration=JSONObject().put("jobId",jobId).put("planHash",draft.planHash).put("batchId",batchId).put("receiptSha256",receiptHash)
+                .put("outputCiphertextSha256s",JSONArray(changed.flatMap{it.chunks}.map{it.ciphertextSha256}.distinct().sorted())).put("validation",actualValidation)
+            checkCloudEpoch(session,bootstrap.libraryEpoch)
+            val reservation=client.reserveSnapshot(session,snapshot,settings.retentionDays,bootstrap.libraryEpoch,migration)
+            require(reservation.missingObjects.all{it.kind=="manifest"}) { "migration_candidate_missing" }
+            for(target in reservation.missingObjects) {
+                val fresh=client.refreshUpload(session,target,bootstrap.libraryEpoch)
+                if(!fresh.alreadyUploaded)client.uploadCiphertext(session,fresh,snapshot.encryptedManifest,bootstrap.libraryEpoch)
+            }
+            checkCloudEpoch(session,bootstrap.libraryEpoch)
+            require(formatWritePolicy.canMigrate(client.formatCapabilities(session))) { "migration_feature_disabled" }
+            cache.storeManifest(client.scopeId(session),snapshot.manifest.snapshotId,snapshot.encryptedManifest,markAsLocalHead=false)
+            beforeComplete(snapshot.manifest.snapshotId,migration)
+            client.completeSnapshot(session,snapshot,bootstrap.libraryEpoch,migration)
+            checkCloudEpoch(session,bootstrap.libraryEpoch)
+            cache.storeManifest(client.scopeId(session),snapshot.manifest.snapshotId,snapshot.encryptedManifest,markAsLocalHead=true)
+            snapshot.manifest.snapshotId
+        } finally {key.fill(0)}
+    }
+
+    private suspend fun retryMigrationPublication(draft:CloudMigrationDraft,intent:JSONObject):Unit = syncMutex.withLock {
+        val session=requireSession();val ctx=migrationContext()
+        require(ctx.userId==draft.plan.getString("userId") && ctx.epoch==draft.plan.getString("libraryEpoch") && ctx.generation==draft.plan.getString("contentGeneration"))
+        require(formatWritePolicy.canMigrate(client.formatCapabilities(session))) { "migration_feature_disabled" }
+        val id=intent.getString("snapshotId")
+        val bytes=cache.loadManifest(ctx.scope,id) ?: error("migration_publication_cache_missing")
+        val key=requireNotNull(keyManager.getAccountKey(session.userId))
+        try {
+            val manifest=codec.decryptManifest(key,id,bytes)
+            require(manifest.sourceDeviceId==deviceId && CloudSnapshotReuse.scopeCompatible(manifest,JSONObject().put("backendScope",ctx.scope).put("ownerUserId",ctx.userId).put("libraryEpoch",ctx.epoch).put("contentGeneration",ctx.generation)))
+            val snapshot=EncryptedCloudSnapshot(manifest,bytes,emptyMap())
+            val migration=intent.getJSONObject("migrationContext")
+            require(migration.getString("jobId")==intent.getString("jobId") && migration.getString("planHash")==draft.planHash)
+            try {client.completeSnapshot(session,snapshot,ctx.epoch,migration)}
+            catch(error:CloudHttpException) {
+                if(!discardedCloudTransfer(error))throw error
+                checkCloudEpoch(session,ctx.epoch)
+                val reserve=client.reserveSnapshot(session,snapshot,settings.retentionDays,ctx.epoch,migration)
+                require(reserve.missingObjects.all{it.kind=="manifest"}) { "migration_candidate_missing" }
+                for(target in reserve.missingObjects) {
+                    val fresh=client.refreshUpload(session,target,ctx.epoch)
+                    if(!fresh.alreadyUploaded)client.uploadCiphertext(session,fresh,bytes,ctx.epoch)
+                }
+                checkCloudEpoch(session,ctx.epoch)
+                client.completeSnapshot(session,snapshot,ctx.epoch,migration)
+            }
+            cache.storeManifest(ctx.scope,id,bytes,markAsLocalHead=true)
+        } finally {key.fill(0)}
+    }
+
     private val approvalsDelegate = lazy { CloudApprovalV2(client, deviceId, ::requireSession,
         { keyManager.devicePublicKeySpki(it.userId, deviceId) },
         { session -> val bootstrap = validatedBootstrap(session); registerCurrentDevice(session, bootstrap.libraryEpoch) },
@@ -202,6 +341,8 @@ class PhoneCloudSyncService(
     /** R45 clears synchronization bookkeeping, never local data, login or key trust. */
     private fun clearContentSyncState(session: PhoneAccountSession) {
         checkApprovalOwner(session)
+        currentMigration=null
+        _migrationState.value=CloudMigrationUiState("unavailable",errorCode="migration_scope_changed")
         settings.clearLibraryState(preserveDeviceSequence = true)
         recordStore.clear(client.scopeId(session))
         _formatStatus.value=CloudFormatStatus()
@@ -216,6 +357,8 @@ class PhoneCloudSyncService(
         settings.contentGeneration?.let { client.useContentGeneration(session, it) }
     }
     private fun clearCloudScope(session: PhoneAccountSession) {
+        currentMigration=null
+        _migrationState.value=CloudMigrationUiState("unavailable",errorCode="migration_scope_changed")
         settings.bindScope(client.backendBaseUrl, session.userId)
         settings.claimLegacyOwner(session.userId)
         keyManager.clearAccountKeys(session.userId); settings.clearScope()
@@ -513,7 +656,7 @@ class PhoneCloudSyncService(
                 statePreview.first,
                 relayPreview.first
             ),
-            privateArticleCount = privatePreview?.articleCount ?: 0,
+            privateArticleCount = if(decoded.objects.containsKey(CloudPrivateOverlay.NAME)) backupService.inspectPrivateOverlayCount(decoded.objects) else privatePreview?.articleCount ?: 0,
             relayArticleCount = relayPreview.second,
             rssStateCount = statePreview.second,
             encryptedDownloadBytes = decoded.download.head.manifestSizeBytes +
@@ -539,10 +682,17 @@ class PhoneCloudSyncService(
         }
         if (mode == BackupImportMode.MERGE) backupService.createSafetySnapshot()
         update(CloudSyncPhase.MERGING, "正在恢复云快照")
+        val manualOverlay=decoded.objects[CloudPrivateOverlay.NAME]?.let(CloudPrivateOverlay::decode).orEmpty()
+        for(entry in manualOverlay.filter{it.kind=="article"&&it.objectName!=null})backupService.validatePrivateOverlayArticle(
+            decoded.objects[entry.objectName] ?: throw java.io.IOException("私有覆盖正文暂不可用"),entry.id)
         val privateResult = privateArchive?.let {
-            decodeCloudObject(snapshotId,PRIVATE_LIBRARY_OBJECT) { backupService.restorePrivateLibrary(it, mode) { checkCloudEpoch(session,expectedEpoch) } }
+            decodeCloudObject(snapshotId,PRIVATE_LIBRARY_OBJECT) { backupService.restorePrivateLibrary(it, mode,excludedCloudArticles=manualOverlay.filter{e->e.kind=="article"}.map{e->e.id}.toSet(),excludedCloudBooks=manualOverlay.filter{e->e.kind=="book"}.map{e->e.id}.toSet()) { checkCloudEpoch(session,expectedEpoch) } }
         }
         _restoreWarnings.value=privateResult?.warnings.orEmpty()
+        for(entry in manualOverlay.filter{it.kind=="article"&&it.objectName!=null}) {
+            val result=backupService.restorePrivateLibrary(decoded.objects.getValue(requireNotNull(entry.objectName)),BackupImportMode.MERGE){checkCloudEpoch(session,expectedEpoch)}
+            _restoreWarnings.value+=result.warnings
+        }
         if (privateArchive != null && mode == BackupImportMode.REPLACE) {
             recordStore.clear(client.scopeId(session))
             readRecordsForRestore(session, expectedEpoch)
@@ -1255,23 +1405,69 @@ class PhoneCloudSyncService(
             head.id,
             manifest.allChunks.map(CloudChunkDescriptor::ciphertextSha256)
         )
+        val durableOverlay=if(fullTransfer)recordStore.privateOverlayEntries(client.scopeId(session))else emptyList()
+        val overlayArticles=durableOverlay.filter{it.kind=="article"}.mapTo(mutableSetOf()){it.id}
+        val overlayBooks=durableOverlay.filter{it.kind=="book"}.mapTo(mutableSetOf()){it.id}
+        val appliedOverlayEntries=mutableMapOf<String,CloudPrivateOverlayEntry>()
+        val overlayBodies=linkedMapOf<String,ByteArray>()
+        var overlayPending=0
+        if(fullTransfer && manifest.objects.any{it.name==CloudPrivateOverlay.NAME}) {
+            require(manifest.rawDocument?.json()?.optJSONObject("features")?.optJSONArray("incompat")?.let{a->(0 until a.length()).any{a.getString(it)==CloudPrivateOverlay.FEATURE}}==true)
+            val index=manifest.objects.single{it.name==CloudPrivateOverlay.NAME}
+            val entries=CloudPrivateOverlay.decode(materializeObject(session,accountKey,manifest,index,listOf(head)))
+            for(entry in entries) {
+                val marker="private-overlay:"+entry.kind+":"+CloudSnapshotCodec.sha256(entry.id.toByteArray())
+                val old=recordStore.document(client.scopeId(session),marker)?.let{raw->CloudPrivateOverlay.decode(("{\"format\":\"watchrss-private-overlay\",\"version\":1,\"entries\":["+raw+"]}").toByteArray()).single()}
+                val winner=CloudPrivateOverlay.merge(listOfNotNull(old,entry)).single()
+                if(winner!=entry) {
+                    if(entry.kind=="article")overlayArticles+=entry.id else overlayBooks+=entry.id
+                    continue
+                }
+                if(entry.objectName==null) {
+                    if(entry.kind=="article")overlayArticles+=entry.id else overlayBooks+=entry.id
+                    recordStore.saveDocument(client.scopeId(session),marker,entry.changedAt.toString(),entry.json().toString(),CloudFormatAccess.WRITABLE)
+                    continue
+                }
+                val descriptor=manifest.objects.singleOrNull{it.name==entry.objectName}
+                if(descriptor==null || descriptor.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED)) {overlayPending++;continue}
+                try {
+                    val bodyMarker="private-overlay-body:"+entry.kind+":"+CloudSnapshotCodec.sha256(entry.id.toByteArray())
+                    val oldDescriptor=recordStore.document(client.scopeId(session),bodyMarker)
+                    if(old==entry && oldDescriptor!=null && oldDescriptor!=descriptor.toRawString())throw CloudFormatUpgradeRequired("overlay_body_conflict")
+                    val bytes=materializeObject(session,accountKey,manifest,descriptor,listOf(head))
+                    if(entry.kind=="article") {
+                        backupService.validatePrivateOverlayArticle(bytes,entry.id)
+                        overlayBodies[entry.id]=bytes;overlayArticles+=entry.id;appliedOverlayEntries[entry.id]=entry
+                    } else {
+                        require(descriptor.privateBook?.getString("bookId")==entry.id)
+                        overlayBooks+=entry.id;appliedOverlayEntries[entry.id]=entry
+                    }
+                } catch(error:Exception) {
+                    checkCloudEpoch(session,expectedEpoch)
+                    if(error !is CloudFormatUpgradeRequired && !recoverableCloudRestoreFailure(error))throw error
+                    overlayPending++
+                }
+            }
+        }
         val formatPending=manifest.objects.count { it.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED) &&
             (it.name in setOf(RSS_STATE_OBJECT,NOTES_STATE_OBJECT,NOTES_ARCHIVE_OBJECT) || fullTransfer && (it.name in setOf(PRIVATE_LIBRARY_OBJECT,RELAY_LIBRARY_OBJECT)||it.privateArticle!=null||it.privateBook!=null)) }
         val selectedObjects = manifest.objects.filter { it.access !in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED) }.filter { descriptor ->
             descriptor.name == RSS_STATE_OBJECT || descriptor.name == NOTES_STATE_OBJECT || descriptor.name == NOTES_ARCHIVE_OBJECT ||
                 (fullTransfer && (descriptor.name in setOf(PRIVATE_LIBRARY_OBJECT, RELAY_LIBRARY_OBJECT) || (descriptor.name.startsWith("reader/") && descriptor.privateArticle != null) || descriptor.privateBook!=null))
         }
+        val suppressedBooks=recordStore.privateOverlayEntries(client.scopeId(session)).filter{it.kind=="book" && it.objectName==null}.map{it.id}.toSet()
         val chunkUrls = download.chunks.associateBy(CloudDownloadObject::sha256)
         yieldToReading()
         checkCloudEpoch(session, expectedEpoch)
         update(CloudSyncPhase.MERGING, "正在合并远端快照")
         var changed = false
-        var rssPending = 0
+        var rssPending = overlayPending
         val privateWarnings=mutableListOf<CloudRestoreWarning>()
         // Restore one logical object at a time: retaining the archive, relay and
         // RSS JSON together can exhaust the heap on a full phone library.
         val restoreOrder = listOf(PRIVATE_LIBRARY_OBJECT, RELAY_LIBRARY_OBJECT, RSS_STATE_OBJECT, NOTES_STATE_OBJECT, NOTES_ARCHIVE_OBJECT)
         for (descriptor in selectedObjects.sortedBy { restoreOrder.indexOf(it.name) }) {
+            if(descriptor.privateBook?.optString("bookId") in suppressedBooks)continue
             yieldToReading()
             checkCloudEpoch(session, expectedEpoch)
             traceSync("object-start:${descriptor.name}")
@@ -1296,6 +1492,7 @@ class PhoneCloudSyncService(
                 require(descriptor.name==value.getString("packagePath"))
                 decodeCloudObject(head.id,descriptor.name) {backupService.restorePrivateBook(value,bytes){checkCloudEpoch(session,expectedEpoch)}}
                 changed=true
+                appliedOverlayEntries[value.getString("bookId")]?.let{entry->recordStore.saveDocument(client.scopeId(session),"private-overlay:book:"+CloudSnapshotCodec.sha256(entry.id.toByteArray()),entry.changedAt.toString(),entry.json().toString(),CloudFormatAccess.WRITABLE)}
             }
             if (descriptor.name.startsWith("reader/") && descriptor.privateArticle != null) {
                 restoreReaderObject(session,expectedEpoch,head.id,descriptor,bytes)?.let(privateWarnings::add)
@@ -1304,7 +1501,8 @@ class PhoneCloudSyncService(
             when (descriptor.name) {
                 PRIVATE_LIBRARY_OBJECT -> {
                     val result = decodeCloudObject(head.id,descriptor.name) {
-                        backupService.restorePrivateLibrary(bytes, BackupImportMode.MERGE) { checkCloudEpoch(session, expectedEpoch) }
+                        backupService.restorePrivateLibrary(bytes, BackupImportMode.MERGE,
+                            excludedCloudArticles=overlayArticles,excludedCloudBooks=overlayBooks) { checkCloudEpoch(session, expectedEpoch) }
                     }
                     privateWarnings += result.warnings
                     changed = changed || result.changedArticleCount > 0 || result.changedSourceCount > 0 || result.changedSavedItemCount > 0
@@ -1326,6 +1524,17 @@ class PhoneCloudSyncService(
                 checkCloudEpoch(session,expectedEpoch)
                 if (!isPrivate || !recoverablePrivateFailure(error)) throw error
                 privateWarnings += cloudPrivateObjectWarning(head.id,descriptor.name,error)
+            }
+        }
+        for((id,bytes) in overlayBodies) {
+            checkCloudEpoch(session,expectedEpoch)
+            val applied=backupService.restorePrivateLibrary(bytes,BackupImportMode.MERGE){checkCloudEpoch(session,expectedEpoch)}
+            privateWarnings+=applied.warnings
+            changed=changed || applied.changedArticleCount>0
+            if(applied.warnings.isEmpty()) {
+                val entry=appliedOverlayEntries.getValue(id)
+                recordStore.saveDocument(client.scopeId(session),"private-overlay:article:"+CloudSnapshotCodec.sha256(id.toByteArray()),entry.changedAt.toString(),entry.json().toString(),CloudFormatAccess.WRITABLE)
+                recordStore.saveDocument(client.scopeId(session),"private-overlay-body:article:"+CloudSnapshotCodec.sha256(id.toByteArray()),entry.changedAt.toString(),manifest.objects.single{it.name==entry.objectName}.toRawString(),CloudFormatAccess.WRITABLE)
             }
         }
         val settled=settleCloudRestoreWarnings(settings,head.id,privateWarnings) { checkCloudEpoch(session,expectedEpoch) }
@@ -1413,6 +1622,21 @@ class PhoneCloudSyncService(
         return result
     }
 
+    private suspend fun materializeObject(session:PhoneAccountSession,key:ByteArray,manifest:CloudSnapshotManifest,descriptor:CloudObjectDescriptor,heads:List<CloudSnapshotHead>):ByteArray {
+        val scope=client.scopeId(session)
+        var remote:CloudSnapshotDownload?=null
+        for(chunk in manifest.chunksFor(descriptor))if(cache.loadChunk(scope,chunk.ciphertextSha256)==null) {
+            checkCloudEpoch(session,manifest.settings.getString("libraryEpoch"))
+            val download=remote ?: client.snapshot(session,manifest.snapshotId).also {
+                validateCloudManifestHeadIdentity(heads.single{h->h.id==manifest.snapshotId},it.head);remote=it
+            }
+            val ref=download.chunks.singleOrNull{it.sha256==chunk.ciphertextSha256} ?: throw java.io.IOException("云对象块暂不可用")
+            cache.storeChunk(scope,chunk.ciphertextSha256,client.download(ref.signedUrl,ref.sizeBytes,ref.sha256))
+        }
+        checkCloudEpoch(session,manifest.settings.getString("libraryEpoch"))
+        return codec.restoreObjects(key,manifest.objectSubset(listOf(descriptor))){sha->cache.loadChunk(scope,sha) ?: throw java.io.IOException("云对象块暂不可用")}.getValue(descriptor.name)
+    }
+
     private suspend fun uploadSnapshot(
         session: PhoneAccountSession,
         accountKey: ByteArray,
@@ -1452,8 +1676,14 @@ class PhoneCloudSyncService(
             }
         }
         val carryScope=JSONObject().put("backendScope",scope).put("contentGeneration",client.knownContentGeneration(session)).put("ownerUserId",session.userId).put("libraryEpoch",bootstrap.libraryEpoch)
+        val writeOverlay = formatWritePolicy.localWrite && formatWritePolicy.canWrite(client.formatCapabilities(session))
         val bodySource = (currentManifests + listOfNotNull(pendingManifest)).firstOrNull {
-            CloudSnapshotReuse.scopeCompatible(it,carryScope,allowMissing=true) && CloudSnapshotReuse.canCarry(it, session.userId, bootstrap.libraryEpoch, keyVersion, privateFingerprint)
+            CloudSnapshotReuse.scopeCompatible(it,carryScope,allowMissing=true) && (CloudSnapshotReuse.canCarry(it, session.userId, bootstrap.libraryEpoch, keyVersion, privateFingerprint) || writeOverlay && it.objects.any{d->d.name==PRIVATE_LIBRARY_OBJECT})
+        }
+        if(fullTransfer && !writeOverlay && currentManifests.any{it.objects.any{d->d.name==CloudPrivateOverlay.NAME}} &&
+            currentManifests.none{it.settings.optString("privateBodyFingerprintV2")==privateFingerprint}) {
+            pendingFormat(session,"manifest:private-overlay-write-disabled")
+            throw CloudFormatUpgradeRequired("overlay_write_disabled")
         }
         val priorBodies = bodySource?.objects.orEmpty().filter { it.name == PRIVATE_LIBRARY_OBJECT }
         if (!fullTransfer && priorBodies.isEmpty()) return UploadOutcome(false,0)
@@ -1461,13 +1691,47 @@ class PhoneCloudSyncService(
         val createdArchive=if (priorBodies.isEmpty() && fullTransfer) backupService.createCloudPrivateArchiveExport() else null
         try {
         traceSync("private-archive:done:bytes=${createdArchive?.file?.length() ?: 0}:carried=${priorBodies.size}")
+        val overlayRows=mutableListOf<Pair<CloudSnapshotManifest,CloudPrivateOverlayEntry>>()
+        if(writeOverlay && fullTransfer)for(manifest in currentManifests) {
+            val index=manifest.objects.singleOrNull{it.name==CloudPrivateOverlay.NAME} ?: continue
+            val bytes=materializeObject(session,accountKey,manifest,index,heads)
+            CloudPrivateOverlay.decode(bytes).forEach{overlayRows+=manifest to it}
+        }
+        val oldOverlay=CloudPrivateOverlay.merge(overlayRows.map{it.second})
+        val winningObjects=oldOverlay.mapNotNull { entry ->
+            val name=entry.objectName ?: return@mapNotNull null
+            val ties=overlayRows.filter{it.second==entry}
+            val descriptors=ties.map{(m,_)->m.objects.singleOrNull{it.name==name} ?: throw java.io.IOException("私有覆盖对象暂不可用")}
+            if(descriptors.map{it.toRawString()}.distinct().size!=1)throw CloudFormatUpgradeRequired("overlay_body_conflict")
+            val source=ties.first().first
+            name to (source to (source.objects.singleOrNull{it.name==name} ?: throw java.io.IOException("私有覆盖对象暂不可用")))
+        }.toMap()
+        val overlayExport=if(writeOverlay && fullTransfer && createdArchive==null && bodySource!=null && privateFingerprint!=bodySource.settings.optString("privateBodyFingerprintV2")) {
+            val backing=materializeObject(session,accountKey,bodySource,priorBodies.single(),heads)
+            val oldBytes=winningObjects.filterKeys{it.startsWith("private/articles/")}.mapValues{(_,pair)->materializeObject(session,accountKey,pair.first,pair.second,heads)}
+            try {backupService.createPrivateOverlayExport(backing,oldOverlay,oldBytes)}
+            catch(error:CloudFormatUpgradeRequired) {pendingFormat(session,"manifest:private-overlay-pending");throw error}
+        } else null
         val notes = noteRepository.allNotes()
         val logicalObjects = buildList {
             createdArchive?.let { add(CloudLogicalObject(PRIVATE_LIBRARY_OBJECT,it.file,false)) }
+            overlayExport?.let { value ->
+                addAll(value.objects)
+                add(CloudLogicalObject(CloudPrivateOverlay.NAME,CloudPrivateOverlay.encode(value.entries)))
+            }
             add(CloudLogicalObject(NOTES_STATE_OBJECT, NoteCloudStateCodec.encode(notes)))
             if (notes.any { !it.deleted }) add(CloudLogicalObject(NOTES_ARCHIVE_OBJECT, noteTransfer.exportZip()))
         }
-        val carried = CloudSnapshotReuse.preserveObjects(currentManifests,logicalObjects.map{it.name}.toSet(),priorBodies)
+        val overlayCarried=if(overlayExport!=null) {
+            val live=overlayExport.entries.mapNotNull{it.objectName}.toSet()
+            winningObjects.values.map{it.second}.filter{it.name in live && it.name !in logicalObjects.map{l->l.name}}
+        } else emptyList()
+        val replaced=logicalObjects.map{it.name}.toSet()+if(overlayExport!=null)currentManifests.flatMap{it.objects}.filter{it.name.startsWith("private/articles/")||it.name.startsWith("books/")||it.name==CloudPrivateOverlay.NAME}.map{it.name} else emptyList()
+        val carried = CloudSnapshotReuse.preserveObjects(currentManifests,replaced,priorBodies+overlayCarried)
+        if(logicalObjects.size+carried.size>1024) {
+            pendingFormat(session,"manifest:private-overlay-capacity")
+            throw CloudFormatUpgradeRequired("manifest_object_limit")
+        }
         val parentHeads = mergedHeads.associate { it.sourceDeviceId to it.id }
         val observedHeads = mergedHeads.associate { it.sourceDeviceId to it.deviceSequence }
         val contentHash = CloudSnapshotContent.hash(logicalObjects, carried, keyVersion, privateFingerprint)
@@ -1495,10 +1759,10 @@ class PhoneCloudSyncService(
             ?.lastSequence
             ?: 0L
         val reusableManifests = currentManifests
-        val bodyIds=createdArchive?.articleIds ?: bodySource?.settings?.optJSONArray("privateBodyArticleIds")?.let { ids ->
+        val bodyIds=overlayExport?.articleIds ?: createdArchive?.articleIds ?: bodySource?.settings?.optJSONArray("privateBodyArticleIds")?.let { ids ->
             (0 until ids.length()).map { ids.getString(it) }.toSet()
         }.orEmpty()
-        val bookIds=createdArchive?.bookIds ?: bodySource?.settings?.optJSONArray("privateBodyBookIds")?.let { ids ->
+        val bookIds=overlayExport?.bookIds ?: createdArchive?.bookIds ?: bodySource?.settings?.optJSONArray("privateBodyBookIds")?.let { ids ->
             (0 until ids.length()).map {ids.getString(it)}.toSet()
         }.orEmpty()
         val snapshotSettings = org.json.JSONObject().put("backendScope",scope).put("contentGeneration",client.knownContentGeneration(session)).put("privateBodyBookIds",JSONArray(bookIds.sorted())).put("snapshotContentLayout",3).put("libraryEpoch",bootstrap.libraryEpoch)
@@ -1519,6 +1783,7 @@ class PhoneCloudSyncService(
             reusableManifests = reusableManifests + listOfNotNull(pendingManifest),
             snapshotSettings = snapshotSettings,
             authenticatedObjectHashes = authenticatedHashes,
+            privateOverlay = overlayExport!=null || carried.any{it.name==CloudPrivateOverlay.NAME},
             onReusedChunk = { descriptor, materialize ->
                 if (cache.loadChunk(client.scopeId(session), descriptor.ciphertextSha256) == null) {
                     cache.storeChunk(client.scopeId(session), descriptor.ciphertextSha256, materialize())
@@ -1533,6 +1798,7 @@ class PhoneCloudSyncService(
             encrypted.manifest.allChunks.map { it.ciphertextSha256 })
         traceSync("upload-chunks:new=${encrypted.newCiphertextChunks.size}:total=${encrypted.manifest.allChunks.size}:newBytes=${encrypted.newCiphertextChunks.values.sumOf { it.size.toLong() }}")
         update(CloudSyncPhase.UPLOADING, "正在预留云空间", bootstrap.member)
+        if(overlayExport!=null && !formatWritePolicy.canWrite(client.formatCapabilities(session)))throw CloudFormatUpgradeRequired("overlay_write_disabled")
         val reservation = client.reserveSnapshot(session, encrypted, settings.retentionDays, bootstrap.libraryEpoch)
         traceSync("upload-plan:objects=${reservation.missingObjects.size}:bytes=${reservation.missingObjects.sumOf { it.sizeBytes }}")
         var uploadedBytes = 0L
@@ -1582,6 +1848,7 @@ class PhoneCloudSyncService(
         }
         traceSync("upload-verify:start")
         update(CloudSyncPhase.UPLOADING, "正在完成同步", bootstrap.member, uploadedBytes)
+        if(overlayExport!=null && !formatWritePolicy.canWrite(client.formatCapabilities(session)))throw CloudFormatUpgradeRequired("overlay_write_disabled")
         client.completeSnapshot(session, encrypted, bootstrap.libraryEpoch)
         traceSync("upload-verify:done")
         recordStore.clearSnapshotPending(client.scopeId(session))

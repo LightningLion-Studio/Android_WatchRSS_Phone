@@ -14,7 +14,9 @@ data class CloudLogicalObject(
     val bytes: ByteArray,
     val compress: Boolean = true,
     val file: File? = null,
-    val incrementalChunks: Boolean = false
+    val incrementalChunks: Boolean = false,
+    val privateArticle: JSONObject? = null,
+    val privateBook: JSONObject? = null
 ) {
     constructor(name: String, file: File, compress: Boolean = true) :
         this(name, ByteArray(0), compress, file)
@@ -182,7 +184,7 @@ data class CloudSnapshotManifest(
         val doc=rawDocument?:CloudRawDocument.parse(knownJson().toString())
         val unknown=doc.unknownBytes(emptyList(),fields)+objects.sumOf{it.unknownBytes}+
             doc.unknownBytes(listOf("settings"),setOf("snapshotContentLayout","libraryEpoch","ownerUserId","backendScope","contentGeneration","snapshotContentHashV3","privateBodyFingerprintV2","privateBodyArticleIds","privateBodyBookIds"))
-        return CloudFormatR48.access(doc,known=emptySet(),unknownBytes=unknown,limit=1048576)
+        return CloudFormatR48.access(doc,known=CloudFormatR48.manifestFeatures,unknownBytes=unknown,limit=1048576)
     }
     fun objectSubset(selected:List<CloudObjectDescriptor>):CloudSnapshotManifest {
         val names=selected.map{it.name}.toMutableSet()
@@ -209,7 +211,7 @@ data class CloudSnapshotManifest(
             require(json.getInt("schemaVersion") == CLOUD_SNAPSHOT_SCHEMA_VERSION) {
                 "不支持的云快照版本"
             }
-            val opaque=CloudFormatR48.access(doc,known=emptySet(),unknownBytes=doc.unknownBytes(emptyList(),fields),limit=1048576) in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED)
+            val opaque=CloudFormatR48.access(doc,known=CloudFormatR48.manifestFeatures,unknownBytes=doc.unknownBytes(emptyList(),fields),limit=1048576) in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED)
             return CloudSnapshotManifest(
                 snapshotId = json.getString("snapshotId"),
                 sourceDeviceId = json.getString("sourceDeviceId"),

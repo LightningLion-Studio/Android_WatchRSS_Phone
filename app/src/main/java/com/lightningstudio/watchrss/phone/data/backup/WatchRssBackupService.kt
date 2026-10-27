@@ -113,6 +113,88 @@ class WatchRssBackupService(
             projected.bookPackages.mapTo(hashSetOf()){it.metadata.getString("bookId")})
     }
 
+    internal data class PrivateOverlayExport(val objects:List<com.lightningstudio.watchrss.phone.cloud.CloudLogicalObject>,
+        val entries:List<com.lightningstudio.watchrss.phone.cloud.CloudPrivateOverlayEntry>,val articleIds:Set<String>,val bookIds:Set<String>)
+
+    /** Compare originals, never a DB/encoder version. The old backing is not rewritten for an article edit. */
+    internal suspend fun createPrivateOverlayExport(backing:ByteArray,oldEntries:List<com.lightningstudio.watchrss.phone.cloud.CloudPrivateOverlayEntry>,
+        oldObjects:Map<String,ByteArray>,clock:Long=System.currentTimeMillis()):PrivateOverlayExport = withContext(Dispatchers.IO) {
+        val baseline=WatchRssBackupArchive.read(backing.inputStream(),tolerateCloudEntries=true)
+        try {
+            val effective=baseline.articles.associateBy{it.articleId}.toMutableMap()
+            val rawArticles=CloudPrivateOverlayArchive.rawArticles(backing).toMutableMap()
+            val readerNow=com.lightningstudio.watchrss.phone.connection.bluetooth.ReaderPresetSyncPayload.snapshotJson(CloudPrivateArchive.reader(readerPresetRepository.exportSnapshot()))
+            val readerThen=baseline.readerSnapshot?.let{com.lightningstudio.watchrss.phone.connection.bluetooth.ReaderPresetSyncPayload.snapshotJson(CloudPrivateArchive.reader(it))}
+            val metaNow=database.appMetaDao().getAll().filter{CloudContentPolicy.privateAppMeta(it.key)}.associate{it.key to it.value}
+            val metaThen=baseline.appMeta.associate{it.key to it.value}
+            if((readerThen!=null && com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordCodec.canonical(readerThen)!=com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordCodec.canonical(readerNow)) || metaNow!=metaThen)
+                throw com.lightningstudio.watchrss.phone.cloud.CloudFormatUpgradeRequired("overlay_config_edit_pending")
+            for(entry in oldEntries.filter{it.kind=="article"}) {
+                if(entry.objectName==null)effective.remove(entry.id)
+                else {
+                    val bytes=requireNotNull(oldObjects[entry.objectName])
+                    effective[entry.id]=CloudPrivateOverlayArchive.validate(bytes,entry.id).articles.single()
+                    rawArticles[entry.id]=CloudPrivateOverlayArchive.rawArticles(bytes).getValue(entry.id)
+                }
+            }
+            val candidates=repository.getPrivateArticlesForCloudArchive().filter(CloudContentPolicy::privateBody)
+            if(candidates.any{it.contentText.isBlank() && it.contentHtml.isNullOrBlank()})
+                throw com.lightningstudio.watchrss.phone.cloud.CloudFormatUpgradeRequired("overlay_original_missing")
+            val current=candidates.associateBy{it.articleId}
+            val entries=oldEntries.associateBy{it.key}.toMutableMap()
+            val objects=mutableListOf<com.lightningstudio.watchrss.phone.cloud.CloudLogicalObject>()
+            for(id in (effective.keys+current.keys).sorted()) {
+                val before=effective[id];val after=current[id]
+                if(before!=null && after!=null && CloudPrivateOverlayArchive.signature(before)==CloudPrivateOverlayArchive.signature(after))continue
+                if(before==null && after==null)continue
+                if(after==null) {
+                    // Absence of a cache row is not a deletion. Require an explicit local membership change.
+                    val local=repository.getArticle(id)
+                    if(local==null || CloudContentPolicy.privateBody(local))continue
+                }
+                val previous=entries["article" to id]
+                val changed=maxOf(clock,(previous?.changedAt ?: 0)+1,after?.updatedAt ?: 0)
+                val name=after?.let{com.lightningstudio.watchrss.phone.cloud.CloudPrivateOverlay.articleName(id)}
+                entries["article" to id]=com.lightningstudio.watchrss.phone.cloud.CloudPrivateOverlayEntry("article",id,name,changed,deviceId)
+                if(after!=null)objects+=com.lightningstudio.watchrss.phone.cloud.CloudLogicalObject(requireNotNull(name),CloudPrivateOverlayArchive.encode(after,rawArticles[id]),false)
+            }
+            val currentBooks=repository.books?.availableBooks().orEmpty()
+            val baseBooks=baseline.bookPackages.map{it.metadata.getString("bookId")}.toMutableSet()
+            for(entry in oldEntries.filter{it.kind=="book"})if(entry.objectName==null)baseBooks.remove(entry.id)else baseBooks.add(entry.id)
+            val states=repository.books?.states().orEmpty().associateBy{it.getString("bookId")}
+            val nowBooks=states.values.filterNot{it.getBoolean("deleted")}.map{it.getString("bookId")}.toSet()
+            for(id in (baseBooks+nowBooks).sorted()) {
+                if(id in baseBooks && id in nowBooks)continue
+                val previous=entries["book" to id]
+                if(id !in nowBooks && states[id]?.getBoolean("deleted")!=true)continue
+                val pair=currentBooks.firstOrNull{it.first.getString("bookId")==id}
+                if(id in nowBooks && pair==null)throw com.lightningstudio.watchrss.phone.cloud.CloudFormatUpgradeRequired("book_original_missing")
+                val metadata=pair?.first?.let{state->JSONObject().put("bookId",id).put("fingerprint",state.getString("fingerprint")).put("title",state.getString("title")).put("chapterCount",state.getInt("chapterCount")).put("sourceUrl",state.optString("sourceUrl")).put("kind",state.optString("kind")).put("packagePath","books/$id.jsonl")}
+                entries["book" to id]=com.lightningstudio.watchrss.phone.cloud.CloudPrivateOverlayEntry("book",id,metadata?.getString("packagePath"),maxOf(clock,(previous?.changedAt ?: 0)+1),deviceId)
+                if(pair!=null)objects+=com.lightningstudio.watchrss.phone.cloud.CloudLogicalObject("books/$id.jsonl",pair.second,false).copy(privateBook=metadata)
+            }
+            val merged=entries.values.sortedWith(compareBy({it.kind},{it.id}))
+            // Validate the bound before creating a reservation. Never trim tombstones to fit.
+            com.lightningstudio.watchrss.phone.cloud.CloudPrivateOverlay.encode(merged)
+            PrivateOverlayExport(objects,merged,current.keys,nowBooks)
+        } finally {baseline.bookPackages.forEach{it.file.delete()}}
+    }
+
+    internal fun inspectPrivateOverlayCount(objects:Map<String,ByteArray>):Int {
+        val backing=objects["private-library.wrss"]?.let{WatchRssBackupArchive.read(it.inputStream(),tolerateCloudEntries=true)}
+        try {
+            val ids=backing?.articles.orEmpty().mapTo(mutableSetOf()){it.articleId}
+            val entries=com.lightningstudio.watchrss.phone.cloud.CloudPrivateOverlay.decode(objects.getValue(com.lightningstudio.watchrss.phone.cloud.CloudPrivateOverlay.NAME))
+            for(entry in entries.filter{it.kind=="article"}) {
+                if(entry.objectName==null)ids.remove(entry.id)
+                else {CloudPrivateOverlayArchive.validate(objects[entry.objectName] ?: throw java.io.IOException("私有覆盖正文暂不可用"),entry.id);ids+=entry.id}
+            }
+            return ids.size
+        } finally {backing?.bookPackages?.forEach{it.file.delete()}}
+    }
+
+    internal fun validatePrivateOverlayArticle(bytes:ByteArray,id:String) {CloudPrivateOverlayArchive.validate(bytes,id)}
+
     /** Optional pool warming only. Never resolve removed subscriptions or gate records on a fetch UUID. */
     internal suspend fun ensureCloudRssSourceIds(resolve: suspend (String) -> String): List<String> {
         val failed = mutableListOf<String>()
@@ -359,6 +441,8 @@ class WatchRssBackupService(
     suspend fun restorePrivateLibrary(
         archive: ByteArray,
         mode: BackupImportMode = BackupImportMode.MERGE,
+        excludedCloudArticles:Set<String> = emptySet(),
+        excludedCloudBooks:Set<String> = emptySet(),
         checkOwner: () -> Unit = {}
     ): BackupImportResult = withContext(Dispatchers.IO) {
         if (mode == BackupImportMode.REPLACE) createSafetySnapshot()
@@ -367,7 +451,8 @@ class WatchRssBackupService(
             mode,
             resetSyncHistory = false,
             cloudRestore = true,
-            checkOwner = checkOwner
+            checkOwner = checkOwner,
+            excludedCloudArticles=excludedCloudArticles, excludedCloudBooks=excludedCloudBooks
         )
     }
 
@@ -454,6 +539,8 @@ class WatchRssBackupService(
         mode: BackupImportMode,
         resetSyncHistory: Boolean = true,
         cloudRestore: Boolean = false,
+        excludedCloudArticles:Set<String> = emptySet(),
+        excludedCloudBooks:Set<String> = emptySet(),
         checkOwner: () -> Unit = {}
     ): BackupImportResult =
         withContext(Dispatchers.IO) {
@@ -465,7 +552,7 @@ class WatchRssBackupService(
             try {
             val warnings=snapshot.readWarnings.toMutableList()
             val restoredArticles = if (!snapshot.cloudContentOnly && !cloudRestore) snapshot.articles else snapshot.articles.mapNotNull { body ->
-                if (body.deleted) return@mapNotNull null
+                if (body.deleted || body.articleId in excludedCloudArticles) return@mapNotNull null
                 if (body.url.isBlank() || body.title.isBlank() || body.contentHash.isBlank()) {
                     warnings += CloudRestoreWarning(body.articleId,"missing_metadata",permanent=true); return@mapNotNull null
                 }
@@ -529,7 +616,7 @@ class WatchRssBackupService(
                 backgrounds = it.backgrounds,
                 deletions = it.deletions
             ) }
-            for(book in snapshot.bookPackages)try {
+            for(book in snapshot.bookPackages.filter{it.metadata.getString("bookId") !in excludedCloudBooks})try {
                 checkOwner()
                 val header=book.file.bufferedReader().use{JSONObject(requireNotNull(it.readLine()))}
                 require(com.lightningstudio.watchrss.phone.data.book.BookSync.integer(book.metadata,"chapterCount")==com.lightningstudio.watchrss.phone.data.book.BookSync.integer(header,"chapterCount"))

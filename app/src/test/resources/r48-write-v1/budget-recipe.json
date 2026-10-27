@@ -1,0 +1,31 @@
+{
+  "protocol": "watchrss-r48",
+  "vectorVersion": 1,
+  "warning": "PUBLIC SYNTHETIC TEST SECRETS. NEVER USE IN PRODUCTION.",
+  "description": "Synthetic recipe and reference wire budget, not a client measurement or production claim",
+  "recipe": {
+    "articles": 2000,
+    "articleIdPrefix": "writev1-fixture-",
+    "bodyUtf8": "合成正文。\n",
+    "bodyRepeats": 256,
+    "books": 1,
+    "chapters": 120,
+    "chapterTextUtf8": "合成章节。\n"
+  },
+  "requiredCases": [
+    "add-one",
+    "edit-one",
+    "delete-one",
+    "favorite-membership-change",
+    "favorite-clock-only"
+  ],
+  "assertions": {
+    "oldBackingDescriptorUnchanged": true,
+    "unchangedArticlesExpandedToDescriptors": 0,
+    "maximumNewArticleObjectsPerSingleEdit": 1,
+    "maximumNewIndexObjectsPerSingleEdit": 1,
+    "deleteBodyUploadBytes": 0,
+    "clockOnlyBodyUploadBytes": 0,
+    "noAutomaticFullMigration": true
+  }
+}

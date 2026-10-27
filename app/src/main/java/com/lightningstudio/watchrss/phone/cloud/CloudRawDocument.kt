@@ -94,9 +94,10 @@ data class CloudFormatStatus(val opaque:Int=0,val readOnly:Int=0,val editPending
 
 object CloudFormatR48 {
     const val readV1 = true // Production R48 reader/preservation vectors and SQLite/CAS acceptance pass.
-    const val writeV1 = false
-    const val migrationV1 = false
+    val writeV1: Boolean get() = com.lightningstudio.watchrss.phone.BuildConfig.CLOUD_FORMAT_R48_WRITE_V1
+    val migrationV1: Boolean get() = com.lightningstudio.watchrss.phone.BuildConfig.CLOUD_FORMAT_MIGRATION_R48_V1 && CloudWorkerTrust.bundled.configured
     // Descriptor title editing has no defined business projection here: retain it read-only.
+    val manifestFeatures=setOf(CloudPrivateOverlay.FEATURE)
     val descriptorFeatures=setOf("r48.entry-ref.v1","r48.object-key.v1")
     fun access(document: CloudRawDocument, path: List<String> = emptyList(), known:Set<String> = setOf("r48.title-bound.v1"), unknownBytes:Int=0, limit:Int=16384):CloudFormatAccess {
         if(unknownBytes>limit)return CloudFormatAccess.ISOLATED

@@ -48,6 +48,7 @@ internal class CloudContentGenerationFence(val scope: String, val generation: St
 }
 
 internal fun isCloudContentWrite(method: String, path: String): Boolean = method != "GET" && (
+    path.startsWith("/functions/v1/cloud/format-migrations") ||
     path == "/functions/v1/cloud/records" || path == "/functions/v1/cloud/records/consent" ||
     path.startsWith("/functions/v1/cloud/snapshots/") || path.startsWith("/functions/v1/cloud/uploads/") ||
     path == "/functions/v1/cloud/chunks/missing" || path.endsWith("/missing-chunks") ||

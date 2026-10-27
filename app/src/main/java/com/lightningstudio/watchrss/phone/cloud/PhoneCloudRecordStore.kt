@@ -50,6 +50,10 @@ internal class PhoneCloudRecordStore(context: Context) : SQLiteOpenHelper(contex
         db.execSQL("CREATE TABLE IF NOT EXISTS raw_documents(owner TEXT NOT NULL,id TEXT NOT NULL,revision TEXT NOT NULL,raw TEXT NOT NULL,access TEXT NOT NULL,PRIMARY KEY(owner,id))")
         db.execSQL("CREATE TABLE IF NOT EXISTS pending_records(owner TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(owner,id))")
     }
+    internal fun privateOverlayEntries(owner:String):List<CloudPrivateOverlayEntry> = readableDatabase.rawQuery(
+        "SELECT raw FROM raw_documents WHERE owner=? AND id LIKE 'private-overlay:%'",arrayOf(owner)).use { c ->
+        buildList { while(c.moveToNext())addAll(CloudPrivateOverlay.decode(("{\"format\":\"watchrss-private-overlay\",\"version\":1,\"entries\":["+c.getString(0)+"]}").toByteArray())) }
+    }
     override fun document(owner:String,id:String):String?=readableDatabase.rawQuery("SELECT raw FROM raw_documents WHERE owner=? AND id=?",arrayOf(owner,id)).use{if(it.moveToFirst())it.getString(0)else null}
     override fun saveDocument(owner:String,id:String,revision:String,raw:String,access:CloudFormatAccess) {
         // Android 8's bundled SQLite predates UPSERT ... DO UPDATE.

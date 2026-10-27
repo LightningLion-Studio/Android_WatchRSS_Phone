@@ -1,0 +1,188 @@
+{
+  "protocol": "watchrss-r48",
+  "vectorVersion": 1,
+  "warning": "PUBLIC SYNTHETIC TEST SECRETS. NEVER USE IN PRODUCTION.",
+  "accountKeyHex": "6eb4bf875c82988bba229a7c055917b12fee7ef472b6ffe0dd8e42e4c6fc18dc",
+  "archiveDescriptor": {
+    "name": "private-library.wrss",
+    "encoding": "identity",
+    "originalBytes": 4473,
+    "encodedBytes": 4473,
+    "chunks": [
+      {
+        "plaintextSha256": "dc30d3775aecdf0566815d1d10dba5ab183b135ff95f44dba5ef408450164847",
+        "ciphertextSha256": "5bfe7daee3d44c68be2aad8e8622463d8b2958d4133e58172de8734966e6a319",
+        "plaintextBytes": 4473,
+        "ciphertextBytes": 4524,
+        "saltBase64": "gD+aH7PVY7MAIGhghBcdFg==",
+        "nonceBase64": "WPfnzrn1cDlFJSIj"
+      }
+    ]
+  },
+  "archiveBlobHex": "57525353434332803f9a1fb3d563b30020686084171d1658f7e7ceb9f5703945252223186898263d86076a13d4b30f809c7fdeffcd422399957196cbefa6029dea33b7f899f7ad0d9872abb02a6d6ee66dcfaf63c5d6bb7f839af614f1ad6f6ac7ecd252b019cd9e04655960a8f10a9054428b09059a1c0cb65d69a576515d62fea55a5c509569566f8f8976802741d57179075d3850aaa4aece67259926b9abd83170576230409a42000de39d553aaf567642a101ce36e7a99f623caeb962acf5673ebe9f978ec3356beb5a0ab3c26f2bb7cef16190279ee47aaefc58c49855b6a49dd23c6aac01a5750b7dabe8c472df6f7e2fb5214e4f404c0febb6f96605b0da35f4d842d397999a7915d3fe102f409fd84d356d101ca4a8bc4f5a75bdf43cf6250ab5758b9e44d3420a3604ca02ef47a6ad82ed2db2784d0d361a2ab1a774a5402208f9f35f22c653f24b33e6ef6a8b997f00dae57e46b79e91fda0614a01116a83fe4f62f2f0c04786ede2b2477948e35b846b67e2b93d71441b59e6f83e5a20d6897fa2e64806f2db171c9555dd367a839ba7c561c14427eacae6ded84e81e25e4c94f9fdb89f9d62f195a963ab795e4de88aaba3a5cf754098f24d77ca31eede30b83759234f44adb008b519c73727c82991696e2796b0a2cc4144dc9fd3efb167e1007360571aede47b9c2f9722742f5e18ada83e40648b2d24d7679534d9a220ce46a963213cda52269cac9b3bfa9f9f123c39a74d60e2d4d2d3666c2cb7106de069a80e442599c0e2568682cedbc87586a4be0f486e6c7c622d368e8c5ab1f974a5a5af5128b23a5ea7562cafd6279bcb4241cfc578a99f4414268ff8e9d2def80b74bc8c7842304bd5884725992e85cf5e4788710ce684cc94455d1646dcc9298179870187153d4675e3538eada35af925bd41ace40488b91fe78bbd5c991f757896dbb4886fb3aa1ba9336fe12641c7c9b1ee83c506c7a83300daf5ad39293fa7ff273d932b4a5452c4392cd07f0ecffc475d809062de7ddc352dfd292739c330675b93bc4b123eaafd2044eec4c8b600813d83799d6a2f1a0422e29ac3d801db8c933ea4e9c37f0aa02c2d9aae0ce5a78983a0fa441500134fc475b2110036b4d5272f613d75fd916e9dc7a10b7e2a3230304004762321517d5bf7a70c5bc34290c67bda227fffd1e378adbe8f4c45175ffc3c6f4eea46719b8ae64df4b47342adc5f0782ff82a87f4dc3f640acfffe4889461d5ed11abe0dd8e5f7009c9a0ae3cff4cb8287c20710dafe66c46340154cf49e3b8b0cc6694f484170888c1c3062e931bcceaa6b0a3cf78136651f9cc8b350f4dc752473c68bf3f0914c3ec41f8ae492a3ce998f38cb2f4ab8ed011b4fb73ff785e783218c63095d30df35aa1382307432c729e9cdd5750f7975d4415ee7f452086102c4e7fa3d561fb9cfa53a0e88447fa30b518e9de1d5f900f342d4cb9c746a8111c661f54a015559e09c08676e9938a42f43cec84d04680cfc4af670416af13bc46ec551f7e7740b5a45b9f4ac2fb0b32807ab7192b27aa681e291b5eaef7067614170c3c836993028c4e670a669ceaf43e0bce836b69907d35834d4059d849898e7c010a815c821b8a27b3fb8236acc07a9cd497e760536f60fdb7e359645ad7589ca68e4f45430129abb7677a111a7a8c91ebf8a3a9a70de7d566bcc7c70a664d90cc4d17137236fa54ffce9807a81eb3fa9e93d381a572648981049d9632cd63ae689cc6752563403be7b0b04b96ab5c3b119beca7a55d8648c38ec6cb6eddcb4511d0eb58084c53819fbdcc31a5b7f3434fb7d86e1dcceebd29a8889dcb083f98f2deaa8e96cf14eae5d36b2e4b2eb2cc9a710351ef151e1e9ee7ef0c039a1c0c13ae2dccb2fe5f2d904612aff43b8ad7f5d322fcec46be7a5492a8643d3241c6bc644d729b0e48ed51d0b822a1c0a5109bda4f933527955c43a57c4019c560ae8b5e4c897d54173c6e558c7d9bc9021bdf38603396c9b8bf672d25a52a56e8189647d0212dc7cb88dd5a5a942061f0d6840a86ee56179c679212d4e2a3e25ec196a2c04b07e2f2a63c1cceecfa237d0eca2bb4fb7d852de9c9df614c9753602a1eb680eda38f64e82af99d964b9c18c11851b98d6474c563943c9ebb1fb9d62408eeb830e4479f0671137d15d2ac63835edea82ec076dfb551dbdf9742858972dbbce3634856cf1207d46cc13a18f62afcf6674af9616ae18d27c7cb42af5def22f71bb51b1abfd1d0c307afe2d004acb2d75783cfa91f2a3433e250faca32ba9a5247acf1cbb88c6ba18736d4e9ee8d419da422ce4683aa7da62b0b316b1c8a64a5464f24f14ce56996f2fe77db1f316871caa7b499219c0a74d70b487b4e664fb3403ed86f802aaaf0d120097cb0516d7c7ca57c2f6a15480eae786323589da17dc6b473cce18e3c92ab78deaffe0916c2f857fba3144c2931e207f3c11c81e6c49e9a45277811d5fd1dad59f988be5735fcdd7731ecd6052475995a6245e11b76c6f683846097a179898157d40524b9a6591bea193542d2d9d6fe96d1e0adc7fa74808c8b05eb0774d832e048e8c2f68e460623c1eefa30b781bf64bef36aa0b93c6a4bf2523388acdc414f4486772a279e52d9e31b3e7d3b2a2f0126cd095f2cafa89a51c63adc501e0b56a88aa346018f55b12437423ec62044c84dd8f4288be6debad845e59ab2963fc854b4f7c445e11f19232902fbc1a38b9e682f1a1c644456b92d226c49702bac8b2b81334998f22b57905f484aca43a97e56fe0fac73cb8a7d3a04c282ccc5d60cc2d5e6c40d1c17c2eeb782bf6c1a6adad0f8079125fd57b6d9c969223948eb878d899499f47f44e4629e2d3f43d9f3cfd33654a2f17728b39f8180d25c94481b5a543436387d7be2893992657d23d9137883c0353b8129a8c1246971be3c16b413009947d3ba13d3337429a2285c216c9ac2a23ae5418b2233d84036564e2eee17f522ca98393dace2328d3b502d1a98dd738fca8b2795b5db7504a6b5e4045ec56173495c0c5b2ca900076a7898718c7fc57029e56e7ea88731e84956cca87d484f5a769434aad10d99c57d0bf7aae9a0ef6b9ec82b8a4e3c66cd0543f1c6710f0aecdbe17ba15c669dedfb950bb57de856ba3b13180682d087f629e45256ed13b0c363edd3826ddc71cfe97522469eb2a492ca16b40ea351214b1d83883c2b37d51d9908459412f299ae517ba82290a0478aa275424106655e05cdafdf7dec233da86a3b889975c7e44a6412ec652e9f9c059253e0826f65ce59fea3be969681fb604ba1a1731243e71af12140f6059dd145bc002d14fb6463d8efb4f381170bf601889f7bf9a33686dc8a1a6cf8a445838cfc735562020e2b195b4b6d4a2819e13696cea43e681f48f9217463968fc3c009dd6a6ef7bdd0d8558479fd4cfad8d7059c20be68e7db2b08a6473454ff4dd9b6aaac566afdfbfa255bfe384bfe6758e982d9e9416b23d0f4279fefd6270ed329616d95723a09e664a297d880ee09fafa303313c9b4ffcb7f3fc767061a8e55941b898aa6fc6c09dfac3e3749c779f74672d50a9ee99dee8eca466dab02f1229d28654998cc774d219c16ea10747b102b17101d7c5c27c1de1a65231f28f33fce98432dae009a1ba72c95b94e991b8b069019ed9be3b594019e9b8823205b655496ae8287ef1c3748f06c643e38cca350f4ee18581a98baf5f7cba4d4aca2088b4896a5f1a8880e5db32df37fb3bc6047c840e173a5f6ffe4af8f3682bf485cc1c24a17a9b5da34a6173e56e3e317aec2d7c4d91f6f9def9795d717ab8271978fc8c139f8b3fa01df6101b1a897512d3ac55ae694f5cac01795450e427a122491d24e5abeaeba136c2fb184480f7c8f2b36bd4e4b8a5b68d6820d6b548ce3c2627a66cae808192f1dfb16575735f4a3dc57161bb408b412ac668291593916c312b5cfad1f3cb28a87901065630b1ce8cbf1020d08749579cf801e83eccc6f1928e952381b3034c7560d70ca1988e900f1460c86d03b42901ce2edeeab96823c31be6fc99c0a822e8868ed7aa1ef4b23ec49c93edcb1c382d9cc38d301da238035e300ed96bbeb2f0f2f38723772203826eba37d001ac99cf3a0d048766757321a4db8ac5f40fb35bd5144ecdb6d3ea51b60af265e352e475dfd1e9f17fd1405d59e51139c61f9a6a562f6e430b2dd24532b7eb4e3b26b82c785a59077b01df923982c40089f2da789a9411f06932f7d7e263b4e0a379a893dacdef5abee32f58b2c1fc0f5318185ea41baf3125e77508160a282e312f419dd385a435e7da6b845ddd5ae56dea3fe04d5d959a4cb636c450f2963bab82939904a3210c553d0193207ad9623670cbc2ef54c30618a9d6c34948eae408e5e22b9dde52565928a6ff4ff4a7b286da0f39ea827736b8d75c1bfcb3858c30a9f618c6f241076b1ca9a4d2319d044cc725fb0b9d566e1ed102889e4776b6d7878fea06e35e7d51f0c02c0a1998108d23a375de7aabd8991fec7eb52b0d3ba58a1f556d753fdb9afc45390f97c7d4b7f4b3e691af776ecff9916e4851d40e866c1c7c7e65199b7eae6d80687f3408f8d4499db89711a364e63e744f402874079f2105c3f7bda9d127cb2dd2732bc5b62aa651f09e35bd04aec1d0c9835328a314a47fcd28b020730ca04c6873a01bb488858fcfc6652783c4ea818bb10a25d8e5bb23af0ba0ad2b10c5b45e60030c008ce6de12a4267b63c1be097686283aa3efab6e633049614ad6f8965569267ebb5e9c81b4cd2e465aec1106264601766b7263086964223530f6b2a97cb1e79e0380fa2cc114d41c7a8b20e49e5ad8081efb06e5954a80d9cc2118b1e9ae7881a2e167c735e614924a8945374d80a6b879b78ba6c0885ecca35d31f80b3e6f354e4134832c03ca1bb298b33dc3c28b985b10074cd0901517c4c0c7dcbd0fe15ec37b577b9a11851482491ba03e9ed38574b7945cbb2027bc7e20fd73ba64e77243fe3c88a98f3223fc36c81f5a5dc3543750c2f401d77fc71bf9a4a098a74fc60be342c707d778594e938be278f26d791b39f6dbc03b32317df08c49cdb89146ea93c7832b48419ddd41080d592495549aa721c5b73c9d168c347994c44850cc0bded3fd7d3074fb61d58ebe988196029c6d9fdc7f0721d9c9ffcbb0199bd3f44d2e628b425fca99a6c5cdb0b62ba9dbfaf7184149753b98b7ff2fba141e03964ac4aa70a5b98152d669590598e5ede868bc2d7b74d71b4f6f4e7689d08329f946a647412055a9f8b4db246fc1ce9034c46a09c1541203004259d3dc59198b63cc2f360cfc237eb34aebc81ed22d28e25475e75e8a94fbb4331210641a60c8f4687c3043906e8c807945d4ab53734934837595ae6c62fa070b6e0c430824972f7ecf907d0a4aa852c37fac277ccb0a972ec62fd0c03129f37679d316270c8cc266bae6cb6ee22640b8fd1caae8091748ac9080a85513fc209483ed956a94b0f8418fccb9d2080e81f581faf6412dbd3ea1a7903c3ee3f81bf5176c5cdf1a53ee07a4bd3efdf5b0de2ea3c6bb548caba4e629b53cf32f4b73e9ecbdb75698c0d9d9a53fba6f19539dbfbec36a8e0964801f4ac884862a69245189b63d389514301a0a58a10c59a2042c8f3d48e0a2ae551c80fd210dbae06b9d4abf720649f71ee157cb245d58fcac1877664da108ead4ab35ce59289dcfeb89ecea28fbbcc38d60d71a9e6f7fb7f8b908f469cfb4ee3be92ed704cf05fb11fae03b5e18a02a5df1b2f2b2649c2d07e5fa754467282a17051a642582c77935612b662d2ac090939774d2b651c1a9557e2243844d341eb9674191247216da878bd3aa87c13f3b1d36242c74c3776d558de126604bc77ab588a2fbcedca73aed248a8a8df66fa815c1d1e6321e6f6b8e7e101c5b65ccca547de97d70682d9b25168ec037739e3a2fd039b3c9b470e6f2efa31636d7f657007678bc97c70e054c1a90e6aaf756cc70d5404146985ca59c781b6e8c2ffce38f4c8e257ec74ebc46c31586df82f78959a8c19445b0bd4044515ae01bb2497d48e3caa81020157ee3184d561d3d4bb7f9c110277c6d6332432697e56ec564ebcf82a71c892e74b45507d5cd59ec5d57e3b6c8f0151bdc7799643a2a92a8930ce466e4a72d2648cc6f2e5260960d4d9cf511fe693ea7b37a23406df43925f7293b563f9395f688b657c08dfa01fa16e5db1a3631e04b3fb2a1aa1ad3b8cdb354f5c22203cb7e4aee8b53061c853ca6547d7729c9ce51509e823a2069d604e14c2ea7faa898a5c3eb55672666bc72148f738f14ee3bedab855e625660f6c2a246b1b7d3297b76a853cd30563e9e364b4c58a91906a47761de98b478c",
+  "descriptor": {
+    "name": "private/fixture-keep.txt",
+    "encoding": "identity",
+    "originalBytes": 19,
+    "encodedBytes": 19,
+    "features": {
+      "incompat": [
+        "r48.entry-ref.v1"
+      ],
+      "roCompat": []
+    },
+    "entryRef": {
+      "object": "private-library.wrss",
+      "entryPath": "bodies/25b131cc3334a7ae0fbac57a2b69ca4c9283ed99cf865f214025d18783bb156e.txt",
+      "encoding": "identity"
+    }
+  },
+  "expectedEntryHex": "e697a7e6ada3e69687e4bf9de68c81e380820a",
+  "expectedEntrySha256": "b2ad53f7a286b9feab839260b0cfebd693136ef2bac100e91be4e3a83696a9ec",
+  "entryRefChainAllowed": false,
+  "invalid": [
+    {
+      "id": "ref-to-ref",
+      "descriptor": {
+        "name": "private/fixture-keep.txt",
+        "encoding": "identity",
+        "originalBytes": 19,
+        "encodedBytes": 19,
+        "features": {
+          "incompat": [
+            "r48.entry-ref.v1"
+          ],
+          "roCompat": []
+        },
+        "entryRef": {
+          "object": "private/fixture-keep.txt",
+          "entryPath": "bodies/25b131cc3334a7ae0fbac57a2b69ca4c9283ed99cf865f214025d18783bb156e.txt",
+          "encoding": "identity"
+        }
+      },
+      "expected": "reject-preserve-input"
+    },
+    {
+      "id": "cycle",
+      "descriptor": {
+        "name": "private/fixture-keep.txt",
+        "encoding": "identity",
+        "originalBytes": 19,
+        "encodedBytes": 19,
+        "features": {
+          "incompat": [
+            "r48.entry-ref.v1"
+          ],
+          "roCompat": []
+        },
+        "entryRef": {
+          "object": "private/cycle.txt",
+          "entryPath": "bodies/25b131cc3334a7ae0fbac57a2b69ca4c9283ed99cf865f214025d18783bb156e.txt",
+          "encoding": "identity"
+        }
+      },
+      "expected": "reject-preserve-input"
+    },
+    {
+      "id": "chunks-plus-ref",
+      "descriptor": {
+        "name": "private/fixture-keep.txt",
+        "encoding": "identity",
+        "originalBytes": 19,
+        "encodedBytes": 19,
+        "features": {
+          "incompat": [
+            "r48.entry-ref.v1"
+          ],
+          "roCompat": []
+        },
+        "entryRef": {
+          "object": "private-library.wrss",
+          "entryPath": "bodies/25b131cc3334a7ae0fbac57a2b69ca4c9283ed99cf865f214025d18783bb156e.txt",
+          "encoding": "identity"
+        },
+        "chunks": [
+          {
+            "plaintextSha256": "dc30d3775aecdf0566815d1d10dba5ab183b135ff95f44dba5ef408450164847",
+            "ciphertextSha256": "5bfe7daee3d44c68be2aad8e8622463d8b2958d4133e58172de8734966e6a319",
+            "plaintextBytes": 4473,
+            "ciphertextBytes": 4524,
+            "saltBase64": "gD+aH7PVY7MAIGhghBcdFg==",
+            "nonceBase64": "WPfnzrn1cDlFJSIj"
+          }
+        ]
+      },
+      "expected": "reject-preserve-input"
+    },
+    {
+      "id": "unsafe-path",
+      "descriptor": {
+        "name": "private/fixture-keep.txt",
+        "encoding": "identity",
+        "originalBytes": 19,
+        "encodedBytes": 19,
+        "features": {
+          "incompat": [
+            "r48.entry-ref.v1"
+          ],
+          "roCompat": []
+        },
+        "entryRef": {
+          "object": "private-library.wrss",
+          "entryPath": "../secrets",
+          "encoding": "identity"
+        }
+      },
+      "expected": "reject-preserve-input"
+    },
+    {
+      "id": "missing-entry",
+      "descriptor": {
+        "name": "private/fixture-keep.txt",
+        "encoding": "identity",
+        "originalBytes": 19,
+        "encodedBytes": 19,
+        "features": {
+          "incompat": [
+            "r48.entry-ref.v1"
+          ],
+          "roCompat": []
+        },
+        "entryRef": {
+          "object": "private-library.wrss",
+          "entryPath": "bodies/absent.txt",
+          "encoding": "identity"
+        }
+      },
+      "expected": "reject-preserve-input"
+    },
+    {
+      "id": "root-plus-ref",
+      "descriptor": {
+        "name": "private/fixture-keep.txt",
+        "encoding": "identity",
+        "originalBytes": 19,
+        "encodedBytes": 19,
+        "features": {
+          "incompat": [
+            "r48.entry-ref.v1"
+          ],
+          "roCompat": []
+        },
+        "entryRef": {
+          "object": "private-library.wrss",
+          "entryPath": "bodies/25b131cc3334a7ae0fbac57a2b69ca4c9283ed99cf865f214025d18783bb156e.txt",
+          "encoding": "identity"
+        },
+        "objectKeyEnvelope": {
+          "version": 1,
+          "scope": "migration:11111111-1111-4111-8111-111111111111",
+          "saltBase64": "hCNRmJtLBEdqJPX5uBEMRw==",
+          "nonceBase64": "lRDo792yYNKGx1rr",
+          "ciphertextBase64": "50Z6qieQs+pAM05iA7TN9FpqRt9CtF140BJ1mQ+7cdWA1+zn78Zprlnk8gu4Xd2U"
+        }
+      },
+      "expected": "reject-preserve-input"
+    }
+  ]
+}

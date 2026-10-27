@@ -130,8 +130,8 @@ class PhoneCloudClient(
                 put("keyVersion", keyVersion)
                 put("capabilities", JSONObject().apply {
                     put("cloudFormatR48ReadV1", CloudFormatR48.readV1)
-                    put("cloudFormatR48WriteV1", false)
-                    put("cloudFormatMigrationR48V1", false)
+                    put("cloudFormatR48WriteV1", CloudFormatR48.writeV1)
+                    put("cloudFormatMigrationR48V1", CloudFormatR48.migrationV1)
                     put("snapshotSchema", 2)
                     put("rssRecordsVersion", 1)
                     put("cloudRelay", true)
@@ -180,7 +180,8 @@ class PhoneCloudClient(
         session: PhoneAccountSession,
         snapshot: EncryptedCloudSnapshot,
         retentionDays: Int?,
-        expectedEpoch: String? = knownEpoch(session)
+        expectedEpoch: String? = knownEpoch(session),
+        migrationContext: JSONObject? = null
     ): CloudSnapshotReservation {
         val manifestHash = CloudSnapshotCodec.sha256(snapshot.encryptedManifest)
         val chunks = JSONArray().apply {
@@ -197,6 +198,7 @@ class PhoneCloudClient(
             "/functions/v1/cloud/snapshots/reserve",
             JSONObject().apply {
                 put("snapshotId", snapshot.manifest.snapshotId)
+                migrationContext?.let { put("migrationContext",it) }
                 put("contentLayout", 3)
                 put("sourceDeviceId", snapshot.manifest.sourceDeviceId)
                 put("deviceSequence", snapshot.manifest.deviceSequence)
@@ -267,13 +269,15 @@ class PhoneCloudClient(
     suspend fun completeSnapshot(
         session: PhoneAccountSession,
         snapshot: EncryptedCloudSnapshot,
-        expectedEpoch: String? = knownEpoch(session)
+        expectedEpoch: String? = knownEpoch(session),
+        migrationContext: JSONObject? = null
     ) {
         post(
             session,
             "/functions/v1/cloud/snapshots/complete",
             JSONObject().apply {
                 put("snapshotId", snapshot.manifest.snapshotId)
+                migrationContext?.let { put("migrationContext",it) }
                 put(
                     "chunkHashes",
                     JSONArray(
@@ -431,12 +435,25 @@ class PhoneCloudClient(
             }
         }
 
-    suspend fun download(url: String, expectedSize: Long, expectedSha256: String): ByteArray =
+    suspend fun download(url: String, expectedSize: Long, expectedSha256: String, maximumBytes:Long? = null): ByteArray =
         withContext(Dispatchers.IO) {
-            retryCloudObjectDownload(downloadBackoff) {
-                http.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
+            val deadline=kotlinx.coroutines.currentCoroutineContext()[CloudMigrationDeadline]
+            var attempts=0
+            retryCloudObjectDownload({delay ->
+                if(deadline==null)downloadBackoff(delay)
+                else kotlinx.coroutines.withTimeout(deadline.budget.remainingMillis()) {downloadBackoff(delay)}
+            }) {
+                require(maximumBytes==null || maximumBytes in 0..8_388_608 && expectedSize<=maximumBytes)
+                // Initiator prepaid the first body. Internal integrity/network retries must not
+                // bypass its per-run payload budget, including when a previous attempt was partial.
+                if(attempts++>0 && deadline!=null)deadline.budget.reserve(expectedSize)
+                val downloadHttp=if(maximumBytes==null && deadline==null)http else http.newBuilder()
+                    .callTimeout(deadline?.budget?.remainingMillis() ?: 30_000,TimeUnit.MILLISECONDS).build()
+                downloadHttp.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
                     if (!response.isSuccessful) response.throwHttp()
-                    val bytes = response.body?.bytes() ?: ByteArray(0)
+                    val bytes = response.body?.let { body ->
+                        if(maximumBytes==null)body.bytes() else readMigrationBody(body.byteStream(),maximumBytes)
+                    } ?: ByteArray(0)
                     if (bytes.size.toLong()!=expectedSize || CloudSnapshotCodec.sha256(bytes)!=expectedSha256) throw CloudDownloadIntegrityException()
                     bytes
                 }
@@ -528,8 +545,11 @@ class PhoneCloudClient(
             .header("accept", "application/json")
             .build()
         val firstRequest = buildRequest()
+        val migrationDeadline=kotlinx.coroutines.currentCoroutineContext()[CloudMigrationDeadline]
         // Reserve/complete may verify hundreds of stored immutable blocks.
         val requestHttp = http.newBuilder().followRedirects(false).followSslRedirects(false).apply {
+            if(migrationDeadline!=null)callTimeout(migrationDeadline.budget.remainingMillis(),TimeUnit.MILLISECONDS)
+            else if(firstRequest.url.encodedPath.startsWith("/functions/v1/cloud/format-migrations"))callTimeout(30_000,TimeUnit.MILLISECONDS)
             if (uploadAttempt != null) {
                 // OkHttp otherwise replays a 408 before our refresh/integrity-aware
                 // retry loop can observe it, doubling slow body attempts invisibly.
@@ -542,14 +562,17 @@ class PhoneCloudClient(
                 readTimeout(180, TimeUnit.SECONDS); writeTimeout(180, TimeUnit.SECONDS)
             }
         }.build()
-        var response = requestHttp.newCall(firstRequest).execute()
+        fun timedCall(request:Request)=requestHttp.newCall(request).also { call ->
+            migrationDeadline?.let { call.timeout().timeout(it.budget.remainingMillis(),TimeUnit.MILLISECONDS) }
+        }
+        var response = timedCall(firstRequest).execute()
         val rejected = firstRequest.header("x-watchrss-device-authorization")?.removePrefix("Bearer ")
         if (response.code == 403 && rejected != null && isRefreshableCloudDeviceSessionError(
                 runCatching { JSONObject(response.peekBody(4096).string()).optString("error") }.getOrDefault("")
             )) {
             response.close()
             if (refreshDeviceSession(rejected, session.userId)) {
-                response = requestHttp.newCall(buildRequest()).execute()
+                response = timedCall(buildRequest()).execute()
             } else {
                 throw CloudDeviceAuthorizationException()
             }
@@ -667,3 +690,18 @@ internal fun isRefreshableCloudDeviceSessionError(code: String): Boolean =
 internal class CloudDeviceAuthorizationException : IOException("设备身份需要重新验证，请前往账号页面完成验证")
 
 internal class CloudHttpException(val status: Int, val detail: String) : IOException(if (status == 426) "请升级客户端后继续云同步" else if (status == 409 && runCatching { JSONObject(detail).optString("error") }.getOrDefault("") == "device_key_conflict") "本机设备身份冲突，请重新登记本机" else "HTTP $status: $detail")
+
+/** A malicious/misconfigured candidate response cannot allocate beyond the advertised local run budget. */
+internal fun readMigrationBody(input:java.io.InputStream,maximumBytes:Long):ByteArray {
+    require(maximumBytes in 0..8_388_608)
+    val output=java.io.ByteArrayOutputStream();val buffer=ByteArray(8192)
+    input.use {
+        while(true) {
+            val count=it.read(buffer,0,minOf(buffer.size.toLong(),maximumBytes-output.size()+1).toInt())
+            if(count<0)break
+            if(count.toLong()>maximumBytes-output.size())throw CloudDownloadIntegrityException()
+            output.write(buffer,0,count)
+        }
+    }
+    return output.toByteArray()
+}

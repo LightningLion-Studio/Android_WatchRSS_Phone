@@ -1,0 +1,81 @@
+{
+  "protocol": "watchrss-r48",
+  "vectorVersion": 1,
+  "warning": "PUBLIC SYNTHETIC TEST SECRETS. NEVER USE IN PRODUCTION.",
+  "signingSeedHex": "7d954fe99df33a8dbfa6055b7b47229c157f7bf5bdef6d88cb41fbb88a16f108",
+  "nextSigningSeedHex": "c11cd1903ff891e9bb788feb4f73f7ff7d845744a5e1d0d27746681e5e3613de",
+  "pins": {
+    "current": "oxiDSWojpcwA1a90okrajQ+ijfn2Qu7I0Okf639bYFM=",
+    "next": "ehVDv8jp0fEsjVqOEd7m7+FuQuBf6ichdlXZXm1z1oU=",
+    "revokedPinSha256": []
+  },
+  "certificate": {
+    "v": 1,
+    "suite": "HPKE-0020-0001-0002",
+    "sessionId": "33333333-3333-4333-8333-333333333333",
+    "pubKey": "8bivCwc4GP8AvTmhSYdUeIV6lrBjH8yXEU6s1R729BY=",
+    "notBefore": 1792800000000,
+    "expiresAt": 1792886400000,
+    "workerBuildSha256": "a59d4b52b38f09239ea29c4d7390071862c53589df238d648f95212e6c93367c",
+    "transforms": [
+      {
+        "id": "identity-repack",
+        "version": 1,
+        "codeSha256": "8963abd5c074b389691ce72b5ca9215bbae3176cb1b3a36209323dfb76c6929c"
+      }
+    ]
+  },
+  "canonicalCertificateUtf8": "{\"expiresAt\":1792886400000,\"notBefore\":1792800000000,\"pubKey\":\"8bivCwc4GP8AvTmhSYdUeIV6lrBjH8yXEU6s1R729BY=\",\"sessionId\":\"33333333-3333-4333-8333-333333333333\",\"suite\":\"HPKE-0020-0001-0002\",\"transforms\":[{\"codeSha256\":\"8963abd5c074b389691ce72b5ca9215bbae3176cb1b3a36209323dfb76c6929c\",\"id\":\"identity-repack\",\"version\":1}],\"v\":1,\"workerBuildSha256\":\"a59d4b52b38f09239ea29c4d7390071862c53589df238d648f95212e6c93367c\"}",
+  "transcriptHex": "77617463687273732f7234382f776f726b65722d636572742f76310a7b22657870697265734174223a313739323838363430303030302c226e6f744265666f7265223a313739323830303030303030302c227075624b6579223a2238626976437763344750384176546d6853596455654956366c72426a4838795845553673315237323942593d222c2273657373696f6e4964223a2233333333333333332d333333332d343333332d383333332d333333333333333333333333222c227375697465223a2248504b452d303032302d303030312d30303032222c227472616e73666f726d73223a5b7b22636f6465536861323536223a2238393633616264356330373462333839363931636537326235636139323135626261653331373663623162336133363230393332336466623736633639323963222c226964223a226964656e746974792d72657061636b222c2276657273696f6e223a317d5d2c2276223a312c22776f726b65724275696c64536861323536223a2261353964346235326233386630393233396561323963346437333930303731383632633533353839646632333864363438663935323132653663393333363763227d",
+  "signatureBase64": "8vfVsKSyr5apXo8GQPiFesxfHFnOg0t9b+1bVV43R9sLCS49bB5FLbaxh3mwRicDo6ePNatRxWr5qjeDl2+xAA==",
+  "cases": [
+    {
+      "id": "current-pin",
+      "at": 1792800000001,
+      "pin": "oxiDSWojpcwA1a90okrajQ+ijfn2Qu7I0Okf639bYFM=",
+      "revoked": [],
+      "expected": "accept"
+    },
+    {
+      "id": "untrusted-pin",
+      "at": 1792800000001,
+      "pin": "ehVDv8jp0fEsjVqOEd7m7+FuQuBf6ichdlXZXm1z1oU=",
+      "expected": "reject-signature"
+    },
+    {
+      "id": "app-revoked-pin",
+      "at": 1792800000001,
+      "revoked": [
+        "cf27d167b0e33f4b4c0ce160cd0c1657b76f25c67382a5ddd8a5543711a29105"
+      ],
+      "expected": "reject-revoked"
+    },
+    {
+      "id": "exact-expiry",
+      "at": 1792886400000,
+      "expected": "reject-expired"
+    },
+    {
+      "id": "before-notBefore",
+      "at": 1792799999999,
+      "expected": "reject-not-yet-valid"
+    },
+    {
+      "id": "transform-code-mismatch",
+      "codeSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "expected": "reject-transform"
+    },
+    {
+      "id": "mutated-build",
+      "mutation": {
+        "workerBuildSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expected": "reject-signature"
+    },
+    {
+      "id": "same-next-pin-rotated",
+      "expected": "accept-next-pin",
+      "signatureBase64": "S60fVwRiAkpZJXInSMB6Tmr37p3Pf/8/3zNiSxwnAxZd1yzWBMSRFZjQtVbnD5l/zsBf/Jd2wzjapue6WVYsAg=="
+    }
+  ]
+}

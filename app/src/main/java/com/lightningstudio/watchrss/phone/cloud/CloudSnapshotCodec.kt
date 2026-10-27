@@ -32,12 +32,14 @@ class CloudSnapshotCodec(
         reusableManifests: List<CloudSnapshotManifest> = emptyList(),
         onReusedChunk: ((CloudChunkDescriptor, () -> ByteArray) -> Unit)? = null,
         snapshotSettings: JSONObject = JSONObject(),
-        authenticatedObjectHashes:Map<String,String> = emptyMap()
+        authenticatedObjectHashes:Map<String,String> = emptyMap(),
+        privateOverlay: Boolean = false
     ): EncryptedCloudSnapshot {
         require(accountKey.size == KEY_BYTES) { "账号主密钥必须为256位" }
         require(keyVersion > 0) { "账号密钥版本无效" }
         require(sourceDeviceId.isNotBlank()) { "设备标识不能为空" }
         require(deviceSequence > 0L) { "设备快照序列无效" }
+        if(logicalObjects.size.toLong()+carryForwardObjects.size>1024)throw CloudFormatUpgradeRequired("manifest_object_limit")
         val allObjectNames = logicalObjects.map { it.name } + carryForwardObjects.map { it.name }
         require(allObjectNames.distinct().size == allObjectNames.size) {
             "云快照对象名称重复"
@@ -106,12 +108,12 @@ class CloudSnapshotCodec(
                 originalBytes = logicalObject.originalBytes,
                 encodedBytes = encodedBytes,
                 chunks = descriptors,
-                privateArticle = prior?.privateArticle,
-                privateBook = prior?.privateBook,
+                privateArticle = logicalObject.privateArticle ?: prior?.privateArticle,
+                privateBook = logicalObject.privateBook ?: prior?.privateBook,
                 rawDocument = patched
             )
         }
-        val manifest = CloudSnapshotManifest(
+        val baseManifest = CloudSnapshotManifest(
             snapshotId = snapshotId,
             sourceDeviceId = sourceDeviceId,
             deviceSequence = deviceSequence,
@@ -123,6 +125,8 @@ class CloudSnapshotCodec(
             settings = snapshotSettings,
             rawDocument=previousManifest?.rawDocument
         )
+        val manifest = if(privateOverlay || carryForwardObjects.any { it.name==CloudPrivateOverlay.NAME }) CloudPrivateOverlay.mark(baseManifest) else baseManifest
+        if(manifest.objects.size>1024)throw CloudFormatUpgradeRequired("manifest_object_limit")
         validateReferences(manifest)
         val encryptedManifest = encryptManifest(accountKey, manifest)
         return EncryptedCloudSnapshot(
@@ -235,6 +239,16 @@ class CloudSnapshotCodec(
             }}
             return requireNotNull(selected){"归档引用条目不存在"}
         }finally{temporary.delete()}
+    }
+
+    /** Scoped per-chunk AES keys, never the root. Only used after explicit R48 consent. */
+    internal fun migrationChunkKeys(accountKey: ByteArray, descriptor: CloudObjectDescriptor): org.json.JSONArray {
+        require(descriptor.entryRef == null && descriptor.access == CloudFormatAccess.WRITABLE)
+        val root = unwrapReaderKey(accountKey, descriptor)
+        return try { org.json.JSONArray(descriptor.chunks.map { chunk ->
+            val key = hkdfSha256(root, chunk.saltBase64.fromBase64(), CHUNK_INFO, 32)
+            try { JSONObject().put("ciphertextSha256",chunk.ciphertextSha256).put("keyBase64",key.toBase64()) } finally { key.fill(0) }
+        }) } finally { if(root !== accountKey) root.fill(0) }
     }
 
     private fun unwrapReaderKey(accountKey: ByteArray, descriptor: CloudObjectDescriptor): ByteArray {

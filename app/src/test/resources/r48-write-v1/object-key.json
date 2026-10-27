@@ -1,0 +1,59 @@
+{
+  "protocol": "watchrss-r48",
+  "vectorVersion": 1,
+  "warning": "PUBLIC SYNTHETIC TEST SECRETS. NEVER USE IN PRODUCTION.",
+  "accountKeyHex": "6eb4bf875c82988bba229a7c055917b12fee7ef472b6ffe0dd8e42e4c6fc18dc",
+  "outputRootHex": "d3131a02bcf596bac4b3ab7701d47335ec3766ca504512655632afc5290ac8c5",
+  "saltHex": "842351989b4b04476a24f5f9b8110c47",
+  "nonceHex": "9510e8efddb260d286c75aeb",
+  "infoHex": "77617463687273732f636c6f75642f6f626a6563742d6b65792f7631",
+  "aadHex": "77617463687273732d6f626a6563742d6b65792d76313a6d6967726174696f6e3a31313131313131312d313131312d343131312d383131312d313131313131313131313131",
+  "wrappingKeyHex": "dc783c1a8fd4760126f0d60dbb7511019e0dc81881b7e5636aa7b5607515fbb3",
+  "envelope": {
+    "version": 1,
+    "scope": "migration:11111111-1111-4111-8111-111111111111",
+    "saltBase64": "hCNRmJtLBEdqJPX5uBEMRw==",
+    "nonceBase64": "lRDo792yYNKGx1rr",
+    "ciphertextBase64": "50Z6qieQs+pAM05iA7TN9FpqRt9CtF140BJ1mQ+7cdWA1+zn78Zprlnk8gu4Xd2U"
+  },
+  "descriptor": {
+    "name": "private/article-1.txt",
+    "encoding": "identity",
+    "originalBytes": 62,
+    "encodedBytes": 62,
+    "chunks": [
+      {
+        "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+        "ciphertextSha256": "d9d077fb9202551e281d6f2fe76a8d3eb4afe58d79031fb18c7b7716cd1c0409",
+        "plaintextBytes": 62,
+        "ciphertextBytes": 113,
+        "saltBase64": "raA//OuTCNKVFTd14iF1RQ==",
+        "nonceBase64": "2eZxNuxH2dkuij8n"
+      }
+    ],
+    "features": {
+      "incompat": [
+        "r48.object-key.v1"
+      ],
+      "roCompat": []
+    },
+    "objectKeyEnvelope": {
+      "version": 1,
+      "scope": "migration:11111111-1111-4111-8111-111111111111",
+      "saltBase64": "hCNRmJtLBEdqJPX5uBEMRw==",
+      "nonceBase64": "lRDo792yYNKGx1rr",
+      "ciphertextBase64": "50Z6qieQs+pAM05iA7TN9FpqRt9CtF140BJ1mQ+7cdWA1+zn78Zprlnk8gu4Xd2U"
+    }
+  },
+  "outputChunkBlobHex": "57525353434332ada03ffceb9308d295153775e2217545d9e67136ec47d9d92e8a3f2744ab47c5c0a0c1a877fdce470a95697387124abc5c115c8eec413b93279ff8945f4b9de4343e916ab0f7cc643e1a42d53ee6fec6580160f178e604355acabe7d17c66f6d12834366beb8aa4e5c6c",
+  "outputPlaintextHex": "e59088e68890e69687e7aba0efbc9ae4bf9de79599e4b8ade69687e38081e68da2e8a18ce5928ce58e9fe69687e380820a52343820666978747572652e0a",
+  "negatives": [
+    "wrong-scope",
+    "wrong-account-key",
+    "root-envelope-and-reader-envelope-both",
+    "write-new-content-under-output-root"
+  ],
+  "readPolicy": "accepted-output-read-only",
+  "editPolicy": "new-account-root-only",
+  "previousRootReuseAllowed": false
+}

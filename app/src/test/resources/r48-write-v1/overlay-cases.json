@@ -1,0 +1,70 @@
+{
+  "protocol": "watchrss-r48",
+  "vectorVersion": 1,
+  "warning": "PUBLIC SYNTHETIC TEST SECRETS. NEVER USE IN PRODUCTION.",
+  "index": {
+    "format": "watchrss-private-overlay",
+    "version": 1,
+    "entries": [
+      {
+        "kind": "article",
+        "id": "article-delete",
+        "object": null,
+        "changedAt": 1792800000001,
+        "sourceDeviceId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+      },
+      {
+        "kind": "article",
+        "id": "article-edit",
+        "object": "private/articles/6017c87b75a56ea7af57330b0071d3afc2076a4859d2ec32895c412772046f43.wrss",
+        "changedAt": 1792800000001,
+        "sourceDeviceId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "no-index-missing-not-delete",
+      "expectedActive": [
+        "article-keep",
+        "article-edit",
+        "article-delete"
+      ]
+    },
+    {
+      "id": "explicit-tombstone-masks-legacy",
+      "expectedDeleted": [
+        "article-delete"
+      ]
+    },
+    {
+      "id": "missing-replacement-not-delete",
+      "expected": "retain-old-and-retry"
+    },
+    {
+      "id": "equal-clock-delete-wins",
+      "expected": "delete"
+    },
+    {
+      "id": "equal-clock-nonnull-conflict",
+      "expected": "retain-inputs-write-blocked"
+    },
+    {
+      "id": "unknown-incompat",
+      "expected": "opaque-head-write-blocked"
+    },
+    {
+      "id": "HTML-not-TXT",
+      "expected": "byte-preserve-both"
+    },
+    {
+      "id": "R_out-edit",
+      "expected": "account-root-new-chunks"
+    }
+  ],
+  "limits": {
+    "manifestObjects": 1024,
+    "overlayEntries": 8192,
+    "decodedIndexBytes": 4194304
+  }
+}

@@ -1,0 +1,475 @@
+{
+  "protocol": "watchrss-r48",
+  "vectorVersion": 1,
+  "warning": "PUBLIC SYNTHETIC TEST SECRETS. NEVER USE IN PRODUCTION.",
+  "domainUtf8": "watchrss/r48/local-details/v1\n",
+  "domainHex": "77617463687273732f7234382f6c6f63616c2d64657461696c732f76310a",
+  "cases": [
+    {
+      "id": "one-object",
+      "details": {
+        "objects": [
+          {
+            "inputDescriptor": {
+              "name": "private/article-1.txt",
+              "encoding": "identity",
+              "originalBytes": 62,
+              "encodedBytes": 62,
+              "chunks": [
+                {
+                  "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                  "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                  "plaintextBytes": 62,
+                  "ciphertextBytes": 113,
+                  "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                  "nonceBase64": "Ef3mv4Hun1y2WqmK"
+                }
+              ]
+            },
+            "semanticSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1"
+          }
+        ]
+      },
+      "inputDescriptorSha256s": [
+        "6ba51af2ead17a705c61e0c6148a19ed618e02a348f341d74176fcc7249b2c36"
+      ],
+      "canonicalUtf8": "{\"objects\":[{\"inputDescriptor\":{\"chunks\":[{\"ciphertextBytes\":113,\"ciphertextSha256\":\"4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801\",\"nonceBase64\":\"Ef3mv4Hun1y2WqmK\",\"plaintextBytes\":62,\"plaintextSha256\":\"ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1\",\"saltBase64\":\"KkiBD/W+eAwJNkNoxb4sZw==\"}],\"encodedBytes\":62,\"encoding\":\"identity\",\"name\":\"private/article-1.txt\",\"originalBytes\":62},\"semanticSha256\":\"ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1\"}]}",
+      "transcriptHex": "77617463687273732f7234382f6c6f63616c2d64657461696c732f76310a7b226f626a65637473223a5b7b22696e70757444657363726970746f72223a7b226368756e6b73223a5b7b22636970686572746578744279746573223a3131332c2263697068657274657874536861323536223a2234616561346363303766653663653134663836633337306666626332333932613134346438316237343365316630373663646362303638623330316163383031222c226e6f6e6365426173653634223a224566336d763448756e31793257716d4b222c22706c61696e746578744279746573223a36322c22706c61696e74657874536861323536223a2261643534646638323465343631636563396531386666646332633338653034323237663936616263356464663836653638346235396135616566383863306231222c2273616c74426173653634223a224b6b6942442f572b6541774a4e6b4e6f786234735a773d3d227d5d2c22656e636f6465644279746573223a36322c22656e636f64696e67223a226964656e74697479222c226e616d65223a22707269766174652f61727469636c652d312e747874222c226f726967696e616c4279746573223a36327d2c2273656d616e746963536861323536223a2261643534646638323465343631636563396531386666646332633338653034323237663936616263356464663836653638346235396135616566383863306231227d5d7d",
+      "commitment": "cc5871692b3fd639b3e1a4eb91a3fca41c97971a664852d1256323a5b9bc1085",
+      "inputObjects": [
+        {
+          "descriptor": {
+            "name": "private/article-1.txt",
+            "encoding": "identity",
+            "originalBytes": 62,
+            "encodedBytes": 62,
+            "chunks": [
+              {
+                "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                "plaintextBytes": 62,
+                "ciphertextBytes": 113,
+                "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                "nonceBase64": "Ef3mv4Hun1y2WqmK"
+              }
+            ]
+          },
+          "chunkKeys": []
+        }
+      ],
+      "invariants": [
+        {
+          "inputDescriptorSha256": "6ba51af2ead17a705c61e0c6148a19ed618e02a348f341d74176fcc7249b2c36",
+          "semanticSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1"
+        }
+      ]
+    },
+    {
+      "id": "multi-object",
+      "details": {
+        "objects": [
+          {
+            "inputDescriptor": {
+              "name": "private/article-1.txt",
+              "encoding": "identity",
+              "originalBytes": 62,
+              "encodedBytes": 62,
+              "chunks": [
+                {
+                  "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                  "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                  "plaintextBytes": 62,
+                  "ciphertextBytes": 113,
+                  "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                  "nonceBase64": "Ef3mv4Hun1y2WqmK"
+                }
+              ]
+            },
+            "semanticSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1"
+          },
+          {
+            "inputDescriptor": {
+              "name": "private/second-article.txt",
+              "encoding": "identity",
+              "originalBytes": 62,
+              "encodedBytes": 62,
+              "chunks": [
+                {
+                  "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                  "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                  "plaintextBytes": 62,
+                  "ciphertextBytes": 113,
+                  "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                  "nonceBase64": "Ef3mv4Hun1y2WqmK"
+                }
+              ]
+            },
+            "semanticSha256": "8a01ade22da708b27cb1e2abe7ceab0658b2e102794201e10920418d1249fffd"
+          }
+        ]
+      },
+      "inputDescriptorSha256s": [
+        "6ba51af2ead17a705c61e0c6148a19ed618e02a348f341d74176fcc7249b2c36",
+        "bcfdd6c3d3c2c3955231ea4fdcdc23ec4d42cd28fe0134e7d1ce92c770801b8e"
+      ],
+      "canonicalUtf8": "{\"objects\":[{\"inputDescriptor\":{\"chunks\":[{\"ciphertextBytes\":113,\"ciphertextSha256\":\"4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801\",\"nonceBase64\":\"Ef3mv4Hun1y2WqmK\",\"plaintextBytes\":62,\"plaintextSha256\":\"ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1\",\"saltBase64\":\"KkiBD/W+eAwJNkNoxb4sZw==\"}],\"encodedBytes\":62,\"encoding\":\"identity\",\"name\":\"private/article-1.txt\",\"originalBytes\":62},\"semanticSha256\":\"ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1\"},{\"inputDescriptor\":{\"chunks\":[{\"ciphertextBytes\":113,\"ciphertextSha256\":\"4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801\",\"nonceBase64\":\"Ef3mv4Hun1y2WqmK\",\"plaintextBytes\":62,\"plaintextSha256\":\"ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1\",\"saltBase64\":\"KkiBD/W+eAwJNkNoxb4sZw==\"}],\"encodedBytes\":62,\"encoding\":\"identity\",\"name\":\"private/second-article.txt\",\"originalBytes\":62},\"semanticSha256\":\"8a01ade22da708b27cb1e2abe7ceab0658b2e102794201e10920418d1249fffd\"}]}",
+      "transcriptHex": "77617463687273732f7234382f6c6f63616c2d64657461696c732f76310a7b226f626a65637473223a5b7b22696e70757444657363726970746f72223a7b226368756e6b73223a5b7b22636970686572746578744279746573223a3131332c2263697068657274657874536861323536223a2234616561346363303766653663653134663836633337306666626332333932613134346438316237343365316630373663646362303638623330316163383031222c226e6f6e6365426173653634223a224566336d763448756e31793257716d4b222c22706c61696e746578744279746573223a36322c22706c61696e74657874536861323536223a2261643534646638323465343631636563396531386666646332633338653034323237663936616263356464663836653638346235396135616566383863306231222c2273616c74426173653634223a224b6b6942442f572b6541774a4e6b4e6f786234735a773d3d227d5d2c22656e636f6465644279746573223a36322c22656e636f64696e67223a226964656e74697479222c226e616d65223a22707269766174652f61727469636c652d312e747874222c226f726967696e616c4279746573223a36327d2c2273656d616e746963536861323536223a2261643534646638323465343631636563396531386666646332633338653034323237663936616263356464663836653638346235396135616566383863306231227d2c7b22696e70757444657363726970746f72223a7b226368756e6b73223a5b7b22636970686572746578744279746573223a3131332c2263697068657274657874536861323536223a2234616561346363303766653663653134663836633337306666626332333932613134346438316237343365316630373663646362303638623330316163383031222c226e6f6e6365426173653634223a224566336d763448756e31793257716d4b222c22706c61696e746578744279746573223a36322c22706c61696e74657874536861323536223a2261643534646638323465343631636563396531386666646332633338653034323237663936616263356464663836653638346235396135616566383863306231222c2273616c74426173653634223a224b6b6942442f572b6541774a4e6b4e6f786234735a773d3d227d5d2c22656e636f6465644279746573223a36322c22656e636f64696e67223a226964656e74697479222c226e616d65223a22707269766174652f7365636f6e642d61727469636c652e747874222c226f726967696e616c4279746573223a36327d2c2273656d616e746963536861323536223a2238613031616465323264613730386232376362316532616265376365616230363538623265313032373934323031653130393230343138643132343966666664227d5d7d",
+      "commitment": "c870bb5616e62d69e53db6b7fb7191bb75cba79bd11fbbbace92485dd7a19346",
+      "inputObjects": [
+        {
+          "descriptor": {
+            "name": "private/second-article.txt",
+            "encoding": "identity",
+            "originalBytes": 62,
+            "encodedBytes": 62,
+            "chunks": [
+              {
+                "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                "plaintextBytes": 62,
+                "ciphertextBytes": 113,
+                "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                "nonceBase64": "Ef3mv4Hun1y2WqmK"
+              }
+            ]
+          },
+          "chunkKeys": []
+        },
+        {
+          "descriptor": {
+            "name": "private/article-1.txt",
+            "encoding": "identity",
+            "originalBytes": 62,
+            "encodedBytes": 62,
+            "chunks": [
+              {
+                "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                "plaintextBytes": 62,
+                "ciphertextBytes": 113,
+                "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                "nonceBase64": "Ef3mv4Hun1y2WqmK"
+              }
+            ]
+          },
+          "chunkKeys": []
+        }
+      ],
+      "invariants": [
+        {
+          "inputDescriptorSha256": "6ba51af2ead17a705c61e0c6148a19ed618e02a348f341d74176fcc7249b2c36",
+          "semanticSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1"
+        },
+        {
+          "inputDescriptorSha256": "bcfdd6c3d3c2c3955231ea4fdcdc23ec4d42cd28fe0134e7d1ce92c770801b8e",
+          "semanticSha256": "8a01ade22da708b27cb1e2abe7ceab0658b2e102794201e10920418d1249fffd"
+        }
+      ]
+    },
+    {
+      "id": "empty-array",
+      "details": {
+        "objects": []
+      },
+      "inputDescriptorSha256s": [],
+      "canonicalUtf8": "{\"objects\":[]}",
+      "transcriptHex": "77617463687273732f7234382f6c6f63616c2d64657461696c732f76310a7b226f626a65637473223a5b5d7d",
+      "commitment": "f46cb89fdff1c375e30879670fb50bc6cbb413439c72aad4ec3d9412bdecf377",
+      "inputObjects": [],
+      "invariants": []
+    }
+  ],
+  "rejectedDetails": [
+    {
+      "id": "legacy-single-shape",
+      "details": {
+        "inputDescriptor": {
+          "name": "private/article-1.txt",
+          "encoding": "identity",
+          "originalBytes": 62,
+          "encodedBytes": 62,
+          "chunks": [
+            {
+              "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+              "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+              "plaintextBytes": 62,
+              "ciphertextBytes": 113,
+              "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+              "nonceBase64": "Ef3mv4Hun1y2WqmK"
+            }
+          ]
+        },
+        "semanticSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1"
+      }
+    },
+    {
+      "id": "descending-digest-order",
+      "details": {
+        "objects": [
+          {
+            "inputDescriptor": {
+              "name": "private/second-article.txt",
+              "encoding": "identity",
+              "originalBytes": 62,
+              "encodedBytes": 62,
+              "chunks": [
+                {
+                  "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                  "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                  "plaintextBytes": 62,
+                  "ciphertextBytes": 113,
+                  "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                  "nonceBase64": "Ef3mv4Hun1y2WqmK"
+                }
+              ]
+            },
+            "semanticSha256": "8a01ade22da708b27cb1e2abe7ceab0658b2e102794201e10920418d1249fffd"
+          },
+          {
+            "inputDescriptor": {
+              "name": "private/article-1.txt",
+              "encoding": "identity",
+              "originalBytes": 62,
+              "encodedBytes": 62,
+              "chunks": [
+                {
+                  "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                  "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                  "plaintextBytes": 62,
+                  "ciphertextBytes": 113,
+                  "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                  "nonceBase64": "Ef3mv4Hun1y2WqmK"
+                }
+              ]
+            },
+            "semanticSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "duplicate-descriptor",
+      "details": {
+        "objects": [
+          {
+            "inputDescriptor": {
+              "name": "private/article-1.txt",
+              "encoding": "identity",
+              "originalBytes": 62,
+              "encodedBytes": 62,
+              "chunks": [
+                {
+                  "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                  "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                  "plaintextBytes": 62,
+                  "ciphertextBytes": 113,
+                  "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                  "nonceBase64": "Ef3mv4Hun1y2WqmK"
+                }
+              ]
+            },
+            "semanticSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1"
+          },
+          {
+            "inputDescriptor": {
+              "name": "private/article-1.txt",
+              "encoding": "identity",
+              "originalBytes": 62,
+              "encodedBytes": 62,
+              "chunks": [
+                {
+                  "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                  "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                  "plaintextBytes": 62,
+                  "ciphertextBytes": 113,
+                  "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                  "nonceBase64": "Ef3mv4Hun1y2WqmK"
+                }
+              ]
+            },
+            "semanticSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "duplicate-descriptor-different-semantic",
+      "details": {
+        "objects": [
+          {
+            "inputDescriptor": {
+              "name": "private/article-1.txt",
+              "encoding": "identity",
+              "originalBytes": 62,
+              "encodedBytes": 62,
+              "chunks": [
+                {
+                  "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                  "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                  "plaintextBytes": 62,
+                  "ciphertextBytes": 113,
+                  "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                  "nonceBase64": "Ef3mv4Hun1y2WqmK"
+                }
+              ]
+            },
+            "semanticSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1"
+          },
+          {
+            "inputDescriptor": {
+              "name": "private/article-1.txt",
+              "encoding": "identity",
+              "originalBytes": 62,
+              "encodedBytes": 62,
+              "chunks": [
+                {
+                  "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                  "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                  "plaintextBytes": 62,
+                  "ciphertextBytes": 113,
+                  "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                  "nonceBase64": "Ef3mv4Hun1y2WqmK"
+                }
+              ]
+            },
+            "semanticSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "id": "uppercase-semantic-digest",
+      "details": {
+        "objects": [
+          {
+            "inputDescriptor": {
+              "name": "private/article-1.txt",
+              "encoding": "identity",
+              "originalBytes": 62,
+              "encodedBytes": 62,
+              "chunks": [
+                {
+                  "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                  "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                  "plaintextBytes": 62,
+                  "ciphertextBytes": 113,
+                  "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                  "nonceBase64": "Ef3mv4Hun1y2WqmK"
+                }
+              ]
+            },
+            "semanticSha256": "AD54DF824E461CEC9E18FFDC2C38E04227F96ABC5DDF86E684B59A5AEF88C0B1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "extra-top-level-field",
+      "details": {
+        "objects": [
+          {
+            "inputDescriptor": {
+              "name": "private/article-1.txt",
+              "encoding": "identity",
+              "originalBytes": 62,
+              "encodedBytes": 62,
+              "chunks": [
+                {
+                  "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                  "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                  "plaintextBytes": 62,
+                  "ciphertextBytes": 113,
+                  "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                  "nonceBase64": "Ef3mv4Hun1y2WqmK"
+                }
+              ]
+            },
+            "semanticSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "id": "extra-object-field",
+      "details": {
+        "objects": [
+          {
+            "inputDescriptor": {
+              "name": "private/article-1.txt",
+              "encoding": "identity",
+              "originalBytes": 62,
+              "encodedBytes": 62,
+              "chunks": [
+                {
+                  "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                  "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                  "plaintextBytes": 62,
+                  "ciphertextBytes": 113,
+                  "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                  "nonceBase64": "Ef3mv4Hun1y2WqmK"
+                }
+              ]
+            },
+            "semanticSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+            "inputDescriptorSha256": "6ba51af2ead17a705c61e0c6148a19ed618e02a348f341d74176fcc7249b2c36"
+          }
+        ]
+      }
+    },
+    {
+      "id": "missing-semantic",
+      "details": {
+        "objects": [
+          {
+            "inputDescriptor": {
+              "name": "private/article-1.txt",
+              "encoding": "identity",
+              "originalBytes": 62,
+              "encodedBytes": 62,
+              "chunks": [
+                {
+                  "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+                  "ciphertextSha256": "4aea4cc07fe6ce14f86c370ffbc2392a144d81b743e1f076cdcb068b301ac801",
+                  "plaintextBytes": 62,
+                  "ciphertextBytes": 113,
+                  "saltBase64": "KkiBD/W+eAwJNkNoxb4sZw==",
+                  "nonceBase64": "Ef3mv4Hun1y2WqmK"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "non-object-descriptor",
+      "details": {
+        "objects": [
+          {
+            "inputDescriptor": [],
+            "semanticSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1"
+          }
+        ]
+      }
+    }
+  ],
+  "rejectedCommitments": [
+    {
+      "id": "legacy-single-no-domain",
+      "sha256": "4a7aecea857c5442ec93da58b3645ae905dd2ddc91505ff1b56e30ac39e927fb"
+    },
+    {
+      "id": "legacy-single-with-domain",
+      "sha256": "d3a1bbe813141e88e73638dfe3a32b2adad7f8f77111bbe61e710535f699a9df"
+    },
+    {
+      "id": "array-without-domain",
+      "sha256": "0843e177ae8f53236c21a04f955beb194d1cfa5070506afea2d1b8d199484a09"
+    },
+    {
+      "id": "literal-backslash-n-domain",
+      "sha256": "17f4fafb8e5b7caf7b6cee00f3149009abc1d2373c9bb9e852edbebbdf274f34"
+    }
+  ]
+}

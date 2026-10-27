@@ -103,8 +103,12 @@ class CloudContentRebuildIntegrationTest {
         var revision=0L
         var completed=0
         var recordsPosted=0
+        var r48WriteEnabled=false
+        var deduplicateStoredChunks=false
         var failed=false
         var putCount=0
+        var httpRequests=0
+        var requestBodyBytes=0L
         val plans=mutableListOf<JSONObject>()
         val objects=linkedMapOf<String,JSONObject>()
         val uploaded=mutableSetOf<String>()
@@ -120,7 +124,7 @@ class CloudContentRebuildIntegrationTest {
         var mutatedDuringUpload=false
         val client=PhoneCloudClient(env,http=OkHttpClient.Builder().addInterceptor { chain ->
             synchronized(this) {
-                val request=chain.request();val path=request.url.encodedPath
+                val request=chain.request();val path=request.url.encodedPath;httpRequests++;requestBodyBytes+=request.body?.contentLength()?.coerceAtLeast(0) ?: 0
                 if(path.startsWith("/r48-fixture-blob/")) {
                     val sha=path.substringAfterLast('/');r48BlobReads+=sha
                     return@addInterceptor Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("fixture").body(r48Blobs.getValue(sha).toResponseBody()).build()
@@ -131,11 +135,16 @@ class CloudContentRebuildIntegrationTest {
                 fun shouldFail(stage:String)=failStage==stage && (!failed || alwaysFail)
                 val result=if(isCloudContentWrite(request.method,path)&&request.header("x-watchrss-content-generation")!=generation){code=409;JSONObject().put("error","cloud_content_rebuild_required")}else when {
                     path.endsWith("/bootstrap") -> bootstrap()
+                    path.endsWith("/ack") -> JSONObject()
+                    path.endsWith("/format-capabilities") -> JSONObject().put("protocol","watchrss-content-evolution").put("version",1)
+                        .put("phaseA",JSONObject().put("cloudFormatR48ReadV1",true).put("cloudFormatR48WriteV1",r48WriteEnabled)).put("phaseB",JSONObject().put("cloudFormatMigrationR48V1",false))
                     path.endsWith("/devices/register") -> JSONObject()
                     path.endsWith("/records") && request.method=="GET" -> {
                         val cursor=request.url.queryParameter("after")!!;afterQueries+=cursor
                         if(mutateDuringPull&&!mutatedDuringPull){mutatedDuringPull=true;runBlocking{repository.setRssSourcePinned("http://127.0.0.1/rss",true)}}
-                        JSONObject().put("formatVersion",1).put("items",JSONArray(recordRows.values.filter{it.getString("revision").toLong()>cursor.toLong()})).put("cursor",revision.toString()).put("headRevision",revision.toString()).put("hasMore",false)
+                        val remaining=recordRows.values.filter{it.getString("revision").toLong()>cursor.toLong()}.sortedBy{it.getString("revision").toLong()}
+                        val page=remaining.take(50)
+                        JSONObject().put("formatVersion",1).put("items",JSONArray(page)).put("cursor",page.lastOrNull()?.getString("revision") ?: revision.toString()).put("headRevision",revision.toString()).put("hasMore",remaining.size>page.size)
                             .put("contentGeneration",generation).put("contentEmpty",ready.isEmpty()&&recordRows.isEmpty())
                     }
                     path.endsWith("/records") -> {
@@ -161,6 +170,7 @@ class CloudContentRebuildIntegrationTest {
                         sequence=body.getLong("deviceSequence");plans+=body
                         val missing=JSONArray();latestObjectIds.clear()
                         fun add(kind:String,sha:String,size:Long) {
+                            if(deduplicateStoredChunks && sha in r48Blobs)return
                             val id=UUID.randomUUID().toString();val target=JSONObject().put("kind",kind).put("sha256",sha).put("sizeBytes",size).put("objectPath","owner/$id").put("reservationId",id).put("uploadUrl","https://test.invalid/functions/v1/cloud/uploads/$id").put("transport","epoch-proxy").put("uploadMethod","PUT")
                             objects[id]=target;latestObjectIds+=id;missing.put(target)
                         }
@@ -228,7 +238,7 @@ class CloudContentRebuildIntegrationTest {
     private suspend fun fixture(stage:String?=null,always:Boolean=false)=Fixture(failStage=stage,alwaysFail=always).also{fixtures+=it;it.initialize()}
     @After fun close(){fixtures.forEach{it.close()};java.security.Security.removeProvider("cloud-r45-fixture")}
     @Test fun clearedServerRebuildsRealRecordsAndEncryptedSnapshotWithoutLosingIdentityOrLocalLibrary()=runBlocking {
-        val f=fixture();val result=f.service.syncNow();assertTrue(result.snapshotUploaded);assertEquals(1,f.completed);assertTrue(f.recordsPosted>0)
+        val f=fixture();val result=f.service.syncNow(manual=true);assertTrue(result.snapshotUploaded);assertEquals(1,f.completed);assertTrue(f.recordsPosted>0)
         assertEquals(CloudSyncPhase.COMPLETE,f.service.state.value.phase);assertEquals(777,f.service.state.value.member!!.usedBytes);assertEquals(0,f.service.state.value.member!!.reservedBytes)
         assertEquals(after,f.state.contentGeneration);assertEquals(epoch,f.state.libraryEpoch);assertEquals(0,f.state.appliedSequence("old-phone",true));assertEquals(listOf("0"),f.afterQueries.distinct())
         assertEquals(session,f.account.session.value);assertArrayEquals(key,f.keys.getAccountKey(session.userId,1));assertEquals(f.publicKey,f.keys.devicePublicKeySpki(session.userId,"phone"));assertEquals(1,f.db.phoneRssSourceDao().getAllForSync().size)
@@ -265,6 +275,103 @@ class CloudContentRebuildIntegrationTest {
         assertTrue(androidx.work.WorkManager.getInstance(f.context).getWorkInfosForUniqueWork("watchrss-cloud-follow-up").get(5,java.util.concurrent.TimeUnit.SECONDS).any{!it.state.isFinished})
         val second=f.service.syncNow(manual=true);assertFalse(second.snapshotUploaded);assertEquals(1,f.plans.size);assertEquals(CloudSyncPhase.COMPLETE,f.service.state.value.phase)
     }
+    @Test fun r48OverlayArticleEditAndDeleteDoNotUploadTheLegacyLibraryAndNoopDoesNotRepublish()=runBlocking {
+        val f=fixture();f.deduplicateStoredChunks=true
+        fun article(i:Int):PhoneArticleEntity {val text="Private original $i 中文 HTML";return PhoneArticleEntity("overlay-$i","phone","https://synthetic.invalid/$i","Title $i","Site","",null,text,"<p>$text</p>",CloudSnapshotCodec.sha256(text.toByteArray()),1,10,true,10,i.toLong(),null,null,false,0,0,false,0,0,false,0)}
+        f.db.phoneArticleDao().upsertAll((0 until 24).map(::article))
+        f.service.syncNow();val first=f.plans.last();val originalId=first.getString("snapshotId")
+        val old=CloudSnapshotCodec().decryptManifest(key,originalId,f.cache.loadManifest(f.client.scopeId(session),originalId)!!)
+        val backing=old.objects.single{it.name=="private-library.wrss"}.toRawString()
+        f.r48WriteEnabled=true
+        f.recordStore.close()
+        f.service=PhoneCloudSyncService(f.context,f.account,f.backup,f.repository,NoteRepository(f.db.noteDao(),"phone"),"phone",f.client,keyManager=f.keys,settings=f.state,cache=f.cache,formatWritePolicy=CloudFormatWritePolicy(true,false))
+        val changed=article(1).copy(contentText="Edited body",contentHtml="<p>Edited &amp; original</p>",contentHash=CloudSnapshotCodec.sha256("Edited body".toByteArray()),updatedAt=20)
+        f.db.phoneArticleDao().upsert(changed)
+        f.db.phoneArticleDao().upsert(article(2).copy(deleted=true,deletedAt=30,updatedAt=30))
+        val result=f.service.syncNow(manual=true);assertTrue(result.snapshotUploaded)
+        val id=f.plans.last().getString("snapshotId");val manifest=CloudSnapshotCodec().decryptManifest(key,id,f.cache.loadManifest(f.client.scopeId(session),id)!!)
+        assertEquals(backing,manifest.objects.single{it.name=="private-library.wrss"}.toRawString())
+        assertEquals(1,manifest.objects.count{it.name.startsWith("private/articles/")})
+        val restored=CloudSnapshotCodec().restoreObjects(key,manifest){f.cache.loadChunk(f.client.scopeId(session),it)!!}
+        val index=CloudPrivateOverlay.decode(restored.getValue(CloudPrivateOverlay.NAME))
+        assertNull(index.single{it.id=="overlay-2"}.objectName)
+        val restoredEdit=CloudPrivateOverlayArchive.validate(restored.getValue(CloudPrivateOverlay.articleName("overlay-1")),"overlay-1").articles.single()
+        assertEquals(changed.contentHtml,restoredEdit.contentHtml)
+        assertTrue(result.uploadedBytes<old.objects.single{it.name=="private-library.wrss"}.originalBytes)
+        val complete=f.completed;val puts=f.putCount
+        assertFalse(f.service.syncNow().snapshotUploaded);assertEquals(complete,f.completed);assertEquals(puts,f.putCount)
+        assertEquals(CloudSyncPhase.COMPLETE,f.service.state.value.phase)
+    }
+
+    @Test fun r48ColdManualRestoreConsumesOverlayWithWriteGateOffAndDoesNotResurrectBackingDeletion()=runBlocking {
+        val f=fixture();val vector=JSONObject(requireNotNull(javaClass.getResource("/r48-write-v1/mixed-manifest.json")).readText())
+        val overlay=CloudPrivateOverlay.decode(vector.getString("overlayUtf8").toByteArray())
+        val edited=java.util.Base64.getDecoder().decode(vector.getString("editedArchiveBase64"))
+        val source=CloudSnapshotCodec().create(key,1,"phone",1,listOf(CloudLogicalObject("private-library.wrss",java.util.Base64.getDecoder().decode(vector.getString("legacyArchiveBase64")),false),CloudLogicalObject(CloudPrivateOverlay.NAME,CloudPrivateOverlay.encode(overlay),false),CloudLogicalObject(CloudPrivateOverlay.articleName("article-edit"),edited,false)),privateOverlay=true)
+        source.newCiphertextChunks.forEach{(hash,bytes)->f.r48Blobs[hash]=bytes}
+        f.r48Blobs[CloudSnapshotCodec.sha256(source.encryptedManifest)]=source.encryptedManifest
+        f.plans+=JSONObject().put("snapshotId",source.manifest.snapshotId).put("chunks",JSONArray(source.manifest.allChunks.map{JSONObject().put("sha256",it.ciphertextSha256).put("sizeBytes",it.ciphertextBytes)}))
+        f.sequence=1;f.ready+=JSONObject().put("id",source.manifest.snapshotId).put("sourceDeviceId","phone").put("deviceSequence",1).put("keyVersion",1).put("manifestSha256",CloudSnapshotCodec.sha256(source.encryptedManifest)).put("manifestSizeBytes",source.encryptedManifest.size).put("parentHeads",JSONObject()).put("observedHeads",JSONObject()).put("contentLayout",3)
+        val preview=f.service.inspectSnapshot(source.manifest.snapshotId);assertEquals(2,preview.privateArticleCount)
+        f.service.restoreSnapshot(source.manifest.snapshotId)
+        val rows=f.db.phoneArticleDao().getAllForSync()
+        assertEquals(2,rows.size);assertTrue(rows.none{it.articleId=="article-delete"})
+        assertEquals(vector.getJSONObject("expected").getString("editedHtmlUtf8"),rows.single{it.articleId=="article-edit"}.contentHtml)
+        assertEquals(CloudSyncPhase.COMPLETE,f.service.state.value.phase);assertFalse(f.r48WriteEnabled)
+    }
+
+    @Test fun r48MissingLocalOriginalCannotBecomeAnOverlayTombstone()=runBlocking {
+        val f=fixture();val text="Original body"
+        val row=PhoneArticleEntity("missing-original","phone","https://synthetic.invalid/missing","Original","Site","",null,text,"<p>Original</p>",CloudSnapshotCodec.sha256(text.toByteArray()),1,10,true,10,0,null,null,false,0,0,false,0,0,false,0)
+        f.db.phoneArticleDao().upsert(row)
+        val backing=f.backup.createCloudPrivateArchive()
+        f.db.phoneArticleDao().upsert(row.copy(contentText="",contentHtml=null))
+        val error=runCatching{f.backup.createPrivateOverlayExport(backing,emptyList(),emptyMap())}.exceptionOrNull()
+        assertTrue(error is CloudFormatUpgradeRequired)
+        assertEquals("overlay_original_missing",(error as CloudFormatUpgradeRequired).reason)
+        assertFalse(f.db.phoneArticleDao().getById(row.articleId)!!.deleted)
+    }
+
+    private suspend fun runR48Budget(write:Boolean) {
+        val f=fixture();f.deduplicateStoredChunks=true
+        val rng=java.util.Random(4801)
+        fun article(i:Int):PhoneArticleEntity {
+            val text=java.util.Base64.getEncoder().encodeToString(ByteArray(2048).also(rng::nextBytes))
+            return PhoneArticleEntity("budget-$i","phone","https://synthetic.invalid/budget/$i","Budget $i","Site","",null,text,"<p>$text</p>",CloudSnapshotCodec.sha256(text.toByteArray()),1,10,true,10,i.toLong(),null,null,false,0,0,false,0,0,false,0)
+        }
+        f.db.phoneArticleDao().upsertAll((0 until 2000).map(::article))
+        val source=com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.txtNovelSourceUrl("r48-budget")
+        f.db.phoneRssSourceDao().upsert(PhoneRssSourceEntity(source,"phone","Budget book","",null,null,1,10,1,false,false,0))
+        f.db.phoneArticleDao().upsertAll((0..1).map{i->val text="Book chapter $i";PhoneArticleEntity("budget-chapter-$i","phone",com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.txtNovelChapterUrl("r48-budget",i,"hash"),"Chapter $i","Book","",null,text,null,CloudSnapshotCodec.sha256(text.toByteArray()),1,10,false,0,0,source,"Book",false,0,0,false,0,0,false,0)})
+        f.service.syncNow(manual=true)
+        fun latest():CloudSnapshotManifest {val id=f.plans.last().getString("snapshotId");return CloudSnapshotCodec().decryptManifest(key,id,f.cache.loadManifest(f.client.scopeId(session),id)!!)}
+        val base=latest();val backing=base.objects.single{it.name=="private-library.wrss"};assertEquals(1,f.books.availableBooks().size)
+        val bookBytes=f.books.availableBooks().single().second.readBytes()
+        f.r48WriteEnabled=write;f.recordStore.close()
+        f.service=PhoneCloudSyncService(f.context,f.account,f.backup,f.repository,NoteRepository(f.db.noteDao(),"phone"),"phone",f.client,keyManager=f.keys,settings=f.state,cache=f.cache,formatWritePolicy=CloudFormatWritePolicy(write,false))
+        val measurements=JSONArray()
+        suspend fun measure(name:String,edit:suspend ()->Unit) {
+            val old=latest();val requests=f.httpRequests;val bytes=f.requestBodyBytes;val start=System.nanoTime()
+            edit();val result=f.service.syncNow(manual=true);val current=latest()
+            if(write)assertEquals(backing.toRawString(),current.objects.single{it.name=="private-library.wrss"}.toRawString())
+            assertArrayEquals(bookBytes,f.books.availableBooks().single().second.readBytes())
+            val oldHashes=old.allChunks.map{it.ciphertextSha256}.toSet()
+            val bodyBytes=current.objects.filter{it.name.startsWith("private/articles/")}.flatMap{it.chunks}.filter{it.ciphertextSha256 !in oldHashes}.sumOf{it.ciphertextBytes.toLong()}
+            if(write && name in setOf("delete","favorite"))assertEquals(0,bodyBytes)
+            if(write)assertTrue(result.uploadedBytes<backing.originalBytes/20)
+            measurements.put(JSONObject().put("case",name).put("uploadedCiphertextBytes",result.uploadedBytes).put("newBodyCiphertextBytes",bodyBytes).put("requests",f.httpRequests-requests).put("requestBodyBytes",f.requestBodyBytes-bytes).put("objects",current.objects.size).put("elapsedMillis",(System.nanoTime()-start)/1_000_000))
+        }
+        measure("add"){f.db.phoneArticleDao().upsert(article(2000))}
+        measure("edit"){val row=f.db.phoneArticleDao().getById("budget-1")!!;f.db.phoneArticleDao().upsert(row.copy(title="Edited original",contentText=row.contentText+"edited",contentHtml=row.contentHtml+"<!--edited-->",contentHash=CloudSnapshotCodec.sha256((row.contentText+"edited").toByteArray()),updatedAt=20))}
+        measure("delete"){val row=f.db.phoneArticleDao().getById("budget-2")!!;f.db.phoneArticleDao().upsert(row.copy(deleted=true,deletedAt=30,updatedAt=30))}
+        measure("favorite"){val row=f.db.phoneArticleDao().getById("budget-3")!!;f.db.phoneArticleDao().upsert(row.copy(favoriteSaved=true,favoriteChangedAt=40,updatedAt=40))}
+        println("R48_PRODUCTION_BUDGET "+JSONObject().put("writer",if(write)"overlay"else"legacy").put("baselineArchiveBytes",backing.originalBytes).put("baselineCiphertextBytes",backing.chunks.sumOf{it.ciphertextBytes.toLong()}).put("articles",2000).put("books",1).put("measurements",measurements))
+        val count=f.completed;assertFalse(f.service.syncNow(manual=true).snapshotUploaded);assertEquals(count,f.completed)
+    }
+
+    @Test fun r48TwoThousandArticlesAndBookBudgetUsesTheRealProducerForAddEditDeleteAndFavorite()=runBlocking {runR48Budget(true)}
+    @Test fun r48LegacyTwoThousandArticlesControlMeasuresSameOperationsAndRequestCounts()=runBlocking {runR48Budget(false)}
+
     @Test fun r48CacheLossAndAddColumnDoNotReencryptOrDownloadUnchangedPrivateBody()=runBlocking {
         val f=fixture();assertTrue(f.service.syncNow().snapshotUploaded)
         val originalId=f.plans.single().getString("snapshotId");val original=f.cache.loadManifest(f.client.scopeId(session),originalId)!!

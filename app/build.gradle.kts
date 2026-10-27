@@ -52,8 +52,12 @@ android {
         applicationId = "com.lightningstudio.watchrss.phone"
         minSdk = 30
         targetSdk = 36
-        versionCode = 88
-        versionName = "1.3.0-33"
+        versionCode = 93
+        versionName = "1.3.0-38"
+        // Implementation approval does not enable production writes or delegated conversion.
+        buildConfigField("boolean", "CLOUD_FORMAT_R48_WRITE_V1", providers.gradleProperty("cloudFormatR48WriteV1").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
+        buildConfigField("String", "R48_WORKER_TRUST_JSON", productionSetting("WATCHRSS_R48_WORKER_TRUST_JSON").asBuildConfigString())
+        buildConfigField("boolean", "CLOUD_FORMAT_MIGRATION_R48_V1", providers.gradleProperty("cloudFormatMigrationR48V1").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField(
             "String",
             "WATCHRSS_PRODUCTION_BACKEND_BASE_URL",
@@ -183,6 +187,7 @@ dependencies {
     implementation(libs.nanohttpd)
     implementation(libs.nanohttpd.websocket)
     implementation(libs.okhttp)
+    implementation("org.bouncycastle:bcprov-jdk18on:1.86")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation(libs.jsoup)
     implementation(libs.reorderable)

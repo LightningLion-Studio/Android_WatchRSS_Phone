@@ -1,0 +1,132 @@
+{
+  "protocol": "watchrss-r48",
+  "vectorVersion": 1,
+  "warning": "PUBLIC SYNTHETIC TEST SECRETS. NEVER USE IN PRODUCTION.",
+  "allowedOutputSchema": "r48.body-output.v1",
+  "strictOutputDescriptorKeys": [
+    "chunks",
+    "encodedBytes",
+    "encoding",
+    "name",
+    "originalBytes"
+  ],
+  "strictChunkKeys": [
+    "ciphertextBytes",
+    "ciphertextSha256",
+    "nonceBase64",
+    "plaintextBytes",
+    "plaintextSha256",
+    "saltBase64"
+  ],
+  "invalidOutputDescriptors": [
+    {
+      "id": "unknown-field",
+      "value": {
+        "name": "private/article-1.txt",
+        "encoding": "identity",
+        "originalBytes": 62,
+        "encodedBytes": 62,
+        "chunks": [
+          {
+            "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+            "ciphertextSha256": "d9d077fb9202551e281d6f2fe76a8d3eb4afe58d79031fb18c7b7716cd1c0409",
+            "plaintextBytes": 62,
+            "ciphertextBytes": 113,
+            "saltBase64": "raA//OuTCNKVFTd14iF1RQ==",
+            "nonceBase64": "2eZxNuxH2dkuij8n"
+          }
+        ],
+        "extra": "injected"
+      },
+      "expected": "reject"
+    },
+    {
+      "id": "tombstone-field",
+      "value": {
+        "name": "private/article-1.txt",
+        "encoding": "identity",
+        "originalBytes": 62,
+        "encodedBytes": 62,
+        "chunks": [
+          {
+            "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+            "ciphertextSha256": "d9d077fb9202551e281d6f2fe76a8d3eb4afe58d79031fb18c7b7716cd1c0409",
+            "plaintextBytes": 62,
+            "ciphertextBytes": 113,
+            "saltBase64": "raA//OuTCNKVFTd14iF1RQ==",
+            "nonceBase64": "2eZxNuxH2dkuij8n"
+          }
+        ],
+        "deletedAt": 1
+      },
+      "expected": "reject"
+    },
+    {
+      "id": "out-of-target-features",
+      "value": {
+        "name": "private/article-1.txt",
+        "encoding": "identity",
+        "originalBytes": 62,
+        "encodedBytes": 62,
+        "chunks": [
+          {
+            "plaintextSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+            "ciphertextSha256": "d9d077fb9202551e281d6f2fe76a8d3eb4afe58d79031fb18c7b7716cd1c0409",
+            "plaintextBytes": 62,
+            "ciphertextBytes": 113,
+            "saltBase64": "raA//OuTCNKVFTd14iF1RQ==",
+            "nonceBase64": "2eZxNuxH2dkuij8n"
+          }
+        ],
+        "features": {
+          "incompat": [
+            "evil.v1"
+          ],
+          "roCompat": []
+        }
+      },
+      "expected": "reject"
+    }
+  ],
+  "cases": [
+    {
+      "id": "worker-adds-unknown-field",
+      "expected": "reject"
+    },
+    {
+      "id": "worker-adds-out-of-target-feature",
+      "expected": "reject"
+    },
+    {
+      "id": "worker-adds-deletedAt",
+      "expected": "reject"
+    },
+    {
+      "id": "worker-substitutes-name",
+      "expected": "reject"
+    },
+    {
+      "id": "worker-reports-wrong-semantic-hash",
+      "expected": "reject"
+    },
+    {
+      "id": "input-plaintext-not-locally-available",
+      "expected": "reject"
+    },
+    {
+      "id": "destructive-sample-mode",
+      "expected": "reject"
+    },
+    {
+      "id": "object-hash-only-server-claimed",
+      "expected": "reject"
+    }
+  ],
+  "inputDescriptorSha256": "6ba51af2ead17a705c61e0c6148a19ed618e02a348f341d74176fcc7249b2c36",
+  "independentSemanticSha256": "ad54df824e461cec9e18ffdc2c38e04227f96abc5ddf86e684b59a5aef88c0b1",
+  "sampling": {
+    "when": "after-grant-local-CSPRNG",
+    "method": "uniform-without-replacement",
+    "k": "min(n,max(8,ceil(sqrt(n))))"
+  }
+}

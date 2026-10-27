@@ -48,7 +48,8 @@ fun DashboardCloudSyncBanner() {
     }
     val hasKey = session != null && service.hasLocalAccountKey()
     val presentation = if (ownerConflict) CloudDashboardPresentation("暂停上传", "本机资料属于另一个账号，选择处理方式后继续同步", "选择处理方式")
-        else cloudDashboardPresentation(session != null, hasKey, paused, state.phase, member)
+        else cloudDashboardPresentation(session != null, hasKey, paused, state.phase, member,
+            upgradeRequired = state.errorCode == "cloud_format_upgrade_required")
     val used = member?.usedBytes?.coerceAtLeast(0)
     CloudSyncStatusCard(
         status = presentation.status,
@@ -100,12 +101,13 @@ internal val cloudActivePhases = setOf(CloudSyncPhase.CHECKING, CloudSyncPhase.D
 internal data class CloudDashboardPresentation(val status: String, val detail: String?, val actionLabel: String? = null)
 
 internal fun cloudDashboardPresentation(loggedIn: Boolean, hasKey: Boolean, paused: Boolean,
-    phase: CloudSyncPhase, member: CloudMemberState?): CloudDashboardPresentation = when {
+    phase: CloudSyncPhase, member: CloudMemberState?, upgradeRequired: Boolean = false): CloudDashboardPresentation = when {
     !loggedIn -> CloudDashboardPresentation("未登录", "登录后查看云同步与云空间", "登录账号")
     member == null -> CloudDashboardPresentation("正在获取状态", "正在读取云空间额度")
     !member.readable -> CloudDashboardPresentation("云空间暂不可用", "请刷新状态或重新登录", "登录账号")
     !hasKey -> CloudDashboardPresentation("此手机尚未授权", "验证身份，安全恢复云端资料", "授权此手机")
     phase == CloudSyncPhase.NEEDS_RECOVERY -> CloudDashboardPresentation("设备身份需要重新验证", "前往账号页面完成验证，资料仍保留在本机", "验证设备身份")
+    upgradeRequired -> CloudDashboardPresentation("需要升级", "升级到最新版本后继续同步，本机修改已保留")
     paused -> CloudDashboardPresentation(if (phase in cloudActivePhases) "正在暂停" else "同步暂停", null)
     phase == CloudSyncPhase.ERROR -> CloudDashboardPresentation("同步未完成", "请检查网络后重试", "重试同步")
     phase in cloudActivePhases -> CloudDashboardPresentation("正在同步", null)

@@ -51,5 +51,8 @@ class CloudDashboardTest {
     @Test fun `waiting states and failures never imply completed sync`() {
         assertEquals("等待同步", cloudDashboardPresentation(true, true, false, CloudSyncPhase.WAITING_FOR_WIFI, member).status)
         assertEquals("重试同步", cloudDashboardPresentation(true, true, false, CloudSyncPhase.ERROR, member).actionLabel)
+        val upgrade = cloudDashboardPresentation(true, true, false, CloudSyncPhase.ERROR, member, upgradeRequired = true)
+        assertEquals("需要升级", upgrade.status)
+        assertEquals(null, upgrade.actionLabel)
     }
 }

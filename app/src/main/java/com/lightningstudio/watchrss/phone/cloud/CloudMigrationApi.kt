@@ -22,17 +22,24 @@ class PhoneCloudMigrationApi(private val client: PhoneCloudClient, private val s
     }
     override suspend fun get(path:String):JSONObject {
         require(path.startsWith("/cloud/format-migrations"));checkFence()
-        return client.v2Get(session(),"/functions/v1$path").also { checkFence() }
+        return client.migrationGet(session(),"/functions/v1$path").also { checkFence() }
     }
     override suspend fun publicationProof(jobId:String,batchId:String):JSONObject? {
         CloudMigrationCrypto.uuid(jobId);CloudMigrationCrypto.uuid(batchId)
-        val status=get("/cloud/format-migrations/$jobId")
-        val proofs=status.getJSONArray("publications")
-        return (0 until proofs.length()).map{proofs.getJSONObject(it)}.singleOrNull{it.getString("batchId")==batchId}
+        return try { get("/cloud/format-migrations/$jobId/publications/$batchId").also {
+            require(it.getString("batchId")==batchId)
+        } } catch(error:CloudHttpException) {
+            if(error.status==404 && cloudErrorCode(error)=="migration_publication_not_found")null else throw error
+        }
     }
     override suspend fun candidateDownload(jobId:String,sha256:String):JSONObject {
-        // Control-plane candidate-reference route is supplied by the shared API contract.
-        error("migration_candidate_download_not_configured")
+        CloudMigrationCrypto.uuid(jobId);CloudMigrationCrypto.hash(sha256)
+        return get("/cloud/format-migrations/$jobId/chunks/$sha256").also {
+            require(it.getString("jobId")==jobId && it.getString("sha256")==sha256)
+            CloudMigrationCrypto.hash(it.getString("planHash"));require(CloudMigrationCrypto.integer(it,"sizeBytes")>0)
+            require(CloudMigrationCrypto.integer(it,"expiresAt")>0 && it.getString("downloadRef").isNotBlank())
+        }
     }
+
     override suspend fun download(url:String,size:Long,sha256:String):ByteArray { checkFence(); return client.download(url,size,sha256,maximumBytes=size).also { checkFence() } }
 }

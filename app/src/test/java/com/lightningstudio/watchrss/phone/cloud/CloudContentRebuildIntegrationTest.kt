@@ -104,6 +104,7 @@ class CloudContentRebuildIntegrationTest {
         var completed=0
         var recordsPosted=0
         var r48WriteEnabled=false
+        var formatFloor=false
         var deduplicateStoredChunks=false
         var failed=false
         var putCount=0
@@ -133,7 +134,7 @@ class CloudContentRebuildIntegrationTest {
                 val body=if(request.method=="POST")JSONObject(buffer.readUtf8())else JSONObject()
                 var code=200
                 fun shouldFail(stage:String)=failStage==stage && (!failed || alwaysFail)
-                val result=if(isCloudContentWrite(request.method,path)&&request.header("x-watchrss-content-generation")!=generation){code=409;JSONObject().put("error","cloud_content_rebuild_required")}else when {
+                val result=if(formatFloor && request.method!="GET" && (path.endsWith("/records") || path.endsWith("/reserve") || path.endsWith("/complete") || path.contains("/uploads/")) && request.header("x-watchrss-r48-write-v1")!="1"){code=426;JSONObject().put("error","cloud_format_upgrade_required")}else if(isCloudContentWrite(request.method,path)&&request.header("x-watchrss-content-generation")!=generation){code=409;JSONObject().put("error","cloud_content_rebuild_required")}else when {
                     path.endsWith("/bootstrap") -> bootstrap()
                     path.endsWith("/ack") -> JSONObject()
                     path.endsWith("/format-capabilities") -> JSONObject().put("protocol","watchrss-content-evolution").put("version",1)
@@ -274,6 +275,23 @@ class CloudContentRebuildIntegrationTest {
         f.service.syncNow();assertEquals(CloudSyncPhase.IDLE,f.service.state.value.phase)
         assertTrue(androidx.work.WorkManager.getInstance(f.context).getWorkInfosForUniqueWork("watchrss-cloud-follow-up").get(5,java.util.concurrent.TimeUnit.SECONDS).any{!it.state.isFinished})
         val second=f.service.syncNow(manual=true);assertFalse(second.snapshotUploaded);assertEquals(1,f.plans.size);assertEquals(CloudSyncPhase.COMPLETE,f.service.state.value.phase)
+    }
+    @Test fun formatFloorHaltsAutomaticRetriesAndPreservesPendingRecordsKeysAndArchive()=runBlocking {
+        val f=fixture();f.formatFloor=true
+        val pending=f.cache.loadPendingManifest(f.client.scopeId(session))!!
+        val result=runCatching{f.service.syncNow(manual=true)}
+        assertTrue(result.exceptionOrNull() is CloudHttpException)
+        assertEquals("cloud_format_upgrade_required",f.service.state.value.errorCode)
+        assertEquals("请升级到最新版本以继续同步",f.service.state.value.message)
+        assertTrue(f.service.formatStatus.value.upgradeRequired)
+        assertTrue(f.db.phoneRssSourceDao().getAllForSync().isNotEmpty())
+        assertTrue(f.keys.hasAccountKey(session.userId));assertEquals(session.userId,f.account.session.value!!.userId)
+        // The fixture includes an obsolete-generation cache, legitimately cleared by R45. Create a
+        // current-generation pending archive and verify 426's halt never clears it or sends IO.
+        f.cache.storePendingManifest(f.client.scopeId(session),pending.first,pending.second,emptyList())
+        val requests=f.httpRequests
+        f.service.syncNow();assertEquals(requests,f.httpRequests)
+        assertArrayEquals(pending.second,f.cache.loadPendingManifest(f.client.scopeId(session))!!.second)
     }
     @Test fun r48OverlayArticleEditAndDeleteDoNotUploadTheLegacyLibraryAndNoopDoesNotRepublish()=runBlocking {
         val f=fixture();f.deduplicateStoredChunks=true

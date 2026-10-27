@@ -50,7 +50,8 @@ data class PhoneCloudSyncState(
     val uploadedBytes: Long = 0,
     val downloadedBytes: Long = 0,
     val lastCompletedAt: Long = 0,
-    val pendingSnapshotUntil: Long = 0
+    val pendingSnapshotUntil: Long = 0,
+    val errorCode:String? = null
 )
 
 data class PhoneCloudSyncResult(
@@ -297,6 +298,7 @@ class PhoneCloudSyncService(
     val recordError: StateFlow<String?> = _recordError
 
     init {
+        client.allowR48Writes={formatWritePolicy.localWrite}
         client.onUploadTransportEvent = { traceSync("upload-transport:$it") }
         client.checkSession = ::checkApprovalOwner
         client.currentDeviceId = deviceId
@@ -1058,6 +1060,12 @@ class PhoneCloudSyncService(
 
     suspend fun syncNow(manual: Boolean = false): PhoneCloudSyncResult = withContext(Dispatchers.IO) {
         if(!manual && bluetoothFence.active)return@withContext PhoneCloudSyncResult(0,0,0,false,0)
+        val activeSession=accountRepository.session.value
+        if(activeSession!=null)bindScope(activeSession)
+        if(!manual && settings.formatUpgradeRequiredVersion>=com.lightningstudio.watchrss.phone.BuildConfig.VERSION_CODE) {
+            _state.update{it.copy(phase=CloudSyncPhase.ERROR,message="请升级到最新版本以继续同步",errorCode="cloud_format_upgrade_required")}
+            return@withContext PhoneCloudSyncResult(0,0,0,false,0)
+        }
         traceSync("sync-request")
         syncMutex.run(manual, { PhoneCloudSyncResult(0, 0, 0, false, 0) }) {
             val automaticJob=if(manual)null else kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]
@@ -1098,6 +1106,11 @@ class PhoneCloudSyncService(
                     update(CloudSyncPhase.NEEDS_RECOVERY, "设备身份需要重新验证")
                 } else if (_state.value.phase !in setOf(CloudSyncPhase.NEEDS_RECOVERY,CloudSyncPhase.ERROR)) {
                     update(CloudSyncPhase.ERROR, error.message ?: "云同步失败")
+                }
+                if(error is CloudHttpException && error.status==426) {
+                    settings.formatUpgradeRequiredVersion=com.lightningstudio.watchrss.phone.BuildConfig.VERSION_CODE
+                    _formatStatus.value=_formatStatus.value.copy(upgradeRequired=true)
+                    _state.update{it.copy(phase=CloudSyncPhase.ERROR,message="请升级到最新版本以继续同步",errorCode="cloud_format_upgrade_required")}
                 }
                 throw error
             } finally { bluetoothFence.finished(automaticJob) }
@@ -1327,7 +1340,7 @@ class PhoneCloudSyncService(
                 update(CloudSyncPhase.IDLE, "等待继续同步")
                 throw error
             } catch (error: Throwable) {
-                if(error is CloudFormatUpgradeRequired)_formatStatus.value=_formatStatus.value.copy(upgradeRequired=true)
+                if(error is CloudFormatUpgradeRequired || error is CloudHttpException && error.status==426)_formatStatus.value=_formatStatus.value.copy(upgradeRequired=true)
                 traceSync("failure:${error.javaClass.simpleName}:status=${(error as? CloudHttpException)?.status ?: (error as? CloudObjectUploadException)?.status}:${error.stackTrace.firstOrNull { it.className.startsWith("com.lightningstudio.watchrss.phone") }}")
                 if (com.lightningstudio.watchrss.phone.BuildConfig.DEBUG) android.util.Log.w("WatchRssCloud", "sync failed phase=${_state.value.phase} type=${error.javaClass.simpleName} at=${error.stackTrace.firstOrNull { it.className.startsWith("com.lightningstudio.watchrss.phone") }}" + if (error is CloudHttpException) " status=${error.status}" else "")
                 if (error is CloudHttpException && discardedCloudTransfer(error)) throw error

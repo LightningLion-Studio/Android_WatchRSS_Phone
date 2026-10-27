@@ -51,6 +51,7 @@ class CloudMigrationInitiatorTest {
         var loseCompleteResponse=false
         var loseAcceptResponse=false
         var cancelBeforeComplete=false
+        var cancelConflicts=0
         var blockReceiptDownload=false
         val downloadStarted=CompletableDeferred<Unit>()
         val releaseDownload=CompletableDeferred<Unit>()
@@ -105,7 +106,7 @@ class CloudMigrationInitiatorTest {
                     state="accepted";if(loseAcceptResponse){loseAcceptResponse=false;throw IOException("synthetic accept loss")}
                     return JSONObject().put("state","accepted")
                 }
-                if(path.endsWith("/cancel")) {state="cancelled";return JSONObject().put("state",state).put("publishedBatchCount",0)}
+                if(path.endsWith("/cancel")) {if(cancelConflicts-->0)throw CloudHttpException(409,"{\"error\":\"migration_plan_conflict\"}");state="cancelled";return JSONObject().put("state",state).put("publishedBatchCount",0)}
                 error("unexpected $path")
             }
             override suspend fun get(path:String):JSONObject {
@@ -113,7 +114,7 @@ class CloudMigrationInitiatorTest {
                 return JSONObject().put("jobId",jobId).put("planId",planId).put("planHash",draft.planHash).put("state",state).put("revision",++revision).put("publishedBatchCount",if(serverProof==null)0 else 1)
             }
             override suspend fun publicationProof(jobId:String,batchId:String):JSONObject?=serverProof
-            override suspend fun candidateDownload(jobId:String,sha256:String):JSONObject=JSONObject().put("downloadRef","fixture://$sha256")
+            override suspend fun candidateDownload(jobId:String,sha256:String):JSONObject=JSONObject().put("downloadRef","fixture://$sha256").put("jobId",jobId).put("planHash",draft.planHash).put("sha256",sha256).put("sizeBytes",resultBlobs.getValue("fixture://$sha256").size)
             override suspend fun download(url:String,size:Long,sha256:String):ByteArray {
                 if(blockReceiptDownload && url=="fixture://receipt"){downloadStarted.complete(Unit);releaseDownload.await()}
                 return resultBlobs.getValue(url).also{require(it.size.toLong()==size && CloudSnapshotCodec.sha256(it)==sha256)}
@@ -251,6 +252,27 @@ class CloudMigrationInitiatorTest {
         assertNull(f.serverProof);assertEquals(0,f.bodies.count{it.first.endsWith("/accept")})
         f.store.reject={false};assertTrue(f.client().validateAndPublish(f.planId,CloudMigrationRunBudget{0}))
         assertEquals("accepted",f.state)
+    }
+    @Test fun cancellationRefreshesWorkerProgressRevisionWithAFiniteRetryBudget()=runBlocking {
+        for(conflicts in listOf(2,5)) {
+            val f=Fixture();val client=f.client();client.create(f.draft);client.consent(f.planId,true);f.cancelConflicts=conflicts
+            val result=runCatching{client.cancel(f.planId)}
+            val attempts=f.bodies.filter{it.first.endsWith("/cancel")}
+            assertEquals(3,attempts.size);assertEquals(1,attempts.map{it.second.getString("requestId")}.distinct().size)
+            assertEquals(3,attempts.map{it.second.getLong("expectedRevision")}.distinct().size)
+            if(conflicts==2)assertEquals("cancelled",result.getOrThrow().getString("state"))
+            else {assertTrue(result.isFailure);assertEquals("conflict",client.state.value.errorCode);assertTrue(client.state.value.retryable)}
+            assertEquals(0,f.publishCalls)
+        }
+    }
+    @Test fun registeredIdentityWorkerDoesNotReceiveUnknownOrBusinessDescriptorFields() {
+        val f=Fixture()
+        for(extra in listOf("privateBook","future")) {
+            val raw=CloudRawDocument.parse(f.source.toRawString()).patch(listOf(extra),"{\"value\":1}")
+            val input=CloudMigrationInput(f.input.snapshotId,f.input.manifestSha256,CloudObjectDescriptor.fromRaw(raw.source),f.input.semanticSha256,f.input.type,f.input.categories,true)
+            val error=runCatching {CloudMigrationPlanBuilder.create(f.current.userId,f.current.installationId,f.current.epoch,f.current.generation,f.originalPlan.getJSONObject("transform"),listOf(input),f.now)}.exceptionOrNull()
+            assertNotNull(error);assertEquals("migration_not_suitable",error!!.message)
+        }
     }
     @Test fun terminalStatusAfterRestartErasesOnlyOutputValidationRoot()=runBlocking {
         for(terminal in listOf("cancelled","expired","budget_exhausted","failed","accepted")) {

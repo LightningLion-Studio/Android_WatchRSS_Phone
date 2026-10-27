@@ -7,8 +7,8 @@ import java.util.concurrent.TimeUnit
 /** Fixed vocabulary only: never include exception text, object names, URLs, IDs, or cryptographic material. */
 enum class CloudMigrationOperation { CREATE, CONSENT, REFRESH, CANCEL, VALIDATE, DOWNLOAD }
 enum class CloudMigrationFailure(val retryable:Boolean) {
-    NETWORK(true), CHECKPOINT(true), BUDGET(true), DISABLED(false), SCOPE_CHANGED(false),
-    CANCELLED(false), EXPIRED(false), UNSUITABLE(false), REJECTED(false), INVALID_RESULT(false), INTERNAL(false)
+    NETWORK(true), CONFLICT(true), CHECKPOINT(true), BUDGET(true), DISABLED(false), SCOPE_CHANGED(false),
+    CLOUD_FORMAT_UPGRADE_REQUIRED(false), CANCELLED(false), EXPIRED(false), UNSUITABLE(false), REJECTED(false), INVALID_RESULT(false), INTERNAL(false)
 }
 data class CloudMigrationEvent(val operation:CloudMigrationOperation,val outcome:String,val elapsedMs:Long,
                                val failure:CloudMigrationFailure?=null,val downloadedBytes:Long=0) {
@@ -39,6 +39,8 @@ internal class CloudMigrationDiagnostics(private val observer:CloudMigrationObse
         fun classify(error:Exception):CloudMigrationFailure = when {
             error is kotlinx.coroutines.TimeoutCancellationException -> CloudMigrationFailure.BUDGET
             error is CancellationException -> CloudMigrationFailure.CANCELLED
+            error is CloudHttpException && error.status==409 && cloudErrorCode(error)=="migration_plan_conflict" -> CloudMigrationFailure.CONFLICT
+            error is CloudHttpException && error.status==426 -> CloudMigrationFailure.CLOUD_FORMAT_UPGRADE_REQUIRED
             error is CloudHttpException -> if(error.status in setOf(408,429,500,502,503,504))CloudMigrationFailure.NETWORK else CloudMigrationFailure.REJECTED
             error is IOException -> CloudMigrationFailure.NETWORK
             error.message=="migration_checkpoint_failed" -> CloudMigrationFailure.CHECKPOINT

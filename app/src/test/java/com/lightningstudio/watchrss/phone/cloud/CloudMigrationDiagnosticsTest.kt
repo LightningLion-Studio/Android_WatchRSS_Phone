@@ -20,6 +20,11 @@ class CloudMigrationDiagnosticsTest {
         assertTrue(events.drop(1).all{it.downloadedBytes==0L})
         assertEquals(listOf("network","network","invalid_result","checkpoint","cancelled"),events.drop(1).map{it.failure!!.name.lowercase()})
     }
+    @Test fun formatFloor426IsStableUpgradeStateAndNeverRetryable() {
+        val failure=CloudMigrationDiagnostics.classify(CloudHttpException(426,"{\"error\":\"cloud_format_upgrade_required\"}"))
+        assertEquals("cloud_format_upgrade_required",failure.name.lowercase());assertFalse(failure.retryable)
+        assertEquals("请升级到最新版本以继续同步",CloudHttpException(426,"untrusted response").message)
+    }
     @Test fun diagnosticsFailureCannotBreakPublicationOrChangeItsException()=runBlocking {
         val diagnostics=CloudMigrationDiagnostics(CloudMigrationObserver {error("synthetic logger full")})
         assertEquals(42,diagnostics.measure(CloudMigrationOperation.CREATE){42})

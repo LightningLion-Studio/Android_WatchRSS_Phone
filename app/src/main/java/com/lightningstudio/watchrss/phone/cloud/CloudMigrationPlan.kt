@@ -32,6 +32,17 @@ object CloudMigrationPlanBuilder {
         inputs.forEach {
             require(it.type in types && it.categories.isNotEmpty() && it.categories.none { category -> category.startsWith("record") }) { "migration_not_suitable" }
             require(it.appMetaCheckedSafe) { "migration_not_suitable" }
+            // The registered worker accepts only this closed body descriptor. Preserve registered
+            // business metadata/unknown tokens locally; never strip them to make a grant fit.
+            val descriptor=it.descriptor.toJson()
+            val supported=runCatching {
+                descriptor.keys().asSequence().all{key->key in setOf("name","encoding","originalBytes","encodedBytes","chunks","features")} &&
+                    (!descriptor.has("features") || descriptor.getJSONObject("features").let { f ->
+                        f.keys().asSequence().all{key->key in setOf("incompat","roCompat")} &&
+                            listOf("incompat","roCompat").all{key->!f.has(key) || f.getJSONArray(key).length()==0}
+                    })
+            }.getOrDefault(false)
+            require(supported) { "migration_not_suitable" }
             require(it.descriptor.entryRef == null && it.descriptor.access == CloudFormatAccess.WRITABLE && it.descriptor.chunks.isNotEmpty())
             CloudMigrationCrypto.uuid(it.snapshotId); CloudMigrationCrypto.hash(it.manifestSha256); CloudMigrationCrypto.hash(it.semanticSha256)
         }

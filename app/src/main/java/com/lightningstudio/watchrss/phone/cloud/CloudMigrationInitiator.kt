@@ -162,9 +162,21 @@ class CloudMigrationInitiator(
         val (draft,local)=load(planId); val job=local.optString("jobId").ifBlank{planId}
         cancelling.add(planId)
         val id=local.optString("cancelRequestId").ifBlank { requestId().also{local.put("cancelRequestId",it);save(draft,local)} }
-        val latest=api.get(base(job));checkScope(draft)
-        require(latest.getString("planHash")==draft.planHash)
-        val reply=api.post(base(latest.getString("jobId"))+"/cancel",JSONObject().put("requestId",id).put("expectedRevision",CloudMigrationCrypto.integer(latest,"revision")));checkScope(draft)
+        var cancelled:JSONObject?=null
+        for(attempt in 0..2) {
+            val latest=api.get(base(job));checkScope(draft)
+            require(latest.getString("planHash")==draft.planHash)
+            try {
+                cancelled=api.post(base(latest.getString("jobId"))+"/cancel",JSONObject().put("requestId",id).put("expectedRevision",CloudMigrationCrypto.integer(latest,"revision")))
+                checkScope(draft);break
+            } catch(error:CloudHttpException) {
+                if(error.status!=409 || cloudErrorCode(error)!="migration_plan_conflict" || attempt==2)throw error
+                // Worker progress may advance revision between GET and cancel. No new grant or
+                // publication is allowed while cancelling; refresh only this optimistic fence.
+                kotlinx.coroutines.delay(50L*(attempt+1))
+            }
+        }
+        val reply=requireNotNull(cancelled)
         require(reply.getString("state")=="cancelled");local.put("state","cancelled").remove("outputRootBase64");save(draft,local);pendingGrants.remove(planId)
         // The validation coroutine observes cancelling before any publish/accept or at beforeComplete.
         mutableState.value=CloudMigrationUiState("cancelled",publishedBatches=reply.optInt("publishedBatchCount"))
@@ -225,6 +237,7 @@ class CloudMigrationInitiator(
                 for(chunk in output.descriptor.chunks.distinctBy{it.ciphertextSha256}) {
                     budget.reserve(chunk.ciphertextBytes.toLong())
                     val download=api.candidateDownload(local.getString("jobId"),chunk.ciphertextSha256);check(draft)
+                    require(download.getString("planHash")==draft.planHash && download.getString("jobId")==local.getString("jobId") && download.getString("sha256")==chunk.ciphertextSha256 && CloudMigrationCrypto.integer(download,"sizeBytes")==chunk.ciphertextBytes.toLong())
                     chunks[chunk.ciphertextSha256]=api.download(download.getString("downloadRef"),chunk.ciphertextBytes.toLong(),chunk.ciphertextSha256);check(draft);budget.checkpoint()
                 }
                 // Root is scoped to this plan; the temporary manifest never leaves the client.

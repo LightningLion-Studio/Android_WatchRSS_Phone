@@ -42,7 +42,7 @@ class CloudV2ClientAndStorageTest {
         assertTrue(inspected)
     }
     @Test fun cloudSecretsAndCursorDatabaseAreExcludedFromBackupAndTransfer() {
-        val paths=setOf("watchrss_cloud_keys.xml","watchrss_cloud_state.xml","cloud-records-v1.db","cloud-records-v1.db-wal","cloud-records-v1.db-shm")
+        val paths=setOf("watchrss_cloud_keys.xml","watchrss_cloud_state.xml","watchrss_cloud_migrations.xml","cloud-records-v1.db","cloud-records-v1.db-wal","cloud-records-v1.db-shm")
         fun assertExcludes(file:File,section:String) {
             val doc=DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(file)
             val root=doc.getElementsByTagName(section).item(0) as org.w3c.dom.Element

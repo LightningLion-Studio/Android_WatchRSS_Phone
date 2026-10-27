@@ -52,8 +52,8 @@ android {
         applicationId = "com.lightningstudio.watchrss.phone"
         minSdk = 30
         targetSdk = 36
-        versionCode = 93
-        versionName = "1.3.0-38"
+        versionCode = 94
+        versionName = "1.3.0-39"
         // Implementation approval does not enable production writes or delegated conversion.
         buildConfigField("boolean", "CLOUD_FORMAT_R48_WRITE_V1", providers.gradleProperty("cloudFormatR48WriteV1").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("String", "R48_WORKER_TRUST_JSON", productionSetting("WATCHRSS_R48_WORKER_TRUST_JSON").asBuildConfigString())
@@ -233,4 +233,21 @@ tasks.withType<Test>().configureEach {
     dependsOn(prepareQrNativeTests)
     systemProperty("java.library.path", layout.buildDirectory.dir("qr-native-tests").get().asFile.absolutePath)
     systemProperty("robolectric.dependency.repo.url", "https://repo.maven.apache.org/maven2")
+}
+
+// Explicit local joint run only; ordinary unit tests never contact a live service.
+tasks.withType<Test>().configureEach {
+    if(name == "testDebugUnitTest") exclude("**/R48JointLocalIntegrationTest*")
+}
+tasks.register<Test>("r48JointLocalTest") {
+    val unit=tasks.named<Test>("testDebugUnitTest").get()
+    dependsOn(unit.testClassesDirs.buildDependencies)
+    testClassesDirs=unit.testClassesDirs
+    classpath=unit.classpath
+    systemProperties(unit.systemProperties)
+    jvmArgs(unit.jvmArgs ?: emptyList<String>())
+    maxHeapSize=unit.maxHeapSize
+    filter.includeTestsMatching("com.lightningstudio.watchrss.phone.cloud.R48JointLocalIntegrationTest")
+    environment("WATCHRSS_R48_JOINT_ENV",providers.environmentVariable("WATCHRSS_R48_JOINT_ENV").orNull ?: "")
+    outputs.upToDateWhen {false}
 }

@@ -23,6 +23,7 @@ class PhoneCloudClient(
     private val refreshDeviceSession: suspend (String, String) -> Boolean = { _, _ -> false },
     private val downloadBackoff: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) }
 ) {
+    internal var allowR48Writes:()->Boolean = { CloudFormatR48.writeV1 }
     val backendBaseUrl: String get() = environment.backendBaseUrl.trimEnd('/')
     private val epochs = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val contentGenerations = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -59,6 +60,12 @@ class PhoneCloudClient(
     internal suspend fun v2Post(session: PhoneAccountSession, path: String, body: JSONObject, expectedEpoch: String? = knownEpoch(session)): JSONObject =
         post(session, path, body, expectedEpoch).use { it.jsonBody() }
     internal suspend fun v2Get(session: PhoneAccountSession, path: String): JSONObject = get(session, path).use { it.jsonBody() }
+    internal suspend fun migrationGet(session:PhoneAccountSession,path:String):JSONObject {
+        val epoch=epoch(session)
+        val generation=knownContentGeneration(session) ?: throw CloudHttpException(426,"{\"error\":\"cloud_format_upgrade_required\"}")
+        return request(session,Request.Builder().url(environment.backendBaseUrl+path).get()
+            .header("x-watchrss-library-epoch",epoch).header("x-watchrss-content-generation",generation),epoch).use{it.jsonBody()}
+    }
     suspend fun storeCommitments(session: PhoneAccountSession, deviceId: String, values: List<CloudKeyCommitment>, expectedEpoch: String? = knownEpoch(session)) {
         v2Post(session, "/functions/v1/cloud/keys/commitments", JSONObject().put("deviceId", deviceId)
             .put("commitments", JSONArray().apply { values.forEach { put(JSONObject().put("keyVersion", it.keyVersion)
@@ -211,7 +218,7 @@ class PhoneCloudClient(
                 put("observedHeads", JSONObject(snapshot.manifest.observedHeads))
                 put("retentionDays", retentionDays ?: JSONObject.NULL)
                 put("chunks", chunks)
-            }, expectedEpoch
+            }, expectedEpoch, requiresR48Write = migrationContext!=null || snapshot.manifest.requiresR48Write()
         ).use { response ->
             val json = response.jsonBody()
             CloudSnapshotReservation(
@@ -227,7 +234,8 @@ class PhoneCloudClient(
                         token = "", tusEndpoint = "", bucketName = "",
                         transport = item.getString("transport"),
                         uploadMethod = item.getString("uploadMethod"),
-                        reservationId = item.optString("reservationId").takeIf { it.isNotBlank() }
+                        reservationId = item.optString("reservationId").takeIf { it.isNotBlank() },
+                        requiresR48Write = migrationContext!=null || snapshot.manifest.requiresR48Write()
                     )
                 }
             )
@@ -237,7 +245,7 @@ class PhoneCloudClient(
     suspend fun refreshUpload(session: PhoneAccountSession, target: CloudUploadObject, expectedEpoch: String? = knownEpoch(session)): CloudUploadObject {
         val id = target.reservationId ?: return target
         require(runCatching { java.util.UUID.fromString(id) }.isSuccess)
-        return post(session, "/functions/v1/cloud/uploads/$id/refresh", JSONObject(), expectedEpoch).use {
+        return post(session, "/functions/v1/cloud/uploads/$id/refresh", JSONObject(), expectedEpoch,requiresR48Write=target.requiresR48Write).use {
             val body = it.jsonBody()
             if (body.optBoolean("alreadyUploaded")) target.copy(alreadyUploaded = true)
             else target.copy(signedUrl = body.optString("uploadUrl", body.optString("signedUrl")),
@@ -257,7 +265,7 @@ class PhoneCloudClient(
         require(target.signedUrl == url) { "云上传地址不匹配" }
         val attempt = CloudUploadAttempt(id, onUploadTransportEvent)
         try {
-            request(session, Request.Builder().url(url).put(bytes.toRequestBody("application/octet-stream".toMediaType())), expectedEpoch, attempt).close()
+            request(session, Request.Builder().url(url).tag(CloudR48WriteRequired::class.java,CloudR48WriteRequired(target.requiresR48Write)).put(bytes.toRequestBody("application/octet-stream".toMediaType())), expectedEpoch, attempt).close()
         } catch (error: IOException) {
             // Keep the existing service retry budget. Only its next PUT changes transport;
             // control requests, immutable bytes and both content fences remain unchanged.
@@ -286,7 +294,7 @@ class PhoneCloudClient(
                             .distinct()
                     )
                 )
-            }, expectedEpoch
+            }, expectedEpoch,requiresR48Write=migrationContext!=null || snapshot.manifest.requiresR48Write()
         ).close()
     }
 
@@ -488,10 +496,12 @@ class PhoneCloudClient(
         session: PhoneAccountSession,
         path: String,
         body: JSONObject,
-        expectedEpoch: String? = knownEpoch(session)
+        expectedEpoch: String? = knownEpoch(session),
+        requiresR48Write:Boolean = false
     ): okhttp3.Response = request(
         session,
         Request.Builder()
+            .tag(CloudR48WriteRequired::class.java,CloudR48WriteRequired(requiresR48Write))
             .url(environment.backendBaseUrl + path)
             .post(body.toString().toRequestBody(JSON)), expectedEpoch
     )
@@ -516,7 +526,13 @@ class PhoneCloudClient(
         // Capture once, including an authentication refresh. Never retag stale work with a new generation.
         val fence = kotlinx.coroutines.currentCoroutineContext()[CloudContentGenerationFence]
         val expectedGeneration = if (fence?.scope == scopeId(session)) fence.generation else knownContentGeneration(session)
+        val initial=builder.build()
+        val admissionPath=initial.method!="GET" && (initial.url.encodedPath in setOf("/functions/v1/cloud/records","/functions/v1/cloud/snapshots/reserve","/functions/v1/cloud/snapshots/complete") || initial.url.encodedPath.startsWith("/functions/v1/cloud/uploads/"))
+        val requiresR48=initial.tag(CloudR48WriteRequired::class.java)?.value==true
+        val admission=admissionPath && allowR48Writes() && CloudFormatWritePolicy(true,false).canWrite(formatCapabilities(session))
+        if(requiresR48 && !admission)throw CloudHttpException(503,"{\"error\":\"r48_write_feature_disabled\"}")
         fun buildRequest() = builder
+            .apply {if(admission)header("x-watchrss-r48-write-v1","1") else removeHeader("x-watchrss-r48-write-v1")}
             .tag(CloudContentRequestGeneration::class.java, CloudContentRequestGeneration(expectedGeneration))
             .also { checkSession(session) }
             .withWatchRssAppVersionHeader()
@@ -689,7 +705,7 @@ internal fun isRefreshableCloudDeviceSessionError(code: String): Boolean =
 
 internal class CloudDeviceAuthorizationException : IOException("设备身份需要重新验证，请前往账号页面完成验证")
 
-internal class CloudHttpException(val status: Int, val detail: String) : IOException(if (status == 426) "请升级客户端后继续云同步" else if (status == 409 && runCatching { JSONObject(detail).optString("error") }.getOrDefault("") == "device_key_conflict") "本机设备身份冲突，请重新登记本机" else "HTTP $status: $detail")
+internal class CloudHttpException(val status: Int, val detail: String) : IOException(if (status == 426) "请升级到最新版本以继续同步" else if (status == 409 && runCatching { JSONObject(detail).optString("error") }.getOrDefault("") == "device_key_conflict") "本机设备身份冲突，请重新登记本机" else "HTTP $status: $detail")
 
 /** A malicious/misconfigured candidate response cannot allocate beyond the advertised local run budget. */
 internal fun readMigrationBody(input:java.io.InputStream,maximumBytes:Long):ByteArray {
@@ -705,3 +721,7 @@ internal fun readMigrationBody(input:java.io.InputStream,maximumBytes:Long):Byte
     }
     return output.toByteArray()
 }
+
+internal data class CloudR48WriteRequired(val value:Boolean)
+internal fun CloudSnapshotManifest.requiresR48Write():Boolean = objects.any{it.entryRef!=null || it.objectKeyEnvelope!=null} ||
+    rawDocument?.json()?.optJSONObject("features")?.optJSONArray("incompat")?.let { a ->(0 until a.length()).any{a.getString(it)==CloudPrivateOverlay.FEATURE} }==true

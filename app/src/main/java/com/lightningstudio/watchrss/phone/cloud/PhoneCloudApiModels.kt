@@ -75,7 +75,8 @@ data class CloudUploadObject(
     val reservationId: String? = null,
     val alreadyUploaded: Boolean = false,
     val transport: String = "storage-signed",
-    val uploadMethod: String = "PUT"
+    val uploadMethod: String = "PUT",
+    val requiresR48Write:Boolean = false
 )
 
 data class CloudSnapshotReservation(

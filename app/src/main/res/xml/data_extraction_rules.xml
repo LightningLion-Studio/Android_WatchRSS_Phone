@@ -12,6 +12,7 @@
     <exclude domain="sharedpref" path="watchrss_cloud_keys.xml" />
     <exclude domain="sharedpref" path="watchrss_cloud_keys_test.xml" />
     <exclude domain="sharedpref" path="watchrss_cloud_state.xml" />
+    <exclude domain="sharedpref" path="watchrss_cloud_migrations.xml" />
     <exclude domain="sharedpref" path="watchrss_cloud_state_test.xml" />
     <exclude domain="sharedpref" path="watchrss_tus_uploads.xml" />
     <exclude domain="sharedpref" path="watchrss_tus_uploads_test.xml" />
@@ -31,6 +32,7 @@
     <exclude domain="sharedpref" path="watchrss_cloud_keys.xml" />
     <exclude domain="sharedpref" path="watchrss_cloud_keys_test.xml" />
     <exclude domain="sharedpref" path="watchrss_cloud_state.xml" />
+    <exclude domain="sharedpref" path="watchrss_cloud_migrations.xml" />
     <exclude domain="sharedpref" path="watchrss_cloud_state_test.xml" />
     <exclude domain="sharedpref" path="watchrss_tus_uploads.xml" />
     <exclude domain="sharedpref" path="watchrss_tus_uploads_test.xml" />

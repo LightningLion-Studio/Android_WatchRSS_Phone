@@ -54,6 +54,13 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
         check(editor.commit())
     }
 
+    var formatUpgradeRequiredVersion:Int
+        get()=if(preferences.getString(scoped("format_upgrade_epoch"),null)==libraryEpoch &&
+            preferences.getString(scoped("format_upgrade_generation"),null)==contentGeneration)
+            preferences.getInt(scoped("format_upgrade_required_version"),0) else 0
+        set(value) {check(preferences.edit().putInt(scoped("format_upgrade_required_version"),value)
+            .putString(scoped("format_upgrade_epoch"),libraryEpoch).putString(scoped("format_upgrade_generation"),contentGeneration).commit())}
+
     var syncPaused: Boolean
         get() = preferences.getBoolean("sync_paused", false)
         set(value) { check(preferences.edit().putBoolean("sync_paused", value).commit()) }

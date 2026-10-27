@@ -23,6 +23,20 @@ class CloudContentLifecycleTest {
         .put("devices",JSONArray()).put("keyEnvelopes",JSONArray()).put("libraryEpoch",vector.getString("epoch"))
         .put("contentGeneration",generation).put("contentClearedAt","2026-10-23T00:00:00Z").put("contentEmpty",empty)
 
+    @Test fun floorUpgradeHaltPersistsButDoesNotCrossOwnerEpochGenerationOrNewBuild() {
+        val prefs=MemoryPreferences();val state=PhoneCloudStateStore(prefs)
+        state.bindScope("https://test.invalid","owner");state.libraryEpoch=vector.getString("epoch")
+        state.observeContentGeneration(before,false){}
+        state.formatUpgradeRequiredVersion=94;assertEquals(94,state.formatUpgradeRequiredVersion)
+        val restarted=PhoneCloudStateStore(prefs);restarted.bindScope("https://test.invalid","owner")
+        assertEquals(94,restarted.formatUpgradeRequiredVersion)
+        assertFalse(restarted.formatUpgradeRequiredVersion>=95)
+        restarted.bindScope("https://test.invalid","another-owner");assertEquals(0,restarted.formatUpgradeRequiredVersion)
+        restarted.bindScope("https://test.invalid","owner");restarted.observeContentGeneration(after,false){}
+        assertEquals(0,restarted.formatUpgradeRequiredVersion)
+        restarted.formatUpgradeRequiredVersion=94
+        restarted.libraryEpoch="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";assertEquals(0,restarted.formatUpgradeRequiredVersion)
+    }
     @Test fun firstEmptyAndChangedGenerationResetExactlyOnceWithCrashSafePersistenceAndScopeIsolation() {
         val prefs=MemoryPreferences(); val state=PhoneCloudStateStore(prefs); state.bindScope("a/","owner")
         state.libraryEpoch=vector.getString("epoch");state.ownerUserId="owner";state.markApplied("watch",9,true)

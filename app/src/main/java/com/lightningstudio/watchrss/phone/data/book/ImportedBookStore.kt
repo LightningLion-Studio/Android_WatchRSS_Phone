@@ -15,6 +15,12 @@ import java.security.MessageDigest
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 
+/** A complete peer item was received, but its package is invalid. Never wrap IO/owner/cancellation failures. */
+internal class InvalidBookPackageException : IllegalArgumentException("book_package_invalid")
+internal inline fun <T> validateBookPackage(block:()->T):T = try {block()}
+    catch(_:org.json.JSONException){throw InvalidBookPackageException()}
+    catch(_:IllegalArgumentException){throw InvalidBookPackageException()}
+
 /** Immutable original packages survive chapter deletion. State/reading are independent small rows. */
 class ImportedBookStore(private val db:PhoneCompanionDatabase,private val directory:File,
     private val contentStore:ArticleContentStore?,private val deviceId:String) {
@@ -153,13 +159,15 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
     suspend fun merge(remote:JSONObject,checkOwner:()->Unit={},forceProjection:Boolean=false):Int=db.withTransaction {
         checkOwner()
         val id=remote.getString("bookId");var previous=dao.get(id)
-        var state=BookSync.merge(previous?.let{JSONObject(it.stateJson)},remote);var json=BookSync.canonical(state)
+        val before=previous?.let{JSONObject(it.stateJson).also(BookSync::validate)}
+        var state=validateBookPackage{BookSync.merge(before,remote)};var json=BookSync.canonical(state)
         if(previous?.stateJson==json && !forceProjection)return@withTransaction 0
         readingJournal.initialize()
         captureDirtyReading()
         // Dirty capture can add a local deletion. Rebase before writing remote metadata.
         previous=dao.get(id)
-        state=BookSync.merge(previous?.let{JSONObject(it.stateJson)},remote);json=BookSync.canonical(state)
+        val captured=previous?.let{JSONObject(it.stateJson).also(BookSync::validate)}
+        state=validateBookPackage{BookSync.merge(captured,remote)};json=BookSync.canonical(state)
         var changed=0
         if(previous?.stateJson!=json){
             val before=previous?.stateJson?.let(::JSONObject)
@@ -345,13 +353,32 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
     }
     /** Validate the entire package before any row becomes visible, then atomically publish file+mapping. */
     suspend fun receivePackage(id:String,input:File,checkOwner:()->Unit={}):Int=withContext(Dispatchers.IO) {
-        checkOwner();require(id.matches(Regex("[0-9a-f]{64}")))
+        checkOwner()
         var header:JSONObject?=null;val hashes=mutableListOf<String>()
-        input.bufferedReader(Charsets.UTF_8).use {r->header=JSONObject(requireNotNull(r.readLine()));require(header!!.getString("format")=="watchrss-book"&&header!!.getInt("version")==1)
-            val count=BookSync.integer(header!!,"chapterCount");require(count in 1..100_000)
-            repeat(count.toInt()){i->val c=JSONObject(requireNotNull(r.readLine()));require(BookSync.integer(c,"chapterIndex")==i+1L);hashes+=BookSync.chapterHash(i+1,c.getString("title"),c.getString("contentText"));require(ImportedContentIds.isImportedContentUrl(c.getString("url")))};require(r.readLine()==null)}
-        val fingerprint=BookSync.fingerprint(hashes);require(BookSync.id(fingerprint)==id)
-        val existing=dao.get(id);if(existing!=null)require(JSONObject(existing.stateJson).getString("fingerprint")==fingerprint && JSONObject(existing.stateJson).getInt("chapterCount")==hashes.size)
+        val fingerprint=validateBookPackage {
+            require(id.matches(Regex("[0-9a-f]{64}")))
+            input.bufferedReader(Charsets.UTF_8).use { r ->
+                val h=JSONObject(requireNotNull(r.readLine()));header=h
+                require(h.getString("format")=="watchrss-book" && BookSync.integer(h,"version")==1L)
+                val count=BookSync.integer(h,"chapterCount");require(count in 1..100_000)
+                require(h.get("title") is String && h.get("sourceUrl") is String && h.get("kind") in listOf("txt","epub"))
+                val source=h.getString("sourceUrl");require(ImportedContentIds.isImportedContentUrl(source))
+                val cli=ImportedContentIds.isCliSingleTextUrl(source.trim())
+                if(cli)require(count==1L && h.getString("kind")=="txt")
+                repeat(count.toInt()) { i ->
+                    val c=JSONObject(requireNotNull(r.readLine()));require(BookSync.integer(c,"chapterIndex")==i+1L)
+                    require(c.get("title") is String && c.get("contentText") is String && c.get("url") is String)
+                    require(!c.has("contentHtml") || c.isNull("contentHtml") || c.get("contentHtml") is String)
+                    val url=c.getString("url");require(ImportedContentIds.isImportedContentUrl(url))
+                    if(ImportedContentIds.isCliSingleTextUrl(url.trim()))require(cli && source.equals(url,ignoreCase=true))
+                    if(cli)require(ImportedContentIds.isCliSingleTextUrl(url.trim()))
+                    hashes+=BookSync.chapterHash(i+1,c.getString("title"),c.getString("contentText"))
+                }
+                require(r.readLine()==null)
+            }
+            BookSync.fingerprint(hashes).also { require(BookSync.id(it)==id) }
+        }
+        val existing=dao.get(id);if(existing!=null)validateBookPackage {require(JSONObject(existing.stateJson).getString("fingerprint")==fingerprint && JSONObject(existing.stateJson).getInt("chapterCount")==hashes.size)}
         checkOwner()
         if(existing!=null && available(existing)) {
             val mappings=dao.chapters(id);val present=articles.getAllIds().toHashSet()
@@ -370,8 +397,15 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             input.bufferedReader(Charsets.UTF_8).use {r->r.readLine();repeat(hashes.size){i->checkOwner();val c=JSONObject(requireNotNull(r.readLine()));val index=i+1
                 val oldId=mappings[index]?.articleId?:allOld[c.getString("url")]?.articleId
                 val articleId=oldId?:BookSync.articleId(id,index);val previous=articles.getById(articleId)
+                fun missing(value:String?)=value.isNullOrBlank() || contentStore?.isMarker(value)==true && contentStore.loadText(value).isNullOrBlank()
+                val repaired=previous?.let { row ->
+                    val text=if(missing(row.contentText))c.getString("contentText") else row.contentText
+                    val html=if(missing(row.contentHtml) && !c.isNull("contentHtml"))c.getString("contentHtml") else row.contentHtml
+                    if(text==row.contentText && html==row.contentHtml)row else row.copy(contentText=text,contentHtml=html,
+                        contentHash=CloudSnapshotCodec.sha256(c.getString("contentText").toByteArray()),syncBodyHash="",syncBodyByteCount=0,syncChunkSize=0,syncChunkHashesJson="",syncMetadataHash="")
+                }
                 val tombstone=merged.getBoolean("deleted")||index in BookSync.deletions(merged)
-                val next=previous?.copy(deleted=previous.deleted||tombstone,deletedAt=maxOf(previous.deletedAt,if(tombstone)maxOf(merged.getLong("deletedAt"),merged.getLong("deletionClock"))else 0))?:PhoneArticleEntity(articleId,merged.getString("sourceDeviceId"),c.getString("url"),c.getString("title"),h.getString("title"),"",if(c.isNull("contentHtml"))null else c.getString("contentHtml"),c.getString("contentText"),null,CloudSnapshotCodec.sha256(c.getString("contentText").toByteArray()),1,1,false,0,0,if(ImportedContentIds.isImportedTextArticleUrl(c.getString("url")))ImportedContentIds.ROOT_SOURCE_URL else h.getString("sourceUrl"),if(ImportedContentIds.isImportedTextArticleUrl(c.getString("url")))ImportedContentIds.ROOT_SOURCE_TITLE else h.getString("title"),false,0,0,false,0,0,tombstone,if(tombstone)maxOf(merged.getLong("deletedAt"),merged.getLong("deletionClock"))else 0)
+                val next=repaired?.copy(deleted=previous!!.deleted||tombstone,deletedAt=maxOf(previous.deletedAt,if(tombstone)maxOf(merged.getLong("deletedAt"),merged.getLong("deletionClock"))else 0))?:PhoneArticleEntity(articleId,merged.getString("sourceDeviceId"),c.getString("url"),c.getString("title"),h.getString("title"),"",if(c.isNull("contentHtml"))null else c.getString("contentHtml"),c.getString("contentText"),null,CloudSnapshotCodec.sha256(c.getString("contentText").toByteArray()),1,1,false,0,0,if(ImportedContentIds.isImportedTextArticleUrl(c.getString("url")))ImportedContentIds.ROOT_SOURCE_URL else h.getString("sourceUrl"),if(ImportedContentIds.isImportedTextArticleUrl(c.getString("url")))ImportedContentIds.ROOT_SOURCE_TITLE else h.getString("title"),false,0,0,false,0,0,tombstone,if(tombstone)maxOf(merged.getLong("deletedAt"),merged.getLong("deletionClock"))else 0)
                 if(next!=previous){writeArticle(next);changed++};dao.putChapters(listOf(BookChapterEntity(id,index,articleId)))
             }}
             val next=BookEntity(id,BookSync.canonical(merged),packageHash,bytes);if(current!=next){dao.put(next);changed++}
@@ -382,7 +416,10 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         };changed
     }
     private suspend fun writeArticle(row:PhoneArticleEntity) {
-        articles.upsert(row.copy(syncMetadataHash=""))
+        val text=if(contentStore!=null && ImportedContentIds.isImportedTextArticleUrl(row.url) &&
+            !contentStore.isMarker(row.contentText) && row.contentText.length>50_000)
+            contentStore.storeText("${row.articleId}-text",row.contentText) else row.contentText
+        articles.upsert(row.copy(contentText=text,syncMetadataHash=""))
         db.bookReadingDao().cleanProjection(row.articleId)
         logArticle(row)
     }

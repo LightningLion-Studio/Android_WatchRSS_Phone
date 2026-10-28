@@ -6,6 +6,11 @@ object ImportedContentIds {
     const val EPUB_SOURCE_ROOT_URL = "https://watchrss.local/import-epub"
     const val TXT_NOVEL_SOURCE_ROOT_URL = "https://watchrss.local/import-txt-novel"
 
+    private val cliSingleText = Regex("(?i)watchrss://import/online-v1/[0-9a-f]{64}")
+
+    /** A CLI local display hint, never a network endpoint or an arbitrary URI scheme. */
+    fun isCliSingleTextUrl(url: String?): Boolean = url != null && cliSingleText.matches(url)
+
     fun txtArticleUrl(contentKey: String): String {
         return "$ROOT_SOURCE_URL/txt/$contentKey"
     }
@@ -32,7 +37,7 @@ object ImportedContentIds {
         val normalized = url?.trim()?.lowercase() ?: return false
         return normalized.startsWith(ROOT_SOURCE_URL) ||
             normalized.startsWith(EPUB_SOURCE_ROOT_URL) ||
-            normalized.startsWith(TXT_NOVEL_SOURCE_ROOT_URL)
+            normalized.startsWith(TXT_NOVEL_SOURCE_ROOT_URL) || isCliSingleTextUrl(normalized)
     }
 
     fun isImportedTextSourceUrl(url: String?): Boolean {
@@ -42,7 +47,7 @@ object ImportedContentIds {
 
     fun isImportedTextArticleUrl(url: String?): Boolean {
         val normalized = url?.trim()?.lowercase() ?: return false
-        return normalized.startsWith("$ROOT_SOURCE_URL/txt/")
+        return normalized.startsWith("$ROOT_SOURCE_URL/txt/") || isCliSingleTextUrl(normalized)
     }
 
     fun isImportedEpubSourceUrl(url: String?): Boolean {

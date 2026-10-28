@@ -42,8 +42,11 @@ data class PhoneBluetoothSyncResult(
     val accountSync: AccountSyncResult? = null,
     val accountSyncWarning: String? = null,
     val readerSyncWarning: String? = null,
-    val tokenUsageSyncWarning: String? = null
-)
+    val tokenUsageSyncWarning: String? = null,
+    val bookSyncIssues: List<BookSyncIssue> = emptyList()
+) {
+    val bookSyncWarning:String? get()=bookSyncIssues.takeIf{it.isNotEmpty()}?.let{"${it.size} 本书的包校验失败，已隔离；可直接点同步重试"}
+}
 
 internal data class PhoneBluetoothProbeTargets(
     val devices: List<PhoneBluetoothWatchDevice>,
@@ -416,6 +419,7 @@ class PhoneBluetoothSyncManager(
         fun skipped(domain:String)=fastPath?.skipped?.contains(domain)==true
         var bluetoothOnlyRecovery=false
         var booksApplied = 0
+        var bookSyncIssues:List<BookSyncIssue> = emptyList()
         var locallyApplied = false
         suspend fun connect() {
             syncSession?.close()
@@ -497,6 +501,7 @@ class PhoneBluetoothSyncManager(
                     }
                     bookSync.domainFastPath=fastPath!=null
                     bookSync.onApplied={if(it>0)locallyApplied=true}
+                    bookSync.onIssue={issue->debugLog.appendEvent("sync.book.isolated",sessionId,fields=mapOf("bookId" to issue.bookIdPrefix,"code" to issue.code))}
                     bookSync.trace={stage->debugLog.appendEvent("sync.book.stage",sessionId,fields=mapOf("stage" to stage))}
                     val physicalSession=syncSession
                     if(active.capabilities.bookReadingDelta && physicalSession?.isPersistent==true) {
@@ -507,7 +512,9 @@ class PhoneBluetoothSyncManager(
                         }
                     }
                     booksApplied += bookSync.sync(syncBooks=!skipped("books"),syncReading=!skipped("bookReading"))
-                    completedDomains.addAll(listOf("books","bookReading"))
+                    bookSyncIssues=bookSync.issues
+                    if(bookSync.booksComplete)completedDomains.add("books")
+                    completedDomains.add("bookReading")
                     reportProgress(onProgress,PhoneBluetoothSyncStage.SYNCING_BOOKS,100)
                 }
             }
@@ -569,7 +576,7 @@ class PhoneBluetoothSyncManager(
                 }
             }
             libraryResult.copy(accountSync = accountSync, accountSyncWarning = accountSyncWarning,
-                tokenUsageSyncWarning = tokenUsageSyncWarning, readerSyncWarning = readerSyncWarning, noteStats = noteStats)
+                tokenUsageSyncWarning = tokenUsageSyncWarning, readerSyncWarning = readerSyncWarning, noteStats = noteStats, bookSyncIssues=bookSyncIssues)
         } catch (failure: Throwable) {
             // A broken transport is already closed; do not wait for a doomed abort round trip.
             if (!isRetryableBluetoothDisconnect(failure)) runCatching { withTimeout(QUICK_EXCHANGE_TIMEOUT_MS) { syncSession?.abort("$sessionId-abort") } }

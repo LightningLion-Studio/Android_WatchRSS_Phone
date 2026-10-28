@@ -1185,13 +1185,14 @@ class MainViewModel(
             val readerWarning = result.readerSyncWarning
             val accountWarning = result.accountSyncWarning
             val tokenWarning = result.tokenUsageSyncWarning
+            val bookWarning = result.bookSyncWarning
             clearSmoothedSyncProgress()
             val message = if (
-                readerWarning == null && accountWarning == null && tokenWarning == null
+                readerWarning == null && accountWarning == null && tokenWarning == null && bookWarning == null
             ) {
                 "已与 $deviceName 同步完成"
             } else {
-                "已与 $deviceName 完成资料库和备忘录同步"
+                if(bookWarning!=null)"已与 $deviceName 同步；部分书籍待处理" else "已与 $deviceName 完成资料库和备忘录同步"
             }
             sessionState.value = sessionState.value.copy(
                 message = message,
@@ -1202,12 +1203,13 @@ class MainViewModel(
                 syncProgress = null
             )
             _toastEvent.tryEmit(
-                if (accountWarning != null || readerWarning != null || tokenWarning != null) {
+                if (accountWarning != null || readerWarning != null || tokenWarning != null || bookWarning != null) {
                     buildString {
                         append(message)
                         accountWarning?.let { append("；账号授权同步失败：$it") }
                         readerWarning?.let { append("；阅读器资源同步失败：$it") }
                         tokenWarning?.let { append("；词元用量同步失败：$it") }
+                        bookWarning?.let { append("；书籍：$it") }
                     }
                 } else if (stats != null) {
                     buildString {

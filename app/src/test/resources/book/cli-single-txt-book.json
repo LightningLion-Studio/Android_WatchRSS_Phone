@@ -1,0 +1,13 @@
+{
+  "producer": "WatchRSS_CLI lib/books.js pack + fingerprint",
+  "sourceUrl": "watchrss://import/online-v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "chapter": {
+    "title": "CLI single chapter",
+    "contentText": "Synthetic CLI original.\nSecond line.",
+    "contentHtml": null,
+    "url": "watchrss://import/online-v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "fingerprint": "933de4ea2637acb53cac2baee8cb200d0b35040b8ed125f1eb961fc578c81ba5",
+  "bookId": "b5be3b428d485edd54f14568e4d27463550c1e913ae616562be305bb6ab32668",
+  "packageUtf8": "{\"chapterCount\":1,\"format\":\"watchrss-book\",\"kind\":\"txt\",\"sourceUrl\":\"watchrss://import/online-v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"title\":\"CLI synthetic single TXT\",\"version\":1}\n{\"chapterIndex\":1,\"contentHtml\":null,\"contentText\":\"Synthetic CLI original.\\nSecond line.\",\"title\":\"CLI single chapter\",\"url\":\"watchrss://import/online-v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n"
+}

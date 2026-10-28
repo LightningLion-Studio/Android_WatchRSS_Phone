@@ -238,6 +238,28 @@ class CloudContentRebuildIntegrationTest {
     }
     private suspend fun fixture(stage:String?=null,always:Boolean=false)=Fixture(failStage=stage,alwaysFail=always).also{fixtures+=it;it.initialize()}
     @After fun close(){fixtures.forEach{it.close()};java.security.Security.removeProvider("cloud-r45-fixture")}
+    @Test
+    @org.robolectric.annotation.SQLiteMode(org.robolectric.annotation.SQLiteMode.Mode.NATIVE)
+    fun legacyMultiMegabyteRowCloudSyncOwnerClearAndLogoutUseSafeReads()=runBlocking {
+        val f=fixture()
+        val row=PhoneArticleEntity(articleId="legacy-large",sourceDeviceId="watch",url="https://fixture.invalid/591",title="large",siteName="fixture",excerpt="body",
+            contentHtml="<p>"+"h".repeat(2_135_000)+"</p>",contentText="t".repeat(2_123_000),imageUrl=null,contentHash="large-hash",importedAt=1,updatedAt=10,
+            independentSaved=true,independentChangedAt=10,independentSortOrder=10,rssSourceUrl=null,rssSourceTitle=null,
+            favoriteSaved=true,favoriteChangedAt=10,favoriteSortOrder=10,watchLaterSaved=false,watchLaterChangedAt=0,watchLaterSortOrder=0,deleted=false,deletedAt=0)
+        f.db.phoneArticleDao().upsert(row)
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertEquals(CloudSyncPhase.COMPLETE,f.service.state.value.phase)
+        assertEquals(row.contentHtml,f.repository.getArticle(row.articleId)!!.contentHtml)
+        assertEquals(row.contentText,f.repository.getArticle(row.articleId)!!.contentText)
+        f.service.resolveLibraryOwner(merge=false)
+        assertTrue(f.db.phoneArticleDao().getAllIds().isEmpty())
+        f.db.phoneArticleDao().upsert(row)
+        f.sessionStore.save(session.copy(expiresAtMillis=1))
+        f.account.logout()
+        assertNull(f.account.session.value)
+        assertEquals(row.contentHtml,f.repository.getArticle(row.articleId)!!.contentHtml)
+        assertEquals(row.contentText,f.repository.getArticle(row.articleId)!!.contentText)
+    }
     @Test fun clearedServerRebuildsRealRecordsAndEncryptedSnapshotWithoutLosingIdentityOrLocalLibrary()=runBlocking {
         val f=fixture();val result=f.service.syncNow(manual=true);assertTrue(result.snapshotUploaded);assertEquals(1,f.completed);assertTrue(f.recordsPosted>0)
         assertEquals(CloudSyncPhase.COMPLETE,f.service.state.value.phase);assertEquals(777,f.service.state.value.member!!.usedBytes);assertEquals(0,f.service.state.value.member!!.reservedBytes)

@@ -6,7 +6,19 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+
+// Full body columns must never share a CursorWindow row. Legacy inline rows can exceed 2 MiB.
+private const val ARTICLE_METADATA_COLUMNS = """articleId, sourceDeviceId, url, title, siteName, excerpt,
+    NULL AS contentHtml, '' AS contentText, imageUrl, contentHash,
+    importedAt, updatedAt, independentSaved, independentChangedAt, independentSortOrder,
+    rssSourceUrl, rssSourceTitle, favoriteSaved, favoriteChangedAt, favoriteSortOrder,
+    watchLaterSaved, watchLaterChangedAt, watchLaterSortOrder, deleted, deletedAt,
+    syncBodyHash, syncBodyByteCount, syncChunkSize, syncChunkHashesJson, syncMetadataHash,
+    readingProgress, isRead, readingPositionBytes, readingPositionContentHash, readingPositionChangedAt"""
+private const val BODY_CHUNK_BYTES = 65_536
 
 @Dao
 interface PhoneArticleDao {
@@ -24,14 +36,21 @@ interface PhoneArticleDao {
     suspend fun projectBookReading(id:String,source:String,read:Boolean,progress:Float,bytes:Long,hash:String,clock:Long,
         favorite:Boolean,favoriteClock:Long,favoriteOrder:Long,later:Boolean,laterClock:Long,laterOrder:Long)
 
-    @Query("""SELECT * FROM phone_articles WHERE articleId>:after AND deleted=0 AND
+    @Query("SELECT " + ARTICLE_METADATA_COLUMNS + """ FROM phone_articles WHERE articleId>:after AND deleted=0 AND
         (url LIKE 'https://watchrss.local/import-%' OR rssSourceUrl LIKE 'https://watchrss.local/import-%'
          OR (rssSourceUrl IS NULL OR rssSourceUrl='') OR favoriteSaved=1 OR watchLaterSaved=1)
         ORDER BY articleId LIMIT :limit""")
-    suspend fun privateCloudBodyPage(after: String, limit: Int): List<PhoneArticleEntity>
+    suspend fun privateCloudBodyMetadataPage(after: String, limit: Int): List<PhoneArticleEntity>
 
-    @Query("SELECT * FROM phone_articles WHERE length(excerpt)>280")
-    suspend fun longCloudExcerpts(): List<PhoneArticleEntity>
+    @Transaction
+    suspend fun privateCloudBodyPage(after: String, limit: Int): List<PhoneArticleEntity> =
+        privateCloudBodyMetadataPage(after, limit).map { withStoredBody(it) }
+
+    @Query("SELECT " + ARTICLE_METADATA_COLUMNS + " FROM phone_articles WHERE length(excerpt)>280")
+    suspend fun longCloudExcerptMetadata(): List<PhoneArticleEntity>
+
+    @Transaction
+    suspend fun longCloudExcerpts(): List<PhoneArticleEntity> = longCloudExcerptMetadata().map { withStoredBody(it) }
 
     @Query("""UPDATE phone_articles SET excerpt=:excerpt, contentText=:text, contentHtml=:html,
         updatedAt=MAX(updatedAt,:clock), sourceDeviceId=:device, syncMetadataHash=''
@@ -243,17 +262,44 @@ interface PhoneArticleDao {
     )
     fun observeWatchLater(): Flow<List<PhoneArticleEntity>>
 
-    @Query("SELECT * FROM phone_articles WHERE articleId = :articleId LIMIT 1")
-    suspend fun getById(articleId: String): PhoneArticleEntity?
+    @Query("SELECT " + ARTICLE_METADATA_COLUMNS + " FROM phone_articles WHERE articleId = :articleId LIMIT 1")
+    suspend fun getBodyMetadataById(articleId: String): PhoneArticleEntity?
 
-    @Query("SELECT * FROM phone_articles WHERE rssSourceUrl = :rssSourceUrl")
-    suspend fun getByRssSourceUrl(rssSourceUrl: String): List<PhoneArticleEntity>
+    @Transaction
+    suspend fun getById(articleId: String): PhoneArticleEntity? = getBodyMetadataById(articleId)?.let { withStoredBody(it) }
 
-    @Query("SELECT * FROM phone_articles WHERE articleId = :articleId LIMIT 1")
-    fun observeById(articleId: String): Flow<PhoneArticleEntity?>
+    @Query("SELECT " + ARTICLE_METADATA_COLUMNS + " FROM phone_articles WHERE rssSourceUrl = :rssSourceUrl")
+    suspend fun getBodyMetadataBySource(rssSourceUrl: String): List<PhoneArticleEntity>
 
-    @Query("SELECT * FROM phone_articles")
-    suspend fun getAllForSync(): List<PhoneArticleEntity>
+    @Transaction
+    suspend fun getByRssSourceUrl(rssSourceUrl: String): List<PhoneArticleEntity> =
+        getBodyMetadataBySource(rssSourceUrl).map { withStoredBody(it) }
+
+    @Query("SELECT " + ARTICLE_METADATA_COLUMNS + " FROM phone_articles WHERE articleId = :articleId LIMIT 1")
+    fun observeBodyMetadataById(articleId: String): Flow<PhoneArticleEntity?>
+
+    fun observeById(articleId: String): Flow<PhoneArticleEntity?> =
+        observeBodyMetadataById(articleId).map { getById(articleId) }
+
+    @Query("SELECT " + ARTICLE_METADATA_COLUMNS + " FROM phone_articles")
+    suspend fun getAllBodyMetadata(): List<PhoneArticleEntity>
+
+    @Transaction
+    suspend fun getAllForSync(): List<PhoneArticleEntity> = getAllBodyMetadata().map { withStoredBody(it) }
+
+    // Called inside the enclosing read transaction, including metadata and every fragment.
+    suspend fun withStoredBody(metadata: PhoneArticleEntity): PhoneArticleEntity = metadata.copy(
+        contentHtml = readContentHtmlChunked(metadata.articleId),
+        contentText = readContentTextChunked(metadata.articleId)
+    )
+
+    suspend fun readContentHtmlChunked(articleId: String): String? = readBodyChunks { start, count ->
+        getContentHtmlChunk(articleId, start, count)
+    }
+
+    suspend fun readContentTextChunked(articleId: String): String = readBodyChunks { start, count ->
+        getContentTextChunk(articleId, start, count)
+    }.orEmpty()
 
     @Query("SELECT articleId FROM phone_articles")
     suspend fun getAllIds(): List<String>
@@ -323,7 +369,8 @@ interface PhoneArticleDao {
 
     @Query(
         """
-        SELECT substr(contentHtml, :startCharacter, :characterCount)
+        SELECT CASE WHEN contentHtml IS NULL THEN NULL
+            ELSE COALESCE(substr(CAST(contentHtml AS BLOB), :startByte, :byteCount), X'') END
         FROM phone_articles
         WHERE articleId = :articleId
         LIMIT 1
@@ -331,13 +378,13 @@ interface PhoneArticleDao {
     )
     suspend fun getContentHtmlChunk(
         articleId: String,
-        startCharacter: Int,
-        characterCount: Int
-    ): String?
+        startByte: Int,
+        byteCount: Int
+    ): ByteArray?
 
     @Query(
         """
-        SELECT substr(contentText, :startCharacter, :characterCount)
+        SELECT COALESCE(substr(CAST(contentText AS BLOB), :startByte, :byteCount), X'')
         FROM phone_articles
         WHERE articleId = :articleId
         LIMIT 1
@@ -345,9 +392,9 @@ interface PhoneArticleDao {
     )
     suspend fun getContentTextChunk(
         articleId: String,
-        startCharacter: Int,
-        characterCount: Int
-    ): String?
+        startByte: Int,
+        byteCount: Int
+    ): ByteArray?
 
     @Query(
         """
@@ -405,4 +452,23 @@ interface PhoneArticleDao {
 
     @Query("DELETE FROM phone_articles")
     suspend fun deleteAll()
+}
+
+/**
+ * Read at most 64 KiB per window, then decode the complete UTF-8 byte sequence.
+ * BLOB substr preserves embedded NULs and avoids both UTF-16/code-point offset drift
+ * and decoding a multibyte character split across two fragments.
+ */
+private suspend fun readBodyChunks(read: suspend (Int, Int) -> ByteArray?): String? {
+    val first = read(1, BODY_CHUNK_BYTES) ?: return null
+    if (first.size < BODY_CHUNK_BYTES) return first.toString(Charsets.UTF_8)
+    val result = ByteArrayOutputStream().apply { write(first) }
+    var start = first.size + 1
+    while (true) {
+        val chunk = read(start, BODY_CHUNK_BYTES) ?: break
+        result.write(chunk)
+        if (chunk.size < BODY_CHUNK_BYTES) break
+        start += chunk.size
+    }
+    return result.toString(Charsets.UTF_8.name())
 }

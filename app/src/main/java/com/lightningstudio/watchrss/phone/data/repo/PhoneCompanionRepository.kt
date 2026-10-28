@@ -398,7 +398,7 @@ class PhoneCompanionRepository(
     suspend fun pruneUnreferencedArticleContent() = withContext(Dispatchers.IO) {
         val store = articleContentStore ?: return@withContext
         val retainedMarkers = buildSet {
-            articleDao.getAllForSync().forEach { article ->
+            articleDao.getAllMetadataForSync().forEach { article ->
                 article.contentHtml?.takeIf(store::isMarker)?.let(::add)
                 article.contentText.takeIf(store::isMarker)?.let(::add)
             }
@@ -1391,7 +1391,7 @@ class PhoneCompanionRepository(
     suspend fun findDeleteConflicts(remoteManifest: List<ArticleSyncManifestEntry>): List<PhoneSyncDeleteConflict> =
         withContext(Dispatchers.IO) {
             remoteManifest.mapNotNull { remote ->
-                val local = articleDao.getById(remote.articleId) ?: return@mapNotNull null
+                val local = articleDao.getBodyMetadataById(remote.articleId) ?: return@mapNotNull null
                 buildDeleteConflict(local, remote)?.takeUnless { rememberedConflictResolution(local, remote) != null }
             }
         }
@@ -1406,7 +1406,10 @@ class PhoneCompanionRepository(
         val suppressedRemoteArticleIds = linkedSetOf<String>()
         val mergeResolutions = linkedMapOf<String, PhoneSyncConflictResolution>()
         remoteManifest.forEachIndexed { index, remote ->
+            val metadata = articleDao.getBodyMetadataById(remote.articleId) ?: return@forEachIndexed
+            if (buildDeleteConflict(metadata, remote) == null) return@forEachIndexed
             val local = articleDao.getById(remote.articleId)?.hydrateExternalText() ?: return@forEachIndexed
+            // A local edit may have resolved the conflict while the body was being read.
             if (buildDeleteConflict(local, remote) == null) return@forEachIndexed
             articleProvenance?.guardEdit(local.articleId,JSONObject().put("operation","resolveConflict").put("resolution",resolutions[remote.articleId]?.name?:"pending"))
             val remembered = rememberedConflictResolution(local, remote)
@@ -2922,55 +2925,9 @@ class PhoneCompanionRepository(
     }
 
     private suspend fun PhoneArticleEntity.loadStoredBodyForSync(): SyncHydratedArticle {
-        val stored = copy(
-            contentHtml = articleDao.readContentHtmlChunked(articleId),
-            contentText = articleDao.readContentTextChunked(articleId)
-        )
+        // getById holds one read transaction over metadata and both chunked bodies.
+        val stored = articleDao.getById(articleId) ?: return SyncHydratedArticle(this, false)
         return stored.hydrateExternalTextForSync()
-    }
-
-    private suspend fun PhoneArticleDao.readContentHtmlChunked(articleId: String): String? {
-        val first = getContentHtmlChunk(
-            articleId = articleId,
-            startCharacter = 1,
-            characterCount = SYNC_DB_TEXT_CHUNK_CHARACTERS
-        ) ?: return null
-        return readTextChunks(articleId, first) { id, start, count ->
-            getContentHtmlChunk(id, start, count)
-        }
-    }
-
-    private suspend fun PhoneArticleDao.readContentTextChunked(articleId: String): String {
-        val first = getContentTextChunk(
-            articleId = articleId,
-            startCharacter = 1,
-            characterCount = SYNC_DB_TEXT_CHUNK_CHARACTERS
-        ).orEmpty()
-        return readTextChunks(articleId, first) { id, start, count ->
-            getContentTextChunk(id, start, count)
-        }
-    }
-
-    private suspend fun readTextChunks(
-        articleId: String,
-        firstChunk: String,
-        readChunk: suspend (String, Int, Int) -> String?
-    ): String {
-        if (firstChunk.length < SYNC_DB_TEXT_CHUNK_CHARACTERS) return firstChunk
-        val text = StringBuilder(firstChunk)
-        var startCharacter = firstChunk.length + 1
-        while (true) {
-            val chunk = readChunk(
-                articleId,
-                startCharacter,
-                SYNC_DB_TEXT_CHUNK_CHARACTERS
-            ).orEmpty()
-            if (chunk.isEmpty()) break
-            text.append(chunk)
-            startCharacter += chunk.length
-            if (chunk.length < SYNC_DB_TEXT_CHUNK_CHARACTERS) break
-        }
-        return text.toString()
     }
 
     private fun PhoneArticleEntity.shouldExternalizeLocalContent(store: ArticleContentStore): Boolean {
@@ -3148,7 +3105,6 @@ class PhoneCompanionRepository(
         private const val FULL_SNAPSHOT_INTERVAL_MS = com.lightningstudio.watchrss.phone.data.ble.BleDomainStore.RECEIPT_MAX_AGE_MS
         private const val SYNC_KIND_ARTICLE = "article"
         private const val SYNC_KIND_RSS_SOURCE = "rssSource"
-        private const val SYNC_DB_TEXT_CHUNK_CHARACTERS = 64 * 1024
         private const val SYNC_ID_QUERY_BATCH_SIZE = 800
         private const val MAX_INLINE_CONTENT_CHARS = 100_000
         private const val MAX_REPAIRED_TITLE_CHARS = 80

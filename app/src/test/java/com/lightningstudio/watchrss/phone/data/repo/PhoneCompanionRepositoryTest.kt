@@ -2768,6 +2768,12 @@ class PhoneCompanionRepositoryTest {
     }
 
     private class FakePhoneArticleDao : PhoneArticleDao {
+        override suspend fun getBodyMetadataById(articleId:String)=getById(articleId)?.copy(contentHtml=null,contentText="")
+        override suspend fun getAllBodyMetadata()=items.map { it.copy(contentHtml=null,contentText="") }
+        override suspend fun getBodyMetadataBySource(rssSourceUrl:String)=getByRssSourceUrl(rssSourceUrl).map { it.copy(contentHtml=null,contentText="") }
+        override fun observeBodyMetadataById(articleId:String):Flow<PhoneArticleEntity?> = emptyFlow()
+        override suspend fun privateCloudBodyMetadataPage(after:String,limit:Int)=privateCloudBodyPage(after,limit).map { it.copy(contentHtml=null,contentText="") }
+        override suspend fun longCloudExcerptMetadata()=longCloudExcerpts().map { it.copy(contentHtml=null,contentText="") }
         override suspend fun bookMetadata(ids:List<String>)=items.filter{it.articleId in ids}.map{it.copy(contentText="",contentHtml=null)}
         override suspend fun unregisteredBookMetadata()=items.filter{ImportedContentIds.isImportedContentUrl(it.url)}
         override suspend fun projectBookReading(id:String,source:String,read:Boolean,progress:Float,bytes:Long,hash:String,clock:Long,
@@ -2835,23 +2841,11 @@ class PhoneCompanionRepositoryTest {
             articleIds: List<String>
         ): List<PhoneArticleEntity> = items.filter { it.articleId in articleIds }
 
-        override suspend fun getContentHtmlChunk(
-            articleId: String,
-            startCharacter: Int,
-            characterCount: Int
-        ): String? = items
-            .firstOrNull { it.articleId == articleId }
-            ?.contentHtml
-            ?.syncChunk(startCharacter, characterCount)
+        override suspend fun getContentHtmlChunk(articleId: String, startByte: Int, byteCount: Int): ByteArray? =
+            items.firstOrNull { it.articleId == articleId }?.contentHtml?.syncChunk(startByte, byteCount)
 
-        override suspend fun getContentTextChunk(
-            articleId: String,
-            startCharacter: Int,
-            characterCount: Int
-        ): String? = items
-            .firstOrNull { it.articleId == articleId }
-            ?.contentText
-            ?.syncChunk(startCharacter, characterCount)
+        override suspend fun getContentTextChunk(articleId: String, startByte: Int, byteCount: Int): ByteArray? =
+            items.firstOrNull { it.articleId == articleId }?.contentText?.syncChunk(startByte, byteCount)
 
         override suspend fun updateSyncMetadata(
             articleId: String,
@@ -2927,11 +2921,12 @@ class PhoneCompanionRepositoryTest {
             items = emptyList()
         }
 
-        private fun String.syncChunk(startCharacter: Int, characterCount: Int): String {
-            val startIndex = (startCharacter - 1).coerceAtLeast(0).coerceAtMost(length)
-            val endIndex = (startIndex + characterCount).coerceAtMost(length)
-            return substring(startIndex, endIndex)
+        private fun String.syncChunk(startByte: Int, byteCount: Int): ByteArray {
+            val bytes = toByteArray(Charsets.UTF_8)
+            val start = (startByte - 1).coerceIn(0, bytes.size)
+            return bytes.copyOfRange(start, (start + byteCount).coerceAtMost(bytes.size))
         }
+
     }
 
     private class FakePhoneRssSourceDao : PhoneRssSourceDao {

@@ -25,6 +25,16 @@ class PhoneAccountRepository(
         sessionStore.load()
     }
 
+    suspend fun refreshAccountSafety():AccountSafetyProfile {
+        val expected=requireSession();val profile=accountClient.accountSafetyProfile(expected)
+        val current=requireSession();check(current.userId==expected.userId && current.accessToken==expected.accessToken) { "phone_change_account_changed" }
+        sessionStore.save(current.copy(phoneMasked=profile.phoneMasked));return profile
+    }
+    suspend fun cancelPhoneAppeal(id:String):AccountSafetyProfile {
+        val expected=requireSession();accountClient.cancelPhoneAppeal(expected,id)
+        val current=requireSession();check(current.userId==expected.userId && current.accessToken==expected.accessToken) { "phone_change_account_changed" }
+        return refreshAccountSafety()
+    }
     suspend fun startPhoneChangeVerification(): LoginProgress =
         accountClient.startActionSecurityVerification(requireSession(), "change-phone")
     suspend fun startPhoneChange(newPhone: String, verificationToken: String): PhoneChangeTransaction =
@@ -38,9 +48,9 @@ class PhoneAccountRepository(
         return masked
     }
 
-    suspend fun refreshPhoneChangeResult(requestedPhone: String): String? {
+    suspend fun refreshPhoneChangeResult(transactionId: String): String? {
         val expected = requireSession()
-        val masked = accountClient.refreshPhoneChangeResult(expected, requestedPhone) ?: return null
+        val masked = accountClient.refreshPhoneChangeResult(expected, transactionId) ?: return null
         val current = requireSession()
         check(current.userId == expected.userId) { "phone_change_account_changed" }
         sessionStore.save(current.copy(phoneMasked = masked))

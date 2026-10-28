@@ -31,4 +31,29 @@ class PhoneChangeViewModelTest {
             "phone_change_expired" to PhoneChangeError.TRANSACTION_EXPIRED)
         codes.forEach { (code,expected) -> assertEquals(expected,phoneChangeError(PhoneAccountHttpException(400,"{\"error\":\"$code\"}"))) }
     }
+    @Test fun nonSmsProofIsRejectedAndDuplicateNewSmsIsNotSent() = runBlocking {
+        var starts=0
+        val vm=PhoneChangeViewModel({"owner"},{LoginProgress("mfa",1,emptyList(),false,null)}, {_,_->starts++;PhoneChangeTransaction("tx",10000)},{_,_->"mask"},{100})
+        vm.begin()
+        assertThrows(IllegalArgumentException::class.java) { vm.acceptVerification(LoginProgress("mfa",1,listOf("password"),true,null,"proof")) }
+        vm.acceptVerification(verified());vm.sendCode("13800138000");vm.sendCode("13800138000")
+        assertEquals(1,starts)
+        assertTrue(phoneChangeErrorText(PhoneAccountHttpException(503,"{\"error\":\"phone_change_disabled\"}")).contains("暂未开放"))
+        assertTrue(phoneChangeErrorText(PhoneAccountHttpException(409,"{\"error\":\"phone_in_use\"}")).contains("未注册"))
+    }
+
+    @Test fun destinationConflictKeepsProofEditableButAmbiguousSmsFailureRequiresNewIdentity() = runBlocking {
+        var fail=true;var starts=0
+        val vm=PhoneChangeViewModel({"owner"},{verified()},{_,_->
+            starts++;if(fail)throw PhoneAccountHttpException(409,"{\"error\":\"phone_in_use\"}")
+            PhoneChangeTransaction("tx",10000)
+        },{_,_->"mask"},{100})
+        vm.begin();vm.sendCode("13800138000");assertEquals(PhoneChangePhase.ENTER_PHONE,vm.state.value.phase)
+        fail=false;vm.sendCode("13900139000");assertEquals(2,starts);assertEquals(PhoneChangePhase.ENTER_CODE,vm.state.value.phase)
+        for(error in listOf(java.io.IOException("lost"),PhoneAccountHttpException(504,"{\"error\":\"sms_provider_timeout\"}"))){
+            val failed=PhoneChangeViewModel({"owner"},{verified()},{_,_->throw error},{_,_->"mask"},{100})
+            failed.begin();failed.sendCode("13800138000");assertEquals(PhoneChangePhase.VERIFY_IDENTITY,failed.state.value.phase)
+        }
+    }
+
 }

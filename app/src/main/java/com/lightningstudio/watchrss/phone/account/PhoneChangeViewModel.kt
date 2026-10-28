@@ -12,7 +12,7 @@ data class PhoneChangeTransaction(val transactionId: String, val expiresAt: Long
 enum class PhoneChangePhase { IDLE, VERIFY_IDENTITY, ENTER_PHONE, ENTER_CODE, COMPLETE }
 enum class PhoneChangeError { PHONE_IN_USE, RATE_LIMITED, INVALID_CODE, MFA_EXPIRED, TRANSACTION_EXPIRED, TRANSACTION_USED, ACCOUNT_CHANGED, NETWORK }
 data class PhoneChangeState(val phase: PhoneChangePhase = PhoneChangePhase.IDLE, val busy: Boolean = false,
-    val loginProgress: LoginProgress? = null, val expiresAt: Long = 0, val phoneMasked: String = "", val error: PhoneChangeError? = null)
+    val loginProgress: LoginProgress? = null, val expiresAt: Long = 0, val phoneMasked: String = "", val error: PhoneChangeError? = null, val errorMessage: String = "")
 
 /** Suspend callbacks let the existing account MFA flow and Lead's Compose page share one state machine. */
 class PhoneChangeViewModel internal constructor(
@@ -45,7 +45,7 @@ class PhoneChangeViewModel internal constructor(
             if (error == PhoneChangeError.ACCOUNT_CHANGED) { reset() }
             if (error in setOf(PhoneChangeError.TRANSACTION_EXPIRED, PhoneChangeError.TRANSACTION_USED, PhoneChangeError.MFA_EXPIRED) ||
                 (error == PhoneChangeError.RATE_LIMITED && state.value.phase == PhoneChangePhase.ENTER_CODE)) requireIdentity(error)
-            mutable.value = state.value.copy(error = error)
+            mutable.value = state.value.copy(error = error, errorMessage = phoneChangeErrorText(e))
         } finally { mutable.value = state.value.copy(busy = false) }
     }
     private fun requireIdentity(error: PhoneChangeError) {
@@ -59,18 +59,24 @@ class PhoneChangeViewModel internal constructor(
         if (progress.complete) acceptVerification(progress)
     }
     fun acceptVerification(progress: LoginProgress) {
-        checkOwner(); require(progress.complete && !progress.verificationToken.isNullOrBlank()) { "请完成当前账号身份验证" }
+        checkOwner(); require(progress.complete && "sms" in progress.completedFactors && !progress.verificationToken.isNullOrBlank()) { "请完成当前账号身份验证" }
         progress.session?.let { require(it.userId == owner) { "phone_change_account_changed" } }
         verification = progress.verificationToken; verifiedUntil = now() + 10 * 60 * 1000
         mutable.value = state.value.copy(phase = PhoneChangePhase.ENTER_PHONE, loginProgress = progress, error = null)
     }
     suspend fun sendCode(newPhone: String) = action {
+        if (state.value.phase == PhoneChangePhase.ENTER_CODE || state.value.phase == PhoneChangePhase.COMPLETE) return@action
         checkOwner()
         if (verification == null || now() >= verifiedUntil) {
             verification = null; mutable.value = state.value.copy(phase = PhoneChangePhase.VERIFY_IDENTITY, error = PhoneChangeError.MFA_EXPIRED)
             return@action
         }
-        transaction = startChange(newPhone, requireNotNull(verification)); checkOwner()
+        transaction = try { startChange(newPhone, requireNotNull(verification)) }
+        catch(e: Exception) {
+            if ((e is java.io.IOException && e !is PhoneAccountHttpException) || (e as? PhoneAccountHttpException)?.statusCode?.let { it >= 500 } == true)
+                requireIdentity(PhoneChangeError.MFA_EXPIRED)
+            throw e
+        }; checkOwner()
         // A successful start consumes this proof. A new transaction requires fresh identity verification.
         verification = null; verifiedUntil = 0; requestedPhone = newPhone
         mutable.value = state.value.copy(phase = PhoneChangePhase.ENTER_CODE, expiresAt = requireNotNull(transaction).expiresAt)
@@ -83,7 +89,7 @@ class PhoneChangeViewModel internal constructor(
         catch (error: PhoneAccountHttpException) {
             if (phoneChangeError(error) != PhoneChangeError.TRANSACTION_USED) throw error
             checkOwner()
-            val refreshed = refreshPhoneChangeResult(requireNotNull(requestedPhone)); checkOwner()
+            val refreshed = refreshPhoneChangeResult(tx.transactionId); checkOwner()
             refreshed ?: throw error
         }
         checkOwner()
@@ -99,9 +105,28 @@ internal fun phoneChangeError(error: Exception): PhoneChangeError {
         code == "phone_in_use" -> PhoneChangeError.PHONE_IN_USE
         code == "phone_change_rate_limited" || (error as? PhoneAccountHttpException)?.statusCode == 429 -> PhoneChangeError.RATE_LIMITED
         code == "invalid_sms_code" -> PhoneChangeError.INVALID_CODE
-        code == "fresh_authentication_required" -> PhoneChangeError.MFA_EXPIRED
+        code in setOf("fresh_authentication_required", "old_phone_sms_required") -> PhoneChangeError.MFA_EXPIRED
         code == "phone_change_used" -> PhoneChangeError.TRANSACTION_USED
         code in setOf("phone_change_expired", "phone_change_not_found") -> PhoneChangeError.TRANSACTION_EXPIRED
         else -> PhoneChangeError.NETWORK
+    }
+}
+
+/** Lead can bind state.errorMessage for new server errors without exposing server detail. */
+internal fun phoneChangeErrorText(error: Exception): String {
+    val code = (error as? PhoneAccountHttpException)?.let { runCatching { JSONObject(it.responseBody).optString("error") }.getOrDefault("") }
+    return when(code) {
+        "phone_change_disabled" -> "手机号换绑暂未开放，请稍后再试或联系支持"
+        "phone_in_use" -> "该号码已绑定账号，请换用未注册号码；如需使用原账号，请退出后登录该账号"
+        "old_phone_sms_required", "fresh_authentication_required" -> "请重新验证旧手机号短信及账号身份；旧号不可用请联系支持申诉"
+        "sms_provider_timeout", "sms_send_failed", "sms_provider_unavailable" -> "短信未确认发送成功，本次尝试可能已计入额度，请稍后重新验证身份"
+        else -> when(phoneChangeError(error)) {
+            PhoneChangeError.RATE_LIMITED -> "验证次数已达上限，请稍后再试"
+            PhoneChangeError.INVALID_CODE -> "验证码不正确，请检查后重新输入"
+            PhoneChangeError.TRANSACTION_EXPIRED, PhoneChangeError.MFA_EXPIRED -> "验证已过期，请关闭后重新开始"
+            PhoneChangeError.TRANSACTION_USED -> "本次验证已使用，请先核对换绑结果"
+            PhoneChangeError.ACCOUNT_CHANGED -> "账号已切换，请重新开始"
+            else -> "尚未确认换绑结果，请检查网络后重试核对"
+        }
     }
 }

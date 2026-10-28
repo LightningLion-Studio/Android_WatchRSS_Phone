@@ -38,7 +38,7 @@ class PhoneChangeRecheckTest {
         var reads=0;var attempts=0
         val vm=PhoneChangeViewModel({"owner"},{proof()},{_,_->PhoneChangeTransaction("tx",1000)}, {_,_->
             if (++attempts==1) throw IOException("verify response lost") else throw failure("phone_change_used")
-        },{100}, refreshPhoneChangeResult={ requested -> assertEquals(phone,requested);reads++;"fresh-server-mask" })
+        },{100}, refreshPhoneChangeResult={ requested -> assertEquals("tx",requested);reads++;"fresh-server-mask" })
         vm.begin();vm.sendCode(phone);vm.verifyCode("123456")
         assertEquals(PhoneChangeError.NETWORK,vm.state.value.error);assertEquals(PhoneChangePhase.ENTER_CODE,vm.state.value.phase)
         vm.verifyCode("123456");assertEquals(PhoneChangePhase.COMPLETE,vm.state.value.phase)
@@ -65,28 +65,27 @@ class PhoneChangeRecheckTest {
         assertEquals(PhoneChangeError.RATE_LIMITED,vm.state.value.error);vm.sendCode(phone)
         assertEquals(1,starts);assertEquals(1,verifies)
     }
-    @Test fun reconciliationReadsAuthenticatedIdentityAndRlsScopedProfileRatherThanCachedMask() {
+    @Test fun reconciliationReadsBackendTransactionWithTheRetainedAccountBearer() {
         val paths=mutableListOf<String>()
-        val result = reconcilePhoneChange(AccountEnvironment(backendBaseUrl="https://test.invalid/test",supabaseAnonKey="anon"),session,phone) { request ->
+        val result = reconcilePhoneChange(AccountEnvironment(backendBaseUrl="https://test.invalid/test",supabaseAnonKey="anon"),session,"tx") { request ->
             assertEquals("GET",request.method);assertEquals("Bearer token",request.header("authorization"));assertEquals("anon",request.header("apikey"))
             paths+=request.url.encodedPath
-            if(request.url.encodedPath.endsWith("/user")) response(request,"{\"id\":\"owner\",\"phone\":\"8613800138000\"}")
-            else { assertEquals("eq.owner",request.url.queryParameter("user_id"));assertEquals("user_id,phone_masked",request.url.queryParameter("select"))
-                response(request,"[{\"user_id\":\"owner\",\"phone_masked\":\"server-mask\"}]") }
+            response(request,"{\"transactionId\":\"tx\",\"status\":\"completed\",\"phoneMasked\":\"138****8000\"}")
         }
-        assertEquals("server-mask",result);assertEquals(listOf("/test/auth/v1/user","/test/rest/v1/profiles"),paths)
-        assertEquals("old-mask",session.phoneMasked) // Client reads never rewrite an unrelated cached session.
+        assertEquals("138****8000",result);assertEquals(listOf("/test/functions/v1/account/phone/change/tx"),paths)
+        assertEquals("old-mask",session.phoneMasked)
     }
-    @Test fun reconciliationRejectsDifferentPhoneOrOwnerAndHttpFailures() {
-        var calls=0
-        assertNull(reconcilePhoneChange(AccountEnvironment(backendBaseUrl="https://test.invalid"),session,phone) { request ->
-            calls++; response(request,"{\"id\":\"owner\",\"phone\":\"13900139000\"}") })
-        assertEquals(1,calls)
+    @Test fun reconciliationRejectsPendingSupersededDifferentTransactionAndHttpFailures() {
+        val env=AccountEnvironment(backendBaseUrl="https://test.invalid")
+        assertNull(reconcilePhoneChange(env,session,"tx") { request -> response(request,"{\"transactionId\":\"tx\",\"status\":\"pending\"}") })
+        for (status in listOf("superseded","expired","blocked")) assertThrows(PhoneAccountHttpException::class.java) {
+            reconcilePhoneChange(env,session,"tx") { request -> response(request,"{\"transactionId\":\"tx\",\"status\":\"$status\"}") }
+        }
         assertThrows(IllegalStateException::class.java) {
-            reconcilePhoneChange(AccountEnvironment(backendBaseUrl="https://test.invalid"),session,phone) { request -> response(request,"{\"id\":\"other\",\"phone\":\"13800138000\"}") }
+            reconcilePhoneChange(env,session,"tx") { request -> response(request,"{\"transactionId\":\"other\",\"status\":\"completed\",\"phoneMasked\":\"138****8000\"}") }
         }
         assertThrows(PhoneAccountHttpException::class.java) {
-            reconcilePhoneChange(AccountEnvironment(backendBaseUrl="https://test.invalid"),session,phone) { request -> response(request,"{}",403) }
+            reconcilePhoneChange(env,session,"tx") { request -> response(request,"{}",403) }
         }
     }
     @Test fun accountSwitchWhileReconcilingCannotFinishAnOldOwnersTransaction() = runBlocking {

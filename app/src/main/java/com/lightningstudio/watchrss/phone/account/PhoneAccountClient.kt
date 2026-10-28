@@ -19,6 +19,17 @@ class PhoneAccountClient(
     private val deviceAccessToken: () -> String? = { null },
     private val httpClient: OkHttpClient = defaultHttpClient()
 ) {
+    suspend fun accountSafetyProfile(session:PhoneAccountSession):AccountSafetyProfile = withContext(Dispatchers.IO) {
+        val request=Request.Builder().url(environment.backendBaseUrl.trimEnd('/')+"/functions/v1/account/profile")
+            .header("apikey",environment.supabaseAnonKey).header("authorization","Bearer ${session.accessToken}").get().build()
+        execute(request).use { parseAccountSafetyProfile(it.jsonBody()) }.also { check(it.userId==session.userId) { "phone_change_account_changed" } }
+    }
+    suspend fun cancelPhoneAppeal(session:PhoneAccountSession,id:String) = withContext(Dispatchers.IO) {
+        require(id.matches(Regex("[A-Za-z0-9-]{1,128}")))
+        post("/functions/v1/account/phone/appeals/$id/cancel",JSONObject(),session.accessToken).use {
+            check(it.jsonBody().getString("status")=="cancelled") { "换绑取消尚未确认，请刷新核对" }
+        }
+    }
     suspend fun startPhoneChange(session: PhoneAccountSession, newPhone: String, verificationToken: String): PhoneChangeTransaction = withContext(Dispatchers.IO) {
         require(verificationToken.isNotBlank()) { "请先验证当前账号身份" }
         val request = Request.Builder().url(environment.backendBaseUrl + "/functions/v1/account/phone/change/start")
@@ -34,8 +45,8 @@ class PhoneAccountClient(
     }
 
     /** Reconcile a lost verify response against server identity, never a cached session label. */
-    suspend fun refreshPhoneChangeResult(session: PhoneAccountSession, requestedPhone: String): String? = withContext(Dispatchers.IO) {
-        reconcilePhoneChange(environment, session, requestedPhone, ::execute)
+    suspend fun refreshPhoneChangeResult(session: PhoneAccountSession, transactionId: String): String? = withContext(Dispatchers.IO) {
+        reconcilePhoneChange(environment, session, transactionId, ::execute)
     }
 
     suspend fun startLogin(phone: String): LoginProgress = withContext(Dispatchers.IO) {

@@ -208,7 +208,7 @@ class BleProjectionUpgradeTest {
         r.markLibrarySyncSuccess("watch",window.toSeqInclusive,0,14,true,true,window.projectionDefinition)
         val before=old.roots("account");old.publish("scope","watch",mapOf("library" to (before.getValue("library") to "b".repeat(64))))
         val business=db.phoneArticleDao().getById("a")!!
-        val next=BleDomainStore(db,directory);assertEquals(3,next.projectionVersions().getValue("library").encoder)
+        val next=store(3);assertEquals(3,next.projectionVersions().getValue("library").encoder)
         val upgraded=repo(next).prepareLibrarySyncWindow("watch",window.toSeqInclusive,true)
         assertTrue(upgraded.fullSnapshot);assertEquals("projectionChanged",upgraded.fallbackReason)
         assertTrue(next.receipts("scope","watch").isEmpty());assertEquals(business.contentText,db.phoneArticleDao().getById("a")!!.contentText)

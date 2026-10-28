@@ -35,6 +35,9 @@ import com.lightningstudio.watchrss.phone.data.local.ARTICLE_TEXT_CHUNK_BYTES
 import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
+import com.lightningstudio.watchrss.phone.data.model.canRecoverSavedRssBodyFrom
+import com.lightningstudio.watchrss.phone.data.model.isMissingSavedRssBody
+import com.lightningstudio.watchrss.phone.data.model.hasSameSavedRssIdentityAndClock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -1457,14 +1460,16 @@ class PhoneCompanionRepository(
             val remote=books?.canonicalArticle(candidate)?:candidate
             val local = articleDao.getById(remote.articleId)
             val localHydrated = local?.hydrateExternalText()
+            val recoversLocalOriginal = localHydrated?.let(remote::canRecoverSavedRssBodyFrom) == true
             val retainsLocalBody =
-                local != null && remote.contentHash == local.contentHash &&
+                recoversLocalOriginal || local != null && remote.contentHash == local.contentHash &&
                 (remote.contentHash.isNotBlank() || remote.updatedAt == local.updatedAt) &&
                 remote.contentHtml.isNullOrBlank() &&
                 remote.contentText.isBlank()
             val remoteWithBody = if (retainsLocalBody) {
                 val localBody = requireNotNull(localHydrated)
                 remote.copy(
+                    contentHash = if (recoversLocalOriginal) localBody.contentHash else remote.contentHash,
                     contentHtml = localBody.contentHtml,
                     contentText = localBody.contentText,
                     syncBodyHash = localBody.syncBodyHash,
@@ -1555,10 +1560,15 @@ class PhoneCompanionRepository(
                 } else {
                     ArticleSyncBody.rebuildBody(localHydrated, payload)
                 }
-                val preparedRemote = payload.article.copy(
+                val decodedRemote = payload.article.copy(
                     contentHtml = contentHtml,
                     contentText = contentText,
                 )
+                // An authoritative state transfer still cannot turn a missing RSS original into an erasure.
+                val preparedRemote = if (localHydrated != null && decodedRemote.canRecoverSavedRssBodyFrom(localHydrated)) {
+                    decodedRemote.copy(contentHash=localHydrated.contentHash,
+                        contentHtml=localHydrated.contentHtml, contentText=localHydrated.contentText)
+                } else decodedRemote
                 val conflictResolution = conflictResolutions[payload.article.articleId]
                 val localForMerge = localHydrated ?: local?.takeIf { conflictResolution != null }
                 val mergedArticle = if (authoritative || localForMerge == null) {
@@ -2220,8 +2230,11 @@ class PhoneCompanionRepository(
             0L
         }
         // State-only records can win the timestamp while carrying no body.
-        // Hydrate only from the same content version; never revive stale text.
-        val body = if (metadata.contentText.isBlank() && metadata.contentHtml.isNullOrBlank()) {
+        // Same-version hydration remains strict, except for the equal-clock saved RSS placeholder below.
+        val recoveredRssBody = listOf(local, remote).firstOrNull(metadata::canRecoverSavedRssBodyFrom)
+        val body = if (recoveredRssBody != null) {
+            recoveredRssBody
+        } else if (metadata.contentText.isBlank() && metadata.contentHtml.isNullOrBlank()) {
             listOf(local, remote).firstOrNull { it.contentHash == metadata.contentHash &&
                 (metadata.contentHash.isNotBlank() || it.updatedAt == metadata.updatedAt) &&
                 (it.contentText.isNotBlank() || !it.contentHtml.isNullOrBlank()) } ?: metadata
@@ -2229,7 +2242,17 @@ class PhoneCompanionRepository(
             listOf(local, remote).firstOrNull { it.contentHash == metadata.contentHash &&
                 (metadata.contentHash.isNotBlank() || it.updatedAt == metadata.updatedAt) && !it.contentHtml.isNullOrBlank() } ?: metadata
         } else metadata
+        val sameClockSavedRss = local.hasSameSavedRssIdentityAndClock(remote) || remote.hasSameSavedRssIdentityAndClock(local)
+        val readFlag = when {
+            // A body-only/old metadata projection's default unread is not a reading operation.
+            sameClockSavedRss && local.readingPositionChangedAt > 0 && remote.readingPositionChangedAt <= 0 -> local.isRead
+            sameClockSavedRss && remote.readingPositionChangedAt > 0 && local.readingPositionChangedAt <= 0 -> remote.isRead
+            else -> com.lightningstudio.watchrss.phone.data.backup.mergeReadFlag(local.isRead, local.readingPositionChangedAt, local.updatedAt, local.sourceDeviceId,
+                remote.isRead, remote.readingPositionChangedAt, remote.updatedAt, remote.sourceDeviceId)
+        }
         return metadata.copy(
+            // Keep the independent metadata/reading decisions above; only repair the missing version.
+            contentHash = recoveredRssBody?.contentHash ?: metadata.contentHash,
             contentText = body.contentText,
             contentHtml = body.contentHtml,
             syncBodyHash = body.syncBodyHash,
@@ -2258,8 +2281,7 @@ class PhoneCompanionRepository(
                 localReadingPositionNewer -> local.readingPositionChangedAt
                 else -> maxOf(local.readingPositionChangedAt, remote.readingPositionChangedAt)
             },
-            isRead = com.lightningstudio.watchrss.phone.data.backup.mergeReadFlag(local.isRead, local.readingPositionChangedAt, local.updatedAt, local.sourceDeviceId,
-                remote.isRead, remote.readingPositionChangedAt, remote.updatedAt, remote.sourceDeviceId)
+            isRead = readFlag
         )
     }
 
@@ -2276,6 +2298,7 @@ class PhoneCompanionRepository(
             ImportedContentIds.isImportedContentUrl(local.url)
         val backupDeletedNewer = backup.deletedAt > local.deletedAt
         val deleted = when {
+            merged.deleted -> true
             merged.favoriteSaved || merged.watchLaterSaved || merged.independentSaved -> false
             !rssSourceUrl.isNullOrBlank() && !isImportedContentArticle -> false
             backupDeletedNewer -> backup.deleted
@@ -2595,7 +2618,7 @@ class PhoneCompanionRepository(
         } else {
             loadStoredBodyForSync()
         }
-        if (!hydrated.bodyAvailable) {
+        if (!hydrated.bodyAvailable || hydrated.article.isMissingSavedRssBody()) {
             val tombstone = if (deleted) withUnavailableTombstoneBodyMetadata() else this
             if (tombstone != this) articleDao.upsert(tombstone)
             return tombstone.toSyncManifestEntry(bodyAvailable = false)
@@ -2605,7 +2628,7 @@ class PhoneCompanionRepository(
 
     private suspend fun PhoneArticleEntity.articleForBodyExport(): PhoneArticleEntity? {
         val hydrated = loadStoredBodyForSync()
-        if (!hydrated.bodyAvailable) return null
+        if (!hydrated.bodyAvailable || hydrated.article.isMissingSavedRssBody()) return null
         return hydrated.article.withCurrentSyncMetadata()
     }
 

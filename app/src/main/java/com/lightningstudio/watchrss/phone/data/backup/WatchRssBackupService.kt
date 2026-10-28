@@ -10,6 +10,7 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneSavedItemEntity
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
+import com.lightningstudio.watchrss.phone.data.model.canRecoverSavedRssBodyFrom
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibrarySyncPayload
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
@@ -375,8 +376,13 @@ class WatchRssBackupService(
         if (body.contentText.isBlank() && body.contentHtml.isNullOrBlank()) return null
         if (body.deleted) return current
         if (current == null) return if (!CloudContentPolicy.publicRss(JSONObject().put("url",body.url).put("rssSourceUrl",body.rssSourceUrl)) && !body.independentSaved && !body.favoriteSaved && !body.watchLaterSaved) body.copy(independentSaved=true) else body
+        if (current.deleted) return current
+        if (current.canRecoverSavedRssBodyFrom(body)) return current.copy(
+            contentHash=body.contentHash, contentText=body.contentText, contentHtml=body.contentHtml)
         val public=CloudContentPolicy.publicRss(JSONObject().put("url",body.url).put("rssSourceUrl",body.rssSourceUrl))
         if (!public && current.contentHash.isNotBlank() && current.contentHash != body.contentHash)
+            return current.takeIf { it.contentText.isNotBlank() || !it.contentHtml.isNullOrBlank() }
+        if (public && current.contentHash != body.contentHash && body.updatedAt <= current.updatedAt)
             return current.takeIf { it.contentText.isNotBlank() || !it.contentHtml.isNullOrBlank() }
         return current.copy(url=body.url,title=body.title,rssSourceUrl=body.rssSourceUrl,contentHash=body.contentHash,
             importedAt=body.importedAt,

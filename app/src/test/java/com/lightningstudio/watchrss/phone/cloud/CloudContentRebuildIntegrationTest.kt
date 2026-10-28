@@ -293,6 +293,43 @@ class CloudContentRebuildIntegrationTest {
         f.service.syncNow();assertEquals(requests,f.httpRequests)
         assertArrayEquals(pending.second,f.cache.loadPendingManifest(f.client.scopeId(session))!!.second)
     }
+    @Test fun bleSavedRssOriginalRepairPublishesInsteadOfCarryingEmptyArchiveAndThenNoops()=runBlocking {
+        for(writeOverlay in listOf(false,true)) {
+            val f=fixture();f.deduplicateStoredChunks=true
+            val empty=PhoneArticleEntity("empty-rss","phone","https://synthetic.invalid/entry","RSS title","Site","",null,"",null,
+                "placeholder-version",1,10,false,0,0,"https://synthetic.invalid/rss","RSS",true,10,10,false,0,0,false,0,
+                readingProgress=.6f,readingPositionBytes=60,readingPositionChangedAt=9,isRead=true)
+            f.db.phoneArticleDao().upsert(empty)
+            f.service.syncNow(manual=true)
+            val initial=f.plans.last().getString("snapshotId")
+            val old=CloudSnapshotCodec().decryptManifest(key,initial,f.cache.loadManifest(f.client.scopeId(session),initial)!!)
+            val before=f.backup.privateCloudFingerprint()
+            if(writeOverlay) {
+                f.r48WriteEnabled=true;f.recordStore.close()
+                f.service=PhoneCloudSyncService(f.context,f.account,f.backup,f.repository,NoteRepository(f.db.noteDao(),"phone"),"phone",f.client,
+                    keyManager=f.keys,settings=f.state,cache=f.cache,formatWritePolicy=CloudFormatWritePolicy(true,false))
+            }
+            val full=empty.copy(contentText="Full watch original\n".repeat(1000),contentHtml="<p>Full original HTML</p>",contentHash="real-original",sourceDeviceId="watch")
+            val m=com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncBody.metadataFor(full)
+            val payload=com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncBody.payloadForRequest(full,
+                com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyRequest(full.articleId,m.bodyHash,m.chunkHashes.indices.toList()),m)
+            assertEquals(1,f.repository.mergeChunkedArticlesFromSync(listOf(payload)))
+            assertNotEquals(before,f.backup.privateCloudFingerprint())
+            assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+            val id=f.plans.last().getString("snapshotId")
+            val current=CloudSnapshotCodec().decryptManifest(key,id,f.cache.loadManifest(f.client.scopeId(session),id)!!)
+            assertNotEquals(old.settings.getString("privateBodyFingerprintV2"),current.settings.getString("privateBodyFingerprintV2"))
+            val objects=CloudSnapshotCodec().restoreObjects(key,current){f.cache.loadChunk(f.client.scopeId(session),it)!!}
+            val name=if(writeOverlay)CloudPrivateOverlay.articleName(full.articleId) else "private-library.wrss"
+            val restored=WatchRssBackupArchive.read(java.io.ByteArrayInputStream(objects.getValue(name))).articles.single()
+            assertEquals(full.contentText,restored.contentText);assertEquals(full.contentHtml,restored.contentHtml)
+            val completed=f.completed;val puts=f.putCount
+            assertFalse(f.service.syncNow(manual=true).snapshotUploaded)
+            assertEquals(completed,f.completed);assertEquals(puts,f.putCount)
+            assertEquals(CloudSyncPhase.COMPLETE,f.service.state.value.phase)
+        }
+    }
+
     @Test fun r48OverlayArticleEditAndDeleteDoNotUploadTheLegacyLibraryAndNoopDoesNotRepublish()=runBlocking {
         val f=fixture();f.deduplicateStoredChunks=true
         fun article(i:Int):PhoneArticleEntity {val text="Private original $i 中文 HTML";return PhoneArticleEntity("overlay-$i","phone","https://synthetic.invalid/$i","Title $i","Site","",null,text,"<p>$text</p>",CloudSnapshotCodec.sha256(text.toByteArray()),1,10,true,10,i.toLong(),null,null,false,0,0,false,0,0,false,0)}

@@ -49,6 +49,85 @@ import org.junit.Test
 import java.security.MessageDigest
 
 class PhoneCompanionRepositoryTest {
+    @Test fun equalClockSavedRssOriginalRepairsDifferentHashPlaceholderAcrossMergePaths() = runBlocking {
+        for ((case,clock) in listOf(0 to 1780624780267L,1 to 1786512641785L))
+        for (route in listOf("inline", "chunked", "backup")) {
+            val empty = article("rss-repair-$case-$route", contentText="", rssSourceUrl="https://feed.test/rss",
+                favoriteSaved=true, favoriteChangedAt=clock, updatedAt=clock).copy(contentHash="empty-placeholder",
+                readingProgress=.6f, readingPositionBytes=42, readingPositionChangedAt=clock-10, isRead=true)
+            val full = empty.copy(contentHash="watch-original", contentText="手表完整原文\n".repeat(600),
+                contentHtml="<article>保留 HTML 原文</article>", sourceDeviceId="watch",
+                readingProgress=0f, readingPositionBytes=0, readingPositionChangedAt=0, isRead=false)
+            val dao=FakePhoneArticleDao().apply { items=listOf(empty) }
+            val repo=PhoneCompanionRepository(FakePhoneSavedItemDao(),dao,FakePhoneRssSourceDao(),"phone")
+            val before=repo.privateCloudVersions()
+            suspend fun merge(row:PhoneArticleEntity):Int = when(route) {
+                "backup" -> repo.mergeArticlesFromBackup(listOf(row))
+                "inline" -> repo.mergeArticlesFromSync(listOf(row))
+                else -> {
+                    val m=ArticleSyncBody.metadataFor(row)
+                    repo.mergeChunkedArticlesFromSync(listOf(ArticleSyncBody.payloadForRequest(row,
+                        ArticleBodyRequest(row.articleId,m.bodyHash,m.chunkHashes.indices.toList()),m)))
+                }
+            }
+            assertEquals(route,1,merge(full))
+            val actual=dao.items.single()
+            assertEquals(route,full.contentText,actual.contentText);assertEquals(full.contentHtml,actual.contentHtml)
+            assertEquals(full.contentHash,actual.contentHash);assertTrue(actual.favoriteSaved)
+            assertEquals(clock,actual.updatedAt);assertEquals(clock,actual.favoriteChangedAt)
+            assertEquals(empty.readingPositionBytes,actual.readingPositionBytes);assertEquals(clock-10,actual.readingPositionChangedAt)
+            assertEquals(empty.readingProgress,actual.readingProgress);assertTrue(actual.isRead)
+            assertNotEquals(before,repo.privateCloudVersions())
+            repeat(2) { merge(empty);merge(full) }
+            assertEquals(full.contentText,dao.items.single().contentText)
+            assertEquals(full.contentHash,dao.items.single().contentHash)
+            assertTrue(dao.items.single().isRead);assertEquals(clock-10,dao.items.single().readingPositionChangedAt)
+            val exported=repo.getArticlesForSync().single()
+            assertEquals(full.contentText,exported.contentText)
+            assertEquals(ArticleSyncBody.metadataFor(full).bodyHash,exported.syncBodyHash)
+        }
+    }
+
+    @Test fun equalClockRssRepairDoesNotCrossIdentityPrivateVersionOrDeletion() = runBlocking {
+        val empty=article("guard",contentText="",rssSourceUrl="https://feed.test/rss",favoriteSaved=true,
+            favoriteChangedAt=100,updatedAt=100)
+        for(local in listOf(empty.copy(updatedAt=101),empty.copy(deleted=true,deletedAt=102),
+            empty.copy(rssSourceUrl=null),empty.copy(url="https://entry.test/different"),
+            empty.copy(rssSourceUrl="https://different.test/rss"))) {
+            val dao=FakePhoneArticleDao().apply { items=listOf(local) }
+            val repo=PhoneCompanionRepository(FakePhoneSavedItemDao(),dao,FakePhoneRssSourceDao(),"phone")
+            repo.mergeArticlesFromSync(listOf(empty.copy(contentHash="different",contentText="older or different original")))
+            assertEquals("",dao.items.single().contentText)
+            if(local.deleted)assertTrue(dao.items.single().deleted)
+        }
+    }
+
+    @Test fun savedRssEmptyPlaceholderIsNotAnAvailableBodyOrExportableOriginal() = runBlocking {
+        val row=article("placeholder",contentText="",rssSourceUrl="https://feed.test/rss",favoriteSaved=true)
+        val dao=FakePhoneArticleDao().apply { items=listOf(row) }
+        val repo=PhoneCompanionRepository(FakePhoneSavedItemDao(),dao,FakePhoneRssSourceDao(),"phone")
+        assertFalse(repo.getArticleManifestsForSync().single().bodyAvailable)
+        assertTrue(repo.getArticlesForSync().isEmpty())
+        assertTrue(repo.getArticlesForSync(listOf(row.articleId)).isEmpty())
+    }
+
+    @Test fun authoritativeSyncStillCannotReplaceSavedRssOriginalWithEqualClockEmptyPlaceholder()=runBlocking {
+        for(chunked in listOf(false,true)) {
+            val full=article("authoritative",contentText="verified original",rssSourceUrl="https://feed.test/rss",
+                favoriteSaved=true,favoriteChangedAt=100,updatedAt=100)
+            val empty=full.copy(contentText="",contentHash="placeholder")
+            val dao=FakePhoneArticleDao().apply { items=listOf(full) }
+            val repo=PhoneCompanionRepository(FakePhoneSavedItemDao(),dao,FakePhoneRssSourceDao(),"phone")
+            if(chunked) {
+                val m=ArticleSyncBody.metadataFor(empty)
+                val payload=ArticleSyncBody.payloadForRequest(empty,ArticleBodyRequest(empty.articleId,m.bodyHash,m.chunkHashes.indices.toList()),m)
+                repo.mergeChunkedArticlesFromSync(listOf(payload),authoritative=true)
+            } else repo.mergeArticlesFromSync(listOf(empty),authoritative=true)
+            assertEquals(full.contentText,dao.items.single().contentText)
+            assertEquals(full.contentHash,dao.items.single().contentHash)
+        }
+    }
+
     @Test
     fun liveLegacyCancellationWithResidualDeleteClockDoesNotAdvertiseArticleDeletion() = runBlocking {
         val dao = FakePhoneArticleDao().apply { items = listOf(article("cancelled", favoriteChangedAt = 200, deleted = false, deletedAt = 100)) }
@@ -2699,7 +2778,7 @@ class PhoneCompanionRepositoryTest {
                 watchLaterSaved=later,watchLaterChangedAt=laterClock,watchLaterSortOrder=laterOrder,syncMetadataHash="")}
         }
         var items: List<PhoneArticleEntity> = emptyList()
-        override suspend fun privateCloudBodyPage(after: String, limit: Int) = items.filter { it.articleId>after && (ImportedContentIds.isImportedContentUrl(it.url) || ImportedContentIds.isImportedContentUrl(it.rssSourceUrl) || it.rssSourceUrl.isNullOrBlank()) }.sortedBy { it.articleId }.take(limit)
+        override suspend fun privateCloudBodyPage(after: String, limit: Int) = items.filter { it.articleId>after && !it.deleted && (ImportedContentIds.isImportedContentUrl(it.url) || ImportedContentIds.isImportedContentUrl(it.rssSourceUrl) || it.rssSourceUrl.isNullOrBlank() || it.favoriteSaved || it.watchLaterSaved) }.sortedBy { it.articleId }.take(limit)
         override suspend fun longCloudExcerpts() = items.filter { it.excerpt.codePointCount(0,it.excerpt.length)>280 }
         override suspend fun compactCloudExcerpt(id: String, hash: String, oldExcerpt: String, oldText: String,
             oldHtml: String?, excerpt: String, text: String, html: String?, clock: Long, device: String): Int {

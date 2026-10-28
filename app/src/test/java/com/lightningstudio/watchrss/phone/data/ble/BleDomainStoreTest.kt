@@ -39,6 +39,34 @@ class BleDomainStoreTest {
         db.phoneArticleDao().upsert(row);assertNotEquals(first["library"],roots()["library"])
         val beforeTechnical=roots();db.appMetaDao().set(AppMetaEntity("cloud_generation","2"));assertEquals(beforeTechnical,roots())
     }
+    @Test fun bodyRecoveryProjectionUpgradeRetiresPreviouslyAvailableEmptyManifest()=runBlocking<Unit> {
+        val old=BleDomainStore(db,directory,BleDomainStore.DOMAINS.associateWith { if(it=="library")3 else 1 })
+        old.roots("account")
+        val empty=article().copy(contentText="")
+        db.phoneArticleDao().upsert(empty)
+        val metadata=ArticleSyncBody.metadataFor(empty)
+        val seq=old.pending().single()
+        assertTrue(old.publishManifest(seq.first,seq.second,ArticleSyncManifestEntry(articleId=empty.articleId,
+            sourceDeviceId=empty.sourceDeviceId,contentHash=empty.contentHash,updatedAt=empty.updatedAt,
+            independentChangedAt=0,favoriteChangedAt=100,watchLaterChangedAt=0,deletedAt=0,deleted=false,
+            bodyHash=metadata.bodyHash,bodyByteCount=metadata.bodyByteCount,chunkSize=metadata.chunkSize,
+            chunkHashes=metadata.chunkHashes,bodyAvailable=true),empty,old.libraryDefinition()))
+        val root=old.roots("account").getValue("library")
+        val upgraded=BleDomainStore(db,directory)
+        assertNotEquals(root,upgraded.roots("account").getValue("library"))
+        val r=PhoneCompanionRepository(db.phoneSavedItemDao(),db.phoneArticleDao(),db.phoneRssSourceDao(),"phone",
+            db.syncChangeLogDao(),db.syncPeerStateDao(),appMetaDao=db.appMetaDao(),bleDomains=upgraded)
+        assertFalse(r.prepareLibrarySyncWindow("watch",0,true).fullArticleManifest.single().bodyAvailable)
+        val before=upgraded.roots("account").getValue("library")
+        val full=empty.copy(contentText="watch original",contentHash="real-original")
+        val m=ArticleSyncBody.metadataFor(full)
+        val payload=ArticleSyncBody.payloadForRequest(full,ArticleBodyRequest(full.articleId,m.bodyHash,m.chunkHashes.indices.toList()),m)
+        assertEquals(1,r.mergeChunkedArticlesFromSync(listOf(payload)))
+        assertNotEquals(before,upgraded.roots("account").getValue("library"))
+        val manifest=r.prepareLibrarySyncWindow("watch",0,true).fullArticleManifest.single()
+        assertTrue(manifest.bodyAvailable);assertEquals(m.bodyHash,manifest.bodyHash)
+        assertEquals(full.contentHash,manifest.contentHash)
+    }
     @Test fun ordinaryUnsavedRssRefreshDoesNotDirtyLibrary()=runBlocking<Unit> {
         val before=roots();db.phoneArticleDao().upsert(article(saved=false));assertEquals(before,roots())
         db.phoneArticleDao().upsert(article(saved=false).copy(contentText="refreshed",contentHash="new",updatedAt=500));assertEquals(before,roots())

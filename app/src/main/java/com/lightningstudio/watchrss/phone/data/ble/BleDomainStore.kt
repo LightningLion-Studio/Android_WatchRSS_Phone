@@ -15,7 +15,8 @@ import java.util.UUID
 /** Technical tables, deliberately independent of cloud cursors. Business triggers share the writer's transaction. */
 class BleDomainStore(
     private val database:PhoneCompanionDatabase, private val files:File,
-    private val encoderVersions:Map<String,Int> = DOMAINS.associateWith { if (it == "library") 3 else 1 },
+    // v4 no longer advertises a saved RSS placeholder as an available original.
+    private val encoderVersions:Map<String,Int> = DOMAINS.associateWith { if (it == "library") 4 else 1 },
     private val now:()->Long = System::currentTimeMillis,
     private val nativeProtocolVersion:Int = LibrarySyncPayload.PROTOCOL_VERSION
 ) {

@@ -1,5 +1,8 @@
 package com.lightningstudio.watchrss.phone.data.backup
 
+import com.lightningstudio.watchrss.phone.data.model.canRecoverSavedRssBodyFrom
+import com.lightningstudio.watchrss.phone.data.model.hasSameSavedRssIdentityAndClock
+
 internal fun com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity.mergeCloudState(
     incoming: CloudRssArticleState
 ): com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity {
@@ -28,7 +31,10 @@ internal fun com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity.merge
         sourceDeviceId
     )
     val metadataRemote = stateWins(incoming.updatedAt, incoming.sourceDeviceId, updatedAt, sourceDeviceId)
-    val bodyChanged = metadataRemote && incoming.contentHash != contentHash
+    val metadataOnly = incoming.toMetadataArticle()
+    val retainOriginal = metadataOnly.canRecoverSavedRssBodyFrom(this)
+    val bodyChanged = metadataRemote && incoming.contentHash != contentHash && !retainOriginal
+    val sameClockSavedRss = hasSameSavedRssIdentityAndClock(metadataOnly) || metadataOnly.hasSameSavedRssIdentityAndClock(this)
     return copy(
         sourceDeviceId = if (metadataRemote) incoming.sourceDeviceId else sourceDeviceId,
         url = if (metadataRemote) incoming.url else url,
@@ -36,7 +42,7 @@ internal fun com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity.merge
         siteName = if (metadataRemote) incoming.siteName else siteName,
         excerpt = if (metadataRemote) incoming.excerpt else excerpt,
         imageUrl = if (metadataRemote) incoming.imageUrl else imageUrl,
-        contentHash = if (metadataRemote) incoming.contentHash else contentHash,
+        contentHash = if (metadataRemote && !retainOriginal) incoming.contentHash else contentHash,
         updatedAt = maxOf(updatedAt, incoming.updatedAt),
         rssSourceUrl = if (metadataRemote) incoming.rssSourceUrl else rssSourceUrl,
         rssSourceTitle = if (metadataRemote) incoming.rssSourceTitle else rssSourceTitle,
@@ -76,8 +82,12 @@ internal fun com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity.merge
             readingPositionChangedAt,
             incoming.readingPositionChangedAt
         ),
-        isRead = mergeReadFlag(isRead, readingPositionChangedAt, updatedAt, sourceDeviceId,
-            incoming.isRead, incoming.readingPositionChangedAt, incoming.updatedAt, incoming.sourceDeviceId)
+        isRead = when {
+            sameClockSavedRss && readingPositionChangedAt > 0 && incoming.readingPositionChangedAt <= 0 -> isRead
+            sameClockSavedRss && incoming.readingPositionChangedAt > 0 && readingPositionChangedAt <= 0 -> incoming.isRead
+            else -> mergeReadFlag(isRead, readingPositionChangedAt, updatedAt, sourceDeviceId,
+                incoming.isRead, incoming.readingPositionChangedAt, incoming.updatedAt, incoming.sourceDeviceId)
+        }
     )
 }
 

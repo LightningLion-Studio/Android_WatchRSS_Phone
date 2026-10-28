@@ -118,6 +118,76 @@ class CloudSlimSnapshotRegressionTest {
         CloudSnapshotCodec.sha256(body.toByteArray()),10,10,private,if(private)10 else 0,0,if(private)null else "https://feed.test/rss",null,
         false,0,0,false,0,0,false,0)
 
+    @Test fun equalClockSavedRssBodyFromBleInvalidatesCloudFingerprintAndRepublishesOriginal()=runBlocking<Unit> {
+        val f=fixture();val empty=article("ble-repair","").copy(favoriteSaved=true,favoriteChangedAt=10)
+        f.db.phoneArticleDao().upsert(empty)
+        val before=f.backup.privateCloudFingerprint();val old=f.image()!!
+        val full=empty.copy(contentText="BLE 原文\n".repeat(1200),contentHtml="<p>完整 HTML</p>",contentHash="real-watch-version")
+        val m=com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncBody.metadataFor(full)
+        val payload=com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncBody.payloadForRequest(full,
+            com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyRequest(full.articleId,m.bodyHash,m.chunkHashes.indices.toList()),m)
+        assertEquals(1,f.repository.mergeChunkedArticlesFromSync(listOf(payload)))
+        assertNotEquals(before,f.backup.privateCloudFingerprint())
+        val next=f.image(old)!!
+        val archive=codec.restoreObjects(key,next.manifest){(old.newCiphertextChunks+next.newCiphertextChunks).getValue(it)}.getValue("private-library.wrss")
+        assertEquals(full.contentText,WatchRssBackupArchive.read(ByteArrayInputStream(archive)).articles.single().contentText)
+        assertNull(f.image(next))
+        f.backup.restorePrivateLibrary(cloudArchive(listOf(empty)))
+        assertEquals(full.contentText,f.repository.getArticle(empty.articleId)!!.contentText)
+    }
+
+    @Test fun cloudOriginalRepairsEqualClockMetadataOnlySavedRssWithoutResettingReading()=runBlocking<Unit> {
+        for(metadataOnly in listOf(false,true)) {
+            val f=fixture();val empty=article("cloud-repair-$metadataOnly","").copy(favoriteSaved=true,favoriteChangedAt=10,
+                readingProgress=.7f,readingPositionBytes=77,readingPositionChangedAt=9,isRead=true)
+            if(metadataOnly) f.backup.applyCloudRssState(CloudRssStateCodec.encode(listOf(empty),0),createMissing=true)
+            else f.db.phoneArticleDao().upsert(empty)
+            assertNotNull(f.repository.getArticle(empty.articleId))
+            val before=f.backup.privateCloudFingerprint()
+            val full=empty.copy(contentText="Cloud original\n".repeat(1000),contentHtml="<p>original HTML</p>",
+                contentHash="real-cloud-version",readingProgress=0f,readingPositionBytes=0,readingPositionChangedAt=0,isRead=false)
+            val archive=cloudArchive(listOf(full))
+            repeat(2) { assertTrue(f.backup.restorePrivateLibrary(archive).warnings.isEmpty()) }
+            val actual=f.repository.getArticle(empty.articleId)!!
+            assertEquals(full.contentText,actual.contentText);assertEquals(full.contentHash,actual.contentHash)
+            assertTrue(actual.favoriteSaved);assertEquals(empty.favoriteChangedAt,actual.favoriteChangedAt)
+            assertEquals(empty.readingPositionBytes,actual.readingPositionBytes);assertEquals(empty.readingPositionChangedAt,actual.readingPositionChangedAt)
+            assertTrue(actual.isRead);assertNotEquals(before,f.backup.privateCloudFingerprint())
+            assertTrue(f.backup.restorePrivateLibrary(cloudArchive(listOf(empty))).warnings.isNotEmpty())
+            assertEquals(full.contentText,f.repository.getArticle(empty.articleId)!!.contentText)
+        }
+    }
+
+    @Test fun staleCloudOriginalDoesNotReplaceNewerSavedRssOrDeletedLocalVersion()=runBlocking<Unit> {
+        for(deleted in listOf(false,true)) {
+            val f=fixture();val current=article("protected","newer local body").copy(favoriteSaved=!deleted,
+                favoriteChangedAt=20,updatedAt=20,deleted=deleted,deletedAt=if(deleted)20 else 0)
+            f.db.phoneArticleDao().upsert(current)
+            val old=current.copy(contentText="older peer body",contentHash="old-version",updatedAt=10,
+                deleted=false,deletedAt=0,favoriteSaved=true,favoriteChangedAt=10)
+            f.backup.restorePrivateLibrary(cloudArchive(listOf(old)))
+            val actual=f.repository.getArticle(current.articleId)!!
+            assertEquals(current.contentText,actual.contentText);assertEquals(current.contentHash,actual.contentHash)
+            assertEquals(current.deleted,actual.deleted);assertEquals(current.deletedAt,actual.deletedAt)
+        }
+    }
+
+    @Test fun legacyMetadataReplayCannotClearRecoveredEqualClockSavedRssOriginal()=runBlocking<Unit> {
+        val f=fixture()
+        val current=article("recovered","recovered original").copy(favoriteSaved=true,favoriteChangedAt=10,
+            contentHtml="<p>recovered HTML</p>",readingPositionChangedAt=9,readingPositionBytes=77,isRead=true)
+        f.db.phoneArticleDao().upsert(current)
+        val fingerprint=f.backup.privateCloudFingerprint()
+        val metadata=current.copy(sourceDeviceId="zz-watch",contentHash="old-placeholder",contentText="",contentHtml=null,
+            readingPositionChangedAt=0,readingPositionBytes=0,isRead=false)
+        repeat(3) { f.backup.applyCloudRssState(CloudRssStateCodec.encode(listOf(metadata),0),createMissing=true) }
+        val actual=f.repository.getArticle(current.articleId)!!
+        assertEquals(current.contentText,actual.contentText);assertEquals(current.contentHtml,actual.contentHtml)
+        assertEquals(current.contentHash,actual.contentHash);assertTrue(actual.isRead)
+        assertEquals(9L,actual.readingPositionChangedAt);assertEquals(77L,actual.readingPositionBytes)
+        assertEquals(fingerprint,f.backup.privateCloudFingerprint())
+    }
+
     @Test fun r48LazyFormatFixtureRetainsRealRelay13And14ReadersWithoutCloudWrites()=runBlocking<Unit> {
         val shared=JSONObject(requireNotNull(javaClass.getResource("/cloud/r48/r48-lazy-migration.json")).readText())
         val formats=shared.getJSONArray("readOnlyFormats")

@@ -110,9 +110,10 @@ class BleProjectionUpgradeTest {
         assertNotEquals(mapped["books"],s.roots("account")["books"])
     }
     @Test fun schemaVersionAloneAlsoChangesProjectionAndRoots() {
-        val s=store();val before=s.roots("account");db.openHelper.writableDatabase.version=19
+        val s=store();val before=s.roots("account");val nextVersion=db.openHelper.writableDatabase.version+1
+        db.openHelper.writableDatabase.version=nextVersion
         val after=s.roots("account");assertNotEquals(before,after)
-        assertEquals(19,s.projectionVersions().getValue("library").schema)
+        assertEquals(nextVersion,s.projectionVersions().getValue("library").schema)
     }
     @Test fun sevenDayReceiptsDoNotSlideOnSkipAndLegacyOrFutureTimesExpire() {
         val s=store();val pair=s.roots("account").getValue("library") to "b".repeat(64)

@@ -74,8 +74,10 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_14_15,
             PhoneCompanionDatabase.MIGRATION_15_16,
             PhoneCompanionDatabase.MIGRATION_16_17,
-            PhoneCompanionDatabase.MIGRATION_17_18
+            PhoneCompanionDatabase.MIGRATION_17_18,
+            PhoneCompanionDatabase.MIGRATION_18_19
         )
+            .addCallback(PhoneCompanionDatabase.ARTICLE_PROVENANCE_CALLBACK)
             .build()
     }
 
@@ -270,7 +272,8 @@ class PhoneCompanionContainer(context: Context) {
             appMetaDao = database.appMetaDao(),
             cloudBackendBaseUrl = accountEnvironment.backendBaseUrl,
             books = bookStore,
-            bleDomains = bleDomains
+            bleDomains = bleDomains,
+            articleProvenance = com.lightningstudio.watchrss.phone.data.repo.ArticleProvenanceStore(database)
         )
     }
 

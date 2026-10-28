@@ -1107,8 +1107,10 @@ class PhoneCloudSyncService(
                 } else if (_state.value.phase !in setOf(CloudSyncPhase.NEEDS_RECOVERY,CloudSyncPhase.ERROR)) {
                     update(CloudSyncPhase.ERROR, error.message ?: "云同步失败")
                 }
-                if(error is CloudHttpException && error.status==426) {
-                    settings.formatUpgradeRequiredVersion=com.lightningstudio.watchrss.phone.BuildConfig.VERSION_CODE
+                if(error is CloudFormatUpgradeRequired || error is CloudHttpException && error.status==426) {
+                    // Only the authenticated account floor halts same-build background passes.
+                    // A locally read-only object must not freeze reads or unrelated records.
+                    if(error is CloudHttpException)settings.formatUpgradeRequiredVersion=com.lightningstudio.watchrss.phone.BuildConfig.VERSION_CODE
                     _formatStatus.value=_formatStatus.value.copy(upgradeRequired=true)
                     _state.update{it.copy(phase=CloudSyncPhase.ERROR,message="请升级到最新版本以继续同步",errorCode="cloud_format_upgrade_required")}
                 }
@@ -1660,6 +1662,7 @@ class PhoneCloudSyncService(
         keyVersion: Int,
         manual: Boolean
     ): UploadOutcome {
+        backupService.requireArticleProvenanceWritable()
         settings.requireUploadOwner(session.userId)
         verifyLocalKeys(session, requireNotNull(trustedBootstrap))
         val scope = client.scopeId(session)

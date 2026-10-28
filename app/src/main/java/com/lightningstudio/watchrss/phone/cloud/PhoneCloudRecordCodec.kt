@@ -14,6 +14,9 @@ internal data class DecodedCloudRecord(val kind:String,val value:JSONObject,val 
     val first get()=kind
     val second get()=value
 }
+/** Carry authenticated tokens and binary64 numbers through the existing JSONObject callback boundary. */
+internal class ArticleProvenanceValue(val record:ArticleRegisterProvenance.Record):JSONObject(record.value.toString())
+internal class ReadOnlyArticleValue(val document:CloudRawDocument,known:JSONObject=document.json().getJSONObject("value")):JSONObject(known.toString())
 internal object PhoneCloudRecordCodec {
     val kinds=setOf("article","source","rss-state","book","book-reading")
     val rootFields=setOf("format","version","kind","value","features")
@@ -24,12 +27,22 @@ internal object PhoneCloudRecordCodec {
         "source"->setOf("url","sourceId","title","description","siteUrl","imageUrl","createdAt","updatedAt","sortOrder","isPinned","deleted","deletedAt","sourceDeviceId","useOriginalContent","continuePlaybackInBackground","localOnly","titleBinding")
         else->setOf("articleId","sourceDeviceId","url","title","siteName","excerpt","imageUrl","contentHash","importedAt","updatedAt","independentSaved","independentChangedAt","independentSortOrder","rssSourceUrl","rssSourceTitle","favoriteSaved","favoriteChangedAt","favoriteSortOrder","watchLaterSaved","watchLaterChangedAt","watchLaterSortOrder","deleted","deletedAt","readingProgress","isRead","readingPositionBytes","readingPositionContentHash","readingPositionChangedAt","rssIndexRetired","bookIndexRetired","titleBinding")
     }
-    fun knownValue(kind:String,value:JSONObject)=JSONObject().also {out->knownFields(kind).filter(value::has).forEach{out.put(it,value.get(it))}}
+    fun knownValue(kind:String,value:JSONObject):JSONObject = if(kind=="article" && (value is ArticleProvenanceValue || value is ReadOnlyArticleValue))value
+        else JSONObject().also {out->knownFields(kind).filter(value::has).forEach{out.put(it,value.get(it))}}
     fun documentAccess(document:CloudRawDocument):CloudFormatAccess {
         val kind=document.json().optString("kind")
         if(kind !in kinds)return CloudFormatAccess.OPAQUE
-        return CloudFormatR48.access(document,unknownBytes=document.unknownBytes(emptyList(),rootFields)+document.unknownBytes(listOf("value"),knownFields(kind)))
+        val marker=kind=="article" && ArticleRegisterProvenance.marked(document)
+        val feature=rootFeature(document,ArticleRegisterProvenance.FEATURE)
+        require(!feature || marker) { "article_provenance_invalid_scope" }
+        if(kind=="article" && document.node(listOf("value","registerSources"))!=null)require(marker) { "article_provenance_missing_marker" }
+        val known=knownFields(kind)+if(marker)setOf("registerSources") else emptySet()
+        val access=CloudFormatR48.access(document,known=setOf("r48.title-bound.v1")+if(kind=="article")setOf(ArticleRegisterProvenance.FEATURE) else emptySet(),unknownBytes=document.unknownBytes(emptyList(),rootFields)+document.unknownBytes(listOf("value"),known))
+        return if(marker && access==CloudFormatAccess.WRITABLE)CloudFormatAccess.READ_ONLY else access
     }
+    private fun rootFeature(document:CloudRawDocument,feature:String):Boolean = document.json().optJSONObject("features")?.let { f ->
+        listOf("incompat","roCompat").any{key->f.optJSONArray(key)?.let{a->(0 until a.length()).any{a.opt(it)==feature}}==true}
+    }==true
     fun patchDocument(kind:String,value:JSONObject,baseline:CloudRawDocument?):CloudRawDocument {
         if(baseline==null)return CloudRawDocument.parse(canonical(JSONObject().put("format","watchrss-rss-record").put("version",1).put("kind",kind).put("value",value)))
         if(documentAccess(baseline)!=CloudFormatAccess.WRITABLE)throw CloudFormatUpgradeRequired("record_read_only")
@@ -59,6 +72,7 @@ internal object PhoneCloudRecordCodec {
         else -> value.toString()
     }
     fun hash(kind: String, input: JSONObject): String {
+        if(kind=="article" && input is ArticleProvenanceValue)return input.record.sha256()
         val value=knownValue(kind,input)
         if (kind == "rss-state") {
             val normalized = JSONObject(value.toString()).apply {
@@ -89,6 +103,7 @@ internal object PhoneCloudRecordCodec {
         return CloudSnapshotCodec.sha256("$kind:${canonical(if (kind in setOf("article", "source")) normalized else value)}".toByteArray(Charsets.UTF_8))
     }
     fun validate(kind: String, value: JSONObject) {
+        if(kind=="article" && (value.has("registerSources") || value is ReadOnlyArticleValue))throw CloudFormatUpgradeRequired("article_provenance_write_disabled")
         require(kind.isNotBlank())
         if (kind !in setOf("article", "source", "rss-state", "book", "book-reading")) return
         require(listOf("contentText", "contentHtml", "contentTextGzip", "contentHtmlGzip", "body", "chapters").none(value::has)) { "记录不得包含正文" }
@@ -146,12 +161,14 @@ internal object PhoneCloudRecordCodec {
             val root = document.json()
             require(root.getString("format") == "watchrss-rss-record" && root.getInt("version") == 1)
             val kind = root.getString("kind");val access=documentAccess(document)
-            val value = root.optJSONObject("value") ?: JSONObject()
+            var value = root.optJSONObject("value") ?: JSONObject()
             if(access !in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED)) {
-                validate(kind, value)
+                if(kind=="article" && ArticleRegisterProvenance.marked(document))value=ArticleProvenanceValue(ArticleRegisterProvenance.decode(document,true))
+                else validate(kind, value)
                 require(idKeys.any { id(it, user, kind, value) == recordId })
                 val ro=root.optJSONObject("features")?.optJSONArray("roCompat")
-                if(ro!=null&&(0 until ro.length()).any{ro.getString(it)=="r48.title-bound.v1"})require(value.getJSONObject("titleBinding").getString("sha256")==CloudFormatR48.titleBinding(value).getString("sha256"))
+                if(ro!=null&&(0 until ro.length()).any{ro.getString(it)=="r48.title-bound.v1"})require(root.getJSONObject("value").getJSONObject("titleBinding").getString("sha256")==CloudFormatR48.titleBinding(value).getString("sha256"))
+                if(kind=="article" && access==CloudFormatAccess.READ_ONLY && value !is ArticleProvenanceValue)value=ReadOnlyArticleValue(document,value)
             }
             return DecodedCloudRecord(kind,value,document,access)
         } catch (isolation:CloudFormatIsolationException) { throw isolation

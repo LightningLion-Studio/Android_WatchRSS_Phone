@@ -8,6 +8,9 @@ import android.database.sqlite.SQLiteOpenHelper
 
 internal data class QuarantinedCloudRecord(val id: String, val revision: String, val keyVersion: Int, val reason: String, val envelope: String, val tombstone: Boolean = false)
 internal interface CloudRecordState {
+    fun acceptDocument(owner:String,id:String,revision:String,raw:String,access:CloudFormatAccess,envelope:String) {
+        saveDocument(owner,id,revision,raw,access);saveRawEnvelope(owner,id,envelope)
+    }
     fun document(owner:String,id:String):String? = null
     fun saveDocument(owner:String,id:String,revision:String,raw:String,access:CloudFormatAccess) = Unit
     fun pending(owner:String,id:String,value:String?) = Unit
@@ -35,7 +38,7 @@ internal interface CloudRecordState {
 }
 
 /** Dedicated app-private SQLite, never the unbounded shared-preferences XML. */
-internal class PhoneCloudRecordStore(context: Context) : SQLiteOpenHelper(context, "cloud-records-v1.db", null, 6), CloudRecordState {
+internal class PhoneCloudRecordStore(context: Context) : SQLiteOpenHelper(context, "cloud-records-v1.db", null, 7), CloudRecordState {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE records (owner TEXT NOT NULL, id TEXT NOT NULL, revision TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(owner,id))")
         db.execSQL("CREATE TABLE cursors (owner TEXT PRIMARY KEY, revision TEXT NOT NULL)")
@@ -43,9 +46,26 @@ internal class PhoneCloudRecordStore(context: Context) : SQLiteOpenHelper(contex
         createRaw(db)
         createRssState(db)
         createDocuments(db)
+        createVersions(db)
     }
     private fun createQuarantine(db: SQLiteDatabase) { db.execSQL("CREATE TABLE IF NOT EXISTS quarantine (owner TEXT NOT NULL, id TEXT NOT NULL, revision TEXT NOT NULL, key_version INTEGER NOT NULL, reason TEXT NOT NULL, envelope TEXT NOT NULL, tombstone INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(owner,id))") }
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) { if (oldVersion < 6) createDocuments(db); if (oldVersion < 5) createRssState(db); if (oldVersion < 2) createQuarantine(db); if (oldVersion < 3) createRaw(db); if (oldVersion in 2..3) db.execSQL("ALTER TABLE quarantine ADD COLUMN tombstone INTEGER NOT NULL DEFAULT 0") }
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) { if(oldVersion<7)createVersions(db); if (oldVersion < 6) createDocuments(db); if (oldVersion < 5) createRssState(db); if (oldVersion < 2) createQuarantine(db); if (oldVersion < 3) createRaw(db); if (oldVersion in 2..3) db.execSQL("ALTER TABLE quarantine ADD COLUMN tombstone INTEGER NOT NULL DEFAULT 0") }
+    private fun createVersions(db:SQLiteDatabase) {db.execSQL("CREATE TABLE IF NOT EXISTS raw_document_versions(owner TEXT NOT NULL,id TEXT NOT NULL,revision TEXT NOT NULL,raw TEXT NOT NULL,envelope TEXT NOT NULL,PRIMARY KEY(owner,id,revision))")}
+    internal fun historicalDocuments(owner:String,id:String):List<String> = readableDatabase.rawQuery("SELECT raw FROM raw_document_versions WHERE owner=? AND id=? ORDER BY revision",arrayOf(owner,id)).use{c->buildList{while(c.moveToNext())add(c.getString(0))}}
+    override fun acceptDocument(owner:String,id:String,revision:String,raw:String,access:CloudFormatAccess,envelope:String) {
+        val db=writableDatabase;db.beginTransaction()
+        try {
+            val previous=db.rawQuery("SELECT revision FROM raw_documents WHERE owner=? AND id=?",arrayOf(owner,id)).use{if(it.moveToFirst())it.getString(0).toLong()else -1L}
+            if(access!=CloudFormatAccess.WRITABLE) {
+                val count=db.rawQuery("SELECT COUNT(*) FROM raw_document_versions WHERE owner=? AND id=? AND revision!=?",arrayOf(owner,id,revision)).use{it.moveToFirst();it.getInt(0)}
+                if(count>=64)throw CloudFormatIsolationException("record_versions_limit")
+                db.insertWithOnConflict("raw_document_versions",null,ContentValues().apply{put("owner",owner);put("id",id);put("revision",revision);put("raw",raw);put("envelope",envelope)},SQLiteDatabase.CONFLICT_IGNORE)
+            }
+            saveDocument(owner,id,revision,raw,access)
+            if(revision.toLong()>=previous)saveRawEnvelope(owner,id,envelope)
+            db.setTransactionSuccessful()
+        }finally{db.endTransaction()}
+    }
     private fun createDocuments(db:SQLiteDatabase) {
         db.execSQL("CREATE TABLE IF NOT EXISTS raw_documents(owner TEXT NOT NULL,id TEXT NOT NULL,revision TEXT NOT NULL,raw TEXT NOT NULL,access TEXT NOT NULL,PRIMARY KEY(owner,id))")
         db.execSQL("CREATE TABLE IF NOT EXISTS pending_records(owner TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(owner,id))")
@@ -126,5 +146,5 @@ internal class PhoneCloudRecordStore(context: Context) : SQLiteOpenHelper(contex
     override fun advance(owner: String, cursor: String) {
         writableDatabase.insertWithOnConflict("cursors", null, ContentValues().apply { put("owner", owner); put("revision", cursor) }, SQLiteDatabase.CONFLICT_REPLACE)
     }
-    override fun clear(owner: String) { writableDatabase.delete("raw_documents","owner=?",arrayOf(owner));writableDatabase.delete("pending_records","owner=?",arrayOf(owner)); writableDatabase.delete("rss_states", "owner=?", arrayOf(owner)); writableDatabase.delete("raw_records", "owner=?", arrayOf(owner)); writableDatabase.delete("quarantine", "owner=?", arrayOf(owner)); writableDatabase.delete("records", "owner=?", arrayOf(owner)); writableDatabase.delete("cursors", "owner=?", arrayOf(owner)) }
+    override fun clear(owner: String) { writableDatabase.delete("raw_document_versions","owner=?",arrayOf(owner)); writableDatabase.delete("raw_documents","owner=?",arrayOf(owner));writableDatabase.delete("pending_records","owner=?",arrayOf(owner)); writableDatabase.delete("rss_states", "owner=?", arrayOf(owner)); writableDatabase.delete("raw_records", "owner=?", arrayOf(owner)); writableDatabase.delete("quarantine", "owner=?", arrayOf(owner)); writableDatabase.delete("records", "owner=?", arrayOf(owner)); writableDatabase.delete("cursors", "owner=?", arrayOf(owner)) }
 }

@@ -209,9 +209,9 @@ class BookReadingPersistenceTest {
         sql.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'book_%'").use{c->val names=mutableListOf<String>();while(c.moveToNext())names+=c.getString(0);names.forEach{sql.execSQL("DROP TRIGGER $it")}}
         for(t in listOf("book_reading_meta","book_reading_versions","book_reading_journal","book_reading_roots","book_reading_hash_dirty","book_reading_dirty","book_reading_peers","book_capture_meta"))sql.execSQL("DROP TABLE $t")
         sql.version=17;db.close()
-        val migrated=Room.databaseBuilder(context,PhoneCompanionDatabase::class.java,name).addMigrations(PhoneCompanionDatabase.MIGRATION_17_18).allowMainThreadQueries().build().also{dbs+=it}
+        val migrated=Room.databaseBuilder(context,PhoneCompanionDatabase::class.java,name).addMigrations(PhoneCompanionDatabase.MIGRATION_17_18,PhoneCompanionDatabase.MIGRATION_18_19).allowMainThreadQueries().build().also{dbs+=it}
         val s=store(migrated);val summary=s.readingSummary();assertEquals(1L,summary.count)
         val restored=s.readingEntries(0,summary.seq).single().state;assertFalse(restored.getBoolean("isRead"));assertFalse(restored.getBoolean("favoriteSaved"));assertEquals(200,restored.getInt("favoriteChangedAt"))
-        assertEquals(18,migrated.openHelper.readableDatabase.version);migrated.close();context.deleteDatabase(name)
+        assertEquals(19,migrated.openHelper.readableDatabase.version);migrated.close();context.deleteDatabase(name)
     }
 }

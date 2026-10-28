@@ -88,7 +88,7 @@ class CloudRawDocument private constructor(val source: String, val root: Node) {
 }
 
 class CloudFormatIsolationException(val reason: String): IllegalArgumentException("cloud_format_isolated:$reason")
-class CloudFormatUpgradeRequired(val reason: String): IllegalStateException("云内容需要升级客户端：$reason")
+class CloudFormatUpgradeRequired(val reason: String): IllegalStateException("请升级到最新版本以继续同步")
 enum class CloudFormatAccess { WRITABLE, READ_ONLY, OPAQUE, ISOLATED }
 data class CloudFormatStatus(val opaque:Int=0,val readOnly:Int=0,val editPending:Int=0,val upgradeRequired:Boolean=false)
 

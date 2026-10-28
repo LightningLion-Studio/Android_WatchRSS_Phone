@@ -44,8 +44,8 @@ class SyncCorrectnessOracleTest {
         val file=File(root,"phone-wires.json");file.writeText(out.toString(2)+"\n");file.setReadable(false,false);file.setReadable(true,true)
     }
     @Test fun exportSharedCorpusThroughProductionMergesAndCodecs() {
-        val root=File(projectRoot(),"..")
-        val corpus=JSONObject(File(root,"vectors.json").readText()).getJSONArray("cases")
+        val corpusBytes=requireNotNull(javaClass.getResource("/sync-correctness-vectors.json")).readBytes()
+        val corpus=JSONObject(corpusBytes.toString(Charsets.UTF_8)).getJSONArray("cases")
         val key=ByteArray(32){41};val user="synthetic-sync-correctness"
         // Pure merge doesn't access repository fields. Avoid introducing DAO mocks.
         val unsafe=Class.forName("sun.misc.Unsafe")
@@ -93,7 +93,7 @@ class SyncCorrectnessOracleTest {
                 .put("left",merge(kind,ab,d)).put("right",merge(kind,a,merge(kind,b,d)))
                 .put("aa",merge(kind,a,a)).put("again",merge(kind,ab,b)).put("replay",replay))
         }
-        File(root,"phone-results.json").writeText(out.toString(2)+"\n")
+        File(projectRoot(),".codex-tmp/sync-correctness-oracle/phone-results.json").apply{parentFile.mkdirs()}.writeText(out.toString(2)+"\n")
         assertEquals(corpus.length(),out.length())
     }
     private fun projectRoot():File {

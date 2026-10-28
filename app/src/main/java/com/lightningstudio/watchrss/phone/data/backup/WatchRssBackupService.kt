@@ -34,6 +34,10 @@ class WatchRssBackupService(
     private val readerPresetRepository: ReaderPresetRepository,
     private val deviceId: String
 ) {
+    private val articleProvenance = repository.articleProvenance ?: com.lightningstudio.watchrss.phone.data.repo.ArticleProvenanceStore(database)
+        .also{repository.articleProvenance=it}
+    internal suspend fun articleProvenancePendingCount()=articleProvenance.pendingCount()
+    internal suspend fun requireArticleProvenanceWritable()=articleProvenance.requireExportable()
     private val appContext = context.applicationContext
     private val contentResolver = appContext.contentResolver
 
@@ -85,6 +89,7 @@ class WatchRssBackupService(
 
     internal data class PrivateArchiveExport(val file: File, val articleIds: Set<String>, val bookIds: Set<String> = emptySet())
     internal suspend fun createCloudPrivateArchiveExport(): PrivateArchiveExport = withContext(Dispatchers.IO) {
+        articleProvenance.requireExportable()
         // Real snapshot time lives in the authenticated cloud manifest. Do not churn body chunks.
         val allArticles = repository.getPrivateArticlesForCloudArchive()
         val exportedAt = 1L
@@ -120,6 +125,7 @@ class WatchRssBackupService(
     /** Compare originals, never a DB/encoder version. The old backing is not rewritten for an article edit. */
     internal suspend fun createPrivateOverlayExport(backing:ByteArray,oldEntries:List<com.lightningstudio.watchrss.phone.cloud.CloudPrivateOverlayEntry>,
         oldObjects:Map<String,ByteArray>,clock:Long=System.currentTimeMillis()):PrivateOverlayExport = withContext(Dispatchers.IO) {
+        articleProvenance.requireExportable()
         val baseline=WatchRssBackupArchive.read(backing.inputStream(),tolerateCloudEntries=true)
         try {
             val effective=baseline.articles.associateBy{it.articleId}.toMutableMap()
@@ -243,6 +249,8 @@ class WatchRssBackupService(
             for (i in 0 until json.length()) {
                 val value = json.getJSONObject(i)
                 if(value.getString("articleId") in bookIds)continue
+                val protected=articleProvenance.readOnlyValue(value.getString("articleId"))
+                if(protected!=null) { consume("article",protected);continue }
                 if (!CloudContentPolicy.publicRss(value)) consume("article", value)
                 else {
                     if (CloudContentPolicy.interacted(value)) {
@@ -259,6 +267,21 @@ class WatchRssBackupService(
 
     internal suspend fun applyCloudRecord(kind: String, value: JSONObject, checkOwner: () -> Unit = {}) = withContext(Dispatchers.IO) {
         checkOwner()
+        if(kind=="article" && value is com.lightningstudio.watchrss.phone.cloud.ArticleProvenanceValue) {
+            require(repository.books?.bookForArticle(value.getString("articleId"))==null)
+            articleProvenance.accept(value.record,checkOwner);return@withContext
+        }
+        if(kind=="article" && value is com.lightningstudio.watchrss.phone.cloud.ReadOnlyArticleValue) {
+            database.withTransaction {
+                if(articleProvenance.record(value.getString("articleId"))==null) {
+                    val state=CloudRssStateCodec.decode(JSONObject().put("format","watchrss-rss-state").put("version",1).put("articles",JSONArray().put(value)).toString().toByteArray()).single()
+                    val old=database.phoneArticleDao().getById(state.articleId)
+                    checkOwner();database.phoneArticleDao().upsert(old?.mergeCloudState(state)?:state.toMetadataArticle())
+                }
+                articleProvenance.protectUnknown(value.document)
+            };return@withContext
+        }
+        if(kind=="article" && articleProvenance.protected(value.getString("articleId")))return@withContext
         if(kind=="book") {requireNotNull(repository.books).merge(value,checkOwner);return@withContext}
         if(kind=="book-reading") {requireNotNull(repository.books).mergeReading(value,checkOwner);return@withContext}
         if(kind=="article" && value.optBoolean("bookIndexRetired"))return@withContext
@@ -486,6 +509,7 @@ class WatchRssBackupService(
         database.withTransaction {
             checkOwner()
             states.forEach { original ->
+                if(articleProvenance.protected(original.articleId))return@forEach
                 val current = database.phoneArticleDao().getById(original.articleId)
                     ?: restoredArticles[original.articleId]
                     ?: if (createMissing) original.toMetadataArticle() else null
@@ -588,7 +612,7 @@ class WatchRssBackupService(
                             database.phoneRssSourceDao().upsertAll(normalizedSources)
                         }
                         changedSourceCount = normalizedSources.size
-                        changedArticleCount = if (warnings.isEmpty()) repository.replaceArticlesFromBackup(restoredArticles) else repository.mergeArticlesFromBackup(restoredArticles)
+                        changedArticleCount = if (warnings.isEmpty() && !articleProvenance.anyProtected()) repository.replaceArticlesFromBackup(restoredArticles) else repository.mergeArticlesFromBackup(restoredArticles)
                         if (snapshot.savedItems.isNotEmpty()) {
                             database.phoneSavedItemDao().upsertAll(snapshot.savedItems)
                         }

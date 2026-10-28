@@ -139,6 +139,8 @@ class PhoneCloudClient(
                     put("cloudFormatR48ReadV1", CloudFormatR48.readV1)
                     put("cloudFormatR48WriteV1", CloudFormatR48.writeV1)
                     put("cloudFormatMigrationR48V1", CloudFormatR48.migrationV1)
+                    put("cloudArticleProvenanceReadV1",ArticleRegisterProvenance.readV1)
+                    put("cloudArticleProvenanceWriteV1",ArticleRegisterProvenance.writeV1)
                     put("snapshotSchema", 2)
                     put("rssRecordsVersion", 1)
                     put("cloudRelay", true)

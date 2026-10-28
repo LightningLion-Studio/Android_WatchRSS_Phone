@@ -176,8 +176,11 @@ class PhoneCompanionRepository(
     private val appMetaDao: AppMetaDao = NoopAppMetaDao,
     private val cloudBackendBaseUrl: String = "",
     val books:com.lightningstudio.watchrss.phone.data.book.ImportedBookStore?=null,
-    internal val bleDomains:com.lightningstudio.watchrss.phone.data.ble.BleDomainStore?=null
+    internal val bleDomains:com.lightningstudio.watchrss.phone.data.ble.BleDomainStore?=null,
+    internal var articleProvenance:ArticleProvenanceStore?=null
 ) {
+    suspend fun articleRegisterReadState(id:String):ArticleProvenanceReadState?=articleProvenance?.state(id)
+    fun observeArticleProvenancePendingCount():Flow<Int> = articleProvenance?.observePendingCount()?:flowOf(0)
     /** 仅用于 instrumented screenshot tests 直接操作真实数据库。 */
     val testArticleDao: PhoneArticleDao get() = articleDao
     /** 仅用于 instrumented screenshot tests 直接操作真实数据库。 */
@@ -288,6 +291,7 @@ class PhoneCompanionRepository(
     suspend fun compactCloudExcerpts(checkOwner: () -> Unit): Int = withContext(Dispatchers.IO) {
         var changed = 0
         for (row in articleDao.longCloudExcerpts()) {
+            if(articleProvenance?.protected(row.articleId)==true)continue
             val compact = row.compactCloudExcerpt(System.currentTimeMillis(), deviceId).externalizeLargeLocalContent()
             checkOwner()
             changed += articleDao.compactCloudExcerpt(row.articleId, row.contentHash, row.excerpt, row.contentText,
@@ -343,11 +347,13 @@ class PhoneCompanionRepository(
 
     suspend fun getArticlesForBackup(): List<PhoneArticleEntity> =
         withContext(Dispatchers.IO) {
+            articleProvenance?.requireExportable()
             articleDao.getAllForSync().map { it.hydrateExternalTextForBackup() }
         }
 
     suspend fun replaceArticlesFromBackup(incoming: List<PhoneArticleEntity>): Int =
         withContext(Dispatchers.IO) {
+            articleProvenance?.requireExportable()
             val prepared = incoming.map { article ->
                 article
                     .normalizeBackupArticle()
@@ -365,6 +371,10 @@ class PhoneCompanionRepository(
         withContext(Dispatchers.IO) {
             var merged = 0
             incoming.forEach { rawBackup ->
+                if(articleProvenance?.protected(rawBackup.articleId)==true) {
+                    if(articleProvenance?.materializeOriginal(rawBackup)==true)merged++
+                    return@forEach
+                }
                 val backup = rawBackup.copy(sourceDeviceId = "")
                 val storedLocal = articleDao.getById(backup.articleId)
                 val local = storedLocal?.hydrateExternalTextForBackup()
@@ -392,6 +402,7 @@ class PhoneCompanionRepository(
                 article.contentHtml?.takeIf(store::isMarker)?.let(::add)
                 article.contentText.takeIf(store::isMarker)?.let(::add)
             }
+            articleProvenance?.originalReferences().orEmpty().filter(store::isMarker).forEach(::add)
         }
         store.prune(retainedMarkers)
     }
@@ -416,6 +427,7 @@ class PhoneCompanionRepository(
         }
 
     suspend fun markArticleRead(articleId: String, read: Boolean) = withContext(Dispatchers.IO) {
+        articleProvenance?.guardEdit(articleId,JSONObject().put("operation","reading").put("isRead",read))
         val article = articleDao.getById(articleId) ?: return@withContext
         val at = maxOf(System.currentTimeMillis(), article.readingPositionChangedAt + 1)
         articleDao.upsert(article.copy(sourceDeviceId = deviceId, isRead = read, readingPositionChangedAt = at))
@@ -423,6 +435,7 @@ class PhoneCompanionRepository(
     }
 
     suspend fun updateArticleReadingProgress(articleId: String, progress: Float) = withContext(Dispatchers.IO) {
+        if(articleProvenance?.stageReadingProgress(articleId,progress.coerceIn(0f,1f).toDouble())==true)return@withContext
         val article = articleDao.getById(articleId) ?: return@withContext
         val clamped = progress.coerceIn(0f, 1f)
         val byteLength = article.hydrateExternalText().contentText
@@ -692,6 +705,7 @@ class PhoneCompanionRepository(
 
     suspend fun toggleSaved(article: PhoneArticleEntity, type: PhoneSavedItemType): PhoneArticleEntity =
         withContext(Dispatchers.IO) {
+            articleProvenance?.guardEdit(article.articleId,JSONObject().put("operation","toggleSaved").put("type",type.name))
             val current = articleDao.getById(article.articleId) ?: article
             val now = System.currentTimeMillis()
             val updated = when (type) {
@@ -804,6 +818,7 @@ class PhoneCompanionRepository(
                     .thenBy { it.title }
             )
         articles.forEachIndexed { index, article ->
+            articleProvenance?.guardEdit(article.articleId,JSONObject().put("operation","reorderIndependent").put("sortOrder",rowSortOrder-index))
             val articleChangedAt = changedAt + index
             val updated = article.copy(
                 sourceDeviceId = deviceId,
@@ -861,6 +876,7 @@ class PhoneCompanionRepository(
 
     suspend fun clearRssSourceContent(sourceUrl: String): Int = withContext(Dispatchers.IO) {
         val articles = articleDao.getByRssSourceUrl(sourceUrl).filterNot { it.deleted }
+        articles.forEach {articleProvenance?.guardEdit(it.articleId,JSONObject().put("operation","clearSourceContent").put("url",sourceUrl))}
         val now = System.currentTimeMillis()
         articles.forEachIndexed { index, article ->
             val deleted = article.markDeletedForStorage(now + index)
@@ -878,6 +894,7 @@ class PhoneCompanionRepository(
     }
 
     suspend fun deleteRssSource(sourceUrl: String) = withContext(Dispatchers.IO) {
+        articleDao.getByRssSourceUrl(sourceUrl).forEach { articleProvenance?.guardEdit(it.articleId,JSONObject().put("operation","deleteSource").put("url",sourceUrl)) }
         books?.ensureRegistered()
         val source = rssSourceDao.getByUrl(sourceUrl) ?: return@withContext
         val now = System.currentTimeMillis()
@@ -902,6 +919,7 @@ class PhoneCompanionRepository(
     }
 
     suspend fun deleteArticle(articleId: String) = withContext(Dispatchers.IO) {
+        articleProvenance?.guardEdit(articleId,JSONObject().put("operation","delete"))
         books?.ensureRegistered()
         val current = articleDao.getById(articleId) ?: return@withContext
         val now = System.currentTimeMillis()
@@ -913,6 +931,7 @@ class PhoneCompanionRepository(
     }
 
     suspend fun clearImportedContent(): Int = withContext(Dispatchers.IO) {
+        articleDao.getByRssSourceUrl(ImportedContentIds.ROOT_SOURCE_URL).forEach { articleProvenance?.guardEdit(it.articleId,JSONObject().put("operation","clearImportedContent")) }
         books?.ensureRegistered()
         val importedArticles = articleDao.getByRssSourceUrl(ImportedContentIds.ROOT_SOURCE_URL)
             .filterNot { it.deleted }
@@ -971,6 +990,8 @@ class PhoneCompanionRepository(
     }
 
     private suspend fun migrateBluetoothAlias(oldId:String,id:String) {
+        articleProvenance?.requireExportable(oldId)
+        articleProvenance?.requireExportable(id)
         val old=articleDao.getById(oldId)?.hydrateExternalText()?:return
         val current=articleDao.getById(id)?.hydrateExternalText()
         require(current==null || current.url==old.url && current.rssSourceUrl==old.rssSourceUrl) { "RSS别名指向不同条目" }
@@ -1114,6 +1135,7 @@ class PhoneCompanionRepository(
 
     /** The fast path must never bypass old cursor/protocol/periodic-full admission. */
     internal suspend fun libraryFastPathAllowed(peer:String,time:Long=System.currentTimeMillis()):Boolean {
+        if(articleProvenance?.anyProtected()==true)return false
         val state=syncPeerStateDao.get(peer) ?: return false
         return state.lastProtocolVersion>=CHANGE_SEQUENCE_PROTOCOL_VERSION && state.lastFullSyncAt>0 &&
             time>=state.lastFullSyncAt && time-state.lastFullSyncAt<FULL_SNAPSHOT_INTERVAL_MS &&
@@ -1123,6 +1145,7 @@ class PhoneCompanionRepository(
     suspend fun prepareLibrarySyncWindow(
         peerDeviceId:String,peerAppliedLocalSeq:Long?=null,excludeRegisteredBooks:Boolean=false
     ):PhoneLibrarySyncWindow=withContext(Dispatchers.IO) {
+        articleProvenance?.requireExportable()
         if(excludeRegisteredBooks && bleDomains!=null)bleDomains.frozenWindow {
             prepareLibrarySyncWindowFrozen(peerDeviceId,peerAppliedLocalSeq,true)
         } else prepareLibrarySyncWindowFrozen(peerDeviceId,peerAppliedLocalSeq,false)
@@ -1385,6 +1408,7 @@ class PhoneCompanionRepository(
         remoteManifest.forEachIndexed { index, remote ->
             val local = articleDao.getById(remote.articleId)?.hydrateExternalText() ?: return@forEachIndexed
             if (buildDeleteConflict(local, remote) == null) return@forEachIndexed
+            articleProvenance?.guardEdit(local.articleId,JSONObject().put("operation","resolveConflict").put("resolution",resolutions[remote.articleId]?.name?:"pending"))
             val remembered = rememberedConflictResolution(local, remote)
             // No UI answer is not consent. Only an explicit answer or a durable decision
             // for exactly these input states may resolve a deletion conflict.
@@ -1457,6 +1481,7 @@ class PhoneCompanionRepository(
     ): Int = withContext(Dispatchers.IO) {
         var merged = 0
         incoming.forEach { candidate ->
+            articleProvenance?.requireExportable(candidate.articleId)
             val remote=books?.canonicalArticle(candidate)?:candidate
             val local = articleDao.getById(remote.articleId)
             val localHydrated = local?.hydrateExternalText()
@@ -1519,6 +1544,7 @@ class PhoneCompanionRepository(
     ): Int =
         withContext(Dispatchers.IO) {
             val projected=incoming.map{payload->payload.copy(article=books?.canonicalArticle(payload.article)?:payload.article)}
+            projected.forEach{articleProvenance?.requireExportable(it.article.articleId)}
             val localByArticleId = mutableMapOf<String, PhoneArticleEntity?>()
             projected.forEach { payload ->
                 if (!localByArticleId.containsKey(payload.article.articleId)) {
@@ -1630,6 +1656,7 @@ class PhoneCompanionRepository(
                         articleDao.getByRssSourceUrl(next.url)
                             .filterNot { it.deleted }
                             .forEachIndexed { index, article ->
+                                if(articleProvenance?.protected(article.articleId)==true)return@forEachIndexed
                                 articleDao.upsert(article.applyRemoteSourceDelete(next, index))
                             }
                     }
@@ -1656,6 +1683,7 @@ class PhoneCompanionRepository(
         retainedArticleIds: Collection<String>,
         retainedSourceUrls: Collection<String>
     ) = withContext(Dispatchers.IO) {
+        articleProvenance?.requireExportable()
         val articleIds = retainedArticleIds.toHashSet()
         val sourceUrls = retainedSourceUrls.toHashSet()
         val removedAt = System.currentTimeMillis()
@@ -1681,6 +1709,7 @@ class PhoneCompanionRepository(
     suspend fun clearLibrary() = withContext(Dispatchers.IO) {
         books?.clear()
         articleDao.deleteAll()
+        articleProvenance?.clearLibrary()
         rssSourceDao.deleteAll()
         savedItemDao.deleteAll()
         syncChangeLogDao.deleteAll()
@@ -1755,6 +1784,11 @@ class PhoneCompanionRepository(
         timestamp: Long = System.currentTimeMillis(),
         preserveExistingBody: Boolean = false
     ): PhoneArticleEntity {
+        if(articleProvenance?.protected(imported.articleId)==true)articleDao.getById(imported.articleId)?.let {
+            articleProvenance?.materializeOriginal(it.copy(contentHash=imported.contentHash,contentText=imported.contentText,contentHtml=imported.contentHtml))
+        }
+        articleProvenance?.guardEdit(imported.articleId,JSONObject().put("operation","import").put("url",imported.url)
+            .put("title",imported.title).put("contentHash",imported.contentHash).put("type",type?.name?:JSONObject.NULL).put("independent",independent))
         val current = articleDao.getById(imported.articleId)
         val base = current ?: PhoneArticleEntity(
             articleId = imported.articleId,
@@ -1909,6 +1943,8 @@ class PhoneCompanionRepository(
                 ?: if (ImportedContentIds.isImportedContentUrl(imported.url)) existingByContentHash[item.contentHash ?: WebArticleImporter.sha256(
                     item.contentHtml ?: item.contentText.ifBlank { item.url }
                 )] else null
+            if(existingArticle!=null && existingArticle.articleId!=canonicalId && articleProvenance?.protected(existingArticle.articleId)==true)
+                return@mapIndexedNotNull existingArticle
             // One canonical URL has one local row. Another subscribed feed must not
             // steal it, reset its clocks, or erase its local read/saved state.
             if (existingArticle?.keepsOtherActiveRssOwner(source.url, activeSourceUrls) == true) {
@@ -1950,6 +1986,10 @@ class PhoneCompanionRepository(
                 .withRssLocalStateFrom(existingArticle?.hydrateExternalText()?.copy(articleId=canonicalId))
                 .withCurrentSyncMetadata()
                 .externalizeLargeLocalContent()
+            if(existingArticle!=null && articleProvenance?.protected(existingArticle.articleId)==true) {
+                articleProvenance?.materializeOriginal(candidate)
+                return@mapIndexedNotNull articleDao.getById(existingArticle.articleId)?:existingArticle
+            }
             if (
                 existingArticle != null &&
                 existingArticle.copy(
@@ -2613,6 +2653,7 @@ class PhoneCompanionRepository(
     }
 
     private suspend fun PhoneArticleEntity.syncManifestEntryForExport(): ArticleSyncManifestEntry {
+        articleProvenance?.requireExportable(articleId)
         val hydrated = if (ArticleSyncBody.cachedMetadataFor(this) != null) {
             hydrateExternalTextForSync()
         } else {
@@ -2627,6 +2668,7 @@ class PhoneCompanionRepository(
     }
 
     private suspend fun PhoneArticleEntity.articleForBodyExport(): PhoneArticleEntity? {
+        articleProvenance?.requireExportable(articleId)
         val hydrated = loadStoredBodyForSync()
         if (!hydrated.bodyAvailable || hydrated.article.isMissingSavedRssBody()) return null
         return hydrated.article.withCurrentSyncMetadata()
@@ -2784,6 +2826,7 @@ class PhoneCompanionRepository(
     }
 
     private suspend fun PhoneArticleEntity.migrateLegacyReadingPositionIfNeeded(): PhoneArticleEntity {
+        if(articleProvenance?.protected(articleId)==true)return this
         if (readingPositionBytes > 0L || readingProgress <= 0f) return this
         val byteLength = if (isFileBackedImportedText()) {
             articleContentStore

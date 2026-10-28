@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "feature": "article-register-provenance.v1",
+  "contractStatus": "APPROVED_STEP_1",
+  "productionCodecs": "PENDING",
+  "defaultWriteEnabled": false,
+  "counts": {
+    "fixedMerge": 31,
+    "seededMerge": 128,
+    "normalization": 13,
+    "reject": 42,
+    "bodyBindings": 3,
+    "admission": 33,
+    "ble": 8,
+    "properties": 2862
+  },
+  "files": {
+    "inputs.json": {
+      "sizeBytes": 252746,
+      "sha256": "2a78f7a44a08977ff29f9d1c796bfc799cfdc393a8f1278f0d1fdaf6c50eb62f"
+    },
+    "vectors.json": {
+      "sizeBytes": 1541132,
+      "sha256": "90f468bbff090f8213da89393a85c34a09e5cc21c9f9100dff7ea49198a039d2"
+    },
+    "reject.json": {
+      "sizeBytes": 47837,
+      "sha256": "b1fa253714451e2beb1901f0c065634fb247f396664af21f691245d7adf4ea09"
+    },
+    "body-bindings.json": {
+      "sizeBytes": 25250,
+      "sha256": "4b5ccea12e26269880f9e09ce01d4c0967ab7edcf23ddd0b7b8850e0048da6ab"
+    },
+    "admission-ble.json": {
+      "sizeBytes": 13849,
+      "sha256": "a9d2f7cce5491a62ba2895879f299c5d9589bed857f216abdf6e12626b88ea58"
+    },
+    "make-inputs.py": {
+      "sizeBytes": 19014,
+      "sha256": "029c0f0e3d433aac8c13aae27462d1df6bedcb3e2b380587be1a8739134ae644"
+    },
+    "generate.py": {
+      "sizeBytes": 16701,
+      "sha256": "28be15834b4b8e3c143bb8485ccf6688d00b215c34ed7275ccb71eb9233c8049"
+    },
+    "verify.mjs": {
+      "sizeBytes": 16956,
+      "sha256": "9a605d4bcde7702377ff891c7b5560a0af13052d408e4ed159d394b3f1803e83"
+    },
+    "selftest.py": {
+      "sizeBytes": 5294,
+      "sha256": "f3d5be15ee366778d2edcb7fb7ed1172dad0ae04370e01bb4bd5d8cbe56400a6"
+    },
+    "README.md": {
+      "sizeBytes": 4408,
+      "sha256": "0235979f0975d29286521258c9d20ae28b95e88d6e34f1f20debc57c8cf2bafe"
+    }
+  }
+}

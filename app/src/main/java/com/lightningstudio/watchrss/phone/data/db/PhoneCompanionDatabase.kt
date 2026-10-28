@@ -32,6 +32,9 @@ import com.lightningstudio.watchrss.phone.data.note.NoteFolderEntity
         NoteAssetEntity::class,
         NoteConflictEntity::class,
         AppMetaEntity::class,
+        ArticleProvenanceEntity::class,
+        ArticleOriginalEntity::class,
+        ArticleProvenanceVersion::class,
         PhoneLlmTokenUsageEntity::class,
         PhoneTokenUsageSyncState::class,
         com.lightningstudio.watchrss.phone.data.book.BookEntity::class,
@@ -46,10 +49,11 @@ import com.lightningstudio.watchrss.phone.data.note.NoteFolderEntity
         com.lightningstudio.watchrss.phone.data.book.BookReadingPeerEntity::class,
         com.lightningstudio.watchrss.phone.data.book.BookCaptureMetaEntity::class
     ],
-    version = 18,
+    version = 19,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
+    abstract fun articleProvenanceDao():ArticleProvenanceDao
     abstract fun bookReadingDao():com.lightningstudio.watchrss.phone.data.book.BookReadingDao
     abstract fun bookDao():com.lightningstudio.watchrss.phone.data.book.BookDao
     abstract fun phoneSavedItemDao(): PhoneSavedItemDao
@@ -63,6 +67,29 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
     abstract fun llmTokenUsageDao(): PhoneLlmTokenUsageDao
 
     companion object {
+        /** A pre-update trigger captures the old source once, before any legacy writer can replace it. */
+        fun installArticleProvenanceWitnesses(db:SupportSQLiteDatabase) {
+            val existing=db.query("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN ('article_provenance_freeze_insert','article_provenance_freeze_update')").use{it.moveToFirst();it.getInt(0)}
+            if(existing==2)return
+            val readingEvidence="contentText!='' OR COALESCE(contentHtml,'')!='' OR isRead!=0 OR readingProgress!=0 OR readingPositionBytes!=0 OR readingPositionContentHash!=''"
+            val clock="CASE WHEN readingPositionChangedAt>0 THEN readingPositionChangedAt WHEN $readingEvidence THEN updatedAt ELSE 0 END"
+            db.execSQL("INSERT OR IGNORE INTO article_register_provenance(articleId,legacySource,legacyReadingClock,raw,pending) SELECT articleId,sourceDeviceId,$clock,'',NULL FROM phone_articles WHERE articleId NOT IN (SELECT articleId FROM imported_book_chapters)")
+            for((event,prefix) in listOf("INSERT" to "NEW","UPDATE" to "OLD")) {
+                val c="CASE WHEN $prefix.readingPositionChangedAt>0 THEN $prefix.readingPositionChangedAt WHEN $prefix.contentText!='' OR COALESCE($prefix.contentHtml,'')!='' OR $prefix.isRead!=0 OR $prefix.readingProgress!=0 OR $prefix.readingPositionBytes!=0 OR $prefix.readingPositionContentHash!='' THEN $prefix.updatedAt ELSE 0 END"
+                db.execSQL("CREATE TRIGGER IF NOT EXISTS article_provenance_freeze_${event.lowercase()} BEFORE $event ON phone_articles BEGIN INSERT OR IGNORE INTO article_register_provenance(articleId,legacySource,legacyReadingClock,raw,pending) VALUES($prefix.articleId,$prefix.sourceDeviceId,$c,'',NULL); END")
+            }
+        }
+        val ARTICLE_PROVENANCE_CALLBACK=object:RoomDatabase.Callback() {
+            override fun onOpen(db:SupportSQLiteDatabase) { installArticleProvenanceWitnesses(db) }
+        }
+        val MIGRATION_18_19=object:Migration(18,19) {
+            override fun migrate(database:SupportSQLiteDatabase) {
+                database.execSQL("CREATE TABLE IF NOT EXISTS article_register_provenance (articleId TEXT NOT NULL PRIMARY KEY,legacySource TEXT NOT NULL,legacyReadingClock INTEGER NOT NULL,raw TEXT NOT NULL,pending TEXT)")
+                database.execSQL("CREATE TABLE IF NOT EXISTS article_register_originals (articleId TEXT NOT NULL,contentHash TEXT NOT NULL,contentText TEXT NOT NULL,contentHtml TEXT,retainedAt INTEGER NOT NULL,PRIMARY KEY(articleId,contentHash))")
+                database.execSQL("CREATE TABLE IF NOT EXISTS article_register_versions (articleId TEXT NOT NULL,sha256 TEXT NOT NULL,raw TEXT NOT NULL,PRIMARY KEY(articleId,sha256))")
+                installArticleProvenanceWitnesses(database)
+            }
+        }
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(database: SupportSQLiteDatabase) {
                 database.execSQL(

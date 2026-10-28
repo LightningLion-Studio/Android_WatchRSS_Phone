@@ -100,8 +100,11 @@ internal class PhoneCloudRecordSync(
                 } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
                 finally { key?.fill(0) }
                 if(decoded!=null) {
-                    store.saveDocument(client.scopeId(session),id,rev,decoded.document.source,decoded.access)
-                    store.saveRawEnvelope(client.scopeId(session),id,envelope.toString())
+                    try { store.acceptDocument(client.scopeId(session),id,rev,decoded.document.source,decoded.access,envelope.toString()) }
+                    catch(e:CloudFormatIsolationException) {
+                        store.quarantine(client.scopeId(session),QuarantinedCloudRecord(id,rev,envelope.optInt("keyVersion"),"r48_isolated",envelope.toString(),item.optBoolean("tombstone")))
+                        continue
+                    }
                 }
                 if (decoded == null || decoded.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED)) {
                     store.quarantine(client.scopeId(session), QuarantinedCloudRecord(id, rev, envelope.optInt("keyVersion"),
@@ -169,6 +172,12 @@ internal class PhoneCloudRecordSync(
                 val owner = client.scopeId(session)
                 val id = PhoneCloudRecordCodec.id(anchor, session.userId, kind, value)
                 val hash = PhoneCloudRecordCodec.hash(kind, value)
+                // Business witnesses survive R45/cache resets. Absence of a raw cache baseline
+                // is never permission to send a protected value through the legacy writer.
+                if(value is ArticleProvenanceValue || value is ReadOnlyArticleValue) {
+                    if(store.record(owner,id)?.second!=hash)store.pending(owner,id,value.toString())
+                    return@pages
+                }
                 if(id in protected) {store.pending(owner,id,value.toString());return@pages}
                 val baseline=baseline(session,id)
                 if(baseline!=null&&PhoneCloudRecordCodec.documentAccess(baseline)!=CloudFormatAccess.WRITABLE) {
@@ -211,8 +220,8 @@ internal class PhoneCloudRecordSync(
         finally { expectedEpoch = null }
     }
 
-    private fun removedRssIndex(kind: String, value: JSONObject): Boolean = kind=="article" && value.optBoolean("bookIndexRetired") || kind == "article" && CloudContentPolicy.publicRss(value) &&
-        (value.optBoolean("rssIndexRetired") || (value.optBoolean("deleted") && !value.optBoolean("favoriteSaved") && !value.optBoolean("watchLaterSaved")))
+    private fun removedRssIndex(kind: String, value: JSONObject): Boolean = value !is ArticleProvenanceValue && value !is ReadOnlyArticleValue && (kind=="article" && value.optBoolean("bookIndexRetired") || kind == "article" && CloudContentPolicy.publicRss(value) &&
+        (value.optBoolean("rssIndexRetired") || (value.optBoolean("deleted") && !value.optBoolean("favoriteSaved") && !value.optBoolean("watchLaterSaved"))))
 
     /** Commit replacement interactions first; only then CAS-delete obsolete public index rows. */
     private suspend fun cleanupRssIndexes(session: PhoneAccountSession, completedSavedIds: Set<String>) {
@@ -339,7 +348,8 @@ internal class PhoneCloudRecordSync(
             val decoded = try { decode(session, key, record.id, envelope) }
                 catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; continue }
                 finally { key.fill(0) }
-            store.saveDocument(owner,record.id,record.revision,decoded.document.source,decoded.access)
+            try {store.acceptDocument(owner,record.id,record.revision,decoded.document.source,decoded.access,envelope.toString())}
+            catch(_:CloudFormatIsolationException){continue}
             if(decoded.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED))continue
             // A newer revision received since quarantine always wins.
             if ((store.record(owner, record.id)?.first?.toLong() ?: -1) <= record.revision.toLong()) {

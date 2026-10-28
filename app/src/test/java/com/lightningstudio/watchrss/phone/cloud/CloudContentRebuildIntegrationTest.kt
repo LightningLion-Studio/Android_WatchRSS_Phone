@@ -293,6 +293,21 @@ class CloudContentRebuildIntegrationTest {
         f.service.syncNow();assertEquals(requests,f.httpRequests)
         assertArrayEquals(pending.second,f.cache.loadPendingManifest(f.client.scopeId(session))!!.second)
     }
+    @Test fun localReadOnlyArticleDoesNotHaltLaterBackgroundReadsAndNeverPublishesADowngrade()=runBlocking {
+        val f=fixture()
+        val input=JSONObject(ArticleProvenanceFixtures.resource("vectors.json").toString(Charsets.UTF_8)).getJSONArray("mergeCases").getJSONObject(0).getJSONArray("inputs").getJSONObject(0)
+        f.backup.applyCloudRecord("article",ArticleProvenanceValue(ArticleRegisterProvenance.decode(input.toString().toByteArray())))
+        f.repository.updateArticleReadingProgress("synthetic-article",.5f)
+        val first=runCatching{f.service.syncNow(manual=true)}
+        assertTrue(first.exceptionOrNull() is CloudFormatUpgradeRequired)
+        assertEquals(0,f.completed);assertEquals(0,f.state.formatUpgradeRequiredVersion)
+        assertEquals("请升级到最新版本以继续同步",f.service.state.value.message)
+        val requests=f.httpRequests
+        val second=runCatching{f.service.syncNow()}
+        assertTrue(second.exceptionOrNull() is CloudFormatUpgradeRequired);assertTrue(f.httpRequests>requests)
+        assertEquals(1,f.backup.articleProvenancePendingCount());assertEquals(0,f.completed)
+        assertTrue(f.keys.hasAccountKey(session.userId))
+    }
     @Test fun bleSavedRssOriginalRepairPublishesInsteadOfCarryingEmptyArchiveAndThenNoops()=runBlocking {
         for(writeOverlay in listOf(false,true)) {
             val f=fixture();f.deduplicateStoredChunks=true

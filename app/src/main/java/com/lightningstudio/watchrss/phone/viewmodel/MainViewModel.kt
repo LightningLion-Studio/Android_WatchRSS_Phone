@@ -10,6 +10,7 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncSession
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClearState
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClearPhase
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClearOperation
+import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClearException
 import kotlinx.coroutines.CancellationException
 import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSessionRegistry
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
@@ -1033,7 +1034,7 @@ class MainViewModel(
                         else -> null
                     }
                     val message = when (state.phase) {
-                        WatchLibraryClearPhase.PROBING -> "正在查找手表…"
+                        WatchLibraryClearPhase.PROBING -> if (state.probeTotal > 1) "正在查找手表（${state.probeCompleted}/${state.probeTotal} 台）…" else "正在查找手表…"
                         WatchLibraryClearPhase.CLEARING -> "正在清空手表资料库…"
                         WatchLibraryClearPhase.COMPLETE -> "${state.deviceName?.ifBlank { "手表" } ?: "手表"}资料库已清空"
                         else -> null
@@ -1044,7 +1045,12 @@ class MainViewModel(
                 _toastEvent.tryEmit(sessionState.value.message ?: "手表资料库已清空")
             } catch (failure: Throwable) {
                 if (failure is CancellationException) throw failure
-                _toastEvent.tryEmit("清空手表资料库失败")
+                val state = sessionState.value.watchLibraryClear
+                val code = (failure as? WatchLibraryClearException)?.errorCode ?: state?.errorCode
+                val hint = if (state?.remoteMayHaveChanged == true) "手表可能已清理一部分，再次清空会接着完成" else null
+                val text = listOfNotNull(watchLibraryClearFailureText(code), hint).joinToString("；")
+                sessionState.value = sessionState.value.copy(message = text, syncStatusMessage = text)
+                _toastEvent.tryEmit(text)
             } finally {
                 clearWatchSelection?.cancel()
                 clearWatchSelection = null
@@ -1053,6 +1059,20 @@ class MainViewModel(
                 clearWatchJob = null
             }
         }
+    }
+
+    private fun watchLibraryClearFailureText(code: String?): String = when (code) {
+        "clear_probe_timeout", "clear_probe_connect", "clear_probe_read" -> "没有连上手表，请让手表停在腕上RSS并靠近手机后重试"
+        "clear_probe_permission" -> "需要蓝牙连接权限才能清空手表"
+        "clear_probe_bluetooth_off" -> "请先打开蓝牙"
+        "clear_probe_bluetooth_unavailable" -> "此手机不支持蓝牙"
+        "clear_probe_not_found" -> "没有找到已配对的手表"
+        "clear_probe_cancelled", "clear_library_cancelled" -> "已取消清空"
+        "clear_library_busy" -> "手表正忙，请稍后重试"
+        "clear_library_changed" -> "清空时手表资料有变化，请重试"
+        "clear_library_timeout", "clear_library_transport_timeout", "clear_library_disconnected" -> "清空未完成，连接中断或超时，请重试"
+        "clear_library_database", "clear_library_files", "clear_library_cleanup" -> "手表清理出错，请重试；仍失败请联系支持"
+        else -> "清空手表资料库失败，请重试"
     }
 
     /** Lead can attach this to the clear-specific cancel affordance. */

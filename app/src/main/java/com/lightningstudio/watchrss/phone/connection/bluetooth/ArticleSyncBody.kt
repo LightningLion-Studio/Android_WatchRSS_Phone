@@ -15,7 +15,6 @@ import java.io.Writer
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.zip.GZIPInputStream
-import java.util.zip.GZIPOutputStream
 import kotlin.math.min
 
 data class ArticleBodyMetadata(
@@ -70,12 +69,30 @@ object ArticleSyncBody {
     private const val BODY_ENCODING_VERSION = 3
     private const val MAX_DECOMPRESSED_TEXT_BYTES = 32 * 1024 * 1024
     private const val JSON_WRITE_BUFFER_CHARS = 16 * 1024
+    private val BODY_HASH_PATTERN = Regex("[0-9a-f]{64}")
     private val HEX_DIGITS = "0123456789abcdef".toCharArray()
 
-    fun metadataFor(article: PhoneArticleEntity): ArticleBodyMetadata {
-        val output = BodyChunkOutputStream()
-        writeEncodedBody(article.contentHtml, article.contentText, output)
-        return output.metadata(metadataHashFor(article))
+    fun metadataFor(article: PhoneArticleEntity, expectedBodyHash: String = article.syncBodyHash): ArticleBodyMetadata {
+        fun encode(os: Int): ArticleBodyMetadata {
+            val output = BodyChunkOutputStream()
+            writeEncodedBody(article.contentHtml, article.contentText, output, os)
+            return output.metadata(metadataHashFor(article))
+        }
+        val current = encode(255)
+        val witnesses = listOf(expectedBodyHash, article.syncBodyHash).filter { it.matches(BODY_HASH_PATTERN) }.distinct()
+        if (witnesses.isEmpty() || current.bodyHash == witnesses.first()) return current
+        // Only a complete SHA-256 match of the real new plaintext can retain an old member.
+        // The canonical path encodes once; compatibility probes are bounded to two OS variants.
+        val candidates = mutableListOf(current)
+        for (os in listOf(0, 3)) {
+            val candidate = encode(os)
+            if (candidate.bodyHash == witnesses.first()) return candidate
+            candidates += candidate
+        }
+        for (witness in witnesses) {
+            candidates.firstOrNull { it.bodyHash == witness }?.let { return it }
+        }
+        return current
     }
 
     fun cachedMetadataFor(article: PhoneArticleEntity): ArticleBodyMetadata? {
@@ -102,8 +119,9 @@ object ArticleSyncBody {
         return metadata.takeIf { it.isCurrentFor(article) }
     }
 
-    fun currentMetadataFor(article: PhoneArticleEntity): ArticleBodyMetadata =
-        cachedMetadataFor(article) ?: metadataFor(article)
+    fun currentMetadataFor(article: PhoneArticleEntity, expectedBodyHash: String = article.syncBodyHash): ArticleBodyMetadata =
+        if (expectedBodyHash.isNotBlank() && expectedBodyHash != article.syncBodyHash) metadataFor(article, expectedBodyHash)
+        else cachedMetadataFor(article) ?: metadataFor(article)
 
     fun payloadForRequest(
         article: PhoneArticleEntity,
@@ -217,12 +235,7 @@ object ArticleSyncBody {
         metadata: ArticleBodyMetadata
     ): List<ArticleBodyChunk> {
         requireValidRequestedChunkIndexes(request, metadata)
-        val output = CachedBodyChunkOutputStream(
-            metadata = metadata,
-            captureIndexes = request.chunkIndexes.toSet()
-        )
-        writeEncodedBody(article.contentHtml, article.contentText, output)
-        return output.chunks()
+        return withVerifiedCachedEncoding(article, metadata, request.chunkIndexes.toSet())
     }
 
     private fun requireValidRequestedChunkIndexes(
@@ -242,7 +255,7 @@ object ArticleSyncBody {
     ): Pair<String?, String> {
         validatePayloadShape(payload)
         val localBodyBytes = localArticle
-            ?.let { encodeBody(it.contentHtml, it.contentText) }
+            ?.let { encodeBody(it.contentHtml, it.contentText, it.syncBodyHash.ifBlank { payload.bodyHash }) }
         if (
             localArticle != null &&
             localBodyBytes != null &&
@@ -326,14 +339,22 @@ object ArticleSyncBody {
     fun decodeChunkData(value: String): ByteArray =
         Base64.getDecoder().decode(value)
 
-    private fun encodeBody(contentHtml: String?, contentText: String): ByteArray {
-        return ByteArrayOutputStream().also { output ->
+    private fun encodeBody(contentHtml: String?, contentText: String, expectedBodyHash: String): ByteArray {
+        val bytes = ByteArrayOutputStream().also { output ->
             writeEncodedBody(contentHtml, contentText, output)
         }.toByteArray()
+        if (expectedBodyHash.matches(BODY_HASH_PATTERN) && sha256(bytes) != expectedBodyHash) {
+            for (os in listOf(0, 3)) {
+                bytes[9] = os.toByte()
+                if (sha256(bytes) == expectedBodyHash) return bytes
+            }
+            bytes[9] = 255.toByte()
+        }
+        return bytes
     }
 
-    private fun writeEncodedBody(contentHtml: String?, contentText: String, output: OutputStream) {
-        GZIPOutputStream(output).use { gzip ->
+    private fun writeEncodedBody(contentHtml: String?, contentText: String, output: OutputStream, os: Int = 255) {
+        ArticleBodyGzipOutputStream(output, os).use { gzip ->
             BufferedWriter(
                 OutputStreamWriter(gzip, Charsets.UTF_8),
                 JSON_WRITE_BUFFER_CHARS
@@ -355,9 +376,21 @@ object ArticleSyncBody {
         article: PhoneArticleEntity,
         metadata: ArticleBodyMetadata
     ) {
-        val output = CachedBodyChunkOutputStream(metadata, emptySet())
-        writeEncodedBody(article.contentHtml, article.contentText, output)
-        output.chunks()
+        withVerifiedCachedEncoding(article, metadata, emptySet())
+    }
+
+    private fun withVerifiedCachedEncoding(
+        article: PhoneArticleEntity, metadata: ArticleBodyMetadata, captureIndexes: Set<Int>
+    ): List<ArticleBodyChunk> {
+        var failure: IllegalArgumentException? = null
+        for (os in listOf(255, 0, 3)) {
+            try {
+                val output = CachedBodyChunkOutputStream(metadata, captureIndexes)
+                writeEncodedBody(article.contentHtml, article.contentText, output, os)
+                return output.chunks() // Validates bytes, ordered chunks AND complete digest.
+            } catch (invalid: IllegalArgumentException) { failure = invalid }
+        }
+        throw requireNotNull(failure)
     }
 
     private fun writeJsonStringField(writer: Writer, name: String, value: String) {

@@ -386,7 +386,7 @@ class PhoneCompanionRepository(
                 if (local != mergedArticle) {
                     val prepared = mergedArticle
                         .normalizeBackupArticle()
-                        .withCurrentSyncMetadata()
+                        .withCurrentSyncMetadata(local?.syncBodyHash.orEmpty())
                         .externalizeLargeLocalContent()
                     articleDao.upsert(prepared)
                     merged += 1
@@ -1509,7 +1509,7 @@ class PhoneCompanionRepository(
             val preparedRemote = if (retainsLocalBody) {
                 remoteWithBody
             } else {
-                remoteWithBody.withCurrentSyncMetadata()
+                remoteWithBody.withCurrentSyncMetadata(localHydrated?.syncBodyHash.orEmpty())
             }
             val next = if (authoritative || local == null) {
                 preparedRemote
@@ -1521,7 +1521,7 @@ class PhoneCompanionRepository(
                     decisionClock = conflictDecisionClock(remote.articleId)
                 )
             }
-            val verifiedNext = (books?.constrainDeletion(next) ?: next).withCurrentSyncMetadata()
+            val verifiedNext = (books?.constrainDeletion(next) ?: next).withCurrentSyncMetadata(localHydrated?.syncBodyHash.orEmpty())
             if(localHydrated==verifiedNext) {
                 if (remote.articleId in conflictResolutions) rememberAppliedConflict(verifiedNext)
                 return@forEach
@@ -1589,6 +1589,13 @@ class PhoneCompanionRepository(
                 val decodedRemote = payload.article.copy(
                     contentHtml = contentHtml,
                     contentText = contentText,
+                    // The raw frame has already passed rebuildBody's complete/chunk verification.
+                    // Retain its digest only as a witness; metadataFor revalidates the actual body.
+                    syncBodyHash = payload.bodyHash,
+                    syncBodyByteCount = payload.bodyByteCount,
+                    syncChunkSize = payload.chunkSize,
+                    syncChunkHashesJson = payload.chunkHashes.toJsonString(),
+                    syncMetadataHash = ""
                 )
                 // An authoritative state transfer still cannot turn a missing RSS original into an erasure.
                 val preparedRemote = if (localHydrated != null && decodedRemote.canRecoverSavedRssBodyFrom(localHydrated)) {
@@ -1615,7 +1622,7 @@ class PhoneCompanionRepository(
                 ) {
                     constrained.withUnavailableTombstoneBodyMetadata(clearBody = true)
                 } else {
-                    constrained.withCurrentSyncMetadata()
+                    constrained.withCurrentSyncMetadata(localHydrated?.syncBodyHash.orEmpty())
                 }
                 if(localHydrated==next) {
                     if (conflictResolution != null) rememberAppliedConflict(next)
@@ -2685,8 +2692,8 @@ class PhoneCompanionRepository(
         )
     }
 
-    private fun PhoneArticleEntity.withCurrentSyncMetadata(): PhoneArticleEntity {
-        return withSyncMetadata(ArticleSyncBody.currentMetadataFor(this))
+    private fun PhoneArticleEntity.withCurrentSyncMetadata(expectedBodyHash: String = syncBodyHash): PhoneArticleEntity {
+        return withSyncMetadata(ArticleSyncBody.currentMetadataFor(this, expectedBodyHash.ifBlank { syncBodyHash }))
     }
 
     private fun PhoneArticleEntity.withUnavailableTombstoneBodyMetadata(
@@ -2875,10 +2882,7 @@ class PhoneCompanionRepository(
     private fun PhoneArticleEntity.normalizeBackupArticle(): PhoneArticleEntity {
         return copy(
             sourceDeviceId = deviceId,
-            syncBodyHash = "",
-            syncBodyByteCount = 0L,
-            syncChunkSize = 0,
-            syncChunkHashesJson = "",
+            // Body hash is a hint, never proof: withCurrentSyncMetadata verifies the complete digest.
             syncMetadataHash = "",
             readingProgress = readingProgress.coerceIn(0f, 1f)
         )

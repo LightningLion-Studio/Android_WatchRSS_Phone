@@ -57,7 +57,7 @@ class LibraryFatalResponseTest {
     @Test fun fatal175ByteManifestCannotCompleteOrPublishProofAndNextUserRetryDelivers500Durably()=runBlocking<Unit> {
         assertEquals(175,BluetoothSyncProtocol.wireSize(fatal()))
         val local=(0 until 500).map{i->PhoneArticleEntity("bulk-$i","phone","https://fixture.invalid/$i","entry $i","test","",null,"body $i",null,
-            CloudSnapshotCodec.sha256("body $i".toByteArray()),1,10,false,0,0,null,null,true,10,0,false,0,0,true,10)}
+            CloudSnapshotCodec.sha256("body $i".toByteArray()),1,10,false,0,0,null,null,true,10,0,false,0,0,false,0)}
         repo.mergeArticlesFromSync(local)
         repo.markLibrarySyncSuccess("watch",0,0,14,true,false)
         val peerBefore=db.syncPeerStateDao().get("watch")
@@ -114,8 +114,11 @@ class LibraryFatalResponseTest {
     }
 
     @Test fun fatalCompleteIncludingLaterBatchCannotApplyArticlesOrAdvanceCursors()=runBlocking<Unit> {
-        val incoming=PhoneArticleEntity("remote","watch","https://fixture.invalid/remote","incoming","test","",null,"real incoming body",null,
-            CloudSnapshotCodec.sha256("real incoming body".toByteArray()),1,10,false,0,0,null,null,true,10,0,false,0,0,true,10)
+        val original=PhoneArticleEntity("remote","watch","https://fixture.invalid/remote","incoming","test","",null,"real incoming body",null,
+            CloudSnapshotCodec.sha256("real incoming body".toByteArray()),1,10,false,0,0,null,null,true,10,0,false,0,0,false,0)
+        val metadata=ArticleSyncBody.metadataFor(original)
+        val incoming=original.copy(syncBodyHash=metadata.bodyHash,syncBodyByteCount=metadata.bodyByteCount,syncChunkSize=metadata.chunkSize,
+            syncChunkHashesJson=JSONArray(metadata.chunkHashes).toString(),syncMetadataHash=metadata.metadataHash)
         val incomingManifest=LibrarySyncPayload.buildManifestResponse("watch",listOf(incoming),changeSequence=LibraryChangeSequence(0,40,true))
         val body=LibrarySyncPayload.buildChunkedResponseFrames("watch",listOf(incoming),emptyList(),useBatches=false).single()
         repo.markLibrarySyncSuccess("watch",0,0,14,true,false)
@@ -126,7 +129,7 @@ class LibraryFatalResponseTest {
             val out=ByteArrayOutputStream()
             val failure=runCatching{manager.syncAll(device,reusableSession=session(listOf(binding(),ok("cursor"),incomingManifest)+response,out))}.exceptionOrNull()
             assertTrue("$tail/$success: $failure",failure is IllegalArgumentException)
-            assertTrue(failure!!.message.orEmpty().contains("可直接点“同步”重试"))
+            assertTrue(failure.toString(),failure!!.message.orEmpty().contains("可直接点“同步”重试"))
             assertTrue(db.phoneArticleDao().getAllForSync().isEmpty());assertEquals(peer,db.syncPeerStateDao().get("watch"));assertEquals(0,cloudCalls)
             val sent=frames(out);val articles=sent.indexOfLast{it.optString("phase")=="articles"}
             assertTrue(articles>=0);assertFalse(sent.drop(articles+1).any{it.optString("action")=="ack"&&it.optBoolean("success")})

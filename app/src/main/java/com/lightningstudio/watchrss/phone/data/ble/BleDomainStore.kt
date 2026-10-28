@@ -15,8 +15,8 @@ import java.util.UUID
 /** Technical tables, deliberately independent of cloud cursors. Business triggers share the writer's transaction. */
 class BleDomainStore(
     private val database:PhoneCompanionDatabase, private val files:File,
-    // v4 no longer advertises a saved RSS placeholder as an available original.
-    private val encoderVersions:Map<String,Int> = DOMAINS.associateWith { if (it == "library") 4 else 1 },
+    // v5 pins gzip headers and validates legacy wire witnesses across cloud restoration.
+    private val encoderVersions:Map<String,Int> = DOMAINS.associateWith { if (it == "library") 5 else 1 },
     private val now:()->Long = System::currentTimeMillis,
     private val nativeProtocolVersion:Int = LibrarySyncPayload.PROTOCOL_VERSION
 ) {
@@ -151,7 +151,9 @@ class BleDomainStore(
                 if("library" in changes) {
                     for(table in listOf("ble_fast_manifest","ble_fast_dirty","ble_fast_manifest_resources","ble_fast_resources","ble_fast_identity","ble_fast_library_baselines"))db.execSQL("DELETE FROM $table")
                     db.execSQL("DELETE FROM app_meta WHERE key='ble_repair_watermark_v2' OR key LIKE 'ble_echo_v2:%'")
-                    db.execSQL("UPDATE phone_articles SET syncBodyHash='',syncBodyByteCount=0,syncChunkSize=0,syncChunkHashesJson='',syncMetadataHash=''")
+                    // Invalidate projection proof, retaining body digests solely as untrusted encoding witnesses.
+                    // Re-seeding re-encodes current plaintext and verifies the complete digest before use.
+                    db.execSQL("UPDATE phone_articles SET syncMetadataHash=''")
                     db.execSQL("INSERT OR REPLACE INTO ble_fast_identity(articleId,url,rssSourceUrl) SELECT articleId,url,rssSourceUrl FROM phone_articles")
                     db.execSQL("INSERT OR REPLACE INTO ble_fast_dirty(articleId,seq) SELECT a.articleId,0 FROM phone_articles a WHERE (${eligible("a")}) AND NOT EXISTS(SELECT 1 FROM imported_book_chapters b WHERE b.articleId=a.articleId)")
                 }

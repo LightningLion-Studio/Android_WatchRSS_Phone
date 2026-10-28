@@ -7,6 +7,10 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyn
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncStage
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothWatchDevice
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncSession
+import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClearState
+import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClearPhase
+import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClearOperation
+import kotlinx.coroutines.CancellationException
 import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSessionRegistry
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncDeleteConflict
@@ -55,6 +59,7 @@ data class MainUiState(
     val syncTransportLabel: String = "两设备连接到同一个wifi以获得更快的同步速度",
     val error: String? = null,
     val syncProgress: MainSyncProgressUi? = null,
+    val watchLibraryClear: WatchLibraryClearState? = null,
     val rssSources: List<PhoneRssSourceEntity> = emptyList(),
     val rssArticles: List<PhoneArticleEntity> = emptyList(),
     val independentArticles: List<PhoneArticleEntity> = emptyList(),
@@ -186,6 +191,9 @@ class MainViewModel(
     fun openWatchPairing() = watchBindingPrompts.openWatchPairing()
 
     private val sessionState = MutableStateFlow(MainUiState())
+    private var clearWatchJob: Job? = null
+    private var clearWatchSelection: CompletableDeferred<PhoneBluetoothWatchDevice?>? = null
+    private var clearWatchCandidates: List<PhoneBluetoothWatchDevice> = emptyList()
     private var conflictResolutionDeferred: CompletableDeferred<PhoneSyncConflictResolution>? = null
     private var smoothedSyncProgressJob: Job? = null
     private var smoothedSyncProgressTarget: MainSyncProgressUi? = null
@@ -997,39 +1005,58 @@ class MainViewModel(
     }
 
     fun clearWatchLibraryByBluetooth() {
-        viewModelScope.launch {
+        if (clearWatchJob?.isActive == true) return
+        clearWatchJob = viewModelScope.launch {
             if (sessionState.value.isBusy) return@launch
-            sessionState.value = sessionState.value.copy(isBusy = true, message = "正在查找手表…")
-            val targets = runCatching {
-                bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress)
-            }.getOrElse { throwable ->
-                sessionState.value = sessionState.value.copy(isBusy = false, message = null)
-                _toastEvent.tryEmit(throwable.message ?: "查找手表失败")
-                return@launch
-            }
-            when (targets.devices.size) {
-                0 -> {
-                    targets.sessionLease?.close()
-                    sessionState.value = sessionState.value.copy(isBusy = false, message = null)
-                    _toastEvent.tryEmit("未找到已打开 WatchRSS 的手表")
-                }
-                1 -> {
-                    targets.sessionLease?.close()
-                    runClearWatchLibrary(targets.devices.single().toUi())
-                }
-                else -> {
-                    targets.sessionLease?.close()
-                    sessionState.value = sessionState.value.copy(
-                        isBusy = false,
-                        bluetoothDevicePrompt = MainBluetoothDevicePromptUi(
-                            targets.devices.map { it.toUi() },
-                            MainBluetoothDevicePromptPurpose.CLEAR_WATCH_LIBRARY
-                        )
-                    )
-                }
+            clearSmoothedSyncProgress()
+            sessionState.value = sessionState.value.copy(isBusy = true, error = null, syncStatusError = null)
+            val operation = WatchLibraryClearOperation(
+                probe = { callback -> bluetoothSyncManager.probeLibrarySyncTargets(callback, allowIpUpgrade = false) },
+                clear = { device, lease -> bluetoothSyncManager.clearWatchLibrary(device.address, lease); Unit },
+                onActive = { active -> if (active) bluetoothSyncManager.foregroundSyncStarted() else bluetoothSyncManager.foregroundSyncFinished() }
+            )
+            try {
+                operation.run(select = { devices ->
+                    val selection = CompletableDeferred<PhoneBluetoothWatchDevice?>()
+                    clearWatchSelection = selection
+                    clearWatchCandidates = devices
+                    sessionState.value = sessionState.value.copy(bluetoothDevicePrompt = MainBluetoothDevicePromptUi(
+                        devices.map { it.toUi() }, MainBluetoothDevicePromptPurpose.CLEAR_WATCH_LIBRARY))
+                    try { selection.await() } finally {
+                        clearWatchSelection = null
+                        clearWatchCandidates = emptyList()
+                    }
+                }, onState = { state ->
+                    val progress = when (state.phase) {
+                        WatchLibraryClearPhase.PROBING -> MainSyncProgressUi("探测手表中", 0, indeterminate = true)
+                        WatchLibraryClearPhase.CLEARING -> MainSyncProgressUi("正在清空手表资料库…", 0, indeterminate = true)
+                        else -> null
+                    }
+                    val message = when (state.phase) {
+                        WatchLibraryClearPhase.PROBING -> "正在查找手表…"
+                        WatchLibraryClearPhase.CLEARING -> "正在清空手表资料库…"
+                        WatchLibraryClearPhase.COMPLETE -> "${state.deviceName?.ifBlank { "手表" } ?: "手表"}资料库已清空"
+                        else -> null
+                    }
+                    sessionState.value = sessionState.value.copy(watchLibraryClear = state, syncProgress = progress,
+                        message = message, syncStatusMessage = message)
+                })
+                _toastEvent.tryEmit(sessionState.value.message ?: "手表资料库已清空")
+            } catch (failure: Throwable) {
+                if (failure is CancellationException) throw failure
+                _toastEvent.tryEmit("清空手表资料库失败")
+            } finally {
+                clearWatchSelection?.cancel()
+                clearWatchSelection = null
+                clearWatchCandidates = emptyList()
+                sessionState.value = sessionState.value.copy(isBusy = false, bluetoothDevicePrompt = null, syncProgress = null)
+                clearWatchJob = null
             }
         }
     }
+
+    /** Lead can attach this to the clear-specific cancel affordance. */
+    fun cancelWatchLibraryClear() { clearWatchJob?.cancel() }
 
     fun syncAccountByBluetooth() {
         viewModelScope.launch {
@@ -1122,7 +1149,7 @@ class MainViewModel(
             if (purpose == MainBluetoothDevicePromptPurpose.ACCOUNT) {
                 runAccountSync(device)
             } else if (purpose == MainBluetoothDevicePromptPurpose.CLEAR_WATCH_LIBRARY) {
-                runClearWatchLibrary(device)
+                clearWatchSelection?.complete(clearWatchCandidates.firstOrNull { it.address == device.address })
             } else {
                 val mode = when (purpose) {
                     MainBluetoothDevicePromptPurpose.PHONE_TO_WATCH_REPLACE -> LibrarySyncMode.PHONE_TO_WATCH_REPLACE
@@ -1139,6 +1166,8 @@ class MainViewModel(
     }
 
     fun dismissBluetoothDevicePrompt() {
+        if (sessionState.value.bluetoothDevicePrompt?.purpose == MainBluetoothDevicePromptPurpose.CLEAR_WATCH_LIBRARY)
+            clearWatchSelection?.complete(null)
         clearSmoothedSyncProgress()
         sessionState.value = sessionState.value.copy(
             bluetoothDevicePrompt = null,
@@ -1254,23 +1283,6 @@ class MainViewModel(
         conflictResolutionDeferred?.cancel()
         conflictResolutionDeferred = null
         sessionState.value = sessionState.value.copy(isBusy = false, conflictPrompt = null)
-    }
-
-    private suspend fun runClearWatchLibrary(device: MainBluetoothDeviceUi) {
-        sessionState.value = sessionState.value.copy(
-            isBusy = true,
-            message = "正在清空手表资料库…",
-            syncStatusMessage = "正在清空手表资料库…",
-            bluetoothDevicePrompt = null
-        )
-        runCatching { bluetoothSyncManager.clearWatchLibrary(device.address) }
-            .onSuccess { result ->
-                val message = "${result.deviceName.ifBlank { "手表" }}资料库已清空"
-                sessionState.value = sessionState.value.copy(message = message, syncStatusMessage = message)
-                _toastEvent.tryEmit(message)
-            }
-            .onFailure { throwable -> _toastEvent.tryEmit(throwable.message ?: "清空手表资料库失败") }
-        sessionState.value = sessionState.value.copy(isBusy = false)
     }
 
     private suspend fun runAccountSync(
@@ -1672,6 +1684,7 @@ class MainViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        clearWatchJob?.cancel()
         smoothedSyncProgressJob?.cancel()
         verificationTransitionJob?.cancel()
     }

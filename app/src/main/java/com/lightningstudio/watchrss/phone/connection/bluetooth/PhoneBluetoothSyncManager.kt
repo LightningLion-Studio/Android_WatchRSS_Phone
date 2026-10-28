@@ -21,6 +21,9 @@ import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundPreparation
 import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundTranscoder
 import android.os.SystemClock
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -50,7 +53,8 @@ data class PhoneBluetoothSyncResult(
 
 internal data class PhoneBluetoothProbeTargets(
     val devices: List<PhoneBluetoothWatchDevice>,
-    val sessionLease: PhoneSyncSession? = null
+    val sessionLease: PhoneSyncSession? = null,
+    val failureCode: String? = null
 )
 
 data class NoteSyncStats(
@@ -129,6 +133,10 @@ class PhoneBluetoothSyncManager(
     private val appContext = context.applicationContext
     private val assetHashes=NoteAssetHashCache(appContext.getSharedPreferences("watchrss_ble_asset_hashes",android.content.Context.MODE_PRIVATE))
     private val client = PhoneBluetoothSyncClient(appContext, debugLog)
+    // Radio boundary; production discovery and cancellation still run inside the manager IO deadline.
+    internal var probeDevices: suspend (String, Boolean, (Int, Int) -> Unit) -> PhoneBluetoothWatchProbeBatch = { id, ip, progress ->
+        client.probeLibrarySyncDevices(deviceId, id, allowIpUpgrade = ip, onProbe = { done, total, _ -> progress(done, total) })
+    }
     private val watchBackgroundTranscoder =
         WatchBackgroundTranscoder(context.applicationContext, readerPresetRepository)
 
@@ -181,7 +189,8 @@ class PhoneBluetoothSyncManager(
     }
 
     internal suspend fun probeLibrarySyncTargets(
-        onProbe: (completed: Int, total: Int) -> Unit = { _, _ -> }
+        onProbe: (completed: Int, total: Int) -> Unit = { _, _ -> },
+        allowIpUpgrade: Boolean = true
     ): PhoneBluetoothProbeTargets {
         val sessionId = BluetoothDebugLog.newSessionId("syncLibraryProbe")
         debugLog.appendEvent(
@@ -189,21 +198,20 @@ class PhoneBluetoothSyncManager(
             sessionId = sessionId,
             fields = mapOf("protocol" to LibrarySyncPayload.PROTOCOL_VERSION)
         )
+        val owner = currentCoroutineContext()[Job]
         return runCatching {
             withTimeout(LIBRARY_PROBE_TIMEOUT_MS) {
                 withContext(Dispatchers.IO) {
-                    client.probeLibrarySyncDevices(
-                        deviceId = deviceId,
-                        sessionId = sessionId,
-                        onProbe = { completed, total, _ ->
-                            onProbe(completed, total)
-                        }
-                    )
+                    probeDevices(sessionId, allowIpUpgrade, onProbe).also { batch ->
+                        batch.sessionLease?.bindCancellation(owner)
+                        currentCoroutineContext().ensureActive()
+                    }
                 }
             }.let { batch ->
                 PhoneBluetoothProbeTargets(
                     devices = batch.results.filter { it.reachable }.map { it.device },
-                    sessionLease = batch.sessionLease
+                    sessionLease = batch.sessionLease,
+                    failureCode = batch.results.firstOrNull { !it.reachable }?.failureCode
                 )
             }.also { targets ->
                     debugLog.appendEvent(
@@ -641,23 +649,31 @@ class PhoneBluetoothSyncManager(
         }.getOrThrow()
     }
 
-    suspend fun clearWatchLibrary(deviceAddress: String): PhoneBluetoothSyncResult {
+    internal suspend fun clearWatchLibrary(deviceAddress: String, syncSession: PhoneSyncSession? = null): PhoneBluetoothSyncResult {
         val sessionId = BluetoothDebugLog.newSessionId("clearWatchLibrary")
-        val exchange = exchange(
-            request = JSONObject().apply {
-                put("version", LibrarySyncPayload.PROTOCOL_VERSION)
-                put("action", BluetoothSyncProtocol.ACTION_CLEAR_LIBRARY)
-                put("nonce", System.currentTimeMillis().toString())
-            },
-            timeoutMs = LIBRARY_SYNC_TIMEOUT_MS,
-            sessionId = sessionId,
-            deviceAddress = deviceAddress
-        )
-        requireSuccess(exchange.response)
-        return PhoneBluetoothSyncResult(
-            deviceName = exchange.deviceName,
-            deviceAddress = exchange.deviceAddress
-        )
+        val request = JSONObject().put("version", LibrarySyncPayload.PROTOCOL_VERSION)
+            .put("action", BluetoothSyncProtocol.ACTION_CLEAR_LIBRARY).put("nonce", System.currentTimeMillis().toString())
+        debugLog.appendEvent("sync.clear.start",sessionId,fields=mapOf("reusableSession" to (syncSession != null)))
+        try {
+            val result = withTimeout(CLEAR_LIBRARY_TIMEOUT_MS) {
+                withContext(Dispatchers.IO) {
+                    val response = if (syncSession != null) {
+                        syncSession.exchangeApplied(request, sessionId, ::requireWatchLibraryCleared)
+                    } else client.exchange(request, deviceAddress = deviceAddress, sessionId = sessionId)
+                    requireWatchLibraryCleared(response.response)
+                    // The clear response is not the terminal frame of a persistent probe session.
+                    if (syncSession != null) withTimeout(5_000) { syncSession.complete("$sessionId-complete") }
+                    PhoneBluetoothSyncResult(response.deviceName, response.deviceAddress)
+                }
+            }
+            debugLog.appendEvent("sync.clear.complete",sessionId)
+            return result
+        } catch (failure: Throwable) {
+            val classified = watchLibraryClearFailure(failure, WatchLibraryClearPhase.CLEARING)
+            debugLog.appendEvent("sync.clear.failed",sessionId,fields=mapOf("errorCode" to classified.errorCode,"retryable" to classified.retryable))
+            if (failure is CancellationException && failure !is TimeoutCancellationException) throw failure
+            throw classified
+        } finally { syncSession?.close() }
     }
 
     internal suspend fun syncLibrary(
@@ -1814,6 +1830,7 @@ class PhoneBluetoothSyncManager(
     companion object {
         // Nine sequential ColorOS SDP probes can each consume a full PAGE timeout.
         private const val LIBRARY_PROBE_TIMEOUT_MS = 90_000L
+        private const val CLEAR_LIBRARY_TIMEOUT_MS = 75_000L
         private const val QUICK_EXCHANGE_TIMEOUT_MS = 30_000L
         // Allow the initial exchange plus the single supported recovery attempt.
         private const val LIBRARY_SYNC_TIMEOUT_MS =

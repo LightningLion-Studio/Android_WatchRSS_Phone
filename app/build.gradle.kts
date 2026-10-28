@@ -52,7 +52,7 @@ android {
         applicationId = "com.lightningstudio.watchrss.phone"
         minSdk = 30
         targetSdk = 36
-        versionCode = 105
+        versionCode = 107
         versionName = "1.3.0-47"
         // Implementation approval does not enable production writes or delegated conversion.
         buildConfigField("boolean", "CLOUD_FORMAT_R48_WRITE_V1", providers.gradleProperty("cloudFormatR48WriteV1").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")

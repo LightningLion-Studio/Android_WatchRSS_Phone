@@ -20,6 +20,8 @@ import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.DisposableHandle
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
 import com.lightningstudio.watchrss.phone.connection.ip.IpReadDeadline
@@ -89,7 +91,7 @@ private data class LibraryResponseRead(
 )
 
 internal fun isSessionOperationSafeForTransparentReplay(action: String): Boolean =
-    action != BluetoothSyncProtocol.ACTION_SYNC_LIBRARY && action != BluetoothSyncProtocol.ACTION_OPEN_PAIRING && action != "syncBooks" && action != "syncDomains"
+    action != BluetoothSyncProtocol.ACTION_CLEAR_LIBRARY && action != BluetoothSyncProtocol.ACTION_SYNC_LIBRARY && action != BluetoothSyncProtocol.ACTION_OPEN_PAIRING && action != "syncBooks" && action != "syncDomains"
 
 private class PreviewStreamStats {
     private var windowStartedAt = SystemClock.elapsedRealtime()
@@ -168,7 +170,8 @@ data class PhoneBluetoothWatchProbeResult(
     val device: PhoneBluetoothWatchDevice,
     val reachable: Boolean,
     val message: String? = null,
-    val capabilities: PhoneWatchCapabilities? = null
+    val capabilities: PhoneWatchCapabilities? = null,
+    val failureCode: String? = null
 )
 
 internal data class PhoneBluetoothWatchProbeBatch(
@@ -197,7 +200,7 @@ data class PhoneWatchCapabilities(
         get() = widthPx > 0 && heightPx > 0
 }
 
-private data class ProbeIdentity(
+internal data class ProbeIdentity(
     val deviceId: String,
     val capabilities: PhoneWatchCapabilities?,
     val ipUpgradeAccepted: Boolean,
@@ -230,11 +233,12 @@ internal class PhoneSyncSession internal constructor(
         val closeOnLegacyFallback: Boolean,
         private val closeTransport: () -> Unit
     ) : Closeable {
-        private var closed = false
+        @Volatile private var closed = false
 
         val isClosed: Boolean
             get() = closed
 
+        @Synchronized
         override fun close() {
             if (closed) return
             closed = true
@@ -245,7 +249,7 @@ internal class PhoneSyncSession internal constructor(
     internal var bindingProbe:JSONObject?=null
     internal var legacyFallback: Boolean = false
     internal val recoveryGate = SingleSessionRecoveryGate()
-    private var closed: Boolean = false
+    @Volatile private var closed: Boolean = false
 
     val isPersistent: Boolean
         get() = persistentAccepted && !closed
@@ -298,7 +302,9 @@ internal class PhoneSyncSession internal constructor(
         }
     }
 
+    @Synchronized
     internal fun replaceWith(replacement: PhoneSyncSession) {
+        if (closed) { replacement.close(); throw CancellationException("同步会话已取消") }
         transport?.close()
         transport = replacement.transport
         replacement.transport = null
@@ -310,11 +316,25 @@ internal class PhoneSyncSession internal constructor(
         device = replacement.device
     }
 
+    private val cancellationBindings = mutableListOf<DisposableHandle>()
+
+    @OptIn(InternalCoroutinesApi::class)
+    @Synchronized
+    internal fun bindCancellation(owner: Job?) {
+        if (closed || owner == null) return
+        val handle = owner.invokeOnCompletion(onCancelling = true, invokeImmediately = true) { cause ->
+            if (cause is CancellationException) close()
+        }
+        if (closed) handle.dispose() else cancellationBindings += handle
+    }
+
+    @Synchronized
     override fun close() {
         if (closed) return
         closed = true
-        transport?.close()
-        transport = null
+        cancellationBindings.forEach { it.dispose() }
+        cancellationBindings.clear()
+        try { transport?.close() } finally { transport = null }
     }
 }
 
@@ -324,6 +344,9 @@ class PhoneBluetoothSyncClient(
 ) {
     private val capabilitiesByAddress = mutableMapOf<String, PhoneWatchCapabilities>()
     private val connectionMutex = Mutex()
+    internal var probeSocketFactory: (BluetoothDevice) -> BluetoothSocket = {
+        it.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
+    }
 
     fun capabilitiesFor(deviceAddress: String): PhoneWatchCapabilities? =
         synchronized(capabilitiesByAddress) { capabilitiesByAddress[deviceAddress] }
@@ -349,6 +372,7 @@ class PhoneBluetoothSyncClient(
         deviceId: String,
         sessionId: String = BluetoothDebugLog.newSessionId("bt-library-probe"),
         perDeviceTimeoutMs: Long = DEFAULT_DEVICE_PROBE_TIMEOUT_MS,
+        allowIpUpgrade: Boolean = true,
         onProbe: (completed: Int, total: Int, result: PhoneBluetoothWatchProbeResult) -> Unit = { _, _, _ -> }
     ): PhoneBluetoothWatchProbeBatch {
         val startedAt = SystemClock.elapsedRealtime()
@@ -436,6 +460,8 @@ class PhoneBluetoothSyncClient(
         val results = mutableListOf<PhoneBluetoothWatchProbeResult>()
         var sessionLease: PhoneSyncSession? = null
         var stoppedAfterPrioritizedReachable = false
+        var handedOff = false
+        try {
         for ((index, device) in candidates.withIndex()) {
             val retainSession = shouldRetainProbeSession(
                 candidateCount = candidates.size,
@@ -448,11 +474,15 @@ class PhoneBluetoothSyncClient(
                 deviceId = deviceId,
                 sessionId = "$sessionId-${index + 1}",
                 timeoutMs = perDeviceTimeoutMs,
-                retainSession = retainSession
+                retainSession = retainSession,
+                allowIpUpgrade = allowIpUpgrade
             )
             val result = probed.result
             results += result
-            sessionLease = probed.sessionLease ?: sessionLease
+            probed.sessionLease?.let { next ->
+                if (sessionLease !== next) sessionLease?.close()
+                sessionLease = next
+            }
             onProbe(index + 1, candidates.size, result)
             if (
                 shouldStopAfterPrioritizedWatchProbe(
@@ -494,7 +524,9 @@ class PhoneBluetoothSyncClient(
             sessionLease?.close()
             sessionLease = null
         }
-        return PhoneBluetoothWatchProbeBatch(results, sessionLease)
+        currentCoroutineContext().ensureActive()
+        return PhoneBluetoothWatchProbeBatch(results, sessionLease).also { handedOff = true }
+        } finally { if (!handedOff) sessionLease?.close() }
     }
 
     @SuppressLint("MissingPermission")
@@ -821,6 +853,7 @@ class PhoneBluetoothSyncClient(
     ): T {
         val cancellationHandle = installSessionCancellationLogger(session, sessionId, action)
         try {
+            currentCoroutineContext().ensureActive()
             return block()
         } catch (throwable: Throwable) {
             if (throwable is LibrarySyncRejectedException) session.close()
@@ -881,6 +914,7 @@ class PhoneBluetoothSyncClient(
         )
         try {
             socket = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
+            currentCoroutineContext().ensureActive()
             connectLogged(socket, sessionId, device)
             var request = initialRequest
             writeFrameLogged(socket, sessionId, "previewFrame", request)
@@ -1071,9 +1105,11 @@ class PhoneBluetoothSyncClient(
                 sessionId = sessionId,
                 fields = deviceFields(device) + mapOf("elapsedMs" to elapsedSince(createStartedAt))
             )
+            currentCoroutineContext().ensureActive()
             connectLogged(socket, sessionId, device)
             writeFrameLogged(socket, sessionId, "request", request)
             val response = readFrameLogged(socket, sessionId, "response")
+            if (request.optString("action") == BluetoothSyncProtocol.ACTION_CLEAR_LIBRARY) requireWatchLibraryCleared(response)
             writeResponseAck(socket, sessionId, success = true, applied = true)
             if (rememberDeviceOnSuccess) {
                 rememberSuccessfulDevice(device, sessionId)
@@ -1128,6 +1164,7 @@ class PhoneBluetoothSyncClient(
         try {
             writeFrameLogged(ipSession.outputStream, sessionId, "request", request)
             val response = readFrameLogged(ipSession.inputStream, sessionId, "response")
+            if (request.optString("action") == BluetoothSyncProtocol.ACTION_CLEAR_LIBRARY) requireWatchLibraryCleared(response)
             writeResponseAck(ipSession.outputStream, sessionId, success = true, applied = true)
             debugLog.appendEvent(
                 event = "ip.exchange.complete",
@@ -1760,7 +1797,8 @@ class PhoneBluetoothSyncClient(
         deviceId: String,
         sessionId: String,
         timeoutMs: Long,
-        retainSession: Boolean
+        retainSession: Boolean,
+        allowIpUpgrade: Boolean = true
     ): ProbedWatch {
         debugLog.appendEvent(
             event = "bt.library.probe.device.start",
@@ -1772,14 +1810,19 @@ class PhoneBluetoothSyncClient(
                 device = device,
                 deviceId = deviceId,
                 sessionId = sessionId,
-                fallbackTimeoutMs = timeoutMs
+                fallbackTimeoutMs = timeoutMs,
+                allowIpUpgrade = allowIpUpgrade
             )
         }
+        if (result.exceptionOrNull() is CancellationException) currentCoroutineContext().ensureActive()
         val identity = result.getOrNull()
-        val ipSession = identity
+        var ipSession: PhoneIpSyncSession? = null
+        var sessionLease = identity?.session
+        var handedOff = false
+        try {
+        ipSession = identity
             ?.takeIf { it.ipUpgradeAccepted && it.deviceId.isNotBlank() }
             ?.let { awaitIpSession(it.deviceId, IP_UPGRADE_WAIT_MS) }
-        var sessionLease = identity?.session
         if (ipSession != null && sessionLease != null) {
             runCatching { sessionLease.complete("$sessionId-rfcomm-upgrade") }
             sessionLease.close()
@@ -1832,7 +1875,8 @@ class PhoneBluetoothSyncClient(
                 PhoneBluetoothWatchProbeResult(
                     device = device.toWatchDevice(),
                     reachable = false,
-                    message = probeFailureMessage(throwable)
+                    message = probeFailureMessage(throwable),
+                    failureCode = watchLibraryClearFailure(throwable, WatchLibraryClearPhase.PROBING).errorCode
                 )
             }
         )
@@ -1852,16 +1896,22 @@ class PhoneBluetoothSyncClient(
                 "message" to probe.message.orEmpty()
             )
         )
-        return ProbedWatch(probe, sessionLease)
+        sessionLease?.bindCancellation(currentCoroutineContext()[Job])
+        currentCoroutineContext().ensureActive()
+        return ProbedWatch(probe, sessionLease).also { handedOff = true }
+        } finally {
+            if (!handedOff) { sessionLease?.close(); ipSession?.close() }
+        }
     }
 
     private suspend fun probeLibrarySyncDeviceWithManifestFallback(
         device: BluetoothDevice,
         deviceId: String,
         sessionId: String,
-        fallbackTimeoutMs: Long
+        fallbackTimeoutMs: Long,
+        allowIpUpgrade: Boolean = true
     ): ProbeIdentity {
-        val direct = probeDirectWithPersistentSessionSdpRecovery(device, deviceId, sessionId)
+        val direct = probeDirectWithPersistentSessionSdpRecovery(device, deviceId, sessionId, allowIpUpgrade)
         if (direct != null) {
             debugLog.appendEvent(
                 event = "bt.library.probe.direct.success",
@@ -1909,6 +1959,7 @@ class PhoneBluetoothSyncClient(
         sessionId: String,
         allowIpUpgrade:Boolean=true
     ): ProbeIdentity? {
+        val owner = currentCoroutineContext()[Job]
         var fastFailureRetries = 0
         while (true) {
             val attempt = fastFailureRetries + 1
@@ -1918,11 +1969,17 @@ class PhoneBluetoothSyncClient(
             } else {
                 "$sessionId-direct-retry${attempt - 1}"
             }
+            var pending: ProbeIdentity? = null
             val result = runCatching {
                 withTimeout(DIRECT_PROBE_TIMEOUT_MS) {
-                    probeDirectPersistentOnce(device, deviceId, attemptSessionId,allowIpUpgrade)
+                    probeDirectPersistentOnce(device, deviceId, attemptSessionId, allowIpUpgrade).also {
+                        pending = it
+                        it?.session?.bindCancellation(owner)
+                        currentCoroutineContext().ensureActive()
+                    }
                 }
             }
+            if (result.isFailure) pending?.session?.close()
             if (result.isSuccess) return result.getOrThrow()
             val throwable = result.exceptionOrNull() ?: error("蓝牙探测失败但没有异常")
             if (throwable is CancellationException) currentCoroutineContext().ensureActive()
@@ -1953,16 +2010,23 @@ class PhoneBluetoothSyncClient(
     }
 
     @SuppressLint("MissingPermission")
-    private fun probeDirectPersistentOnce(
+    internal suspend fun probeDirectPersistentOnce(
         device: BluetoothDevice,
         deviceId: String,
         sessionId: String,
         allowIpUpgrade:Boolean=true
     ): ProbeIdentity? {
         var socket: BluetoothSocket? = null
+        var cancellationHandle: DisposableHandle? = null
+        var transferred: PhoneSyncSession? = null
+        var stage = "connect"
         return try {
-            socket = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
-            connectLogged(socket, sessionId, device)
+            val created = probeSocketFactory(device)
+            socket = created
+            cancellationHandle = installSocketCancellationLogger(sessionId, "directProbe") { created }
+            currentCoroutineContext().ensureActive()
+            connectLogged(created, sessionId, device)
+            stage = "read"
             val request = BluetoothSyncProtocol.withPersistentSessionRequest(
                 LibrarySyncPayload.buildProbeRequest(deviceId)
             ).apply {
@@ -2001,6 +2065,7 @@ class PhoneBluetoothSyncClient(
                             response,
                             connectedSocket
                         ).also {
+                            transferred = it
                             socket = null
                         }
                     } else {
@@ -2010,7 +2075,13 @@ class PhoneBluetoothSyncClient(
                     }
                 )
             }
+        } catch (failure: Throwable) {
+            currentCoroutineContext().ensureActive()
+            if (failure is IOException) throw ProbeTransportException(stage, failure)
+            throw failure
         } finally {
+            cancellationHandle?.dispose()
+            if (!currentCoroutineContext().isActive) transferred?.close()
             socket?.let { closeSocketLogged(it, sessionId, "probe") }
         }
     }
@@ -2632,6 +2703,7 @@ class PhoneBluetoothSyncClient(
             val createStartedAt = SystemClock.elapsedRealtime()
             val candidate = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
             onSocketChanged(candidate)
+            currentCoroutineContext().ensureActive()
             debugLog.appendEvent(
                 event = "bt.socket.create.success",
                 sessionId = sessionId,
@@ -2890,7 +2962,7 @@ class PhoneBluetoothSyncClient(
         action: String
     ) = currentCoroutineContext()[Job]?.invokeOnCompletion(
         onCancelling = true,
-        invokeImmediately = false
+        invokeImmediately = true
     ) { cause ->
         if (cause !is CancellationException) return@invokeOnCompletion
         val transport = session.transport ?: return@invokeOnCompletion
@@ -2914,7 +2986,7 @@ class PhoneBluetoothSyncClient(
         socketProvider: () -> BluetoothSocket?
     ) = currentCoroutineContext()[Job]?.invokeOnCompletion(
         onCancelling = true,
-        invokeImmediately = false
+        invokeImmediately = true
     ) { cause ->
         if (cause !is CancellationException) return@invokeOnCompletion
         val socket = socketProvider() ?: return@invokeOnCompletion

@@ -39,7 +39,7 @@ class BookSessionIsolationTest {
         .put("sourceUrl",fixture.getString("sourceUrl")).put("kind","txt").put("deletedChapters",JSONArray()).put("deletionClock",0).put("deleted",false).put("deletedAt",0).put("updatedAt",1).put("sourceDeviceId","cli").put("contentAvailable",true)
     private fun reply(action:String,phase:String)=JSONObject().put("success",true).put("action",action).put("phase",phase).put("version",if(action=="syncDomains")2 else if(action=="syncBooks")1 else 14).put("deviceId","watch")
     @After fun close(){scope.cancel();db.close();root.deleteRecursively()}
-    private suspend fun runSession(invalid:Boolean):PhoneBluetoothSyncResult {
+    private suspend fun runSession(invalid:Boolean,fatalLibrary:Boolean=false):PhoneBluetoothSyncResult {
         books.manifests()
         repo.markLibrarySyncSuccess("watch",0,0,14,true,true,domains.libraryDefinition())
         val initial=domains.roots("account");val remote=BleDomainStore.DOMAINS.associateWith{"b".repeat(64)}
@@ -57,7 +57,8 @@ class BookSessionIsolationTest {
                         "probe"->reply(action,phase).put("account",JSONObject().put("bound",true).put("userIdHash",CloudSnapshotCodec.sha256("owner".toByteArray())))
                             .put("supportsPersistentSession",true).put("persistentSessionAccepted",true).advertiseBleSyncV2()
                         "cursor"->LibrarySyncPayload.buildCursorResponse("watch",LibrarySyncCursor(0,0,0))
-                        "manifest"->LibrarySyncPayload.buildManifestRequestFromEntries("watch",emptyList(),emptyList()).put("success",true)
+                        "manifest"->if(fatalLibrary)reply(action,phase).put("success",false).put("fatalSession",true).put("errorCode","library_exchange_failed")
+                            else LibrarySyncPayload.buildManifestRequestFromEntries("watch",emptyList(),emptyList()).put("success",true)
                         "articles","complete"->reply(action,"complete").put("articles",JSONArray())
                         else->error("unexpected library phase $phase")
                     }.put("supportsReaderPresets",false).put("supportsNoteManifestV2",false).put("supportsNoteAssetInventory",false).put("supportsBookReadingDeltaV1",phase=="probe")
@@ -101,6 +102,14 @@ class BookSessionIsolationTest {
         assertFalse(commit.getJSONArray("completedDomains").toString().contains("\"books\""))
         assertFalse(domains.receipts("scope","watch").containsKey("books"));assertTrue(db.bookDao().chapters().isEmpty())
         assertTrue(log.snapshot().contains("sync.book.isolated"));assertFalse(log.snapshot().contains("javascript:"))
+    }
+    @Test fun isolatedBookDoesNotDowngradeFatalLibraryToWarningOrPublishDomainReceipts()=runBlocking<Unit> {
+        val failure=runCatching{runSession(true,fatalLibrary=true)}.exceptionOrNull()
+        assertTrue("fatal library must fail even after isolated book: $failure",failure is IllegalArgumentException)
+        assertTrue(log.snapshot().contains("sync.book.isolated"))
+        assertFalse(frames.any{it.optString("action")=="syncDomains"&&it.optString("phase")=="commit"})
+        assertFalse(frames.any{it.optString("action")=="syncSession"&&it.optString("phase")=="complete"})
+        assertFalse(domains.receipts("scope","watch").containsKey("library"))
     }
     @Test fun realCliPackageContinuesAllPhasesAndHasNoBookWarning()=runBlocking<Unit> {
         val result=runSession(false)

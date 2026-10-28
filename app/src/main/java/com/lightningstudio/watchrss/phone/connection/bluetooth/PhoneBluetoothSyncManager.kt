@@ -1017,6 +1017,10 @@ class PhoneBluetoothSyncManager(
                 sentArticles = (sentArticles + resolved).distinctBy { it.articleId }
                 debugLog.appendEvent("sync.library.conflict.returned", sessionId, mapOf("count" to resolved.size))
             }
+            // Defense at the durability boundary as well as in the transport's per-frame reader.
+            // Rejections must never publish cursor/known-manifest/echo or global domain proofs.
+            requireSuccess(exchange.manifestResponse)
+            requireSuccess(exchange.response)
             onLibraryManifest(exchange.manifestResponse)
             val window = syncWindow ?: error("同步窗口尚未准备")
             // Only a successful library response ACK may publish peer cursors/echo proof.
@@ -1771,7 +1775,7 @@ class PhoneBluetoothSyncManager(
     }
 
     private fun requireSuccess(response: JSONObject) {
-        require(response.optBoolean("success")) {
+        require(response.optBoolean("success") && !response.optBoolean("fatalSession", false)) {
             watchBluetoothFailureMessage(response)
         }
     }
@@ -1831,6 +1835,9 @@ class PhoneBluetoothSyncManager(
 
 internal fun watchBluetoothFailureMessage(response: JSONObject): String {
     val code = response.optString("error").ifBlank { response.optString("errorCode") }
+    if (response.optBoolean("fatalSession", false) || code == "library_exchange_failed") {
+        return "手表资料库同步失败，可直接点“同步”重试。"
+    }
     return watchAccountConflictMessage(code) ?: response.optString("message").ifBlank { "手表返回蓝牙同步失败" }
 }
 

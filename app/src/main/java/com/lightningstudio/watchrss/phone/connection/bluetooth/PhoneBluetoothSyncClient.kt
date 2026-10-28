@@ -65,6 +65,16 @@ data class BluetoothLibrarySyncExchange(
     val response: JSONObject
 )
 
+/** A protocol rejection is not a reconnectable IO error and cannot confirm any cursor. */
+private class LibrarySyncRejectedException(response: JSONObject) :
+    IllegalArgumentException(watchBluetoothFailureMessage(response))
+
+private fun requireLibraryFrameAccepted(response: JSONObject) {
+    if (!response.optBoolean("success", true) || response.optBoolean("fatalSession", false)) {
+        throw LibrarySyncRejectedException(response)
+    }
+}
+
 private data class LibraryFrameStats(
     val frameCount: Int,
     val totalBytes: Long,
@@ -813,6 +823,7 @@ class PhoneBluetoothSyncClient(
         try {
             return block()
         } catch (throwable: Throwable) {
+            if (throwable is LibrarySyncRejectedException) session.close()
             // Socket close caused by cancellation must retain the timeout/cancel cause.
             currentCoroutineContext().ensureActive()
             if (
@@ -1276,6 +1287,7 @@ class PhoneBluetoothSyncClient(
             val cursorResponse = cursorRequest?.let { cursorPayload ->
                 writeFrameLogged(connectedSocket, sessionId, "cursorRequest", cursorPayload, tracker)
                 readFrameLogged(connectedSocket, sessionId, "cursorResponse", tracker).also { response ->
+                    requireLibraryFrameAccepted(response)
                     require(response.optBoolean("success", false)) {
                         response.optString("message").ifBlank { "手表游标握手失败" }
                     }
@@ -1307,25 +1319,7 @@ class PhoneBluetoothSyncClient(
             }
             report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
             val manifestResponse = readManifestFrames(connectedSocket.inputStream, sessionId, tracker)
-            if (!manifestResponse.optBoolean("success", true)) {
-                debugLog.appendEvent(
-                    event = "bt.library.manifest.rejected",
-                    sessionId = sessionId,
-                    fields = payloadFields("manifestResponse", manifestResponse) +
-                        mapOf("elapsedMs" to elapsedSince(totalStartedAt))
-                )
-                writeResponseAck(connectedSocket, sessionId, success = true, applied = true)
-                return BluetoothLibrarySyncExchange(
-                    deviceName = device.name.orEmpty(),
-                    deviceAddress = device.address,
-                    cursorResponse = cursorResponse,
-                    request = request,
-                    manifestResponse = manifestResponse,
-                    articleRequestFrameCount = 0,
-                    responseFrameCount = 1,
-                    response = manifestResponse
-                )
-            }
+            // Every manifest frame was validated before any success ACK or callback.
             val supportsArticleBatches = manifestResponse.optBoolean("supportsArticleBatches", false)
             var articleRequestStats = EMPTY_FRAME_STATS
             var articleRequestFrameCount = 0
@@ -1478,6 +1472,7 @@ class PhoneBluetoothSyncClient(
             val cursorResponse = cursorRequest?.let { cursorPayload ->
                 writeFrameLogged(ipSession.outputStream, sessionId, "cursorRequest", cursorPayload, tracker)
                 readFrameLogged(ipSession.inputStream, sessionId, "cursorResponse", tracker).also { response ->
+                    requireLibraryFrameAccepted(response)
                     require(response.optBoolean("success", false)) {
                         response.optString("message").ifBlank { "手表游标握手失败" }
                     }
@@ -1513,24 +1508,7 @@ class PhoneBluetoothSyncClient(
                 tracker,
                 initialIdleTimeoutMs=if(request.optBoolean("fullSnapshot",true))90_000 else 20_000
             )
-            if (!manifestResponse.optBoolean("success", true)) {
-                writeResponseAck(
-                    ipSession.outputStream,
-                    sessionId,
-                    success = true,
-                    applied = true
-                )
-                return BluetoothLibrarySyncExchange(
-                    deviceName = "WatchRSS 手表",
-                    deviceAddress = ipAddress,
-                    cursorResponse = cursorResponse,
-                    request = request,
-                    manifestResponse = manifestResponse,
-                    articleRequestFrameCount = 0,
-                    responseFrameCount = 1,
-                    response = manifestResponse
-                )
-            }
+            // Every manifest frame was validated before any success ACK or callback.
             val supportsArticleBatches = manifestResponse.optBoolean("supportsArticleBatches", false)
             val articleRequests = buildArticleRequests(manifestResponse, supportsArticleBatches)
             val articleRequestStats = frameStats(articleRequests)
@@ -1665,6 +1643,7 @@ class PhoneBluetoothSyncClient(
             "sessionCursorResponse",
             tracker
         ).also { response ->
+            requireLibraryFrameAccepted(response)
             require(response.optBoolean("success", false)) {
                 response.optString("message").ifBlank { "手表游标握手失败" }
             }
@@ -1694,19 +1673,7 @@ class PhoneBluetoothSyncClient(
         }
         report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
         val manifestResponse = readManifestFrames(transport.inputStream, sessionId, tracker,initialIdleTimeoutMs=if(request.optBoolean("fullSnapshot",true))90_000 else 20_000)
-        if (!manifestResponse.optBoolean("success", true)) {
-            writeResponseAck(transport.outputStream, sessionId, success = true, applied = true)
-            return BluetoothLibrarySyncExchange(
-                deviceName = session.device.name,
-                deviceAddress = session.device.address,
-                cursorResponse = cursorResponse,
-                request = request,
-                manifestResponse = manifestResponse,
-                articleRequestFrameCount = 0,
-                responseFrameCount = 1,
-                response = manifestResponse
-            )
-        }
+        // Every manifest frame was validated before any success ACK or callback.
         val supportsArticleBatches = manifestResponse.optBoolean("supportsArticleBatches", false)
         val articleRequests = buildArticleRequests(manifestResponse, supportsArticleBatches)
         val articleRequestStats = frameStats(articleRequests)
@@ -2233,12 +2200,7 @@ class PhoneBluetoothSyncClient(
                 responseWireBytesRead += bytes
             }
         )
-        if (!first.optBoolean("success", true)) {
-            return LibraryResponseRead(
-                response = first,
-                stats = frameStats(first)
-            )
-        }
+        requireLibraryFrameAccepted(first)
         val batchCount = validateBatchFrame(
             frame = first,
             label = "libraryResponse",
@@ -2271,6 +2233,7 @@ class PhoneBluetoothSyncClient(
                     }
                 }
             )
+            requireLibraryFrameAccepted(frame)
             validateBatchFrame(
                 frame = frame,
                 label = "libraryResponse",
@@ -2313,7 +2276,7 @@ class PhoneBluetoothSyncClient(
             label = "manifestResponse",
             byteTracker = byteTracker
         )
-        if (!first.optBoolean("success", true)) return first
+        requireLibraryFrameAccepted(first)
         val batchCount = LibrarySyncPayload.manifestBatchCount(first)
         if (batchCount <= 1) return first
         val frames = ArrayList<JSONObject>(batchCount)
@@ -2324,7 +2287,7 @@ class PhoneBluetoothSyncClient(
                 sessionId = sessionId,
                 label = batchLabel("manifestResponse", index, batchCount),
                 byteTracker = byteTracker
-            )
+            ).also(::requireLibraryFrameAccepted)
         }
         return LibrarySyncPayload.combineManifestFrames(frames)
     }

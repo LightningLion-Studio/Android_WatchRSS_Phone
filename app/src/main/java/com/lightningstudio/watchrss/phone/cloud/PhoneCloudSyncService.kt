@@ -1145,7 +1145,7 @@ class PhoneCloudSyncService(
                 if (!keyManager.hasAccountKey(session.userId)) {
                     bootstrap = requestDeviceApproval(syncEpoch)
                     if (!acceptDeviceApproval()) {
-                        error("当前设备尚未获得云端解密密钥，请在旧设备批准后重试")
+                        error("当前设备尚未获得云端解密密钥，请在其他已登录设备上批准后重试")
                     }
                     bootstrap = client.bootstrap(session)
                     checkCloudEpoch(session, syncEpoch)

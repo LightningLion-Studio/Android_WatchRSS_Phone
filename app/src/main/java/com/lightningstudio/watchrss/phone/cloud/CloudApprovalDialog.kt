@@ -72,7 +72,7 @@ internal fun CloudApprovalDialog(service: PhoneCloudSyncService, onAuthorized: (
                         if (!state.locallyConfirmed) Text("两边完全一致时，请在两台设备上都点“一致”。",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    else -> Text("请打开已登录同一账号的手机 App 或微信小程序，按提示开始核对。\n\n此页面保持打开，5 分钟内有效。")
+                    else -> Text("请在另一台已登录本账号的设备（手机 App 或微信小程序）上打开腕上RSS，稍等会弹出授权提示，按提示核对授权码。\n\n此页面请保持打开，5 分钟内有效。")
                 }
             }
         },

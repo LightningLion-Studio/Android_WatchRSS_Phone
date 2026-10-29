@@ -74,7 +74,7 @@ class WatchPairingActivity : ComponentActivity() {
                 WatchPairingScreen(
                     viewModel = viewModel,
                     onClose = { viewModel.cancel(); finish() },
-                    onOpenCloudSync = { startActivity(AccountActivity.createIntent(this, section = AccountSection.CLOUD_SYNC)) }
+                    onOpenCloudSync = { startActivity(AccountActivity.createIntent(this, section = AccountSection.CLOUD_SYNC, returnWhenCloudReady = true)) }
                 )
             }
         }
@@ -110,6 +110,8 @@ private fun WatchPairingScreen(viewModel: WatchPairingViewModel, onClose: () -> 
         val permission = (state as? WatchPairingState.Scanning)?.permission
         if ((permission == PairingCameraPermission.BLOCKED || permission == PairingCameraPermission.DENIED) && granted())
             viewModel.onCameraPermissionResult(true)
+        // Back from recovering the cloud key: carry on to the camera instead of making the user start over.
+        if (state is WatchPairingState.NeedsKey) viewModel.retry()
     }
     BackHandler(onBack = onClose)
     // Opening this page already asks the watch to show its code; the model ignores repeats on recreation.

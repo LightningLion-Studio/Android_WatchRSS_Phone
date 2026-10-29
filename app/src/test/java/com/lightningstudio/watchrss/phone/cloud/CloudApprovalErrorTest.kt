@@ -11,7 +11,7 @@ class CloudApprovalErrorTest {
     }
     @Test fun `unknown server and network errors never expose raw internals`() {
         for (message in listOf("HTTP 502: <html>internal proxy path</html>", "socket reset /private/path")) {
-            assertEquals("暂时无法请求旧设备批准，请检查网络后重试", cloudApprovalRequestError(IOException(message)))
+            assertEquals("暂时无法发起授权请求，请检查网络后重试", cloudApprovalRequestError(IOException(message)))
         }
     }
     @Test fun `rate limit gets actionable message`() {

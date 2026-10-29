@@ -296,7 +296,7 @@ fun CloudAccountPanel(
                     onClick = { showApprovalDialog = true },
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth()
-                ) { Text("请求旧设备批准") }
+                ) { Text("请已登录的设备批准") }
                 RecoveryInputPrivacy {
                     OutlinedTextField(
                         keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),

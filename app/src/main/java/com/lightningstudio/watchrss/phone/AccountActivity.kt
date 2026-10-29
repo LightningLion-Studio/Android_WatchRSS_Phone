@@ -139,6 +139,7 @@ class AccountActivity : ComponentActivity() {
         val accountRepository = container.accountRepository
         val passkeyCoordinator = PhonePasskeyCoordinator(this, accountRepository)
         val finishAfterLogin = intent.getBooleanExtra(EXTRA_FINISH_AFTER_LOGIN, false)
+        val returnWhenCloudReady = intent.getBooleanExtra(EXTRA_RETURN_WHEN_CLOUD_READY, false)
 
         setContent {
             WatchRssPhoneTheme {
@@ -156,6 +157,7 @@ class AccountActivity : ComponentActivity() {
                     rssSources = rssSources,
                     usageTelemetry = container.usageTelemetry,
                     onBack = ::finish,
+                    returnWhenCloudReady = returnWhenCloudReady,
                     onLoginComplete = {
                         if (finishAfterLogin) {
                             lifecycleScope.launch {
@@ -195,13 +197,16 @@ class AccountActivity : ComponentActivity() {
 
     companion object {
         private const val EXTRA_SECTION = "account_section"
+        private const val EXTRA_RETURN_WHEN_CLOUD_READY = "return_when_cloud_ready"
         private const val EXTRA_FINISH_AFTER_LOGIN =
             "com.lightningstudio.watchrss.phone.extra.FINISH_AFTER_LOGIN"
 
-        fun createIntent(context: Context, finishAfterLogin: Boolean = false, section: AccountSection = AccountSection.ROOT): Intent =
+        fun createIntent(context: Context, finishAfterLogin: Boolean = false, section: AccountSection = AccountSection.ROOT,
+            returnWhenCloudReady: Boolean = false): Intent =
             Intent(context, AccountActivity::class.java).apply {
                 putExtra(EXTRA_FINISH_AFTER_LOGIN, finishAfterLogin)
                 putExtra(EXTRA_SECTION, section.name)
+                putExtra(EXTRA_RETURN_WHEN_CLOUD_READY, returnWhenCloudReady)
             }
     }
 }
@@ -225,6 +230,15 @@ private enum class LoginMethod(val label: String, val supportingText: String, va
     PASSKEY("通行密钥", "使用指纹、人脸或设备屏幕锁。", "passkey")
 }
 
+/** Phone accounts always have SMS; a password is the most common second factor. */
+private fun nextLoginMethod(current: LoginMethod, completed: List<String>): LoginMethod? {
+    val order = when (current) {
+        LoginMethod.OTP -> listOf(LoginMethod.PASSWORD, LoginMethod.TOTP, LoginMethod.PASSKEY)
+        else -> listOf(LoginMethod.OTP, LoginMethod.PASSWORD, LoginMethod.TOTP, LoginMethod.PASSKEY)
+    }
+    return order.firstOrNull { it != current && it.factorName !in completed }
+}
+
 private enum class SecurityVerificationPurpose {
     DISABLE_TWO_FACTOR,
     UPDATE_PASSWORD,
@@ -246,7 +260,9 @@ internal fun AccountScreen(
     createPasskey: suspend () -> Unit,
     runAction: (suspend () -> Unit) -> Unit,
     leadingPane: (@Composable () -> Unit)? = null,
-    initialSection: AccountSection = AccountSection.ROOT
+    initialSection: AccountSection = AccountSection.ROOT,
+    /** Opened from watch pairing for the cloud key: go straight back once the key exists, and Back returns there too. */
+    returnWhenCloudReady: Boolean = false
 ) {
     val session by accountRepository.session.collectAsState()
     val context = LocalContext.current
@@ -518,7 +534,17 @@ internal fun AccountScreen(
                     tipManager?.recordEvent(TipEvents.ACCOUNT_SIGNED_IN)
                     onLoginComplete()
                 } ?: run {
-                    message = "已完成一种验证方式，请再选择另一种不同方式。"
+                    // Two-step sign-in: move straight to the next factor instead of
+                    // leaving the user on the one that just succeeded.
+                    val done = progress.completedFactors
+                    val next = nextLoginMethod(loginMethod, done)
+                    if (next != null) {
+                        loginMethod = next
+                        password = ""
+                        otp = ""
+                    }
+                    message = if (next != null) "第一步已通过，请继续用${next.label}完成第二步验证。"
+                    else "已完成一种验证方式，请再选择另一种不同方式。"
                 }
             }
             val loginMethodPicker: @Composable (Modifier) -> Unit = { modifier ->
@@ -1014,11 +1040,21 @@ internal fun AccountScreen(
     }
 
     fun leaveCloudSync() {
+        if (returnWhenCloudReady) { onBack(); return }
         if (page != AccountPage.CLOUD_SYNC || paneTransition != null) return
         if (showCloudInventory) { showCloudInventory = false; return }
         page = AccountPage.ROOT
         if (leadingPane != null) {
             completePaneTransition(AccountPaneTransition.CLOSING_CLOUD)
+        }
+    }
+
+    if (returnWhenCloudReady) {
+        LaunchedEffect(session?.userId) {
+            while (session != null) {
+                if (cloudSyncService.hasLocalAccountKey()) { onBack(); break }
+                delay(800)
+            }
         }
     }
 

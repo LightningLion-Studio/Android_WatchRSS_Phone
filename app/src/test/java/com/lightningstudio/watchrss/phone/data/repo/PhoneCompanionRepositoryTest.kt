@@ -2673,6 +2673,7 @@ class PhoneCompanionRepositoryTest {
 
     private class FakePhoneSavedItemDao : PhoneSavedItemDao {
         var items: List<PhoneSavedItemEntity> = emptyList()
+        override suspend fun hasAny() = items.isNotEmpty()
 
         override fun observeByType(type: String): Flow<List<PhoneSavedItemEntity>> = emptyFlow()
 
@@ -2768,6 +2769,7 @@ class PhoneCompanionRepositoryTest {
     }
 
     private class FakePhoneArticleDao : PhoneArticleDao {
+        override suspend fun hasAny() = items.isNotEmpty()
         override suspend fun getBodyMetadataById(articleId:String)=getById(articleId)?.copy(contentHtml=null,contentText="")
         override suspend fun getAllBodyMetadata()=items.map { it.copy(contentHtml=null,contentText="") }
         override suspend fun getBodyMetadataBySource(rssSourceUrl:String)=getByRssSourceUrl(rssSourceUrl).map { it.copy(contentHtml=null,contentText="") }
@@ -2931,6 +2933,7 @@ class PhoneCompanionRepositoryTest {
 
     private class FakePhoneRssSourceDao : PhoneRssSourceDao {
         var sources: List<PhoneRssSourceEntity> = emptyList()
+        override suspend fun hasAny() = sources.isNotEmpty()
         override suspend fun cloudRecordPage(after: String, limit: Int): List<PhoneRssSourceEntity> =
             sources.filter { it.url > after }.sortedBy { it.url }.take(limit)
 

@@ -2,7 +2,13 @@ package com.lightningstudio.watchrss.phone.pairing
 
 import com.lightningstudio.watchrss.phone.account.*
 import com.lightningstudio.watchrss.phone.cloud.*
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
+import java.net.ServerSocket
+import java.net.Socket
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.CountDownLatch
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ResponseBody.Companion.toResponseBody
@@ -62,5 +68,43 @@ class PairingHttpTest {
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("ok").body(body.toString().toResponseBody()).build()
         }.build())
         assertEquals("confirmed",client.bootstrap(session).devices.single().watchSelfRegisteredAt)
+    }
+    @Test fun cancellationClosesRealCallWhileWaitingForHeadersOrForStalledBody()=runBlocking {
+        for(bodyStarted in listOf(false,true)) {
+            val server=ServerSocket(0);val failed=CountDownLatch(1);val received=CountDownLatch(1)
+            val accepted=AtomicReference<Socket>();val executor=Executors.newSingleThreadExecutor()
+            val peer=executor.submit<Boolean> {
+                server.accept().use {socket->
+                    accepted.set(socket);socket.soTimeout=2000
+                    val input=socket.getInputStream();val header=StringBuilder()
+                    while(!header.endsWith("\r\n\r\n")) {val value=input.read();check(value>=0);header.append(value.toChar())}
+                    repeat(2){check(input.read()>=0)} // The complete two-byte {} request body.
+                    if(bodyStarted) {socket.getOutputStream().write("HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n".toByteArray());socket.getOutputStream().flush()}
+                    received.countDown()
+                    input.read()==-1 // Cancellation must actually close the socket, not only the coroutine.
+                }
+            }
+            val client=OkHttpClient.Builder().eventListener(object:EventListener(){
+                override fun callFailed(call:Call,ioe:java.io.IOException){failed.countDown()}
+            }).build()
+            try {
+                val transport=PairingRelayHttp(AccountEnvironment(backendBaseUrl="http://127.0.0.1:${server.localPort}"),{session},{null},{_,_->false},client)
+                val job=async {transport.call("POST","/functions/v1/watch-pairing/sessions/${d.qr().sessionId}/claim","{}","cap",30_000)}
+                assertTrue(withContext(Dispatchers.IO){received.await(2,TimeUnit.SECONDS)})
+                job.cancel();withTimeout(1000){job.join();while(failed.count>0)delay(10)}
+                assertTrue(withContext(Dispatchers.IO){peer.get(1,TimeUnit.SECONDS)});assertTrue(job.isCancelled)
+            }finally {accepted.get()?.close();server.close();executor.shutdownNow();client.dispatcher.executorService.shutdown();client.connectionPool.evictAll()}
+        }
+    }
+    @Test fun responsePathsAreBoundedToNegotiatedMaximumAndNeverAllowExtraQueryOrOtherOrigins()=runBlocking {
+        var calls=0
+        val client=OkHttpClient.Builder().addInterceptor {chain->calls++;Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("ok").body("{}".toResponseBody()).build()}.build()
+        val transport=PairingRelayHttp(AccountEnvironment(backendBaseUrl="https://test.invalid"),{session},{null},{_,_->false},client)
+        val prefix="/functions/v1/watch-pairing/sessions/${d.qr().sessionId}/response?seq="
+        for(seq in listOf("0","15","16","99","100","254","255"))transport.call("GET",prefix+seq,null,"cap")
+        assertEquals(7,calls)
+        for(seq in listOf("256","-1","01","1&other=x","1/extra","1#fragment","9999999")) {
+            assertThrows(IllegalArgumentException::class.java){runBlocking{transport.call("GET",prefix+seq,null,"cap")}}
+        };assertEquals(7,calls)
     }
 }

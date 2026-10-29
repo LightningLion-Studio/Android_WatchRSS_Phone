@@ -22,6 +22,11 @@ class WatchPairingViewModelTest {
         override val changes=MutableSharedFlow<Unit>(extraBufferCapacity=10)
         var current:PairingOwner?=data.owner
         var hasKeys=true;var cloudFailure:Exception?=null;var keyReceiptFailure=false;var finishFailure=false
+        var watchConfirmed=true;var watchRejected=false;var conflict=false;var replaceCap=true
+        var replacementGate:CompletableDeferred<Unit>?=null;var ignoreReplacementCancellation=false
+        var replaceCalls=0;var replacementFailure:Exception?=null;var replacementReceipt:JSONObject?=null
+        var issueFailure:Exception?=null;var statusGate:CompletableDeferred<Unit>?=null
+        var statusFailure:Exception?=null
         var issueCalls=0;var cloudCalls=0;var opens=0;var closes=0;var invalidated=false
         var claimGate:CompletableDeferred<Unit>?=null
         var prepareGate:CompletableDeferred<Unit>?=null
@@ -48,8 +53,10 @@ class WatchPairingViewModelTest {
                 return when(action) {
                     "prepare"->{
                         if(ignorePrepareCancellation)withContext(NonCancellable){prepareGate?.await()}else prepareGate?.await()
-                        prepareReceipt?:JSONObject().put("success",true).put("userId",data.user).put("deviceId",data.device).put("installId",data.install).put("publicKeySpki",data.spki)
+                        prepareReceipt?:uxPrepare(data,watchConfirmed,conflict,replaceCap)
                     }
+                    "pairingStatus"->{statusGate?.await();statusFailure?.let {throw it};uxStatus(message.getString("decision"),watchConfirmed,watchRejected,conflict)}
+                    "replaceAccount"->{replaceCalls++;if(ignoreReplacementCancellation)withContext(NonCancellable){replacementGate?.await()}else replacementGate?.await();replacementFailure?.let {throw it};conflict=false;replacementReceipt?:JSONObject().put("success",true).put("action","replaceAccount").put("released",true).put("cleared",true).put("userId",data.user).put("deviceId",data.device).put("installId",data.install).put("publicKeySpki",data.spki)}
                     "configure"->{configureGate?.await();configureFailure?.let {throw it};configureReceipt?:JSONObject().put("success",true).put("bound",true).put("userId",data.user).put("deviceId",data.device)}
                     "key"->{if(keyReceiptFailure)throw IOException("key response lost");JSONObject().put("success",true).put("cloudReady",true).put("keyVersion",1).put("deviceId",data.device)}
                     "finish"->{if(finishFailure)throw IOException("finish response lost");JSONObject().put("success",true)}
@@ -59,8 +66,19 @@ class WatchPairingViewModelTest {
             override fun invalidate(){invalidated=true}
             override suspend fun close(){closes++;qr.destroy()}
         }}
-        override suspend fun issueCredentials(qr:WatchPairingQr,owner:PairingOwner):WatchDeviceToken {calls+="issue";issueCalls++;return WatchDeviceToken("watch-access",data.now+100000,"watch-refresh",data.now+200000,WatchEntitlementSnapshot())}
+        override suspend fun issueCredentials(qr:WatchPairingQr,owner:PairingOwner):WatchDeviceToken {calls+="issue";issueCalls++;issueFailure?.let {throw it};return WatchDeviceToken("watch-access",data.now+100000,"watch-refresh",data.now+200000,WatchEntitlementSnapshot())}
         override suspend fun grantCloud(qr:WatchPairingQr,preparedSpki:String,owner:PairingOwner):PairingCloudGrant {calls+="grant";cloudCalls++;cloudFailure?.let{throw it};return data.grant(qr)}
+    }
+    private companion object {
+        fun uxPrepare(d:PairingTestData,watch:Boolean=true,conflict:Boolean=false,replace:Boolean=true)=JSONObject()
+            .put("success",true).put("userId",d.user).put("deviceId",d.device).put("installId",d.install).put("publicKeySpki",d.spki)
+            .put("pairingUxVersion",1).put("messageSequenceMax",255)
+            .put("capabilities",JSONObject().put("pairingConfirmV1",true).put("pairingReplaceAccountV1",replace))
+            .put("confirmation",JSONObject().put("phone","pending").put("watch",if(watch)"confirmed" else "pending"))
+            .put("accountConflict",conflict)
+        fun uxStatus(phone:String,watch:Boolean,rejected:Boolean=false,conflict:Boolean=false)=JSONObject().put("success",true).put("action","pairingStatus")
+            .put("confirmation",JSONObject().put("phone",phone).put("watch",if(rejected)"rejected" else if(watch)"confirmed" else "pending"))
+            .put("accountConflict",conflict)
     }
     private fun TestScope.vm(p:Ports)=WatchPairingViewModel(p,backgroundScope,{d.now},{testScheduler.currentTime})
     private fun TestScope.scan(vm:WatchPairingViewModel) {vm.onPageEntered();vm.startScan(true);runCurrent();assertTrue(vm.state.value is WatchPairingState.Scanning);vm.onQrDecoded(d.raw);runCurrent();assertTrue(vm.state.value is WatchPairingState.Confirming)}
@@ -94,95 +112,53 @@ class WatchPairingViewModelTest {
         assertEquals(WatchPairingState.Done(true,true),vm.state.value)
         assertEquals(1,p.issueCalls);assertEquals(1,p.calls.count{it=="configure"});vm.cancel()
     }
-    @Test fun realEncryptedRelayCanPollNullWhilePhoneAlreadyOffersItsLocalSas()=runTest {
-        val p=Ports();var watchConfirmed=false;var polls=0;var prepares=0;var claims=0
-        p.channelFactory={qr -> WatchPairingRelay(qr,object:PairingHttp {
-            override suspend fun call(method:String,path:String,body:String?,capability:String?,timeoutMillis:Long):JSONObject=when {
-                path.endsWith("/claim")->{claims++;JSONObject().put("claimed",true)}
-                path.endsWith("/request")->{
-                    prepares++
-                    val envelope=JSONObject(body!!)
-                    val request=PairingWireCodec.open(qr,"phone",0,envelope.getJSONObject("wire"))
-                    assertEquals("prepare",request.getString("action"));assertEquals(d.user,request.getString("userId"))
-                    assertEquals(d.fixture.getString("sas"),PairingWireCodec.sas(qr,request.getString("userId")))
-                    JSONObject().put("accepted",true)
-                }
-                path.contains("/response?")->{
-                    polls++
-                    JSONObject().put("wire",if(!watchConfirmed)JSONObject.NULL else PairingWireCodec.seal(qr,"watch",0,
-                        JSONObject().put("success",true).put("userId",d.user).put("deviceId",d.device).put("publicKeySpki",d.spki)))
-                }
-                else->JSONObject().put("closed",true)
-            }
-        },{},{true},{d.now+testScheduler.currentTime}) }
-        val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent()
-        val waiting=vm.state.value as WatchPairingState.Confirming.Phone
-        assertEquals(d.fixture.getString("sas"),waiting.sas)
-        assertEquals(1,claims);assertEquals(1,prepares);assertEquals(1,polls)
-        advanceTimeBy(3600);runCurrent();assertTrue(polls>=4)
-        assertEquals(waiting,vm.state.value);assertEquals(0,p.issueCalls)
-        watchConfirmed=true;advanceTimeBy(1200);runCurrent()
-        assertEquals(WatchPairingState.Confirming(waiting.sas),vm.state.value)
-        assertEquals(1,prepares);assertEquals(0,p.issueCalls);vm.cancel();runCurrent()
-    }
-    @Test fun r43EncryptedRelayAllowsEitherConfirmationOrderAndWatchRejectionNeverBecomesBound()=runTest {
+    @Test fun encryptedUxRelayAllowsEitherOrderWithoutDeliveringSecretsBeforeBothConfirm()=runTest {
         for(order in listOf("phone-first","watch-first","watch-rejects")) {
-            val p=Ports();var watchConfirmed=false;var watchRejected=false;var savedAccount=false
-            val requests=linkedMapOf<Int,JSONObject>();var polls=0;var closes=0
+            val p=Ports();var watchConfirmed=false;var rejected=false;var phoneConfirmed=false;var saved=false
+            val requests=linkedMapOf<Int,JSONObject>();var closes=0
             p.channelFactory={qr -> WatchPairingRelay(qr,object:PairingHttp {
                 override suspend fun call(method:String,path:String,body:String?,capability:String?,timeoutMillis:Long):JSONObject=when {
                     path.endsWith("/claim")->JSONObject().put("claimed",true)
                     path.endsWith("/request")->{
-                        val encrypted=JSONObject(body!!);val seq=encrypted.getInt("seq")
-                        val plain=PairingWireCodec.open(qr,"phone",seq,encrypted.getJSONObject("wire"))
-                        assertFalse("one accepted request per sequence",requests.containsKey(seq));requests[seq]=plain
-                        JSONObject().put("accepted",true)
+                        val e=JSONObject(body!!);val seq=e.getInt("seq")
+                        val plain=PairingWireCodec.open(qr,"phone",seq,e.getJSONObject("wire"),255)
+                        assertFalse(requests.containsKey(seq));requests[seq]=plain;JSONObject().put("accepted",true)
                     }
                     path.contains("/response?")->{
                         val seq=path.substringAfter("seq=").toInt();val request=requests.getValue(seq)
                         val reply=when(request.getString("action")) {
-                            // R43 prepare does not wait for confirmation or carry any account credentials.
-                            "prepare"->JSONObject().put("success",true).put("userId",d.user).put("deviceId",d.device).put("installId",d.install).put("publicKeySpki",d.spki)
-                            "configure"->{
-                                polls++
-                                assertEquals("watch-access",request.getJSONObject("account").getString("watchAccessToken"))
-                                when {
-                                    watchRejected->JSONObject().put("success",false)
-                                    !watchConfirmed->null
-                                    else->{savedAccount=true;JSONObject().put("success",true).put("bound",true).put("userId",d.user).put("deviceId",d.device)}
-                                }
-                            }
-                            "key"->{assertTrue(savedAccount);JSONObject().put("success",true).put("cloudReady",true).put("keyVersion",1).put("deviceId",d.device)}
+                            "prepare"->uxPrepare(d,false)
+                            "pairingStatus"->{phoneConfirmed=request.getString("decision")=="confirmed";uxStatus(request.getString("decision"),watchConfirmed,rejected)}
+                            "configure"->{assertTrue(watchConfirmed && phoneConfirmed);assertFalse(rejected);saved=true;JSONObject().put("success",true).put("bound",true).put("userId",d.user).put("deviceId",d.device)}
+                            "key"->{assertTrue(saved);JSONObject().put("success",true).put("cloudReady",true).put("keyVersion",1).put("deviceId",d.device)}
                             "finish"->JSONObject().put("success",true)
                             else->error("unexpected action")
                         }
-                        JSONObject().put("wire",if(reply==null)JSONObject.NULL else PairingWireCodec.seal(qr,"watch",seq,reply))
+                        JSONObject().put("wire",PairingWireCodec.seal(qr,"watch",seq,reply,255))
                     }
                     else->{closes++;JSONObject().put("closed",true)}
                 }
             },{},{true},{d.now+testScheduler.currentTime}) }
-            val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent()
-            assertEquals(WatchPairingState.Confirming(d.fixture.getString("sas")),vm.state.value)
-            assertEquals(listOf("prepare"),requests.values.map{it.getString("action")})
-            assertFalse(savedAccount);assertEquals(0,p.issueCalls)
-            if(order=="watch-first")watchConfirmed=true
+            val vm=vm(p);scan(vm)
+            assertEquals(0,p.issueCalls);assertFalse(saved)
+            if(order=="watch-first") {watchConfirmed=true;advanceTimeBy(1000);runCurrent();assertTrue(vm.confirmation.value.watchConfirmed);assertEquals(0,p.issueCalls)}
             vm.confirmSas(true);runCurrent()
             if(order!="watch-first") {
                 assertTrue(vm.state.value is WatchPairingState.WaitingWatchConfirmAfterPhone)
-                assertFalse(savedAccount);assertEquals(0,p.cloudCalls);assertEquals(1,p.issueCalls)
-                advanceTimeBy(2400);runCurrent();assertTrue(polls>=3)
-                if(order=="watch-rejects")watchRejected=true else watchConfirmed=true
-                advanceTimeBy(1200);runCurrent()
+                assertEquals(0,p.issueCalls);assertEquals(0,p.cloudCalls);assertFalse(saved)
+                // Exercise sequences beyond the legacy maximum using the production codec/relay.
+                advanceTimeBy(20_000);runCurrent();assertEquals(0,p.issueCalls)
+                if(order=="watch-rejects")rejected=true else watchConfirmed=true
+                advanceTimeBy(1000);runCurrent()
             }
             if(order=="watch-rejects") {
-                assertFalse(savedAccount);assertFalse((vm.state.value as WatchPairingState.Failed).canRetry)
-                assertEquals(listOf("prepare","configure"),requests.values.map{it.getString("action")})
-                assertEquals(0,p.cloudCalls)
+                assertFalse((vm.state.value as WatchPairingState.Failed).canRetry)
+                assertFalse(saved);assertEquals(0,p.issueCalls)
+                assertFalse(requests.values.any{it.getString("action") in setOf("configure","key")})
             } else {
-                assertEquals(WatchPairingState.Done(true,true),vm.state.value);assertTrue(savedAccount)
-                assertEquals(listOf("prepare","configure","key","finish"),requests.values.map{it.getString("action")})
+                assertEquals(WatchPairingState.Done(true,true),vm.state.value);assertTrue(saved);assertEquals(1,p.issueCalls)
             }
-            assertEquals(1,closes);assertEquals(1,p.issueCalls);vm.cancel();runCurrent()
+            assertEquals(1,closes);vm.cancel();runCurrent()
         }
     }
     @Test fun claimAndPrepareEachHaveATwoMinuteErrorExitAndTimeoutCanRetrySameSession()=runTest {
@@ -218,7 +194,7 @@ class WatchPairingViewModelTest {
     @Test fun rejectionOrMismatchingPrepareIdentityAndSasNeverAllowsPhoneConfirmation()=runTest {
         for(kind in listOf("user","device","install","sas","sas-null","sas-number","success","spki")) {
             val p=Ports();p.prepareGate=CompletableDeferred()
-            p.prepareReceipt=JSONObject().put("success",true).put("userId",d.user).put("deviceId",d.device).put("publicKeySpki",d.spki).apply {
+            p.prepareReceipt=uxPrepare(d).apply {
                 when(kind) {
                     "user"->put("userId","other");"device"->put("deviceId","other");"install"->put("installId","other");"sas"->put("sas","00000000")
                     "sas-null"->put("sas",JSONObject.NULL);"sas-number"->put("sas",61099432)
@@ -235,7 +211,7 @@ class WatchPairingViewModelTest {
     }
     @Test fun optionalEchoedSasMustMatchLocalCodeAndDisagreeingWhileWaitingCancels()=runTest {
         val p=Ports();p.prepareGate=CompletableDeferred()
-        p.prepareReceipt=JSONObject().put("success",true).put("userId",d.user).put("deviceId",d.device).put("publicKeySpki",d.spki).put("sas",d.fixture.getString("sas"))
+        p.prepareReceipt=uxPrepare(d).put("sas",d.fixture.getString("sas"))
         val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent()
         vm.confirmSas(false);runCurrent();assertTrue(vm.state.value is WatchPairingState.Failed)
         p.prepareGate!!.complete(Unit);runCurrent();assertEquals(0,p.issueCalls);assertTrue(p.invalidated)
@@ -322,7 +298,7 @@ class WatchPairingViewModelTest {
         assertEquals(0,p.issueCalls);assertEquals(0,p.cloudCalls)
         vm.confirmSas(true);runCurrent()
         assertEquals(WatchPairingState.Done(true,true),vm.state.value)
-        assertEquals(listOf("prepareCloud","claim","prepare","issue","configure","grant","key","finish"),p.calls)
+        assertEquals(listOf("prepareCloud","claim","prepare","pairingStatus","pairingStatus","issue","configure","grant","key","finish"),p.calls)
         assertEquals(1,p.closes)
         val account=p.messages.first{it.getString("action")=="configure"}.getJSONObject("account")
         assertEquals(d.install,account.getString("installId"));assertEquals("watch-access",account.getString("watchAccessToken"))
@@ -451,5 +427,152 @@ class WatchPairingViewModelTest {
         assertFalse(vm.requestWatchQrAgain());vm.onPageEntered();runCurrent();advanceTimeBy(10_001)
         assertTrue(vm.requestWatchQrAgain());assertFalse(vm.requestWatchQrAgain());runCurrent()
         assertEquals(2,p.qrRequests);assertEquals(WatchPairingState.Idle,vm.state.value);assertTrue(p.calls.isEmpty());vm.cancel()
+    }
+    @Test fun uxPhoneFirstCannotIssueUntilWatchConfirmsAndPeerConfirmationIsVisible()=runTest {
+        val p=Ports();p.watchConfirmed=false;val vm=vm(p);scan(vm)
+        vm.confirmSas(true);runCurrent()
+        assertEquals(PairingConfirmation(true,false),vm.confirmation.value)
+        advanceTimeBy(5000);runCurrent();assertEquals(0,p.issueCalls);assertEquals(0,p.cloudCalls)
+        assertTrue(p.messages.all {it.getString("action") in setOf("prepare","pairingStatus")})
+        p.watchConfirmed=true;advanceTimeBy(1000);runCurrent()
+        assertEquals(WatchPairingState.Done(true,true),vm.state.value);assertEquals(1,p.issueCalls);vm.cancel()
+    }
+    @Test fun uxWatchFirstDoesNotConfirmPhoneAndDeclineClosesWithoutIssuance()=runTest {
+        val p=Ports();val vm=vm(p);scan(vm)
+        assertEquals(PairingConfirmation(false,true),vm.confirmation.value)
+        assertEquals(0,p.issueCalls);vm.confirmSas(false);runCurrent()
+        assertFalse((vm.state.value as WatchPairingState.Failed).canRetry);assertEquals(1,p.closes);assertEquals(0,p.issueCalls)
+    }
+    @Test fun uxOldOrMalformedCapabilitiesNeverDowngradeToCredentialConfigure()=runTest {
+        for(kind in listOf("old-minimal","old","version","budget","confirm","confirm-string")) {
+            val p=Ports();p.prepareReceipt=uxPrepare(d).apply {when(kind) {
+                "old"->remove("pairingUxVersion");"version"->put("pairingUxVersion",2);"budget"->put("messageSequenceMax",15)
+                "confirm"->getJSONObject("capabilities").put("pairingConfirmV1",false)
+                else->getJSONObject("capabilities").put("pairingConfirmV1","true")
+            }}
+            if(kind=="old-minimal")p.prepareReceipt=JSONObject(d.fixture.getJSONObject("watch").getString("plaintext"))
+            val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent()
+            val failed=vm.state.value as WatchPairingState.Failed
+            assertFalse(failed.canRetry);assertTrue(failed.message.contains("更新"));vm.confirmSas(true);runCurrent()
+            assertEquals(0,p.issueCalls);assertEquals(0,p.cloudCalls);assertTrue(p.invalidated);vm.cancel()
+        }
+    }
+    @Test fun uxConflictsRequireBothConfirmationsAndExplicitDestructiveConsent()=runTest {
+        val p=Ports();p.conflict=true;p.watchConfirmed=false;val vm=vm(p);scan(vm)
+        vm.replaceAccountAndContinue();vm.confirmSas(true);runCurrent();assertEquals(0,p.replaceCalls);assertEquals(0,p.issueCalls)
+        p.watchConfirmed=true;advanceTimeBy(1000);runCurrent()
+        assertTrue((vm.state.value as WatchPairingState.AccountConflict).canReplace);assertEquals(0,p.replaceCalls);assertEquals(0,p.issueCalls)
+        vm.replaceAccountAndContinue();runCurrent();assertEquals(WatchPairingState.Done(true,true),vm.state.value)
+        assertEquals(1,p.replaceCalls);assertEquals(1,p.issueCalls);assertTrue(p.calls.indexOf("replaceAccount")<p.calls.indexOf("issue"));vm.cancel()
+    }
+    @Test fun uxCancelConflictNeverLogsOutClearsOrIssuesAndUnsupportedPeerCannotReplace()=runTest {
+        for(cap in listOf(false,true)) {
+            val p=Ports();p.conflict=true;p.replaceCap=cap;val vm=vm(p);scan(vm);vm.confirmSas(true);runCurrent()
+            assertEquals(cap,(vm.state.value as WatchPairingState.AccountConflict).canReplace)
+            if(!cap) {vm.replaceAccountAndContinue();runCurrent();assertEquals(0,p.replaceCalls)}
+            vm.cancel();runCurrent();assertEquals(0,p.replaceCalls);assertEquals(0,p.issueCalls);assertEquals(1,p.closes)
+        }
+    }
+    @Test fun uxIssuanceOwnership409CanContinueOnSameQrButRevocationCannotBeBypassed()=runTest {
+        for(code in listOf("account_switch_requires_logout","device_owned_by_another_account","installation_owned_by_another_account","device_revoked")) {
+            val p=Ports();p.issueFailure=PhoneAccountHttpException(409,JSONObject().put("error",code).toString())
+            val vm=vm(p);scan(vm);vm.confirmSas(true);runCurrent()
+            if(code=="device_revoked") {
+                assertTrue(vm.state.value is WatchPairingState.Failed);vm.replaceAccountAndContinue();runCurrent();assertEquals(0,p.replaceCalls)
+            } else {
+                assertTrue(vm.state.value is WatchPairingState.AccountConflict);p.issueFailure=null
+                vm.replaceAccountAndContinue();runCurrent();assertEquals(WatchPairingState.Done(true,true),vm.state.value)
+                assertEquals(1,p.opens);assertEquals(1,p.replaceCalls);assertEquals(2,p.issueCalls)
+            };vm.cancel()
+        }
+    }
+    @Test fun uxReplacementMustReturnCompleteMatchingReceiptBeforeAnyNewCredential()=runTest {
+        for(kind in listOf("released","cleared","user","device","install","spki","missing-spki","success")) {
+            val p=Ports();p.conflict=true
+            p.replacementReceipt=JSONObject().put("success",true).put("action","replaceAccount").put("released",true).put("cleared",true)
+                .put("userId",d.user).put("deviceId",d.device).put("installId",d.install).put("publicKeySpki",d.spki).apply {
+                when(kind) {"released"->put("released",false);"cleared"->put("cleared",false);"user"->put("userId","other");"device"->put("deviceId","other")
+                    "install"->put("installId","other");"spki"->put("publicKeySpki","other");"missing-spki"->remove("publicKeySpki");else->put("success",false)}
+            }
+            val vm=vm(p);scan(vm);vm.confirmSas(true);runCurrent();vm.replaceAccountAndContinue();runCurrent()
+            assertTrue(vm.state.value is WatchPairingState.Failed);assertEquals(0,p.issueCalls);assertEquals(0,p.cloudCalls);vm.cancel()
+        }
+    }
+    @Test fun uxReleaseFailureAndAmbiguousResponseRetryDoNotAssumeSuccessOrRepeatIssue()=runTest {
+        val p=Ports();p.conflict=true;p.replacementFailure=IOException("lost release receipt")
+        val vm=vm(p);scan(vm);vm.confirmSas(true);runCurrent();vm.replaceAccountAndContinue();runCurrent()
+        assertTrue(vm.state.value is WatchPairingState.Failed);assertEquals(0,p.issueCalls)
+        p.replacementFailure=null;vm.retry();runCurrent();assertEquals(WatchPairingState.Done(true,true),vm.state.value)
+        val attempts=p.messages.filter{it.getString("action")=="replaceAccount"}
+        assertEquals(2,attempts.size);assertEquals(attempts[0].toString(),attempts[1].toString());assertEquals(1,p.issueCalls);vm.cancel()
+    }
+    @Test fun uxStatusNetworkFailureRetainsPendingDecisionWhenPhoneClicksBeforeRetry()=runTest {
+        val p=Ports();p.watchConfirmed=false;p.statusFailure=IOException("network")
+        val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent()
+        assertTrue(vm.state.value is WatchPairingState.Failed)
+        p.statusFailure=null;vm.retry();runCurrent();vm.confirmSas(true);runCurrent()
+        assertEquals(0,p.issueCalls);p.watchConfirmed=true;advanceTimeBy(1000);runCurrent()
+        assertEquals(WatchPairingState.Done(true,true),vm.state.value);assertEquals(1,p.issueCalls);vm.cancel()
+    }
+    @Test fun uxConfirmationHasBoundedTimeoutAndRetryKeepsSameSessionWithoutSecrets()=runTest {
+        val p=Ports();p.watchConfirmed=false;val vm=vm(p);scan(vm);vm.confirmSas(true);runCurrent()
+        advanceTimeBy(90_000);runCurrent()
+        val failed=vm.state.value as WatchPairingState.Failed;assertTrue(failed.message.contains("双端核对超时"));assertTrue(failed.canRetry)
+        assertEquals(0,p.issueCalls);assertEquals(0,p.replaceCalls)
+        p.watchConfirmed=true;vm.retry();runCurrent();assertEquals(WatchPairingState.Done(true,true),vm.state.value);assertEquals(1,p.opens);vm.cancel()
+    }
+    @Test fun uxRejectOrWrongIdentityStatusNeverBecomesApproval()=runTest {
+        for(kind in listOf("watch-reject","invalid-decision","phone-forgery","wrong-user")) {
+            val p=Ports();p.watchConfirmed=false
+            p.channelFactory={_ -> object:WatchPairingChannel {
+                override suspend fun connect(){}
+                override suspend fun request(message:JSONObject):JSONObject=when(message.getString("action")) {
+                    "prepare"->uxPrepare(d,false)
+                    "pairingStatus"->uxStatus("pending",false).apply {when(kind) {
+                        "watch-reject"->getJSONObject("confirmation").put("watch","rejected")
+                        "invalid-decision"->getJSONObject("confirmation").put("watch",true)
+                        "phone-forgery"->getJSONObject("confirmation").put("phone","confirmed")
+                        else->put("userId","other")
+                    }}
+                    else->error("no credential action allowed")
+                }
+                override fun invalidate(){p.invalidated=true}
+                override suspend fun close(){p.closes++}
+            }}
+            val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent()
+            assertTrue(vm.state.value is WatchPairingState.Failed);assertEquals(0,p.issueCalls);assertEquals(0,p.cloudCalls);vm.cancel()
+        }
+    }
+    @Test fun uxRotationRetainsSingleConsentSessionButBackgroundEndsItAndIgnoresLateWatchConfirmation()=runTest {
+        val p=Ports();p.watchConfirmed=false;val vm=vm(p);scan(vm);vm.confirmSas(true);runCurrent()
+        vm.onPageBackgrounded(true);vm.onPageEntered();runCurrent()
+        assertEquals(1,p.opens);assertEquals(1,p.qrRequests);assertEquals(0,p.issueCalls)
+        assertTrue(vm.state.value is WatchPairingState.WaitingWatchConfirmAfterPhone)
+        vm.onPageBackgrounded(false);runCurrent();p.watchConfirmed=true;advanceTimeBy(5000);runCurrent()
+        assertEquals(WatchPairingState.Idle,vm.state.value);assertEquals(0,p.issueCalls);assertEquals(1,p.closes)
+    }
+    @Test fun uxReplacementTimeoutHasAnErrorExitAndRetryUsesTheSameDestructiveRequest()=runTest {
+        val p=Ports();p.conflict=true;p.replacementGate=CompletableDeferred()
+        val vm=vm(p);scan(vm);vm.confirmSas(true);runCurrent();vm.replaceAccountAndContinue();runCurrent()
+        advanceTimeBy(120_000);runCurrent()
+        val failed=vm.state.value as WatchPairingState.Failed;assertTrue(failed.canRetry);assertTrue(failed.message.contains("退出或清理超时"))
+        assertEquals(0,p.issueCalls);p.replacementGate!!.complete(Unit);vm.retry();runCurrent()
+        assertEquals(WatchPairingState.Done(true,true),vm.state.value);assertEquals(1,p.issueCalls)
+        val messages=p.messages.filter{it.getString("action")=="replaceAccount"};assertEquals(2,messages.size);assertEquals(messages[0].toString(),messages[1].toString());vm.cancel()
+    }
+    @Test fun uxCancellationOrOwnerChangeDuringReplacementCannotIssueFromALateSuccessReceipt()=runTest {
+        for(change in listOf("cancel","user","backend","epoch","logout")) {
+            val p=Ports();p.conflict=true;p.replacementGate=CompletableDeferred();p.ignoreReplacementCancellation=true
+            val vm=vm(p);scan(vm);vm.confirmSas(true);runCurrent();vm.replaceAccountAndContinue();runCurrent()
+            assertEquals(1,p.replaceCalls);assertEquals(0,p.issueCalls)
+            if(change=="cancel")vm.cancel()else {
+                p.current=when(change){"user"->d.owner.copy(userId="other");"backend"->d.owner.copy(backendBaseUrl="https://other.invalid");"epoch"->d.owner.copy(epoch="other");else->null}
+                p.changes.emit(Unit)
+            }
+            runCurrent();p.replacementGate!!.complete(Unit);runCurrent()
+            assertEquals(0,p.issueCalls);assertEquals(0,p.cloudCalls);assertTrue(p.invalidated)
+            if(change=="cancel")assertEquals(WatchPairingState.Idle,vm.state.value)else assertTrue(vm.state.value is WatchPairingState.Failed)
+            vm.cancel()
+        }
     }
 }

@@ -562,6 +562,14 @@ class PhoneCloudSyncService(
         return settings.ownerUserId.let { it != null && it != userId }
     }
 
+    /** Nothing local to lose: adopt the signed-in account without asking. Returns true when no choice remains. */
+    suspend fun resolveLibraryOwnerIfEmpty(): Boolean {
+        if (!libraryOwnerConflict()) return true
+        if (repository.hasLibraryContent() || noteRepository.hasAny()) return false
+        resolveLibraryOwner(merge = false)
+        return !libraryOwnerConflict()
+    }
+
     /** Explicit user action only; the clear callback must remove the entire local private library. */
     suspend fun resolveLibraryOwner(merge: Boolean) = syncMutex.withLock {
         val session = requireSession()

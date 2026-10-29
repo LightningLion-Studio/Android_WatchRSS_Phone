@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface NoteDao {
+    @Query("SELECT EXISTS(SELECT 1 FROM notes) OR EXISTS(SELECT 1 FROM note_folders)") suspend fun hasAny(): Boolean
     @Query("SELECT * FROM note_folders WHERE deleted = 0 ORDER BY sortOrder, name COLLATE NOCASE")
     fun observeFolders(): Flow<List<NoteFolderEntity>>
 

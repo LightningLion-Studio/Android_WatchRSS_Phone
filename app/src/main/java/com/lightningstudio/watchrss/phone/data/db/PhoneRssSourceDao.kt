@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface PhoneRssSourceDao {
+    @Query("SELECT EXISTS(SELECT 1 FROM phone_rss_sources)") suspend fun hasAny(): Boolean
     @Query("SELECT * FROM phone_rss_sources WHERE url > :after ORDER BY url LIMIT :limit")
     suspend fun cloudRecordPage(after: String, limit: Int): List<PhoneRssSourceEntity>
 

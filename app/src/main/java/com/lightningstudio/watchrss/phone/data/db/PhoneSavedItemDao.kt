@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface PhoneSavedItemDao {
+    @Query("SELECT EXISTS(SELECT 1 FROM phone_saved_items)") suspend fun hasAny(): Boolean
     @Query("SELECT * FROM phone_saved_items WHERE type = :type ORDER BY syncedAt DESC, title ASC")
     fun observeByType(type: String): Flow<List<PhoneSavedItemEntity>>
 

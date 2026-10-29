@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.cloud
 
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -32,6 +33,15 @@ fun DashboardCloudSyncBanner() {
     val recordError by service.recordError.collectAsState()
     var ownerConflict by remember(session?.userId, state.phase) { mutableStateOf(service.libraryOwnerConflict()) }
     var showOwnerChoice by remember { mutableStateOf(false) }
+    // Ask once per account as soon as the conflict appears; an empty phone needs no question at all.
+    var ownerPrompted by rememberSaveable(session?.userId) { mutableStateOf(false) }
+    LaunchedEffect(session?.userId, ownerConflict) {
+        if (!ownerConflict) return@LaunchedEffect
+        runCatching { service.resolveLibraryOwnerIfEmpty() }
+        ownerConflict = service.libraryOwnerConflict()
+        if (!ownerConflict) container.setCloudSyncPaused(false)
+        else if (!ownerPrompted) { ownerPrompted = true; showOwnerChoice = true }
+    }
     val scope = rememberCoroutineScope()
     LaunchedEffect(session?.userId, lifecycle, refreshKey) {
         if (session == null) return@LaunchedEffect

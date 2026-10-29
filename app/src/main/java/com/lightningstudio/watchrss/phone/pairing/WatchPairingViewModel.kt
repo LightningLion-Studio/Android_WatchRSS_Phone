@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.pairing
 
+import com.lightningstudio.watchrss.phone.account.accountHttpErrorCode
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lightningstudio.watchrss.phone.account.WatchDeviceToken
@@ -7,6 +8,7 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.OpenPairingReques
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchQrRequest
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchQrNotOpenedReason
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -38,6 +40,7 @@ sealed interface WatchPairingState {
     data class WaitingWatchConfirmAfterPhone(val sas:String):Configuring("请在手表上点一致，绑定") {
         val message:String get() = step
     }
+    data class AccountConflict(val sas:String,val canReplace:Boolean,val message:String="这块手表登录着另一个账号。退出该账号并绑定到当前账号？手表上的本地资料会被清空。"):WatchPairingState
     data class Done(val bound:Boolean,val cloudReady:Boolean,val cloudError:String?=null,val finishError:String?=null,val canRetry:Boolean=false):WatchPairingState
     data class Failed(val message:String,val canRetry:Boolean=true):WatchPairingState
 }
@@ -60,6 +63,14 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
     val state:StateFlow<WatchPairingState> = mutable
     private val mutableWatchQrRequest=MutableStateFlow<WatchQrRequest?>(null)
     val watchQrRequest:StateFlow<WatchQrRequest?> = mutableWatchQrRequest.asStateFlow()
+    private val mutableConfirmation=MutableStateFlow(PairingConfirmation())
+    val confirmation:StateFlow<PairingConfirmation> = mutableConfirmation.asStateFlow()
+    private val consentWake=Channel<Unit>(Channel.CONFLATED)
+    private var consent:PairingConsentReceipt?=null
+    private var pendingStatus:JSONObject?=null
+    private var accountConflict=false
+    private var replacing=false
+    private var replacementApproved=false
     private val generation=AtomicLong()
     private var work:Job?=null
     private var watchQrJob:Job?=null
@@ -97,10 +108,12 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
             catch(error:CancellationException) { if(generation.get()==ticket && !sameOwner()) invalidate("账号或云资料库已变化，请重新开始扫码绑定") }
             catch(error:Exception) {
                 if(generation.get()==ticket) {
-                    val ended=(error is PairingException && error.code in setOf("watch_rejected","pairing_expired")) ||
+                    val revoked=error.accountHttpErrorCode()=="device_revoked"
+                    val ended=revoked || (error is PairingException && error.code in setOf("watch_rejected","pairing_expired","pairing_upgrade_required")) ||
+                        (error is PairingPeerException && (!replacing || error.peerCode in setOf("pairing_rejected","watch_rejected","device_revoked","pairing_identity_changed","pairing_confirmation_expired","pairing_upgrade_required"))) ||
                         (error is PairingHttpException && error.status in setOf(404,410))
                     if(ended)this@WatchPairingViewModel.cancel()
-                    mutable.value=WatchPairingState.Failed(error.message?:"配对失败，请重试",canRetry=!ended)
+                    mutable.value=WatchPairingState.Failed(if(revoked)"手表设备授权已撤销，请联系支持恢复" else error.message?:"配对失败，请重试",canRetry=!ended)
                 }
             }
             finally { if(generation.get()==ticket)work=null }
@@ -183,15 +196,11 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
             withTimeout(CONNECT_PREPARE_TIMEOUT_MS) {
                 link.connect();check(ticket)
                 if(prepared==null) {
-                    val receipt=link.request(JSONObject().put("action","prepare").put("userId",requireNotNull(owner).userId).put("phoneMasked",requireNotNull(owner).phoneMasked.ifBlank { "当前账号" }))
+                    val receipt=link.request(JSONObject().put("action","prepare").put("pairingUxVersion",1).put("userId",requireNotNull(owner).userId).put("phoneMasked",requireNotNull(owner).phoneMasked.ifBlank { "当前账号" }))
                     check(ticket)
-                    require(receipt.optBoolean("success") && receipt.optString("deviceId")==descriptor.deviceId && receipt.optString("userId")==requireNotNull(owner).userId &&
-                        (!receipt.has("installId") || receipt.get("installId")==descriptor.installId)) { "手表身份与配对码不一致，请重新扫码" }
-                    val receiptSas=PairingWireCodec.sas(descriptor,receipt.getString("userId"))
-                    require(receiptSas==localSas && (!receipt.has("sas") || receipt.get("sas")==localSas)) { "手表配对码不一致，请重新扫码" }
-                    val spki=receipt.getString("publicKeySpki")
-                    com.lightningstudio.watchrss.phone.cloud.CloudKeyEnvelopeCodec.decodeP256PublicKey(spki)
-                    prepared=receipt
+                    val status=PairingUxCodec.prepare(receipt,descriptor,requireNotNull(owner).userId)
+                    link.negotiateUx(receipt)
+                    consent=status;accountConflict=status.accountConflict;prepared=receipt
                 }
                 check(ticket)
             }
@@ -199,31 +208,95 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
             check(ticket)
             throw PairingException("pairing_timeout","等待手表响应超时，请重试；若配对码过期请重新扫描")
         }
-        if(!sasConfirmed) mutable.value=WatchPairingState.Confirming(localSas)
-        // If the click arrived while prepare was in flight, this same worker continues;
-        // do not start a second claim/request or lose the click to launchWork's busy guard.
-        if(sasConfirmed) configure(ticket)
+        awaitConsent(ticket)
+    }
+    /** Only this worker sends status frames, including retries of an ambiguous pending decision. */
+    private suspend fun awaitConsent(ticket:Long) {
+        val descriptor=requireNotNull(qr);val link=requireNotNull(channel);val pinned=requireNotNull(owner)
+        try {
+            withTimeout(CONSENT_TIMEOUT_MS) {
+                while(true) {
+                    check(ticket)
+                    val previous=consent
+                    if(previous?.rejected==true)throw PairingException("watch_rejected","一端已取消配对，请重新扫描")
+                    mutableConfirmation.value=PairingConfirmation(sasConfirmed,previous?.watch=="confirmed")
+                    if(sasConfirmed && previous?.bothConfirmed==true)break
+                    val sas=PairingWireCodec.sas(descriptor,pinned.userId)
+                    mutable.value=if(sasConfirmed)WatchPairingState.WaitingWatchConfirmAfterPhone(sas)else WatchPairingState.Confirming(sas)
+                    val request=pendingStatus?:JSONObject().put("action","pairingStatus").put("userId",pinned.userId)
+                        .put("decision",if(sasConfirmed)"confirmed" else "pending").also {pendingStatus=it}
+                    val reply=link.request(request);check(ticket)
+                    require(reply.opt("action")=="pairingStatus") { "手表核对响应无效，请重新扫码" }
+                    val next=PairingUxCodec.status(reply,descriptor,pinned.userId)
+                    require(next.phone!="confirmed" || (sasConfirmed && request.getString("decision")=="confirmed")) { "手表核对响应无效，请重新扫码" }
+                    require(previous?.watch!="confirmed" || next.watch!="pending") { "手表确认已失效，请重新扫码" }
+                    require(previous?.phone!="confirmed" || next.phone!="pending") { "手机确认已失效，请重新扫码" }
+                    require(!reply.has("publicKeySpki") || reply.opt("publicKeySpki")==requireNotNull(prepared).getString("publicKeySpki")) { "手表身份已变化，请重新扫码核对" }
+                    pendingStatus=null;consent=next;accountConflict=accountConflict || next.accountConflict
+                    mutableConfirmation.value=PairingConfirmation(sasConfirmed,next.watch=="confirmed")
+                    if(next.rejected || (sasConfirmed && next.bothConfirmed))continue
+                    // A click wakes polling immediately; an in-flight request still finishes in sequence.
+                    withTimeoutOrNull(CONSENT_POLL_MS) {consentWake.receive()}
+                }
+            }
+        } catch(error:TimeoutCancellationException) {
+            check(ticket)
+            throw PairingException("pairing_timeout","等待双端核对超时，请重试；若配对码过期请重新扫描")
+        }
+        check(ticket)
+        if(accountConflict)showAccountConflict()else configure(ticket)
     }
     fun confirmSas(matches:Boolean) {
         val current=state.value
         if(current !is WatchPairingState.Confirming && current !is WatchPairingState.WaitingForPrepareAfterPhone &&
             current !is WatchPairingState.WaitingWatchConfirmAfterPhone)return
         if(!matches) {cancel();mutable.value=WatchPairingState.Failed("两端配对码不一致，已取消；请重新扫描",false);return}
-        if(current !is WatchPairingState.Confirming || sasConfirmed)return
+        if(sasConfirmed)return
         sasConfirmed=true
-        if(prepared==null) {
-            mutable.value=WatchPairingState.WaitingForPrepareAfterPhone(current.sas)
-            return
+        mutableConfirmation.value=mutableConfirmation.value.copy(phoneConfirmed=true)
+        if(prepared==null)mutable.value=WatchPairingState.WaitingForPrepareAfterPhone((current as WatchPairingState.Confirming).sas)
+        consentWake.trySend(Unit)
+    }
+    private fun showAccountConflict() {
+        val descriptor=requireNotNull(qr)
+        mutable.value=WatchPairingState.AccountConflict(PairingWireCodec.sas(descriptor,requireNotNull(owner).userId),PairingUxCodec.canReplace(requireNotNull(prepared)))
+    }
+    /** Explicit destructive consent, distinct from SAS confirmation. Retries reuse the same action. */
+    fun replaceAccountAndContinue() {
+        val current=state.value as? WatchPairingState.AccountConflict?:return
+        if(!current.canReplace)return
+        replacementApproved=true
+        launchWork {replaceAccount(it)}
+    }
+    private suspend fun replaceAccount(ticket:Long) {
+        check(ticket);check(replacementApproved && sasConfirmed && consent?.bothConfirmed==true)
+        val descriptor=requireNotNull(qr);val pinned=requireNotNull(owner);val link=requireNotNull(channel)
+        check(PairingUxCodec.canReplace(requireNotNull(prepared)))
+        replacing=true
+        mutable.value=WatchPairingState.Configuring("正在退出手表原账号并清空本地资料")
+        val receipt=try {withTimeout(CONNECT_PREPARE_TIMEOUT_MS) {
+            link.request(JSONObject().put("action","replaceAccount").put("userId",pinned.userId).put("confirmClearLocal",true))
+        }}catch(error:TimeoutCancellationException) {
+            check(ticket);throw PairingException("pairing_timeout","等待手表退出或清理超时，请重试")
         }
-        launchWork { ticket -> configure(ticket) }
+        check(ticket)
+        PairingUxCodec.replacement(receipt,descriptor,pinned.userId,requireNotNull(prepared).getString("publicKeySpki"))
+        replacing=false;replacementApproved=false;accountConflict=false
+        // No issued credential may survive a change of account ownership.
+        issued=null;configureMessage=null
+        configure(ticket)
     }
     private suspend fun configure(ticket:Long) {
-        check(ticket);check(sasConfirmed && prepared!=null)
+        check(ticket);check(sasConfirmed && prepared!=null && consent?.bothConfirmed==true && !accountConflict && !replacing)
         val descriptor=requireNotNull(qr);val link=requireNotNull(channel);val pinned=requireNotNull(owner)
         try {
             if(!bound) {
                 mutable.value=WatchPairingState.Configuring("正在签发手表凭据")
-                if(issued==null) {val token=ports.issueCredentials(descriptor,pinned);check(ticket);require(token.accessToken.isNotBlank()&&token.refreshToken.isNotBlank()&&token.accessTokenExpiresAtMillis>now()){ "手表凭据未确认" };issued=token}
+                if(issued==null) {val token=try {ports.issueCredentials(descriptor,pinned)}catch(error:Exception) {
+                    check(ticket)
+                    if(PairingUxCodec.ownershipConflict(error)) {accountConflict=true;showAccountConflict();return}
+                    throw error
+                };check(ticket);require(token.accessToken.isNotBlank()&&token.refreshToken.isNotBlank()&&token.accessTokenExpiresAtMillis>now()){ "手表凭据未确认" };issued=token}
                 if(configureMessage==null)configureMessage=configureMessage(pinned,descriptor,requireNotNull(issued))
                 mutable.value=WatchPairingState.WaitingWatchConfirmAfterPhone(PairingWireCodec.sas(descriptor,pinned.userId))
                 val receipt=try {
@@ -233,7 +306,7 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
                     throw PairingException("pairing_timeout","等待手表绑定确认超时，请重试；若配对码过期请重新扫描")
                 }
                 check(ticket)
-                require(receipt.optBoolean("bound")&&receipt.optString("deviceId")==descriptor.deviceId&&receipt.optString("userId")==pinned.userId) { "手表尚未确认保存账号，请重试" }
+                require(receipt.opt("success")==true&&receipt.opt("bound")==true&&receipt.optString("deviceId")==descriptor.deviceId&&receipt.optString("userId")==pinned.userId) { "手表尚未确认保存账号，请重试" }
                 bound=true;issued=null;configureMessage=null
             }
             if(!cloudReady) {
@@ -241,12 +314,13 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
                 if(grant==null) {val value=ports.grantCloud(descriptor,requireNotNull(prepared).getString("publicKeySpki"),pinned);check(ticket);grant=value}
                 val keyGrant=requireNotNull(grant)
                 val receipt=link.request(keyGrant.message(pinned.userId,requireNotNull(pinned.epoch)));check(ticket)
-                require(receipt.optBoolean("cloudReady")&&receipt.optString("deviceId")==descriptor.deviceId&&receipt.optInt("keyVersion")==keyGrant.keyVersion) { "手表尚未确认云密钥保存，请重试授权" }
+                require(receipt.opt("success")==true&&receipt.opt("cloudReady")==true&&receipt.optString("deviceId")==descriptor.deviceId&&receipt.optInt("keyVersion")==keyGrant.keyVersion) { "手表尚未确认云密钥保存，请重试授权" }
                 cloudReady=true;grant=null
             }
             if(!finished) {
                 mutable.value=WatchPairingState.Configuring("正在结束配对")
-                link.request(JSONObject().put("action","finish").put("cloudReady",true));check(ticket);finished=true
+                val receipt=link.request(JSONObject().put("action","finish").put("cloudReady",true));check(ticket)
+                require(receipt.opt("success")==true) { "手表结束确认未送达，请重试" };finished=true
             }
             link.close();check(ticket);channel=null;qr=null;prepared=null
             mutable.value=WatchPairingState.Done(true,true)
@@ -265,7 +339,10 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
             is WatchPairingState.NeedsKey -> prepareScan()
             is WatchPairingState.Scanning -> if(current.permission!=PairingCameraPermission.GRANTED)mutable.value=WatchPairingState.Scanning(PairingCameraPermission.REQUEST_REQUIRED)
             is WatchPairingState.Done -> if(current.canRetry)launchWork {configure(it)}
-            is WatchPairingState.Failed -> if(qr!=null && current.canRetry)launchWork { if(sasConfirmed && prepared!=null)configure(it)else connectAndPrepare(it) } else startScan(cameraGranted)
+            is WatchPairingState.Failed -> if(qr!=null && current.canRetry)launchWork {
+                when { replacing && replacementApproved -> replaceAccount(it);prepared==null -> connectAndPrepare(it)
+                    consent?.bothConfirmed!=true -> awaitConsent(it);accountConflict -> showAccountConflict();else -> configure(it) }
+            } else startScan(cameraGranted)
             else -> Unit
         }
     }
@@ -277,11 +354,22 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
     private fun resetPairing() {
         generation.incrementAndGet();work?.cancel();work=null;release();owner=null
         bound=false;cloudReady=false;finished=false;sasConfirmed=false
+        consent=null;pendingStatus=null;accountConflict=false;replacing=false;replacementApproved=false
+        mutableConfirmation.value=PairingConfirmation()
+        while(consentWake.tryReceive().isSuccess) { /* Drop an abandoned session's click. */ }
         mutable.value=WatchPairingState.Idle
     }
     private fun clearWatchQrRequest() {
         watchQrGeneration.incrementAndGet();watchQrJob?.cancel();watchQrJob=null
         mutableWatchQrRequest.value=null;watchQrOwner=null
+    }
+    /** An actual background transition ends consent; Activity recreation retains it. */
+    fun onPageBackgrounded(changingConfiguration:Boolean=false) {
+        if(changingConfiguration)return
+        when(state.value) {
+            is WatchPairingState.Confirming,is WatchPairingState.Configuring,is WatchPairingState.AccountConflict,WatchPairingState.Connecting -> cancel()
+            else -> Unit
+        }
     }
     fun cancel() {resetPairing();clearWatchQrRequest()}
     private fun invalidate(message:String) {cancel();mutable.value=WatchPairingState.Failed(message,false)}
@@ -289,6 +377,8 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
     internal companion object {
         const val CONNECT_PREPARE_TIMEOUT_MS=120_000L
         const val WATCH_BOUND_TIMEOUT_MS=120_000L
+        const val CONSENT_TIMEOUT_MS=90_000L
+        const val CONSENT_POLL_MS=1_000L
     }
 }
 

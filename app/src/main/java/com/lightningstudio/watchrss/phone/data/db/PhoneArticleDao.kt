@@ -22,6 +22,7 @@ private const val BODY_CHUNK_BYTES = 65_536
 
 @Dao
 interface PhoneArticleDao {
+    @Query("SELECT EXISTS(SELECT 1 FROM phone_articles)") suspend fun hasAny(): Boolean
     @Transaction
     suspend fun upsertRssIdentityRows(articles: List<PhoneArticleEntity>, retiredIds: List<String>) {
         upsertAll(articles)

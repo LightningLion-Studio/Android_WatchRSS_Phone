@@ -1716,6 +1716,11 @@ class PhoneCompanionRepository(
         removedArticles to removedSources
     }
 
+    /** Any user content that an account switch could lose. */
+    suspend fun hasLibraryContent(): Boolean = withContext(Dispatchers.IO) {
+        articleDao.hasAny() || rssSourceDao.hasAny() || savedItemDao.hasAny()
+    }
+
     suspend fun clearLibrary() = withContext(Dispatchers.IO) {
         books?.clear()
         articleDao.deleteAll()

@@ -80,6 +80,11 @@ class WatchPairingActivity : ComponentActivity() {
         }
     }
 
+    override fun onStop() {
+        viewModel.onPageBackgrounded(isChangingConfigurations)
+        super.onStop()
+    }
+
     override fun onDestroy() {
         if (isFinishing) viewModel.cancel()
         super.onDestroy()
@@ -95,6 +100,7 @@ class WatchPairingActivity : ComponentActivity() {
 private fun WatchPairingScreen(viewModel: WatchPairingViewModel, onClose: () -> Unit, onOpenCloudSync: () -> Unit) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val watchQr by viewModel.watchQrRequest.collectAsStateWithLifecycle()
+    val confirmation by viewModel.confirmation.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val granted = { ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED }
     val activity = context as? ComponentActivity
@@ -160,25 +166,18 @@ private fun WatchPairingScreen(viewModel: WatchPairingViewModel, onClose: () -> 
                     else -> Progress("正在请求相机权限…")
                 }
                 WatchPairingState.Connecting -> Progress("正在连接手表…")
-                is WatchPairingState.Confirming -> {
-                    Lead("核对手表上的数字")
-                    Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            current.sas.let { if (it.length == 8) "${it.take(4)} ${it.takeLast(4)}" else it },
-                            style = MaterialTheme.typography.displayMedium, fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp)
-                        )
-                    }
-                    Muted("两边数字一致，就在手机和手表上各点一次“一致”，先后不限。不一致说明扫错了手表或有人冒充，请点“不一致”。")
-                    Button(onClick = { viewModel.confirmSas(true) }, modifier = Modifier.fillMaxWidth()) { Text("一致") }
-                    OutlinedButton(onClick = { viewModel.confirmSas(false) }, modifier = Modifier.fillMaxWidth()) { Text("不一致") }
-                }
-                is WatchPairingState.WaitingWatchConfirmAfterPhone -> {
-                    Lead("手机已确认")
-                    Progress("请在手表上点「一致，绑定」…")
-                    Muted("手表确认后会自动完成绑定和云同步授权。")
-                    OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) { Text("取消") }
+                is WatchPairingState.Confirming -> PairingConsent(current.sas, confirmation.phoneConfirmed, confirmation.watchConfirmed, viewModel::confirmSas)
+                is WatchPairingState.WaitingForPrepareAfterPhone -> PairingConsent(current.sas, true, confirmation.watchConfirmed, viewModel::confirmSas)
+                is WatchPairingState.WaitingWatchConfirmAfterPhone -> PairingConsent(current.sas, true, confirmation.watchConfirmed, viewModel::confirmSas)
+                is WatchPairingState.AccountConflict -> {
+                    Lead("手表登录着另一个账号")
+                    AlertDialog(
+                        onDismissRequest = { viewModel.cancel() },
+                        title = { Text("退出原账号并绑定？") },
+                        text = { Text(if (current.canReplace) current.message else current.message + "\n当前手表暂不支持自动退出，请更新手表后重新扫码。") },
+                        confirmButton = { if (current.canReplace) TextButton(onClick = viewModel::replaceAccountAndContinue) { Text("退出并绑定") } },
+                        dismissButton = { TextButton(onClick = { viewModel.cancel() }) { Text("取消") } }
+                    )
                 }
                 is WatchPairingState.Configuring -> {
                     Progress(current.step)
@@ -291,4 +290,23 @@ private fun WatchQrStatus(request: WatchQrRequest?, onAgain: () -> Unit) {
 @Composable private fun Progress(text: String) = Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
     CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 3.dp)
     Text(text, style = MaterialTheme.typography.bodyLarge)
+}
+
+@Composable
+private fun PairingConsent(sas: String, phoneConfirmed: Boolean, watchConfirmed: Boolean, onDecision: (Boolean) -> Unit) {
+    Lead("核对手表上的数字")
+    Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+        Text(sas.let { if (it.length == 8) "${it.take(4)} ${it.takeLast(4)}" else it },
+            style = MaterialTheme.typography.displayMedium, fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp))
+    }
+    Muted(when {
+        phoneConfirmed && watchConfirmed -> "两端已确认，正在保存账号。"
+        watchConfirmed -> "手表已确认，等你点一致。"
+        phoneConfirmed -> "手机已确认，请在手表上点「一致，绑定」。"
+        else -> "两边数字一致，就在手机和手表上各点一次「一致」，先后不限。"
+    })
+    Button(onClick = { onDecision(true) }, enabled = !phoneConfirmed, modifier = Modifier.fillMaxWidth()) { Text(if (phoneConfirmed) "手机已确认" else "一致") }
+    OutlinedButton(onClick = { onDecision(false) }, modifier = Modifier.fillMaxWidth()) { Text("不一致") }
 }

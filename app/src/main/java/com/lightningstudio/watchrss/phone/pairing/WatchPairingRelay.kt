@@ -16,6 +16,7 @@ internal class PairingHttpException(val status: Int, val code: String) : IOExcep
 interface WatchPairingChannel {
     suspend fun connect()
     suspend fun request(message: JSONObject): JSONObject
+    fun negotiateUx(receipt:JSONObject) {}
     fun invalidate()
     suspend fun close()
 }
@@ -35,6 +36,7 @@ internal class WatchPairingRelay(
     private val closeSent=AtomicBoolean(false)
     private var claimAttempted=false; private var claimed=false
     private var sequence=0
+    private var maxSequence=15
     private var pendingPlain: String? = null
     private var pendingBody: String? = null
     private fun check() { if(closed) throw PairingInvalidated(); if(now() >= qr.expiresAt) throw PairingException("pairing_expired","配对码已过期，请重新扫描"); checkOwner() }
@@ -58,11 +60,11 @@ internal class WatchPairingRelay(
         require(result.optBoolean("claimed")) { "配对认领未确认" };claimed=true
     }
     override suspend fun request(message:JSONObject):JSONObject = mutex.withLock {
-        check();check(claimed && sequence in 0..15) { "请重新扫描配对码" }
+        check();check(claimed && sequence in 0..maxSequence) { "请重新扫描配对码" }
         val text=message.toString()
         if(pendingBody==null) {
             pendingPlain=text
-            val wire=PairingWireCodec.seal(qr,"phone",sequence,message)
+            val wire=PairingWireCodec.seal(qr,"phone",sequence,message,maxSequence)
             pendingBody=JSONObject().put("seq",sequence).put("wire",wire).toString()
         } else require(pendingPlain==text) { "上一条配对消息尚未确认，请重试原操作" }
         val deadline=minOf(qr.expiresAt,now()+110_000)
@@ -71,14 +73,18 @@ internal class WatchPairingRelay(
             check()
             val result=send("GET","/response?seq=$sequence",null)
             if(result.has("wire") && !result.isNull("wire")) {
-                val plain=PairingWireCodec.open(qr,"watch",sequence,result.getJSONObject("wire"));check()
-                if(!plain.optBoolean("success")) throw PairingException("watch_rejected","手表未完成配置，请检查手表后重试")
+                val plain=PairingWireCodec.open(qr,"watch",sequence,result.getJSONObject("wire"),maxSequence);check()
                 sequence++;pendingPlain=null;pendingBody=null
+                if(plain.opt("success")!=true) throw PairingPeerException(plain.optString("errorCode").ifBlank { plain.optString("error").ifBlank { plain.optString("code") } })
                 return@withLock plain
             }
             sleep(1200)
         }
         throw PairingException("pairing_timeout","等待手表确认超时，请重试；若配对码过期请重新扫描")
+    }
+    override fun negotiateUx(receipt:JSONObject) {
+        check();check(sequence==1 && pendingBody==null)
+        PairingUxCodec.requireSupport(receipt);maxSequence=PairingUxCodec.SEQUENCE_MAX
     }
     override fun invalidate() { closed=true;qr.destroy() }
     override suspend fun close() {

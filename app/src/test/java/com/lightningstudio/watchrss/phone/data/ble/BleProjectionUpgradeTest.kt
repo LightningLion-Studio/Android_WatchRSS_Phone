@@ -26,6 +26,21 @@ class BleProjectionUpgradeTest {
     @Before fun registered()=runBlocking<Unit>{db.bookReadingDao().putRegistration(BookCaptureMetaEntity(checkedRevision=0))}
     @After fun close(){db.close();directory.deleteRecursively()}
 
+    @Test fun previewGuardUpgradeInvalidatesLegacyBodyAvailabilityCache()=runBlocking<Unit> {
+        val source=com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.ROOT_SOURCE_URL
+        val text="合成正文".repeat(1000);val preview=text.take(280)
+        val article=row().copy(url=com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.txtArticleUrl("previewguard"),rssSourceUrl=source,excerpt=preview,contentText=preview,
+            contentHash=com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec.sha256(text.toByteArray()))
+        db.phoneArticleDao().upsert(article)
+        val old=store(6);old.initialize();repo(old).prepareLibrarySyncWindow("watch",0,true)
+        // The old serializer could certify preview text. Keep business clocks unchanged.
+        db.openHelper.writableDatabase.execSQL("UPDATE ble_fast_manifest SET json=replace(json,'\"bodyAvailable\":false','\"bodyAvailable\":true')")
+        assertTrue(old.manifests().single().bodyAvailable)
+        val next=BleDomainStore(db,directory)
+        val window=repo(next).prepareLibrarySyncWindow("watch",0,true)
+        assertFalse(window.articleManifest.single().bodyAvailable)
+    }
+
     @Test fun actualFiveLegacyDecisionsConsumeOldAliasTombstonesAcrossFullAndUpgrade()=runBlocking<Unit> {
         val fixture=org.json.JSONArray(requireNotNull(javaClass.getResourceAsStream("/ble/conflict5-state-chain.json")).bufferedReader().readText())
         val old=store();old.initialize()

@@ -52,6 +52,21 @@ class BookSyncRegressionTest {
     private fun readingReply()=reply("reading").put("states",JSONArray()).put("hasMore",false).put("nextAfter",0)
     private fun entries(bytes:ByteArray):Map<String,ByteArray> = buildMap {ZipInputStream(ByteArrayInputStream(bytes)).use{z->while(true){val e=z.nextEntry?:break;put(e.name,z.readBytes())}}}
 
+    @Test fun previewGuardRejectsPlainPreviewAndRegistersRestoredBodyWithoutChangingOldPackages()=runBlocking<Unit> {
+        val f=fixture();val source=ImportedContentIds.txtNovelSourceUrl("previewguard")
+        val full="合成完整正文\n".repeat(1000);val preview=full.replace(Regex("\\s+")," ").trim().take(280)
+        val original=row("previewguard",ImportedContentIds.txtNovelChapterUrl("previewguard",0,"hash"),source,"Synthetic",full).copy(excerpt=preview)
+        f.db.phoneArticleDao().upsertAll(listOf(original.copy(contentText=preview)))
+        f.store.ensureRegistered();assertTrue(f.store.states().isEmpty());assertTrue(f.store.migrationWarnings.contains(source))
+        assertTrue(f.dir.listFiles().orEmpty().none{it.extension=="jsonl"})
+        f.db.phoneArticleDao().upsertAll(listOf(original));f.store.ensureRegistered()
+        val state=f.store.states().single();val file=f.store.packageFile(state.getString("bookId"))!!;val before=file.readBytes()
+        assertTrue(file.readText().contains("合成完整正文"))
+        f.db.phoneArticleDao().upsertAll(listOf(original.copy(contentText=preview)));f.store.ensureRegistered()
+        assertArrayEquals(before,file.readBytes())
+        val short="短".repeat(87);assertTrue(BodyAuthority.accepts(original.copy(contentText=short,excerpt=short,contentHash=CloudSnapshotCodec.sha256(short.toByteArray()))))
+    }
+
     @Test fun sharedFingerprintVectorsMatchEveryChapterBookAndArticleId() {
         val cases=JSONObject(requireNotNull(javaClass.getResource("/book/book-fingerprint.json")).readText()).getJSONArray("cases")
         for(i in 0 until cases.length()) {

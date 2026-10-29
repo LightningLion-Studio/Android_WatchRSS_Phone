@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "redacted": true,
+  "fullRecipe": {
+    "unit": "合成正文甲乙丙丁戊己\n\n",
+    "chars": 6823584
+  },
+  "excerptChars": 280,
+  "shortChars": 87,
+  "cases": [
+    {
+      "name": "8223-redacted-preview-inline",
+      "text": "excerpt",
+      "excerpt": "excerpt",
+      "bodyEvidence": false,
+      "contentHash": "abc7cccf502eb7cd6e2c52074a57889fd77c940aa96d088676c34f1000a10f3a",
+      "bodyAvailable": true,
+      "fileImport": true,
+      "expected": false,
+      "contentHtml": null
+    },
+    {
+      "name": "8223-redacted-preview-in-body-row",
+      "text": "excerpt",
+      "excerpt": "excerpt",
+      "bodyEvidence": true,
+      "contentHash": "abc7cccf502eb7cd6e2c52074a57889fd77c940aa96d088676c34f1000a10f3a",
+      "bodyAvailable": true,
+      "fileImport": true,
+      "expected": false,
+      "contentHtml": null
+    },
+    {
+      "name": "whitespace-compressed-preview",
+      "text": "合成\n\t 正文",
+      "excerpt": "合成 正文",
+      "bodyEvidence": true,
+      "contentHash": "",
+      "bodyAvailable": true,
+      "fileImport": true,
+      "expected": false,
+      "contentHtml": null
+    },
+    {
+      "name": "8223-redacted-complete",
+      "text": "full",
+      "excerpt": "excerpt",
+      "bodyEvidence": true,
+      "contentHash": "abc7cccf502eb7cd6e2c52074a57889fd77c940aa96d088676c34f1000a10f3a",
+      "bodyAvailable": true,
+      "fileImport": true,
+      "expected": true,
+      "contentHtml": null
+    },
+    {
+      "name": "short-87-authentic",
+      "text": "short",
+      "excerpt": "short",
+      "bodyEvidence": true,
+      "contentHash": "460440db6ed0a266b404e28ae8c9c3a8a9d613a0fb5f396f59f29849c7eda849",
+      "bodyAvailable": true,
+      "fileImport": true,
+      "expected": true,
+      "contentHtml": null
+    },
+    {
+      "name": "short-87-no-proof",
+      "text": "short",
+      "excerpt": "short",
+      "bodyEvidence": true,
+      "contentHash": "",
+      "bodyAvailable": true,
+      "fileImport": true,
+      "expected": false,
+      "contentHtml": null
+    },
+    {
+      "name": "short-not-preview",
+      "text": "真实短章",
+      "excerpt": "摘要",
+      "bodyEvidence": true,
+      "contentHash": "",
+      "bodyAvailable": true,
+      "fileImport": true,
+      "expected": true,
+      "contentHtml": null
+    },
+    {
+      "name": "only-articles-content",
+      "text": "真实短章",
+      "excerpt": "摘要",
+      "bodyEvidence": false,
+      "contentHash": "",
+      "bodyAvailable": true,
+      "fileImport": true,
+      "expected": false,
+      "contentHtml": null
+    },
+    {
+      "name": "missing-body-explicit",
+      "text": "full",
+      "excerpt": "excerpt",
+      "bodyEvidence": true,
+      "contentHash": "abc7cccf502eb7cd6e2c52074a57889fd77c940aa96d088676c34f1000a10f3a",
+      "bodyAvailable": false,
+      "fileImport": true,
+      "expected": false,
+      "contentHtml": null
+    },
+    {
+      "name": "non-file-article",
+      "text": "excerpt",
+      "excerpt": "excerpt",
+      "bodyEvidence": true,
+      "contentHash": "",
+      "bodyAvailable": true,
+      "fileImport": false,
+      "expected": true,
+      "contentHtml": null
+    },
+    {
+      "name": "short-87-html-proof",
+      "text": "short",
+      "excerpt": "short",
+      "bodyEvidence": true,
+      "contentHash": "3106c539fbd42f5019b440ec2b3742af3c28fa8a086a2f8aefd408ebc7a5ba41",
+      "bodyAvailable": true,
+      "fileImport": true,
+      "expected": true,
+      "contentHtml": "htmlShort"
+    },
+    {
+      "name": "html-proof-does-not-certify-preview",
+      "text": "excerpt",
+      "excerpt": "excerpt",
+      "bodyEvidence": true,
+      "contentHash": "2c0cce770e738dbb8ab0d423ce5d2f8bc56285ee4c66edf639cfd1a394994853",
+      "bodyAvailable": true,
+      "fileImport": true,
+      "expected": false,
+      "contentHtml": "htmlFull"
+    }
+  ]
+}

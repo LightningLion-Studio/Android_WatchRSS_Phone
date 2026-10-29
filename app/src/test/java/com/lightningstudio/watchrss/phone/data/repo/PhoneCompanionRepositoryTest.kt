@@ -2087,6 +2087,20 @@ class PhoneCompanionRepositoryTest {
         assertEquals(manifest.bodyHash, articleDao.items.single().syncBodyHash)
     }
 
+    @Test fun previewGuardNeverExportsPlainPreviewAsSyncBody() = runBlocking {
+        val full="合成完整正文\n".repeat(1000);val preview=full.replace(Regex("\\s+")," ").trim().take(280)
+        val original=article(id="previewguard",url=ImportedContentIds.txtArticleUrl("previewguard"),rssSourceUrl=ImportedContentIds.ROOT_SOURCE_URL,contentText=full).copy(excerpt=preview,contentHash=WebArticleImporter.sha256(full))
+        val dao=FakePhoneArticleDao().apply{items=listOf(original.copy(contentText=preview))}
+        val repo=PhoneCompanionRepository(FakePhoneSavedItemDao(),dao,FakePhoneRssSourceDao(),"test-phone")
+        assertEquals(false,repo.getArticleManifestsForSync().single().bodyAvailable)
+        assertTrue(repo.getArticlesForSync(listOf(original.articleId)).isEmpty())
+        dao.items=listOf(original);assertTrue(repo.getArticleManifestsForSync().single().bodyAvailable)
+        assertEquals(full,repo.getArticlesForSync(listOf(original.articleId)).single().contentText)
+        val short="短".repeat(87);dao.items=listOf(original.copy(contentText=short,excerpt=short,contentHash=WebArticleImporter.sha256(short)))
+        assertTrue(repo.getArticleManifestsForSync().single().bodyAvailable)
+        assertEquals(short,repo.getArticlesForSync(listOf(original.articleId)).single().contentText)
+    }
+
     @Test
     fun getArticleManifestsForSync_marksMissingExternalBodyUnavailable() = runBlocking {
         val sourceUrl = ImportedContentIds.ROOT_SOURCE_URL

@@ -1,5 +1,7 @@
 package com.lightningstudio.watchrss.phone.data.repo
 
+import com.lightningstudio.watchrss.phone.data.book.BodyAuthority
+import com.lightningstudio.watchrss.phone.data.local.isArticleContentMarker
 import com.lightningstudio.watchrss.phone.cloud.compactCloudExcerpt
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncBody
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyMetadata
@@ -551,7 +553,7 @@ class PhoneCompanionRepository(
                 if (similarity < MIN_TXT_NAME_SIMILARITY && existing.contentHash != newHash) {
                     return@mapNotNull null
                 }
-                val oldText = existing.hydrateExternalText().contentText
+                val oldText = existing.hydrateExternalTextForWrite().contentText
                 val relation = classifyTxtUpdate(
                     oldText = oldText,
                     newText = newText,
@@ -992,8 +994,8 @@ class PhoneCompanionRepository(
     private suspend fun migrateBluetoothAlias(oldId:String,id:String) {
         articleProvenance?.requireExportable(oldId)
         articleProvenance?.requireExportable(id)
-        val old=articleDao.getById(oldId)?.hydrateExternalText()?:return
-        val current=articleDao.getById(id)?.hydrateExternalText()
+        val old=articleDao.getById(oldId)?.hydrateExternalTextForWrite()?:return
+        val current=articleDao.getById(id)?.hydrateExternalTextForWrite()
         require(current==null || current.url==old.url && current.rssSourceUrl==old.rssSourceUrl) { "RSS别名指向不同条目" }
         val rekeyed=old.copy(articleId=id,syncMetadataHash="")
         val merged=(if(current==null)rekeyed else mergeArticleByLatest(rekeyed,current)).withCurrentSyncMetadata()
@@ -1287,7 +1289,7 @@ class PhoneCompanionRepository(
         var repaired = 0
         sources.forEach { source ->
             val articles = articleDao.getByRssSourceUrl(source.url)
-                .map { it.hydrateExternalText() }
+                .map { it.hydrateExternalTextForWrite() }
                 .sortedByDescending { it.importedAt }
             val updates = inferImportedEpubTitleUpdates(articles)
             updates.forEach { (articleId, title) ->
@@ -1408,7 +1410,7 @@ class PhoneCompanionRepository(
         remoteManifest.forEachIndexed { index, remote ->
             val metadata = articleDao.getBodyMetadataById(remote.articleId) ?: return@forEachIndexed
             if (buildDeleteConflict(metadata, remote) == null) return@forEachIndexed
-            val local = articleDao.getById(remote.articleId)?.hydrateExternalText() ?: return@forEachIndexed
+            val local = articleDao.getById(remote.articleId)?.hydrateExternalTextForWrite() ?: return@forEachIndexed
             // A local edit may have resolved the conflict while the body was being read.
             if (buildDeleteConflict(local, remote) == null) return@forEachIndexed
             articleProvenance?.guardEdit(local.articleId,JSONObject().put("operation","resolveConflict").put("resolution",resolutions[remote.articleId]?.name?:"pending"))
@@ -1487,7 +1489,8 @@ class PhoneCompanionRepository(
             articleProvenance?.requireExportable(candidate.articleId)
             val remote=books?.canonicalArticle(candidate)?:candidate
             val local = articleDao.getById(remote.articleId)
-            val localHydrated = local?.hydrateExternalText()
+            val localProof = local?.hydrateExternalTextForSync()
+            val localHydrated = localProof?.article?.takeIf { localProof.bodyAvailable } ?: local?.copy(contentText="",contentHtml=null)
             val recoversLocalOriginal = localHydrated?.let(remote::canRecoverSavedRssBodyFrom) == true
             val retainsLocalBody =
                 recoversLocalOriginal || local != null && remote.contentHash == local.contentHash &&
@@ -1495,6 +1498,7 @@ class PhoneCompanionRepository(
                 remote.contentHtml.isNullOrBlank() &&
                 remote.contentText.isBlank()
             val remoteWithBody = if (retainsLocalBody) {
+                check(localProof?.bodyAvailable==true) { "同步正文暂不可用，请补回原文后重试" }
                 val localBody = requireNotNull(localHydrated)
                 remote.copy(
                     contentHash = if (recoversLocalOriginal) localBody.contentHash else remote.contentHash,
@@ -1998,7 +2002,7 @@ class PhoneCompanionRepository(
                 // Normalize the feed preview before comparing against the stored row.
                 // Otherwise every refresh restores the long summary and stamps a new change.
                 .compactCloudExcerpt(timestamp, deviceId)
-                .withRssLocalStateFrom(existingArticle?.hydrateExternalText()?.copy(articleId=canonicalId))
+                .withRssLocalStateFrom(existingArticle?.hydrateExternalTextForWrite()?.copy(articleId=canonicalId))
                 .withCurrentSyncMetadata()
                 .externalizeLargeLocalContent()
             if(existingArticle!=null && articleProvenance?.protected(existingArticle.articleId)==true) {
@@ -2650,7 +2654,7 @@ class PhoneCompanionRepository(
     }
 
     private suspend fun PhoneArticleEntity.ensureSyncMetadata(
-        hydrated: PhoneArticleEntity = hydrateExternalText()
+        hydrated: PhoneArticleEntity
     ): PhoneArticleEntity {
         ArticleSyncBody.cachedMetadataFor(hydrated)?.let { cached ->
             if (hasSyncMetadata(cached)) return this
@@ -2827,6 +2831,14 @@ class PhoneCompanionRepository(
         )
     }
 
+    /** Writes and sync must never promote a display excerpt to persisted body text. */
+    private fun PhoneArticleEntity.hydrateExternalTextForWrite(): PhoneArticleEntity {
+        val hydrated=hydrateExternalTextForSync()
+        check(hydrated.bodyAvailable) { "文章正文暂不可用，请补回原文后重试" }
+        return hydrated.article
+    }
+
+    /** Display only. Callers must not persist or export this projection. */
     private fun PhoneArticleEntity.hydrateExternalText(): PhoneArticleEntity {
         val store = articleContentStore ?: return this
         val html = contentHtml?.let { value ->
@@ -2906,7 +2918,8 @@ class PhoneCompanionRepository(
     }
 
     private fun PhoneArticleEntity.hydrateExternalTextForSync(): SyncHydratedArticle {
-        val store = articleContentStore ?: return SyncHydratedArticle(this, bodyAvailable = true)
+        val store = articleContentStore ?: return SyncHydratedArticle(this,
+            bodyAvailable = !isArticleContentMarker(contentText) && !isArticleContentMarker(contentHtml) && BodyAuthority.accepts(this))
         var bodyAvailable = true
         val html = contentHtml?.let { value ->
             if (store.isMarker(value)) {
@@ -2926,7 +2939,8 @@ class PhoneCompanionRepository(
         } else {
             contentText
         }
-        return SyncHydratedArticle(copy(contentHtml = html, contentText = text), bodyAvailable)
+        val hydrated=copy(contentHtml = html, contentText = text)
+        return SyncHydratedArticle(hydrated, bodyAvailable && BodyAuthority.accepts(hydrated))
     }
 
     private suspend fun PhoneArticleEntity.loadStoredBodyForSync(): SyncHydratedArticle {

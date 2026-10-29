@@ -40,7 +40,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         return File.createTempFile(prefix,".part",staging)
     }
     private fun hydrate(row:PhoneArticleEntity):PhoneArticleEntity {
-        fun load(value:String):String=if(contentStore?.isMarker(value)==true)contentStore.loadText(value)?:error("导入书正文暂不可用") else value
+        fun load(value:String):String=if(com.lightningstudio.watchrss.phone.data.local.isArticleContentMarker(value) || contentStore?.isMarker(value)==true)contentStore?.loadText(value)?:error("导入书正文暂不可用") else value
         return row.copy(contentText=load(row.contentText),contentHtml=row.contentHtml?.let(::load))
     }
     companion object {
@@ -93,7 +93,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
                 out.append(BookSync.canonical(JSONObject().put("format","watchrss-book").put("version",1).put("title",title).put("chapterCount",metadata.size).put("sourceUrl",source).put("kind",if(source.contains("epub"))"epub" else "txt"))).append('\n')
                 for((index,item) in metadata.withIndex()) {
                     val row=hydrate(requireNotNull(articles.getById(item.articleId)))
-                    require(row.contentText.isNotEmpty() || !row.contentHtml.isNullOrEmpty()) {"导入书正文暂不可用"}
+                    if(!BodyAuthority.accepts(row))throw IncompleteOriginal("导入书缺少权威正文，等待补回正文")
                     hashes+=BookSync.chapterHash(index+1,row.title,row.contentText)
                     out.append(BookSync.canonical(JSONObject().put("chapterIndex",index+1).put("title",BookSync.normalized(row.title))
                         .put("contentText",BookSync.normalized(row.contentText)).put("contentHtml",row.contentHtml?.let(BookSync::normalized)?:JSONObject.NULL).put("url",row.url))).append('\n')

@@ -16,7 +16,7 @@ import java.util.UUID
 class BleDomainStore(
     private val database:PhoneCompanionDatabase, private val files:File,
     // v5 pins gzip headers and validates legacy wire witnesses across cloud restoration.
-    private val encoderVersions:Map<String,Int> = DOMAINS.associateWith { if (it == "library") 6 else 1 },
+    private val encoderVersions:Map<String,Int> = DOMAINS.associateWith { if (it == "library") 7 else 1 },
     private val now:()->Long = System::currentTimeMillis,
     private val nativeProtocolVersion:Int = LibrarySyncPayload.PROTOCOL_VERSION
 ) {

@@ -55,8 +55,8 @@ class DocumentLibraryActivity : ComponentActivity() {
                                 verticalArrangement = Arrangement.spacedBy(20.dp)
                             ) {
                                 listOf(
-                                    LegalDocument.WATCH_QA to "手表阅读、同步与常见问题",
                                     LegalDocument.PHONE_QA to "内容管理、蓝牙同步与常见问题",
+                                    LegalDocument.WATCH_QA to "手表阅读、同步与常见问题",
                                     LegalDocument.MINI_PROGRAM_QA to "小程序阅读、云同步与常见问题"
                                 ).forEach { (document, description) ->
                                     LegalDocumentSection(

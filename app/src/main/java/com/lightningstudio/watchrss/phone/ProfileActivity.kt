@@ -585,7 +585,7 @@ private fun ProfileNavigation(
             )
             ProfileEntry(
                 title = "文档库",
-                supportingText = "手表版、手机版与小程序版 Q&A",
+                supportingText = "手机版、手表版与小程序版 Q&A",
                 icon = Icons.Default.MenuBook,
                 onClick = onDocumentLibraryClick
             )

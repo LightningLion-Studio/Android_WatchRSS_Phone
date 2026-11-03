@@ -1750,7 +1750,18 @@ class PhoneCloudSyncService(
             val live=overlayExport.entries.mapNotNull{it.objectName}.toSet()
             winningObjects.values.map{it.second}.filter{it.name in live && it.name !in logicalObjects.map{l->l.name}}
         } else emptyList()
-        val replaced=logicalObjects.map{it.name}.toSet()+if(overlayExport!=null)currentManifests.flatMap{it.objects}.filter{it.name.startsWith("private/articles/")||it.name.startsWith("books/")||it.name==CloudPrivateOverlay.NAME}.map{it.name} else emptyList()
+        val retiredNotesObjects = if (notes.none { !it.deleted }) {
+            // Omission retires this supported object, so it needs the same write
+            // permission as replacement. Never discard a future archive format.
+            for (old in currentManifests.flatMap { it.objects }.filter { it.name == NOTES_ARCHIVE_OBJECT }) {
+                if (old.access != CloudFormatAccess.WRITABLE) {
+                    pendingFormat(session,"object:${old.name}")
+                    throw CloudFormatUpgradeRequired("object_read_only")
+                }
+            }
+            setOf(NOTES_ARCHIVE_OBJECT)
+        } else emptySet()
+        val replaced=logicalObjects.map{it.name}.toSet()+retiredNotesObjects+if(overlayExport!=null)currentManifests.flatMap{it.objects}.filter{it.name.startsWith("private/articles/")||it.name.startsWith("books/")||it.name==CloudPrivateOverlay.NAME}.map{it.name} else emptyList()
         val carried = CloudSnapshotReuse.preserveObjects(currentManifests,replaced,priorBodies+overlayCarried)
         if(logicalObjects.size+carried.size>1024) {
             pendingFormat(session,"manifest:private-overlay-capacity")

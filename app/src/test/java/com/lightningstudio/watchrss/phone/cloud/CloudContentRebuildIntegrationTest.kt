@@ -7,7 +7,7 @@ import androidx.room.Room
 import com.lightningstudio.watchrss.phone.account.*
 import com.lightningstudio.watchrss.phone.data.backup.*
 import com.lightningstudio.watchrss.phone.data.db.*
-import com.lightningstudio.watchrss.phone.data.note.NoteRepository
+import com.lightningstudio.watchrss.phone.data.note.*
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.testing.MemoryPreferences
@@ -123,6 +123,7 @@ class CloudContentRebuildIntegrationTest {
         var mutatedDuringPull=false
         var mutateDuringUpload=false
         var mutatedDuringUpload=false
+        var onComplete: (suspend () -> Unit)? = null
         val client=PhoneCloudClient(env,http=OkHttpClient.Builder().addInterceptor { chain ->
             synchronized(this) {
                 val request=chain.request();val path=request.url.encodedPath;httpRequests++;requestBodyBytes+=request.body?.contentLength()?.coerceAtLeast(0) ?: 0
@@ -201,7 +202,8 @@ class CloudContentRebuildIntegrationTest {
                         if(shouldFail("complete")){failed=true;code=404;JSONObject().put("error","snapshot_not_found")}
                         else {
                             val plan=plans.last();assertEquals(plan.getString("snapshotId"),body.getString("snapshotId"));assertTrue(latestObjectIds.all{it in uploaded})
-                            completed++;ready.clear();ready+=JSONObject().put("id",plan.getString("snapshotId")).put("sourceDeviceId","phone").put("deviceSequence",sequence).put("keyVersion",1)
+                            onComplete?.also { onComplete=null;runBlocking { it() } }
+                            completed++;ready.removeAll { it.getString("sourceDeviceId")=="phone" };ready+=JSONObject().put("id",plan.getString("snapshotId")).put("sourceDeviceId","phone").put("deviceSequence",sequence).put("keyVersion",1)
                                 .put("manifestSha256",plan.getJSONObject("manifest").getString("sha256")).put("manifestSizeBytes",plan.getJSONObject("manifest").getLong("sizeBytes")).put("parentHeads",JSONObject()).put("observedHeads",JSONObject()).put("contentLayout",3)
                             JSONObject()
                         }
@@ -514,4 +516,197 @@ class CloudContentRebuildIntegrationTest {
             assertNotEquals(f.plans[0].getJSONObject("manifest").getString("sha256"),f.plans[1].getJSONObject("manifest").getString("sha256"))
         }
     }
+
+    private fun notes(f: Fixture) = NoteRepository(f.db.noteDao(), "phone") { 1000L }
+    private fun assetZip(key: String = "mini.png", text: String = "image") = MarkdownNoteArchive.write(listOf(
+        MarkdownArchiveEntry("notes/assets/$key", text.toByteArray())
+    ))
+
+    /** Installs an authenticated, independently encrypted foreign head, without a mini write. */
+    private fun seedNotesHead(
+        f: Fixture,
+        device: String,
+        state: ByteArray = NoteCloudStateCodec.encode(emptyList()),
+        archive: ByteArray? = assetZip(),
+        extra: List<CloudLogicalObject> = emptyList(),
+        encryptKey: ByteArray = key,
+        patch: (CloudRawDocument) -> CloudRawDocument = { it }
+    ): CloudSnapshotManifest {
+        val codec = CloudSnapshotCodec()
+        val snapshot = codec.create(encryptKey, 1, device, 1, buildList {
+            add(CloudLogicalObject("notes-state.json", state))
+            archive?.let { add(CloudLogicalObject("notes-assets.zip", it)) }
+            addAll(extra)
+        }, snapshotSettings=JSONObject().put("ownerUserId",session.userId).put("libraryEpoch",epoch)
+            .put("contentGeneration",f.generation).put("backendScope",f.client.scopeId(session)))
+        val id=snapshot.manifest.snapshotId
+        // The manifest always authenticates with the account key. A different encryptKey
+        // deliberately makes the state chunk fail authentication after manifest acceptance.
+        val raw=patch(CloudRawDocument.parse(snapshot.manifest.toRawString()))
+        val bytes=codec.encryptManifestBytes(key,id,raw.source.toByteArray(),ByteArray(16),ByteArray(12))
+        val sha=CloudSnapshotCodec.sha256(bytes)
+        f.r48Blobs.putAll(snapshot.newCiphertextChunks);f.r48Blobs[sha]=bytes
+        val chunks=JSONArray(snapshot.manifest.allChunks.map { c -> JSONObject()
+            .put("sha256",c.ciphertextSha256).put("sizeBytes",c.ciphertextBytes) })
+        f.plans+=JSONObject().put("snapshotId",id).put("chunks",chunks)
+        f.ready+=JSONObject().put("id",id).put("sourceDeviceId",device).put("deviceSequence",1).put("keyVersion",1)
+            .put("manifestSha256",sha).put("manifestSizeBytes",bytes.size)
+            .put("parentHeads",JSONObject()).put("observedHeads",JSONObject()).put("contentLayout",3)
+        if(device=="phone")f.sequence=1
+        return codec.decryptManifest(key,id,bytes)
+    }
+
+    private fun completedNotesManifest(f: Fixture): CloudSnapshotManifest {
+        val head=f.ready.single { it.getString("sourceDeviceId")=="phone" }
+        return CloudSnapshotCodec().decryptManifest(key,head.getString("id"),f.r48Blobs.getValue(head.getString("manifestSha256")))
+    }
+    private fun completedNotesObjects(f: Fixture): Map<String,ByteArray> =
+        CloudSnapshotCodec().restoreObjects(key,completedNotesManifest(f)) { f.r48Blobs.getValue(it) }
+
+    @Test fun notesArchiveDifferentPhoneAndMiniHeadsPublishLastDeletionWithoutMiniAction()=runBlocking {
+        val f=fixture();val repo=notes(f)
+        val live=repo.save("last","Last","old text")
+        repo.delete(live.noteId)
+        val p=seedNotesHead(f,"phone",NoteCloudStateCodec.encode(listOf(live)),assetZip(text="phone"))
+        val m=seedNotesHead(f,"mini",NoteCloudStateCodec.encode(listOf(live)),assetZip(text="mini"))
+        val oldSet=setOf("notes-state.json","private-library.wrss")
+        val conflict=runCatching { CloudSnapshotReuse.preserveObjects(listOf(p,m),oldSet,emptyList()) }.exceptionOrNull()
+        assertEquals("unknown_object_conflicting_heads",(conflict as CloudFormatUpgradeRequired).reason)
+        assertTrue(CloudSnapshotReuse.preserveObjects(listOf(p,m),oldSet+"notes-assets.zip",emptyList()).isEmpty())
+        val miniHead=f.ready.single{it.getString("sourceDeviceId")=="mini"}.toString()
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertEquals(1,f.completed)
+        val objects=completedNotesObjects(f)
+        assertFalse(objects.containsKey("notes-assets.zip"))
+        assertEquals(listOf(repo.note("last")),NoteCloudStateCodec.decode(objects.getValue("notes-state.json")))
+        assertTrue(NoteCloudStateCodec.decode(objects.getValue("notes-state.json")).single().deleted)
+        assertEquals(miniHead,f.ready.single{it.getString("sourceDeviceId")=="mini"}.toString())
+    }
+
+    @Test fun notesArchiveThreeDistinctForeignArchivesRetireAfterAllNotesStatesMerge()=runBlocking {
+        val f=fixture();val repo=notes(f)
+        val live=repo.save("last","Last","text")
+        val deleted=live.copy(deleted=true,deletedAt=2000,updatedAt=2000,modifiedBy="mini")
+        val heads=(1..3).map { i -> seedNotesHead(f,"peer-$i",NoteCloudStateCodec.encode(listOf(deleted)),assetZip(text="peer-$i")) }
+        assertEquals(3,heads.map { it.objects.single{d->d.name=="notes-assets.zip"}.toRawString() }.distinct().size)
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertFalse(completedNotesObjects(f).containsKey("notes-assets.zip"))
+        assertEquals(heads.map{it.sourceDeviceId}.toSet(),completedNotesManifest(f).parentHeads.keys)
+        assertTrue(repo.note("last")!!.deleted)
+    }
+
+    @Test fun notesArchiveSingleForeignArchiveAlsoRetiresWithEmptyRepository()=runBlocking {
+        val f=fixture();seedNotesHead(f,"mini")
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertFalse(completedNotesObjects(f).containsKey("notes-assets.zip"))
+        assertTrue(NoteCloudStateCodec.decode(completedNotesObjects(f).getValue("notes-state.json")).isEmpty())
+    }
+
+    @Test fun notesArchiveMergedLiveNoteStillExportsArchiveAndRestoresMiniImage()=runBlocking {
+        val f=fixture();val repo=notes(f)
+        val live=repo.save("live","Live","![photo](assets/mini.png)")
+        f.db.noteDao().clearNotes()
+        repo.registerAsset(NoteAssetEntity("mini","live",CloudSnapshotCodec.sha256("first".toByteArray()),"mini.png","image/png",5,"mini.png",false,1000))
+        seedNotesHead(f,"peer-1",NoteCloudStateCodec.encode(listOf(live)),assetZip(text="first"))
+        seedNotesHead(f,"peer-2",NoteCloudStateCodec.encode(listOf(live)),assetZip(key="other.png",text="second"))
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertEquals(live,repo.note("live"))
+        val entries=MarkdownNoteArchive.read(completedNotesObjects(f).getValue("notes-assets.zip"))
+        assertTrue(entries.any{it.path=="notes/live.md"})
+        assertArrayEquals(MarkdownNoteCodec.export(live).toByteArray(),entries.single{it.path=="notes/live.md"}.bytes)
+        assertArrayEquals("first".toByteArray(),entries.single{it.path=="notes/assets/mini.png"}.bytes)
+        assertEquals("first",java.io.File(f.context.filesDir,"notes/assets/mini.png").readText())
+    }
+
+    @Test fun notesArchiveRetirementDoesNotResolveOtherUnknownObjectConflicts()=runBlocking {
+        val f=fixture()
+        for(i in 1..2)seedNotesHead(f,"peer-$i",extra=listOf(CloudLogicalObject("future.bin","future-$i".toByteArray())))
+        val originals=f.ready.map{it.toString()}
+        val error=runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()
+        assertEquals("unknown_object_conflicting_heads",(error as CloudFormatUpgradeRequired).reason)
+        assertEquals(0,f.completed);assertEquals(0,f.putCount);assertEquals(originals,f.ready.map{it.toString()})
+    }
+
+    @Test fun notesArchiveUnknownArchiveOrStateFeaturesStopPublicationAndPreserveOriginals()=runBlocking {
+        for(name in listOf("notes-assets.zip","notes-state.json"))for(feature in listOf("roCompat","incompat")) {
+            val f=fixture();val repo=notes(f)
+            val live=repo.save("last","Last","text");repo.delete("last")
+            val original=seedNotesHead(f,"mini",NoteCloudStateCodec.encode(listOf(live)),patch={ raw ->
+                val rows=raw.json().getJSONArray("objects")
+                val index=(0 until rows.length()).single{rows.getJSONObject(it).getString("name")==name}
+                rows.getJSONObject(index).put("features",JSONObject().put(feature,JSONArray(listOf("future.notes.v1"))))
+                raw.patch(listOf("objects"),rows.toString())
+            })
+            assertNotEquals(CloudFormatAccess.WRITABLE,original.objects.single{it.name==name}.access)
+            val heads=f.ready.map{it.toString()}
+            val error=runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()
+            assertTrue("$name/$feature: $error",error is CloudFormatUpgradeRequired)
+            assertEquals(0,f.completed);assertEquals(0,f.putCount);assertEquals(heads,f.ready.map{it.toString()})
+            assertTrue(repo.note("last")!!.deleted)
+            assertEquals(original.toRawString(),CloudSnapshotCodec().decryptManifest(key,original.snapshotId,
+                f.r48Blobs.getValue(f.ready.single().getString("manifestSha256"))).toRawString())
+        }
+    }
+
+    @Test fun notesArchiveFailedStateAuthenticationOrDecodingNeverPublishesDeletion()=runBlocking {
+        for(authFailure in listOf(false,true)) {
+            val f=fixture();val repo=notes(f);repo.save("last","Last","text");repo.delete("last")
+            val original=seedNotesHead(f,"mini",state=if(authFailure)NoteCloudStateCodec.encode(emptyList())else
+                "{\"format\":\"watchrss-notes\",\"version\":999,\"notes\":[]}".toByteArray(),
+                encryptKey=if(authFailure)ByteArray(32){99}else key)
+            val heads=f.ready.map{it.toString()}
+            val error=runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()
+            assertNotNull(error);assertEquals(0,f.completed);assertEquals(0,f.putCount)
+            if(authFailure) {
+                assertTrue(error is CloudObjectDecryptionException)
+                assertEquals(cloudObjectDiagnosticId(original.snapshotId,"notes-state.json"),(error as CloudObjectDecryptionException).objectId)
+            } else {
+                assertTrue(error is IllegalArgumentException)
+                assertEquals("云端笔记格式不受支持",error!!.message)
+            }
+            assertEquals(heads,f.ready.map{it.toString()});assertTrue(repo.note("last")!!.deleted)
+            assertTrue(f.service.restoreWarnings.value.isEmpty())
+        }
+    }
+
+    @Test fun notesArchiveAssetOnlyMiniZipHydratesReferencesWithoutImportingMarkdown()=runBlocking {
+        val f=fixture();val repo=notes(f)
+        val live=repo.save("local","Local","![photo](assets/mini.png)")
+        val transfer=NoteImportExportService(f.context,repo)
+        val image="mini image bytes".toByteArray()
+        transfer.restoreAssetsZip(MarkdownNoteArchive.write(listOf(MarkdownArchiveEntry("notes/assets/mini.png",image))))
+        assertArrayEquals(image,java.io.File(f.context.filesDir,"notes/assets/mini.png").readBytes())
+        assertEquals(listOf(live),repo.allNotes())
+        transfer.restoreAssetsZip(MarkdownNoteArchive.write(listOf(
+            MarkdownArchiveEntry("notes/local.md","overwriting Markdown".toByteArray()),
+            MarkdownArchiveEntry("notes/foreign.md","unexpected new note".toByteArray())
+        )))
+        assertEquals(listOf(live),repo.allNotes())
+        assertTrue(repo.note("local")!!.markdown.contains("assets/mini.png"))
+    }
+
+    @Test fun notesArchiveLastDeletePublicationDoesNotAcknowledgeLaterEditOrDiscardImage()=runBlocking {
+        val f=fixture();val repo=notes(f)
+        repo.save("last","Last","old");repo.delete("last")
+        val image="durable new image".toByteArray()
+        val file=java.io.File(f.context.filesDir,"notes/assets/later.png").also{it.parentFile!!.mkdirs();it.writeBytes(image)}
+        f.onComplete={
+            repo.save("last","New edit","![new](assets/later.png)")
+            repo.registerAsset(NoteAssetEntity("later","last",CloudSnapshotCodec.sha256(image),"later.png","image/png",image.size.toLong(),"later.png",false,2000))
+        }
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        val first=completedNotesManifest(f)
+        assertFalse(completedNotesObjects(f).containsKey("notes-assets.zip"))
+        assertTrue(NoteCloudStateCodec.decode(completedNotesObjects(f).getValue("notes-state.json")).single().deleted)
+        assertFalse(repo.note("last")!!.deleted);assertArrayEquals(image,file.readBytes())
+        assertEquals(first.settings.getString("snapshotContentHashV3"),f.state.lastContentHash(true))
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertEquals(2,f.completed)
+        assertNotEquals(first.settings.getString("snapshotContentHashV3"),f.state.lastContentHash(true))
+        val second=completedNotesObjects(f)
+        assertFalse(NoteCloudStateCodec.decode(second.getValue("notes-state.json")).single().deleted)
+        assertArrayEquals(image,MarkdownNoteArchive.read(second.getValue("notes-assets.zip")).single{it.path=="notes/assets/later.png"}.bytes)
+        assertArrayEquals(image,file.readBytes())
+    }
+
 }

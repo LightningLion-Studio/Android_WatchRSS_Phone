@@ -28,6 +28,7 @@ class CloudSlimSnapshotRegressionTest {
     private val key = ByteArray(32) { it.toByte() }
     private val session = PhoneAccountSession("slim-owner", "***", "session", "", Long.MAX_VALUE)
     private val codec = CloudSnapshotCodec()
+    private val snapshotOwner=CloudSnapshotReuse.Owner("phone",session.userId,"epoch","scope","generation")
     private val fixtures = mutableListOf<Fixture>()
     private class State : CloudRecordState {
         var cursor = "0"
@@ -107,7 +108,7 @@ class CloudSlimSnapshotRegressionTest {
             val hash=CloudSnapshotContent.hash(objects,emptyList(),1,fingerprint)
             if(!CloudContentPolicy.shouldPublish(previous?.manifest?.settings?.optString("snapshotContentHashV3")!=hash,true,0,1)) return null
             return codec.create(key,1,"phone",(previous?.manifest?.deviceSequence?:0)+1,objects,previousManifest=previous?.manifest,
-                snapshotSettings=JSONObject().put("snapshotContentLayout",3).put("ownerUserId",session.userId).put("libraryEpoch","epoch")
+                snapshotSettings=snapshotOwner.settings().put(CloudSnapshotReuse.OWN_OBJECTS_SETTING,1).put("snapshotContentLayout",3)
                     .put("privateBodyFingerprintV2",fingerprint).put("snapshotContentHashV3",hash))
         }
     }
@@ -455,12 +456,12 @@ class CloudSlimSnapshotRegressionTest {
         val head=CloudSnapshotHead(first.manifest.snapshotId,"phone",1,1,CloudSnapshotCodec.sha256(first.encryptedManifest),first.encryptedManifest.size.toLong(),emptyMap(),emptyMap())
         // Only the current encrypted manifest is fetched; local manifest/chunk caches are absent.
         val manifest=CloudSnapshotReuse.authenticate(codec,key,head,first.encryptedManifest)
-        assertTrue(CloudSnapshotReuse.canCarry(manifest,session.userId,"epoch",1,f.backup.privateCloudFingerprint()))
+        assertTrue(CloudSnapshotReuse.canCarry(manifest,snapshotOwner,1,f.backup.privateCloudFingerprint()))
         val carried=codec.create(key,1,"phone",2,emptyList(),carryForwardObjects=manifest.objects)
         assertTrue(carried.newCiphertextChunks.isEmpty());assertEquals(first.manifest.objects,carried.manifest.objects)
-        assertFalse(CloudSnapshotReuse.canCarry(manifest,"another","epoch",1,f.backup.privateCloudFingerprint()))
-        assertFalse(CloudSnapshotReuse.canCarry(manifest,session.userId,"new-epoch",1,f.backup.privateCloudFingerprint()))
-        assertFalse(CloudSnapshotReuse.canCarry(manifest,session.userId,"epoch",2,f.backup.privateCloudFingerprint()))
+        assertFalse(CloudSnapshotReuse.canCarry(manifest,snapshotOwner.copy(userId="another"),1,f.backup.privateCloudFingerprint()))
+        assertFalse(CloudSnapshotReuse.canCarry(manifest,snapshotOwner.copy(epoch="new-epoch"),1,f.backup.privateCloudFingerprint()))
+        assertFalse(CloudSnapshotReuse.canCarry(manifest,snapshotOwner,2,f.backup.privateCloudFingerprint()))
         assertThrows(IllegalArgumentException::class.java) { CloudSnapshotReuse.authenticate(codec,key,head.copy(sourceDeviceId="other"),first.encryptedManifest) }
     }
     @Test fun s7_5_emptyDeviceRestoresRecordsLatestArchiveAndDeferredPublicInteractions()=runBlocking<Unit> {
@@ -737,12 +738,13 @@ class CloudSlimSnapshotRegressionTest {
         f.server.records[id]=JSONObject().put("recordId",id).put("revision","1").put("envelope",PhoneCloudRecordCodec.encrypt(key,session.userId,id,1,"article",value));f.server.revision=1
         f.records();val pending=f.image()!!;pending.manifest.settings.put("privateBodyArticleIds",JSONArray().put(row.articleId))
         val fp=f.backup.privateCloudFingerprint()
-        assertTrue(CloudSnapshotReuse.canCarry(pending.manifest,session.userId,"epoch",1,fp))
-        val confirmed=CloudSnapshotReuse.completedArticleIds(emptyList(),session.userId,"epoch",1,fp)
+        assertTrue(CloudSnapshotReuse.canCarry(pending.manifest,snapshotOwner,1,fp))
+        val borrowed=pending.manifest.copy(sourceDeviceId="mini")
+        val confirmed=CloudSnapshotReuse.completedArticleIds(listOf(borrowed),snapshotOwner,1,fp)
         f.sync.retireSavedRssIndexes(session,"epoch",confirmed);assertFalse(f.server.records.getValue(id).optBoolean("tombstone"))
         val noBody=pending.manifest.copy(settings=JSONObject(pending.manifest.settings.toString()).put("privateBodyArticleIds",JSONArray()))
-        assertTrue(CloudSnapshotReuse.completedArticleIds(listOf(noBody),session.userId,"epoch",1,fp).isEmpty())
-        f.sync.retireSavedRssIndexes(session,"epoch",CloudSnapshotReuse.completedArticleIds(listOf(pending.manifest),session.userId,"epoch",1,fp))
+        assertTrue(CloudSnapshotReuse.completedArticleIds(listOf(noBody),snapshotOwner,1,fp).isEmpty())
+        f.sync.retireSavedRssIndexes(session,"epoch",CloudSnapshotReuse.completedArticleIds(listOf(pending.manifest),snapshotOwner,1,fp))
         assertTrue(f.server.records.getValue(id).getBoolean("tombstone"))
     }
 
@@ -834,13 +836,18 @@ class CloudSlimSnapshotRegressionTest {
         assertEquals(1,f.server.events.count{it.first=="book"});assertEquals(1,f.server.events.count{it.first=="book-reading"})
         val exported=f.backup.createCloudPrivateArchiveExport()
         assertTrue(exported.articleIds.isEmpty());assertEquals(1,exported.bookIds.size)
-        val image=try{codec.create(key,1,"phone",1,listOf(CloudLogicalObject("private-library.wrss",exported.file.readBytes())),snapshotSettings=JSONObject()
-            .put("snapshotContentLayout",3).put("ownerUserId",session.userId).put("libraryEpoch","epoch").put("privateBodyFingerprintV2",f.backup.privateCloudFingerprint())
+        val image=try{codec.create(key,1,"phone",1,listOf(CloudLogicalObject("private-library.wrss",exported.file.readBytes())),snapshotSettings=snapshotOwner.settings().put(CloudSnapshotReuse.OWN_OBJECTS_SETTING,1)
+            .put("snapshotContentLayout",3).put("privateBodyFingerprintV2",f.backup.privateCloudFingerprint())
             .put("privateBodyBookIds",JSONArray(exported.bookIds.toList())))}finally{exported.file.delete()}
         val fp=f.backup.privateCloudFingerprint()
-        f.sync.retireSavedRssIndexes(session,"epoch",emptySet(),CloudSnapshotReuse.completedBookIds(emptyList(),session.userId,"epoch",1,fp))
+        f.sync.retireSavedRssIndexes(session,"epoch",emptySet(),CloudSnapshotReuse.completedBookIds(emptyList(),snapshotOwner,1,fp))
         assertFalse(f.server.records.getValue(legacy).optBoolean("tombstone"))
-        val confirmed=CloudSnapshotReuse.completedBookIds(listOf(image.manifest),session.userId,"epoch",1,fp)
+        val borrowed=image.manifest.copy(sourceDeviceId="mini")
+        val foreignClaims=CloudSnapshotReuse.completedBookIds(listOf(borrowed),snapshotOwner,1,fp)
+        assertTrue(foreignClaims.isEmpty())
+        f.sync.retireSavedRssIndexes(session,"epoch",emptySet(),foreignClaims)
+        assertFalse(f.server.records.getValue(legacy).optBoolean("tombstone"))
+        val confirmed=CloudSnapshotReuse.completedBookIds(listOf(image.manifest),snapshotOwner,1,fp)
         f.sync.retireSavedRssIndexes(session,"epoch",emptySet(),confirmed)
         assertTrue(f.server.records.getValue(legacy).getBoolean("tombstone"))
         val decoded=PhoneCloudRecordCodec.decrypt(key,session.userId,legacy,f.server.records.getValue(legacy).getJSONObject("envelope")).second

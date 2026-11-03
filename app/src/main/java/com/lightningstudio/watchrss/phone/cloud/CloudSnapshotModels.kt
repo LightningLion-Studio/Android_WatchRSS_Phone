@@ -183,7 +183,7 @@ data class CloudSnapshotManifest(
     val access:CloudFormatAccess get() {
         val doc=rawDocument?:CloudRawDocument.parse(knownJson().toString())
         val unknown=doc.unknownBytes(emptyList(),fields)+objects.sumOf{it.unknownBytes}+
-            doc.unknownBytes(listOf("settings"),setOf("snapshotContentLayout","libraryEpoch","ownerUserId","backendScope","contentGeneration","snapshotContentHashV3","privateBodyFingerprintV2","privateBodyArticleIds","privateBodyBookIds"))
+            doc.unknownBytes(listOf("settings"),setOf("snapshotContentLayout","libraryEpoch","ownerUserId","backendScope","contentGeneration","snapshotContentHashV3","privateBodyFingerprintV2","privateBodyArticleIds","privateBodyBookIds",CloudSnapshotReuse.OWN_OBJECTS_SETTING))
         return CloudFormatR48.access(doc,known=CloudFormatR48.manifestFeatures,unknownBytes=unknown,limit=1048576)
     }
     fun objectSubset(selected:List<CloudObjectDescriptor>):CloudSnapshotManifest {

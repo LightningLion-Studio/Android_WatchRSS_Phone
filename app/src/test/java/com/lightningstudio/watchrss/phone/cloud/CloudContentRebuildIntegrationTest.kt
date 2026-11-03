@@ -217,7 +217,8 @@ class CloudContentRebuildIntegrationTest {
         val recordStore get()=(PhoneCloudSyncService::class.java.getDeclaredField("recordStore").apply{isAccessible=true}.get(service) as PhoneCloudRecordStore)
         fun bootstrap()=JSONObject().put("libraryEpoch",epoch).put("contentGeneration",generation).put("contentEmpty",initialEmpty&&ready.isEmpty()&&recordRows.isEmpty())
             .put("member",JSONObject().put("active",true).put("writable",true).put("readable",true).put("quotaBytes",1000000).put("usedBytes",if(completed>0)777 else 0).put("reservedBytes",if(completed>0)0 else 100))
-            .put("keyVersionFloor",0).put("keyCommitments",JSONArray().put(JSONObject().put("keyVersion",1).put("commitment",CloudProtocolV2.commitment(key,session.userId,epoch,1))))
+            .put("keyVersionFloor",0).put("keyCommitments",JSONArray(keys.keyVersions(session.userId).map { version ->
+                JSONObject().put("keyVersion",version).put("commitment",CloudProtocolV2.commitment(requireNotNull(keys.getAccountKey(session.userId,version)),session.userId,epoch,version)) }))
             .put("keyEnvelopes",JSONArray()).put("devices",JSONArray().put(JSONObject().put("deviceId","phone").put("platform","phone").put("publicKeySpki",publicKey).put("keyVersion",1).put("lastSequence",sequence)))
         suspend fun initialize() {
             sessionStore.save(session)
@@ -567,12 +568,12 @@ class CloudContentRebuildIntegrationTest {
         val f=fixture();val repo=notes(f)
         val live=repo.save("last","Last","old text")
         repo.delete(live.noteId)
-        val p=seedNotesHead(f,"phone",NoteCloudStateCodec.encode(listOf(live)),assetZip(text="phone"))
+        val p=seedNotesHead(f,"phone",NoteCloudStateCodec.encode(listOf(live)),assetZip(text="phone"),
+            patch={raw->raw.patch(listOf("settings",CloudSnapshotReuse.OWN_OBJECTS_SETTING),"1")})
         val m=seedNotesHead(f,"mini",NoteCloudStateCodec.encode(listOf(live)),assetZip(text="mini"))
         val oldSet=setOf("notes-state.json","private-library.wrss")
-        val conflict=runCatching { CloudSnapshotReuse.preserveObjects(listOf(p,m),oldSet,emptyList()) }.exceptionOrNull()
-        assertEquals("unknown_object_conflicting_heads",(conflict as CloudFormatUpgradeRequired).reason)
-        assertTrue(CloudSnapshotReuse.preserveObjects(listOf(p,m),oldSet+"notes-assets.zip",emptyList()).isEmpty())
+        val owner=CloudSnapshotReuse.Owner("phone",session.userId,epoch,f.client.scopeId(session),f.generation)
+        assertTrue(CloudSnapshotReuse.preserveObjects(listOf(p,m),oldSet+"notes-assets.zip",emptyList(),owner).isEmpty())
         val miniHead=f.ready.single{it.getString("sourceDeviceId")=="mini"}.toString()
         assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
         assertEquals(1,f.completed)
@@ -618,20 +619,20 @@ class CloudContentRebuildIntegrationTest {
         assertEquals("first",java.io.File(f.context.filesDir,"notes/assets/mini.png").readText())
     }
 
-    @Test fun notesArchiveRetirementDoesNotResolveOtherUnknownObjectConflicts()=runBlocking {
+    @Test fun ownObjectsForeignUnknownConflictsDoNotStallPublication()=runBlocking {
         val f=fixture()
         for(i in 1..2)seedNotesHead(f,"peer-$i",extra=listOf(CloudLogicalObject("future.bin","future-$i".toByteArray())))
         val originals=f.ready.map{it.toString()}
-        val error=runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()
-        assertEquals("unknown_object_conflicting_heads",(error as CloudFormatUpgradeRequired).reason)
-        assertEquals(0,f.completed);assertEquals(0,f.putCount);assertEquals(originals,f.ready.map{it.toString()})
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertFalse(completedNotesManifest(f).objects.any{it.name=="future.bin"})
+        assertEquals(originals,f.ready.filter{it.getString("sourceDeviceId")!="phone"}.map{it.toString()})
     }
 
     @Test fun notesArchiveUnknownArchiveOrStateFeaturesStopPublicationAndPreserveOriginals()=runBlocking {
         for(name in listOf("notes-assets.zip","notes-state.json"))for(feature in listOf("roCompat","incompat")) {
             val f=fixture();val repo=notes(f)
             val live=repo.save("last","Last","text");repo.delete("last")
-            val original=seedNotesHead(f,"mini",NoteCloudStateCodec.encode(listOf(live)),patch={ raw ->
+            val original=seedNotesHead(f,"phone",NoteCloudStateCodec.encode(listOf(live)),patch={ raw ->
                 val rows=raw.json().getJSONArray("objects")
                 val index=(0 until rows.length()).single{rows.getJSONObject(it).getString("name")==name}
                 rows.getJSONObject(index).put("features",JSONObject().put(feature,JSONArray(listOf("future.notes.v1"))))
@@ -707,6 +708,119 @@ class CloudContentRebuildIntegrationTest {
         assertFalse(NoteCloudStateCodec.decode(second.getValue("notes-state.json")).single().deleted)
         assertArrayEquals(image,MarkdownNoteArchive.read(second.getValue("notes-assets.zip")).single{it.path=="notes/assets/later.png"}.bytes)
         assertArrayEquals(image,file.readBytes())
+    }
+
+
+    private fun installOwnObjectsSnapshot(f:Fixture,snapshot:EncryptedCloudSnapshot):CloudSnapshotManifest {
+        val m=snapshot.manifest;val sha=CloudSnapshotCodec.sha256(snapshot.encryptedManifest)
+        f.r48Blobs.putAll(snapshot.newCiphertextChunks);f.r48Blobs[sha]=snapshot.encryptedManifest
+        f.plans+=JSONObject().put("snapshotId",m.snapshotId).put("chunks",JSONArray(m.allChunks.map{JSONObject().put("sha256",it.ciphertextSha256).put("sizeBytes",it.ciphertextBytes)}))
+        f.ready.removeAll{it.getString("sourceDeviceId")==m.sourceDeviceId}
+        f.ready+=JSONObject().put("id",m.snapshotId).put("sourceDeviceId",m.sourceDeviceId).put("deviceSequence",m.deviceSequence).put("keyVersion",m.keyVersion)
+            .put("manifestSha256",sha).put("manifestSizeBytes",snapshot.encryptedManifest.size).put("parentHeads",JSONObject()).put("observedHeads",JSONObject()).put("contentLayout",3)
+        return m
+    }
+
+    private fun borrowedHead(f:Fixture,own:CloudSnapshotManifest,extra:List<CloudLogicalObject> = emptyList()):CloudSnapshotManifest {
+        val claims=JSONObject(own.settings.toString()).put("privateBodyArticleIds",JSONArray(listOf("foreign-article-claim")))
+            .put("privateBodyBookIds",JSONArray(listOf("foreign-book-claim")))
+        return installOwnObjectsSnapshot(f,CloudSnapshotCodec().create(key,1,"mini",1,extra,carryForwardObjects=own.objects,
+            snapshotSettings=claims,privateOverlay=own.objects.any{it.name==CloudPrivateOverlay.NAME}))
+    }
+
+    @Test fun ownObjectsBorrowedMiniBodiesAndClaimsAreMergedButNeverUsedAsPublicationInputs()=runBlocking {
+        for(overlay in listOf(false,true)) {
+            val f=fixture()
+            val body="Merged original body"
+            val article=PhoneArticleEntity("borrowed-original","phone","https://synthetic.invalid/borrowed","Borrowed","Site","",null,body,"<p>$body</p>",CloudSnapshotCodec.sha256(body.toByteArray()),1,10,true,10,0,null,null,false,0,0,false,0,0,false,0)
+            f.db.phoneArticleDao().upsert(article)
+            assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+            val own=completedNotesManifest(f)
+            val mini=borrowedHead(f,own,listOf(CloudLogicalObject("future.bin","mini only".toByteArray())))
+            val foreignHead=f.ready.single{it.getString("sourceDeviceId")=="mini"}.toString()
+            // Simulate a fresh phone head. Its durable local row needs the foreign body merge.
+            f.ready.removeAll{it.getString("sourceDeviceId")=="phone"}
+            f.db.phoneArticleDao().upsert(article.copy(contentText="",contentHtml=null))
+            f.cache.clear(f.client.scopeId(session))
+            f.r48WriteEnabled=overlay;f.recordStore.close()
+            f.service=PhoneCloudSyncService(f.context,f.account,f.backup,f.repository,notes(f),"phone",f.client,keyManager=f.keys,settings=f.state,cache=f.cache,formatWritePolicy=CloudFormatWritePolicy(overlay,false))
+            assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+            val published=completedNotesManifest(f)
+            assertEquals(body,f.repository.getArticle(article.articleId)!!.contentText)
+            assertFalse(published.objects.any{it.name=="future.bin" || it.name==CloudPrivateOverlay.NAME})
+            assertNotEquals(mini.objects.single{it.name=="private-library.wrss"}.toRawString(),published.objects.single{it.name=="private-library.wrss"}.toRawString())
+            assertEquals(listOf(article.articleId),published.settings.getJSONArray("privateBodyArticleIds").let{a->(0 until a.length()).map(a::getString)})
+            assertEquals(0,published.settings.getJSONArray("privateBodyBookIds").length())
+            assertEquals(1,published.settings.getInt(CloudSnapshotReuse.OWN_OBJECTS_SETTING))
+            assertEquals(foreignHead,f.ready.single{it.getString("sourceDeviceId")=="mini"}.toString())
+        }
+    }
+
+    @Test fun ownObjectsDeletedBookIsNotCarriedBackFromMiniPackageOrArchive()=runBlocking {
+        val f=fixture()
+        val source=com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.txtNovelSourceUrl("own-objects-book")
+        f.db.phoneRssSourceDao().upsert(PhoneRssSourceEntity(source,"phone","Book","",null,null,1,10,1,false,false,0))
+        val chapter=PhoneArticleEntity("own-chapter","phone",com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.txtNovelChapterUrl("own-objects-book",0,"hash"),"Chapter","Book","",null,"Original chapter",null,"chapter-hash",1,10,false,0,0,source,"Book",false,0,0,false,0,0,false,0)
+        f.db.phoneArticleDao().upsert(chapter)
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        val own=completedNotesManifest(f);val (book,file)=f.books.availableBooks().single();val id=book.getString("bookId")
+        val metadata=JSONObject(book.toString()).put("packagePath","books/$id.jsonl")
+        borrowedHead(f,own,listOf(CloudLogicalObject("books/$id.jsonl",file.readBytes(),false,privateBook=metadata)))
+        f.repository.deleteRssSource(source)
+        assertTrue(f.books.states().single().getBoolean("deleted"))
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertTrue(f.books.states().single().getBoolean("deleted"));assertTrue(f.books.availableBooks().isEmpty())
+        assertTrue(f.repository.getArticle(chapter.articleId)!!.deleted)
+        val published=completedNotesManifest(f)
+        assertFalse(published.objects.any{it.name.startsWith("books/")})
+        assertEquals(0,published.settings.getJSONArray("privateBodyBookIds").length())
+        val archive=WatchRssBackupArchive.read(java.io.ByteArrayInputStream(completedNotesObjects(f).getValue("private-library.wrss")))
+        assertTrue(archive.bookPackages.isEmpty())
+    }
+
+    @Test fun ownObjectsSilentUpgradeRepublishesSameContentOnceWithoutManualOverride()=runBlocking {
+        val f=fixture();assertTrue(f.service.syncNow().snapshotUploaded)
+        val old=completedNotesManifest(f);val head=f.ready.single()
+        val raw=CloudRawDocument.parse(old.toRawString()).patch(listOf("settings"),JSONObject(old.settings.toString()).apply{remove(CloudSnapshotReuse.OWN_OBJECTS_SETTING)}.toString())
+        val bytes=CloudSnapshotCodec().encryptManifestBytes(key,old.snapshotId,raw.source.toByteArray(),ByteArray(16),ByteArray(12))
+        val sha=CloudSnapshotCodec.sha256(bytes);f.r48Blobs[sha]=bytes
+        head.put("manifestSha256",sha).put("manifestSizeBytes",bytes.size)
+        f.cache.clear(f.client.scopeId(session));f.state.lastSnapshotPublishedAt=System.currentTimeMillis()
+        assertTrue(f.service.syncNow(manual=false).snapshotUploaded)
+        val upgraded=completedNotesManifest(f)
+        assertEquals(2,f.completed)
+        assertEquals(old.settings.getString("snapshotContentHashV3"),upgraded.settings.getString("snapshotContentHashV3"))
+        assertEquals(1,upgraded.settings.getInt(CloudSnapshotReuse.OWN_OBJECTS_SETTING))
+        assertNotEquals(old.objects.single{it.name=="private-library.wrss"}.toRawString(),upgraded.objects.single{it.name=="private-library.wrss"}.toRawString())
+        assertFalse(f.service.syncNow(manual=false).snapshotUploaded);assertEquals(2,f.completed)
+    }
+
+    @Test fun ownObjectsUnknownOwnObjectStopsUpgradeWithoutTouchingTheHead()=runBlocking {
+        val f=fixture();val original=seedNotesHead(f,"phone",extra=listOf(CloudLogicalObject("future.bin","own future data".toByteArray())))
+        val head=f.ready.single().toString()
+        val error=runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()
+        assertEquals("unknown_own_object",(error as CloudFormatUpgradeRequired).reason)
+        assertEquals(0,f.completed);assertEquals(0,f.putCount);assertEquals(head,f.ready.single().toString())
+        assertEquals("future.bin",original.objects.last().name)
+    }
+
+    @Test fun ownObjectsFutureOwnPolicyVersionStopsPublication()=runBlocking {
+        val f=fixture()
+        seedNotesHead(f,"phone",patch={raw->raw.patch(listOf("settings",CloudSnapshotReuse.OWN_OBJECTS_SETTING),"2")})
+        val original=f.ready.single().toString()
+        val error=runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()
+        assertEquals("phone_ownership_version",(error as CloudFormatUpgradeRequired).reason)
+        assertEquals(0,f.completed);assertEquals(original,f.ready.single().toString())
+    }
+
+    @Test fun ownObjectsKeyRotationCannotDiscardUnknownOwnObjectsFromAnOlderKeyHead()=runBlocking {
+        val f=fixture()
+        seedNotesHead(f,"phone",extra=listOf(CloudLogicalObject("future.bin","old-key own data".toByteArray())))
+        f.keys.saveVerifiedKeys(session.userId,mapOf(1 to key,2 to ByteArray(32){42}))
+        val original=f.ready.single().toString()
+        val error=runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()
+        assertEquals("unknown_own_object",(error as CloudFormatUpgradeRequired).reason)
+        assertEquals(0,f.completed);assertEquals(0,f.putCount);assertEquals(original,f.ready.single().toString())
     }
 
 }

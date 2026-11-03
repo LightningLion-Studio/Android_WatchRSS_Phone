@@ -157,8 +157,9 @@ class CloudR48CompatibilityTest {
         val first=codec.create(key,1,"phone",1,listOf(CloudLogicalObject("known.txt","old".toByteArray(),false),CloudLogicalObject("future.bin","future".toByteArray(),false)))
         val changed=CloudRawDocument.parse(first.manifest.objects[1].toRawString()).patch(listOf("x-unknown"),"{ \"wide\":9007199254740993 }".replace("\\\"","\""))
         val unknown=CloudObjectDescriptor.fromRaw(changed.source)
-        val manifest=first.manifest.copy(objects=listOf(first.manifest.objects[0],unknown))
-        val carried=CloudSnapshotReuse.preserveObjects(listOf(manifest),setOf("known.txt"),emptyList())
+        val owner=CloudSnapshotReuse.Owner("phone","owner","epoch","scope","generation")
+        val manifest=first.manifest.copy(objects=listOf(first.manifest.objects[0],unknown),settings=owner.settings().put(CloudSnapshotReuse.OWN_OBJECTS_SETTING,1))
+        val carried=CloudSnapshotReuse.preserveObjects(listOf(manifest),setOf("known.txt"),emptyList(),owner)
         val next=codec.create(key,1,"phone",2,listOf(CloudLogicalObject("known.txt","new".toByteArray(),false)),previousManifest=manifest,carryForwardObjects=carried)
         assertEquals(1,next.newCiphertextChunks.size)
         assertEquals(unknown.toRawString(),next.manifest.objects.single{it.name=="future.bin"}.toRawString())
@@ -167,12 +168,13 @@ class CloudR48CompatibilityTest {
     @Test fun unchangedAcceptedRootMayBeCarriedButOpaqueBodiesNeverProveCompleteRestoration() {
         val v=fixture("object-key-envelope")
         val d=CloudObjectDescriptor.fromRaw(v.getJSONObject("descriptor").toString()).copy(name="private-library.wrss")
-        val settings=JSONObject().put("snapshotContentLayout",3).put("ownerUserId","owner").put("libraryEpoch","epoch").put("privateBodyFingerprintV2","fingerprint")
+        val owner=CloudSnapshotReuse.Owner("phone","owner","epoch","scope","generation")
+        val settings=owner.settings().put(CloudSnapshotReuse.OWN_OBJECTS_SETTING,1).put("snapshotContentLayout",3).put("privateBodyFingerprintV2","fingerprint")
             .put("privateBodyArticleIds",JSONArray(listOf("a")))
         val manifest=CloudSnapshotManifest("id","phone",1,1,0,emptyMap(),emptyMap(),listOf(d),settings)
-        assertTrue(CloudSnapshotReuse.canCarry(manifest,"owner","epoch",1,"fingerprint"))
+        assertTrue(CloudSnapshotReuse.canCarry(manifest,owner,1,"fingerprint"))
         val opaque=d.copy(rawDocument=CloudRawDocument.parse(d.toRawString()).patch(listOf("features"),"{\"incompat\":[\"future.body.v1\"]}"))
-        assertTrue(CloudSnapshotReuse.completedArticleIds(listOf(manifest.copy(objects=listOf(opaque))),"owner","epoch",1,"fingerprint").isEmpty())
+        assertTrue(CloudSnapshotReuse.completedArticleIds(listOf(manifest.copy(objects=listOf(opaque))),owner,1,"fingerprint").isEmpty())
     }
     @Test fun nestedPrivateMetadataAndChunkExtensionsRemainRawOnCarryAndAccountRootEdit() {
         val original=codec.create(key,1,"phone",1,listOf(CloudLogicalObject("body.txt","old".toByteArray(),false)))

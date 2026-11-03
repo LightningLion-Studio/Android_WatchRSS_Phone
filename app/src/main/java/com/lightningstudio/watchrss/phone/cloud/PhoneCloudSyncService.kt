@@ -216,15 +216,18 @@ class PhoneCloudSyncService(
                 val bytes=client.download(download.manifestSignedUrl,head.manifestSizeBytes,head.manifestSha256)
                 CloudSnapshotReuse.authenticate(codec,key,head,bytes)
             }
-            val base=manifests.firstOrNull{it.sourceDeviceId==deviceId} ?: return@withLock null
-            // A concurrent head holding any different descriptor wins. Never flatten newer user work.
-            val eligible=outputs.filter { output -> manifests.flatMap{it.objects}.filter{it.name==output.input.descriptor.name}.all{it.toRawString()==output.input.descriptor.toRawString()} }
+            val owner=CloudSnapshotReuse.Owner(deviceId,session.userId,bootstrap.libraryEpoch,client.scopeId(session),requireNotNull(client.knownContentGeneration(session)))
+            val ownManifests=manifests.filter(owner::current)
+            val base=ownManifests.firstOrNull() ?: return@withLock null
+            CloudSnapshotReuse.requireOwnPublicationWritable(base)
+            // A concurrent own head holding a different descriptor wins. Never flatten newer user work.
+            val eligible=outputs.filter { output -> ownManifests.flatMap{it.objects}.filter{it.name==output.input.descriptor.name}.all{it.toRawString()==output.input.descriptor.toRawString()} }
             val rebased=CloudMigrationResult.rebase(base,eligible,key,root,draft.plan.getString("planId"))
             val changed=rebased.filterIndexed{index,d->d.toRawString()!=base.objects[index].toRawString()}
             if(changed.isEmpty())return@withLock null
             if(changed.size!=outputs.size && validation.getString("mode")!="full")return@withLock null
             val actualValidation=if(changed.size==outputs.size)validation else JSONObject().put("mode","full").put("verifiedObjects",changed.size).put("totalObjects",changed.size)
-            val carried=CloudSnapshotReuse.preserveObjects(manifests,changed.map{it.name}.toSet(),changed)
+            val carried=CloudSnapshotReuse.preserveObjects(ownManifests,changed.map{it.name}.toSet(),changed,owner)
             val snapshot=codec.create(key,keyVersion,deviceId,settings.nextSequence(bootstrap.devices.firstOrNull{it.deviceId==deviceId}?.lastSequence ?: 0),emptyList(),
                 parentHeads=heads.associate{it.sourceDeviceId to it.id},observedHeads=heads.associate{it.sourceDeviceId to it.deviceSequence},previousManifest=base,
                 carryForwardObjects=carried,snapshotSettings=base.settings)
@@ -257,7 +260,9 @@ class PhoneCloudSyncService(
         val key=requireNotNull(keyManager.getAccountKey(session.userId))
         try {
             val manifest=codec.decryptManifest(key,id,bytes)
-            require(manifest.sourceDeviceId==deviceId && CloudSnapshotReuse.scopeCompatible(manifest,JSONObject().put("backendScope",ctx.scope).put("ownerUserId",ctx.userId).put("libraryEpoch",ctx.epoch).put("contentGeneration",ctx.generation)))
+            val owner=CloudSnapshotReuse.Owner(deviceId,ctx.userId,ctx.epoch,ctx.scope,ctx.generation)
+            if(!owner.current(manifest))throw CloudFormatUpgradeRequired("phone_ownership_upgrade_required")
+            CloudSnapshotReuse.requireOwnPublicationWritable(manifest)
             val snapshot=EncryptedCloudSnapshot(manifest,bytes,emptyMap())
             val migration=intent.getJSONObject("migrationContext")
             require(migration.getString("jobId")==intent.getString("jobId") && migration.getString("planHash")==draft.planHash)
@@ -1676,7 +1681,7 @@ class PhoneCloudSyncService(
         val scope = client.scopeId(session)
         recordStore.markHeads(scope,heads.mapTo(hashSetOf()){it.id})
         val currentManifests = mutableListOf<CloudSnapshotManifest>()
-        for (head in heads.filter { it.keyVersion == keyVersion && !it.sourceDeviceId.startsWith("reader-migration-") }) {
+        for (head in heads.filter { (it.keyVersion == keyVersion || it.sourceDeviceId == deviceId) && !it.sourceDeviceId.startsWith("reader-migration-") }) {
             checkCloudEpoch(session, bootstrap.libraryEpoch)
             val bytes = cache.loadManifest(scope, head.id) ?: run {
                 val remote = client.snapshot(session, head.id, manifestOnly = true)
@@ -1686,26 +1691,31 @@ class PhoneCloudSyncService(
                     cache.storeManifest(scope,head.id,it,markAsLocalHead=false)
                 }
             }
-            currentManifests += decodeCloudObject(head.id,"manifest") { CloudSnapshotReuse.authenticate(codec,accountKey,head,bytes) }.also {
+            val manifestKey = if(head.keyVersion==keyVersion) accountKey else
+                keyManager.getAccountKey(session.userId,head.keyVersion) ?: error("缺少第${head.keyVersion}版账号密钥")
+            currentManifests += decodeCloudObject(head.id,"manifest") { CloudSnapshotReuse.authenticate(codec,manifestKey,head,bytes) }.also {
                 observeFormat(session,it)
             }
         }
-        val previous = currentManifests.firstOrNull { it.sourceDeviceId == deviceId }
-            ?: currentManifests.firstOrNull()
+        val owner = CloudSnapshotReuse.Owner(deviceId,session.userId,bootstrap.libraryEpoch,scope,requireNotNull(client.knownContentGeneration(session)))
+        val ownHeads = currentManifests.filter { it.sourceDeviceId == deviceId }
+        val ownManifests = currentManifests.filter { it.keyVersion==keyVersion && owner.current(it) }
+        val previous = ownManifests.firstOrNull()
+        val ownershipUpgrade = previous == null
         val privateFingerprint = if (fullTransfer) backupService.privateCloudFingerprint() else previous?.settings?.optString("privateBodyFingerprintV2")?.takeIf { it.isNotBlank() }
         val pendingManifest = cache.loadPendingManifest(scope)?.let { (id, bytes) ->
             runCatching { codec.decryptManifest(accountKey,id,bytes) }.getOrNull()?.takeIf {
-                it.keyVersion == keyVersion && it.sourceDeviceId == deviceId && it.settings.optString("libraryEpoch") == bootstrap.libraryEpoch &&
-                    it.settings.optString("ownerUserId") == session.userId && it.allChunks.all { chunk -> cache.loadChunk(scope,chunk.ciphertextSha256) != null }
+                it.keyVersion == keyVersion && owner.current(it) &&
+                    it.allChunks.all { chunk -> cache.loadChunk(scope,chunk.ciphertextSha256) != null }
             }
         }
-        val carryScope=JSONObject().put("backendScope",scope).put("contentGeneration",client.knownContentGeneration(session)).put("ownerUserId",session.userId).put("libraryEpoch",bootstrap.libraryEpoch)
         val writeOverlay = formatWritePolicy.localWrite && formatWritePolicy.canWrite(client.formatCapabilities(session))
-        val bodySource = (currentManifests + listOfNotNull(pendingManifest)).firstOrNull {
-            CloudSnapshotReuse.scopeCompatible(it,carryScope,allowMissing=true) && (CloudSnapshotReuse.canCarry(it, session.userId, bootstrap.libraryEpoch, keyVersion, privateFingerprint) || writeOverlay && it.objects.any{d->d.name==PRIVATE_LIBRARY_OBJECT})
+        val bodySource = (ownManifests + listOfNotNull(pendingManifest)).firstOrNull {
+            CloudSnapshotReuse.canCarry(it, owner, keyVersion, privateFingerprint) ||
+                writeOverlay && owner.current(it) && it.objects.any{d->d.name==PRIVATE_LIBRARY_OBJECT && d.access==CloudFormatAccess.WRITABLE}
         }
-        if(fullTransfer && !writeOverlay && currentManifests.any{it.objects.any{d->d.name==CloudPrivateOverlay.NAME}} &&
-            currentManifests.none{it.settings.optString("privateBodyFingerprintV2")==privateFingerprint}) {
+        if(fullTransfer && !writeOverlay && ownManifests.any{it.objects.any{d->d.name==CloudPrivateOverlay.NAME}} &&
+            ownManifests.none{it.settings.optString("privateBodyFingerprintV2")==privateFingerprint}) {
             pendingFormat(session,"manifest:private-overlay-write-disabled")
             throw CloudFormatUpgradeRequired("overlay_write_disabled")
         }
@@ -1716,7 +1726,7 @@ class PhoneCloudSyncService(
         try {
         traceSync("private-archive:done:bytes=${createdArchive?.file?.length() ?: 0}:carried=${priorBodies.size}")
         val overlayRows=mutableListOf<Pair<CloudSnapshotManifest,CloudPrivateOverlayEntry>>()
-        if(writeOverlay && fullTransfer)for(manifest in currentManifests) {
+        if(writeOverlay && fullTransfer)for(manifest in ownManifests) {
             val index=manifest.objects.singleOrNull{it.name==CloudPrivateOverlay.NAME} ?: continue
             val bytes=materializeObject(session,accountKey,manifest,index,heads)
             CloudPrivateOverlay.decode(bytes).forEach{overlayRows+=manifest to it}
@@ -1753,7 +1763,7 @@ class PhoneCloudSyncService(
         val retiredNotesObjects = if (notes.none { !it.deleted }) {
             // Omission retires this supported object, so it needs the same write
             // permission as replacement. Never discard a future archive format.
-            for (old in currentManifests.flatMap { it.objects }.filter { it.name == NOTES_ARCHIVE_OBJECT }) {
+            for (old in ownHeads.flatMap { it.objects }.filter { it.name == NOTES_ARCHIVE_OBJECT }) {
                 if (old.access != CloudFormatAccess.WRITABLE) {
                     pendingFormat(session,"object:${old.name}")
                     throw CloudFormatUpgradeRequired("object_read_only")
@@ -1761,8 +1771,8 @@ class PhoneCloudSyncService(
             }
             setOf(NOTES_ARCHIVE_OBJECT)
         } else emptySet()
-        val replaced=logicalObjects.map{it.name}.toSet()+retiredNotesObjects+if(overlayExport!=null)currentManifests.flatMap{it.objects}.filter{it.name.startsWith("private/articles/")||it.name.startsWith("books/")||it.name==CloudPrivateOverlay.NAME}.map{it.name} else emptyList()
-        val carried = CloudSnapshotReuse.preserveObjects(currentManifests,replaced,priorBodies+overlayCarried)
+        val replaced=logicalObjects.map{it.name}.toSet()+retiredNotesObjects+if(overlayExport!=null)ownManifests.flatMap{it.objects}.filter{it.name.startsWith("private/articles/")||it.name.startsWith("books/")||it.name==CloudPrivateOverlay.NAME}.map{it.name} else emptyList()
+        val carried = CloudSnapshotReuse.preserveObjects(ownManifests,replaced,priorBodies+overlayCarried,owner)
         if(logicalObjects.size+carried.size>1024) {
             pendingFormat(session,"manifest:private-overlay-capacity")
             throw CloudFormatUpgradeRequired("manifest_object_limit")
@@ -1770,30 +1780,25 @@ class PhoneCloudSyncService(
         val parentHeads = mergedHeads.associate { it.sourceDeviceId to it.id }
         val observedHeads = mergedHeads.associate { it.sourceDeviceId to it.deviceSequence }
         val contentHash = CloudSnapshotContent.hash(logicalObjects, carried, keyVersion, privateFingerprint)
-        val own = currentManifests.firstOrNull { it.sourceDeviceId == deviceId }
-        val contentChanged = (own?.settings?.optString("snapshotContentHashV3") ?: settings.lastContentHash(fullTransfer)) != contentHash || own == null
+        val contentChanged = ownershipUpgrade || previous?.settings?.optString("snapshotContentHashV3") != contentHash
         val lastPublished = maxOf(settings.lastSnapshotPublishedAt,
             heads.filter { it.sourceDeviceId == deviceId }.mapNotNull { head -> head.completedAt?.let { runCatching { java.time.Instant.parse(it).toEpochMilli() }.getOrNull() } }.maxOrNull() ?: 0)
-        if (!CloudContentPolicy.shouldPublish(contentChanged, manual, lastPublished, System.currentTimeMillis())) {
+        if (!CloudContentPolicy.shouldPublish(contentChanged, manual || ownershipUpgrade, lastPublished, System.currentTimeMillis())) {
             val due = if (contentChanged && !manual) lastPublished + CloudContentPolicy.MIN_SNAPSHOT_INTERVAL_MS else 0L
             createdArchive?.file?.delete()
             if (due > 0) PhoneCloudSyncWorker.scheduleSnapshot(appContext,due-System.currentTimeMillis())
-            return UploadOutcome(false,0,confirmedArticleIds=if (fullTransfer) CloudSnapshotReuse.completedArticleIds(currentManifests,session.userId,bootstrap.libraryEpoch,keyVersion,privateFingerprint) else emptySet(),deferredUntil=due,confirmedBookIds=if(fullTransfer) CloudSnapshotReuse.completedBookIds(currentManifests,session.userId,bootstrap.libraryEpoch,keyVersion,privateFingerprint) else emptySet())
+            return UploadOutcome(false,0,confirmedArticleIds=if (fullTransfer) CloudSnapshotReuse.completedArticleIds(ownManifests,owner,keyVersion,privateFingerprint) else emptySet(),deferredUntil=due,confirmedBookIds=if(fullTransfer) CloudSnapshotReuse.completedBookIds(ownManifests,owner,keyVersion,privateFingerprint) else emptySet())
         }
-        for(manifest in currentManifests)if(manifest.access!=CloudFormatAccess.WRITABLE) {
-            pendingFormat(session,"manifest:${manifest.snapshotId}");manifest.requireWritable()
+        for(manifest in ownHeads) {
+            try { CloudSnapshotReuse.requireOwnPublicationWritable(manifest) }
+            catch(error:CloudFormatUpgradeRequired) {pendingFormat(session,"manifest:${manifest.snapshotId}");throw error}
         }
-        val authenticatedHashes=authenticatedObjectHashes(session,accountKey,currentManifests,heads,logicalObjects)
-        for(old in currentManifests.flatMap{it.objects}.filter { it.name in logicalObjects.map{logical->logical.name} }) {
-            if(old.access!=CloudFormatAccess.WRITABLE && authenticatedHashes[old.name]!=logicalObjects.first{it.name==old.name}.sha256()) {
-                pendingFormat(session,"object:${old.name}");throw CloudFormatUpgradeRequired("object_read_only")
-            }
-        }
+        val authenticatedHashes=authenticatedObjectHashes(session,accountKey,ownManifests,heads,logicalObjects)
         val serverSequence = bootstrap.devices
             .firstOrNull { it.deviceId == deviceId }
             ?.lastSequence
             ?: 0L
-        val reusableManifests = currentManifests
+        val reusableManifests = ownManifests
         val bodyIds=overlayExport?.articleIds ?: createdArchive?.articleIds ?: bodySource?.settings?.optJSONArray("privateBodyArticleIds")?.let { ids ->
             (0 until ids.length()).map { ids.getString(it) }.toSet()
         }.orEmpty()
@@ -1802,6 +1807,7 @@ class PhoneCloudSyncService(
         }.orEmpty()
         val snapshotSettings = org.json.JSONObject().put("backendScope",scope).put("contentGeneration",client.knownContentGeneration(session)).put("privateBodyBookIds",JSONArray(bookIds.sorted())).put("snapshotContentLayout",3).put("libraryEpoch",bootstrap.libraryEpoch)
             .put("ownerUserId",session.userId).put("snapshotContentHashV3",contentHash).put("privateBodyArticleIds",JSONArray(bodyIds.sorted()))
+            .put(CloudSnapshotReuse.OWN_OBJECTS_SETTING,CloudSnapshotReuse.OWN_OBJECTS_VERSION)
         if (privateFingerprint != null && (!fullTransfer || privateFingerprint == backupService.privateCloudFingerprint())) {
             snapshotSettings.put("privateBodyFingerprintV2",privateFingerprint)
         }

@@ -30,6 +30,8 @@ class CloudRssInventoryPreferences(
             .apply()
     }
 
+    internal fun receiptContext():String = org.json.JSONObject(preferences.all.filterKeys{it.startsWith("all_")}.toSortedMap()).toString()
+
     private fun key(sourceUrl: String): String =
         "all_${WebArticleImporter.sha256(sourceUrl)}"
 }

@@ -25,17 +25,18 @@ class CloudCycleCheckpointTest {
         assertFalse(receipt.compatible(receipt.context,"40",99))
         assertFalse(receipt.compatible(receipt.context,"40",86_400_100))
         assertNull(CloudCycleCheckpoint.decode("{}"))
-        assertNull(CloudCycleCheckpoint.decode(receipt.encode().replace("\"version\":1","\"version\":2")))
+        assertNull(CloudCycleCheckpoint.decode(receipt.encode().replace("\"version\":2","\"version\":3")))
     }
     @Test fun failureToPersistNeverLeavesAnEligibleReceiptEvenInTheSameProcess() {
         val prefs=MemoryPreferences();val state=PhoneCloudStateStore(prefs)
-        state.bindScope("backend","owner");state.completeCycle(receipt)
+        state.bindScope("backend","owner");state.completeCycle(receipt,state.admitCycle())
         state.invalidateCycleCheckpoint()
         assertNull(PhoneCloudStateStore(prefs).also{it.bindScope("backend","owner")}.cycleCheckpoint())
+        val admission=state.admitCycle()
         prefs.failCommit=true
-        assertTrue(runCatching{state.completeCycle(receipt.copy(localMaxSeq=24))}.isFailure)
+        assertTrue(runCatching{state.completeCycle(receipt.copy(localMaxSeq=24),admission)}.isFailure)
         assertNull(state.cycleCheckpoint())
-        prefs.failCommit=false;state.completeCycle(receipt)
+        prefs.failCommit=false;state.completeCycle(receipt,state.admitCycle())
         prefs.failCommit=true
         assertTrue(runCatching{state.invalidateCycleCheckpoint()}.isFailure)
         assertNull(state.cycleCheckpoint())
@@ -43,10 +44,23 @@ class CloudCycleCheckpointTest {
         assertNull(state.cycleCheckpoint())
     }
     @Test fun receiptsCannotCrossAccountsBackendsEpochResetOrLibraryClear() {
-        val state=PhoneCloudStateStore(MemoryPreferences());state.bindScope("a","owner");state.completeCycle(receipt)
+        val state=PhoneCloudStateStore(MemoryPreferences());state.bindScope("a","owner");state.completeCycle(receipt,state.admitCycle())
         state.bindScope("b","owner");assertNull(state.cycleCheckpoint())
         state.bindScope("a","other");assertNull(state.cycleCheckpoint())
         state.bindScope("a","owner");assertEquals(receipt,state.cycleCheckpoint())
         state.clearLibraryState();assertNull(state.cycleCheckpoint())
     }
+    @Test fun anyInvalidationAfterAdmissionRejectsCompletionAndSurvivesReopenAndClear() {
+        val prefs=MemoryPreferences();val state=PhoneCloudStateStore(prefs)
+        state.bindScope("backend","owner")
+        val admission=state.admitCycle()
+        state.invalidateCycleCheckpoint() // arbitrary future source, no inventory preference involved
+        assertFalse(state.completeCycle(receipt,admission));assertNull(state.cycleCheckpoint())
+        val reopened=PhoneCloudStateStore(prefs).also{it.bindScope("backend","owner")}
+        assertFalse(reopened.completeCycle(receipt,admission))
+        val beforeClear=state.admitCycle();state.clearScope()
+        assertFalse(state.completeCycle(receipt,beforeClear))
+        assertTrue(state.completeCycle(receipt,state.admitCycle()))
+    }
+
 }

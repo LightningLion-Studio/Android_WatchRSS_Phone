@@ -336,7 +336,9 @@ class ReaderResourceStore(context: Context) {
             val finalName = "$hash.$extension"
             val target = File(fonts, finalName)
             if (!target.exists()) {
+                com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target) {
                 check(temp.renameTo(target)) { "字体文件保存失败" }
+                }
             }
             val parsedMetadata = OpenTypeMetadataParser.parse(target)
             val faceCount = parsedMetadata.optInt("faceCount", 1)
@@ -431,7 +433,9 @@ class ReaderResourceStore(context: Context) {
                 val assetId = UUID.randomUUID().toString()
                 val finalName = "$assetId.$extension"
                 val target = File(backgrounds, finalName)
+                com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target) {
                 check(source.renameTo(target)) { "背景资源保存失败" }
+                }
                 val metadata = if (kind == ReaderBackgroundType.IMAGE) {
                     imageMetadata(target)
                 } else {
@@ -508,10 +512,12 @@ class ReaderResourceStore(context: Context) {
         val assetId = UUID.randomUUID().toString()
         val target = File(backgrounds, "$assetId.jpg")
         try {
+            com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target) {
             target.outputStream().buffered().use { output ->
                 check(scaled.compress(Bitmap.CompressFormat.JPEG, 92, output)) {
                     "视频画面保存失败"
                 }
+            }
             }
         } finally {
             scaled.recycle()
@@ -686,7 +692,7 @@ class ReaderResourceStore(context: Context) {
 
     suspend fun deleteFontFile(fileName: String) = withContext(Dispatchers.IO) {
         safeChild(fonts, fileName)?.let { file ->
-            !file.exists() || file.delete()
+            !file.exists() || com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file){file.delete()}
         } ?: false
     }
 
@@ -724,7 +730,7 @@ class ReaderResourceStore(context: Context) {
             .filter(File::isFile)
             .filterNot { it.name.startsWith('.') }
             .filter { it.name !in keepNames }
-            .forEach(File::delete)
+            .forEach{file -> com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file){file.delete()}}
     }
 
     private fun copyUri(uri: Uri, target: File, limitBytes: Long) {

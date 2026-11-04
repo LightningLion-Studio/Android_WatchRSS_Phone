@@ -14,7 +14,7 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
         context.applicationContext.getSharedPreferences(prefsName, Context.MODE_PRIVATE))
 
     private var scope = ""
-    fun bindScope(baseUrl: String, userId: String) {
+    fun bindScope(baseUrl: String, userId: String) = synchronized(preferences) {
         scope = CloudSnapshotCodec.sha256("${baseUrl.trimEnd('/')}\n$userId".toByteArray()) + ":"
         if (!preferences.getBoolean("scoped_cloud_v2", false)) {
             val editor = preferences.edit().putBoolean("scoped_cloud_v2", true)
@@ -25,17 +25,28 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
     }
     private fun scoped(key: String): String = scope + key
     private val failedCycleScopes=mutableSetOf<String>()
-    internal fun cycleCheckpoint():CloudCycleCheckpoint? = if(scope in failedCycleScopes)null else
-        CloudCycleCheckpoint.decode(preferences.getString(scoped("cycle_checkpoint_v1"),null))
-    // SharedPreferences can update memory even when disk commit fails. Taint that scope too.
-    internal fun invalidateCycleCheckpoint() {
-        failedCycleScopes.add(scope)
-        check(preferences.edit().remove(scoped("cycle_checkpoint_v1")).commit())
+    internal data class CycleAdmission(val scope:String,val version:Long,val checkpoint:CloudCycleCheckpoint?)
+    private fun invalidationVersion()=preferences.getLong(scoped("cycle_invalidation_version"),0)
+    internal fun cycleCheckpoint():CloudCycleCheckpoint? = synchronized(preferences) {
+        if(scope in failedCycleScopes)null else CloudCycleCheckpoint.decode(preferences.getString(scoped("cycle_checkpoint_v1"),null))
     }
-    internal fun completeCycle(checkpoint:CloudCycleCheckpoint) {
+    internal fun admitCycle():CycleAdmission = synchronized(preferences) {
+        val prior=cycleCheckpoint()
+        invalidateCycleCheckpoint()
+        CycleAdmission(scope,invalidationVersion(),prior)
+    }
+    // Every source uses this durable counter. Completion may consume only its own admission.
+    internal fun invalidateCycleCheckpoint() = synchronized(preferences) {
+        failedCycleScopes.add(scope)
+        val next=Math.addExact(invalidationVersion(),1L)
+        check(preferences.edit().remove(scoped("cycle_checkpoint_v1")).putLong(scoped("cycle_invalidation_version"),next).commit())
+    }
+    internal fun completeCycle(checkpoint:CloudCycleCheckpoint, admission:CycleAdmission):Boolean = synchronized(preferences) {
+        if(scope!=admission.scope || invalidationVersion()!=admission.version)return@synchronized false
         failedCycleScopes.add(scope)
         check(preferences.edit().putString(scoped("cycle_checkpoint_v1"),checkpoint.encode()).commit())
         failedCycleScopes.remove(scope)
+        true
     }
     var libraryEpoch: String?
         get() = preferences.getString(scoped("library_epoch"), null)
@@ -60,10 +71,11 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
         set(value) { check(preferences.edit().putString("private_library_owner", value).commit()) }
     fun claimLegacyOwner(userId: String) { if (ownerUserId == null) ownerUserId = userId }
     fun requireUploadOwner(userId: String) { check(ownerUserId == userId) { "本机资料属于其他账号，请先清空本机资料或明确确认合并" } }
-    fun clearScope() {
+    fun clearScope() = synchronized(preferences) {
         check(scope.isNotEmpty())
+        invalidateCycleCheckpoint()
         val editor = preferences.edit()
-        preferences.all.keys.filter { it.startsWith(scope) }.forEach(editor::remove)
+        preferences.all.keys.filter { it.startsWith(scope) && it!=scoped("cycle_invalidation_version") }.forEach(editor::remove)
         check(editor.commit())
     }
 

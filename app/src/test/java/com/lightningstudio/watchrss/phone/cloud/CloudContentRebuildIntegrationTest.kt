@@ -129,6 +129,7 @@ class CloudContentRebuildIntegrationTest {
         var mutateDuringUpload=false
         var mutatedDuringUpload=false
         var onComplete: (suspend () -> Unit)? = null
+        var onRecordsGet: (() -> Unit)? = null
         var rejectReserve=false
         var reserveAttempts=0
         var omitGeneration=false
@@ -153,6 +154,7 @@ class CloudContentRebuildIntegrationTest {
                     path.endsWith("/devices/register") -> JSONObject()
                     path.endsWith("/records") && request.method=="GET" -> {
                         val cursor=request.url.queryParameter("after")!!;afterQueries+=cursor
+                        onRecordsGet?.also { onRecordsGet=null;it() }
                         if(mutateDuringPull&&!mutatedDuringPull){mutatedDuringPull=true;runBlocking{repository.setRssSourcePinned("http://127.0.0.1/rss",true)}}
                         val remaining=recordRows.values.filter{it.getString("revision").toLong()>cursor.toLong()}.sortedBy{it.getString("revision").toLong()}
                         val page=remaining.take(50)
@@ -254,6 +256,79 @@ class CloudContentRebuildIntegrationTest {
     }
     private suspend fun fixture(stage:String?=null,always:Boolean=false)=Fixture(failStage=stage,alwaysFail=always).also{fixtures+=it;it.initialize()}
     @After fun close(){fixtures.forEach{it.close()};java.security.Security.removeProvider("cloud-r45-fixture")}
+    @Test fun reviewAssetOnlyRemoteHydrationMustPublishNewLocalBytes()=runBlocking {
+        val f=fixture(); val repo=notes(f)
+        val imageFile=java.io.File(f.context.filesDir,"notes/assets/review-hydrate.png")
+        imageFile.delete()
+        val local=repo.save("asset-only","Asset only","![photo](assets/review-hydrate.png)")
+        f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        assertNotNull(f.state.cycleCheckpoint())
+        val seq=f.repository.getLibrarySyncCursor(null).localMaxSeq
+        seedNotesHead(f,"watch",NoteCloudStateCodec.encode(listOf(local)),assetZip("review-hydrate.png","new image"))
+        f.service.syncNow(manual=true)
+        assertEquals("new image",imageFile.readText())
+        assertEquals(seq,f.repository.getLibrarySyncCursor(null).localMaxSeq)
+        assertNotNull(f.state.cycleCheckpoint())
+        f.backup.cloudWork.reset()
+        val result=f.service.syncNow(manual=true)
+        assertTrue("newly hydrated local assets must be published to the phone's own head",result.snapshotUploaded)
+        val ownZip=MarkdownNoteArchive.read(completedNotesObjects(f).getValue("notes-assets.zip"))
+        assertEquals("new image",ownZip.single{it.path=="notes/assets/review-hydrate.png"}.bytes.toString(Charsets.UTF_8))
+        assertTrue("hydration must run the ZIP producer",f.backup.cloudWork.notesZips>0)
+    }
+
+
+    @Test fun reviewInventoryInvalidationDuringIdleProbeMustSurviveCompletion()=runBlocking {
+        val f=fixture();f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        assertNotNull(f.state.cycleCheckpoint())
+        f.onRecordsGet={f.service.setRssInventoryMode("http://127.0.0.1/rss",CloudRssInventoryMode.ALL)}
+        f.backup.cloudWork.reset();f.service.syncNow(manual=true)
+        assertEquals(CloudRssInventoryMode.ALL,f.service.rssInventoryMode("http://127.0.0.1/rss"))
+        assertEquals(0,f.backup.cloudWork.fingerprints)
+        assertNull("inventory invalidation during the probe must survive the idle completion",f.state.cycleCheckpoint())
+    }
+
+    @Test fun reviewInventoryInvalidationDuringPublishMustSurviveCompletion()=runBlocking {
+        val f=fixture();f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        assertNotNull(f.state.cycleCheckpoint())
+        notes(f).save("mode-race","Race","edit")
+        f.onComplete={f.service.setRssInventoryMode("http://127.0.0.1/rss",CloudRssInventoryMode.ALL)}
+        f.service.syncNow(manual=true)
+        assertNull("settings invalidation during publication must survive completion",f.state.cycleCheckpoint())
+    }
+
+    @Test fun reviewAnyInvalidationDuringIdleAndPublishCannotBeAcknowledgedByCompletion()=runBlocking {
+        val f=fixture();f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        f.onRecordsGet={f.state.invalidateCycleCheckpoint()}
+        f.service.syncNow(manual=true);assertNull(f.state.cycleCheckpoint())
+        f.service.syncNow(manual=true);assertNotNull(f.state.cycleCheckpoint())
+        notes(f).save("generic-race","Race","edit")
+        f.onComplete={f.state.invalidateCycleCheckpoint()}
+        f.service.syncNow(manual=true);assertNull(f.state.cycleCheckpoint())
+    }
+
+    @Test fun reviewFileOnlyReaderHydrationRebuildsThePrivateArchiveWithoutRoomEdits()=runBlocking {
+        val f=fixture();val bytes="hydrated font".toByteArray();val hash=CloudSnapshotCodec.sha256(bytes);val name="review-font.ttf"
+        f.reader.resourceStore.targetFontFile(name).delete()
+        f.db.readerPresetDao().upsertFont(com.lightningstudio.watchrss.phone.data.reader.ReaderFontAssetEntity("review-font",hash,"font","font",name,"font/ttf",bytes.size.toLong(),1,"{}",1,"phone",false))
+        f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        assertNotNull(f.state.cycleCheckpoint())
+        val seq=f.repository.getLibrarySyncCursor(null).localMaxSeq
+        val response=JSONObject().put("data",java.util.Base64.getEncoder().encodeToString(bytes)).put("chunkSha256",hash).put("chunkIndex",0).put("chunkCount",1)
+        assertTrue(com.lightningstudio.watchrss.phone.connection.bluetooth.ReaderPresetSyncPayload.applyPulledChunk(response,
+            com.lightningstudio.watchrss.phone.connection.bluetooth.ResourceDescriptor("font",name,hash,bytes.size.toLong()),f.reader))
+        assertEquals(seq,f.repository.getLibrarySyncCursor(null).localMaxSeq)
+        f.backup.cloudWork.reset()
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertTrue("private file hydration must rebuild the archive",f.backup.cloudWork.exports>0)
+        val archive=completedNotesObjects(f).getValue("private-library.wrss")
+        var found:ByteArray?=null
+        java.util.zip.ZipInputStream(archive.inputStream()).use { zip ->
+            while(true) {val entry=zip.nextEntry ?: break;if(entry.name=="reader/fonts/$hash.bin")found=zip.readBytes()}
+        }
+        assertArrayEquals(bytes,found)
+    }
+
     @Test fun syncSkipIdleRealSizeLibraryDoesZeroProducerWork()=runBlocking {
         val f=fixture();val rng=java.util.Random(4811)
         f.db.phoneArticleDao().upsertAll((0 until 2000).map { i ->

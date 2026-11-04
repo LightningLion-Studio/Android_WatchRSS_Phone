@@ -454,7 +454,9 @@ class ReaderPresetTransferService(
                     partial.length() == resource.byteCount &&
                         repository.resourceStore.fileSha256(partial) == resource.sha256
                 ) { "导入资源校验失败：${resource.fileName}" }
+                com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target) {
                 require(partial.renameTo(target)) { "阅读器资源保存失败：${resource.fileName}" }
+                }
             } finally {
                 partial.delete()
             }

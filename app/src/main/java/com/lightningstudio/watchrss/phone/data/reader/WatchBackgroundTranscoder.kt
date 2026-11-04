@@ -183,7 +183,9 @@ class WatchBackgroundTranscoder(context: Context, private val repository: Reader
         require(temp.length() > 0) { "预处理输出为空" }
         val hash = repository.resourceStore.fileSha256(temp)
         val target = repository.resourceStore.targetVariantFile("$hash.$extension")
-        if (target.exists()) temp.delete() else check(temp.renameTo(target)) { "背景版本保存失败" }
+        if (target.exists()) temp.delete() else com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target) {
+            check(temp.renameTo(target)) { "背景版本保存失败" }
+        }
         return target
     }
 

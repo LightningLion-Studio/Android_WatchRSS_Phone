@@ -55,7 +55,7 @@ class FileArticleContentStore internal constructor(
                 output.fd.sync()
             }
             check(temporary.length() == encoded.size.toLong()) { "正文临时文件校验失败" }
-            try {
+            CloudExportFileWitness.changing(target) { try {
                 Files.move(
                     temporary.toPath(),
                     target.toPath(),
@@ -68,6 +68,7 @@ class FileArticleContentStore internal constructor(
                     target.toPath(),
                     StandardCopyOption.REPLACE_EXISTING
                 )
+            }
             }
             check(target.matchesContent(encoded.size.toLong(), contentHash)) { "正文文件校验失败" }
         } finally {
@@ -124,7 +125,7 @@ class FileArticleContentStore internal constructor(
             val managedFile = isArticleContentFileName(file.name) ||
                 (file.name.startsWith(".write-") && file.name.endsWith(".part"))
             if (file.isFile && managedFile && file.name !in retainedFileNames) {
-                runCatching { file.delete() }
+                CloudExportFileWitness.changing(file) { runCatching { file.delete() } }
             }
         }
     }

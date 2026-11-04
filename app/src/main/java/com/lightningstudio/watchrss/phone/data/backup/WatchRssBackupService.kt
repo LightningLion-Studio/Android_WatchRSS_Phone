@@ -64,7 +64,7 @@ class WatchRssBackupService(
     internal suspend fun privateCloudFingerprint(): String = withContext(Dispatchers.IO) {
         cloudWork.fingerprints++
         val bookVersions=repository.books?.availableBooks().orEmpty().associate{it.first.getString("bookId") to it.first.getString("fingerprint")}
-        val state = JSONObject().put("books",JSONObject(bookVersions))
+        val state = JSONObject().put("privateFilesRevision",com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.revision(appContext.filesDir).privateFiles).put("books",JSONObject(bookVersions))
             .put("versions", JSONObject(repository.privateCloudVersions(layoutV3 = true)))
             .put("reader", com.lightningstudio.watchrss.phone.connection.bluetooth.ReaderPresetSyncPayload.snapshotJson(CloudPrivateArchive.reader(readerPresetRepository.exportSnapshot())))
             .put("appMeta", JSONObject(database.appMetaDao().getAll().filter { CloudContentPolicy.privateAppMeta(it.key) }.associate { it.key to it.value }))

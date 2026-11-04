@@ -151,8 +151,10 @@ object ReaderPresetSyncPayload {
         if (index != count - 1) return false
         require(partial.length() == resource.byteCount) { "下载资源大小校验失败" }
         require(runBlockingHash(partial) == resource.sha256) { "下载资源完整校验失败" }
+        com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target) {
         if (target.exists()) target.delete()
         require(partial.renameTo(target)) { "下载资源落盘失败" }
+        }
         metadata.delete()
         return true
     }

@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.cloud
 
 import com.lightningstudio.watchrss.phone.pairing.*
+import com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.async
@@ -1124,14 +1125,12 @@ class PhoneCloudSyncService(
                     update(CloudSyncPhase.CHECKING,"云端内容已清理，正在从本机重建同步")
                     client.bootstrap(session)
                 }, attempt = {
-                    val prior=settings.cycleCheckpoint()
-                    // Invalidate before bootstrap too: failed/cancelled passes must not reuse a receipt.
-                    settings.invalidateCycleCheckpoint()
-                    if (paused.value || !networkGate.isConnected()) syncOnePass(manual, retryingTransfer)
+                    val session=requireSession()
+                    val admission=settings.admitCycle()
+                    if (paused.value || !networkGate.isConnected()) syncOnePass(manual, retryingTransfer, admission=admission)
                     else {
-                        val session = requireSession()
                         val bootstrap=validatedBootstrap(session)
-                        client.inContentGeneration(session) { syncOnePass(manual, retryingTransfer, bootstrap, prior) }
+                        client.inContentGeneration(session) { syncOnePass(manual, retryingTransfer, bootstrap, admission) }
                     }
                 })
             } catch (error: Exception) {
@@ -1162,7 +1161,7 @@ class PhoneCloudSyncService(
         }
     }
 
-    private suspend fun syncOnePass(manual: Boolean, retryingTransfer: Boolean = false, initialBootstrap:CloudBootstrap? = null, priorCycle:CloudCycleCheckpoint? = null): PhoneCloudSyncResult = run {
+    private suspend fun syncOnePass(manual: Boolean, retryingTransfer: Boolean = false, initialBootstrap:CloudBootstrap? = null, admission:PhoneCloudStateStore.CycleAdmission? = null): PhoneCloudSyncResult = run {
             traceSync("sync-lock")
             _restoreWarnings.value=emptyList(); _rssRefreshWarnings.value=emptyList()
             var uploadedBytes = 0L
@@ -1181,8 +1180,7 @@ class PhoneCloudSyncService(
                 update(CloudSyncPhase.CHECKING, "正在检查云端")
                 require(networkGate.isConnected()) { "当前没有可用网络" }
                 val session = requireSession()
-                // Bind and invalidate this exact scope even if the account changed after admission.
-                settings.invalidateCycleCheckpoint()
+                check(admission!=null) { "cloud_cycle_admission_missing" }
                 var bootstrap = initialBootstrap ?: validatedBootstrap(session)
                 val syncEpoch = bootstrap.libraryEpoch
                 pausedResult()?.let { return@run it }
@@ -1219,13 +1217,14 @@ class PhoneCloudSyncService(
                 val schema=backupService.cloudChangeSchemaIdentity()
                 val heads = client.snapshotHeads(session)
                 val localAtStart=repository.getLibrarySyncCursor(null).localMaxSeq
-                val previousCycle=priorCycle
+                val previousCycle=admission.checkpoint
+                val filesAtStart=CloudExportFileWitness.revision(appContext.filesDir)
                 val cycleContext=cycleContext(session,bootstrap,schema)
                 val eligible=fullTransfer && !retryingTransfer && cycleCanCheckpoint(session,bootstrap) &&
                     previousCycle?.compatible(cycleContext,recordStore.cursor(client.scopeId(session)),System.currentTimeMillis())==true
                 val probe=if(eligible)recordSync.probeCommit(session,bootstrap.libraryEpoch) else CloudRecordProbe.FULL
                 val recordsEmpty=probe==CloudRecordProbe.EMPTY
-                var plan=if(eligible && probe!=CloudRecordProbe.FULL)requireNotNull(previousCycle).plan(heads,localAtStart,recordsEmpty) else CloudCyclePlan.FULL
+                var plan=if(eligible && probe!=CloudRecordProbe.FULL)requireNotNull(previousCycle).plan(heads,localAtStart,recordsEmpty,filesAtStart) else CloudCyclePlan.FULL
                 // A new own commit can be a migration or an ownership transition, never apply-only.
                 if(eligible && (heads.none{it.sourceDeviceId==deviceId} ||
                     heads.any{it.sourceDeviceId==deviceId && previousCycle?.heads?.get(it.id)!=it.manifestSha256}))plan=CloudCyclePlan.FULL
@@ -1235,7 +1234,9 @@ class PhoneCloudSyncService(
                 traceSync("cycle-plan:${plan.name.lowercase()}")
                 if(plan==CloudCyclePlan.IDLE) {
                     checkCloudEpoch(session,syncEpoch)
-                    settings.completeCycle(requireNotNull(previousCycle))
+                    CloudExportFileWitness.withRevision(appContext.filesDir,filesAtStart) {
+                        settings.completeCycle(requireNotNull(previousCycle),admission)
+                    }
                     update(CloudSyncPhase.COMPLETE,"云同步完成",bootstrap.member,0,0,completedAt=System.currentTimeMillis())
                     return@run PhoneCloudSyncResult(0,0,0,false,0)
                 }
@@ -1344,6 +1345,7 @@ class PhoneCloudSyncService(
                 repository.books?.ensureRegistered()
                 traceSync("books-register:done")
                 // Compare against the publication window, after this pass's own restore/RSS work.
+                val filesAtPublish=if(publishLocal)CloudExportFileWitness.revision(appContext.filesDir) else requireNotNull(previousCycle).filesRevision
                 val localSequenceAtPublish = if(publishLocal) repository.getLibrarySyncCursor(null).localMaxSeq else requireNotNull(previousCycle).localMaxSeq
                 if(publishLocal) {
                     traceSync("records-push:start")
@@ -1427,8 +1429,11 @@ class PhoneCloudSyncService(
                     (plan==CloudCyclePlan.APPLY || repository.getLibrarySyncCursor(null).localMaxSeq==localSequenceAtPublish) &&
                     cycleCanCheckpoint(session,bootstrap) && cycleContext==cycleContext(session,bootstrap,backupService.cloudChangeSchemaIdentity())) {
                     checkCloudEpoch(session,syncEpoch)
-                    settings.completeCycle(CloudCycleCheckpoint(cycleContext,CloudCycleCheckpoint.identities(completedHeads),localSequenceAtPublish,
-                        recordStore.cursor(client.scopeId(session)),if(plan==CloudCyclePlan.FULL)System.currentTimeMillis() else requireNotNull(previousCycle).fullCheckedAt))
+                    val filesNow=CloudExportFileWitness.revision(appContext.filesDir)
+                    if(plan==CloudCyclePlan.APPLY || filesNow==filesAtPublish)CloudExportFileWitness.withRevision(appContext.filesDir,filesNow) {
+                        settings.completeCycle(CloudCycleCheckpoint(cycleContext,CloudCycleCheckpoint.identities(completedHeads),localSequenceAtPublish,
+                            recordStore.cursor(client.scopeId(session)),if(plan==CloudCyclePlan.FULL)System.currentTimeMillis() else requireNotNull(previousCycle).fullCheckedAt,filesAtPublish),admission)
+                    }
                 }
                 PhoneCloudSyncResult(
                     uploadedBytes = uploadedBytes,
@@ -1463,7 +1468,7 @@ class PhoneCloudSyncService(
             com.lightningstudio.watchrss.phone.BuildConfig.VERSION_CODE,CloudSnapshotReuse.OWN_OBJECTS_VERSION,
             keyManager.currentKeyVersion(session.userId),bootstrap.keyVersionFloor,
             bootstrap.keyCommitments.sortedBy{it.keyVersion}.joinToString{ "${it.keyVersion}:${it.commitment}" },
-            settings.networkPolicy,settings.retentionDays,bootstrap.member.readable,bootstrap.member.writable).joinToString("\n")
+            settings.networkPolicy,settings.retentionDays,rssInventoryPreferences.receiptContext(),bootstrap.member.readable,bootstrap.member.writable).joinToString("\n")
 
     private suspend fun cycleCanCheckpoint(session:PhoneAccountSession,bootstrap:CloudBootstrap):Boolean {
         val own=bootstrap.devices.singleOrNull{it.deviceId==deviceId} ?: return false
@@ -1875,9 +1880,11 @@ class PhoneCloudSyncService(
             }
         }
         val writeOverlay = formatWritePolicy.localWrite && formatWritePolicy.canWrite(client.formatCapabilities(session))
+        val privateFilesRevision=CloudExportFileWitness.revision(appContext.filesDir).privateFiles
+        val forcePrivateArchive=previous!=null && previous.settings.optString("privateFilesRevision","0")!=privateFilesRevision
         val bodySource = (ownManifests + listOfNotNull(pendingManifest)).firstOrNull {
-            CloudSnapshotReuse.canCarry(it, owner, keyVersion, privateFingerprint) ||
-                writeOverlay && owner.current(it) && it.objects.any{d->d.name==PRIVATE_LIBRARY_OBJECT && d.access==CloudFormatAccess.WRITABLE}
+            !forcePrivateArchive && (CloudSnapshotReuse.canCarry(it, owner, keyVersion, privateFingerprint) ||
+                writeOverlay && owner.current(it) && it.objects.any{d->d.name==PRIVATE_LIBRARY_OBJECT && d.access==CloudFormatAccess.WRITABLE})
         }
         if(fullTransfer && !writeOverlay && ownManifests.any{it.objects.any{d->d.name==CloudPrivateOverlay.NAME}} &&
             ownManifests.none{it.settings.optString("privateBodyFingerprintV2")==privateFingerprint}) {
@@ -1929,7 +1936,7 @@ class PhoneCloudSyncService(
             // The common own-format guard below protects retirement as well as replacement.
             setOf(NOTES_ARCHIVE_OBJECT)
         } else emptySet()
-        val replaced=logicalObjects.map{it.name}.toSet()+retiredNotesObjects+if(overlayExport!=null)ownManifests.flatMap{it.objects}.filter{it.name.startsWith("private/articles/")||it.name.startsWith("books/")||it.name==CloudPrivateOverlay.NAME}.map{it.name} else emptyList()
+        val replaced=logicalObjects.map{it.name}.toSet()+retiredNotesObjects+if(overlayExport!=null || createdArchive!=null)ownManifests.flatMap{it.objects}.filter{it.name.startsWith("private/articles/")||it.name.startsWith("books/")||it.name==CloudPrivateOverlay.NAME}.map{it.name} else emptyList()
         val carried = CloudSnapshotReuse.preserveObjects(ownManifests,replaced,priorBodies+overlayCarried,owner)
         if(logicalObjects.size+carried.size>1024) {
             pendingFormat(session,"manifest:private-overlay-capacity")
@@ -1964,7 +1971,7 @@ class PhoneCloudSyncService(
             (0 until ids.length()).map {ids.getString(it)}.toSet()
         }.orEmpty()
         val snapshotSettings = org.json.JSONObject().put("backendScope",scope).put("contentGeneration",client.knownContentGeneration(session)).put("privateBodyBookIds",JSONArray(bookIds.sorted())).put("snapshotContentLayout",3).put("libraryEpoch",bootstrap.libraryEpoch)
-            .put("ownerUserId",session.userId).put("snapshotContentHashV3",contentHash).put("privateBodyArticleIds",JSONArray(bodyIds.sorted()))
+            .put("privateFilesRevision",privateFilesRevision).put("ownerUserId",session.userId).put("snapshotContentHashV3",contentHash).put("privateBodyArticleIds",JSONArray(bodyIds.sorted()))
             .put(CloudSnapshotReuse.OWN_OBJECTS_SETTING,CloudSnapshotReuse.OWN_OBJECTS_VERSION)
         if (privateFingerprint != null && (!fullTransfer || privateFingerprint == backupService.privateCloudFingerprint())) {
             snapshotSettings.put("privateBodyFingerprintV2",privateFingerprint)

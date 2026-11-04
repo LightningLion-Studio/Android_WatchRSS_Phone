@@ -21,7 +21,8 @@ data class StoredNoteAsset(
 class NoteAssetStore(private val context: Context) {
     fun discardImportedAsset(storageKey: String) {
         require(storageKey == File(storageKey).name) { "图片文件名无效" }
-        File(context.filesDir, "notes/assets/$storageKey").delete()
+        val target=File(context.filesDir, "notes/assets/$storageKey")
+        if(target.exists())com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target){target.delete()}
     }
 
     suspend fun importImage(noteId: String, uri: Uri, keepOriginal: Boolean): StoredNoteAsset {
@@ -45,8 +46,11 @@ class NoteAssetStore(private val context: Context) {
             requireNotNull(BitmapFactory.decodeStream(input)) { "图片格式不受支持" }
         }
         val scaled = scaleTo680Pixels(bitmap)
-        FileOutputStream(target).use { output ->
-            check(scaled.compress(Bitmap.CompressFormat.JPEG, 85, output)) { "图片压缩失败" }
+        com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target) {
+            FileOutputStream(target).use { output ->
+                check(scaled.compress(Bitmap.CompressFormat.JPEG, 85, output)) { "图片压缩失败" }
+                output.fd.sync()
+            }
         }
         if (scaled !== bitmap) bitmap.recycle()
         val sourceName = uri.lastPathSegment?.substringAfterLast('/')?.take(120).orEmpty().ifBlank { "图片" }
@@ -91,7 +95,7 @@ class NoteAssetStore(private val context: Context) {
         val target = File(directory, "$assetId.$extension")
         context.contentResolver.openInputStream(uri).use { input ->
             requireNotNull(input) { "无法读取原图" }
-            FileOutputStream(target).use(input::copyTo)
+            com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target) { FileOutputStream(target).use{out->input.copyTo(out);out.fd.sync()} }
         }
         val displayName = uri.lastPathSegment?.substringAfterLast('/')?.take(120).orEmpty().ifBlank { "图片" }
         return NoteAssetEntity(

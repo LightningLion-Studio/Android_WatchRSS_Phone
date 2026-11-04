@@ -565,8 +565,10 @@ internal object WatchRssBackupArchive {
             if (target != null && (!target.exists() || target.length() != byteCount)) {
                 val partial = File(target.parentFile, "${target.name}.restore")
                 partial.outputStream().buffered().use { it.write(bytes) }
+                com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target) {
                 if (target.exists()) target.delete()
                 require(partial.renameTo(target)) { "WRSS 阅读器资源恢复失败" }
+                }
             }
         }
         val expectedNames = expected.mapTo(linkedSetOf()) { (identity, _) ->

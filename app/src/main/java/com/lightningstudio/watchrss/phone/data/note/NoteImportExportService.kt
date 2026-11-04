@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.data.note
 import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
+import com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload
 import com.lightningstudio.watchrss.phone.data.importer.LocalFileImportTarget
 import com.lightningstudio.watchrss.phone.data.importer.classifyLocalFileImport
 import com.lightningstudio.watchrss.phone.data.importer.isMarkdownFileName
@@ -17,12 +18,14 @@ class NoteImportExportService(private val context: Context, private val reposito
         val entries = mutableListOf<MarkdownArchiveEntry>()
         repository.allNotes().filterNot { it.deleted }.forEach { note ->
             entries += MarkdownArchiveEntry("notes/${note.noteId}.md", MarkdownNoteCodec.export(note).toByteArray())
-            repository.assets(note.noteId).forEach { asset ->
-                val source = File(context.filesDir, "notes/assets/${asset.storageKey}")
-                if (source.isFile) entries += MarkdownArchiveEntry("notes/assets/${asset.storageKey}", source.readBytes())
+            // Cloud hydration can restore referenced image files before local asset rows exist.
+            val keys=repository.assets(note.noteId).map{it.storageKey}.toSet()+NoteAssetSyncPayload.referencedStorageKeys(note.markdown)
+            keys.forEach { key ->
+                val source = File(context.filesDir, "notes/assets/$key")
+                if (source.isFile) entries += MarkdownArchiveEntry("notes/assets/$key", source.readBytes())
             }
         }
-        return MarkdownNoteArchive.write(entries)
+        return MarkdownNoteArchive.write(entries.distinctBy{it.path})
     }
 
     suspend fun importZip(bytes: ByteArray): Int = importEntries(MarkdownNoteArchive.read(bytes))

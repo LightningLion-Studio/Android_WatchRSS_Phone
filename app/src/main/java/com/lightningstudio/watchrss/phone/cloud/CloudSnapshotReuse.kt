@@ -8,6 +8,12 @@ internal fun validateCloudManifestHeadIdentity(expected: CloudSnapshotHead, actu
 internal object CloudSnapshotReuse {
     const val OWN_OBJECTS_VERSION = 1
     const val OWN_OBJECTS_SETTING = "phoneOwnObjectsVersion"
+    private val knownObjectNames = setOf("private-library.wrss","library-sync.json","rss-state.json","notes-state.json","notes-assets.zip",CloudPrivateOverlay.NAME)
+
+    fun legacy(manifest:CloudSnapshotManifest):Boolean = manifest.settings.opt(OWN_OBJECTS_SETTING).let { it==null || it==0 }
+    fun understoodObject(d:CloudObjectDescriptor):Boolean = d.name in knownObjectNames ||
+        d.name.startsWith("private/articles/") || d.name.startsWith("books/") && d.privateBook!=null ||
+        d.name.startsWith("reader/") && d.privateArticle!=null
 
     data class Owner(val deviceId:String,val userId:String,val epoch:String,val backendScope:String,val generation:String) {
         fun settings():org.json.JSONObject = org.json.JSONObject().put("ownerUserId",userId).put("libraryEpoch",epoch)
@@ -54,13 +60,13 @@ internal object CloudSnapshotReuse {
             manifest.objects.any { it.name == "private-library.wrss" && it.access !in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED) }
 
     fun requireOwnPublicationWritable(manifest:CloudSnapshotManifest) {
+        // Legacy descriptors are read into the repository, never inherited by the new writer.
+        if(legacy(manifest)) {manifest.requireReadable();return}
         manifest.requireWritable()
         val version=manifest.settings.opt(OWN_OBJECTS_SETTING)
         if(version!=null && version!=0 && version!=OWN_OBJECTS_VERSION)throw CloudFormatUpgradeRequired("phone_ownership_version")
         for(d in manifest.objects) {
-            val known=d.name in setOf("private-library.wrss","library-sync.json","rss-state.json","notes-state.json","notes-assets.zip",CloudPrivateOverlay.NAME) ||
-                d.name.startsWith("private/articles/") || d.privateBook!=null || d.name.startsWith("reader/") && d.privateArticle!=null
-            if(!known)throw CloudFormatUpgradeRequired("unknown_own_object")
+            if(!understoodObject(d))throw CloudFormatUpgradeRequired("unknown_own_object")
             if(d.access!=CloudFormatAccess.WRITABLE)throw CloudFormatUpgradeRequired("object_read_only")
         }
     }

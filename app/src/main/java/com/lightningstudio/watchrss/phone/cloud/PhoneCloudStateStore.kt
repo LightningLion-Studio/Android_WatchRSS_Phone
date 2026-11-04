@@ -125,6 +125,13 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
         get() = preferences.getLong(scoped("last_snapshot_published_at_v3"), 0)
         set(value) { check(preferences.edit().putLong(scoped("last_snapshot_published_at_v3"), value).commit()) }
 
+    var ownershipUpgradeAttemptAt: Long
+        get()=if(preferences.getString(scoped("ownership_attempt_epoch"),null)==libraryEpoch &&
+            preferences.getString(scoped("ownership_attempt_generation"),null)==contentGeneration)
+            preferences.getLong(scoped("ownership_attempt_at"),0) else 0
+        set(value) {check(preferences.edit().putLong(scoped("ownership_attempt_at"),value)
+            .putString(scoped("ownership_attempt_epoch"),libraryEpoch).putString(scoped("ownership_attempt_generation"),contentGeneration).commit())}
+
     fun lastParentHeads(): String? = preferences.getString(scoped(KEY_PARENT_HEADS), null)
 
     fun markUploaded(
@@ -197,6 +204,9 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
             preferences.edit()
                 .apply { if (!preserveDeviceSequence) remove(scoped(KEY_DEVICE_SEQUENCE)) }
                 .remove(scoped("last_snapshot_published_at_v3"))
+                .remove(scoped("ownership_attempt_at"))
+                .remove(scoped("ownership_attempt_epoch"))
+                .remove(scoped("ownership_attempt_generation"))
                 .remove(scoped(KEY_APPLIED_FULL))
                 .remove(scoped(KEY_APPLIED_STATE))
                 .remove(scoped(KEY_CONTENT_HASH))

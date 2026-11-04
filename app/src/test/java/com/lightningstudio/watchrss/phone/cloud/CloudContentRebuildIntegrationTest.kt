@@ -124,6 +124,11 @@ class CloudContentRebuildIntegrationTest {
         var mutateDuringUpload=false
         var mutatedDuringUpload=false
         var onComplete: (suspend () -> Unit)? = null
+        var rejectReserve=false
+        var reserveAttempts=0
+        var omitGeneration=false
+        var bootstrapEpoch=epoch
+        var migrationEnabled=false
         val client=PhoneCloudClient(env,http=OkHttpClient.Builder().addInterceptor { chain ->
             synchronized(this) {
                 val request=chain.request();val path=request.url.encodedPath;httpRequests++;requestBodyBytes+=request.body?.contentLength()?.coerceAtLeast(0) ?: 0
@@ -135,11 +140,11 @@ class CloudContentRebuildIntegrationTest {
                 val body=if(request.method=="POST")JSONObject(buffer.readUtf8())else JSONObject()
                 var code=200
                 fun shouldFail(stage:String)=failStage==stage && (!failed || alwaysFail)
-                val result=if(formatFloor && request.method!="GET" && (path.endsWith("/records") || path.endsWith("/reserve") || path.endsWith("/complete") || path.contains("/uploads/")) && request.header("x-watchrss-r48-write-v1")!="1"){code=426;JSONObject().put("error","cloud_format_upgrade_required")}else if(isCloudContentWrite(request.method,path)&&request.header("x-watchrss-content-generation")!=generation){code=409;JSONObject().put("error","cloud_content_rebuild_required")}else when {
+                val result=if(formatFloor && request.method!="GET" && (path.endsWith("/records") || path.endsWith("/reserve") || path.endsWith("/complete") || path.contains("/uploads/")) && request.header("x-watchrss-r48-write-v1")!="1"){code=426;JSONObject().put("error","cloud_format_upgrade_required")}else if(!omitGeneration&&isCloudContentWrite(request.method,path)&&request.header("x-watchrss-content-generation")!=generation){code=409;JSONObject().put("error","cloud_content_rebuild_required")}else when {
                     path.endsWith("/bootstrap") -> bootstrap()
                     path.endsWith("/ack") -> JSONObject()
                     path.endsWith("/format-capabilities") -> JSONObject().put("protocol","watchrss-content-evolution").put("version",1)
-                        .put("phaseA",JSONObject().put("cloudFormatR48ReadV1",true).put("cloudFormatR48WriteV1",r48WriteEnabled)).put("phaseB",JSONObject().put("cloudFormatMigrationR48V1",false))
+                        .put("phaseA",JSONObject().put("cloudFormatR48ReadV1",true).put("cloudFormatR48WriteV1",r48WriteEnabled)).put("phaseB",JSONObject().put("cloudFormatMigrationR48V1",migrationEnabled))
                     path.endsWith("/devices/register") -> JSONObject()
                     path.endsWith("/records") && request.method=="GET" -> {
                         val cursor=request.url.queryParameter("after")!!;afterQueries+=cursor
@@ -150,7 +155,7 @@ class CloudContentRebuildIntegrationTest {
                             .put("contentGeneration",generation).put("contentEmpty",ready.isEmpty()&&recordRows.isEmpty())
                     }
                     path.endsWith("/records") -> {
-                        assertEquals(generation,request.header("x-watchrss-content-generation"))
+                        if(!omitGeneration)assertEquals(generation,request.header("x-watchrss-content-generation"))
                         val items=body.getJSONArray("items");val result=JSONArray()
                         for(i in 0 until items.length()) {val item=items.getJSONObject(i);val id=item.getString("recordId");assertEquals(recordRows[id]?.getString("revision")?:"0",item.getString("expectedRevision"));recordRows[id]=JSONObject(item.toString()).put("revision",(++revision).toString());result.put(JSONObject().put("recordId",id).put("revision",revision.toString()));recordsPosted++}
                         JSONObject().put("items",result)
@@ -167,8 +172,10 @@ class CloudContentRebuildIntegrationTest {
                         }
                         JSONObject().put("snapshot",head).put("chunks",chunks)
                     }
+                    path.endsWith("/reserve") && rejectReserve -> {reserveAttempts++;code=503;JSONObject().put("error","temporary_unavailable")}
                     path.endsWith("/reserve") -> {
-                        assertEquals(3,body.getInt("contentLayout"));assertEquals(generation,request.header("x-watchrss-content-generation"));assertTrue(body.getLong("deviceSequence")>sequence)
+                        reserveAttempts++
+                        assertEquals(3,body.getInt("contentLayout"));if(!omitGeneration)assertEquals(generation,request.header("x-watchrss-content-generation"));assertTrue(body.getLong("deviceSequence")>sequence)
                         sequence=body.getLong("deviceSequence");plans+=body
                         val missing=JSONArray();latestObjectIds.clear()
                         fun add(kind:String,sha:String,size:Long) {
@@ -181,7 +188,7 @@ class CloudContentRebuildIntegrationTest {
                         JSONObject().put("snapshotId",body.getString("snapshotId")).put("reservedBytes",100).put("missingObjects",missing)
                     }
                     path.endsWith("/refresh") -> {
-                        assertEquals(generation,request.header("x-watchrss-content-generation"))
+                        if(!omitGeneration)assertEquals(generation,request.header("x-watchrss-content-generation"))
                         val id=path.split('/').dropLast(1).last()
                         if(shouldFail("expired")){failed=true;code=400;JSONObject().put("error","reservation_expired")}
                         else JSONObject(objects.getValue(id).toString()).put("alreadyUploaded",id in uploaded)
@@ -198,24 +205,25 @@ class CloudContentRebuildIntegrationTest {
                         }
                     }
                     path.endsWith("/complete") -> {
-                        assertEquals(generation,request.header("x-watchrss-content-generation"))
+                        if(!omitGeneration)assertEquals(generation,request.header("x-watchrss-content-generation"))
                         if(shouldFail("complete")){failed=true;code=404;JSONObject().put("error","snapshot_not_found")}
                         else {
                             val plan=plans.last();assertEquals(plan.getString("snapshotId"),body.getString("snapshotId"));assertTrue(latestObjectIds.all{it in uploaded})
                             onComplete?.also { onComplete=null;runBlocking { it() } }
-                            completed++;ready.removeAll { it.getString("sourceDeviceId")=="phone" };ready+=JSONObject().put("id",plan.getString("snapshotId")).put("sourceDeviceId","phone").put("deviceSequence",sequence).put("keyVersion",1)
+                            completed++;ready.removeAll { it.getString("sourceDeviceId")=="phone" };ready+=JSONObject().put("id",plan.getString("snapshotId")).put("sourceDeviceId","phone").put("deviceSequence",sequence).put("keyVersion",plan.getInt("keyVersion"))
                                 .put("manifestSha256",plan.getJSONObject("manifest").getString("sha256")).put("manifestSizeBytes",plan.getJSONObject("manifest").getLong("sizeBytes")).put("parentHeads",JSONObject()).put("observedHeads",JSONObject()).put("contentLayout",3)
                             JSONObject()
                         }
                     }
                     else -> error("unexpected route $path")
                 }
+                if(omitGeneration)result.remove("contentGeneration")
                 Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(code).message("fixture").body(result.toString().toResponseBody("application/json".toMediaType())).build()
             }
         }.build())
         lateinit var service:PhoneCloudSyncService
         val recordStore get()=(PhoneCloudSyncService::class.java.getDeclaredField("recordStore").apply{isAccessible=true}.get(service) as PhoneCloudRecordStore)
-        fun bootstrap()=JSONObject().put("libraryEpoch",epoch).put("contentGeneration",generation).put("contentEmpty",initialEmpty&&ready.isEmpty()&&recordRows.isEmpty())
+        fun bootstrap()=JSONObject().put("libraryEpoch",bootstrapEpoch).put("contentGeneration",generation).put("contentEmpty",initialEmpty&&ready.isEmpty()&&recordRows.isEmpty())
             .put("member",JSONObject().put("active",true).put("writable",true).put("readable",true).put("quotaBytes",1000000).put("usedBytes",if(completed>0)777 else 0).put("reservedBytes",if(completed>0)0 else 100))
             .put("keyVersionFloor",0).put("keyCommitments",JSONArray(keys.keyVersions(session.userId).map { version ->
                 JSONObject().put("keyVersion",version).put("commitment",CloudProtocolV2.commitment(requireNotNull(keys.getAccountKey(session.userId,version)),session.userId,epoch,version)) }))
@@ -636,7 +644,7 @@ class CloudContentRebuildIntegrationTest {
                 val rows=raw.json().getJSONArray("objects")
                 val index=(0 until rows.length()).single{rows.getJSONObject(it).getString("name")==name}
                 rows.getJSONObject(index).put("features",JSONObject().put(feature,JSONArray(listOf("future.notes.v1"))))
-                raw.patch(listOf("objects"),rows.toString())
+                raw.patch(listOf("objects"),rows.toString()).patch(listOf("settings",CloudSnapshotReuse.OWN_OBJECTS_SETTING),"1")
             })
             assertNotEquals(CloudFormatAccess.WRITABLE,original.objects.single{it.name==name}.access)
             val heads=f.ready.map{it.toString()}
@@ -713,6 +721,7 @@ class CloudContentRebuildIntegrationTest {
 
     private fun installOwnObjectsSnapshot(f:Fixture,snapshot:EncryptedCloudSnapshot):CloudSnapshotManifest {
         val m=snapshot.manifest;val sha=CloudSnapshotCodec.sha256(snapshot.encryptedManifest)
+        if(m.sourceDeviceId=="phone")f.sequence=maxOf(f.sequence,m.deviceSequence)
         f.r48Blobs.putAll(snapshot.newCiphertextChunks);f.r48Blobs[sha]=snapshot.encryptedManifest
         f.plans+=JSONObject().put("snapshotId",m.snapshotId).put("chunks",JSONArray(m.allChunks.map{JSONObject().put("sha256",it.ciphertextSha256).put("sizeBytes",it.ciphertextBytes)}))
         f.ready.removeAll{it.getString("sourceDeviceId")==m.sourceDeviceId}
@@ -796,7 +805,7 @@ class CloudContentRebuildIntegrationTest {
     }
 
     @Test fun ownObjectsUnknownOwnObjectStopsUpgradeWithoutTouchingTheHead()=runBlocking {
-        val f=fixture();val original=seedNotesHead(f,"phone",extra=listOf(CloudLogicalObject("future.bin","own future data".toByteArray())))
+        val f=fixture();val original=seedNotesHead(f,"phone",extra=listOf(CloudLogicalObject("future.bin","own future data".toByteArray())),patch={raw->raw.patch(listOf("settings",CloudSnapshotReuse.OWN_OBJECTS_SETTING),"1")})
         val head=f.ready.single().toString()
         val error=runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()
         assertEquals("unknown_own_object",(error as CloudFormatUpgradeRequired).reason)
@@ -815,12 +824,220 @@ class CloudContentRebuildIntegrationTest {
 
     @Test fun ownObjectsKeyRotationCannotDiscardUnknownOwnObjectsFromAnOlderKeyHead()=runBlocking {
         val f=fixture()
-        seedNotesHead(f,"phone",extra=listOf(CloudLogicalObject("future.bin","old-key own data".toByteArray())))
+        seedNotesHead(f,"phone",extra=listOf(CloudLogicalObject("future.bin","old-key own data".toByteArray())),patch={raw->raw.patch(listOf("settings",CloudSnapshotReuse.OWN_OBJECTS_SETTING),"1")})
         f.keys.saveVerifiedKeys(session.userId,mapOf(1 to key,2 to ByteArray(32){42}))
         val original=f.ready.single().toString()
         val error=runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()
         assertEquals("unknown_own_object",(error as CloudFormatUpgradeRequired).reason)
         assertEquals(0,f.completed);assertEquals(0,f.putCount);assertEquals(original,f.ready.single().toString())
+    }
+
+
+    private fun reviewP1Restart(f:Fixture):PhoneCloudClient {
+        f.recordStore.close()
+        val http=PhoneCloudClient::class.java.getDeclaredField("http").apply{isAccessible=true}.get(f.client) as OkHttpClient
+        val client=PhoneCloudClient(f.env,http=http)
+        f.service=PhoneCloudSyncService(f.context,f.account,f.backup,f.repository,notes(f),"phone",client,keyManager=f.keys,settings=f.state,cache=f.cache,
+            formatWritePolicy=CloudFormatWritePolicy(true,true))
+        return client
+    }
+
+    @Test fun reviewP1MigrationRejectsForeignAndLegacyInputsBeforeCreatingAJob()=runBlocking {
+        val vector=JSONObject(requireNotNull(javaClass.getResource("/r48-write-v1/mixed-manifest.json")).readText())
+        val body=java.util.Base64.getDecoder().decode(vector.getString("editedArchiveBase64"))
+        val name=CloudPrivateOverlay.articleName("article-edit")
+        val overlay=listOf(CloudPrivateOverlayEntry("article","article-edit",name,1,"phone"))
+        for(device in listOf("mini","watch","phone")) {
+            val f=fixture()
+            val snapshot=CloudSnapshotCodec().create(key,1,device,1,listOf(CloudLogicalObject(name,body,false),
+                CloudLogicalObject(CloudPrivateOverlay.NAME,CloudPrivateOverlay.encode(overlay),false)),privateOverlay=true,
+                snapshotSettings=CloudSnapshotReuse.Owner("phone",session.userId,epoch,f.client.scopeId(session),f.generation).settings())
+            installOwnObjectsSnapshot(f,snapshot)
+            val error=runCatching{f.service.prepareFormatMigration(snapshot.manifest.snapshotId,setOf(name),
+                JSONObject().put("id","identity-repack").put("version",1).put("codeSha256","a".repeat(64)))}.exceptionOrNull()
+            assertNotNull("$device input accepted",error)
+            assertEquals(if(device=="phone")"migration_ownership_upgrade_required" else "migration_foreign_head",error!!.message)
+            assertEquals(0,f.completed);assertEquals(0,f.reserveAttempts)
+        }
+    }
+
+    @Test fun reviewP1LegacyBorrowedOpaqueObjectsDoNotBlockSilentUpgrade()=runBlocking {
+        for(bookMetadata in listOf(false,true)) {
+            val f=fixture()
+            val descriptor=CloudLogicalObject("book-catalogs/mini.json","foreign catalog".toByteArray(),privateBook=if(bookMetadata)JSONObject().put("bookId","mini").put("packagePath","book-catalogs/mini.json")else null)
+            seedNotesHead(f,"phone",extra=listOf(descriptor),patch={raw->
+                val objects=raw.json().getJSONArray("objects")
+                objects.getJSONObject(objects.length()-1).put("features",JSONObject().put("incompat",JSONArray(listOf("book-lifecycle.v1"))))
+                raw.patch(listOf("objects"),objects.toString())
+            })
+            assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+            assertFalse(completedNotesManifest(f).objects.any{it.name.startsWith("book-catalogs/")})
+            assertEquals(1,completedNotesManifest(f).settings.getInt(CloudSnapshotReuse.OWN_OBJECTS_SETTING))
+            assertFalse(f.service.formatStatus.value.upgradeRequired)
+        }
+    }
+
+    @Test fun reviewP1DroppedOldKeyHeadDoesNotBlockNewKeyPublication()=runBlocking {
+        for(applied in listOf(false,true)) {
+            val f=fixture();seedNotesHead(f,"phone");f.client.bootstrap(session)
+            f.state.ensureFullBodyRestoreVersion(session.userId)
+            if(applied){f.state.markApplied("phone",1,true);f.state.markApplied("phone",1,false)}
+            f.keys.replaceVerifiedKeys(session.userId,mapOf(2 to ByteArray(32){42}))
+            assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+            assertEquals(1,f.completed);assertEquals(2,f.plans.last().getInt("keyVersion"))
+        }
+    }
+
+    @Test fun reviewP1RestartReloadsGenerationEvenWhenManifestsAreCached()=runBlocking {
+        val f=fixture();assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        val restarted=reviewP1Restart(f)
+        assertEquals(f.generation,restarted.knownContentGeneration(session))
+        assertFalse(f.service.syncNow(manual=true).snapshotUploaded)
+        assertEquals(f.generation,restarted.knownContentGeneration(session));assertEquals(1,f.completed)
+    }
+
+    @Test fun reviewP1MissingGenerationStopsBeforeContentWrites()=runBlocking {
+        val f=fixture();f.omitGeneration=true;f.state.clearScope();reviewP1Restart(f)
+        val error=runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()
+        assertTrue("$error",error is CloudHttpException)
+        assertEquals(426,(error as CloudHttpException).status)
+        assertEquals(0,f.reserveAttempts);assertEquals(0,f.completed)
+    }
+
+    @Test fun reviewP1EmptyEpochStopsBeforeAnyUpgradePublication()=runBlocking {
+        val f=fixture();f.bootstrapEpoch=""
+        assertTrue(runCatching{f.service.syncNow(manual=false)}.isFailure)
+        assertEquals(0,f.reserveAttempts);assertEquals(0,f.completed)
+    }
+
+    @Test fun reviewP1AutomaticUpgradeAttemptsHaveDurableBackoff()=runBlocking {
+        val f=fixture();f.rejectReserve=true
+        assertTrue(runCatching{f.service.syncNow(manual=false)}.isFailure)
+        assertEquals(1,f.reserveAttempts)
+        reviewP1Restart(f)
+        assertFalse(f.service.syncNow(manual=false).snapshotUploaded)
+        assertEquals(1,f.reserveAttempts);assertTrue(f.service.state.value.pendingSnapshotUntil>System.currentTimeMillis())
+        assertTrue(runCatching{f.service.syncNow(manual=true)}.isFailure)
+        assertEquals(2,f.reserveAttempts)
+    }
+
+    @Test fun reviewP1LegacyCloudOnlyPrivateBodyIsRestoredBeforeUpgrade()=runBlocking {
+        val f=fixture()
+        val vector=JSONObject(requireNotNull(javaClass.getResource("/r48-write-v1/mixed-manifest.json")).readText())
+        val body=java.util.Base64.getDecoder().decode(vector.getString("editedArchiveBase64"))
+        val name=CloudPrivateOverlay.articleName("article-edit")
+        val overlay=listOf(CloudPrivateOverlayEntry("article","article-edit",name,1,"phone"))
+        val legacy=CloudSnapshotCodec().create(key,1,"phone",1,listOf(CloudLogicalObject(name,body,false),
+            CloudLogicalObject(CloudPrivateOverlay.NAME,CloudPrivateOverlay.encode(overlay),false)),privateOverlay=true,
+                snapshotSettings=CloudSnapshotReuse.Owner("phone",session.userId,epoch,f.client.scopeId(session),f.generation).settings())
+        installOwnObjectsSnapshot(f,legacy)
+        f.client.bootstrap(session);f.state.ensureFullBodyRestoreVersion(session.userId);f.state.markApplied("phone",1,true);f.state.markApplied("phone",1,false)
+        assertNull(f.repository.getArticle("article-edit"))
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        val restored=WatchRssBackupArchive.read(java.io.ByteArrayInputStream(completedNotesObjects(f).getValue("private-library.wrss")))
+        assertEquals(vector.getJSONObject("expected").getString("editedHtmlUtf8"),restored.articles.single{it.articleId=="article-edit"}.contentHtml)
+    }
+
+    @Test fun reviewP1UnreadableLegacyCloudBodyKeepsOriginalHeadWithWarning()=runBlocking {
+        for(applied in listOf(false,true)) {
+        val f=fixture()
+        val name=CloudPrivateOverlay.articleName("cloud-only")
+        val overlay=listOf(CloudPrivateOverlayEntry("article","cloud-only",name,1,"phone"))
+        val legacy=CloudSnapshotCodec().create(key,1,"phone",1,listOf(CloudLogicalObject(name,"corrupt archive".toByteArray(),false),
+            CloudLogicalObject(CloudPrivateOverlay.NAME,CloudPrivateOverlay.encode(overlay),false)),privateOverlay=true,
+                snapshotSettings=CloudSnapshotReuse.Owner("phone",session.userId,epoch,f.client.scopeId(session),f.generation).settings())
+        installOwnObjectsSnapshot(f,legacy)
+        f.client.bootstrap(session);f.state.ensureFullBodyRestoreVersion(session.userId)
+        if(applied){f.state.markApplied("phone",1,true);f.state.markApplied("phone",1,false)}
+        val original=f.ready.single().toString()
+        assertFalse(f.service.syncNow(manual=true).snapshotUploaded)
+        assertEquals(original,f.ready.single().toString());assertEquals(0,f.completed)
+        assertTrue(f.service.restoreWarnings.value.any{it.reason=="ownership_upgrade_pending"})
+        }
+    }
+
+
+    private suspend fun reviewP1RetryIntent(service:PhoneCloudSyncService,draft:CloudMigrationDraft,intent:JSONObject):Unit =
+        kotlin.coroutines.suspendCoroutine { continuation ->
+            try {
+                val method=PhoneCloudSyncService::class.java.getDeclaredMethod("retryMigrationPublication",CloudMigrationDraft::class.java,JSONObject::class.java,kotlin.coroutines.Continuation::class.java).apply{isAccessible=true}
+                val result=method.invoke(service,draft,intent,continuation)
+                if(result!==kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED)continuation.resumeWith(Result.success(Unit))
+            } catch(error:java.lang.reflect.InvocationTargetException) {continuation.resumeWith(Result.failure(error.targetException))}
+        }
+
+    @Test fun reviewP1ServiceClassifiesPreUpgradeIntentAsObsolete()=runBlocking {
+        val f=fixture();f.r48WriteEnabled=true;f.migrationEnabled=true
+        val legacy=seedNotesHead(f,"phone")
+        val client=reviewP1Restart(f);client.bootstrap(session)
+        val head=f.ready.single();f.cache.storeManifest(client.scopeId(session),legacy.snapshotId,f.r48Blobs.getValue(head.getString("manifestSha256")),markAsLocalHead=false)
+        val draft=CloudMigrationDraft(JSONObject().put("userId",session.userId).put("installationId","phone").put("libraryEpoch",epoch).put("contentGeneration",f.generation),emptyList(),JSONObject())
+        val error=runCatching{reviewP1RetryIntent(f.service,draft,JSONObject().put("snapshotId",legacy.snapshotId))}.exceptionOrNull()
+        assertEquals("migration_publication_obsolete",error!!.message)
+        f.cache.clear(client.scopeId(session))
+        val missing=runCatching{reviewP1RetryIntent(f.service,draft,JSONObject().put("snapshotId",legacy.snapshotId))}.exceptionOrNull()
+        assertEquals("migration_publication_obsolete",missing!!.message)
+        assertEquals(0,f.completed);assertEquals(0,f.reserveAttempts)
+    }
+
+    @Test fun reviewP1LegacyCloudOnlyBookPackageIsReexported()=runBlocking {
+        val f=fixture()
+        val source=com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.txtNovelSourceUrl("legacy-cloud-book")
+        f.db.phoneRssSourceDao().upsert(PhoneRssSourceEntity(source,"phone","Book","",null,null,1,10,1,false,false,0))
+        val chapter=PhoneArticleEntity("legacy-cloud-chapter","phone",com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.txtNovelChapterUrl("legacy-cloud-book",0,"hash"),"Chapter","Book","",null,"Only cloud original",null,"chapter-hash",1,10,false,0,0,source,"Book",false,0,0,false,0,0,false,0)
+        f.db.phoneArticleDao().upsert(chapter)
+        val (book,file)=f.books.availableBooks().single();val id=book.getString("bookId")
+        val legacy=CloudSnapshotCodec().create(key,1,"phone",1,listOf(CloudLogicalObject("books/$id.jsonl",file.readBytes(),false,
+            privateBook=JSONObject(book.toString()).put("packagePath","books/$id.jsonl"))),
+            snapshotSettings=CloudSnapshotReuse.Owner("phone",session.userId,epoch,f.client.scopeId(session),f.generation).settings())
+        f.books.clear();f.db.phoneArticleDao().deleteAll();f.db.phoneRssSourceDao().deleteAll()
+        installOwnObjectsSnapshot(f,legacy)
+        f.client.bootstrap(session);f.state.ensureFullBodyRestoreVersion(session.userId);f.state.markApplied("phone",1,true);f.state.markApplied("phone",1,false)
+        assertTrue(f.books.availableBooks().isEmpty())
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertEquals(id,f.books.availableBooks().single().first.getString("bookId"))
+        val exported=WatchRssBackupArchive.read(java.io.ByteArrayInputStream(completedNotesObjects(f).getValue("private-library.wrss")))
+        assertEquals(id,exported.bookPackages.single().metadata.getString("bookId"))
+    }
+
+    @Test fun reviewP1AuthenticatedOwnManifestReuseIsBoundToHeadMetadata()=runBlocking {
+        val f=fixture();assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertFalse(f.service.syncNow(manual=true).snapshotUploaded)
+        val head=f.ready.single();val sha=head.getString("manifestSha256")
+        val reads=f.r48BlobReads.count{it==sha}
+        f.cache.clear(f.client.scopeId(session))
+        assertFalse(f.service.syncNow(manual=true).snapshotUploaded)
+        assertEquals(reads,f.r48BlobReads.count{it==sha})
+        val manifest=CloudSnapshotCodec().decryptManifest(key,head.getString("id"),f.r48Blobs.getValue(sha))
+        val raw=CloudRawDocument.parse(manifest.toRawString()).patch(listOf("compatible-extra"),"1")
+        val bytes=CloudSnapshotCodec().encryptManifestBytes(key,manifest.snapshotId,raw.source.toByteArray(),ByteArray(16),ByteArray(12))
+        val changedSha=CloudSnapshotCodec.sha256(bytes);f.r48Blobs[changedSha]=bytes
+        head.put("manifestSha256",changedSha).put("manifestSizeBytes",bytes.size);f.cache.clear(f.client.scopeId(session))
+        assertFalse(f.service.syncNow(manual=true).snapshotUploaded)
+        assertEquals(1,f.r48BlobReads.count{it==changedSha})
+    }
+
+    @Test fun reviewP1LegacyCloudOnlyNoteImagesSurviveReexportAndNextSync()=runBlocking {
+        val f=fixture();val repo=notes(f)
+        val note=repo.save("cloud-image","Image","<p><img src=\"assets/cloud.png\"></p>")
+        f.db.noteDao().clearNotes()
+        seedNotesHead(f,"phone",NoteCloudStateCodec.encode(listOf(note)),assetZip("cloud.png","cloud image bytes"))
+        f.client.bootstrap(session);f.state.ensureFullBodyRestoreVersion(session.userId);f.state.markApplied("phone",1,true);f.state.markApplied("phone",1,false)
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        val archive=MarkdownNoteArchive.read(completedNotesObjects(f).getValue("notes-assets.zip"))
+        assertEquals("cloud image bytes",archive.single{it.path=="notes/assets/cloud.png"}.bytes.toString(Charsets.UTF_8))
+        assertFalse(f.service.syncNow(manual=true).snapshotUploaded)
+    }
+
+    @Test fun reviewP1FutureOwnKeyIsNotTreatedAsADroppedOldKey()=runBlocking {
+        val f=fixture()
+        val future=CloudSnapshotCodec().create(ByteArray(32){7},2,"phone",1,listOf(CloudLogicalObject("notes-state.json",NoteCloudStateCodec.encode(emptyList()))))
+        installOwnObjectsSnapshot(f,future);f.client.bootstrap(session)
+        f.state.ensureFullBodyRestoreVersion(session.userId);f.state.markApplied("phone",1,true);f.state.markApplied("phone",1,false)
+        val original=f.ready.single().toString()
+        val error=runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()
+        assertNotNull(error);assertEquals(0,f.reserveAttempts);assertEquals(0,f.completed)
+        assertEquals(original,f.ready.single().toString())
     }
 
 }

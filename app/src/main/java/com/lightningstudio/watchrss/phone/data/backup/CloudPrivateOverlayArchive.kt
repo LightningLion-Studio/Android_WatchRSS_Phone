@@ -40,7 +40,7 @@ internal object CloudPrivateOverlayArchive {
                 }
             }
         }
-        error("missing_article_metadata")
+        throw IllegalArgumentException("missing_article_metadata")
     }
     fun validate(bytes:ByteArray,id:String):WatchRssBackupSnapshot {
         val metadata=rawArticles(bytes)

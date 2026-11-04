@@ -57,6 +57,9 @@ class CloudMigrationInitiatorTest {
         val releaseDownload=CompletableDeferred<Unit>()
         var publishCalls=0
         var retryCalls=0
+        var obsoleteRetry=false
+        var obsoletePublish=false
+        var failBeforeComplete=false
         val events=mutableListOf<CloudMigrationEvent>()
         fun runSyntheticWorker(body:JSONObject) {
             val sealed=body.getJSONObject("sealedGrant")
@@ -121,9 +124,10 @@ class CloudMigrationInitiatorTest {
             }
         }
         fun client(policy:CloudFormatWritePolicy=CloudFormatWritePolicy(true,true))=CloudMigrationInitiator({current},api,store,trust,{CloudMigrationCrypto.hex("00".repeat(32))},object:CloudMigrationPublisher {
-            override suspend fun retryPublication(draft:CloudMigrationDraft,intent:JSONObject) { retryCalls++;require(state!="cancelled");serverProof=intent }
+            override suspend fun retryPublication(draft:CloudMigrationDraft,intent:JSONObject) { retryCalls++;if(obsoleteRetry)throw IllegalStateException("migration_publication_obsolete");require(state!="cancelled");serverProof=intent }
             override suspend fun publish(draft:CloudMigrationDraft,jobId:String,receiptHash:String,batchId:String,outputs:List<CloudMigrationOutput>,root:ByteArray,validation:JSONObject,beforeComplete:(String,JSONObject)->Unit):String? {
                 publishCalls++
+                if(obsoletePublish)throw IllegalStateException("migration_publication_obsolete")
                 val base=CloudSnapshotManifest("11111111-1111-4111-8111-111111111111","phone",1,1,1,emptyMap(),emptyMap(),listOf(source))
                 val rebased=CloudMigrationResult.rebase(base,outputs,ByteArray(32),root,planId)
                 published=CloudSnapshotCodec().create(ByteArray(32),1,"phone",2,emptyList(),carryForwardObjects=rebased)
@@ -131,6 +135,7 @@ class CloudMigrationInitiatorTest {
                 val migration=JSONObject().put("jobId",jobId).put("planHash",draft.planHash).put("batchId",batchId).put("receiptSha256",receiptHash).put("validation",validation)
                 beforeComplete(id,migration)
                 if(cancelBeforeComplete){state="cancelled";throw IllegalStateException("migration_cancelled")}
+                if(failBeforeComplete)throw IOException("synthetic pre-complete loss")
                 serverProof=JSONObject().put("batchId",batchId).put("snapshotId",id).put("receiptSha256",receiptHash).put("validation",validation)
                 if(loseCompleteResponse){loseCompleteResponse=false;throw IOException("synthetic complete loss")}
                 return id
@@ -299,4 +304,27 @@ class CloudMigrationInitiatorTest {
         clock=30_000;assertThrows(Exception::class.java){budget.checkpoint()}
         assertThrows(Exception::class.java){CloudMigrationRunBudget{0}.reserve(8_388_609)}
     }
+    @Test fun reviewP1ObsoleteIntentIsDiscardedOnceAndTerminalAfterRestart()=runBlocking {
+        val f=Fixture();val client=f.client();client.create(f.draft);client.consent(f.planId,true);f.state="awaiting_validation"
+        f.failBeforeComplete=true
+        assertTrue(runCatching{client.validateAndPublish(f.planId,CloudMigrationRunBudget{0})}.isFailure)
+        assertTrue(f.store.load(f.current.scope,f.planId)!!.has("publicationIntent"))
+        f.obsoleteRetry=true
+        val resumed=f.client();assertTrue(resumed.validateAndPublish(f.planId,CloudMigrationRunBudget{0}))
+        val local=f.store.load(f.current.scope,f.planId)!!
+        assertEquals("superseded",local.getString("state"));assertFalse(local.has("publicationIntent"));assertFalse(local.has("outputRootBase64"))
+        assertEquals("publication_obsolete",resumed.state.value.errorCode);assertFalse(resumed.state.value.retryable)
+        val restarted=f.client();assertEquals("superseded",restarted.refresh(f.planId).getString("state"))
+        assertTrue(restarted.validateAndPublish(f.planId,CloudMigrationRunBudget{0}));assertEquals(1,f.retryCalls)
+        assertNull(f.serverProof);assertTrue(f.bodies.none{it.first.endsWith("/accept")})
+    }
+
+    @Test fun reviewP1DisappearedMigrationTargetIsTerminalWithoutPublication()=runBlocking {
+        val f=Fixture();val client=f.client();client.create(f.draft);client.consent(f.planId,true);f.state="awaiting_validation";f.obsoletePublish=true
+        assertTrue(client.validateAndPublish(f.planId,CloudMigrationRunBudget{0}))
+        assertEquals("superseded",client.state.value.state)
+        assertTrue(f.client().validateAndPublish(f.planId,CloudMigrationRunBudget{0}));assertEquals(1,f.publishCalls)
+        assertNull(f.serverProof);assertTrue(f.bodies.none{it.first.endsWith("/accept")})
+    }
+
 }

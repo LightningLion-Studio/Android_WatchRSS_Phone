@@ -19,6 +19,8 @@ interface CloudMigrationPublisher {
     suspend fun publish(draft:CloudMigrationDraft,jobId:String,receiptHash:String,batchId:String,outputs:List<CloudMigrationOutput>,root:ByteArray,validation:JSONObject,beforeComplete:(String,JSONObject)->Unit):String?
 }
 
+internal class CloudMigrationPublicationObsolete : IllegalStateException("migration_publication_obsolete")
+
 /** Explicitly invoked only. There is no startup migration, automatic grant, or background all-library loop. */
 class CloudMigrationInitiator(
     private val context: () -> CloudMigrationContext,
@@ -44,7 +46,7 @@ class CloudMigrationInitiator(
     }
     private suspend fun <T> observed(operation:CloudMigrationOperation,block:suspend()->T):T = diagnostics.measure(operation,
         failed={failure -> mutableState.update { it.copy(errorCode=failure.name.lowercase(),retryable=failure.retryable) }}) {
-        block().also { mutableState.update { it.copy(errorCode=null,retryable=false) } }
+        block().also { mutableState.update { if(it.state=="superseded")it else it.copy(errorCode=null,retryable=false) } }
     }
     private val cancelling=java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val pendingGrants=java.util.concurrent.ConcurrentHashMap<String,JSONObject>() // exact ciphertext retry, memory only
@@ -58,6 +60,16 @@ class CloudMigrationInitiator(
         require(draft.plan.getString("planId") !in cancelling) { "migration_cancelled" }
     }
     private fun save(draft:CloudMigrationDraft,value:JSONObject) { val ctx=checkScope(draft);store.save(ctx.scope,draft.plan.getString("planId"),value) }
+    private fun supersede(draft:CloudMigrationDraft,local:JSONObject):Boolean {
+        local.remove("publicationIntent");local.remove("batchId");local.remove("outputRootBase64")
+        local.put("state","superseded");save(draft,local)
+        pendingGrants.remove(draft.plan.getString("planId"))
+        return showSuperseded(draft)
+    }
+    private fun showSuperseded(draft:CloudMigrationDraft):Boolean {
+        mutableState.value=CloudMigrationUiState("superseded",draft.inputs.size,errorCode="publication_obsolete",retryable=false)
+        return true
+    }
     private fun load(id:String):Pair<CloudMigrationDraft,JSONObject> {
         val value=requireNotNull(store.load(context().scope,id)) { "migration_plan_missing" }
         val rows=value.getJSONArray("inputs")
@@ -145,6 +157,10 @@ class CloudMigrationInitiator(
     } }
     suspend fun refresh(planId:String):JSONObject = observed(CloudMigrationOperation.REFRESH) { mutex.withLock { val (draft,local)=load(planId);refresh(draft,local) } }
     private suspend fun refresh(draft:CloudMigrationDraft,local:JSONObject):JSONObject {
+        if(local.optString("state")=="superseded") {
+            showSuperseded(draft)
+            return JSONObject().put("state","superseded").put("jobId",local.getString("jobId")).put("planId",draft.plan.getString("planId")).put("planHash",draft.planHash)
+        }
         val reply=api.get(base(local.getString("jobId")));checkScope(draft)
         require(reply.getString("jobId")==local.getString("jobId") && reply.getString("planId")==draft.plan.getString("planId") && reply.getString("planHash")==draft.planHash)
         val state=reply.getString("state");require(state in setOf("planned","granted","running","awaiting_validation","accepted","needs_grant","budget_exhausted","failed","cancelled","expired"))
@@ -186,6 +202,7 @@ class CloudMigrationInitiator(
     /** One bounded verification run. Returns false when another scheduled/user-invoked run is required. */
     suspend fun validateAndPublish(planId:String,budget:CloudMigrationRunBudget = CloudMigrationRunBudget()):Boolean = observed(CloudMigrationOperation.VALIDATE) { budget.within { mutex.withLock {
         val (draft,local)=load(planId)
+        if(local.optString("state")=="superseded")return@withLock showSuperseded(draft)
         val capabilities=api.capabilities();check(draft)
         // Reconcile a complete whose response/accept was lost before doing any new conversion or publish.
         val status=refresh(draft,local)
@@ -193,8 +210,11 @@ class CloudMigrationInitiator(
             val intent=local.getJSONObject("publicationIntent")
             val proof=api.publicationProof(local.getString("jobId"),intent.getString("batchId"));check(draft)
             if(proof==null) {
+                if(status.getString("state") in setOf("cancelled","expired","failed","budget_exhausted"))return@withLock supersede(draft,local)
                 require(status.getString("state")=="awaiting_validation" && policy.canMigrate(capabilities))
-                publisher.retryPublication(draft,intent);check(draft)
+                try { publisher.retryPublication(draft,intent) }
+                catch(error:IllegalStateException) {if(error.message=="migration_publication_obsolete")return@withLock supersede(draft,local) else throw error}
+                check(draft)
                 api.post(base(local.getString("jobId"))+"/accept",acceptBody(intent));check(draft)
                 local.remove("publicationIntent");save(draft,local);return@withLock true
             }
@@ -254,11 +274,12 @@ class CloudMigrationInitiator(
             // Gate/expiry/cancellation is checked again by publisher and atomically at normal complete.
             require(policy.canMigrate(api.capabilities())) { "migration_feature_disabled" };check(draft)
             var publication:JSONObject?=null
-            val snapshotId=publisher.publish(draft,local.getString("jobId"),receiptHash,batchId,outputs,root,validation) { id,migrationContext ->
+            val snapshotId=try { publisher.publish(draft,local.getString("jobId"),receiptHash,batchId,outputs,root,validation) { id,migrationContext ->
                 check(draft)
                 val intent=JSONObject().put("requestId",requestId()).put("jobId",local.getString("jobId")).put("migrationContext",migrationContext).put("planHash",draft.planHash).put("batchId",batchId).put("snapshotId",id).put("receiptSha256",receiptHash).put("validation",migrationContext.getJSONObject("validation"))
                 local.put("publicationIntent",intent);save(draft,local);publication=intent
-            } ?: return@withLock false
+            } } catch(error:IllegalStateException) {if(error.message=="migration_publication_obsolete")return@withLock supersede(draft,local) else throw error}
+                ?: return@withLock false
             check(draft)
             val proof=requireNotNull(publication);require(proof.getString("snapshotId")==snapshotId)
             val accepted=api.post(base(local.getString("jobId"))+"/accept",acceptBody(proof));check(draft)

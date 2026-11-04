@@ -555,17 +555,17 @@ class CloudContentRebuildIntegrationTest {
         assertEquals(1,f.requestPaths.count{it.endsWith("/heads")})
     }
 
-    @Test fun syncSkipNotesAndAssetsAdvanceLocalMaxSeq()=runBlocking {
+    @Test fun syncSkipNotesAndAssetsAdvanceCloudChangeSequence()=runBlocking {
         val f=fixture() // production onOpen hooks must count edits before the first sync too
-        suspend fun sequence()=f.repository.getLibrarySyncCursor(null).localMaxSeq
+        fun sequence()=f.backup.cloudChangeSequence()
         var seq=sequence()
         val repo=notes(f);repo.save("counter-note","Counter","first")
-        assertTrue("note save must advance localMaxSeq",sequence()>seq);seq=sequence()
+        assertTrue("note save must advance cloud change sequence",sequence()>seq);seq=sequence()
         repo.setPinned("counter-note",true);assertTrue(sequence()>seq);seq=sequence()
         repo.move("counter-note","folder");assertTrue(sequence()>seq);seq=sequence()
         repo.delete("counter-note");assertTrue(sequence()>seq);seq=sequence()
         repo.registerAsset(com.lightningstudio.watchrss.phone.data.note.NoteAssetEntity("asset","counter-note","a".repeat(64),"a.txt","text/plain",1,"asset.txt",true,1,false,0))
-        assertTrue("asset insertion must advance localMaxSeq",sequence()>seq)
+        assertTrue("asset insertion must advance cloud change sequence",sequence()>seq)
     }
 
     @Test fun syncSkipRestartReusesDurableReceiptAndForeignManifestMemoAvoidsReauthentication()=runBlocking {
@@ -1449,6 +1449,109 @@ class CloudContentRebuildIntegrationTest {
         val error=runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()
         assertNotNull(error);assertEquals(0,f.reserveAttempts);assertEquals(0,f.completed)
         assertEquals(original,f.ready.single().toString())
+    }
+
+    private suspend fun assertR3IdleWithin(f:Fixture,limit:Int=5):Int {
+        repeat(limit){i->
+            f.service.syncNow(manual=true)
+            val backup=PhoneCloudSyncService::class.java.getDeclaredField("backupService").apply{isAccessible=true}.get(f.service) as WatchRssBackupService
+            backup.cloudWork.reset();f.requestPaths.clear()
+            f.service.syncNow(manual=true)
+            if(backup.cloudWork.fingerprints==0L && backup.cloudWork.exports==0L && backup.cloudWork.notesZips==0L && backup.cloudWork.recordHashes==0L) {
+                assertEquals(1,f.requestPaths.count{it.endsWith("/bootstrap")})
+                assertEquals(1,f.requestPaths.count{it.endsWith("/heads")})
+                println("R3_IDLE cycles=${2*(i+1)}")
+                return i+1
+            }
+        }
+        fail("quiescent eligible library did not reach zero-producer IDLE within ${2*limit} cycles")
+        return -1
+    }
+    @Test fun reviewR3WrssRestoreMustNotEraseTheOnlyLocalChangeWitness()=runBlocking<Unit> {
+        val f=fixture();f.reader.ensureSeeded();assertR3IdleWithin(f)
+        suspend fun archive(articles:List<PhoneArticleEntity>,meta:List<AppMetaEntity>):ByteArray {
+            val out=java.io.ByteArrayOutputStream()
+            WatchRssBackupArchive.write(WatchRssBackupSnapshot(exportedAt=1,appVersion="",dataStructureVersion=WatchRssBackupArchive.CURRENT_DATA_STRUCTURE_VERSION,
+                sources=emptyList(),articles=articles,savedItems=emptyList(),readerSnapshot=f.reader.exportSnapshot(),appMeta=meta),out)
+            return out.toByteArray()
+        }
+        // A real first restore puts the otherwise healthy library at an acknowledged MAX(seq)=0.
+        val meta=listOf(AppMetaEntity("r3-backup-config","config"))
+        f.backup.importFrom(archive(emptyList(),meta).inputStream(),BackupImportMode.MERGE)
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        val checkpoint=requireNotNull(f.state.cycleCheckpoint())
+        assertEquals(0,f.db.syncChangeLogDao().maxSeq())
+        assertEquals(f.revision.toString(),f.recordStore.cursor(f.client.scopeId(session)))
+        val body="restored inline private article"
+        val article=PhoneArticleEntity("r3-restored-inline","phone","https://fixture.invalid/restored-inline","Restored","Site","",null,body,null,
+            CloudSnapshotCodec.sha256(body.toByteArray()),1,10,true,10,1,null,null,false,0,0,false,0,0,false,0)
+        f.backup.importFrom(archive(listOf(article),meta).inputStream(),BackupImportMode.MERGE)
+        assertEquals(body,f.repository.getArticle(article.articleId)!!.contentText)
+        assertEquals(0,f.repository.getLibrarySyncCursor(null).localMaxSeq)
+        assertEquals(checkpoint.filesRevision,com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.revision(f.context.filesDir))
+        f.backup.cloudWork.reset();f.requestPaths.clear()
+        val result=f.service.syncNow(manual=true)
+        val own=WatchRssBackupArchive.read(completedNotesObjects(f).getValue("private-library.wrss").inputStream(),tolerateCloudEntries=true)
+        val archived=own.articles.any{it.articleId==article.articleId&&it.contentText==body}
+        repeat(2){assertFalse(f.service.syncNow(manual=true).snapshotUploaded)}
+        println("R3_WRSS_RESTORE postPublishIdle=2 sqlSeq=${f.db.syncChangeLogDao().maxSeq()} cloudSeq=${f.backup.cloudChangeSequence()} producerExports=${f.backup.cloudWork.exports} fingerprints=${f.backup.cloudWork.fingerprints} uploaded=${result.snapshotUploaded} archived=$archived receipt=${f.state.cycleCheckpoint()!=null}")
+        assertTrue("a successful WRSS restore must publish its new private article instead of accepting IDLE",archived)
+        assertTrue(result.snapshotUploaded)
+        assertR3IdleWithin(f)
+    }
+    @Test fun reviewR3WrssNoResetControlPublishesAndConverges()=runBlocking<Unit> {
+        val f=fixture();f.reader.ensureSeeded();assertR3IdleWithin(f)
+        suspend fun archive(articles:List<PhoneArticleEntity>,meta:List<AppMetaEntity>):ByteArray {
+            val out=java.io.ByteArrayOutputStream()
+            WatchRssBackupArchive.write(WatchRssBackupSnapshot(exportedAt=1,appVersion="",dataStructureVersion=WatchRssBackupArchive.CURRENT_DATA_STRUCTURE_VERSION,
+                sources=emptyList(),articles=articles,savedItems=emptyList(),readerSnapshot=f.reader.exportSnapshot(),appMeta=meta),out)
+            return out.toByteArray()
+        }
+        // A real first restore puts the otherwise healthy library at an acknowledged MAX(seq)=0.
+        val meta=listOf(AppMetaEntity("r3-backup-config","config"))
+        f.backup.importFrom(archive(emptyList(),meta).inputStream(),BackupImportMode.MERGE)
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        val checkpoint=requireNotNull(f.state.cycleCheckpoint())
+        assertEquals(0,f.db.syncChangeLogDao().maxSeq())
+        assertEquals(f.revision.toString(),f.recordStore.cursor(f.client.scopeId(session)))
+        val body="restored inline private article"
+        val article=PhoneArticleEntity("r3-restored-inline","phone","https://fixture.invalid/restored-inline","Restored","Site","",null,body,null,
+            CloudSnapshotCodec.sha256(body.toByteArray()),1,10,true,10,1,null,null,false,0,0,false,0,0,false,0)
+        f.backup.importFrom(archive(listOf(article),meta).inputStream(),BackupImportMode.MERGE,resetSyncHistory=false)
+        assertEquals(body,f.repository.getArticle(article.articleId)!!.contentText)
+        assertTrue(f.backup.cloudChangeSequence()>checkpoint.localMaxSeq)
+        assertEquals(checkpoint.filesRevision,com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.revision(f.context.filesDir))
+        f.backup.cloudWork.reset();f.requestPaths.clear()
+        val result=f.service.syncNow(manual=true)
+        val own=WatchRssBackupArchive.read(completedNotesObjects(f).getValue("private-library.wrss").inputStream(),tolerateCloudEntries=true)
+        val archived=own.articles.any{it.articleId==article.articleId&&it.contentText==body}
+        println("R3_WRSS_NO_RESET_CONTROL producerExports=${f.backup.cloudWork.exports} fingerprints=${f.backup.cloudWork.fingerprints} uploaded=${result.snapshotUploaded} archived=$archived receipt=${f.state.cycleCheckpoint()!=null}")
+        assertTrue("retaining the change log publishes the same restored private article",archived)
+        assertR3IdleWithin(f)
+    }
+    @Test fun fix5HistoryAndAccountCleanupCannotHideAChangeAfterCheckpoint()=runBlocking<Unit> {
+        val f=fixture();assertR3IdleWithin(f)
+        var checkpoint=requireNotNull(f.state.cycleCheckpoint())
+        val steps=listOf<Pair<String,suspend ()->Unit>>(
+            "history DAO" to { f.db.syncChangeLogDao().deleteAll() },
+            "BLE full resync" to { f.repository.resetLibrarySyncPeerState() },
+            "clear phone library" to { f.repository.clearLibrary() },
+            "cloud library state reset" to { f.state.clearLibraryState(preserveDeviceSequence=true) },
+            "cloud account scope clear" to { f.state.clearScope() },
+            "account switch clearing content" to { f.service.resolveLibraryOwner(merge=false) }
+        )
+        for((index,step) in steps.withIndex()) {
+            notes(f).save("fix5-cleanup-$index","Changed","after acknowledged ${checkpoint.localMaxSeq}")
+            val dirty=f.backup.cloudChangeSequence()
+            assertTrue(step.first,dirty>checkpoint.localMaxSeq)
+            step.second()
+            assertTrue("${step.first} must retain the outstanding change",f.backup.cloudChangeSequence()>=dirty)
+            assertR3IdleWithin(f)
+            val next=requireNotNull(f.state.cycleCheckpoint())
+            assertTrue("${step.first} must never repeat the older acknowledged value",next.localMaxSeq>checkpoint.localMaxSeq)
+            println("FIX5_CLEANUP ${step.first}: ${checkpoint.localMaxSeq} -> ${next.localMaxSeq}")
+            checkpoint=next
+        }
     }
 
 }

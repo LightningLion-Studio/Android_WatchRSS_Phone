@@ -1,6 +1,9 @@
 package com.lightningstudio.watchrss.phone.cloud
 
-import com.lightningstudio.watchrss.phone.data.db.SyncChangeLogDao
+import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
+import com.lightningstudio.watchrss.phone.data.db.CloudLocalChanges
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
@@ -13,19 +16,20 @@ import kotlinx.coroutines.flow.first
 import java.util.concurrent.atomic.AtomicLong
 
 class PhoneCloudChangeScheduler(
-    private val changeLogDao: SyncChangeLogDao,
+    database: PhoneCompanionDatabase,
     private val cloudSyncService: PhoneCloudSyncService,
     private val scope: CoroutineScope
 ) {
+    private val changes=CloudLocalChanges(database)
     private var job: Job? = null
     private val bluetoothGate=BluetoothCloudChangeGate()
     fun setBluetoothSyncActive(active:Boolean) {bluetoothGate.setActive(active)}
-    suspend fun acknowledgeBluetoothChanges() {bluetoothGate.acknowledge(changeLogDao.maxSeq())}
+    suspend fun acknowledgeBluetoothChanges() = withContext(Dispatchers.IO) {bluetoothGate.acknowledge(changes.sequence())}
     @OptIn(FlowPreview::class)
     fun start() {
         if (job != null) return
         job = scope.launch {
-            changeLogDao.observeMaxSeq()
+            changes.observeSequence()
                 .drop(1)
                 .debounce(10 * 60 * 1000L)
                 .collect { sequence ->

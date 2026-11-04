@@ -36,6 +36,7 @@ class WatchRssBackupService(
 ) {
     private val cloudChanges = com.lightningstudio.watchrss.phone.data.db.CloudLocalChanges(database)
     internal fun cloudChangeSchemaIdentity():String = cloudChanges.schemaIdentity()
+    internal fun cloudChangeSequence():Long = cloudChanges.sequence()
     internal fun cloudHasPendingProvenance():Boolean = cloudChanges.hasPendingProvenance()
     internal val cloudWork = com.lightningstudio.watchrss.phone.cloud.CloudSyncWorkCounters()
     private val articleProvenance = repository.articleProvenance ?: com.lightningstudio.watchrss.phone.data.repo.ArticleProvenanceStore(database)

@@ -340,7 +340,7 @@ class PhoneCompanionContainer(context: Context) {
 
     private val cloudChangeScheduler: PhoneCloudChangeScheduler by lazy {
         PhoneCloudChangeScheduler(
-            changeLogDao = database.syncChangeLogDao(),
+            database = database,
             cloudSyncService = cloudSyncService,
             scope = appScope
         )

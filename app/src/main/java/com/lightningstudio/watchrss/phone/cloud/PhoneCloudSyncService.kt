@@ -1216,7 +1216,7 @@ class PhoneCloudSyncService(
                 settings.ensureRssChannelOnlyVersion { recordStore.clear(client.scopeId(session)) }
                 val schema=backupService.cloudChangeSchemaIdentity()
                 val heads = client.snapshotHeads(session)
-                val localAtStart=repository.getLibrarySyncCursor(null).localMaxSeq
+                val localAtStart=backupService.cloudChangeSequence()
                 val previousCycle=admission.checkpoint
                 val filesAtStart=CloudExportFileWitness.observe(appContext.filesDir)
                 val cycleContext=cycleContext(session,bootstrap,schema)
@@ -1228,7 +1228,7 @@ class PhoneCloudSyncService(
                 // A new own commit can be a migration or an ownership transition, never apply-only.
                 if(eligible && (heads.none{it.sourceDeviceId==deviceId} ||
                     heads.any{it.sourceDeviceId==deviceId && previousCycle?.heads?.get(it.id)!=it.manifestSha256}))plan=CloudCyclePlan.FULL
-                if(repository.getLibrarySyncCursor(null).localMaxSeq!=localAtStart) {
+                if(backupService.cloudChangeSequence()!=localAtStart) {
                     plan=if(plan in setOf(CloudCyclePlan.IDLE,CloudCyclePlan.PUBLISH))CloudCyclePlan.PUBLISH else CloudCyclePlan.FULL
                 }
                 traceSync("cycle-plan:${plan.name.lowercase()}")
@@ -1347,7 +1347,7 @@ class PhoneCloudSyncService(
                 // Compare against the publication window, after this pass's own restore/RSS work.
                 val filesAtPublish=if(publishLocal)CloudExportFileWitness.observe(appContext.filesDir) else null
                 val publishedFiles=filesAtPublish?.revision ?: requireNotNull(previousCycle).filesRevision
-                val localSequenceAtPublish = if(publishLocal) repository.getLibrarySyncCursor(null).localMaxSeq else requireNotNull(previousCycle).localMaxSeq
+                val localSequenceAtPublish = if(publishLocal) backupService.cloudChangeSequence() else requireNotNull(previousCycle).localMaxSeq
                 if(publishLocal) {
                     traceSync("records-push:start")
                     try { recordSync.sync(session, true, bootstrap.libraryEpoch, requireAvailable = true, pullAlreadyCompleted = recordsEmpty); _formatStatus.value=recordStore.formatStatus(client.scopeId(session)); _recordError.value = null }
@@ -1405,7 +1405,7 @@ class PhoneCloudSyncService(
                 } else if (snapshotDeferredUntil > 0) {
                     update(CloudSyncPhase.IDLE, "阅读状态已同步；私有快照等待合并窗口", bootstrap.member, uploadedBytes, downloadedBytes)
                     _state.update { it.copy(pendingSnapshotUntil=snapshotDeferredUntil) }
-                } else if (localSequenceAtPublish != repository.getLibrarySyncCursor(null).localMaxSeq) {
+                } else if (localSequenceAtPublish != backupService.cloudChangeSequence()) {
                     val completion = cloudPassCompletion(true)
                     update(completion.first, completion.second, bootstrap.member, uploadedBytes, downloadedBytes)
                     PhoneCloudSyncWorker.scheduleFollowUp(appContext)
@@ -1427,7 +1427,7 @@ class PhoneCloudSyncService(
                     (!droppedOwnKeyHead(session,head) && settings.appliedSequence(head.sourceDeviceId,true)>=head.deviceSequence) }
                 if(fullTransfer && publicationReady && fullyApplied && allApplied && pendingStates==0 && snapshotDeferredUntil==0L &&
                     _restoreWarnings.value.isEmpty() && _rssRefreshWarnings.value.isEmpty() &&
-                    (plan==CloudCyclePlan.APPLY || repository.getLibrarySyncCursor(null).localMaxSeq==localSequenceAtPublish) &&
+                    (plan==CloudCyclePlan.APPLY || backupService.cloudChangeSequence()==localSequenceAtPublish) &&
                     cycleCanCheckpoint(session,bootstrap) && cycleContext==cycleContext(session,bootstrap,backupService.cloudChangeSchemaIdentity())) {
                     checkCloudEpoch(session,syncEpoch)
                     val filesNow=CloudExportFileWitness.observe(appContext.filesDir)

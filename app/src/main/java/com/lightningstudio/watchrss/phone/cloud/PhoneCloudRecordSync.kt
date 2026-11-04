@@ -7,6 +7,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /** Bounded pull and CAS diff. Android never grants the mini program's consent. */
+internal enum class CloudRecordProbe { EMPTY, CHANGED, FULL }
+
 internal class PhoneCloudRecordSync(
     private val client: PhoneCloudClient,
     private val store: CloudRecordState,
@@ -20,14 +22,15 @@ internal class PhoneCloudRecordSync(
     private val keepArticle: (suspend (JSONObject) -> Boolean)? = null,
     private val afterPull: suspend (PhoneAccountSession) -> Unit = {},
     private val canonicalArticleId: suspend (JSONObject) -> String = { it.getString("articleId") },
-    private val bookForArticle: (suspend(JSONObject)->Pair<JSONObject,JSONObject?>?)?=null
+    private val bookForArticle: (suspend(JSONObject)->Pair<JSONObject,JSONObject?>?)?=null,
+    private val onHash: () -> Unit = {}
 ) {
-    suspend fun sync(session: PhoneAccountSession, allowUpload: Boolean, operationEpoch: String? = client.knownEpoch(session), requireAvailable: Boolean = false) = withContext(Dispatchers.IO) {
+    suspend fun sync(session: PhoneAccountSession, allowUpload: Boolean, operationEpoch: String? = client.knownEpoch(session), requireAvailable: Boolean = false, pullAlreadyCompleted: Boolean = false) = withContext(Dispatchers.IO) {
         expectedEpoch = operationEpoch
         try {
         stageRestrictedEdits(session)
         replay(session)
-        if (!pull(session)) { if (requireAvailable) throw CloudRecordsUnavailableException(); return@withContext }
+        if (!pullAlreadyCompleted && !pull(session)) { if (requireAvailable) throw CloudRecordsUnavailableException(); return@withContext }
         checkBoundOwner(session); afterPull(session)
         if (!allowUpload) return@withContext
         for (attempt in 0..2) {
@@ -41,6 +44,36 @@ internal class PhoneCloudRecordSync(
         }
         } finally { expectedEpoch = null }
     }
+    /** Read only the cursor commit. Do not replay, traverse local records, hash, or apply RSS states. */
+    suspend fun probeCommit(session:PhoneAccountSession, operationEpoch:String):CloudRecordProbe = withContext(Dispatchers.IO) {
+        expectedEpoch=operationEpoch
+        try {
+            checkBoundOwner(session)
+            val cursor=store.cursor(client.scopeId(session))
+            val page=try {client.recordPage(session,cursor)} catch(e:CloudHttpException) {
+                if(e.status==400 && runCatching{JSONObject(e.detail).optString("error")}.getOrNull()=="cloud_record_cursor_invalid")return@withContext CloudRecordProbe.FULL
+                throw e
+            } ?: return@withContext CloudRecordProbe.FULL
+            checkBoundOwner(session)
+            runCatching {
+                require(page.getInt("formatVersion")==1)
+                val items=page.getJSONArray("items");require(items.length()<=50)
+                val next=page.getString("cursor").also(::revision)
+                val head=page.getString("headRevision").also(::revision)
+                val more=page.getBoolean("hasMore")
+                require(next.toLong()>=cursor.toLong() && next.toLong()<=head.toLong())
+                if(more)require(items.length()>0 && next.toLong()>cursor.toLong()) else require(next==head)
+                var previous=cursor.toLong()
+                for(i in 0 until items.length()) {
+                    val rev=items.getJSONObject(i).getString("revision").also(::revision).toLong()
+                    require(rev>previous && rev<=next.toLong());previous=rev
+                }
+                if(items.length()>0)CloudRecordProbe.CHANGED
+                else if(next==cursor)CloudRecordProbe.EMPTY else CloudRecordProbe.FULL
+            }.getOrDefault(CloudRecordProbe.FULL)
+        } finally { expectedEpoch=null }
+    }
+    private fun recordHash(kind:String,value:JSONObject):String { onHash();return PhoneCloudRecordCodec.hash(kind,value) }
     private var expectedEpoch: String? = null
     private fun checkBoundOwner(session: PhoneAccountSession) {
         checkOwner(session)
@@ -123,7 +156,7 @@ internal class PhoneCloudRecordSync(
                         checkBoundOwner(session); store.quarantine(client.scopeId(session), QuarantinedCloudRecord(id, rev, envelope.optInt("keyVersion"), "invalid_fields", envelope.toString(), item.optBoolean("tombstone"))); continue
                     }
                 }
-                checkBoundOwner(session); store.save(client.scopeId(session), id, rev, if (retired) "retired" else PhoneCloudRecordCodec.hash(kind, value))
+                checkBoundOwner(session); store.save(client.scopeId(session), id, rev, if (retired) "retired" else recordHash(kind, value))
                 store.saveRawEnvelope(client.scopeId(session), id, envelope.toString())
                 store.release(client.scopeId(session), id)
             }
@@ -139,7 +172,7 @@ internal class PhoneCloudRecordSync(
         try {pages {kind,value->
             checkBoundOwner(session)
             val id=PhoneCloudRecordCodec.id(anchor,session.userId,kind,value)
-            if(id in ids)store.pending(owner,id,value.toString().takeIf{store.record(owner,id)?.second!=PhoneCloudRecordCodec.hash(kind,value)})
+            if(id in ids)store.pending(owner,id,value.toString().takeIf{store.record(owner,id)?.second!=recordHash(kind,value)})
         }}finally{anchor.fill(0)}
     }
     private suspend fun push(session: PhoneAccountSession) {
@@ -171,7 +204,7 @@ internal class PhoneCloudRecordSync(
                 checkBoundOwner(session)
                 val owner = client.scopeId(session)
                 val id = PhoneCloudRecordCodec.id(anchor, session.userId, kind, value)
-                val hash = PhoneCloudRecordCodec.hash(kind, value)
+                val hash = recordHash(kind, value)
                 // Business witnesses survive R45/cache resets. Absence of a raw cache baseline
                 // is never permission to send a protected value through the legacy writer.
                 if(value is ArticleProvenanceValue || value is ReadOnlyArticleValue) {
@@ -239,7 +272,7 @@ internal class PhoneCloudRecordSync(
             for (i in 0 until items.length()) {
                 val result=items.getJSONObject(i);val id=result.getString("recordId")
                 val rev=result.getString("revision").also(::revision);val (value,env)=saved.getValue(id)
-                checkBoundOwner(session);store.save(owner,id,rev,PhoneCloudRecordCodec.hash("article",value));store.saveRawEnvelope(owner,id,env.toString())
+                checkBoundOwner(session);store.save(owner,id,rev,recordHash("article",value));store.saveRawEnvelope(owner,id,env.toString())
             }
             batch=JSONArray();saved.clear()
         }
@@ -306,8 +339,8 @@ internal class PhoneCloudRecordSync(
                     val anchor=accountKey(session.userId,anchorVersion(session.userId))?:error("缺少锚定密钥")
                     try {
                         val replacement=PhoneCloudRecordCodec.id(anchor,session.userId,"book",book)
-                        if(store.record(owner,replacement)?.second!=PhoneCloudRecordCodec.hash("book",book))continue
-                        if(reading!=null&&!book.getBoolean("deleted")&&store.record(owner,PhoneCloudRecordCodec.id(anchor,session.userId,"book-reading",reading))?.second!=PhoneCloudRecordCodec.hash("book-reading",reading))continue
+                        if(store.record(owner,replacement)?.second!=recordHash("book",book))continue
+                        if(reading!=null&&!book.getBoolean("deleted")&&store.record(owner,PhoneCloudRecordCodec.id(anchor,session.userId,"book-reading",reading))?.second!=recordHash("book-reading",reading))continue
                     }finally{anchor.fill(0)}
                     val idKey=keys.first{PhoneCloudRecordCodec.id(it,session.userId,kind,value)==id}
                     val clock=value.keys().asSequence().filter{it.endsWith("At")}.maxOfOrNull{value.optLong(it)}?:0L
@@ -316,7 +349,7 @@ internal class PhoneCloudRecordSync(
                     val encrypted=PhoneCloudRecordCodec.encrypt(key,session.userId,id,env.getInt("keyVersion"),kind,tombstone,idKey=idKey,baseline=document.document)
                     val row=JSONObject().put("recordId",id).put("expectedRevision",store.record(owner,id)!!.first).put("tombstone",true).put("envelope",encrypted)
                     if(batch.length()>=50||batch.toString().toByteArray().size+row.toString().toByteArray().size>1000000)flush()
-                    batch.put(row);hashes[id]=PhoneCloudRecordCodec.hash(kind,tombstone);envelopes[id]=encrypted
+                    batch.put(row);hashes[id]=recordHash(kind,tombstone);envelopes[id]=encrypted
                 }finally{key.fill(0);keys.forEach{it.fill(0)}}
             }
             after=page.last().first
@@ -360,7 +393,7 @@ internal class PhoneCloudRecordSync(
                 catch (_: org.json.JSONException) { checkBoundOwner(session); continue }
                 catch (_: IllegalArgumentException) { checkBoundOwner(session); continue }
                 checkBoundOwner(session)
-                store.save(owner, record.id, record.revision, if(retired) "retired" else PhoneCloudRecordCodec.hash(decoded.first, decoded.second))
+                store.save(owner, record.id, record.revision, if(retired) "retired" else recordHash(decoded.first, decoded.second))
             }
             store.release(owner, record.id)
         }

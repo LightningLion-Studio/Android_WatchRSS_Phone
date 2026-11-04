@@ -30,6 +30,8 @@ class CloudLocalCache internal constructor(
         atomicWrite(pendingFile(userId), snapshotId.toByteArray())
     }
 
+    internal fun hasPendingManifest(userId:String):Boolean = pendingFile(userId).exists()
+
     fun loadPendingManifest(userId: String): Pair<String, ByteArray>? {
         val id = pendingFile(userId).takeIf(File::isFile)?.readText()?.trim()
             ?.takeIf { it.matches(SAFE_ID) } ?: return null

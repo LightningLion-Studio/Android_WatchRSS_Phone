@@ -32,6 +32,20 @@ class PhoneCloudRecordSyncTest {
     private fun sync(client: PhoneCloudClient, state: State, values: List<JSONObject> = emptyList(), apply: suspend (String, JSONObject) -> Unit = { _, _ -> }, owner: (PhoneAccountSession) -> Unit = {}) =
         PhoneCloudRecordSync(client, state, { consume -> values.forEach { consume("article", it) } }, { _, kind, value -> apply(kind, value) }, { 1 }, { _, _ -> key.copyOf() }, owner)
 
+    @Test fun commitProbeNeverTraversesHashesAppliesOrAdvancesTheCursor()=runBlocking {
+        val state=State();var work=0
+        fun probeClient(response:JSONObject)=client { 200 to response }
+        fun probe(response:JSONObject)=PhoneCloudRecordSync(probeClient(response),state,{work++},{_,_,_->work++},{1},{_,_->key.copyOf()},{},afterPull={work++},onHash={work++})
+        assertEquals(CloudRecordProbe.EMPTY,probe(page()).probeCommit(session,"epoch"))
+        assertEquals(CloudRecordProbe.CHANGED,probe(page(JSONArray().put(JSONObject().put("revision","1")),"1")).probeCommit(session,"epoch"))
+        assertEquals(CloudRecordProbe.FULL,probe(page(cursor="1")).probeCommit(session,"epoch"))
+        assertEquals(CloudRecordProbe.FULL,probe(page(format=0)).probeCommit(session,"epoch"))
+        assertEquals(CloudRecordProbe.FULL,probe(page(more=true)).probeCommit(session,"epoch"))
+        assertEquals(0,work);assertEquals("0",state.cursor)
+        val invalid=PhoneCloudRecordSync(client{400 to JSONObject().put("error","cloud_record_cursor_invalid")},state,{work++},{_,_,_->work++},{1},{_,_->key.copyOf()},{})
+        assertEquals(CloudRecordProbe.FULL,invalid.probeCommit(session,"epoch"));assertEquals("0",state.cursor)
+    }
+
     @Test fun onlyChangedRecordsPostedInBoundedBatches() = runBlocking {
         val state = State(); val values = (1..120).map(::value); val sizes = mutableListOf<Int>()
         val client = client { request -> if (request.method == "GET") 200 to page() else {

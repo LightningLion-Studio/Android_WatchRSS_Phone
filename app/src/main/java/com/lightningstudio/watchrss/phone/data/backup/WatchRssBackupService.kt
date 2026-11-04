@@ -34,6 +34,10 @@ class WatchRssBackupService(
     private val readerPresetRepository: ReaderPresetRepository,
     private val deviceId: String
 ) {
+    private val cloudChanges = com.lightningstudio.watchrss.phone.data.db.CloudLocalChanges(database)
+    internal fun cloudChangeSchemaIdentity():String = cloudChanges.schemaIdentity()
+    internal fun cloudHasPendingProvenance():Boolean = cloudChanges.hasPendingProvenance()
+    internal val cloudWork = com.lightningstudio.watchrss.phone.cloud.CloudSyncWorkCounters()
     private val articleProvenance = repository.articleProvenance ?: com.lightningstudio.watchrss.phone.data.repo.ArticleProvenanceStore(database)
         .also{repository.articleProvenance=it}
     internal suspend fun articleProvenancePendingCount()=articleProvenance.pendingCount()
@@ -58,6 +62,7 @@ class WatchRssBackupService(
 
     /** Actual private bytes/configuration only; read/favorite/progress clocks travel in RSS state. */
     internal suspend fun privateCloudFingerprint(): String = withContext(Dispatchers.IO) {
+        cloudWork.fingerprints++
         val bookVersions=repository.books?.availableBooks().orEmpty().associate{it.first.getString("bookId") to it.first.getString("fingerprint")}
         val state = JSONObject().put("books",JSONObject(bookVersions))
             .put("versions", JSONObject(repository.privateCloudVersions(layoutV3 = true)))
@@ -89,6 +94,7 @@ class WatchRssBackupService(
 
     internal data class PrivateArchiveExport(val file: File, val articleIds: Set<String>, val bookIds: Set<String> = emptySet())
     internal suspend fun createCloudPrivateArchiveExport(): PrivateArchiveExport = withContext(Dispatchers.IO) {
+        cloudWork.exports++
         articleProvenance.requireExportable()
         // Real snapshot time lives in the authenticated cloud manifest. Do not churn body chunks.
         val allArticles = repository.getPrivateArticlesForCloudArchive()

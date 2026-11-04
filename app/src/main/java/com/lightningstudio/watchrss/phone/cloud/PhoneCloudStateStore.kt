@@ -24,6 +24,19 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
         }
     }
     private fun scoped(key: String): String = scope + key
+    private val failedCycleScopes=mutableSetOf<String>()
+    internal fun cycleCheckpoint():CloudCycleCheckpoint? = if(scope in failedCycleScopes)null else
+        CloudCycleCheckpoint.decode(preferences.getString(scoped("cycle_checkpoint_v1"),null))
+    // SharedPreferences can update memory even when disk commit fails. Taint that scope too.
+    internal fun invalidateCycleCheckpoint() {
+        failedCycleScopes.add(scope)
+        check(preferences.edit().remove(scoped("cycle_checkpoint_v1")).commit())
+    }
+    internal fun completeCycle(checkpoint:CloudCycleCheckpoint) {
+        failedCycleScopes.add(scope)
+        check(preferences.edit().putString(scoped("cycle_checkpoint_v1"),checkpoint.encode()).commit())
+        failedCycleScopes.remove(scope)
+    }
     var libraryEpoch: String?
         get() = preferences.getString(scoped("library_epoch"), null)
         set(value) { check(preferences.edit().putString(scoped("library_epoch"), value).commit()) }
@@ -197,6 +210,7 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
     }
 
     fun clearLibraryState(preserveDeviceSequence: Boolean = false) {
+        invalidateCycleCheckpoint()
         val abandoned=preferences.edit()
         preferences.all.keys.filter { it.startsWith(scoped("abandoned_restore_v1:")) }.forEach(abandoned::remove)
         check(abandoned.commit())

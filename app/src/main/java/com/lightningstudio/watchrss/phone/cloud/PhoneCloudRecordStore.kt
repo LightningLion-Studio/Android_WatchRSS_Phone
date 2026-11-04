@@ -39,6 +39,13 @@ internal interface CloudRecordState {
 
 /** Dedicated app-private SQLite, never the unbounded shared-preferences XML. */
 internal class PhoneCloudRecordStore(context: Context) : SQLiteOpenHelper(context, "cloud-records-v1.db", null, 7), CloudRecordState {
+    override fun onOpen(db:SQLiteDatabase) {
+        super.onOpen(db)
+        db.execSQL("CREATE INDEX IF NOT EXISTS raw_documents_owner_access ON raw_documents(owner,access)")
+    }
+    internal fun hasCycleBlockers(owner:String):Boolean = readableDatabase.rawQuery(
+        "SELECT EXISTS(SELECT 1 FROM pending_records WHERE owner=?) OR EXISTS(SELECT 1 FROM quarantine WHERE owner=?) OR EXISTS(SELECT 1 FROM raw_documents WHERE owner=? AND access IN ('READ_ONLY','OPAQUE','ISOLATED'))",
+        arrayOf(owner,owner,owner)).use { it.moveToFirst();it.getInt(0)!=0 }
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE records (owner TEXT NOT NULL, id TEXT NOT NULL, revision TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(owner,id))")
         db.execSQL("CREATE TABLE cursors (owner TEXT PRIMARY KEY, revision TEXT NOT NULL)")

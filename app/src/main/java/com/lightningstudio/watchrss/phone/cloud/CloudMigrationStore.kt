@@ -19,6 +19,18 @@ class CloudMigrationPreferences(context: Context?, private val overridePreferenc
         MasterKey.Builder(appContext).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
         EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM) }
     private fun key(scope:String,id:String) = CloudSnapshotCodec.sha256("$scope\n$id".toByteArray())
+    /** Include checkpoints created by older builds, which have no separate pending index. */
+    internal fun hasPending(context:CloudMigrationContext):Boolean {
+        if(overridePreferences==null && appContext?.getSharedPreferences("watchrss_cloud_migrations",Context.MODE_PRIVATE)?.all?.isEmpty()==true)return false
+        return preferences.all.values.any { value ->
+            val raw=value as? String ?: return@any true
+            val row=runCatching { JSONObject(raw) }.getOrNull() ?: return@any true
+            val plan=row.optJSONObject("plan") ?: return@any true
+            if(plan.optString("userId")!=context.userId || plan.optString("installationId")!=context.installationId ||
+                plan.optString("libraryEpoch")!=context.epoch || plan.optString("contentGeneration")!=context.generation) return@any false
+            row.has("publicationIntent") || row.optString("state") !in setOf("completed","cancelled","superseded","rejected","expired")
+        }
+    }
     override fun load(scope:String,planId:String):JSONObject? = preferences.getString(key(scope,planId),null)?.let {CloudRawDocument.parse(it).json()}
     override fun save(scope:String,planId:String,value:JSONObject) {
         require(value.keys().asSequence().none { it in setOf("grant","sealedGrant","chunkKeys","accountKey","bearer") })

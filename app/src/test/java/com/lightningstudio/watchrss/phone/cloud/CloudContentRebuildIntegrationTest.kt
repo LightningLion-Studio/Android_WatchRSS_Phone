@@ -82,13 +82,15 @@ class CloudContentRebuildIntegrationTest {
     private inner class Fixture(val initialEmpty:Boolean=true, val failStage:String?=null, val alwaysFail:Boolean=false) {
         val context:Context=RuntimeEnvironment.getApplication()
         val scope=CoroutineScope(SupervisorJob()+Dispatchers.Default)
-        val db=Room.inMemoryDatabaseBuilder(context,PhoneCompanionDatabase::class.java).allowMainThreadQueries().build()
+        val db=Room.inMemoryDatabaseBuilder(context,PhoneCompanionDatabase::class.java).addCallback(PhoneCompanionDatabase.ARTICLE_PROVENANCE_CALLBACK).allowMainThreadQueries().build()
         val bookDir=java.io.File.createTempFile("cloud-r45-local-books-","",context.cacheDir).apply{delete();mkdirs()}
         val books=com.lightningstudio.watchrss.phone.data.book.ImportedBookStore(db,bookDir,null,"phone")
         val repository=PhoneCompanionRepository(db.phoneSavedItemDao(),db.phoneArticleDao(),db.phoneRssSourceDao(),"phone",syncChangeLogDao=db.syncChangeLogDao(),syncPeerStateDao=db.syncPeerStateDao(),appMetaDao=db.appMetaDao(),cloudBackendBaseUrl="https://test.invalid",books=books)
         val reader=ReaderPresetRepository(context,db,db.readerPresetDao(),"phone",scope)
         val backup=WatchRssBackupService(context,db,repository,reader,"phone")
-        val state=PhoneCloudStateStore(MemoryPreferences())
+        val statePreferences=MemoryPreferences()
+        val migrationPreferences=MemoryPreferences()
+        val state=PhoneCloudStateStore(statePreferences)
         val keys=CloudKeyManager(null,preferencesOverride=MemoryPreferences()).also {it.bindBackend("https://test.invalid");it.saveVerifiedKeys(session.userId,mapOf(1 to key))}
         val publicKey=keys.devicePublicKeySpki(session.userId,"phone")
         val cacheDir=java.io.File.createTempFile("cloud-r45-","",context.cacheDir).apply{delete();mkdirs()}
@@ -106,8 +108,11 @@ class CloudContentRebuildIntegrationTest {
         var r48WriteEnabled=false
         var formatFloor=false
         var deduplicateStoredChunks=false
+        var failAck=false
+        var failBootstrap=false
         var failed=false
         var putCount=0
+        val requestPaths=mutableListOf<String>()
         var httpRequests=0
         var requestBodyBytes=0L
         val plans=mutableListOf<JSONObject>()
@@ -131,7 +136,7 @@ class CloudContentRebuildIntegrationTest {
         var migrationEnabled=false
         val client=PhoneCloudClient(env,http=OkHttpClient.Builder().addInterceptor { chain ->
             synchronized(this) {
-                val request=chain.request();val path=request.url.encodedPath;httpRequests++;requestBodyBytes+=request.body?.contentLength()?.coerceAtLeast(0) ?: 0
+                val request=chain.request();val path=request.url.encodedPath;requestPaths+=path;httpRequests++;requestBodyBytes+=request.body?.contentLength()?.coerceAtLeast(0) ?: 0
                 if(path.startsWith("/r48-fixture-blob/")) {
                     val sha=path.substringAfterLast('/');r48BlobReads+=sha
                     return@addInterceptor Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("fixture").body(r48Blobs.getValue(sha).toResponseBody()).build()
@@ -141,8 +146,8 @@ class CloudContentRebuildIntegrationTest {
                 var code=200
                 fun shouldFail(stage:String)=failStage==stage && (!failed || alwaysFail)
                 val result=if(formatFloor && request.method!="GET" && (path.endsWith("/records") || path.endsWith("/reserve") || path.endsWith("/complete") || path.contains("/uploads/")) && request.header("x-watchrss-r48-write-v1")!="1"){code=426;JSONObject().put("error","cloud_format_upgrade_required")}else if(!omitGeneration&&isCloudContentWrite(request.method,path)&&request.header("x-watchrss-content-generation")!=generation){code=409;JSONObject().put("error","cloud_content_rebuild_required")}else when {
-                    path.endsWith("/bootstrap") -> bootstrap()
-                    path.endsWith("/ack") -> JSONObject()
+                    path.endsWith("/bootstrap") -> { if(failBootstrap)throw java.io.IOException("fixture bootstrap crash");bootstrap() }
+                    path.endsWith("/ack") -> { if(failAck)throw java.io.IOException("fixture crash after apply before receipt");JSONObject() }
                     path.endsWith("/format-capabilities") -> JSONObject().put("protocol","watchrss-content-evolution").put("version",1)
                         .put("phaseA",JSONObject().put("cloudFormatR48ReadV1",true).put("cloudFormatR48WriteV1",r48WriteEnabled)).put("phaseB",JSONObject().put("cloudFormatMigrationR48V1",migrationEnabled))
                     path.endsWith("/devices/register") -> JSONObject()
@@ -238,7 +243,7 @@ class CloudContentRebuildIntegrationTest {
             shadow.setActiveNetworkInfo(ShadowNetworkInfo.newInstance(NetworkInfo.DetailedState.CONNECTED,ConnectivityManager.TYPE_WIFI,0,true,true))
             val caps=NetworkCapabilities();Shadows.shadowOf(caps).addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);Shadows.shadowOf(caps).addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
             shadow.setNetworkCapabilities(manager.activeNetwork,caps)
-            service=PhoneCloudSyncService(context,account,backup,repository,NoteRepository(db.noteDao(),"phone"),"phone",client,keyManager=keys,settings=state,cache=cache)
+            service=PhoneCloudSyncService(context,account,backup,repository,NoteRepository(db.noteDao(),"phone"),"phone",client,keyManager=keys,settings=state,cache=cache,migrationPreferences=CloudMigrationPreferences(null,migrationPreferences))
             val owner=client.scopeId(session)
             recordStore.advance(owner,"900");recordStore.save(owner,"stale-cas","900","stale-hash")
             recordStore.saveRawEnvelope(owner,"stale-cas","{}")
@@ -249,6 +254,141 @@ class CloudContentRebuildIntegrationTest {
     }
     private suspend fun fixture(stage:String?=null,always:Boolean=false)=Fixture(failStage=stage,alwaysFail=always).also{fixtures+=it;it.initialize()}
     @After fun close(){fixtures.forEach{it.close()};java.security.Security.removeProvider("cloud-r45-fixture")}
+    @Test fun syncSkipIdleRealSizeLibraryDoesZeroProducerWork()=runBlocking {
+        val f=fixture();val rng=java.util.Random(4811)
+        f.db.phoneArticleDao().upsertAll((0 until 2000).map { i ->
+            val text=java.util.Base64.getEncoder().encodeToString(ByteArray(2048).also(rng::nextBytes))
+            PhoneArticleEntity("idle-$i","phone","https://fixture.invalid/$i","Title $i","Site","",null,text,null,CloudSnapshotCodec.sha256(text.toByteArray()),1,10,true,10,i.toLong(),null,null,false,0,0,false,0,0,false,0)
+        })
+        repeat(20) { notes(f).save("idle-note-$it","Note $it","note text ".repeat(500)) }
+        f.service.syncNow(manual=true)
+        f.service.syncNow(manual=true) // drain the records created by our own publication
+        val measurements=JSONArray()
+        repeat(3) {
+            f.backup.cloudWork.reset();f.requestPaths.clear()
+            val cpu=Class.forName("java.lang.management.ManagementFactory").getMethod("getOperatingSystemMXBean").invoke(null)
+            val cpuMethod=Class.forName("com.sun.management.OperatingSystemMXBean").getMethod("getProcessCpuTime")
+            val cpuStart=cpuMethod.invoke(cpu) as Long;val start=System.nanoTime()
+            val result=f.service.syncNow(manual=true)
+            val wall=(System.nanoTime()-start)/1_000_000.0
+            measurements.put(f.backup.cloudWork.json().put("wallMs",wall).put("cpuMs",((cpuMethod.invoke(cpu) as Long)-cpuStart)/1_000_000.0)
+                .put("bootstrap",f.requestPaths.count{it.endsWith("/bootstrap")}).put("heads",f.requestPaths.count{it.endsWith("/heads")}))
+            assertFalse(result.snapshotUploaded)
+        }
+        println("SYNCSKIP_IDLE_MEASUREMENT "+JSONObject().put("articles",2000).put("bodyBytes",2000*2732).put("notes",20).put("measurements",measurements))
+        assertEquals("idle exports",0,f.backup.cloudWork.exports)
+        assertEquals("idle fingerprints",0,f.backup.cloudWork.fingerprints)
+        assertEquals("idle ZIPs",0,f.backup.cloudWork.notesZips)
+        assertEquals("idle record hashing",0,f.backup.cloudWork.recordHashes)
+        assertEquals(1,f.requestPaths.count{it.endsWith("/bootstrap")})
+        assertEquals(1,f.requestPaths.count{it.endsWith("/heads")})
+    }
+
+    @Test fun syncSkipNotesAndAssetsAdvanceLocalMaxSeq()=runBlocking {
+        val f=fixture() // production onOpen hooks must count edits before the first sync too
+        suspend fun sequence()=f.repository.getLibrarySyncCursor(null).localMaxSeq
+        var seq=sequence()
+        val repo=notes(f);repo.save("counter-note","Counter","first")
+        assertTrue("note save must advance localMaxSeq",sequence()>seq);seq=sequence()
+        repo.setPinned("counter-note",true);assertTrue(sequence()>seq);seq=sequence()
+        repo.move("counter-note","folder");assertTrue(sequence()>seq);seq=sequence()
+        repo.delete("counter-note");assertTrue(sequence()>seq);seq=sequence()
+        repo.registerAsset(com.lightningstudio.watchrss.phone.data.note.NoteAssetEntity("asset","counter-note","a".repeat(64),"a.txt","text/plain",1,"asset.txt",true,1,false,0))
+        assertTrue("asset insertion must advance localMaxSeq",sequence()>seq)
+    }
+
+    @Test fun syncSkipRestartReusesDurableReceiptAndForeignManifestMemoAvoidsReauthentication()=runBlocking {
+        val f=fixture();f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        seedNotesHead(f,"watch",archive=null)
+        f.service.syncNow(manual=true) // apply-only authenticates the new immutable head
+        f.backup.cloudWork.reset()
+        notes(f).save("memo-local","Memo","local edit")
+        f.service.syncNow(manual=true)
+        assertEquals("unchanged own and foreign manifests must be memoized",0,f.backup.cloudWork.manifestDecrypts)
+        f.service.syncNow(manual=true)
+        assertNotNull(f.state.cycleCheckpoint())
+        val seq=f.repository.getLibrarySyncCursor(null).localMaxSeq
+        f.recordStore.close()
+        val restartedBackup=WatchRssBackupService(f.context,f.db,f.repository,f.reader,"phone")
+        f.service=PhoneCloudSyncService(f.context,f.account,restartedBackup,f.repository,notes(f),"phone",f.client,keyManager=f.keys,settings=f.state,cache=f.cache,
+            migrationPreferences=CloudMigrationPreferences(null,f.migrationPreferences))
+        f.requestPaths.clear();f.service.syncNow(manual=true)
+        assertEquals(seq,f.repository.getLibrarySyncCursor(null).localMaxSeq)
+        assertEquals(0,restartedBackup.cloudWork.fingerprints);assertEquals(0,restartedBackup.cloudWork.recordHashes)
+        assertEquals(1,f.requestPaths.count{it.endsWith("/bootstrap")})
+    }
+
+    @Test fun syncSkipLocalNoteEditPublishesWithoutPullingUnchangedSnapshots()=runBlocking {
+        val f=fixture();notes(f).save("local-edit","Local","before")
+        f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        assertNotNull(f.state.cycleCheckpoint())
+        notes(f).save("local-edit","Local","after")
+        f.backup.cloudWork.reset();f.requestPaths.clear()
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertTrue(f.backup.cloudWork.fingerprints>0)
+        assertTrue(f.backup.cloudWork.recordHashes>0)
+        assertEquals(1,f.requestPaths.count{it.endsWith("/records")})
+        val restored=NoteCloudStateCodec.decode(completedNotesObjects(f).getValue("notes-state.json"))
+        assertEquals("after",restored.single().markdown)
+    }
+
+    @Test fun syncSkipCrashAfterApplyBeforeReceiptForcesFullNextCycle()=runBlocking {
+        val f=fixture();f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        assertNotNull(f.state.cycleCheckpoint())
+        seedNotesHead(f,"watch",archive=null);f.failAck=true
+        assertTrue(runCatching{f.service.syncNow(manual=true)}.exceptionOrNull() is java.io.IOException)
+        assertEquals(1,f.state.appliedSequence("watch",true))
+        assertNull(f.state.cycleCheckpoint())
+        f.failAck=false;f.backup.cloudWork.reset()
+        f.service.syncNow(manual=true)
+        assertTrue("crash must force the producer path",f.backup.cloudWork.fingerprints>0)
+        assertNotNull(f.state.cycleCheckpoint())
+    }
+
+    @Test fun syncSkipBootstrapFailureAlsoInvalidatesThePreviousReceipt()=runBlocking {
+        val f=fixture();f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        assertNotNull(f.state.cycleCheckpoint());f.failBootstrap=true
+        assertTrue(runCatching{f.service.syncNow(manual=true)}.isFailure)
+        assertNull(f.state.cycleCheckpoint());f.failBootstrap=false;f.backup.cloudWork.reset()
+        f.service.syncNow(manual=true);assertTrue(f.backup.cloudWork.fingerprints>0)
+    }
+
+    @Test fun syncSkipPendingOwnershipMigrationAndPublicationIntentForceFullPath()=runBlocking {
+        val f=fixture();f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        assertNotNull(f.state.cycleCheckpoint())
+        f.state.ownershipUpgradeAttemptAt=1;f.backup.cloudWork.reset();f.service.syncNow(manual=true)
+        assertTrue(f.backup.cloudWork.fingerprints>0)
+        assertNotNull(f.state.cycleCheckpoint())
+        val plan=JSONObject().put("userId",session.userId).put("installationId","phone").put("libraryEpoch",epoch).put("contentGeneration",f.generation)
+        val migration=CloudMigrationPreferences(null,f.migrationPreferences)
+        migration.save(f.client.scopeId(session),"pending",JSONObject().put("plan",plan).put("state","running"))
+        f.backup.cloudWork.reset();f.service.syncNow(manual=true)
+        assertTrue(f.backup.cloudWork.fingerprints>0);assertNull(f.state.cycleCheckpoint())
+        migration.save(f.client.scopeId(session),"pending",JSONObject().put("plan",plan).put("state","accepted").put("publicationIntent",JSONObject()))
+        f.backup.cloudWork.reset();f.service.syncNow(manual=true)
+        assertTrue(f.backup.cloudWork.fingerprints>0);assertNull(f.state.cycleCheckpoint())
+    }
+
+    @Test fun syncSkipSchemaChangeAndCursorGapForceFullPath()=runBlocking {
+        val f=fixture();f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        f.db.openHelper.writableDatabase.execSQL("ALTER TABLE notes ADD COLUMN futureColumn TEXT")
+        f.backup.cloudWork.reset();f.service.syncNow(manual=true)
+        assertTrue(f.backup.cloudWork.fingerprints>0)
+        assertNotNull(f.state.cycleCheckpoint())
+        f.recordStore.resetCursor(f.client.scopeId(session))
+        f.backup.cloudWork.reset();f.service.syncNow(manual=true)
+        assertTrue(f.backup.cloudWork.fingerprints>0)
+    }
+
+    @Test fun syncSkipRemoteOnlyAppliesWithoutExportOrFingerprint()=runBlocking {
+        val f=fixture();f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        seedNotesHead(f,"watch",archive=null)
+        f.backup.cloudWork.reset()
+        assertEquals(1,f.service.syncNow(manual=true).snapshotsApplied)
+        assertEquals(0,f.backup.cloudWork.exports);assertEquals(0,f.backup.cloudWork.fingerprints)
+        assertEquals(0,f.backup.cloudWork.notesZips);assertEquals(0,f.backup.cloudWork.recordHashes)
+    }
+
     @Test
     @org.robolectric.annotation.SQLiteMode(org.robolectric.annotation.SQLiteMode.Mode.NATIVE)
     fun legacyMultiMegabyteRowCloudSyncOwnerClearAndLogoutUseSafeReads()=runBlocking {

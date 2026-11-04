@@ -80,7 +80,10 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
             }
         }
         val ARTICLE_PROVENANCE_CALLBACK=object:RoomDatabase.Callback() {
-            override fun onOpen(db:SupportSQLiteDatabase) { installArticleProvenanceWitnesses(db) }
+            override fun onOpen(db:SupportSQLiteDatabase) {
+                installArticleProvenanceWitnesses(db)
+                installCloudLocalChanges(db)
+            }
         }
         val MIGRATION_18_19=object:Migration(18,19) {
             override fun migrate(database:SupportSQLiteDatabase) {

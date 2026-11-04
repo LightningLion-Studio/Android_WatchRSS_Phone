@@ -15,9 +15,23 @@ import java.util.zip.CRC32
  */
 internal object CloudExportFileWitness {
     data class Revision(val notes:String="0",val privateFiles:String="0")
-    data class Observation(val revision:Revision,val mutations:Long)
+    data class Observation(val revision:Revision,val mutations:Long,val incarnation:String)
+    /** This proof is stamped in each authenticated own head, never inferred from pending flags. */
+    data class PrivateObservation(val token:String,val incarnation:String,val installs:Long) {
+        fun json():JSONObject=JSONObject().put("version",1).put("token",token).put("incarnation",incarnation).put("installs",installs)
+        companion object {
+            fun decode(value:JSONObject?):PrivateObservation?=runCatching {
+                val row=requireNotNull(value);require(row.getInt("version")==1)
+                val token=row.getString("token");require(token=="0" || UUID.fromString(token).toString()==token)
+                val incarnation=row.getString("incarnation");require(UUID.fromString(incarnation).toString()==incarnation)
+                PrivateObservation(token,incarnation,row.getLong("installs").also{require(it>=0)})
+            }.getOrNull()
+        }
+    }
     private data class Record(val generation:Long,val revision:Revision)
     private class State(var record:Record) {
+        val incarnation=UUID.randomUUID().toString()
+        var privateInstalls=0L
         var notesNeedsBump=true
         var privateNeedsBump=true
         // After a restart, an existing token without a receipt is conservatively unpublished.
@@ -95,10 +109,13 @@ internal object CloudExportFileWitness {
         }
     }
     fun revision(filesDir:File):Revision = locked(filesDir){_,state->state.record.revision}
-    fun observe(filesDir:File):Observation = locked(filesDir){_,state->Observation(state.record.revision,state.mutations)}
+    fun observe(filesDir:File):Observation = locked(filesDir){_,state->Observation(state.record.revision,state.mutations,state.incarnation)}
+    fun observePrivate(filesDir:File):PrivateObservation=locked(filesDir){_,state->
+        PrivateObservation(state.record.revision.privateFiles,state.incarnation,state.privateInstalls)
+    }
     fun privateFilesPending(filesDir:File):Boolean = locked(filesDir){_,state->state.privatePending}
     fun complete(filesDir:File,expected:Observation,published:Revision,commit:()->Boolean):Boolean = locked(filesDir) { _,state ->
-        if(Observation(state.record.revision,state.mutations)!=expected)return@locked false
+        if(Observation(state.record.revision,state.mutations,state.incarnation)!=expected)return@locked false
         val notes=published.notes==state.record.revision.notes
         val privateFiles=published.privateFiles==state.record.revision.privateFiles
         val oldNotes=state.notesNeedsBump;val oldPrivate=state.privateNeedsBump
@@ -144,6 +161,7 @@ internal object CloudExportFileWitness {
             }
             if(notes)state.notesPending=true else state.privatePending=true
             state.mutations=Math.addExact(state.mutations,1L)
+            if(!notes)state.privateInstalls=Math.addExact(state.privateInstalls,1L)
             block()
         }
     }

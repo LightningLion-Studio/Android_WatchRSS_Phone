@@ -51,6 +51,9 @@ class AppStorageManager(context: Context) {
         )
     }
 
+    // Cache eviction, not a reader-content deletion: retain presets, originals and cloud copies.
+    // Deliberately do not advance the publication witness just to remove regenerable local variants.
+    // The Settings action promises that these copies will be generated again when required.
     suspend fun clearWatchBackgroundCopies(): Long = withContext(Dispatchers.IO) {
         val directory = File(
             File(appContext.filesDir, ReaderResourceStore.ROOT_DIRECTORY),

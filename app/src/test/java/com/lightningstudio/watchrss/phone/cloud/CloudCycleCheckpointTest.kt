@@ -25,7 +25,8 @@ class CloudCycleCheckpointTest {
         assertFalse(receipt.compatible(receipt.context,"40",99))
         assertFalse(receipt.compatible(receipt.context,"40",86_400_100))
         assertNull(CloudCycleCheckpoint.decode("{}"))
-        assertNull(CloudCycleCheckpoint.decode(receipt.encode().replace("\"version\":2","\"version\":3")))
+        assertNull("pre-FIX-3 receipts cannot certify old incomplete archives",CloudCycleCheckpoint.decode(receipt.encode().replace("\"version\":3","\"version\":2")))
+        assertNull(CloudCycleCheckpoint.decode(receipt.encode().replace("\"version\":3","\"version\":4")))
     }
     @Test fun failureToPersistNeverLeavesAnEligibleReceiptEvenInTheSameProcess() {
         val prefs=MemoryPreferences();val state=PhoneCloudStateStore(prefs)

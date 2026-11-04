@@ -6,6 +6,11 @@ internal fun validateCloudManifestHeadIdentity(expected: CloudSnapshotHead, actu
 }
 
 internal object CloudSnapshotReuse {
+    const val PRIVATE_FILES_OBSERVATION = "privateFilesObservationV1"
+    fun privateFilesProven(manifest:CloudSnapshotManifest,owner:Owner,observation:com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.PrivateObservation):Boolean =
+        owner.current(manifest) && com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.PrivateObservation.decode(
+            manifest.settings.optJSONObject(PRIVATE_FILES_OBSERVATION))==observation
+
     const val OWN_OBJECTS_VERSION = 1
     const val OWN_OBJECTS_SETTING = "phoneOwnObjectsVersion"
     private val knownObjectNames = setOf("private-library.wrss","library-sync.json","rss-state.json","notes-state.json","notes-assets.zip",CloudPrivateOverlay.NAME)

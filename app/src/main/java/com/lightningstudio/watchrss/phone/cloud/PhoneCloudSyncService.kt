@@ -1873,6 +1873,10 @@ class PhoneCloudSyncService(
                         .any{!java.io.File(appContext.filesDir,"notes/assets/$it").isFile}
                 })return upgradePending()
         }
+        val privateObservation=CloudExportFileWitness.observePrivate(appContext.filesDir)
+        fun filesProven(manifest:CloudSnapshotManifest)=CloudSnapshotReuse.privateFilesProven(manifest,owner,privateObservation)
+        val provenOwnManifests=ownManifests.filter(::filesProven)
+        val privateProofChanged=fullTransfer && (previous==null || !filesProven(previous))
         val privateFingerprint = if (fullTransfer) backupService.privateCloudFingerprint() else previous?.settings?.optString("privateBodyFingerprintV2")?.takeIf { it.isNotBlank() }
         val pendingManifest = cache.loadPendingManifest(scope)?.let { (id, bytes) ->
             runCatching { codec.decryptManifest(accountKey,id,bytes) }.getOrNull()?.takeIf {
@@ -1881,11 +1885,9 @@ class PhoneCloudSyncService(
             }
         }
         val writeOverlay = formatWritePolicy.localWrite && formatWritePolicy.canWrite(client.formatCapabilities(session))
-        val privateFilesRevision=CloudExportFileWitness.revision(appContext.filesDir).privateFiles
-        val privateFilesPending=CloudExportFileWitness.privateFilesPending(appContext.filesDir)
-        val forcePrivateArchive=privateFilesPending || previous!=null && previous.settings.optString("privateFilesRevision","0")!=privateFilesRevision
+        val privateFilesRevision=privateObservation.token
         val bodySource = (ownManifests + listOfNotNull(pendingManifest)).firstOrNull {
-            !forcePrivateArchive && (CloudSnapshotReuse.canCarry(it, owner, keyVersion, privateFingerprint) ||
+            filesProven(it) && (CloudSnapshotReuse.canCarry(it, owner, keyVersion, privateFingerprint) ||
                 writeOverlay && owner.current(it) && it.objects.any{d->d.name==PRIVATE_LIBRARY_OBJECT && d.access==CloudFormatAccess.WRITABLE})
         }
         if(fullTransfer && !writeOverlay && ownManifests.any{it.objects.any{d->d.name==CloudPrivateOverlay.NAME}} &&
@@ -1947,14 +1949,15 @@ class PhoneCloudSyncService(
         val parentHeads = mergedHeads.associate { it.sourceDeviceId to it.id }
         val observedHeads = mergedHeads.associate { it.sourceDeviceId to it.deviceSequence }
         val contentHash = CloudSnapshotContent.hash(logicalObjects, carried, keyVersion, privateFingerprint)
-        val contentChanged = privateFilesPending || ownershipUpgrade || previous?.settings?.optString("snapshotContentHashV3") != contentHash
+        val contentChanged = privateProofChanged || ownershipUpgrade || previous?.settings?.optString("snapshotContentHashV3") != contentHash
         val lastPublished = maxOf(settings.lastSnapshotPublishedAt,
             heads.filter { it.sourceDeviceId == deviceId }.mapNotNull { head -> head.completedAt?.let { runCatching { java.time.Instant.parse(it).toEpochMilli() }.getOrNull() } }.maxOrNull() ?: 0)
         if (!CloudContentPolicy.shouldPublish(contentChanged, manual || ownershipUpgrade, lastPublished, System.currentTimeMillis())) {
             val due = if (contentChanged && !manual) lastPublished + CloudContentPolicy.MIN_SNAPSHOT_INTERVAL_MS else 0L
             createdArchive?.file?.delete()
             if (due > 0) PhoneCloudSyncWorker.scheduleSnapshot(appContext,due-System.currentTimeMillis())
-            return UploadOutcome(false,0,ownershipReady=!ownershipUpgrade,confirmedArticleIds=if (fullTransfer) CloudSnapshotReuse.completedArticleIds(ownManifests,owner,keyVersion,privateFingerprint) else emptySet(),deferredUntil=due,confirmedBookIds=if(fullTransfer) CloudSnapshotReuse.completedBookIds(ownManifests,owner,keyVersion,privateFingerprint) else emptySet())
+            val stillProven=if(fullTransfer && privateObservation==CloudExportFileWitness.observePrivate(appContext.filesDir))provenOwnManifests else emptyList()
+            return UploadOutcome(false,0,ownershipReady=!ownershipUpgrade,confirmedArticleIds=CloudSnapshotReuse.completedArticleIds(stillProven,owner,keyVersion,privateFingerprint),deferredUntil=due,confirmedBookIds=CloudSnapshotReuse.completedBookIds(stillProven,owner,keyVersion,privateFingerprint))
         }
         for(manifest in ownHeads) {
             try { CloudSnapshotReuse.requireOwnPublicationWritable(manifest) }
@@ -1975,6 +1978,11 @@ class PhoneCloudSyncService(
         val snapshotSettings = org.json.JSONObject().put("backendScope",scope).put("contentGeneration",client.knownContentGeneration(session)).put("privateBodyBookIds",JSONArray(bookIds.sorted())).put("snapshotContentLayout",3).put("libraryEpoch",bootstrap.libraryEpoch)
             .put("privateFilesRevision",privateFilesRevision).put("ownerUserId",session.userId).put("snapshotContentHashV3",contentHash).put("privateBodyArticleIds",JSONArray(bodyIds.sorted()))
             .put(CloudSnapshotReuse.OWN_OBJECTS_SETTING,CloudSnapshotReuse.OWN_OBJECTS_VERSION)
+        // Stamp only the observation actually used by this export/carry. A concurrent install
+        // leaves this head unproven, even if a different scope later consumes the root window.
+        if(fullTransfer && privateObservation==CloudExportFileWitness.observePrivate(appContext.filesDir)) {
+            snapshotSettings.put(CloudSnapshotReuse.PRIVATE_FILES_OBSERVATION,privateObservation.json())
+        }
         if (privateFingerprint != null && (!fullTransfer || privateFingerprint == backupService.privateCloudFingerprint())) {
             snapshotSettings.put("privateBodyFingerprintV2",privateFingerprint)
         }
@@ -2082,10 +2090,11 @@ class PhoneCloudSyncService(
         settings.markUploaded(contentHash,parentHeads,full = false)
         settings.lastSnapshotPublishedAt = System.currentTimeMillis()
         if(ownershipUpgrade)settings.ownershipUpgradeAttemptAt=0
+        val privateStillProven=fullTransfer && privateObservation==CloudExportFileWitness.observePrivate(appContext.filesDir)
         return UploadOutcome(true, uploadedBytes, ownershipReady=true,
             publishedHead=CloudSnapshotHead(encrypted.manifest.snapshotId,deviceId,encrypted.manifest.deviceSequence,keyVersion,
-                CloudSnapshotCodec.sha256(encrypted.encryptedManifest),encrypted.encryptedManifest.size.toLong(),parentHeads,observedHeads), confirmedArticleIds=if (fullTransfer && privateFingerprint == backupService.privateCloudFingerprint()) bodyIds else emptySet(),
-            confirmedBookIds=if (fullTransfer && privateFingerprint == backupService.privateCloudFingerprint()) bookIds else emptySet())
+                CloudSnapshotCodec.sha256(encrypted.encryptedManifest),encrypted.encryptedManifest.size.toLong(),parentHeads,observedHeads), confirmedArticleIds=if (privateStillProven && privateFingerprint == backupService.privateCloudFingerprint()) bodyIds else emptySet(),
+            confirmedBookIds=if (privateStillProven && privateFingerprint == backupService.privateCloudFingerprint()) bookIds else emptySet())
         } finally {createdArchive?.file?.delete()}
     }
 

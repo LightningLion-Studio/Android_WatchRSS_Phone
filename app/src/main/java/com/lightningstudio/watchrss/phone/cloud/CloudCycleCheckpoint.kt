@@ -23,7 +23,7 @@ internal data class CloudCycleCheckpoint(
             else -> CloudCyclePlan.IDLE
         }
     }
-    fun encode():String = JSONObject().put("version",2).put("context",context).put("heads",JSONObject(heads))
+    fun encode():String = JSONObject().put("version",3).put("context",context).put("heads",JSONObject(heads))
         .put("localMaxSeq",localMaxSeq).put("recordsCursor",recordsCursor).put("fullCheckedAt",fullCheckedAt).put("notesFilesRevision",filesRevision.notes).put("privateFilesRevision",filesRevision.privateFiles).toString()
     companion object {
         fun identities(heads:List<CloudSnapshotHead>):Map<String,String> {
@@ -31,7 +31,7 @@ internal data class CloudCycleCheckpoint(
             return heads.associate{it.id to it.manifestSha256}
         }
         fun decode(raw:String?):CloudCycleCheckpoint? = runCatching {
-            val j=JSONObject(requireNotNull(raw));require(j.getInt("version")==2)
+            val j=JSONObject(requireNotNull(raw));require(j.getInt("version")==3)
             val heads=j.getJSONObject("heads")
             CloudCycleCheckpoint(j.getString("context"),heads.keys().asSequence().associateWith{heads.getString(it)},
                 j.getLong("localMaxSeq").also{require(it>=0)},j.getString("recordsCursor"),j.getLong("fullCheckedAt"),

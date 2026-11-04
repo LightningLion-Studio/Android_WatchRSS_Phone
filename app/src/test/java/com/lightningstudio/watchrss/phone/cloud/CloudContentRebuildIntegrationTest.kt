@@ -79,7 +79,7 @@ class CloudContentRebuildIntegrationTest {
     private val session=PhoneAccountSession("rebuild-owner","***","session","refresh",Long.MAX_VALUE)
     private val key=ByteArray(32) {it.toByte()}
     private val fixtures=mutableListOf<Fixture>()
-    private inner class Fixture(val initialEmpty:Boolean=true, val failStage:String?=null, val alwaysFail:Boolean=false) {
+    private inner class Fixture(val initialEmpty:Boolean=true, val failStage:String?=null, val alwaysFail:Boolean=false, val backend:String="https://test.invalid", val accountSession:PhoneAccountSession=session) {
         val context:Context=RuntimeEnvironment.getApplication()
         val scope=CoroutineScope(SupervisorJob()+Dispatchers.Default)
         val db=Room.inMemoryDatabaseBuilder(context,PhoneCompanionDatabase::class.java).addCallback(PhoneCompanionDatabase.ARTICLE_PROVENANCE_CALLBACK).allowMainThreadQueries().build()
@@ -91,14 +91,14 @@ class CloudContentRebuildIntegrationTest {
         val statePreferences=MemoryPreferences()
         val migrationPreferences=MemoryPreferences()
         val state=PhoneCloudStateStore(statePreferences)
-        val keys=CloudKeyManager(null,preferencesOverride=MemoryPreferences()).also {it.bindBackend("https://test.invalid");it.saveVerifiedKeys(session.userId,mapOf(1 to key))}
-        val publicKey=keys.devicePublicKeySpki(session.userId,"phone")
+        val keys=CloudKeyManager(null,preferencesOverride=MemoryPreferences()).also {it.bindBackend(backend);it.saveVerifiedKeys(accountSession.userId,mapOf(1 to key))}
+        val publicKey=keys.devicePublicKeySpki(accountSession.userId,"phone")
         val cacheDir=java.io.File.createTempFile("cloud-r45-","",context.cacheDir).apply{delete();mkdirs()}
         val cache=CloudLocalCache(cacheDir)
         val sessionStore=EncryptedAccountSessionStore(context).also { store ->
             EncryptedAccountSessionStore::class.java.getDeclaredField("prefsRef").apply{isAccessible=true}.set(store,MemoryPreferences())
         }
-        val env=AccountEnvironment(backendBaseUrl="https://test.invalid")
+        val env=AccountEnvironment(backendBaseUrl=backend)
         val account=PhoneAccountRepository(env,sessionStore,PhoneInstallationIdentity(context),PhoneAccountClient(env,LicenseDeviceIdentity(context)),"phone")
         var generation=after
         var sequence=0L
@@ -171,11 +171,11 @@ class CloudContentRebuildIntegrationTest {
                     request.method=="GET" && path.contains("/cloud/snapshots/") -> {
                         val plan=plans.single{it.getString("snapshotId")==path.substringAfterLast('/')}
                         val head=JSONObject(ready.single{it.getString("id")==plan.getString("snapshotId")}.toString())
-                        head.put("manifestSignedUrl","https://test.invalid/r48-fixture-blob/"+head.getString("manifestSha256"))
+                        head.put("manifestSignedUrl","$backend/r48-fixture-blob/"+head.getString("manifestSha256"))
                         val chunks=JSONArray()
                         if(request.url.queryParameter("manifestOnly")!="true")for(i in 0 until plan.getJSONArray("chunks").length()) {
                             val c=plan.getJSONArray("chunks").getJSONObject(i)
-                            chunks.put(JSONObject(c.toString()).put("signedUrl","https://test.invalid/r48-fixture-blob/"+c.getString("sha256")))
+                            chunks.put(JSONObject(c.toString()).put("signedUrl","$backend/r48-fixture-blob/"+c.getString("sha256")))
                         }
                         JSONObject().put("snapshot",head).put("chunks",chunks)
                     }
@@ -187,7 +187,7 @@ class CloudContentRebuildIntegrationTest {
                         val missing=JSONArray();latestObjectIds.clear()
                         fun add(kind:String,sha:String,size:Long) {
                             if(deduplicateStoredChunks && sha in r48Blobs)return
-                            val id=UUID.randomUUID().toString();val target=JSONObject().put("kind",kind).put("sha256",sha).put("sizeBytes",size).put("objectPath","owner/$id").put("reservationId",id).put("uploadUrl","https://test.invalid/functions/v1/cloud/uploads/$id").put("transport","epoch-proxy").put("uploadMethod","PUT")
+                            val id=UUID.randomUUID().toString();val target=JSONObject().put("kind",kind).put("sha256",sha).put("sizeBytes",size).put("objectPath","owner/$id").put("reservationId",id).put("uploadUrl","$backend/functions/v1/cloud/uploads/$id").put("transport","epoch-proxy").put("uploadMethod","PUT")
                             objects[id]=target;latestObjectIds+=id;missing.put(target)
                         }
                         add("manifest",body.getJSONObject("manifest").getString("sha256"),body.getJSONObject("manifest").getLong("sizeBytes"))
@@ -232,21 +232,21 @@ class CloudContentRebuildIntegrationTest {
         val recordStore get()=(PhoneCloudSyncService::class.java.getDeclaredField("recordStore").apply{isAccessible=true}.get(service) as PhoneCloudRecordStore)
         fun bootstrap()=JSONObject().put("libraryEpoch",bootstrapEpoch).put("contentGeneration",generation).put("contentEmpty",initialEmpty&&ready.isEmpty()&&recordRows.isEmpty())
             .put("member",JSONObject().put("active",true).put("writable",true).put("readable",true).put("quotaBytes",1000000).put("usedBytes",if(completed>0)777 else 0).put("reservedBytes",if(completed>0)0 else 100))
-            .put("keyVersionFloor",0).put("keyCommitments",JSONArray(keys.keyVersions(session.userId).map { version ->
-                JSONObject().put("keyVersion",version).put("commitment",CloudProtocolV2.commitment(requireNotNull(keys.getAccountKey(session.userId,version)),session.userId,epoch,version)) }))
+            .put("keyVersionFloor",0).put("keyCommitments",JSONArray(keys.keyVersions(accountSession.userId).map { version ->
+                JSONObject().put("keyVersion",version).put("commitment",CloudProtocolV2.commitment(requireNotNull(keys.getAccountKey(accountSession.userId,version)),accountSession.userId,epoch,version)) }))
             .put("keyEnvelopes",JSONArray()).put("devices",JSONArray().put(JSONObject().put("deviceId","phone").put("platform","phone").put("publicKeySpki",publicKey).put("keyVersion",1).put("lastSequence",sequence)))
         suspend fun initialize() {
-            sessionStore.save(session)
-            state.bindScope(env.backendBaseUrl,session.userId);state.ownerUserId=session.userId;state.libraryEpoch=epoch
+            sessionStore.save(accountSession)
+            state.bindScope(env.backendBaseUrl,accountSession.userId);state.ownerUserId=accountSession.userId;state.libraryEpoch=epoch
             state.observeContentGeneration(before,false){};state.markApplied("old-phone",900,true);state.markUploaded("stale",mapOf("old-phone" to "gone"),true);state.lastSnapshotPublishedAt=System.currentTimeMillis()
-            val oldId="11111111-1111-4111-8111-111111111119";cache.storePendingManifest(client.scopeId(session),oldId,byteArrayOf(1),emptyList())
+            val oldId="11111111-1111-4111-8111-111111111119";cache.storePendingManifest(client.scopeId(accountSession),oldId,byteArrayOf(1),emptyList())
             val manager=context.getSystemService(ConnectivityManager::class.java)
             val shadow=Shadows.shadowOf(manager)
             shadow.setActiveNetworkInfo(ShadowNetworkInfo.newInstance(NetworkInfo.DetailedState.CONNECTED,ConnectivityManager.TYPE_WIFI,0,true,true))
             val caps=NetworkCapabilities();Shadows.shadowOf(caps).addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);Shadows.shadowOf(caps).addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
             shadow.setNetworkCapabilities(manager.activeNetwork,caps)
             service=PhoneCloudSyncService(context,account,backup,repository,NoteRepository(db.noteDao(),"phone"),"phone",client,keyManager=keys,settings=state,cache=cache,migrationPreferences=CloudMigrationPreferences(null,migrationPreferences))
-            val owner=client.scopeId(session)
+            val owner=client.scopeId(accountSession)
             recordStore.advance(owner,"900");recordStore.save(owner,"stale-cas","900","stale-hash")
             recordStore.saveRawEnvelope(owner,"stale-cas","{}")
             recordStore.quarantine(owner,QuarantinedCloudRecord("old-quarantine","900",9,"missing_key","{}"))
@@ -361,6 +361,95 @@ class CloudContentRebuildIntegrationTest {
         }
         assertArrayEquals(late,restored)
         assertNotNull(f.state.cycleCheckpoint())
+    }
+
+    @Test fun reviewR2OtherBackendReceiptCannotConsumeLateBytesForThisBackend()=runBlocking {
+        val f=fixture()
+        val early="early font".toByteArray();val late="late font".toByteArray()
+        suspend fun metadata(name:String,bytes:ByteArray) {
+            f.reader.resourceStore.targetFontFile(name).delete()
+            f.db.readerPresetDao().upsertFont(com.lightningstudio.watchrss.phone.data.reader.ReaderFontAssetEntity(name,CloudSnapshotCodec.sha256(bytes),name,name,name,"font/ttf",bytes.size.toLong(),1,"{}",1,"phone",false))
+        }
+        fun install(name:String,bytes:ByteArray) {
+            val hash=CloudSnapshotCodec.sha256(bytes)
+            assertTrue(com.lightningstudio.watchrss.phone.connection.bluetooth.ReaderPresetSyncPayload.applyPulledChunk(
+                JSONObject().put("data",java.util.Base64.getEncoder().encodeToString(bytes)).put("chunkSha256",hash).put("chunkIndex",0).put("chunkCount",1),
+                com.lightningstudio.watchrss.phone.connection.bluetooth.ResourceDescriptor("font",name,hash,bytes.size.toLong()),f.reader))
+        }
+        metadata("review-r2-early.ttf",early);metadata("review-r2-late.ttf",late)
+        f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        assertNotNull(f.state.cycleCheckpoint())
+        install("review-r2-early.ttf",early)
+        val witness=com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness
+        val token=witness.revision(f.context.filesDir)
+        f.onComplete={install("review-r2-late.ttf",late);assertEquals(token,witness.revision(f.context.filesDir))}
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertNull(f.state.cycleCheckpoint())
+        assertTrue(witness.privateFilesPending(f.context.filesDir))
+        val g=Fixture(backend="https://other.invalid").also{fixtures+=it;it.initialize()}
+        g.recordStore.close()
+        g.service=PhoneCloudSyncService(f.context,g.account,f.backup,f.repository,notes(f),"phone",g.client,keyManager=g.keys,settings=g.state,cache=g.cache,
+            migrationPreferences=CloudMigrationPreferences(null,g.migrationPreferences))
+        assertNotEquals(f.client.scopeId(session),g.client.scopeId(session))
+        assertTrue(g.service.syncNow(manual=true).snapshotUploaded)
+        g.service.syncNow(manual=true)
+        assertNotNull(g.state.cycleCheckpoint())
+        assertFalse(witness.privateFilesPending(f.context.filesDir))
+        f.backup.cloudWork.reset()
+        val result=f.service.syncNow(manual=true)
+        repeat(2){f.service.syncNow(manual=true)}
+        val archive=completedNotesObjects(f).getValue("private-library.wrss")
+        var lateFound=false
+        java.util.zip.ZipInputStream(archive.inputStream()).use {zip ->
+            while(true){val entry=zip.nextEntry ?: break;if(entry.name=="reader/fonts/${CloudSnapshotCodec.sha256(late)}.bin")lateFound=true}
+        }
+        println("REVIEW_R2_TWO_SCOPES republished=${result.snapshotUploaded} lateFound=$lateFound archiveExports=${f.backup.cloudWork.exports} checkpoint=${f.state.cycleCheckpoint()!=null}")
+        assertTrue("the original backend must publish bytes installed after its older archive",lateFound)
+    }
+    @Test fun reviewR2OtherAccountReceiptCannotConsumeLateBytesForThisAccount()=runBlocking {
+        val f=fixture()
+        val early="early font".toByteArray();val late="late font".toByteArray()
+        suspend fun metadata(name:String,bytes:ByteArray) {
+            f.reader.resourceStore.targetFontFile(name).delete()
+            f.db.readerPresetDao().upsertFont(com.lightningstudio.watchrss.phone.data.reader.ReaderFontAssetEntity(name,CloudSnapshotCodec.sha256(bytes),name,name,name,"font/ttf",bytes.size.toLong(),1,"{}",1,"phone",false))
+        }
+        fun install(name:String,bytes:ByteArray) {
+            val hash=CloudSnapshotCodec.sha256(bytes)
+            assertTrue(com.lightningstudio.watchrss.phone.connection.bluetooth.ReaderPresetSyncPayload.applyPulledChunk(
+                JSONObject().put("data",java.util.Base64.getEncoder().encodeToString(bytes)).put("chunkSha256",hash).put("chunkIndex",0).put("chunkCount",1),
+                com.lightningstudio.watchrss.phone.connection.bluetooth.ResourceDescriptor("font",name,hash,bytes.size.toLong()),f.reader))
+        }
+        metadata("review-r2-early.ttf",early);metadata("review-r2-late.ttf",late)
+        f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        assertNotNull(f.state.cycleCheckpoint())
+        install("review-r2-early.ttf",early)
+        val witness=com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness
+        val token=witness.revision(f.context.filesDir)
+        f.onComplete={install("review-r2-late.ttf",late);assertEquals(token,witness.revision(f.context.filesDir))}
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertNull(f.state.cycleCheckpoint())
+        assertTrue(witness.privateFilesPending(f.context.filesDir))
+        f.service.discardSessionCloudState(session) // same clearing callback used on account switch
+        val g=Fixture(accountSession=session.copy(userId="other-owner")).also{fixtures+=it;it.initialize()}
+        g.recordStore.close()
+        g.service=PhoneCloudSyncService(f.context,g.account,f.backup,f.repository,notes(f),"phone",g.client,keyManager=g.keys,settings=g.state,cache=g.cache,
+            migrationPreferences=CloudMigrationPreferences(null,g.migrationPreferences))
+        assertNotEquals(f.client.scopeId(session),g.client.scopeId(g.accountSession))
+        assertTrue(g.service.syncNow(manual=true).snapshotUploaded)
+        g.service.syncNow(manual=true)
+        assertNotNull(g.state.cycleCheckpoint())
+        assertFalse(witness.privateFilesPending(f.context.filesDir))
+        f.keys.saveVerifiedKeys(session.userId,mapOf(1 to key)) // restored authorization on return
+        f.backup.cloudWork.reset()
+        val result=f.service.syncNow(manual=true)
+        repeat(2){f.service.syncNow(manual=true)}
+        val archive=completedNotesObjects(f).getValue("private-library.wrss")
+        var lateFound=false
+        java.util.zip.ZipInputStream(archive.inputStream()).use {zip ->
+            while(true){val entry=zip.nextEntry ?: break;if(entry.name=="reader/fonts/${CloudSnapshotCodec.sha256(late)}.bin")lateFound=true}
+        }
+        println("REVIEW_R2_TWO_ACCOUNTS republished=${result.snapshotUploaded} lateFound=$lateFound archiveExports=${f.backup.cloudWork.exports} checkpoint=${f.state.cycleCheckpoint()!=null}")
+        assertTrue("the original account must publish bytes installed after its older archive",lateFound)
     }
 
     @Test fun syncSkipIdleRealSizeLibraryDoesZeroProducerWork()=runBlocking {

@@ -41,10 +41,19 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
         val next=Math.addExact(invalidationVersion(),1L)
         check(preferences.edit().remove(scoped("cycle_checkpoint_v1")).putLong(scoped("cycle_invalidation_version"),next).commit())
     }
-    internal fun completeCycle(checkpoint:CloudCycleCheckpoint, admission:CycleAdmission):Boolean = synchronized(preferences) {
+    internal fun closedPrivateArchive():ClosedPrivateArchiveProof? = synchronized(preferences) {
+        ClosedPrivateArchiveProof.decode(preferences.getString(scoped("closed_private_archive_v1"),null))
+    }
+    internal fun completeCycle(checkpoint:CloudCycleCheckpoint, admission:CycleAdmission,closedPrivateArchive:ClosedPrivateArchiveProof?=null):Boolean = synchronized(preferences) {
         if(scope!=admission.scope || invalidationVersion()!=admission.version)return@synchronized false
         failedCycleScopes.add(scope)
-        check(preferences.edit().putString(scoped("cycle_checkpoint_v1"),checkpoint.encode()).commit())
+        val edit=preferences.edit().putString(scoped("cycle_checkpoint_v1"),checkpoint.encode())
+        if(closedPrivateArchive!=null) {
+            require(checkpoint.heads[closedPrivateArchive.headId]==closedPrivateArchive.manifestSha256 &&
+                checkpoint.filesRevision.privateFiles==closedPrivateArchive.token)
+            edit.putString(scoped("closed_private_archive_v1"),closedPrivateArchive.encode())
+        }
+        check(edit.commit())
         failedCycleScopes.remove(scope)
         true
     }
@@ -229,6 +238,7 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
         check(
             preferences.edit()
                 .apply { if (!preserveDeviceSequence) remove(scoped(KEY_DEVICE_SEQUENCE)) }
+                .remove(scoped("closed_private_archive_v1"))
                 .remove(scoped("last_snapshot_published_at_v3"))
                 .remove(scoped("ownership_attempt_at"))
                 .remove(scoped("ownership_attempt_epoch"))

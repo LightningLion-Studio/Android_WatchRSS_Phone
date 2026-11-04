@@ -1432,8 +1432,14 @@ class PhoneCloudSyncService(
                     checkCloudEpoch(session,syncEpoch)
                     val filesNow=CloudExportFileWitness.observe(appContext.filesDir)
                     if(plan==CloudCyclePlan.APPLY || filesNow==filesAtPublish)CloudExportFileWitness.complete(appContext.filesDir,filesNow,publishedFiles) {
+                        // FULL/PUBLISH observed an unchanged export window. Persist its exact own
+                        // head closure in the same commit; APPLY must not certify newly arrived bytes.
+                        val ownHead=if(publishLocal)completedHeads.singleOrNull{it.sourceDeviceId==deviceId} else null
+                        val closed=ownHead?.let { head -> ClosedPrivateArchiveProof(
+                            CloudSnapshotReuse.Owner(deviceId,session.userId,syncEpoch,client.scopeId(session),requireNotNull(client.knownContentGeneration(session))),
+                            head.id,head.manifestSha256,publishedFiles.privateFiles) }
                         settings.completeCycle(CloudCycleCheckpoint(cycleContext,CloudCycleCheckpoint.identities(completedHeads),localSequenceAtPublish,
-                            recordStore.cursor(client.scopeId(session)),if(plan==CloudCyclePlan.FULL)System.currentTimeMillis() else requireNotNull(previousCycle).fullCheckedAt,publishedFiles),admission)
+                            recordStore.cursor(client.scopeId(session)),if(plan==CloudCyclePlan.FULL)System.currentTimeMillis() else requireNotNull(previousCycle).fullCheckedAt,publishedFiles),admission,closed)
                     }
                 }
                 PhoneCloudSyncResult(
@@ -1874,7 +1880,9 @@ class PhoneCloudSyncService(
                 })return upgradePending()
         }
         val privateObservation=CloudExportFileWitness.observePrivate(appContext.filesDir)
-        fun filesProven(manifest:CloudSnapshotManifest)=CloudSnapshotReuse.privateFilesProven(manifest,owner,privateObservation)
+        val closedPrivateArchive=settings.closedPrivateArchive()
+        fun filesProven(manifest:CloudSnapshotManifest)=CloudSnapshotReuse.privateFilesProven(manifest,owner,privateObservation,
+            closedPrivateArchive,heads.singleOrNull{it.id==manifest.snapshotId}?.manifestSha256)
         val provenOwnManifests=ownManifests.filter(::filesProven)
         val privateProofChanged=fullTransfer && (previous==null || !filesProven(previous))
         val privateFingerprint = if (fullTransfer) backupService.privateCloudFingerprint() else previous?.settings?.optString("privateBodyFingerprintV2")?.takeIf { it.isNotBlank() }

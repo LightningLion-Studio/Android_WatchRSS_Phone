@@ -452,6 +452,79 @@ class CloudContentRebuildIntegrationTest {
         assertTrue("the original account must publish bytes installed after its older archive",lateFound)
     }
 
+    private fun restartFix4(f:Fixture):WatchRssBackupService {
+        f.recordStore.close()
+        com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.forgetProcessForTest(f.context.filesDir)
+        val backup=WatchRssBackupService(f.context,f.db,f.repository,f.reader,"phone")
+        val settings=PhoneCloudStateStore(f.statePreferences)
+        f.service=PhoneCloudSyncService(f.context,f.account,backup,f.repository,notes(f),"phone",f.client,keyManager=f.keys,settings=settings,cache=f.cache,
+            migrationPreferences=CloudMigrationPreferences(null,f.migrationPreferences))
+        return backup
+    }
+    @Test fun fix4RestartWithoutFileWritesNotePublishDoesZeroPrivateExports()=runBlocking {
+        val f=fixture();val rng=java.util.Random(4844)
+        f.db.phoneArticleDao().upsertAll((0 until 2000).map { i ->
+            val text=java.util.Base64.getEncoder().encodeToString(ByteArray(2048).also(rng::nextBytes))
+            PhoneArticleEntity("fix4-$i","phone","https://fixture.invalid/fix4/$i","Title $i","Site","",null,text,null,CloudSnapshotCodec.sha256(text.toByteArray()),1,10,true,10,i.toLong(),null,null,false,0,0,false,0,0,false,0)
+        })
+        val ids=com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
+        val source=ids.txtNovelSourceUrl("fix4-book")
+        f.db.phoneRssSourceDao().upsert(PhoneRssSourceEntity(source,"phone","Book","",null,null,1,10,1,false,false,0))
+        f.db.phoneArticleDao().upsertAll((0..1).map {i->val text="Chapter $i "+"book text ".repeat(20000);PhoneArticleEntity("fix4-chapter-$i","phone",ids.txtNovelChapterUrl("fix4-book",i,"hash"),"Chapter $i","Book","",null,text,null,CloudSnapshotCodec.sha256(text.toByteArray()),1,10,false,0,0,source,"Book",false,0,0,false,0,0,false,0)})
+        notes(f).save("fix4-note","Note","before")
+        f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        assertNotNull(f.state.cycleCheckpoint());assertEquals(1,f.books.availableBooks().size)
+        val backup=restartFix4(f)
+        notes(f).save("fix4-note","Note","after process death")
+        backup.cloudWork.reset();f.requestPaths.clear()
+        val start=System.nanoTime();val result=f.service.syncNow(manual=true);val wall=(System.nanoTime()-start)/1_000_000.0
+        println("FIX4_CLOSED_RESTART "+backup.cloudWork.json().put("wallMs",wall).put("articles",2000).put("books",1))
+        assertTrue(result.snapshotUploaded)
+        assertEquals("closed scoped file window must survive process death",0,backup.cloudWork.exports)
+        assertEquals(1,f.requestPaths.count{it.endsWith("/records")}) // PUBLISH, not a full restore pass
+        assertEquals("after process death",NoteCloudStateCodec.decode(completedNotesObjects(f).getValue("notes-state.json")).single().markdown)
+    }
+    @Test fun fix4RestartAfterFileWriteStillRebuildsPrivateArchive()=runBlocking {
+        val f=fixture();val bytes="file installed after process death".toByteArray();val hash=CloudSnapshotCodec.sha256(bytes);val name="fix4-late.ttf"
+        f.reader.resourceStore.targetFontFile(name).delete()
+        f.db.readerPresetDao().upsertFont(com.lightningstudio.watchrss.phone.data.reader.ReaderFontAssetEntity(name,hash,name,name,name,"font/ttf",bytes.size.toLong(),1,"{}",1,"phone",false))
+        f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        assertTrue(com.lightningstudio.watchrss.phone.connection.bluetooth.ReaderPresetSyncPayload.applyPulledChunk(
+            JSONObject().put("data",java.util.Base64.getEncoder().encodeToString(bytes)).put("chunkSha256",hash).put("chunkIndex",0).put("chunkCount",1),
+            com.lightningstudio.watchrss.phone.connection.bluetooth.ResourceDescriptor("font",name,hash,bytes.size.toLong()),f.reader))
+        val backup=restartFix4(f)
+        backup.cloudWork.reset();val start=System.nanoTime()
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        println("FIX4_OPEN_RESTART "+backup.cloudWork.json().put("wallMs",(System.nanoTime()-start)/1_000_000.0))
+        assertTrue("a new file token must require a private export",backup.cloudWork.exports>0)
+        var found:ByteArray?=null
+        java.util.zip.ZipInputStream(completedNotesObjects(f).getValue("private-library.wrss").inputStream()).use { zip ->
+            while(true){val entry=zip.nextEntry ?: break;if(entry.name=="reader/fonts/$hash.bin")found=zip.readBytes()}
+        }
+        assertArrayEquals(bytes,found)
+    }
+
+    @Test fun fix4ClosedWindowSurvivesCycleInvalidationAndRestartIntoFullPass()=runBlocking {
+        val f=fixture();val bytes="closed resource".toByteArray();val hash=CloudSnapshotCodec.sha256(bytes);val name="fix4-closed.ttf"
+        f.reader.resourceStore.targetFontFile(name).delete()
+        f.db.readerPresetDao().upsertFont(com.lightningstudio.watchrss.phone.data.reader.ReaderFontAssetEntity(name,hash,name,name,name,"font/ttf",bytes.size.toLong(),1,"{}",1,"phone",false))
+        assertTrue(com.lightningstudio.watchrss.phone.connection.bluetooth.ReaderPresetSyncPayload.applyPulledChunk(
+            JSONObject().put("data",java.util.Base64.getEncoder().encodeToString(bytes)).put("chunkSha256",hash).put("chunkIndex",0).put("chunkCount",1),
+            com.lightningstudio.watchrss.phone.connection.bluetooth.ResourceDescriptor("font",name,hash,bytes.size.toLong()),f.reader))
+        f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        val closed=requireNotNull(f.state.closedPrivateArchive())
+        assertNotEquals("0",closed.token)
+        f.state.invalidateCycleCheckpoint()
+        assertNull(f.state.cycleCheckpoint());assertEquals(closed,f.state.closedPrivateArchive())
+        val backup=restartFix4(f)
+        notes(f).save("fix4-full-note","Note","force full without new files")
+        backup.cloudWork.reset();f.requestPaths.clear()
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertEquals(0,backup.cloudWork.exports)
+        assertTrue("missing cycle receipt still takes FULL",f.requestPaths.count{it.endsWith("/records")}>1)
+        assertNotNull(f.state.closedPrivateArchive())
+    }
+
     @Test fun syncSkipIdleRealSizeLibraryDoesZeroProducerWork()=runBlocking {
         val f=fixture();val rng=java.util.Random(4811)
         f.db.phoneArticleDao().upsertAll((0 until 2000).map { i ->

@@ -7,9 +7,11 @@ internal fun validateCloudManifestHeadIdentity(expected: CloudSnapshotHead, actu
 
 internal object CloudSnapshotReuse {
     const val PRIVATE_FILES_OBSERVATION = "privateFilesObservationV1"
-    fun privateFilesProven(manifest:CloudSnapshotManifest,owner:Owner,observation:com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.PrivateObservation):Boolean =
-        owner.current(manifest) && com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.PrivateObservation.decode(
-            manifest.settings.optJSONObject(PRIVATE_FILES_OBSERVATION))==observation
+    fun privateFilesProven(manifest:CloudSnapshotManifest,owner:Owner,observation:com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.PrivateObservation,
+        closed:ClosedPrivateArchiveProof?=null,headSha256:String?=null):Boolean = owner.current(manifest) &&
+        (com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.PrivateObservation.decode(
+            manifest.settings.optJSONObject(PRIVATE_FILES_OBSERVATION))==observation ||
+            closed?.proves(manifest,owner,observation.token,headSha256)==true)
 
     const val OWN_OBJECTS_VERSION = 1
     const val OWN_OBJECTS_SETTING = "phoneOwnObjectsVersion"

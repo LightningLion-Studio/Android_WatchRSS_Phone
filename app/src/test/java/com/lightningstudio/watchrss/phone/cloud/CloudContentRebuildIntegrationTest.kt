@@ -329,6 +329,40 @@ class CloudContentRebuildIntegrationTest {
         assertArrayEquals(bytes,found)
     }
 
+    @Test fun witnessCrashAfterLatePrivateWriteReexportsInsteadOfCarryingAnIncompleteOwnHead()=runBlocking {
+        val f=fixture()
+        val early="early font".toByteArray();val late="late font".toByteArray()
+        suspend fun metadata(name:String,bytes:ByteArray) {
+            f.reader.resourceStore.targetFontFile(name).delete()
+            f.db.readerPresetDao().upsertFont(com.lightningstudio.watchrss.phone.data.reader.ReaderFontAssetEntity(name,CloudSnapshotCodec.sha256(bytes),name,name,name,"font/ttf",bytes.size.toLong(),1,"{}",1,"phone",false))
+        }
+        fun install(name:String,bytes:ByteArray) {
+            val hash=CloudSnapshotCodec.sha256(bytes)
+            assertTrue(com.lightningstudio.watchrss.phone.connection.bluetooth.ReaderPresetSyncPayload.applyPulledChunk(
+                JSONObject().put("data",java.util.Base64.getEncoder().encodeToString(bytes)).put("chunkSha256",hash).put("chunkIndex",0).put("chunkCount",1),
+                com.lightningstudio.watchrss.phone.connection.bluetooth.ResourceDescriptor("font",name,hash,bytes.size.toLong()),f.reader))
+        }
+        metadata("early-window.ttf",early);metadata("late-window.ttf",late)
+        f.service.syncNow(manual=true);f.service.syncNow(manual=true)
+        assertNotNull(f.state.cycleCheckpoint())
+        install("early-window.ttf",early)
+        val witness=com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness
+        val token=witness.revision(f.context.filesDir)
+        f.onComplete={install("late-window.ttf",late);assertEquals(token,witness.revision(f.context.filesDir))}
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        assertNull("late installation cannot be consumed by the earlier export",f.state.cycleCheckpoint())
+        witness.forgetProcessForTest(f.context.filesDir)
+        assertEquals(token,witness.revision(f.context.filesDir))
+        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
+        val archive=completedNotesObjects(f).getValue("private-library.wrss")
+        var restored:ByteArray?=null
+        java.util.zip.ZipInputStream(archive.inputStream()).use { zip ->
+            while(true) {val entry=zip.nextEntry ?: break;if(entry.name=="reader/fonts/${CloudSnapshotCodec.sha256(late)}.bin")restored=zip.readBytes()}
+        }
+        assertArrayEquals(late,restored)
+        assertNotNull(f.state.cycleCheckpoint())
+    }
+
     @Test fun syncSkipIdleRealSizeLibraryDoesZeroProducerWork()=runBlocking {
         val f=fixture();val rng=java.util.Random(4811)
         f.db.phoneArticleDao().upsertAll((0 until 2000).map { i ->

@@ -1218,13 +1218,13 @@ class PhoneCloudSyncService(
                 val heads = client.snapshotHeads(session)
                 val localAtStart=repository.getLibrarySyncCursor(null).localMaxSeq
                 val previousCycle=admission.checkpoint
-                val filesAtStart=CloudExportFileWitness.revision(appContext.filesDir)
+                val filesAtStart=CloudExportFileWitness.observe(appContext.filesDir)
                 val cycleContext=cycleContext(session,bootstrap,schema)
                 val eligible=fullTransfer && !retryingTransfer && cycleCanCheckpoint(session,bootstrap) &&
                     previousCycle?.compatible(cycleContext,recordStore.cursor(client.scopeId(session)),System.currentTimeMillis())==true
                 val probe=if(eligible)recordSync.probeCommit(session,bootstrap.libraryEpoch) else CloudRecordProbe.FULL
                 val recordsEmpty=probe==CloudRecordProbe.EMPTY
-                var plan=if(eligible && probe!=CloudRecordProbe.FULL)requireNotNull(previousCycle).plan(heads,localAtStart,recordsEmpty,filesAtStart) else CloudCyclePlan.FULL
+                var plan=if(eligible && probe!=CloudRecordProbe.FULL)requireNotNull(previousCycle).plan(heads,localAtStart,recordsEmpty,filesAtStart.revision) else CloudCyclePlan.FULL
                 // A new own commit can be a migration or an ownership transition, never apply-only.
                 if(eligible && (heads.none{it.sourceDeviceId==deviceId} ||
                     heads.any{it.sourceDeviceId==deviceId && previousCycle?.heads?.get(it.id)!=it.manifestSha256}))plan=CloudCyclePlan.FULL
@@ -1234,7 +1234,7 @@ class PhoneCloudSyncService(
                 traceSync("cycle-plan:${plan.name.lowercase()}")
                 if(plan==CloudCyclePlan.IDLE) {
                     checkCloudEpoch(session,syncEpoch)
-                    CloudExportFileWitness.withRevision(appContext.filesDir,filesAtStart) {
+                    CloudExportFileWitness.complete(appContext.filesDir,filesAtStart,requireNotNull(previousCycle).filesRevision) {
                         settings.completeCycle(requireNotNull(previousCycle),admission)
                     }
                     update(CloudSyncPhase.COMPLETE,"云同步完成",bootstrap.member,0,0,completedAt=System.currentTimeMillis())
@@ -1345,7 +1345,8 @@ class PhoneCloudSyncService(
                 repository.books?.ensureRegistered()
                 traceSync("books-register:done")
                 // Compare against the publication window, after this pass's own restore/RSS work.
-                val filesAtPublish=if(publishLocal)CloudExportFileWitness.revision(appContext.filesDir) else requireNotNull(previousCycle).filesRevision
+                val filesAtPublish=if(publishLocal)CloudExportFileWitness.observe(appContext.filesDir) else null
+                val publishedFiles=filesAtPublish?.revision ?: requireNotNull(previousCycle).filesRevision
                 val localSequenceAtPublish = if(publishLocal) repository.getLibrarySyncCursor(null).localMaxSeq else requireNotNull(previousCycle).localMaxSeq
                 if(publishLocal) {
                     traceSync("records-push:start")
@@ -1429,10 +1430,10 @@ class PhoneCloudSyncService(
                     (plan==CloudCyclePlan.APPLY || repository.getLibrarySyncCursor(null).localMaxSeq==localSequenceAtPublish) &&
                     cycleCanCheckpoint(session,bootstrap) && cycleContext==cycleContext(session,bootstrap,backupService.cloudChangeSchemaIdentity())) {
                     checkCloudEpoch(session,syncEpoch)
-                    val filesNow=CloudExportFileWitness.revision(appContext.filesDir)
-                    if(plan==CloudCyclePlan.APPLY || filesNow==filesAtPublish)CloudExportFileWitness.withRevision(appContext.filesDir,filesNow) {
+                    val filesNow=CloudExportFileWitness.observe(appContext.filesDir)
+                    if(plan==CloudCyclePlan.APPLY || filesNow==filesAtPublish)CloudExportFileWitness.complete(appContext.filesDir,filesNow,publishedFiles) {
                         settings.completeCycle(CloudCycleCheckpoint(cycleContext,CloudCycleCheckpoint.identities(completedHeads),localSequenceAtPublish,
-                            recordStore.cursor(client.scopeId(session)),if(plan==CloudCyclePlan.FULL)System.currentTimeMillis() else requireNotNull(previousCycle).fullCheckedAt,filesAtPublish),admission)
+                            recordStore.cursor(client.scopeId(session)),if(plan==CloudCyclePlan.FULL)System.currentTimeMillis() else requireNotNull(previousCycle).fullCheckedAt,publishedFiles),admission)
                     }
                 }
                 PhoneCloudSyncResult(
@@ -1881,7 +1882,8 @@ class PhoneCloudSyncService(
         }
         val writeOverlay = formatWritePolicy.localWrite && formatWritePolicy.canWrite(client.formatCapabilities(session))
         val privateFilesRevision=CloudExportFileWitness.revision(appContext.filesDir).privateFiles
-        val forcePrivateArchive=previous!=null && previous.settings.optString("privateFilesRevision","0")!=privateFilesRevision
+        val privateFilesPending=CloudExportFileWitness.privateFilesPending(appContext.filesDir)
+        val forcePrivateArchive=privateFilesPending || previous!=null && previous.settings.optString("privateFilesRevision","0")!=privateFilesRevision
         val bodySource = (ownManifests + listOfNotNull(pendingManifest)).firstOrNull {
             !forcePrivateArchive && (CloudSnapshotReuse.canCarry(it, owner, keyVersion, privateFingerprint) ||
                 writeOverlay && owner.current(it) && it.objects.any{d->d.name==PRIVATE_LIBRARY_OBJECT && d.access==CloudFormatAccess.WRITABLE})
@@ -1945,7 +1947,7 @@ class PhoneCloudSyncService(
         val parentHeads = mergedHeads.associate { it.sourceDeviceId to it.id }
         val observedHeads = mergedHeads.associate { it.sourceDeviceId to it.deviceSequence }
         val contentHash = CloudSnapshotContent.hash(logicalObjects, carried, keyVersion, privateFingerprint)
-        val contentChanged = ownershipUpgrade || previous?.settings?.optString("snapshotContentHashV3") != contentHash
+        val contentChanged = privateFilesPending || ownershipUpgrade || previous?.settings?.optString("snapshotContentHashV3") != contentHash
         val lastPublished = maxOf(settings.lastSnapshotPublishedAt,
             heads.filter { it.sourceDeviceId == deviceId }.mapNotNull { head -> head.completedAt?.let { runCatching { java.time.Instant.parse(it).toEpochMilli() }.getOrNull() } }.maxOrNull() ?: 0)
         if (!CloudContentPolicy.shouldPublish(contentChanged, manual || ownershipUpgrade, lastPublished, System.currentTimeMillis())) {

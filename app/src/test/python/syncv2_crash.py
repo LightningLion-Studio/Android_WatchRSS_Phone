@@ -33,13 +33,17 @@ for journal in args.journals:
             db = sqlite3.connect(root/'phone.db')
             counts = {name:db.execute(f'SELECT COUNT(*) FROM {name}').fetchone()[0] for name in ['syncv2_identity_map','syncv2_candidates','syncv2_change_log']}
             cursor = db.execute("SELECT lastRemoteSeqApplied FROM sync_peer_state WHERE peerDeviceId='peer'").fetchone()[0]
+            business_count = db.execute("SELECT COUNT(*) FROM phone_articles").fetchone()[0]
+            business_revision = db.execute("SELECT seq FROM sqlite_sequence WHERE name='cloud_local_change_counter'").fetchone()[0]
+            assert business_count == 2
+            assert business_revision == 3
             page,complete = db.execute("SELECT page_key,complete FROM syncv2_scan WHERE domain='phone_articles'").fetchone()
             expected = 2 if boundary=='after-transaction' else 1
             assert all(n==expected for n in counts.values()), (journal,boundary,counts)
             assert cursor==7
             assert page==('b-suffix' if expected==2 else 'a-prefix')
             assert complete==(1 if expected==2 else 0)
-            row = {'journal':journal,'boundary':boundary,'workerExitCode':73,'counts':counts,'pageKey':page,'complete':bool(complete),'oldCursor':cursor,'persistentPrefixRetained':True,'scope':'Actual Kotlin product SQL in Robolectric native SQLite; host process halt, not device power loss'}
+            row = {'journal':journal,'boundary':boundary,'workerExitCode':73,'counts':counts,'pageKey':page,'complete':bool(complete),'oldCursor':cursor,'businessCount':business_count,'businessRevision':business_revision,'persistentPrefixRetained':True,'scope':'Actual Kotlin product SQL in Robolectric native SQLite; host process halt, not device power loss'}
             results.append(row)
             (args.evidence/'process-crash.json').write_text(json.dumps(results,ensure_ascii=False,indent=2)+'\n')
             print(json.dumps(row), flush=True)

@@ -38,7 +38,7 @@ internal class CloudLocalChanges(private val database:PhoneCompanionDatabase) {
     }
 }
 
-private val CLOUD_CHANGE_TABLES=listOf("phone_articles","phone_rss_sources","phone_saved_items","notes","note_folders","note_assets","note_conflicts",
+internal val CLOUD_CHANGE_TABLES=listOf("phone_articles","phone_rss_sources","phone_saved_items","notes","note_folders","note_assets","note_conflicts",
     "reader_presets","reader_font_assets","reader_background_assets","reader_deletions","app_meta",
     "imported_books","imported_book_chapters","imported_book_reading","book_reading_versions",
     "article_register_provenance","article_register_originals","article_register_versions")
@@ -52,7 +52,8 @@ internal fun installCloudLocalChanges(db:SupportSQLiteDatabase) {
             db.execSQL("CREATE TABLE IF NOT EXISTS cloud_local_change_counter(seq INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL)")
             // Start above every legacy allocated sequence, even if history rows were deleted.
             // Only initialization allocates an explicit value; normal mutations always use NULL.
-            db.execSQL("INSERT INTO cloud_local_change_counter(seq) SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='sync_change_log'),0)+1 WHERE NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='cloud_local_change_counter')")
+            val missingSequence=db.query("SELECT NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='cloud_local_change_counter')").use{it.moveToFirst();it.getInt(0)!=0}
+            db.execSQL("INSERT INTO cloud_local_change_counter(seq) SELECT MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='sync_change_log'),0),COALESCE((SELECT MAX(seq) FROM cloud_local_change_counter),0))+1 WHERE NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='cloud_local_change_counter')")
             var rebuildPending=db.query("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cloud_local_pending_provenance'").use { it.moveToFirst();it.getInt(0)==0 }
             db.execSQL("CREATE TABLE IF NOT EXISTS cloud_local_pending_provenance(articleId TEXT PRIMARY KEY NOT NULL)")
             val existing=db.query("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'cloud_local_change_%'").use { c ->
@@ -75,7 +76,10 @@ internal fun installCloudLocalChanges(db:SupportSQLiteDatabase) {
                     if(existing[name]!=sql) { db.execSQL("DROP TRIGGER IF EXISTS $name");db.execSQL(sql);rebuildPending=true }
                 }
             }
-            if(rebuildPending) {
+            if(rebuildPending || missingSequence) {
+                // A repaired/missing witness cannot authenticate an older acknowledged prefix.
+                // Keep its allocated sequence, but change the BUSINESS witness incarnation.
+                db.execSQL("UPDATE cloud_local_change_identity SET identity=? WHERE id=1",arrayOf(UUID.randomUUID().toString()))
                 db.execSQL("DELETE FROM cloud_local_pending_provenance")
                 db.execSQL("INSERT INTO cloud_local_pending_provenance SELECT articleId FROM article_register_provenance WHERE pending IS NOT NULL")
             }

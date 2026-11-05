@@ -11,19 +11,32 @@ internal object SyncV2Schema {
         Domain("imported_books", "book", "bookId"), Domain("imported_book_reading", "book-reading", "bookId || ':' || chapterIndex"),
         Domain("notes", "note", "noteId"), Domain("note_folders", "folder", "folderId"), Domain("note_assets", "asset", "assetId")
     )
-    /** D64 decimal carry uses only one-digit casts, including above signed Long. */
-    fun increment(column: String): String {
-        val stem = "rtrim($column,'9')"
-        return "CASE WHEN $stem='' THEN '1'||replace($column,'9','0') ELSE substr($stem,1,length($stem)-1)||CAST(CAST(substr($stem,-1) AS INTEGER)+1 AS TEXT)||replace(substr($column,length($stem)+1),'9','0') END"
+    /** Remove the old P1 business triggers even when the projection gate is closed. */
+    fun beforeBusinessOpen(db:SupportSQLiteDatabase) {
+        val tables=(domains.map{it.table}+listOf("imported_book_chapters","note_conflicts","article_register_provenance")).toSet()
+        val names=db.query("SELECT name,tbl_name FROM sqlite_master WHERE type='trigger' AND name LIKE 'syncv2_%'").use { c ->
+            buildList { while(c.moveToNext())if(c.getString(1) in tables)add(c.getString(0)) }
+        }
+        for(name in names)db.execSQL("DROP TRIGGER IF EXISTS `${name.replace("`","``")}`")
+        // Remember a missing/changed witness before the original business callback repairs it.
+        if(hasColumn(db,"syncv2_control","witness_epoch") && !SyncV2BusinessWitness.isCurrent(db))
+            runCatching {db.execSQL("UPDATE syncv2_control SET witness_epoch='' WHERE witness_epoch!=''")}
     }
-    fun onOpen(db: SupportSQLiteDatabase) {
-        if (BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION) install(db)
-        else if (db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='syncv2_control'").use { it.moveToFirst() }) {
-            // Closing the projection gate is reversible; retain every projection/checkpoint byte.
-            db.execSQL("UPDATE syncv2_control SET enabled=0 WHERE enabled!=0")
+    fun onOpen(db:SupportSQLiteDatabase) {
+        try {
+            beforeBusinessOpen(db)
+            if(BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION)install(db)
+            else if(hasColumn(db,"syncv2_control","enabled"))db.execSQL("UPDATE syncv2_control SET enabled=0 WHERE enabled!=0")
+        } catch(_:Exception) {
+            // Isolate projection setup/closing faults from the original Room business open.
+            runCatching {db.execSQL("UPDATE syncv2_control SET enabled=0,failure_code='projection_setup_failed' WHERE id=1")}
         }
     }
+    private fun hasColumn(db:SupportSQLiteDatabase,table:String,column:String)=db.query("PRAGMA table_info(`$table`)").use { c ->
+        var found=false;while(c.moveToNext())if(c.getString(1)==column)found=true;found
+    }
     fun install(db: SupportSQLiteDatabase) {
+        beforeBusinessOpen(db)
         db.beginTransaction()
         try {
             listOf(
@@ -40,24 +53,12 @@ internal object SyncV2Schema {
                 "CREATE TABLE IF NOT EXISTS syncv2_scan(scope TEXT NOT NULL,domain TEXT NOT NULL,binding TEXT NOT NULL,r0 TEXT NOT NULL,r1 TEXT,page_key TEXT NOT NULL,tail_seq INTEGER NOT NULL,complete INTEGER NOT NULL,PRIMARY KEY(scope,domain))",
                 "CREATE TABLE IF NOT EXISTS syncv2_legacy_inbox(scope TEXT NOT NULL,peer TEXT NOT NULL,version INTEGER NOT NULL,cursor TEXT NOT NULL,arrival INTEGER NOT NULL,body_hash TEXT NOT NULL,body BLOB NOT NULL,route TEXT NOT NULL,applied INTEGER NOT NULL,PRIMARY KEY(scope,peer,version,cursor),UNIQUE(scope,peer,version,arrival))"
             ).forEach(db::execSQL)
-            db.execSQL("INSERT OR IGNORE INTO syncv2_control VALUES(1,0,?,NULL,NULL)", arrayOf(SyncV2Codec.hex(SyncV2Codec.random(16))))
-            val existing = db.query("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'syncv2_%'").use { c -> buildMap { while(c.moveToNext()) put(c.getString(0),c.getString(1)) } }
-            for (domain in domains + listOf(Domain("imported_book_chapters", "book", "bookId"), Domain("note_conflicts", "note", "noteId"), Domain("article_register_provenance", "article", "articleId"))) {
-                val columns = db.query("PRAGMA table_info(`${domain.table}`)").use { c -> buildList { while(c.moveToNext()) add(c.getString(1)) } }
-                check(columns.isNotEmpty()) { "syncv2_missing_domain" }
-                for (op in listOf("INSERT", "UPDATE", "DELETE")) {
-                    val alias = if (op == "DELETE") "OLD" else "NEW"
-                    fun key(prefix: String) = domain.key.split(" || ").joinToString(" || ") { if (it.startsWith("'")) it else "$prefix.$it" }
-                    val guard = if(op == "UPDATE") " AND (" + columns.filterNot { it.startsWith("sync") }.joinToString(" OR ") { "OLD.`$it` IS NOT NEW.`$it`" } + ")" else ""
-                    val name = "syncv2_${domain.table}_${op.lowercase()}"
-                    val oldKey = if(op == "UPDATE") "INSERT INTO syncv2_outbox(scope,revision,table_name,logical_id,operation,base_state) SELECT scope,local_revision,'${domain.table}',${key("OLD")},'DELETE',body FROM syncv2_state WHERE scope=(SELECT active_scope FROM syncv2_control WHERE id=1) AND ${key("OLD")} IS NOT ${key("NEW")};" else ""
-                    val sql = "CREATE TRIGGER $name AFTER $op ON `${domain.table}` WHEN (SELECT enabled FROM syncv2_control WHERE id=1)=1$guard BEGIN " +
-                        "SELECT CASE WHEN EXISTS(SELECT 1 FROM syncv2_state WHERE (state_version='18446744073709551615' OR local_revision='18446744073709551615') AND scope=(SELECT active_scope FROM syncv2_control WHERE id=1)) THEN RAISE(ABORT,'counter_exhausted') END;" +
-                        "UPDATE syncv2_state SET state_version=${increment("state_version")},local_revision=${increment("local_revision")} WHERE scope=(SELECT active_scope FROM syncv2_control WHERE id=1);" + oldKey +
-                        "INSERT INTO syncv2_outbox(scope,revision,table_name,logical_id,operation,base_state) SELECT scope,local_revision,'${domain.table}',${key(alias)},'$op',body FROM syncv2_state WHERE scope=(SELECT active_scope FROM syncv2_control WHERE id=1); END"
-                    if(existing[name] != sql) { db.execSQL("DROP TRIGGER IF EXISTS $name"); db.execSQL(sql) }
-                }
-            }
+            db.execSQL("INSERT OR IGNORE INTO syncv2_control(id,enabled,library_id,active_scope,failure_code) VALUES(1,0,?,NULL,NULL)", arrayOf(SyncV2Codec.hex(SyncV2Codec.random(16))))
+            for((column,type)in listOf("witness_epoch" to "TEXT NOT NULL DEFAULT ''","witness_coverage" to "TEXT NOT NULL DEFAULT ''"))
+                if(!hasColumn(db,"syncv2_control",column))db.execSQL("ALTER TABLE syncv2_control ADD COLUMN $column $type")
+            if(!hasColumn(db,"syncv2_scan","business_stamp"))db.execSQL("ALTER TABLE syncv2_scan ADD COLUMN business_stamp TEXT NOT NULL DEFAULT ''")
+            beforeBusinessOpen(db)
+            SyncV2BusinessWitness.install(db)
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
     }

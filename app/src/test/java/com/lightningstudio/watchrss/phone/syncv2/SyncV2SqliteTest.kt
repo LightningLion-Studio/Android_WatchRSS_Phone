@@ -112,10 +112,10 @@ class SyncV2SqliteTest {
         SyncV2Fixtures.evidence("reopen.json",JSONObject().put("observations",trace).put("ddlOnStableReopen",0).put("guestGateReopenPreserved",true))
     }
     private fun SyncV2Projection.stateOrNullForTest():SyncV2Projection.State?=try{state()}catch(_:IllegalStateException){null}
-    @Test fun writesCaptureOutboxAndCountersAtomicallyWithoutReadingArticleBody() {
+    @Test fun businessWritesOnlyRevisionAndWorkerBuildsOutboxWithoutReadingArticleBody() {
         val db=room();val a=adapter(db);a.install();val sql=db.openHelper.writableDatabase
         put(db,article("big",body="x".repeat(3*1024*1024)))
-        assertEquals("1",a.state().revision);assertEquals(1,scalar(sql,"SELECT COUNT(*) FROM syncv2_outbox"))
+        assertEquals("1",a.state().revision);assertEquals(0,scalar(sql,"SELECT COUNT(*) FROM syncv2_outbox"))
         val page=a.scanPage("phone_articles");assertEquals(1,page.rows);assertTrue(page.bytes<4096)
         val v=a.state();val before=scalar(sql,"SELECT length(contentText) FROM phone_articles")
         sql.beginTransaction()
@@ -151,11 +151,15 @@ class SyncV2SqliteTest {
         val crash=adapter(db){if(it=="after-tail-entry" && armed){armed=false;error("tail-crash")}}
         assertEquals("tail-crash",error{crash.catchUp(1)});db.close();db=room(path)
         val resumed=adapter(db);resumed.install();assertEquals(1,resumed.catchUp(1))
-        put(db,article("late"));assertEquals(2,resumed.catchUp(64));assertFalse(resumed.state().body.has("tailR1Seq"))
-        assertEquals(1,resumed.catchUp(64));assertEquals(0,resumed.catchUp(64))
+        put(db,article("late"))
+        var attempts=0
+        while(resumed.catchUp(64)>0){assertTrue(++attempts<50)}
+        // A fixed pass may finish with a later witness pending for the following window.
+        repeat(2){while(resumed.catchUp(64)>0){assertTrue(++attempts<100)}}
         val sql=db.openHelper.writableDatabase
         assertEquals(4,scalar(sql,"SELECT COUNT(*) FROM syncv2_candidates"));assertEquals(4,scalar(sql,"SELECT COUNT(*) FROM syncv2_identity_map"))
         assertEquals(4,scalar(sql,"SELECT COUNT(*) FROM syncv2_outbox"))
+        assertEquals("4",resumed.state().revision)
     }
     @Test fun preciseSchemaCapabilityAndScopeBindingRetainsUnrelatedCandidates() {
         val db=room();val a=adapter(db);a.install();put(db,article("one"));a.scanPage("phone_articles");a.scanPage("notes")
@@ -177,7 +181,9 @@ class SyncV2SqliteTest {
         val before=nodes();val other=sql.query("SELECT state FROM syncv2_candidates WHERE logical_id='row599'").use{it.moveToFirst();it.getBlob(0)}
         // Catch up already scanned source witnesses first, then change exactly one entity.
         while(a.catchUp()>0){}
-        put(db,article("row1",title="one edit"));assertEquals(1,a.catchUp())
+        put(db,article("row1",title="one edit"));var work=0;var rounds=0
+        while(true){val n=a.catchUp();work+=n;if(n==0)break;assertTrue(++rounds<50)}
+        assertTrue(work>=1)
         val after=nodes();val changed=after.keys.filter{before[it]!=after[it]}
         val entity=SyncV2Fixtures.identity().entity("article","row1")
         assertTrue(changed.isNotEmpty());assertTrue(changed.all{entity.startsWith(it)});assertTrue(changed.size<=65)
@@ -247,15 +253,17 @@ class SyncV2SqliteTest {
         assertEquals(0,a.state().body.getJSONObject("applied").length())
         sql.query("SELECT body FROM syncv2_legacy_inbox").use{while(it.moveToNext())assertFalse(it.getBlob(0).toString(Charsets.UTF_8).contains("private offline body"))}
     }
-    @Test fun d64ExhaustionRejectsBeforeCallbacksAndBusinessTriggerRollsBack() {
+    @Test fun d64ProjectionExhaustionRejectsBeforeCallbacksButBusinessStillCommits() {
         val db=room();val a=adapter(db);a.install();val sql=db.openHelper.writableDatabase
         sql.execSQL("UPDATE syncv2_state SET state_version='18446744073709551614',local_revision='18446744073709551614'")
         put(db,article("last"));assertEquals("18446744073709551615",a.state().version)
         assertEquals("18446744073709551615",a.state().revision)
         var callback=false;val exhausted=adapter(db){callback=true}
         assertEquals("counter_exhausted",error{exhausted.scanPage("phone_articles")});assertFalse(callback)
-        try{put(db,article("never"));fail("overflow accepted")}catch(e:android.database.sqlite.SQLiteException){assertTrue(e.message!!.contains("counter_exhausted"))}
-        assertEquals(1,scalar(sql,"SELECT COUNT(*) FROM phone_articles"))
+        put(db,article("business-survives"))
+        assertEquals(2,scalar(sql,"SELECT COUNT(*) FROM phone_articles"))
+        assertEquals("counter_exhausted",error{a.state()})
+        assertEquals(0,scalar(sql,"SELECT COUNT(*) FROM syncv2_outbox"))
     }
     @Test fun sharedB05B09ObservationsAndEditsPreserveLatestState() {
         val fixed=SyncV2Fixtures.vector("rc3-review").getJSONArray("cases")
@@ -269,7 +277,7 @@ class SyncV2SqliteTest {
         val sql=db.openHelper.writableDatabase;sql.execSQL("UPDATE syncv2_state SET local_revision='7'")
         val next=a.captureLegacyChoice(window)
         val error=error{a.validateChoice(next){put(db,article("new-edit"))}}
-        same(expected("B09"),JSONObject().put("error",error).put("oldEditRetained",scalar(sql,"SELECT COUNT(*) FROM syncv2_legacy_inbox WHERE applied=0")==1L).put("newEditRetained",scalar(sql,"SELECT COUNT(*) FROM syncv2_outbox")==1L).put("revision",a.state().revision))
+        same(expected("B09"),JSONObject().put("error",error).put("oldEditRetained",scalar(sql,"SELECT COUNT(*) FROM syncv2_legacy_inbox WHERE applied=0")==1L).put("newEditRetained",scalar(sql,"SELECT COUNT(*) FROM phone_articles WHERE articleId='new-edit'")==1L).put("revision",a.state().revision))
     }
     @Test fun samePinnedHeadCannotClaimAnotherSignedGeneration() {
         val db=room();val a=adapter(db);a.install();pending(a);val before=a.state()
@@ -277,13 +285,13 @@ class SyncV2SqliteTest {
         assertEquals("replay_detected",error{a.observeVerified(forged,emptyList())})
         assertEquals(before.version,a.state().version);same(before.body,a.state().body)
     }
-    @Test fun deletionBeforeScanIsDurableAndUpdatesOnlyCandidateTree() {
+    @Test fun unseenCreateDeleteRetainsRevisionWithoutInventingBusinessEntities() {
         val db=room();val a=adapter(db);a.install();put(db,article("removed-before-scan"));val sql=db.openHelper.writableDatabase
         sql.execSQL("DELETE FROM phone_articles WHERE articleId='removed-before-scan'")
         while(a.catchUp()>0){}
-        assertTrue(a.candidate("article","removed-before-scan")!!.second.getBoolean("projectionRemoved"))
-        assertEquals(1,scalar(sql,"SELECT COUNT(*) FROM syncv2_identity_map"));assertEquals(0,scalar(sql,"SELECT COUNT(*) FROM phone_articles"))
-        assertEquals(1,scalar(sql,"SELECT COUNT(*) FROM syncv2_tree_nodes WHERE prefix=''"))
+        assertNull(a.candidate("article","removed-before-scan"))
+        assertEquals("2",a.state().revision)
+        assertEquals(0,scalar(sql,"SELECT COUNT(*) FROM syncv2_identity_map"));assertEquals(0,scalar(sql,"SELECT COUNT(*) FROM phone_articles"))
     }
     @Test fun windowBudgetPauseReusesActualPersistedPrefix() {
         val path=path();var db=room(path);var a=adapter(db);a.install();repeat(200){put(db,article("id%03d".format(it)))}
@@ -293,6 +301,140 @@ class SyncV2SqliteTest {
         val sql=db.openHelper.writableDatabase;assertEquals(128,scalar(sql,"SELECT COUNT(*) FROM syncv2_candidates"))
         var ticks=0L;val exhausted=a.runWindow(budgetMillis=1,now={ticks++})
         assertTrue(exhausted.paused);assertEquals(0,exhausted.rows)
+    }
+    @Test fun p1rR02OutboxFailureCannotRollbackBusinessAndRetryUsesWitness() {
+        val db=room();put(db,article("review"));val sql=db.openHelper.writableDatabase;val a=adapter(db);a.install()
+        a.scanPage("phone_articles");val before=scalar(sql,"SELECT seq FROM sqlite_sequence WHERE name='cloud_local_change_counter'")
+        sql.execSQL("CREATE TRIGGER review_fail BEFORE INSERT ON syncv2_outbox BEGIN SELECT RAISE(ABORT,'projection_disk_failure');END")
+        sql.execSQL("UPDATE phone_articles SET title='user edit' WHERE articleId='review'")
+        assertEquals("user edit",sql.query("SELECT title FROM phone_articles").use{it.moveToFirst();it.getString(0)})
+        assertTrue(scalar(sql,"SELECT seq FROM sqlite_sequence WHERE name='cloud_local_change_counter'")>before)
+        val queue=scalar(sql,"SELECT COUNT(*) FROM syncv2_outbox")
+        try{a.scanPage("phone_articles");fail("worker fault not injected")}catch(e:android.database.sqlite.SQLiteException){assertTrue(e.message!!.contains("projection_disk_failure"))}
+        assertEquals(queue,scalar(sql,"SELECT COUNT(*) FROM syncv2_outbox"))
+        assertEquals("title",a.candidate("article","review")!!.first.getJSONObject("payload").getString("title"))
+        sql.execSQL("DROP TRIGGER review_fail")
+        assertEquals(1,a.scanPage("phone_articles").rows)
+        assertEquals("user edit",a.candidate("article","review")!!.first.getJSONObject("payload").getString("title"))
+    }
+    @Test fun p1rR02NoBusinessTriggerDependsOnAnyProjectionTable() {
+        val db=room();val a=adapter(db);a.install();val sql=db.openHelper.writableDatabase
+        assertEquals(0,scalar(sql,"SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name NOT LIKE 'syncv2_%' AND sql LIKE '%syncv2_%'"))
+        for(table in listOf("syncv2_state","syncv2_candidates","syncv2_change_log","syncv2_outbox")) {
+            sql.execSQL("CREATE TRIGGER fail_$table BEFORE INSERT ON $table BEGIN SELECT RAISE(ABORT,'projection_only');END")
+        }
+        put(db,article("one"));assertEquals(1,scalar(sql,"SELECT COUNT(*) FROM phone_articles"))
+        assertEquals(0,scalar(sql,"SELECT COUNT(*) FROM syncv2_outbox"))
+        // A rolled-back business transaction also rolls back its independent revision witness.
+        val seq=scalar(sql,"SELECT seq FROM sqlite_sequence WHERE name='cloud_local_change_counter'")
+        sql.beginTransaction();try{sql.execSQL("UPDATE phone_articles SET title='rollback'")}finally{sql.endTransaction()}
+        assertEquals(seq,scalar(sql,"SELECT seq FROM sqlite_sequence WHERE name='cloud_local_change_counter'"))
+    }
+    @Test fun p1rR03PauseEditResumeRechecksRevisionAndRetainsIdentityAndCursor()=runBlocking<Unit> {
+        val path=path();var db=room(path);put(db,article("review"));val a=adapter(db);a.install();a.scanPage("phone_articles")
+        db.syncPeerStateDao().upsert(SyncPeerStateEntity("peer",8,7,0,14,0))
+        val original=SyncV2Fixtures.identity().entity("article","review")
+        a.pause();db.openHelper.writableDatabase.execSQL("UPDATE phone_articles SET title='written while off'");db.close()
+        db=room(path);val resumed=adapter(db);resumed.install();assertEquals(1,resumed.scanPage("phone_articles").rows)
+        assertEquals("written while off",resumed.candidate("article","review")!!.first.getJSONObject("payload").getString("title"))
+        assertEquals(original,resumed.candidate("article","review")!!.first.getString("entityKey"))
+        assertEquals(7,db.syncPeerStateDao().get("peer")!!.lastRemoteSeqApplied)
+        assertEquals(1,scalar(db.openHelper.writableDatabase,"SELECT COUNT(*) FROM syncv2_identity_map"))
+    }
+    @Test fun p1rR03MissingWitnessAndPhysicalDeletionForceReconciliation() {
+        val db=room();put(db,article("one"));put(db,article("two"));val a=adapter(db);a.install();a.scanPage("phone_articles")
+        val sql=db.openHelper.writableDatabase
+        val keep=sql.query("SELECT state FROM syncv2_candidates WHERE logical_id='two'").use{it.moveToFirst();it.getBlob(0)}
+        a.pause();sql.execSQL("DELETE FROM cloud_local_change_identity")
+        sql.execSQL("UPDATE phone_articles SET title='changed' WHERE articleId='two'")
+        sql.execSQL("DELETE FROM phone_articles WHERE articleId='one'")
+        val resumed=adapter(db);resumed.install();assertEquals(2,resumed.scanPage("phone_articles").rows)
+        assertTrue(resumed.candidate("article","one")!!.second.getBoolean("projectionRemoved"))
+        assertEquals("changed",resumed.candidate("article","two")!!.first.getJSONObject("payload").getString("title"))
+        assertEquals(2,scalar(sql,"SELECT COUNT(*) FROM syncv2_identity_map"))
+        val after=sql.query("SELECT state FROM syncv2_candidates WHERE logical_id='two'").use{it.moveToFirst();it.getBlob(0)}
+        assertFalse(keep.contentEquals(after))
+    }
+    @Test fun p1rR03BusinessWitnessRepairBeforeProjectionOpenInvalidatesOldCheckpoint() {
+        val db=room();put(db,article("review"));val a=adapter(db);a.install();a.scanPage("phone_articles");a.pause()
+        val sql=db.openHelper.writableDatabase
+        val seq=scalar(sql,"SELECT seq FROM sqlite_sequence WHERE name='cloud_local_change_counter'")
+        sql.execSQL("DROP TRIGGER cloud_local_change_phone_articles_update")
+        sql.execSQL("UPDATE phone_articles SET title='missed while witness absent'")
+        assertEquals(seq,scalar(sql,"SELECT seq FROM sqlite_sequence WHERE name='cloud_local_change_counter'"))
+        // The preexisting business open callback may repair the counter before P1 runs.
+        com.lightningstudio.watchrss.phone.data.db.installCloudLocalChanges(sql)
+        val resumed=adapter(db);resumed.install();assertEquals(1,resumed.scanPage("phone_articles").rows)
+        assertEquals("missed while witness absent",resumed.candidate("article","review")!!.first.getJSONObject("payload").getString("title"))
+    }
+    @Test fun p1rR02DefaultClosedOpenRetiresPreviouslyInstalledBusinessTriggers() {
+        val db=room();put(db,article("review"));val a=adapter(db);a.install();a.scanPage("phone_articles")
+        val sql=db.openHelper.writableDatabase
+        sql.execSQL("CREATE TRIGGER syncv2_phone_articles_update AFTER UPDATE ON phone_articles BEGIN SELECT RAISE(ABORT,'old_projection_business_abort');END")
+        try{sql.execSQL("UPDATE phone_articles SET title='must rollback'");fail("old trigger not installed")}catch(e:android.database.sqlite.SQLiteException){assertTrue(e.message!!.contains("old_projection_business_abort"))}
+        SyncV2Schema.onOpen(sql)
+        sql.execSQL("UPDATE phone_articles SET title='business succeeds after upgrade'")
+        assertEquals(0,scalar(sql,"SELECT COUNT(*) FROM sqlite_master WHERE name='syncv2_phone_articles_update'"))
+        assertEquals("business succeeds after upgrade",sql.query("SELECT title FROM phone_articles").use{it.moveToFirst();it.getString(0)})
+    }
+    @Test fun p1rR02ProjectionClosingFaultDoesNotFailBusinessOpenOrUpdate() {
+        val db=room();val a=adapter(db);a.install();val sql=db.openHelper.writableDatabase
+        sql.execSQL("CREATE TRIGGER fail_close BEFORE UPDATE ON syncv2_control BEGIN SELECT RAISE(ABORT,'projection_control_failed');END")
+        SyncV2Schema.onOpen(sql)
+        put(db,article("business-survives-close-fault"));assertEquals(1,scalar(sql,"SELECT COUNT(*) FROM phone_articles"))
+    }
+    @Test fun p1rR02WorkerRejectsNestedBusinessTransactionWithoutWritingProjection() {
+        val db=room();val a=adapter(db);a.install();val sql=db.openHelper.writableDatabase
+        sql.beginTransaction()
+        try {
+            put(db,article("business"))
+            assertEquals("projection_in_business_transaction",error{a.scanPage("phone_articles")})
+            sql.setTransactionSuccessful()
+        }finally{sql.endTransaction()}
+        assertEquals(1,scalar(sql,"SELECT COUNT(*) FROM phone_articles"));assertEquals(0,scalar(sql,"SELECT COUNT(*) FROM syncv2_candidates"))
+    }
+    @Test fun p1rR03MissingCounterSequenceRebuildsWithoutReusingCheckpoint() {
+        val db=room();put(db,article("review"));val a=adapter(db);a.install();a.scanPage("phone_articles");a.pause()
+        val sql=db.openHelper.writableDatabase
+        sql.execSQL("DELETE FROM sqlite_sequence WHERE name='cloud_local_change_counter'")
+        val resumed=adapter(db);resumed.install()
+        assertEquals(1,resumed.scanPage("phone_articles").rows)
+        assertEquals(1,scalar(sql,"SELECT COUNT(*) FROM syncv2_identity_map"))
+        assertEquals("title",resumed.candidate("article","review")!!.first.getJSONObject("payload").getString("title"))
+        assertEquals(0,resumed.scanPage("phone_articles").rows)
+    }
+    @Test fun p1rR03UnchangedReopenKeepsPartialPrefixAndCompletedCheckpoint() {
+        val path=path();var db=room(path);repeat(3){put(db,article("id$it"))};var a=adapter(db);a.install();assertEquals(1,a.scanPage("phone_articles",limit=1).rows)
+        val version=a.state().version;db.close();db=room(path);a=adapter(db);a.install();assertEquals(version,a.state().version)
+        assertEquals(2,a.scanPage("phone_articles").rows);assertEquals(0,a.scanPage("phone_articles").rows)
+    }
+    @Test fun p1rR04ExistingUnsentNoteRetainsUnknownBaseAcrossRollbackAndReopen() {
+        val path=path();var db=room(path);val sql=db.openHelper.writableDatabase
+        sql.execSQL("INSERT INTO notes VALUES('review',NULL,'note','local edit','local edit','new hash','ancestor hash','base',1,0,10,'old',0,0)")
+        var a=adapter(db);a.install();assertNotEquals("0",a.state().revision)
+        assertTrue(a.state().body.getJSONObject("bootstrapEdits").getBoolean("dirtyNote"))
+        a.observeVerified(SyncV2Fixtures.window(),SyncV2Fixtures.observationHeaders())
+        assertEquals("awaiting-user",a.status());val version=a.state().version
+        db.close();db=room(path);a=adapter(db);a.install()
+        assertEquals(version,a.state().version);assertEquals("awaiting-user",a.status())
+        assertEquals("local edit",db.openHelper.writableDatabase.query("SELECT markdown FROM notes").use{it.moveToFirst();it.getString(0)})
+        assertEquals("base",db.openHelper.writableDatabase.query("SELECT baseMarkdown FROM notes").use{it.moveToFirst();it.getString(0)})
+    }
+    @Test fun p1rCaptureGuardDoesNotConsumeOrRepairBusinessWitness() {
+        val db=room();val a=adapter(db);a.install();pending(a);val cap=a.captureLegacyChoice(SyncV2Fixtures.window());val sql=db.openHelper.writableDatabase
+        put(db,article("new-local-edit"))
+        val version=sql.query("SELECT state_version FROM syncv2_state").use{it.moveToFirst();it.getString(0)}
+        assertEquals("choice_stale",error{a.captureLegacyChoice(SyncV2Fixtures.window())})
+        assertEquals("choice_stale",error{a.validateChoice(cap)})
+        assertEquals(version,sql.query("SELECT state_version FROM syncv2_state").use{it.moveToFirst();it.getString(0)})
+        a.state();val fresh=a.captureLegacyChoice(SyncV2Fixtures.window());a.validateChoice(fresh)
+        sql.execSQL("DELETE FROM cloud_local_change_identity")
+        assertEquals("choice_stale",error{a.validateChoice(fresh)})
+        assertEquals(0,scalar(sql,"SELECT COUNT(*) FROM cloud_local_change_identity"))
+    }
+    @Test fun p1rR04EmptyFreshLibraryHasNoInventedPendingChoice() {
+        val db=room();val a=adapter(db);a.install();assertEquals("0",a.state().revision)
+        a.observeVerified(SyncV2Fixtures.window(),SyncV2Fixtures.observationHeaders());assertTrue(a.state().body.isNull("pendingChoice"))
     }
     @Test fun paged12500MetadataCandidatesResumeAcrossWindows() {
         val path=path();var db=room(path);var a=adapter(db);a.install();val sql=db.openHelper.writableDatabase
@@ -306,7 +448,7 @@ class SyncV2SqliteTest {
         assertEquals(12500,count);assertTrue(pages>=196);assertTrue(maxPageBytes<=1048576)
         assertEquals(before,businessDigest(db.openHelper.writableDatabase))
         var tail=0;do{val n=a.catchUp();tail+=n}while(n>0)
-        assertEquals(12500,tail);assertEquals(12500,scalar(db.openHelper.writableDatabase,"SELECT COUNT(*) FROM syncv2_identity_map"))
+        assertTrue(tail>=12500);assertEquals(12500,scalar(db.openHelper.writableDatabase,"SELECT COUNT(*) FROM syncv2_identity_map"))
         val evidence=JSONObject().put("platform","JVM Robolectric native SQLite, sdk35; not a physical phone").put("entities",count).put("pages",pages).put("maxRowsPerPage",64).put("metadataInputBytes",bytes).put("maxPageBytes",maxPageBytes).put("durableWindowPrefixes",windows).put("tailEntries",tail).put("scanElapsedMillis",(System.nanoTime()-started)/1000000)
         db.openHelper.writableDatabase.query("SELECT SUM(length(meta)),SUM(length(state)),COUNT(*) FROM syncv2_candidates").use{it.moveToFirst();evidence.put("encryptedMetaBytes",it.getLong(0)).put("encryptedStateBytes",it.getLong(1)).put("candidateObjects",it.getLong(2)*2)}
         val status=File("/proc/self/status").readLines().firstOrNull{it.startsWith("VmHWM:")};db.openHelper.writableDatabase.query("SELECT COUNT(*),SUM(length(body)) FROM syncv2_tree_nodes").use{it.moveToFirst();evidence.put("localCandidateTreeNodes",it.getLong(0)).put("localCandidateTreeBytes",it.getLong(1))}

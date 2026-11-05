@@ -81,6 +81,7 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
         }
         val ARTICLE_PROVENANCE_CALLBACK=object:RoomDatabase.Callback() {
             override fun onOpen(db:SupportSQLiteDatabase) {
+                com.lightningstudio.watchrss.phone.syncv2.SyncV2Schema.beforeBusinessOpen(db)
                 installArticleProvenanceWitnesses(db)
                 installCloudLocalChanges(db)
                 com.lightningstudio.watchrss.phone.syncv2.SyncV2Schema.onOpen(db)

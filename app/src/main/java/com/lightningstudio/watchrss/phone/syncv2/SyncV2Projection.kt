@@ -23,8 +23,9 @@ internal class SyncV2Projection(
         val on=db.query("SELECT enabled FROM syncv2_control WHERE id=1 AND active_scope=?",arrayOf(scope)).use { it.moveToFirst() && it.getInt(0)==1 }
         if(!on) SyncV2Codec.fail("feature_disabled")
     }
+    private fun requireWorkerContext(){if(db.inTransaction())SyncV2Codec.fail("projection_in_business_transaction")}
     fun install() {
-        gate(); SyncV2Schema.install(db)
+        requireWorkerContext();gate(); SyncV2Schema.install(db)
         db.beginTransaction()
         try {
             val prior=db.query("SELECT descriptor_pin,account_id,identity FROM syncv2_state WHERE scope=?",arrayOf(scope)).use { c ->
@@ -40,8 +41,12 @@ internal class SyncV2Projection(
                 val body=JSONObject().put("rollbackGeneration","0").put("account",JSONObject.NULL)
                     .put("pendingChoice",JSONObject.NULL).put("editBase",JSONObject.NULL).put("received",JSONObject())
                     .put("applied",JSONObject()).put("activeGeneration",JSONObject.NULL).put("appliedAccount",JSONObject.NULL).put("keepDiscardedLocalChanges7Days",true)
-                db.execSQL("INSERT INTO syncv2_state VALUES(?,?,?,?,?,?,?)",arrayOf(scope,"0","0",seal("state",body),identity.encryptedRecord(key),identity.descriptorOid,identity.accountId))
+                val edits=SyncV2BusinessWitness.initialEdits(db)
+                val unknown=edits.getBoolean("unknownV2Base")
+                body.put("bootstrapEdits",edits).put("unknownEditBase",unknown).put("businessStamp",SyncV2BusinessWitness.read(db).encoded())
+                db.execSQL("INSERT INTO syncv2_state VALUES(?,?,?,?,?,?,?)",arrayOf(scope,"0",if(unknown)"1"else"0",seal("state",body),identity.encryptedRecord(key),identity.descriptorOid,identity.accountId))
             }
+            synchronizeBusinessInTransaction(readState(),SyncV2BusinessWitness.read(db))
             db.execSQL("UPDATE syncv2_control SET enabled=1,active_scope=?,failure_code=NULL WHERE id=1",arrayOf(scope))
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
@@ -50,19 +55,50 @@ internal class SyncV2Projection(
     private fun seal(purpose: String, value: Any?) = SyncV2Codec.sealLocal(key,scope,purpose,value)
     private fun open(purpose: String, bytes: ByteArray)=JSONObject(SyncV2Codec.openLocal(key,scope,purpose,bytes))
     data class State(val version: String,val revision: String,val body: JSONObject)
+    private fun readState():State = db.query("SELECT state_version,local_revision,body FROM syncv2_state WHERE scope=?",arrayOf(scope)).use { c ->
+        check(c.moveToFirst());State(c.getString(0),c.getString(1),open("state",c.getBlob(2)))
+    }
     fun state(): State {
-        ensureActive()
-        return db.query("SELECT state_version,local_revision,body FROM syncv2_state WHERE scope=?",arrayOf(scope)).use { c ->
-            check(c.moveToFirst()); State(c.getString(0),c.getString(1),open("state",c.getBlob(2)))
+        requireWorkerContext();ensureActive()
+        val stamp=SyncV2BusinessWitness.read(db)
+        val old=readState()
+        if(old.body.optString("businessStamp")==stamp.encoded())return old
+        db.beginTransaction()
+        try {
+            synchronizeBusinessInTransaction(readState(),SyncV2BusinessWitness.read(db))
+            db.setTransactionSuccessful()
+        } finally {db.endTransaction()}
+        return readState()
+    }
+    /** A projection observation of a PREVIOUSLY committed business revision; never a business hook. */
+    private fun synchronizeBusinessInTransaction(st:State,stamp:SyncV2BusinessWitness.Stamp) {
+        if(st.body.optString("businessStamp")==stamp.encoded())return
+        val following=SyncV2Codec.next(st.version)
+        val previous=SyncV2BusinessWitness.decode(st.body.optString("businessStamp"))
+        val continuous=previous!=null && previous.sameSource(stamp) && SyncV2Codec.d64(stamp.revision)>SyncV2Codec.d64(previous.revision)
+        val delta=if(continuous)SyncV2Codec.d64(stamp.revision)-SyncV2Codec.d64(previous!!.revision)else java.math.BigInteger.ONE
+        val revision=(SyncV2Codec.d64(st.revision)+delta).also{if(it>SyncV2Codec.maxD64)SyncV2Codec.fail("counter_exhausted")}.toString()
+        if(!continuous)st.body.put("businessEpoch",SyncV2Codec.next(st.body.optString("businessEpoch","0")))
+        val base=st.body.optJSONObject("account")
+        if(st.body.isNull("editBase")) {
+            if(continuous && base!=null && !st.body.optBoolean("unknownEditBase"))st.body.put("editBase",JSONObject().put("accountOid",base.getString("oid")).put("generation",base.getString("generation")))
+            else st.body.put("unknownEditBase",true)
         }
+        // Without an authenticated per-operation base, a post-rollback legacy/local write is unknown.
+        if(!continuous || st.body.getString("rollbackGeneration")!="0")st.body.put("unknownEditBase",true)
+        st.body.put("businessStamp",stamp.encoded())
+        refreshPending(st.body)
+        db.execSQL("UPDATE syncv2_state SET state_version=?,local_revision=?,body=? WHERE scope=? AND state_version=?",arrayOf(following,revision,seal("state",st.body),scope,st.version))
+        if(db.query("SELECT changes()").use{it.moveToFirst();it.getInt(0)}!=1)SyncV2Codec.fail("choice_stale")
     }
     private fun <T> writer(expected: String?=null, body: (State)->T): T {
-        ensureActive()
+        state() // Consume only the small business witness, outside the projection transaction.
         db.beginTransaction() // Android uses an immediate/exclusive SQLite writer, never a read-deferred txn.
         var started=false
         try {
-            val old=state(); val following=SyncV2Codec.next(old.version) // before callbacks and fault hooks
+            val old=readState(); val following=SyncV2Codec.next(old.version) // before callbacks and fault hooks
             if(expected!=null && old.version!=expected) SyncV2Codec.fail("choice_stale")
+            if(old.body.optString("businessStamp")!=SyncV2BusinessWitness.read(db).encoded())SyncV2Codec.fail("choice_stale")
             started=true
             fault("begin")
             val result=body(old)
@@ -125,12 +161,13 @@ internal class SyncV2Projection(
         a
     } catch (_: Exception) { SyncV2Codec.fail("choice_stale") }
     fun captureLegacyChoice(window: JSONObject): ChoiceCapture {
-        val st=state(); val a=current(st)
+        ensureActive();val st=readState(); val a=current(st)
         if(SyncV2Codec.canonical(a)!=SyncV2Codec.canonical(window)) SyncV2Codec.fail("choice_stale")
         return ChoiceCapture(st.version,a.getString("oid"),a.getString("revision"),a.getString("generation"),st.revision).also { checkCapture(st,it) }
     }
     private fun checkCapture(st: State,capture: ChoiceCapture) {
         val a=current(st); ChoiceCapture.restore(capture.json())
+        if(st.body.optString("businessStamp")!=SyncV2BusinessWitness.peek(db)?.encoded())SyncV2Codec.fail("choice_stale")
         val pending=st.body.optJSONObject("pendingChoice")?:SyncV2Codec.fail("choice_stale")
         if(pending.get("generation") !is String)SyncV2Codec.fail("choice_stale")
         if(capture.stateVersion!=st.version || capture.localChangeRevision!=st.revision || capture.accountOid!=a.getString("oid") ||
@@ -138,15 +175,16 @@ internal class SyncV2Projection(
     }
     /** Validates at both preparation and commit boundaries, but product apply is intentionally closed. */
     fun validateChoice(capture: ChoiceCapture, prepare: ()->Unit = {}) {
-        checkCapture(state(),capture); prepare()
+        ensureActive();checkCapture(readState(),capture); prepare()
         db.beginTransaction()
-        try { checkCapture(state(),capture) } finally { db.endTransaction() }
+        try { checkCapture(readState(),capture) } finally { db.endTransaction() }
     }
     /** Prepare a minimal encrypted recovery candidate, then recheck the same Capture.
      * It is not a committed recovery reference and cannot authorize discarding the inbox.
      */
     fun prepareLegacyCloud(capture: ChoiceCapture,peer:String,version:Int,cursor:String,cloud:JSONObject,now:Long):JSONObject {
-        val before=state();checkCapture(before,capture)
+        requireWorkerContext();ensureActive();val before=readState();checkCapture(before,capture)
+        if(before.body.optBoolean("unknownEditBase"))SyncV2Codec.fail("merge_unavailable")
         val base=before.body.optJSONObject("editBase")?:SyncV2Codec.fail("merge_unavailable")
         val intent=db.query("SELECT body FROM syncv2_legacy_inbox WHERE scope=? AND peer=? AND version=? AND cursor=? AND route='pendingChoice'",arrayOf<Any>(scope,peer,version,cursor)).use{if(it.moveToFirst())open("legacy",it.getBlob(0))else SyncV2Codec.fail("choice_stale")}
         if(intent.getJSONObject("body").has("legacy-frame"))SyncV2Codec.fail("unsupported_feature")
@@ -161,7 +199,7 @@ internal class SyncV2Projection(
         return copy
     }
     fun resolveLegacyCloud(capture: ChoiceCapture): Nothing {
-        checkCapture(state(),capture); SyncV2Codec.fail("feature_disabled")
+        ensureActive();checkCapture(readState(),capture); SyncV2Codec.fail("feature_disabled")
     }
     private fun pending(body: JSONObject,generation: String) {
         val keys=body.optJSONObject("pendingChoice")?.optJSONArray("inboxKeys")?:JSONArray()
@@ -178,7 +216,7 @@ internal class SyncV2Projection(
     data class LegacyInput(val peer: String,val version: Int,val cursor: String,val body: JSONObject,val removed: List<String> = emptyList(),val bodyRefs: JSONObject = JSONObject())
     /** Receives a local projection copy only. Never acknowledges business apply or changes the BLE cursor. */
     fun receiveLegacy(input: LegacyInput, affected: Set<String>?, rollbackKnown: Boolean): String {
-        ensureActive()
+        requireWorkerContext();ensureActive()
         if(input.version !in setOf(13,14) || input.peer.isEmpty() || input.cursor.isEmpty() || input.removed.distinct()!=input.removed || input.removed.any(input.body::has)) SyncV2Codec.fail("invalid_schema")
         val intent=JSONObject().put("body",input.body).put("removed",JSONArray(input.removed.sorted())).put("bodyRefsByEntity",input.bodyRefs)
         if(SyncV2Codec.utf8(SyncV2Codec.canonical(intent)).size>1048576)SyncV2Codec.fail("object_too_large")
@@ -233,72 +271,89 @@ internal class SyncV2Projection(
     }
     private fun binding(domain: SyncV2Schema.Domain, capability: String): String = SyncV2Codec.hash(JSONObject()
         .put("schema",SyncV2Schema.semanticBinding(db,listOf(domain.table)+when(domain.table){"notes"->listOf("note_conflicts");"phone_articles"->listOf("article_register_provenance");"imported_books"->listOf("imported_book_chapters");else->emptyList()}))
-        .put("scope",identity.scope).put("descriptor",identity.descriptorOid).put("account",identity.accountId).put("capability",capability))
+        .put("scope",identity.scope).put("descriptor",identity.descriptorOid).put("account",identity.accountId).put("capability",capability)
+        .put("businessEpoch",readState().body.optString("businessEpoch","0")))
     /** Stable keyset page; no OFFSET or SELECT * against article bodies. Maximum 64 records / 1 MiB. */
-    fun scanPage(domainName: String, capability: String="p1-local-v1", limit: Int=64, byteBudget: Int=1048576): PageResult {
-        ensureActive(); require(limit in 1..64 && byteBudget in 262144..1048576)
-        val domain=SyncV2Schema.domains.single { it.table==domainName }
-        val bind=binding(domain,capability)
-        val reusable=db.query("SELECT complete,binding FROM syncv2_scan WHERE scope=? AND domain=?",arrayOf(scope,domainName)).use { it.moveToFirst() && it.getInt(0)==1 && it.getString(1)==bind }
+    fun scanPage(domainName:String,capability:String="p1-local-v1",limit:Int=64,byteBudget:Int=1048576):PageResult =
+        scanPageAt(domainName,capability,limit,byteBudget,null)
+    private fun scanPageAt(domainName:String,capability:String,limit:Int,byteBudget:Int,targetStamp:String?):PageResult {
+        val initial=state();require(limit in 1..64 && byteBudget in 262144..1048576)
+        val target=targetStamp?:initial.body.getString("businessStamp")
+        val domain=SyncV2Schema.domains.single{it.table==domainName};val bind=binding(domain,capability)
+        val reusable=db.query("SELECT complete,binding,business_stamp FROM syncv2_scan WHERE scope=? AND domain=?",arrayOf(scope,domainName)).use {
+            it.moveToFirst() && it.getInt(0)==1 && it.getString(1)==bind && it.getString(2)==target
+        }
         if(reusable)return PageResult(domainName,0,0,true,false)
-        return writer { st ->
-            val checkpoint=db.query("SELECT binding,r0,page_key,complete FROM syncv2_scan WHERE scope=? AND domain=?",arrayOf(scope,domainName)).use { c ->
-                if(c.moveToFirst()) listOf(c.getString(0),c.getString(1),c.getString(2),c.getInt(3).toString()) else null
+        return writer {st->
+            val cp=db.query("SELECT binding,r0,page_key,complete,business_stamp FROM syncv2_scan WHERE scope=? AND domain=?",arrayOf(scope,domainName)).use {c->
+                if(c.moveToFirst())listOf(c.getString(0),c.getString(1),c.getString(2),c.getInt(3).toString(),c.getString(4))else null
             }
-            val restart=checkpoint==null || checkpoint[0]!=bind
-            if(restart) {
-                db.execSQL("INSERT OR REPLACE INTO syncv2_scan VALUES(?,?,?,?,NULL,'',0,0)",arrayOf(scope,domainName,bind,st.revision))
-            } else if(checkpoint!![3]=="1") return@writer PageResult(domainName,0,0,true,false)
-            val last=if(restart)"" else checkpoint!![2]
-            val columns=columns(domain)
-            var rows=0; var bytes=0; var keyAt=last; var exhausted=true
-            db.query("SELECT ${domain.key} AS projection_key,$columns FROM `${domain.table}` WHERE (${domain.key}) COLLATE BINARY > ? ORDER BY (${domain.key}) COLLATE BINARY LIMIT ?",arrayOf(last,limit+1)).use { c ->
-                while(c.moveToNext()) {
-                    if(rows==limit) { exhausted=false; break }
-                    val id=c.getString(0); val record=readRecord(domain,c)
-                    val size=SyncV2Codec.utf8(record.toString()).size
-                    if(size>byteBudget)SyncV2Codec.fail("object_too_large")
-                    if(rows>0 && bytes+size>byteBudget){ exhausted=false;break }
-                    project(domain,id,record,st.revision)
-                    keyAt=id; rows++; bytes+=size
-                }
+            val oldStamp=cp?.let{SyncV2BusinessWitness.decode(it[4])};val wanted=SyncV2BusinessWitness.decode(target)?:SyncV2Codec.fail("business_witness_unavailable")
+            val restart=cp==null || cp[0]!=bind || oldStamp==null || !oldStamp.sameSource(wanted) || SyncV2Codec.d64(oldStamp.revision)>SyncV2Codec.d64(wanted.revision) || (cp[3]=="1" && cp[4]!=target)
+            if(restart)db.execSQL("INSERT OR REPLACE INTO syncv2_scan(scope,domain,binding,r0,r1,page_key,tail_seq,complete,business_stamp) VALUES(?,?,?,?,NULL,'',0,0,?)",arrayOf(scope,domainName,bind,st.revision,target))
+            else if(cp!![3]=="1")return@writer PageResult(domainName,0,0,true,false)
+            val last=if(restart)""else cp!![2]
+            val ids=sourceKeys(domain,last,limit+1)
+            var rows=0;var bytes=0;var keyAt=last;var exhausted=true
+            for(id in ids) {
+                if(rows==limit){exhausted=false;break}
+                val value=db.query("SELECT ${domain.key} AS projection_key,${columns(domain)} FROM `${domain.table}` WHERE (${domain.key})=?",arrayOf(id)).use{c->if(c.moveToFirst())readRecord(domain,c)else null}
+                val size=value?.let{SyncV2Codec.utf8(it.toString()).size}?:0
+                if(size>byteBudget)SyncV2Codec.fail("object_too_large")
+                if(rows>0 && bytes+size>byteBudget){exhausted=false;break}
+                if(value!=null)project(domain,id,value,st.revision,st.body.optJSONObject("account"),true,st.body)
+                else markRemoved(domain,id,st.revision)
+                keyAt=id;rows++;bytes+=size
             }
             fault("before-checkpoint")
             db.execSQL("UPDATE syncv2_scan SET page_key=?,complete=?,r1=? WHERE scope=? AND domain=?",arrayOf<Any?>(keyAt,if(exhausted)1 else 0,if(exhausted)st.revision else null,scope,domainName))
-            fault("after-checkpoint"); PageResult(domainName,rows,bytes,exhausted,false)
+            fault("after-checkpoint");PageResult(domainName,rows,bytes,exhausted,false)
         }
     }
-    /** Fixed R1 watermark per pass. Entries after R1 stay durable for the following execution window. */
-    fun catchUp(limit: Int=64): Int {
+    /** Include prior candidate keys so physical deletions during a closed/missing witness are seen. */
+    private fun sourceKeys(d:SyncV2Schema.Domain,after:String,limit:Int):List<String> = db.query(
+        "SELECT projection_key FROM (SELECT (${d.key}) AS projection_key FROM `${d.table}` UNION SELECT logical_id AS projection_key FROM syncv2_candidates WHERE scope=? AND kind=?) WHERE projection_key COLLATE BINARY > ? ORDER BY projection_key COLLATE BINARY LIMIT ?",arrayOf<Any>(scope,d.kind,after,limit)).use{c->buildList{while(c.moveToNext())add(c.getString(0))}}
+    /** Outbox is now a DERIVED projection queue, written only by workers after business commit.
+     * A fixed reconciliation pass handles the compact witness's lack of per-entity history.
+     */
+    fun catchUp(limit:Int=64):Int {
         require(limit in 1..64)
-        val before=state()
-        val maxPending=db.query("SELECT COALESCE(MAX(seq),0) FROM syncv2_outbox WHERE scope=?",arrayOf(scope)).use {it.moveToFirst();it.getLong(0)}
-        if(!before.body.has("tailR1Seq") && maxPending==before.body.optLong("tailSeq",0))return 0
-        return writer { st ->
-            val max=db.query("SELECT COALESCE(MAX(seq),0) FROM syncv2_outbox WHERE scope=?",arrayOf(scope)).use{it.moveToFirst();it.getLong(0)}
-            val entries=mutableListOf<Array<Any>>()
-            val from=st.body.optLong("tailSeq",0)
-            val end=if(st.body.has("tailR1Seq"))st.body.getLong("tailR1Seq") else max.also{st.body.put("tailR1Seq",it)}
-            db.query("SELECT seq,revision,table_name,logical_id,operation,base_state FROM syncv2_outbox WHERE scope=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?",arrayOf<Any>(scope,from,end,limit)).use { c ->
-                while(c.moveToNext()) entries.add(arrayOf(c.getLong(0),c.getString(1),c.getString(2),c.getString(3),c.getString(4),c.getBlob(5)))
-            }
-            for(e in entries) {
-                val table=e[2] as String
-                val domain=SyncV2Schema.domains.first {it.table==when(table){"note_conflicts"->"notes";"imported_book_chapters"->"imported_books";"article_register_provenance"->"phone_articles";else->table}}
-                val id=e[3] as String
-                val eventState=open("state",e[5] as ByteArray)
-                val eventAccount=eventState.optJSONObject("account")
-                if(st.body.isNull("editBase") && eventAccount!=null) st.body.put("editBase",JSONObject().put("accountOid",eventAccount.getString("oid")).put("generation",eventAccount.getString("generation")))
-                db.query("SELECT ${domain.key} AS projection_key,${columns(domain)} FROM `${domain.table}` WHERE (${domain.key})=?",arrayOf(id)).use { c ->
-                    if(c.moveToFirst()) project(domain,id,readRecord(domain,c),e[1] as String,eventAccount)
-                    else markRemoved(domain,id,e[1] as String)
-                }
-                fault("after-tail-entry"); st.body.put("tailSeq",e[0])
-            }
-            if(entries.isEmpty() || (entries.last()[0] as Long)==end)st.body.remove("tailR1Seq")
-            refreshPending(st.body)
-            entries.size
+        var before=state()
+        val max=db.query("SELECT COALESCE(MAX(seq),0) FROM syncv2_outbox WHERE scope=?",arrayOf(scope)).use{it.moveToFirst();it.getLong(0)}
+        if(before.body.has("tailR1Seq") || max>before.body.optLong("tailSeq",0))return drainDerivedQueue(limit)
+        val current=before.body.getString("businessStamp")
+        val semantics=SyncV2Codec.hash(JSONArray(SyncV2Schema.domains.map{binding(it,"p1-local-v1")}))
+        if(!before.body.has("reconcileStamp") && before.body.optString("reconciledStamp")==current && before.body.optString("reconciledSemantics")==semantics)return 0
+        if(!before.body.has("reconcileStamp"))writer{it.body.put("reconcileStamp",current).put("reconcileSemantics",semantics).put("reconcileDomain",0)}
+        before=state();val target=before.body.getString("reconcileStamp")
+        var index=before.body.getInt("reconcileDomain")
+        while(index<SyncV2Schema.domains.size) {
+            val page=scanPageAt(SyncV2Schema.domains[index].table,"p1-local-v1",limit,1048576,target)
+            if(page.complete){index++;val next=index;writer{it.body.put("reconcileDomain",next)}}
+            if(page.rows>0)return page.rows
         }
+        writer{it.body.put("reconciledStamp",target).put("reconciledSemantics",it.body.getString("reconcileSemantics")).remove("reconcileStamp");it.body.remove("reconcileDomain");it.body.remove("reconcileSemantics")}
+        // A newer business revision remains for the next fixed pass; never claim it was applied.
+        return 0
+    }
+    private fun drainDerivedQueue(limit:Int):Int = writer {st->
+        val max=db.query("SELECT COALESCE(MAX(seq),0) FROM syncv2_outbox WHERE scope=?",arrayOf(scope)).use{it.moveToFirst();it.getLong(0)}
+        val end=if(st.body.has("tailR1Seq"))st.body.getLong("tailR1Seq")else max.also{st.body.put("tailR1Seq",it)}
+        val entries=mutableListOf<Array<Any>>()
+        db.query("SELECT seq,revision,table_name,logical_id,base_state FROM syncv2_outbox WHERE scope=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?",arrayOf<Any>(scope,st.body.optLong("tailSeq",0),end,limit)).use {c->
+            while(c.moveToNext())entries.add(arrayOf(c.getLong(0),c.getString(1),c.getString(2),c.getString(3),c.getBlob(4)))
+        }
+        for(e in entries) {
+            val table=e[2] as String
+            val d=SyncV2Schema.domains.first{it.table==when(table){"note_conflicts"->"notes";"imported_book_chapters"->"imported_books";"article_register_provenance"->"phone_articles";else->table}}
+            val id=e[3] as String;val eventAccount=open("state",e[4] as ByteArray).optJSONObject("account")
+            db.query("SELECT ${d.key} AS projection_key,${columns(d)} FROM `${d.table}` WHERE (${d.key})=?",arrayOf(id)).use{c->
+                if(c.moveToFirst())project(d,id,readRecord(d,c),st.revision,eventAccount)else markRemoved(d,id,st.revision)
+            }
+            fault("after-tail-entry");st.body.put("tailSeq",e[0])
+        }
+        if(entries.isEmpty() || entries.last()[0] as Long==end)st.body.remove("tailR1Seq")
+        refreshPending(st.body);entries.size
     }
     private fun columns(d: SyncV2Schema.Domain): String = when(d.table) {
         "phone_articles" -> SyncV2Business.articleFields.filterNot{it in setOf("rssIndexRetired","bookIndexRetired","registerSources")}.sorted().joinToString(","){"`$it`"}
@@ -330,7 +385,7 @@ internal class SyncV2Projection(
         }
         return out
     }
-    private fun project(d: SyncV2Schema.Domain,id: String,value: JSONObject,revision: String,eventAccount: JSONObject?=null) {
+    private fun project(d: SyncV2Schema.Domain,id: String,value: JSONObject,revision: String,eventAccount: JSONObject?=null,enqueue:Boolean=false,sourceState:JSONObject?=null) {
         val entity=identity.entity(d.kind,id)
         val library=db.query("SELECT library_id FROM syncv2_control WHERE id=1").use{it.moveToFirst();it.getString(0)}
         val prior=db.query("SELECT entity_key FROM syncv2_identity_map WHERE library_id=? AND repo_id=? AND kind=? AND logical_id=?",arrayOf(library,identity.repoId,d.kind,id)).use{if(it.moveToFirst())it.getString(0) else null}
@@ -353,6 +408,7 @@ internal class SyncV2Projection(
         fault("before-log")
         db.execSQL("INSERT OR IGNORE INTO syncv2_change_log VALUES(?,?,?)",arrayOf(scope,revision,entity))
         fault("after-log")
+        if(enqueue)db.execSQL("INSERT INTO syncv2_outbox(scope,revision,table_name,logical_id,operation,base_state) VALUES(?,?,?,?,?,?)",arrayOf(scope,revision,d.table,id,"OBSERVE",seal("state",sourceState?:JSONObject())))
     }
     /** Bounded encrypted source sidecars retain note conflicts and legacy register ancestry verbatim.
      * These are local candidates, not new wire payload extensions.
@@ -385,6 +441,7 @@ internal class SyncV2Projection(
     private fun markRemoved(d: SyncV2Schema.Domain,id: String,revision: String) {
         val entity=identity.entity(d.kind,id)
         val prior=db.query("SELECT meta,state FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())it.getBlob(0) to it.getBlob(1) else null}
+        if(prior!=null && open("candidate-state",prior.second).optBoolean("projectionRemoved"))return
         val meta=prior?.first?:seal("meta",JSONObject().put("version",2).put("entityKey",entity).put("kind",d.kind).put("logicalId",id).put("addedAtSource","unknown").put("requiredFeatures",JSONArray()).put("payload",JSONObject()))
         val value=(prior?.let{open("candidate-state",it.second)}?:JSONObject().put("version",2).put("entityKey",entity).put("requiredFeatures",JSONArray()).put("payload",JSONObject()).put("noteSegments",JSONArray())).put("projectionRemoved",true)
         val sealed=seal("candidate-state",value);val hash=SyncV2Codec.hash(value)

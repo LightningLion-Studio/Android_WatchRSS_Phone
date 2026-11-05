@@ -256,10 +256,12 @@ internal class SyncV2Projection(
         val prepared=mutableListOf<Pair<String,JSONObject>>()
         for(c in candidates) {
             val entity=c[0] as String;val hash=c[5] as String
+            val meta=open("meta",c[3] as ByteArray);val state=open("candidate-state",c[4] as ByteArray)
+            if(state.has("projectionRemoved"))SyncV2Codec.fail("unsupported_feature")
+            // Revalidate persisted candidates before reusing a pre-upgrade sealed cache.
+            SyncV2Business.join(c[1] as String,meta,state)
             val prior=db.query("SELECT body FROM syncv2_wire_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())open("wire-candidate",it.getBlob(0))else null}
             val value=if(prior!=null && prior.getString("sourceHash")==hash && prior.getLong("keyVersion")==keyVersion)prior else {
-                val meta=open("meta",c[3] as ByteArray);val state=open("candidate-state",c[4] as ByteArray)
-                if(state.has("projectionRemoved"))SyncV2Codec.fail("unsupported_feature")
                 val sealedMeta=SyncV2Envelope.seal(identity,contentKey,keyVersion,"meta",SyncV2Codec.utf8(SyncV2Codec.canonical(meta)))
                 val sealedState=SyncV2Envelope.seal(identity,contentKey,keyVersion,"state",SyncV2Codec.utf8(SyncV2Codec.canonical(state)))
                 val body=(c[1] as String) in setOf("article","book","asset")

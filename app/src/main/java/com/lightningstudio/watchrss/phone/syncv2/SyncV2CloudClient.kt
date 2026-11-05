@@ -141,12 +141,12 @@ internal class SyncV2CloudClient(
         val type=parent.substringBefore(':');if(type !in setOf("state","recipe"))SyncV2Codec.fail("invalid_oid")
         return get("$type-refs/$parent",mapOf("windowId" to window))
     }
-    fun raw(oid:String):ByteArray { SyncV2Wire.oid(oid);return bytes("GET","objects/$oid",raw=true).first }
+    fun raw(oid:String,window:String?=null):ByteArray { SyncV2Wire.oid(oid);return bytes("GET","objects/$oid",query=if(window==null)emptyMap()else mapOf("windowId" to window),raw=true).first }
     fun batch(window:String,oids:List<String>)=post("objects/batch-get",JSONObject().put("windowId",window).put("oids",JSONArray(oids)))
     fun objects(window:String,oids:List<String>):Map<String,ByteArray> {
         val response=batch(window,oids);val out=linkedMapOf<String,ByteArray>();val a=response.getJSONArray("objects")
         for(i in 0 until a.length()) {val item=a.getJSONObject(i);SyncV2Codec.exact(item,setOf("oid","bytes"));val oid=item.getString("oid");if(oid !in oids || out.containsKey(oid))SyncV2Codec.fail("invalid_schema");out[oid]=SyncV2Codec.decode64(item.getString("bytes"))}
-        for(oid in SyncV2Wire.strings(response.getJSONArray("nextOids"),512,false)) {if(oid !in oids || out.containsKey(oid))SyncV2Codec.fail("invalid_schema");out[oid]=raw(oid)}
+        for(oid in SyncV2Wire.strings(response.getJSONArray("nextOids"),512,false)) {if(oid !in oids || out.containsKey(oid))SyncV2Codec.fail("invalid_schema");out[oid]=raw(oid,window)}
         if(out.keys!=oids.toSet())SyncV2Codec.fail("object_missing")
         return out
     }

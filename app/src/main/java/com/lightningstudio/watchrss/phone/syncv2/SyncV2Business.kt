@@ -74,18 +74,28 @@ internal object SyncV2Business {
             }
         }
         val required=when(kind) {
-            "article" -> fields("articleId sourceDeviceId url title updatedAt")
+            "article" -> if(input.has("registerSources")) fields("articleId sourceDeviceId url contentHash updatedAt registerSources") else fields("articleId url")
             "book" -> fields("bookId fingerprint title chapterCount deletedChapters deletionClock deleted deletedAt updatedAt sourceDeviceId")
             "book-reading" -> fields("bookId chapterIndex isRead readingProgress readingPositionBytes readingPositionContentHash readingPositionChangedAt sourceDeviceId")
-            "note" -> noteFields + "noteConflicts"; "folder" -> folderFields; "asset" -> assetFields
-            "source" -> fields("url title updatedAt sourceDeviceId")
+            "note" -> noteFields; "folder" -> folderFields; "asset" -> assetFields
+            "source" -> fields("url")
+            "rss-state" -> fields("sourceId articleIdHash")
             else -> emptySet()
         }
         if(required.any { !input.has(it) }) SyncV2Codec.fail("invalid_schema")
+        if(kind=="book") {
+            val fingerprint=input.getString("fingerprint");val id=input.getString("bookId")
+            if(!Regex("[0-9a-f]{64}").matches(fingerprint) || !Regex("[0-9a-f]{64}").matches(id))SyncV2Codec.fail("invalid_schema")
+            val instance=input.optString("instanceId","")
+            val fields=if(input.has("instanceId"))listOf("watchrss/book/instance-id/v1",fingerprint,instance) else listOf("watchrss/book/id/v1",fingerprint)
+            if(SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.lp(*fields.map(SyncV2Codec::utf8).toTypedArray())))!=id)SyncV2Codec.fail("invalid_schema")
+        }
     }
     data class PairObjects(val meta: JSONObject, val state: JSONObject)
     fun split(kind: String, logicalId: String, entityKey: String, value: JSONObject, addedAt: Long?): PairObjects {
         validate(kind,value)
+        // A missing channel is readable unknown data, never permission to rewrite an empty set.
+        if(kind=="note" && !value.has("noteConflicts"))SyncV2Codec.fail("unsupported_feature")
         val meta=JSONObject(); val state=JSONObject()
         for(key in value.keys()) {
             if(key=="readingProgress") state.put("readingProgressMicros",kotlin.math.floor(value.getDouble(key)*1000000.0+0.5).toLong())

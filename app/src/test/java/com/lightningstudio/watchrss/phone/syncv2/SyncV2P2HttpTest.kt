@@ -109,7 +109,7 @@ class SyncV2P2HttpTest {
     }
     @Test fun oversizedBatchFallsBackToRawGetOnceAndChecksEtag() {
         val oid="state-refs:sha256:"+"1".repeat(64);val calls=mutableListOf<String>()
-        val s=server {r->calls.add(r.requestUrl!!.encodedPath);if(r.method=="POST")response(dto().put("objects",JSONArray()).put("nextOids",JSONArray().put(oid)))else MockResponse().setHeader("ETag",oid).setBody("raw-control")}
+        val s=server {r->calls.add(r.requestUrl!!.encodedPath);if(r.method=="POST")response(dto().put("objects",JSONArray()).put("nextOids",JSONArray().put(oid)))else {assertEquals("11".repeat(16),r.requestUrl!!.queryParameter("windowId"));MockResponse().setHeader("ETag",oid).setBody("raw-control")}}
         val c=client(s);c.capabilities();assertArrayEquals("raw-control".toByteArray(),c.objects("11".repeat(16),listOf(oid)).getValue(oid));assertEquals(2,calls.size)
     }
     @Test fun busyAndTransportAndUpgradeAreNotAuthorizationFailureOrEmptyLibrary() {

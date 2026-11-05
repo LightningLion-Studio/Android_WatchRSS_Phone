@@ -43,6 +43,13 @@ class SyncV2P2StorageTest {
     private fun code(fn:()->Unit):String?=try{fn();null}catch(e:IllegalStateException){e.message}
     private fun scalar(db:PhoneCompanionDatabase,sql:String)=db.openHelper.writableDatabase.query(sql).use{it.moveToFirst();it.getLong(0)}
     @After fun close(){dbs.forEach{if(it.isOpen)it.close()};roots.forEach{it.deleteRecursively()}}
+    @Test fun invalidBookCannotEnterProjectionAndBusinessSaveSurvivesRejection() {
+        val db=room(root().resolve("phone.db"));val p=adapter(db);p.install()
+        val book=JSONObject().put("bookId","phone-1-book").put("fingerprint","synthetic-book-fingerprint-phone-1").put("title","").put("chapterCount",1).put("deletedChapters",JSONArray()).put("deletionClock",0).put("deleted",false).put("deletedAt",0).put("updatedAt",0).put("sourceDeviceId","")
+        db.openHelper.writableDatabase.execSQL("INSERT INTO imported_books VALUES(?,?,'synthetic-hash',0)",arrayOf<Any>("phone-1-book",SyncV2Codec.canonical(book)))
+        assertEquals("invalid_schema",code{p.scanPage("imported_books")})
+        assertEquals(1,scalar(db,"SELECT COUNT(*) FROM imported_books"));assertEquals(0,scalar(db,"SELECT COUNT(*) FROM syncv2_candidates"))
+    }
     @Test fun completeEncryptedIndexAuthenticatesAndPersistsWithoutAnyBodyWorkerOrBusinessAck() {
         val file=root().resolve("phone.db");var db=room(file);seed(db);var p=adapter(db);p.install();p.scanPage("notes")
         val index=p.prepareWireIndex(signer(),contentKey,1);val body=JSONObject(SyncV2Fixtures.envelope().getJSONObject("body").toString()).put("treeRoot",index.tree.root)

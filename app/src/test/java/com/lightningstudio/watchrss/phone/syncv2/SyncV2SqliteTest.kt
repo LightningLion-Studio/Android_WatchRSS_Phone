@@ -63,7 +63,9 @@ class SyncV2SqliteTest {
         val book=SyncV2Fixtures.vector("book-merge").getJSONArray("cases").getJSONObject(0).getJSONObject("left")
         sql.execSQL("INSERT INTO imported_books VALUES(?,?,'hash',5)",arrayOf(book.getString("bookId"),book.toString()))
         val copy=JSONObject(SyncV2Fixtures.vector("book-merge").getJSONArray("cases").getJSONObject(0).getJSONObject("right").toString()).put("instanceId","ab".repeat(16))
-        sql.execSQL("INSERT INTO imported_books VALUES('copy',?,'hash',5)",arrayOf(copy.toString()))
+        val copyId=SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.lp(SyncV2Codec.utf8("watchrss/book/instance-id/v1"),SyncV2Codec.utf8(copy.getString("fingerprint")),SyncV2Codec.utf8(copy.getString("instanceId")))))
+        copy.put("bookId",copyId)
+        sql.execSQL("INSERT INTO imported_books VALUES(?,?,'hash',5)",arrayOf(copyId,copy.toString()))
         val countsBefore=businessCounts(sql)
         val before=businessDigest(sql);val a=adapter(db);a.install()
         for(d in SyncV2Schema.domains)while(!a.scanPage(d.table).complete){}
@@ -76,7 +78,7 @@ class SyncV2SqliteTest {
         assertEquals("remote",a.sourceProvenance("note","note")!!.getJSONArray("conflicts").getJSONObject(0).getString("remoteMarkdown"))
         assertEquals("unknown",pair.first.getString("addedAtSource"))
         assertTrue(a.candidate("book",book.getString("bookId"))!!.second.getJSONObject("payload").getBoolean("deleted"))
-        assertEquals("ab".repeat(16),a.candidate("book","copy")!!.first.getJSONObject("payload").getString("instanceId"))
+        assertEquals("ab".repeat(16),a.candidate("book",copyId)!!.first.getJSONObject("payload").getString("instanceId"))
         assertEquals(87,db.syncPeerStateDao().get("paired-peer")!!.lastRemoteSeqApplied)
         SyncV2Fixtures.evidence("domain-preservation.json",JSONObject().put("countsBefore",countsBefore).put("countsAfter",businessCounts(sql)).put("beforeSha256",before).put("afterSha256",businessDigest(sql)).put("oldRemoteCursor",87).put("candidateCount",scalar(sql,"SELECT COUNT(*) FROM syncv2_candidates")))
     }

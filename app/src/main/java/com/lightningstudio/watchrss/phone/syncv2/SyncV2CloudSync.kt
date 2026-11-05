@@ -55,7 +55,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             if(next!=at || page.get("complete")!=(at==pin))SyncV2Codec.fail("ref_continuity_unavailable")
         }
         val closure=SyncV2ControlClosure(identity,authors,contentKey)
-        val verified=closure.verify(headers.first(),client::raw) { parent ->
+        val verified=closure.verify(headers.first(),{oid->client.raw(oid,id)}) { parent ->
             client.reference(parent,id).let { JSONObject(it.toString()).apply { remove("version") } }
         }
         fresh(window)
@@ -140,7 +140,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val signed=signer.commit(body);val oid=SyncV2Codec.oid("commit",body)
         val objects=index.objects.toMutableMap();objects[oid]=SyncV2Codec.utf8(SyncV2Codec.canonical(signed))
         // Each reservation is bounded. Control upload never requests a content slot.
-        for(batch in objects.entries.sortedBy{it.key}.chunked(64)) {
+        for(batch in objects.entries.filter{it.key.substringBefore(':') in setOf("meta","state","tree","commit")}.sortedBy{it.key}.chunked(64)) {
             val reserve=client.reserve(randomId(),batch.map{it.key to it.value.size});val reservation=reserve.getString("reservationId")
             val entries=reserve.getJSONArray("objects")
             for(item in batch) {

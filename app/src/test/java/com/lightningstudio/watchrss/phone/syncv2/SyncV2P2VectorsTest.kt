@@ -12,6 +12,32 @@ class SyncV2P2VectorsTest {
     private fun error(code:String,action:()->Unit) {try{action();fail("accepted invalid input: $code")}catch(e:IllegalStateException){assertEquals(code,e.message)}}
     private fun cases(a:JSONArray,fn:(JSONObject)->Unit){for(i in 0 until a.length())fn(a.getJSONObject(i))}
     private fun hex(s:String)=SyncV2Codec.unhex(s,s.length/2)
+    @Test fun bookFingerprintAndDerivedIdentityAreValidatedBeforeSealingOrAccepting() {
+        val book=JSONObject().put("bookId","").put("fingerprint","ab".repeat(32)).put("title","").put("chapterCount",1).put("deletedChapters",JSONArray()).put("deletionClock",0).put("deleted",false).put("deletedAt",0).put("updatedAt",0).put("sourceDeviceId","")
+        book.put("bookId",SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.lp(SyncV2Codec.utf8("watchrss/book/id/v1"),SyncV2Codec.utf8(book.getString("fingerprint"))))))
+        SyncV2Business.validate("book",book)
+        error("invalid_schema"){SyncV2Business.validate("book",JSONObject(book.toString()).put("fingerprint","synthetic-book-fingerprint"))}
+        error("invalid_schema"){SyncV2Business.validate("book",JSONObject(book.toString()).put("bookId","cd".repeat(32)))}
+        val instance=JSONObject(book.toString()).put("instanceId","ef".repeat(16))
+        error("invalid_schema"){SyncV2Business.validate("book",instance)}
+        instance.put("bookId",SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.lp(SyncV2Codec.utf8("watchrss/book/instance-id/v1"),SyncV2Codec.utf8(book.getString("fingerprint")),SyncV2Codec.utf8(instance.getString("instanceId"))))))
+        SyncV2Business.validate("book",instance)
+    }
+    @Test fun absentNoteConflictChannelIsReadableUnknownAndCannotAuthorizeRewrite() {
+        val meta=JSONObject().put("payload",JSONObject().put("noteId","old").put("folderId",JSONObject.NULL).put("title","").put("createdAt",0))
+        val state=JSONObject().put("payload",JSONObject().put("markdown","").put("plainText","").put("contentHash","").put("baseContentHash","").put("baseMarkdown","").put("pinned",false).put("updatedAt",0).put("modifiedBy","").put("deleted",false).put("deletedAt",0))
+        val read=SyncV2Business.join("note",meta,state)
+        assertFalse(read.has("noteConflicts"))
+        error("unsupported_feature"){SyncV2Business.split("note","old","aa".repeat(32),read,null)}
+        assertFalse(state.getJSONObject("payload").has("noteConflicts"))
+    }
+    @Test fun frozenOptionalRecordFieldsRemainAbsentWithoutDefaultFilling() {
+        for((kind,raw)in listOf("article" to JSONObject().put("articleId","old").put("url","https://example.invalid/old"),"source" to JSONObject().put("url","https://example.invalid/feed"))) {
+            val pair=SyncV2Business.split(kind,"old","aa".repeat(32),raw,null)
+            val restored=SyncV2Business.join(kind,pair.meta,pair.state)
+            same(raw,restored);assertFalse(restored.has("title"));assertFalse(restored.has("updatedAt"));assertFalse(restored.has("sourceDeviceId"))
+        }
+    }
     private fun signer()=SyncV2Signing.fromPrivate(hex(v("commit").getString("publicFixtureSigningKeyHex")),"aa".repeat(16),"ab".repeat(16))
     private fun mutate(value:JSONObject,path:JSONArray,replacement:Any?,remove:Boolean=false) {
         var at:Any=value

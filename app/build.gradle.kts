@@ -256,3 +256,20 @@ tasks.register<Test>("r48JointLocalTest") {
     environment("WATCHRSS_R48_JOINT_ENV",providers.environmentVariable("WATCHRSS_R48_JOINT_ENV").orNull ?: "")
     outputs.upToDateWhen {false}
 }
+
+// Opt-in only. Credentials remain in the per-phone private fixture, never JVM command arguments.
+tasks.withType<Test>().configureEach {
+    if(name == "testDebugUnitTest") exclude("**/SyncV2P2JointIntegrationTest*")
+}
+tasks.register<Test>("syncV2P2JointTest") {
+    val unit=tasks.named<Test>("testDebugUnitTest").get()
+    dependsOn(unit.testClassesDirs.buildDependencies)
+    testClassesDirs=unit.testClassesDirs
+    classpath=unit.classpath
+    systemProperties(unit.systemProperties)
+    jvmArgs(unit.jvmArgs ?: emptyList<String>())
+    maxHeapSize=unit.maxHeapSize
+    filter.includeTestsMatching("com.lightningstudio.watchrss.phone.syncv2.SyncV2P2JointIntegrationTest")
+    environment("WATCHRSS_P2_PHONE_JOINT",providers.environmentVariable("WATCHRSS_P2_PHONE_JOINT").orNull ?: "")
+    outputs.upToDateWhen {false}
+}

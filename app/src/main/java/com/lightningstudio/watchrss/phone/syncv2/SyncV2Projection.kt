@@ -226,6 +226,13 @@ internal class SyncV2Projection(
         SyncV2Codec.unhex(id,16);st.body.put("pendingPublish",JSONObject(bytes))
     }
     fun pendingPublish():JSONObject? = state().body.optJSONObject("pendingPublish")?.let {JSONObject(it.toString())}
+    /** Definitive CAS rejection invalidates only this signed attempt, never its edits or sealed objects. */
+    fun rejectPublish(request:JSONObject,code:String) = writer { st ->
+        if(code !in setOf("ref_conflict","rollback_conflict"))SyncV2Codec.fail("invalid_schema")
+        val pending=st.body.optJSONObject("pendingPublish")?:return@writer
+        if(SyncV2Codec.canonical(pending)!=SyncV2Codec.canonical(request))SyncV2Codec.fail("choice_stale")
+        st.body.remove("pendingPublish")
+    }
     fun confirmPublish(request:JSONObject,response:JSONObject) = writer { st ->
         val pending=st.body.optJSONObject("pendingPublish")?:SyncV2Codec.fail("choice_stale")
         if(SyncV2Codec.canonical(pending)!=SyncV2Codec.canonical(request))SyncV2Codec.fail("choice_stale")

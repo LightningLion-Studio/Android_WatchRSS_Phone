@@ -47,6 +47,17 @@ class SyncV2P2HttpTest {
         assertEquals(session.legacyEpoch,request.getHeader("x-watchrss-library-epoch"));assertEquals(session.legacyGeneration,request.getHeader("x-watchrss-content-generation"))
         assertEquals(account,session.accountId)
     }
+    @Test fun c1SeparateDeviceAuthorizationHeaderIsPreserved() {
+        val s=server{response(dto())};val c=client(s,{session.copy(deviceAuthorization="synthetic-device-session-proof")});c.capabilities()
+        val r=s.takeRequest();assertEquals("synthetic-device-session-proof",r.getHeader("x-watchrss-device-authorization"));assertEquals(session.legacyDeviceId,r.getHeader("x-watchrss-cloud-device-id"))
+    }
+    @Test fun exactMutationSchemasDoNotGainTopLevelVersionOrSignedWrapperScope() {
+        val s=server{r->if(r.requestUrl!!.encodedPath.endsWith("negotiate"))response(dto().put("windowId","11".repeat(16)).put("expiresAtMillis",1000).put("serverRevision","0").put("historyFloorRevision","0").put("account",JSONObject().put("commitOid",JSONObject.NULL).put("revision","0").put("rollbackGeneration","0")))else response(dto())}
+        val c=client(s);c.capabilities();s.takeRequest();c.negotiate()
+        val negotiation=SyncV2Wire.parse(s.takeRequest().body.readByteArray());assertEquals(setOf("scope","knownRefs","features"),negotiation.keys().asSequence().toSet())
+        val request=JSONObject().put("account",JSONObject().put("body",JSONObject().put("requestId","11".repeat(16)))).put("device",JSONObject()).put("relayGrant",JSONObject.NULL)
+        c.publish(request);assertEquals(SyncV2Codec.canonical(request),s.takeRequest().body.readUtf8())
+    }
     @Test fun oldEpochOrAccountChangeEndsRoundAndDefaultGateIsClosed() {
         var owner=session;val s=server {response(dto())};val c=client(s,{owner});c.capabilities();s.takeRequest()
         owner=owner.copy(legacyGeneration="33333333-3333-3333-3333-333333333333")

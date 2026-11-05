@@ -136,7 +136,7 @@ class SyncV2P2StorageTest {
         server.dispatcher=object:okhttp3.mockwebserver.Dispatcher(){override fun dispatch(request:okhttp3.mockwebserver.RecordedRequest):okhttp3.mockwebserver.MockResponse {
             val path=request.requestUrl!!.encodedPath.removePrefix("/functions/v1/sync/v2/");calls[path]=(calls[path]?:0)+1
             return when {
-                path=="capabilities" ->json(dto().put("minVersion",2).put("maxVersion",2).put("features",JSONArray()).put("historyDays",7).put("maxPartBytes",65536).put("receiptKeyId",bootstrap.getString("receiptKeyId")).put("receiptSigningPublicKey",bootstrap.getString("receiptSigningPublicKey")))
+                path=="capabilities" ->json(dto().put("minVersion",2).put("maxVersion",2).put("features",JSONArray()).put("historyDays",7).put("maxPartBytes",65536).put("flags",JSONObject().put("read",true).put("indexWrite",true).put("contentWrite",false).put("relay",false).put("gc",false).put("historyRestore",false)).put("receiptKeyId",bootstrap.getString("receiptKeyId")).put("receiptSigningPublicKey",bootstrap.getString("receiptSigningPublicKey")))
                 path=="negotiate" ->json(window().put("refs",JSONArray()).put("checkpointOid",JSONObject.NULL).put("pageToken",JSONObject.NULL))
                 path=="devices/signing-keys" ->json(dto().put("bindings",JSONArray().put(binding)).put("revocationRevision","0"))
                 path=="account/ancestry" -> {
@@ -164,12 +164,25 @@ class SyncV2P2StorageTest {
             val objectCalls=calls.filterKeys{it.startsWith("objects/")}.values.sum()
             assertEquals("metadata-ready",sync.readCurrent())
             assertEquals(objectCalls,calls.filterKeys{it.startsWith("objects/")}.values.sum())
-            rolled=true;val poll=sync.poll();assertTrue(poll.getBoolean("historyExpired"));assertEquals("awaiting-user",poll.getString("status"))
+            rolled=true
+            val publicationRace=try{sync.publishIndex(signer(),contentKey,1);null}catch(e:SyncV2CloudError){e.code}
+            assertEquals("ref_conflict",publicationRace)
+            assertNull(p.pendingPublish())
+            val poll=sync.poll();assertTrue(poll.getBoolean("historyExpired"));assertEquals("awaiting-user",poll.getString("status"))
             assertFalse(p.state().body.isNull("pendingChoice"));assertEquals("1",p.state().body.getString("rollbackGeneration"));assertEquals("2",p.state().body.getString("eventCursor"))
             assertTrue(p.state().body.isNull("appliedAccount"));assertEquals(90000,scalar(db,"SELECT updatedAt FROM notes WHERE noteId='note'"))
             assertFalse(calls.keys.any{it.contains("acks/applied")||it.contains("account/publish")||it.contains("blob:")})
             SyncV2Fixtures.evidence("p2-http-rollback.json",JSONObject().put("status",poll.getString("status")).put("calls",JSONObject(calls as Map<*,*>)).put("bodyWorkerCalls",0).put("businessAppliedAckCalls",0))
         }finally{server.shutdown()}
+    }
+    @Test fun definitiveCasRejectionDropsOnlyAttemptAndAllowsFreshRequest() {
+        val db=room(root().resolve("phone.db"));val p=adapter(db);p.install()
+        fun request(id:String)=JSONObject().put("account",JSONObject().put("body",JSONObject().put("requestId",id)))
+        val original=p.state();val one=request("11".repeat(16));p.persistPublish(one,original.version)
+        assertNotNull(p.pendingPublish());p.rejectPublish(one,"ref_conflict");assertNull(p.pendingPublish())
+        assertEquals(original.revision,p.state().revision);assertEquals(SyncV2Codec.canonical(original.body.get("editBase")),SyncV2Codec.canonical(p.state().body.get("editBase")))
+        val two=request("22".repeat(16));p.persistPublish(two,p.state().version)
+        assertEquals(SyncV2Codec.canonical(two),SyncV2Codec.canonical(p.pendingPublish()))
     }
     @Test fun reservedSequenceSurvivesReopenAndD64ExhaustionNeverRunsHook() {
         val file=root().resolve("phone.db");var db=room(file);var p=adapter(db);p.install();assertEquals("1",p.reserveDeviceSequence());db.close();db=room(file);p=adapter(db);p.install();assertEquals("2",p.reserveDeviceSequence())

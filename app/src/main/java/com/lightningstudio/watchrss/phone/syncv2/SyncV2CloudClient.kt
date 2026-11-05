@@ -30,7 +30,7 @@ internal class SyncV2CloudClient(
         .followRedirects(false).followSslRedirects(false).callTimeout(30, TimeUnit.SECONDS).build()
 ) {
     data class Session(val userId: String, val legacyDeviceId: String, val legacyEpoch: String,
-        val legacyGeneration: String, val scopeJson: String, val deviceId: String, val bearer: String, val apiKey: String) {
+        val legacyGeneration: String, val scopeJson: String, val deviceId: String, val bearer: String, val apiKey: String, val deviceAuthorization: String? = null) {
         val accountId: String get() {
             if (!Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}").matches(userId)) SyncV2Codec.fail("authentication_required")
             return userId.replace("-", "").lowercase()
@@ -67,6 +67,7 @@ internal class SyncV2CloudClient(
             .header("apikey",s.apiKey).header("x-watchrss-cloud-device-id",s.legacyDeviceId)
             .header("x-watchrss-library-epoch",s.legacyEpoch).header("x-watchrss-content-generation",s.legacyGeneration)
             .header("Accept",if(raw)"application/octet-stream" else "application/json")
+        s.deviceAuthorization?.let { builder.header("x-watchrss-device-authorization",it) }
         headers.forEach { (k,v) -> builder.header(k,v) }
         val request = builder.method(method, body?.toRequestBody((if(raw || method=="PUT")"application/octet-stream" else "application/json").toMediaType())).build()
         http.newCall(request).execute().use { response ->
@@ -95,8 +96,10 @@ internal class SyncV2CloudClient(
     private fun get(path: String, query: Map<String,String> = emptyMap()): JSONObject = check(SyncV2Wire.parse(bytes("GET",path,query=query).first))
     private fun post(path: String, value: JSONObject): JSONObject {
         val request=JSONObject(value.toString())
-        if(path!="devices/signing-key")request.put("version",2)
-        if(!request.has("scope") && !request.has("body") && !request.has("descriptor"))request.put("scope",scope)
+        // Request version belongs only inside the explicitly versioned signed bodies.
+        // The backend's complete request schemas do not allow a generic top-level version.
+        val signed=path in setOf("devices/signing-key","state-refs","refs/cas","account/publish","repo/init")
+        if(!signed && !request.has("scope"))request.put("scope",scope)
         return check(SyncV2Wire.parse(bytes("POST",path,SyncV2Codec.utf8(SyncV2Codec.canonical(request))).first))
     }
     private fun check(value: JSONObject): JSONObject {

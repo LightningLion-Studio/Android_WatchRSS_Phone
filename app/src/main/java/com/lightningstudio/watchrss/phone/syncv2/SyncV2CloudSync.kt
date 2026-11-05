@@ -64,7 +64,12 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
     }
     fun resumePublish():JSONObject? {
         val request=projection.pendingPublish()?:return null
-        val response=client.publish(request);projection.confirmPublish(request,response);return response
+        client.capabilities() // A restart has not authenticated this HTTP client's capabilities yet.
+        val response=publishAttempt(request);projection.confirmPublish(request,response);return response
+    }
+    private fun publishAttempt(request:JSONObject):JSONObject = try{client.publish(request)}catch(e:SyncV2CloudError) {
+        if(e.code in setOf("ref_conflict","rollback_conflict"))projection.rejectPublish(request,e.code)
+        throw e
     }
     fun poll():JSONObject {
         val before=projection.state().body
@@ -97,7 +102,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val st=projection.state()
         if(!st.body.isNull("pendingChoice"))SyncV2Codec.fail("choice_pending")
         val account=window.getJSONObject("account");val accepted=st.body.optJSONObject("account")
-        if(!account.isNull("commitOid") && (accepted==null || accepted.getString("oid")!=account.getString("commitOid") || accepted.getString("generation")!=account.getString("rollbackGeneration")))SyncV2Codec.fail("ref_continuity_unavailable")
+        if(!account.isNull("commitOid") && (accepted==null || accepted.getString("oid")!=account.getString("commitOid") || accepted.getString("generation")!=account.getString("rollbackGeneration")))throw SyncV2CloudError("ref_conflict",true)
         if(!account.isNull("commitOid") && st.body.optJSONObject("metadataAccount")?.optString("oid")!=account.getString("commitOid"))SyncV2Codec.fail("closure_incomplete")
         val localIndex=projection.prepareWireIndex(signer,contentKey,keyVersion)
         // Without an authenticated operation base, a differing local row cannot overwrite a cloud row.
@@ -161,7 +166,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val request=JSONObject().put("account",SyncV2CloudClient.refUpdate(signer,identity.scope,"refs/account/current",old,account.getString("revision"),oid,id,now()))
             .put("device",SyncV2CloudClient.refUpdate(signer,identity.scope,"refs/devices/${signer.deviceId}/index",own,revision,oid,id,now())).put("relayGrant",JSONObject.NULL)
         projection.persistPublish(request,publishState.version)
-        val response=client.publish(request);projection.confirmPublish(request,response);return response
+        val response=publishAttempt(request);projection.confirmPublish(request,response);return response
     }
     private fun randomId()=SyncV2Codec.hex(SyncV2Codec.random(16))
 }

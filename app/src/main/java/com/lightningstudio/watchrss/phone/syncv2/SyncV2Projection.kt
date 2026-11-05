@@ -264,11 +264,28 @@ internal class SyncV2Projection(
         }
         while(!paused()) {
             val n=catchUp();tail+=n;pages++
-            // Do not start a new R1 chase in this execution window.
-            if(!state().body.has("tailR1Seq"))return WindowProgress(rows,tail,pages,false)
+            // A drained fixed tail alone says nothing about the reconciliation's persisted page.
+            // Yield with continuation when that pass (or a newer business revision) still needs work.
+            if(!state().body.has("tailR1Seq"))return WindowProgress(rows,tail,pages,!isWindowComplete())
         }
         return WindowProgress(rows,tail,pages,true)
     }
+    /** Observe completion in one short SQLite snapshot; never acknowledge only an old tail R1.
+     * A business write between state() and this snapshot also requires another window.
+     */
+    private fun isWindowComplete():Boolean {
+        state()
+        db.beginTransaction()
+        try {
+            val body=readState().body
+            val current=SyncV2BusinessWitness.peek(db)?.encoded()?:return false
+            if(body.optString("businessStamp")!=current || body.has("tailR1Seq") || body.has("reconcileStamp") ||
+                body.optString("reconciledStamp")!=current || body.optString("reconciledSemantics")!=reconciliationSemantics())return false
+            val queued=db.query("SELECT COALESCE(MAX(seq),0) FROM syncv2_outbox WHERE scope=?",arrayOf(scope)).use{it.moveToFirst();it.getLong(0)}
+            return queued<=body.optLong("tailSeq",0)
+        } finally {db.endTransaction()}
+    }
+    private fun reconciliationSemantics()=SyncV2Codec.hash(JSONArray(SyncV2Schema.domains.map{binding(it,"p1-local-v1")}))
     private fun binding(domain: SyncV2Schema.Domain, capability: String): String = SyncV2Codec.hash(JSONObject()
         .put("schema",SyncV2Schema.semanticBinding(db,listOf(domain.table)+when(domain.table){"notes"->listOf("note_conflicts");"phone_articles"->listOf("article_register_provenance");"imported_books"->listOf("imported_book_chapters");else->emptyList()}))
         .put("scope",identity.scope).put("descriptor",identity.descriptorOid).put("account",identity.accountId).put("capability",capability)
@@ -322,7 +339,7 @@ internal class SyncV2Projection(
         val max=db.query("SELECT COALESCE(MAX(seq),0) FROM syncv2_outbox WHERE scope=?",arrayOf(scope)).use{it.moveToFirst();it.getLong(0)}
         if(before.body.has("tailR1Seq") || max>before.body.optLong("tailSeq",0))return drainDerivedQueue(limit)
         val current=before.body.getString("businessStamp")
-        val semantics=SyncV2Codec.hash(JSONArray(SyncV2Schema.domains.map{binding(it,"p1-local-v1")}))
+        val semantics=reconciliationSemantics()
         if(!before.body.has("reconcileStamp") && before.body.optString("reconciledStamp")==current && before.body.optString("reconciledSemantics")==semantics)return 0
         if(!before.body.has("reconcileStamp"))writer{it.body.put("reconcileStamp",current).put("reconcileSemantics",semantics).put("reconcileDomain",0)}
         before=state();val target=before.body.getString("reconcileStamp")

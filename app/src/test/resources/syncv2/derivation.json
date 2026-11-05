@@ -1,0 +1,61 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "idKeyHex": "1111111111111111111111111111111111111111111111111111111111111111",
+  "cases": [
+    {
+      "input": {
+        "repoId": "01010101010101010101010101010101",
+        "kind": "article",
+        "logicalId": "article-1"
+      },
+      "expected": "93bdc8427905229dd72acadf56ad57d4f83c81b51aed1defcac384ae46f99d55"
+    },
+    {
+      "input": {
+        "repoId": "01010101010101010101010101010101",
+        "kind": "book",
+        "logicalId": "中😀"
+      },
+      "expected": "70e1828855c222967ded3953652b28541d9b35f9f00d453abe34ae48cbadd00e"
+    },
+    {
+      "input": {
+        "repoId": "01010101010101010101010101010101",
+        "kind": "note",
+        "logicalId": "é"
+      },
+      "expected": "80ba37052a6b6e72338efc6ebb6b16982e0db8b1ec8cdcb4f1f6518925490d79"
+    },
+    {
+      "input": {
+        "repoId": "01010101010101010101010101010101",
+        "kind": "note",
+        "logicalId": "é"
+      },
+      "expected": "7cafd385532cce3ea452f641084fb417f31045578c7ffb32a22d2dccf8989c3d"
+    }
+  ],
+  "scope": {
+    "repoId": "01010101010101010101010101010101",
+    "libraryEpoch": "1",
+    "contentGeneration": "2"
+  },
+  "opaqueCases": [
+    {
+      "input": {
+        "type": "meta",
+        "plainHex": "e4b8adf09f98800d0a"
+      },
+      "expected": "f47fb6a68c8655d4886b8c7922652987eed7617fb0c5c8fdefe66a72881ceaf6"
+    },
+    {
+      "input": {
+        "type": "blob",
+        "plainHex": "e4b8adf09f98800d0a"
+      },
+      "expected": "45bc471d9bb50000f105d628ee0854f3d22e465963f4287cf04794eab5afa3db"
+    }
+  ]
+}

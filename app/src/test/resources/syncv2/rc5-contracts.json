@@ -1,0 +1,65 @@
+{
+  "syntheticOnly": true,
+  "window": {
+    "oid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+    "revision": "3",
+    "generation": "1"
+  },
+  "editBase": {
+    "accountOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+    "generation": "0"
+  },
+  "fields": [
+    "stateVersion",
+    "accountOid",
+    "accountRevision",
+    "generation",
+    "localChangeRevision"
+  ],
+  "staleExpected": {
+    "error": "choice_stale",
+    "latestStateRetained": true
+  },
+  "pinTimes": {
+    "first": 1000,
+    "second": 2000,
+    "purgeFirst": 604801500,
+    "third": 604801600,
+    "purgeSecond": 604802000
+  },
+  "roots": [
+    "recipe:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "recipe:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "recipe:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  ],
+  "nullAdjacency": {
+    "before": {
+      "book": {
+        "revision": 2,
+        "dependencies": null
+      }
+    },
+    "target": {
+      "book": {
+        "revision": 1,
+        "dependencies": null
+      }
+    },
+    "expected": null
+  },
+  "absentAdjacency": {
+    "before": {
+      "book": {
+        "revision": 2
+      }
+    },
+    "target": {
+      "book": {
+        "revision": 1
+      }
+    },
+    "expected": [
+      "book"
+    ]
+  }
+}

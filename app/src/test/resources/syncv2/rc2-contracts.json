@@ -1,0 +1,524 @@
+{
+  "version": "v2-rc2",
+  "syntheticOnly": true,
+  "expectedSource": "Handwritten protocol requirements; not reference observed output",
+  "scope": {
+    "repoId": "01010101010101010101010101010101",
+    "libraryEpoch": "1",
+    "contentGeneration": "2"
+  },
+  "pub": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+  "refs": {
+    "body": {
+      "scope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "stateOid": "state:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "segmentOids": [
+        "state:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "state:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ]
+    },
+    "signature": "E4I0wLzPHG1C3HLVZPvcj5QYaYPq2A1sqC1DlE7pznp1M3H4Ga4h83L-t135Ih9HE0TolqbMSfslAxRaVI-7cA"
+  },
+  "empty": {
+    "body": {
+      "scope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "stateOid": "state:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "segmentOids": []
+    },
+    "signature": "B45klUir6y25DYmUbxj7P39LSRHrFEw2S1F260SzDjV6z66hDM8WHL056XeqqhY_rClCYw7I6TLzGOJWp-H2ig"
+  },
+  "children": [
+    "state:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "state:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  ],
+  "parent": "state:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "item": {
+    "entityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "bodyRevision": "ffffffffffffffffffffffffffffffff",
+    "recipeOid": "recipe:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "scope": {
+      "repoId": "01010101010101010101010101010101",
+      "libraryEpoch": "1",
+      "contentGeneration": "2"
+    },
+    "kind": "rss",
+    "addedAtMillis": 0,
+    "addedAtSource": "original",
+    "lastOpenedAtMillis": null,
+    "localBytes": 100,
+    "openedNow": false,
+    "dirty": false
+  },
+  "proof": {
+    "scope": {
+      "repoId": "01010101010101010101010101010101",
+      "libraryEpoch": "1",
+      "contentGeneration": "2"
+    },
+    "entityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "bodyRevision": "ffffffffffffffffffffffffffffffff",
+    "recipeOid": "recipe:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "verified": true,
+    "complete": true
+  },
+  "availability": {
+    "body": {
+      "version": 2,
+      "scope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "entityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "bodyRevision": "ffffffffffffffffffffffffffffffff",
+      "recipeOid": "recipe:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "status": "cloud-ready",
+      "blobOidsHash": "a3acc659143e6cdcc8f0d65279d31e0a3bbddb428e7306ee254cc7751967c8a4",
+      "storeId": "12121212121212121212121212121212",
+      "receiptRevision": "1",
+      "createdAtMillis": 1,
+      "expiresAtMillis": 604800001
+    },
+    "signature": "ynC9yN8VlHxK2wnI8EOI2TK-Xv3R_AeM5B2N5876JnljcsY-aGu9J3_9xcS3qAiF6z9WpM5fM62LG46EuizCSQ"
+  },
+  "blobOids": [
+    "blob:sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  ],
+  "cleanup": [
+    {
+      "name": "lease-only-not-custody",
+      "proof": {
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "entityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "bodyRevision": "ffffffffffffffffffffffffffffffff",
+        "recipeOid": "recipe:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "verified": true,
+        "complete": true,
+        "kind": "lease",
+        "expiresAtMillis": 9999999999
+      },
+      "expected": []
+    },
+    {
+      "name": "historical-cloud-copy",
+      "proof": {
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "entityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "bodyRevision": "ffffffffffffffffffffffffffffffff",
+        "recipeOid": "recipe:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "verified": true,
+        "complete": true,
+        "kind": "cloud-current",
+        "inCurrentClosure": false
+      },
+      "expected": []
+    },
+    {
+      "name": "current-cloud-closure",
+      "proof": {
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "entityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "bodyRevision": "ffffffffffffffffffffffffffffffff",
+        "recipeOid": "recipe:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "verified": true,
+        "complete": true,
+        "kind": "cloud-current",
+        "inCurrentClosure": true
+      },
+      "expected": [
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      ]
+    },
+    {
+      "name": "peer-pin-survives-session-expiry",
+      "proof": {
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "entityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "bodyRevision": "ffffffffffffffffffffffffffffffff",
+        "recipeOid": "recipe:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "verified": true,
+        "complete": true,
+        "kind": "peer-custody",
+        "pinPersisted": true,
+        "pinReleased": false
+      },
+      "expected": [
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      ]
+    },
+    {
+      "name": "released-peer-pin",
+      "proof": {
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "entityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "bodyRevision": "ffffffffffffffffffffffffffffffff",
+        "recipeOid": "recipe:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "verified": true,
+        "complete": true,
+        "kind": "peer-custody",
+        "pinPersisted": true,
+        "pinReleased": true
+      },
+      "expected": []
+    },
+    {
+      "name": "wrong-body-revision",
+      "proof": {
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "entityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "bodyRevision": "00000000000000000000000000000000",
+        "recipeOid": "recipe:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "verified": true,
+        "complete": true,
+        "kind": "cloud-current",
+        "inCurrentClosure": true
+      },
+      "expected": []
+    }
+  ],
+  "closure": [
+    {
+      "edges": {
+        "state:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "state:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "state:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        ],
+        "state:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [],
+        "state:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc": []
+      },
+      "present": [
+        "state:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "state:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "state:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ],
+      "expected": {
+        "marked": [
+          "state:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "state:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "state:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        ]
+      }
+    },
+    {
+      "edges": {
+        "state:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "state:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "state:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        ],
+        "state:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": []
+      },
+      "present": [
+        "state:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "state:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "state:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ],
+      "expected": {
+        "error": "closure_incomplete",
+        "missing": [
+          "state:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        ]
+      }
+    },
+    {
+      "edges": {
+        "state:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "state:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "state:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        ],
+        "state:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [],
+        "state:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc": []
+      },
+      "present": [
+        "state:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "state:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ],
+      "expected": {
+        "error": "closure_incomplete",
+        "missing": [
+          "state:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        ]
+      }
+    }
+  ],
+  "heads": {
+    "pins": {
+      "scope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "accountOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+      "seenOids": [
+        "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+        "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790"
+      ],
+      "authors": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "sequence": "9007199254740994",
+          "oid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790"
+        }
+      }
+    },
+    "keys": {
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "047cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc4766997807775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1"
+    },
+    "cases": [
+      {
+        "name": "higher-server-revision-does-not-authorize-old-head",
+        "candidate": {
+          "body": {
+            "version": 2,
+            "scope": {
+              "repoId": "01010101010101010101010101010101",
+              "libraryEpoch": "1",
+              "contentGeneration": "2"
+            },
+            "authorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "deviceSequence": "9007199254740993",
+            "previousOwnCommit": null,
+            "mergedParents": [],
+            "treeRoot": "tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02",
+            "requiredFeatures": [],
+            "createdAtMillis": 100,
+            "observedRefs": [],
+            "indexComplete": true,
+            "accountParent": null,
+            "rollbackGeneration": "0",
+            "operation": {
+              "kind": "normal",
+              "rollbackTarget": null,
+              "resolvesGeneration": null
+            }
+          },
+          "oid": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+          "canonicalBody": "{\"accountParent\":null,\"authorDeviceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"createdAtMillis\":100,\"deviceSequence\":\"9007199254740993\",\"indexComplete\":true,\"mergedParents\":[],\"observedRefs\":[],\"operation\":{\"kind\":\"normal\",\"resolvesGeneration\":null,\"rollbackTarget\":null},\"previousOwnCommit\":null,\"requiredFeatures\":[],\"rollbackGeneration\":\"0\",\"scope\":{\"contentGeneration\":\"2\",\"libraryEpoch\":\"1\",\"repoId\":\"01010101010101010101010101010101\"},\"treeRoot\":\"tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02\",\"version\":2}",
+          "signature": "jls9QtfdTAX3YhoPzNu2KGfBTwVJo4BhRfnbjPYi5CN2SnAVsBLj0ViGoKmYT3RxsiZn9CfvwoBSgKTs3pcHwg"
+        },
+        "chain": [],
+        "expected": {
+          "error": "replay_detected"
+        }
+      },
+      {
+        "name": "unknown-fork",
+        "candidate": {
+          "body": {
+            "version": 2,
+            "scope": {
+              "repoId": "01010101010101010101010101010101",
+              "libraryEpoch": "1",
+              "contentGeneration": "2"
+            },
+            "authorDeviceId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "deviceSequence": "1",
+            "previousOwnCommit": null,
+            "mergedParents": [],
+            "treeRoot": "tree:sha256:9defb3271d3ee6e1ff372b8419f0a1adecaf77c916b44ce78ff27e215e60a72d",
+            "requiredFeatures": [],
+            "createdAtMillis": 100,
+            "observedRefs": [],
+            "indexComplete": true,
+            "accountParent": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+            "rollbackGeneration": "0",
+            "operation": {
+              "kind": "normal",
+              "rollbackTarget": null,
+              "resolvesGeneration": null
+            }
+          },
+          "oid": "commit:sha256:f057bf3d3b9ee7a997f1f0f0c619d0254dca729ec029c09979d2c9dfbfc51457",
+          "canonicalBody": "{\"accountParent\":\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\",\"authorDeviceId\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"createdAtMillis\":100,\"deviceSequence\":\"1\",\"indexComplete\":true,\"mergedParents\":[],\"observedRefs\":[],\"operation\":{\"kind\":\"normal\",\"resolvesGeneration\":null,\"rollbackTarget\":null},\"previousOwnCommit\":null,\"requiredFeatures\":[],\"rollbackGeneration\":\"0\",\"scope\":{\"contentGeneration\":\"2\",\"libraryEpoch\":\"1\",\"repoId\":\"01010101010101010101010101010101\"},\"treeRoot\":\"tree:sha256:9defb3271d3ee6e1ff372b8419f0a1adecaf77c916b44ce78ff27e215e60a72d\",\"version\":2}",
+          "signature": "LY522RCsoWa9G-lMVaBsCAPvO9fqHtzTvmTZow0djIQWVBnl7Ser4zUZCbX4uxa0QyjPSsMAidrdvPNQ5HeS_w"
+        },
+        "chain": [
+          {
+            "body": {
+              "version": 2,
+              "scope": {
+                "repoId": "01010101010101010101010101010101",
+                "libraryEpoch": "1",
+                "contentGeneration": "2"
+              },
+              "authorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "deviceSequence": "9007199254740993",
+              "previousOwnCommit": null,
+              "mergedParents": [],
+              "treeRoot": "tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02",
+              "requiredFeatures": [],
+              "createdAtMillis": 100,
+              "observedRefs": [],
+              "indexComplete": true,
+              "accountParent": null,
+              "rollbackGeneration": "0",
+              "operation": {
+                "kind": "normal",
+                "rollbackTarget": null,
+                "resolvesGeneration": null
+              }
+            },
+            "oid": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+            "canonicalBody": "{\"accountParent\":null,\"authorDeviceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"createdAtMillis\":100,\"deviceSequence\":\"9007199254740993\",\"indexComplete\":true,\"mergedParents\":[],\"observedRefs\":[],\"operation\":{\"kind\":\"normal\",\"resolvesGeneration\":null,\"rollbackTarget\":null},\"previousOwnCommit\":null,\"requiredFeatures\":[],\"rollbackGeneration\":\"0\",\"scope\":{\"contentGeneration\":\"2\",\"libraryEpoch\":\"1\",\"repoId\":\"01010101010101010101010101010101\"},\"treeRoot\":\"tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02\",\"version\":2}",
+            "signature": "jls9QtfdTAX3YhoPzNu2KGfBTwVJo4BhRfnbjPYi5CN2SnAVsBLj0ViGoKmYT3RxsiZn9CfvwoBSgKTs3pcHwg"
+          }
+        ],
+        "expected": {
+          "error": "ref_continuity_unavailable"
+        }
+      },
+      {
+        "name": "new-rollback-extends-current-pin",
+        "candidate": {
+          "body": {
+            "version": 2,
+            "scope": {
+              "repoId": "01010101010101010101010101010101",
+              "libraryEpoch": "1",
+              "contentGeneration": "2"
+            },
+            "authorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "deviceSequence": "9007199254740995",
+            "previousOwnCommit": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+            "mergedParents": [
+              "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045"
+            ],
+            "treeRoot": "tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02",
+            "requiredFeatures": [],
+            "createdAtMillis": 100,
+            "observedRefs": [],
+            "indexComplete": true,
+            "accountParent": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+            "rollbackGeneration": "1",
+            "operation": {
+              "kind": "rollback",
+              "rollbackTarget": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+              "resolvesGeneration": null
+            }
+          },
+          "oid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+          "canonicalBody": "{\"accountParent\":\"commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790\",\"authorDeviceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"createdAtMillis\":100,\"deviceSequence\":\"9007199254740995\",\"indexComplete\":true,\"mergedParents\":[\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\"],\"observedRefs\":[],\"operation\":{\"kind\":\"rollback\",\"resolvesGeneration\":null,\"rollbackTarget\":\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\"},\"previousOwnCommit\":\"commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790\",\"requiredFeatures\":[],\"rollbackGeneration\":\"1\",\"scope\":{\"contentGeneration\":\"2\",\"libraryEpoch\":\"1\",\"repoId\":\"01010101010101010101010101010101\"},\"treeRoot\":\"tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02\",\"version\":2}",
+          "signature": "45RIfhLMCZm-cg3x0cS9AFrkx81VvibPHPeO45PEOcN1SpJ0o3-F_Zybfz4jyZDbvx7nye8u0lnlCC9oiA4Zxg"
+        },
+        "chain": [],
+        "expected": {
+          "accepted": true
+        }
+      }
+    ]
+  },
+  "legacy": [
+    {
+      "input": {
+        "cloudEnabled": true,
+        "rollbackKnown": true,
+        "affectedDomain": true
+      },
+      "expected": "pendingChoice"
+    },
+    {
+      "input": {
+        "cloudEnabled": true,
+        "rollbackKnown": true
+      },
+      "expected": "pendingChoice"
+    },
+    {
+      "input": {
+        "cloudEnabled": true,
+        "rollbackKnown": true,
+        "affectedDomain": false
+      },
+      "expected": "normal"
+    },
+    {
+      "input": {
+        "cloudEnabled": false,
+        "rollbackKnown": true
+      },
+      "expected": "legacy-only"
+    }
+  ],
+  "journal": {
+    "lastSeen": "0",
+    "lastSeenAccountOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+    "localChangeRevision": "7",
+    "editBase": {
+      "accountOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+      "generation": "0"
+    },
+    "pendingChoice": null,
+    "local": {
+      "title": "offline synthetic edit"
+    },
+    "edits": [
+      {
+        "revision": "7",
+        "value": "offline synthetic edit"
+      }
+    ],
+    "activeGeneration": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790"
+  },
+  "window": {
+    "oid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+    "revision": "3",
+    "generation": "1"
+  },
+  "demand": [
+    {
+      "at": 100000,
+      "expiry": 700000,
+      "now": 100000,
+      "expected": true
+    },
+    {
+      "at": 130001,
+      "expiry": 700000,
+      "now": 100000,
+      "expected": false
+    },
+    {
+      "at": 100000,
+      "expiry": 700001,
+      "now": 100000,
+      "expected": false
+    },
+    {
+      "at": 100000,
+      "expiry": 100000,
+      "now": 100000,
+      "expected": false
+    }
+  ]
+}

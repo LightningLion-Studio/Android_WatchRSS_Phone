@@ -1,0 +1,172 @@
+{
+  "syntheticOnly": true,
+  "window": {
+    "oid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+    "revision": "3",
+    "generation": "1"
+  },
+  "editBase": {
+    "accountOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+    "generation": "0"
+  },
+  "choiceStale": "choice_stale",
+  "invalidCurrent": [
+    {
+      "name": "absent account",
+      "path": [
+        "account"
+      ],
+      "remove": true
+    },
+    {
+      "name": "null account",
+      "path": [
+        "account"
+      ],
+      "value": null
+    },
+    {
+      "name": "missing oid",
+      "path": [
+        "account",
+        "oid"
+      ],
+      "remove": true
+    },
+    {
+      "name": "missing revision",
+      "path": [
+        "account",
+        "revision"
+      ],
+      "remove": true
+    },
+    {
+      "name": "missing generation",
+      "path": [
+        "account",
+        "generation"
+      ],
+      "remove": true
+    },
+    {
+      "name": "null oid",
+      "path": [
+        "account",
+        "oid"
+      ],
+      "value": null
+    },
+    {
+      "name": "wrong OID type",
+      "path": [
+        "account",
+        "oid"
+      ],
+      "value": "recipe:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "numeric revision",
+      "path": [
+        "account",
+        "revision"
+      ],
+      "value": 3
+    },
+    {
+      "name": "zero revision with commit",
+      "path": [
+        "account",
+        "revision"
+      ],
+      "value": "0"
+    },
+    {
+      "name": "noncanonical generation",
+      "path": [
+        "account",
+        "generation"
+      ],
+      "value": "01"
+    },
+    {
+      "name": "missing rollback generation",
+      "path": [
+        "rollbackGeneration"
+      ],
+      "remove": true
+    },
+    {
+      "name": "conflicting rollback generation",
+      "path": [
+        "rollbackGeneration"
+      ],
+      "value": "9"
+    },
+    {
+      "name": "missing local change version",
+      "path": [
+        "localChangeRevision"
+      ],
+      "remove": true
+    },
+    {
+      "name": "null local change version",
+      "path": [
+        "localChangeRevision"
+      ],
+      "value": null
+    },
+    {
+      "name": "mismatched known OID alias",
+      "path": [
+        "lastSeenAccountOid"
+      ],
+      "value": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "name": "null known OID alias",
+      "path": [
+        "lastSeenAccountOid"
+      ],
+      "value": null
+    },
+    {
+      "name": "mismatched revision alias",
+      "path": [
+        "lastSeenAccountRevision"
+      ],
+      "value": "99"
+    },
+    {
+      "name": "mismatched generation alias",
+      "path": [
+        "lastSeen"
+      ],
+      "value": "99"
+    }
+  ],
+  "malformedDependencies": [
+    null,
+    42,
+    false,
+    "bad",
+    {},
+    [
+      null
+    ],
+    [
+      42
+    ],
+    [
+      false
+    ],
+    [
+      {}
+    ],
+    [
+      ""
+    ]
+  ],
+  "invalidGraphExpected": null
+}

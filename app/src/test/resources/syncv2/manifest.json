@@ -1,0 +1,20 @@
+{
+  "source": "syncv2/vectors (v2-rc6), fixed original bytes; do not regenerate expected",
+  "sha256": {
+    "derivation.json": "d88975adb9f11141723ad9ee5544eaf598981c8b2dfbe40eb9a53ffcc45426e7",
+    "book-merge.json": "afccc4efad252519bebab6452572d56e45b4bdb4d4dd387fc98df3ea5b3304c8",
+    "notes-merge.json": "d8f011780c0ef927add4c901a0d70025c691fddae143d3f73d7fda27e482ccd5",
+    "identity-bootstrap.json": "6d0ec4673adad4defb1a9586c6123afb8364094926670c6cf099cf0e80cd197e",
+    "commit.json": "8534a6dd5a3ee785c81bd0e5fbbc79121d1e6d5c6fa26b630801e816cbd124f1",
+    "rollback.json": "6caba998799e5f2ed9b363798a1a3e3da85964d96a254b63740c85eb499e3233",
+    "rc2-contracts.json": "1ceff4817057468a175d3e102606374c98a5b60e75f4173da94cb026ccac6973",
+    "rc3-contracts.json": "02b84644847ed449245ea03c2828f3a5da95bc9a343d6df793c61238a3392bda",
+    "adversarial-review.json": "811694af73ac201a683401ab12dc80e4e63cb06537dfd4cc79bf9fe89994454b",
+    "rc3-review.json": "8ddee298ff2fb766f7f0200f7bdc5cbd78b816ddb82d5d2959d60f555c6f2af8",
+    "rc4-review.json": "9636d80f2761c84f3b19e2611770d4c5418bcc528babac7211af76526e7bbd08",
+    "rc5-review.json": "34aa8b66eee60f69001564e7325cd9faaf97f9be8e193edb3d7d2f4089455a52",
+    "rc6-review.json": "9183a74c1b6ed81d09991512a3a11cc3457f04a7c54505344b4dd9aa424f5b18",
+    "rc5-contracts.json": "26842d6fbcbe763ce10a89b20225c9e4782b14715383c0217617f231bc62fbb7",
+    "rc6-contracts.json": "67f8d4b000689dd810384a9ff1eaa692d05310b80033f8c1f5278eacc63d67d0"
+  }
+}

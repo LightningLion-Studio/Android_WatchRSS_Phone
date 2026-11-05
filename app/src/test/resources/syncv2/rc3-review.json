@@ -1,0 +1,158 @@
+{
+  "syntheticOnly": true,
+  "source": "review/rc2/probe-rc2.ts; all B expected unchanged",
+  "inputSchema": "Declarative transformations of account-cas/rollback/rc2-contracts/commit fixed fixtures; re-sign uses commit.publicFixtureSigningKeyHex, never production keys.",
+  "cases": [
+    {
+      "id": "B01",
+      "finding": "N01/R11",
+      "input": {
+        "probe": "publish-mutation",
+        "caseIndex": 0,
+        "path": [
+          "operation",
+          "rollbackTarget"
+        ],
+        "value": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045"
+      },
+      "expected": {
+        "rejected": true
+      }
+    },
+    {
+      "id": "B02",
+      "finding": "N01/R11",
+      "input": {
+        "probe": "publish-mutation",
+        "caseIndex": 0,
+        "path": [
+          "indexComplete"
+        ],
+        "value": false
+      },
+      "expected": {
+        "rejected": true
+      }
+    },
+    {
+      "id": "B03",
+      "finding": "N01/R11",
+      "input": {
+        "probe": "publish-mutation",
+        "caseIndex": 0,
+        "path": [
+          "treeRoot"
+        ],
+        "remove": true
+      },
+      "expected": {
+        "rejected": true
+      }
+    },
+    {
+      "id": "B04",
+      "finding": "N01/R11",
+      "input": {
+        "probe": "rollback-wrong-tree",
+        "caseIndex": 1,
+        "treeRoot": "tree:sha256:9defb3271d3ee6e1ff372b8419f0a1adecaf77c916b44ce78ff27e215e60a72d"
+      },
+      "expected": {
+        "rejected": true
+      }
+    },
+    {
+      "id": "B05",
+      "finding": "N02/R04/R08",
+      "input": {
+        "probe": "observe-during-apply",
+        "generation": "2",
+        "revision": "4",
+        "sequence": "9007199254740996",
+        "now": 1000,
+        "backup": false
+      },
+      "expected": {
+        "lastSeen": "2",
+        "oldGenerationRejected": true
+      }
+    },
+    {
+      "id": "B06",
+      "finding": "N03/R01",
+      "input": {
+        "probe": "custody-overwrite",
+        "pinId": "p",
+        "first": {
+          "complete": true,
+          "persisted": true,
+          "recipeOid": "recipe:sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "second": {
+          "complete": true,
+          "persisted": true,
+          "recipeOid": "recipe:sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      },
+      "expected": {
+        "conflictingPinRejected": true,
+        "firstCopyRetained": true
+      }
+    },
+    {
+      "id": "B07",
+      "finding": "N04/R03",
+      "input": {
+        "probe": "pin-extra-future",
+        "futureCaseIndex": 4
+      },
+      "expected": {
+        "legitimateRollbackAccepted": true,
+        "legitimateResolveAccepted": true
+      }
+    },
+    {
+      "id": "B08",
+      "finding": "N05/R09",
+      "input": {
+        "probe": "framing",
+        "state": {
+          "authenticated": true,
+          "scopeMatched": true,
+          "ready": true,
+          "commitAck": true
+        }
+      },
+      "expected": {
+        "enabled": false
+      }
+    },
+    {
+      "id": "B09",
+      "finding": "R04-positive-control",
+      "input": {
+        "probe": "edit-during-apply",
+        "value": "racing local edit",
+        "now": 1000,
+        "backup": false
+      },
+      "expected": {
+        "error": "choice_stale",
+        "oldEditRetained": true,
+        "newEditRetained": true,
+        "revision": "8"
+      }
+    },
+    {
+      "id": "B10",
+      "finding": "N01/R11",
+      "input": {
+        "probe": "stage-overflow",
+        "sequence": "18446744073709551616"
+      },
+      "expected": {
+        "rejected": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,757 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "publicKeyHex": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+  "targetCommit": {
+    "body": {
+      "version": 2,
+      "scope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "authorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "deviceSequence": "9007199254740993",
+      "previousOwnCommit": null,
+      "mergedParents": [],
+      "treeRoot": "tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02",
+      "requiredFeatures": [],
+      "createdAtMillis": 100,
+      "observedRefs": [],
+      "indexComplete": true,
+      "accountParent": null,
+      "rollbackGeneration": "0",
+      "operation": {
+        "kind": "normal",
+        "rollbackTarget": null,
+        "resolvesGeneration": null
+      }
+    },
+    "expected": {
+      "oid": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+      "canonicalBody": "{\"accountParent\":null,\"authorDeviceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"createdAtMillis\":100,\"deviceSequence\":\"9007199254740993\",\"indexComplete\":true,\"mergedParents\":[],\"observedRefs\":[],\"operation\":{\"kind\":\"normal\",\"resolvesGeneration\":null,\"rollbackTarget\":null},\"previousOwnCommit\":null,\"requiredFeatures\":[],\"rollbackGeneration\":\"0\",\"scope\":{\"contentGeneration\":\"2\",\"libraryEpoch\":\"1\",\"repoId\":\"01010101010101010101010101010101\"},\"treeRoot\":\"tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02\",\"version\":2}",
+      "signature": "jls9QtfdTAX3YhoPzNu2KGfBTwVJo4BhRfnbjPYi5CN2SnAVsBLj0ViGoKmYT3RxsiZn9CfvwoBSgKTs3pcHwg"
+    }
+  },
+  "currentCommit": {
+    "body": {
+      "version": 2,
+      "scope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "authorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "deviceSequence": "9007199254740994",
+      "previousOwnCommit": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+      "mergedParents": [],
+      "treeRoot": "tree:sha256:9defb3271d3ee6e1ff372b8419f0a1adecaf77c916b44ce78ff27e215e60a72d",
+      "requiredFeatures": [],
+      "createdAtMillis": 100,
+      "observedRefs": [],
+      "indexComplete": true,
+      "accountParent": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+      "rollbackGeneration": "0",
+      "operation": {
+        "kind": "normal",
+        "rollbackTarget": null,
+        "resolvesGeneration": null
+      }
+    },
+    "expected": {
+      "oid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+      "canonicalBody": "{\"accountParent\":\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\",\"authorDeviceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"createdAtMillis\":100,\"deviceSequence\":\"9007199254740994\",\"indexComplete\":true,\"mergedParents\":[],\"observedRefs\":[],\"operation\":{\"kind\":\"normal\",\"resolvesGeneration\":null,\"rollbackTarget\":null},\"previousOwnCommit\":\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\",\"requiredFeatures\":[],\"rollbackGeneration\":\"0\",\"scope\":{\"contentGeneration\":\"2\",\"libraryEpoch\":\"1\",\"repoId\":\"01010101010101010101010101010101\"},\"treeRoot\":\"tree:sha256:9defb3271d3ee6e1ff372b8419f0a1adecaf77c916b44ce78ff27e215e60a72d\",\"version\":2}",
+      "signature": "HHO-pXDni-99puUNRBYp8SBfmpO07TJgHRw51Z5lXusdzWj6oOKh_FzpD5qHywCyxOcd3HBwNxRqSRDjwN7y1w"
+    }
+  },
+  "rollbackCommit": {
+    "body": {
+      "version": 2,
+      "scope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "authorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "deviceSequence": "9007199254740995",
+      "previousOwnCommit": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+      "mergedParents": [
+        "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045"
+      ],
+      "treeRoot": "tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02",
+      "requiredFeatures": [],
+      "createdAtMillis": 100,
+      "observedRefs": [],
+      "indexComplete": true,
+      "accountParent": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+      "rollbackGeneration": "1",
+      "operation": {
+        "kind": "rollback",
+        "rollbackTarget": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+        "resolvesGeneration": null
+      }
+    },
+    "expected": {
+      "oid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+      "canonicalBody": "{\"accountParent\":\"commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790\",\"authorDeviceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"createdAtMillis\":100,\"deviceSequence\":\"9007199254740995\",\"indexComplete\":true,\"mergedParents\":[\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\"],\"observedRefs\":[],\"operation\":{\"kind\":\"rollback\",\"resolvesGeneration\":null,\"rollbackTarget\":\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\"},\"previousOwnCommit\":\"commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790\",\"requiredFeatures\":[],\"rollbackGeneration\":\"1\",\"scope\":{\"contentGeneration\":\"2\",\"libraryEpoch\":\"1\",\"repoId\":\"01010101010101010101010101010101\"},\"treeRoot\":\"tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02\",\"version\":2}",
+      "signature": "45RIfhLMCZm-cg3x0cS9AFrkx81VvibPHPeO45PEOcN1SpJ0o3-F_Zybfz4jyZDbvx7nye8u0lnlCC9oiA4Zxg"
+    }
+  },
+  "detection": [
+    {
+      "seen": "0",
+      "current": "2",
+      "dirty": true,
+      "expected": "awaiting-user"
+    },
+    {
+      "seen": "0",
+      "current": "2",
+      "dirty": false,
+      "expected": "follow-cloud"
+    },
+    {
+      "seen": "2",
+      "current": "1",
+      "dirty": true,
+      "expected": "replay_detected"
+    },
+    {
+      "seen": "2",
+      "current": "2",
+      "dirty": true,
+      "expected": "normal"
+    }
+  ],
+  "mergeCases": [
+    {
+      "name": "independent-note-edits",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "a\nb\nc"
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "A\nb\nc"
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "title": "rolled back",
+            "markdown": "a\nb\nC"
+          }
+        },
+        "ops": [
+          {
+            "kind": "update",
+            "id": "n",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ]
+      },
+      "expected": {
+        "canMerge": true,
+        "tree": {
+          "n": {
+            "identity": "n",
+            "title": "rolled back",
+            "markdown": "A\nb\nC"
+          }
+        }
+      }
+    },
+    {
+      "name": "note-conflict",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "a\nb\nc"
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "A\nb\nc"
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "X\nb\nc"
+          }
+        },
+        "ops": [
+          {
+            "kind": "update",
+            "id": "n",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ]
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "note_conflict"
+      }
+    },
+    {
+      "name": "target-missing",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "a\nb\nc"
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "A\nb\nc"
+          }
+        },
+        "cloud": {},
+        "ops": [
+          {
+            "kind": "update",
+            "id": "n",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ]
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "delete_edit_conflict"
+      }
+    },
+    {
+      "name": "base-missing",
+      "input": {
+        "base": {},
+        "local": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "A\nb\nc"
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "title": "rolled back",
+            "markdown": "a\nb\nC"
+          }
+        },
+        "ops": [
+          {
+            "kind": "update",
+            "id": "n",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ]
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "missing_base"
+      }
+    },
+    {
+      "name": "incomplete",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "a\nb\nc"
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "A\nb\nc"
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "title": "rolled back",
+            "markdown": "a\nb\nC"
+          }
+        },
+        "ops": [
+          {
+            "kind": "update",
+            "id": "n",
+            "fields": [
+              "markdown"
+            ],
+            "complete": false
+          }
+        ]
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "missing_content"
+      }
+    },
+    {
+      "name": "safe-create",
+      "input": {
+        "base": {},
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "new"
+          }
+        },
+        "cloud": {},
+        "ops": [
+          {
+            "kind": "create",
+            "id": "n",
+            "complete": true
+          }
+        ]
+      },
+      "expected": {
+        "canMerge": true,
+        "tree": {
+          "n": {
+            "identity": "n",
+            "markdown": "new"
+          }
+        }
+      }
+    },
+    {
+      "name": "id-collision",
+      "input": {
+        "base": {},
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "new"
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "other"
+          }
+        },
+        "ops": [
+          {
+            "kind": "create",
+            "id": "n",
+            "complete": true
+          }
+        ]
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "identity_conflict"
+      }
+    },
+    {
+      "name": "storage-pressure",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "a\nb\nc"
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "A\nb\nc"
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "title": "rolled back",
+            "markdown": "a\nb\nC"
+          }
+        },
+        "ops": [
+          {
+            "kind": "update",
+            "id": "n",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ],
+        "spaceAvailable": false
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "storage_pressure"
+      }
+    }
+  ],
+  "choices": [
+    {
+      "input": {
+        "expectedRevision": "9",
+        "currentRevision": "9",
+        "expectedGeneration": "2",
+        "currentGeneration": "2",
+        "currentOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "title": "rolled back",
+            "markdown": "a\nb\nC"
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "A\nb\nc"
+          }
+        },
+        "merge": {
+          "base": {
+            "n": {
+              "identity": "n",
+              "title": "old",
+              "markdown": "a\nb\nc"
+            }
+          },
+          "local": {
+            "n": {
+              "identity": "n",
+              "title": "old",
+              "markdown": "A\nb\nc"
+            }
+          },
+          "cloud": {
+            "n": {
+              "identity": "n",
+              "title": "rolled back",
+              "markdown": "a\nb\nC"
+            }
+          },
+          "ops": [
+            {
+              "kind": "update",
+              "id": "n",
+              "fields": [
+                "markdown"
+              ],
+              "complete": true
+            }
+          ]
+        },
+        "choice": "cloud"
+      },
+      "expected": {
+        "commit": null,
+        "tree": {
+          "n": {
+            "identity": "n",
+            "title": "rolled back",
+            "markdown": "a\nb\nC"
+          }
+        },
+        "discardEditsAfterApply": true
+      }
+    },
+    {
+      "input": {
+        "expectedRevision": "9",
+        "currentRevision": "9",
+        "expectedGeneration": "2",
+        "currentGeneration": "2",
+        "currentOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "title": "rolled back",
+            "markdown": "a\nb\nC"
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "A\nb\nc"
+          }
+        },
+        "merge": {
+          "base": {
+            "n": {
+              "identity": "n",
+              "title": "old",
+              "markdown": "a\nb\nc"
+            }
+          },
+          "local": {
+            "n": {
+              "identity": "n",
+              "title": "old",
+              "markdown": "A\nb\nc"
+            }
+          },
+          "cloud": {
+            "n": {
+              "identity": "n",
+              "title": "rolled back",
+              "markdown": "a\nb\nC"
+            }
+          },
+          "ops": [
+            {
+              "kind": "update",
+              "id": "n",
+              "fields": [
+                "markdown"
+              ],
+              "complete": true
+            }
+          ]
+        },
+        "choice": "local"
+      },
+      "expected": {
+        "operation": "resolve-local",
+        "tree": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "A\nb\nc"
+          }
+        },
+        "accountParent": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "rollbackGeneration": "2",
+        "resolvesGeneration": "2",
+        "discardEditsAfterPublish": true
+      }
+    },
+    {
+      "input": {
+        "expectedRevision": "9",
+        "currentRevision": "9",
+        "expectedGeneration": "2",
+        "currentGeneration": "2",
+        "currentOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "title": "rolled back",
+            "markdown": "a\nb\nC"
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "A\nb\nc"
+          }
+        },
+        "merge": {
+          "base": {
+            "n": {
+              "identity": "n",
+              "title": "old",
+              "markdown": "a\nb\nc"
+            }
+          },
+          "local": {
+            "n": {
+              "identity": "n",
+              "title": "old",
+              "markdown": "A\nb\nc"
+            }
+          },
+          "cloud": {
+            "n": {
+              "identity": "n",
+              "title": "rolled back",
+              "markdown": "a\nb\nC"
+            }
+          },
+          "ops": [
+            {
+              "kind": "update",
+              "id": "n",
+              "fields": [
+                "markdown"
+              ],
+              "complete": true
+            }
+          ]
+        },
+        "choice": "merge"
+      },
+      "expected": {
+        "operation": "resolve-merge",
+        "tree": {
+          "n": {
+            "identity": "n",
+            "title": "rolled back",
+            "markdown": "A\nb\nC"
+          }
+        },
+        "accountParent": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "rollbackGeneration": "2",
+        "resolvesGeneration": "2",
+        "discardEditsAfterPublish": true
+      }
+    },
+    {
+      "input": {
+        "expectedRevision": "9",
+        "currentRevision": "9",
+        "expectedGeneration": "2",
+        "currentGeneration": "3",
+        "currentOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "title": "rolled back",
+            "markdown": "a\nb\nC"
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "A\nb\nc"
+          }
+        },
+        "merge": {
+          "base": {
+            "n": {
+              "identity": "n",
+              "title": "old",
+              "markdown": "a\nb\nc"
+            }
+          },
+          "local": {
+            "n": {
+              "identity": "n",
+              "title": "old",
+              "markdown": "A\nb\nc"
+            }
+          },
+          "cloud": {
+            "n": {
+              "identity": "n",
+              "title": "rolled back",
+              "markdown": "a\nb\nC"
+            }
+          },
+          "ops": [
+            {
+              "kind": "update",
+              "id": "n",
+              "fields": [
+                "markdown"
+              ],
+              "complete": true
+            }
+          ]
+        },
+        "choice": "cloud"
+      },
+      "expected": {
+        "error": "choice_stale",
+        "localEditsRetained": true
+      }
+    },
+    {
+      "input": {
+        "expectedRevision": "9",
+        "currentRevision": "9",
+        "expectedGeneration": "2",
+        "currentGeneration": "2",
+        "currentOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "title": "rolled back",
+            "markdown": "a\nb\nC"
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "title": "old",
+            "markdown": "A\nb\nc"
+          }
+        },
+        "merge": {
+          "base": {
+            "n": {
+              "identity": "n",
+              "title": "old",
+              "markdown": "a\nb\nc"
+            }
+          },
+          "local": {
+            "n": {
+              "identity": "n",
+              "title": "old",
+              "markdown": "A\nb\nc"
+            }
+          },
+          "cloud": {
+            "n": {
+              "identity": "n",
+              "title": "old",
+              "markdown": "X\nb\nc"
+            }
+          },
+          "ops": [
+            {
+              "kind": "update",
+              "id": "n",
+              "fields": [
+                "markdown"
+              ],
+              "complete": true
+            }
+          ]
+        },
+        "choice": "merge"
+      },
+      "expected": {
+        "error": "merge_unavailable",
+        "reason": "note_conflict",
+        "localEditsRetained": true
+      }
+    }
+  ]
+}

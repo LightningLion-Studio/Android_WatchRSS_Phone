@@ -1,0 +1,255 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "source": "PodJS_WatchRSS/tests/books/lifecycle.test.ts + WatchRSS_WeChat/tests/book-lifecycle.test.mjs",
+  "cases": [
+    {
+      "name": "restore-beats-old-delete",
+      "left": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "Book",
+        "chapterCount": 2,
+        "sourceDeviceId": "mini",
+        "updatedAt": 10,
+        "deleted": true,
+        "deletedAt": 90,
+        "deletionClock": 90,
+        "deletedChapters": [
+          1,
+          2
+        ],
+        "sourceUrl": "https://watchrss.local/import-epub/lifecycle",
+        "kind": "epub"
+      },
+      "right": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "Book",
+        "chapterCount": 2,
+        "sourceDeviceId": "mini",
+        "updatedAt": 100,
+        "deleted": false,
+        "deletedAt": 0,
+        "deletionClock": 0,
+        "deletedChapters": [],
+        "sourceUrl": "https://watchrss.local/import-epub/lifecycle",
+        "kind": "epub",
+        "lifecycle": {
+          "generation": 1,
+          "operationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "startedAt": 100
+        }
+      },
+      "expected": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "Book",
+        "chapterCount": 2,
+        "sourceDeviceId": "mini",
+        "updatedAt": 100,
+        "deleted": false,
+        "deletedAt": 0,
+        "deletionClock": 0,
+        "deletedChapters": [],
+        "sourceUrl": "https://watchrss.local/import-epub/lifecycle",
+        "kind": "epub",
+        "lifecycle": {
+          "generation": 1,
+          "operationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "startedAt": 100
+        }
+      }
+    },
+    {
+      "name": "same-token-union",
+      "left": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "Book",
+        "chapterCount": 2,
+        "sourceDeviceId": "mini",
+        "updatedAt": 100,
+        "deleted": false,
+        "deletedAt": 0,
+        "deletionClock": 110,
+        "deletedChapters": [
+          1
+        ],
+        "sourceUrl": "https://watchrss.local/import-epub/lifecycle",
+        "kind": "epub",
+        "lifecycle": {
+          "generation": 1,
+          "operationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "startedAt": 100
+        }
+      },
+      "right": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "Book",
+        "chapterCount": 2,
+        "sourceDeviceId": "mini",
+        "updatedAt": 100,
+        "deleted": true,
+        "deletedAt": 120,
+        "deletionClock": 120,
+        "deletedChapters": [
+          2
+        ],
+        "sourceUrl": "https://watchrss.local/import-epub/lifecycle",
+        "kind": "epub",
+        "lifecycle": {
+          "generation": 1,
+          "operationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "startedAt": 100
+        }
+      },
+      "expected": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "Book",
+        "chapterCount": 2,
+        "sourceDeviceId": "mini",
+        "updatedAt": 100,
+        "deleted": true,
+        "deletedAt": 120,
+        "deletionClock": 120,
+        "deletedChapters": [
+          1,
+          2
+        ],
+        "sourceUrl": "https://watchrss.local/import-epub/lifecycle",
+        "kind": "epub",
+        "lifecycle": {
+          "generation": 1,
+          "operationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "startedAt": 100
+        }
+      }
+    },
+    {
+      "name": "concurrent-restore-token",
+      "left": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "Book",
+        "chapterCount": 2,
+        "sourceDeviceId": "mini",
+        "updatedAt": 100,
+        "deleted": false,
+        "deletedAt": 0,
+        "deletionClock": 0,
+        "deletedChapters": [
+          1
+        ],
+        "sourceUrl": "https://watchrss.local/import-epub/lifecycle",
+        "kind": "epub",
+        "lifecycle": {
+          "generation": 1,
+          "operationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "startedAt": 100
+        }
+      },
+      "right": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "Book",
+        "chapterCount": 2,
+        "sourceDeviceId": "mini",
+        "updatedAt": 99,
+        "deleted": false,
+        "deletedAt": 0,
+        "deletionClock": 0,
+        "deletedChapters": [],
+        "sourceUrl": "https://watchrss.local/import-epub/lifecycle",
+        "kind": "epub",
+        "lifecycle": {
+          "generation": 1,
+          "operationId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "startedAt": 100
+        }
+      },
+      "expected": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "Book",
+        "chapterCount": 2,
+        "sourceDeviceId": "mini",
+        "updatedAt": 99,
+        "deleted": false,
+        "deletedAt": 0,
+        "deletionClock": 0,
+        "deletedChapters": [],
+        "sourceUrl": "https://watchrss.local/import-epub/lifecycle",
+        "kind": "epub",
+        "lifecycle": {
+          "generation": 1,
+          "operationId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "startedAt": 100
+        }
+      }
+    },
+    {
+      "name": "numeric-generation",
+      "left": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "Book",
+        "chapterCount": 2,
+        "sourceDeviceId": "mini",
+        "updatedAt": 100,
+        "deleted": false,
+        "deletedAt": 0,
+        "deletionClock": 0,
+        "deletedChapters": [],
+        "sourceUrl": "https://watchrss.local/import-epub/lifecycle",
+        "kind": "epub",
+        "lifecycle": {
+          "generation": 2,
+          "operationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "startedAt": 100
+        }
+      },
+      "right": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "Book",
+        "chapterCount": 2,
+        "sourceDeviceId": "mini",
+        "updatedAt": 100,
+        "deleted": false,
+        "deletedAt": 0,
+        "deletionClock": 0,
+        "deletedChapters": [],
+        "sourceUrl": "https://watchrss.local/import-epub/lifecycle",
+        "kind": "epub",
+        "lifecycle": {
+          "generation": 10,
+          "operationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "startedAt": 100
+        }
+      },
+      "expected": {
+        "bookId": "064df969af2b94c0b515aaa96883440edc3d1a81082113bf9dd917685ff605a6",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "Book",
+        "chapterCount": 2,
+        "sourceDeviceId": "mini",
+        "updatedAt": 100,
+        "deleted": false,
+        "deletedAt": 0,
+        "deletionClock": 0,
+        "deletedChapters": [],
+        "sourceUrl": "https://watchrss.local/import-epub/lifecycle",
+        "kind": "epub",
+        "lifecycle": {
+          "generation": 10,
+          "operationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "startedAt": 100
+        }
+      }
+    }
+  ]
+}

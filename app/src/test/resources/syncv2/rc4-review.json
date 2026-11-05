@@ -1,0 +1,347 @@
+{
+  "syntheticOnly": true,
+  "source": "review/rc3/probe-rc3.ts and c-results.json; independent C01-C08 expected unchanged",
+  "cases": [
+    {
+      "id": "C01",
+      "issue": "M01/R07",
+      "input": {
+        "probe": "affected-route",
+        "before": {
+          "book": {
+            "revision": 2,
+            "dependencies": [
+              "chapter"
+            ]
+          },
+          "chapter": {
+            "dependencies": [
+              "asset"
+            ]
+          },
+          "asset": {
+            "revision": 1
+          }
+        },
+        "target": {
+          "book": {
+            "revision": 1,
+            "dependencies": [
+              "chapter"
+            ]
+          },
+          "chapter": {
+            "dependencies": [
+              "asset"
+            ]
+          },
+          "asset": {
+            "revision": 1
+          }
+        },
+        "message": {
+          "peer": "peer",
+          "version": 14,
+          "cursor": "1",
+          "entityKeys": [
+            "asset"
+          ],
+          "body": {
+            "asset": {
+              "revision": 9
+            }
+          }
+        },
+        "saved": {
+          "rollbackKnown": true,
+          "rollbackGeneration": "1"
+        }
+      },
+      "expected": {
+        "affected": [
+          "asset",
+          "book",
+          "chapter"
+        ],
+        "route": "pendingChoice"
+      }
+    },
+    {
+      "id": "C02",
+      "issue": "M02/R07",
+      "input": {
+        "probe": "two-choices",
+        "saved": {
+          "rollbackKnown": true,
+          "rollbackGeneration": "1"
+        },
+        "messages": [
+          {
+            "peer": "peer",
+            "version": 14,
+            "cursor": "1",
+            "entityKeys": [
+              "first"
+            ],
+            "body": {
+              "first": {
+                "title": "one"
+              }
+            }
+          },
+          {
+            "peer": "peer",
+            "version": 14,
+            "cursor": "2",
+            "entityKeys": [
+              "second"
+            ],
+            "body": {
+              "second": {
+                "title": "two"
+              }
+            }
+          }
+        ],
+        "resolveSecond": "peer:14:2",
+        "resolveFirst": "peer:14:1"
+      },
+      "expected": {
+        "secondResolved": true,
+        "firstRecoverable": true,
+        "unresolvedStillHasChoice": true
+      }
+    },
+    {
+      "id": "C03",
+      "issue": "M03/N07/R07",
+      "input": {
+        "probe": "cloud-delta",
+        "saved": {
+          "rollbackKnown": true,
+          "rollbackGeneration": "1",
+          "editBase": {
+            "accountOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+            "generation": "0"
+          },
+          "rows": {
+            "same": {
+              "title": "unchanged"
+            }
+          }
+        },
+        "message": {
+          "peer": "peer",
+          "version": 14,
+          "cursor": "1",
+          "entityKeys": [
+            "changed"
+          ],
+          "body": {
+            "changed": {
+              "title": "offline"
+            }
+          }
+        },
+        "cloud": {
+          "changed": {
+            "title": "cloud"
+          },
+          "same": {
+            "title": "unchanged"
+          }
+        },
+        "window": {
+          "oid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+          "revision": "3",
+          "generation": "1"
+        },
+        "now": 1000,
+        "keyHex": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "expected": {
+        "changes": [
+          {
+            "id": "changed",
+            "kind": "set",
+            "value": {
+              "title": "offline"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "C04",
+      "issue": "M04/R08",
+      "input": {
+        "probe": "state-exhaustion",
+        "version": "18446744073709551615"
+      },
+      "expected": {
+        "adapterRejected": true,
+        "adapterStateUnchanged": true,
+        "modeRejected": true,
+        "modeStateUnchanged": true
+      }
+    },
+    {
+      "id": "C05",
+      "issue": "M03/N07/R07",
+      "input": {
+        "probe": "cloud-body-refs",
+        "saved": {
+          "rollbackKnown": true,
+          "rollbackGeneration": "1",
+          "editBase": {
+            "accountOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+            "generation": "0"
+          }
+        },
+        "message": {
+          "peer": "peer",
+          "version": 14,
+          "cursor": "1",
+          "entityKeys": [
+            "changed"
+          ],
+          "body": {
+            "changed": {
+              "title": "offline",
+              "recipeOid": "recipe:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "bodyRefsByEntity": {
+            "changed": [
+              "recipe:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ]
+          }
+        },
+        "cloud": {},
+        "window": {
+          "oid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+          "revision": "3",
+          "generation": "1"
+        },
+        "now": 1000,
+        "keyHex": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "expected": {
+        "bodyRefs": [
+          "recipe:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ]
+      }
+    },
+    {
+      "id": "C06",
+      "issue": "R07-positive-control",
+      "input": {
+        "probe": "affected-route",
+        "before": {
+          "book": {
+            "revision": 2,
+            "dependencies": [
+              "chapter"
+            ]
+          },
+          "chapter": {
+            "revision": 1
+          }
+        },
+        "target": {
+          "book": {
+            "revision": 1,
+            "dependencies": [
+              "chapter"
+            ]
+          },
+          "chapter": {
+            "revision": 1
+          }
+        },
+        "message": {
+          "peer": "peer",
+          "version": 14,
+          "cursor": "1",
+          "entityKeys": [
+            "chapter"
+          ],
+          "body": {
+            "chapter": {
+              "revision": 2
+            }
+          }
+        },
+        "saved": {
+          "rollbackKnown": true,
+          "rollbackGeneration": "1"
+        }
+      },
+      "expected": {
+        "affected": [
+          "book",
+          "chapter"
+        ],
+        "route": "pendingChoice"
+      }
+    },
+    {
+      "id": "C07",
+      "issue": "M03/N07/R07",
+      "input": {
+        "probe": "cloud-closure-failure",
+        "saved": {
+          "rollbackKnown": true,
+          "rollbackGeneration": "1",
+          "editBase": {
+            "accountOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+            "generation": "0"
+          },
+          "recoveryBodyClosuresReady": false
+        },
+        "message": {
+          "peer": "peer",
+          "version": 14,
+          "cursor": "1",
+          "entityKeys": [
+            "changed"
+          ],
+          "body": {
+            "changed": {
+              "title": "offline",
+              "recipeOid": "recipe:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        },
+        "cloud": {},
+        "window": {
+          "oid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+          "revision": "3",
+          "generation": "1"
+        },
+        "now": 1000,
+        "keyHex": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "expected": {
+        "error": "closure_incomplete",
+        "sourceRetained": true
+      }
+    },
+    {
+      "id": "C08",
+      "issue": "N01-positive-control",
+      "input": {
+        "probe": "rollback-control",
+        "fixtures": [
+          "account-cas",
+          "rollback",
+          "commit"
+        ]
+      },
+      "expected": {
+        "wrongTree": "invalid_schema",
+        "correctTreePublished": true
+      }
+    }
+  ]
+}

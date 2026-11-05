@@ -1,0 +1,91 @@
+{
+  "syntheticOnly": true,
+  "context": {
+    "accountId": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "scope": {
+      "repoId": "01010101010101010101010101010101",
+      "libraryEpoch": "1",
+      "contentGeneration": "2"
+    },
+    "creationId": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+    "creatorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "creatorPlatform": "android",
+    "wrappingKeyVersion": 1
+  },
+  "wrapKeyHex": "2222222222222222222222222222222222222222222222222222222222222222",
+  "idKeyHex": "1111111111111111111111111111111111111111111111111111111111111111",
+  "signingKeyHex": "0000000000000000000000000000000000000000000000000000000000000001",
+  "saltHex": "3333333333333333333333333333333333333333333333333333333333333333",
+  "nonceHex": "444444444444444444444444",
+  "descriptor": {
+    "body": {
+      "accountId": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "scope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "creationId": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "creatorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "creatorPlatform": "android",
+      "wrappingKeyVersion": 1,
+      "version": 2,
+      "creatorPublicKey": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+      "idKeyCommitment": "429100302a29c089fdbf628c39fc513f906e74fac4b21c066ab038318e72372e"
+    },
+    "proof": "ABqZl8F21W7elw0cTTYSzHs-6F8vQ8wCiAMB_2k4xcs",
+    "signature": "ZCk00ade0dCVtpY3tNpy_2Qffl2LxRbpnHHV7UEta0lLYEvqqJpqDWPnCwZQq6ZUj01EMDTdrwT07kYwQGCF5w"
+  },
+  "capsule": {
+    "header": {
+      "version": 2,
+      "domain": "wrss.sync.v2/id-key-recovery",
+      "accountId": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "scope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "descriptorOid": "repo-descriptor:sha256:6d6a85aa952add4613445662b52a3723f7de516035062f41194c27d02babf637",
+      "wrappingKeyVersion": 1,
+      "salt": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM",
+      "nonce": "RERERERERERERERE"
+    },
+    "ciphertext": "xRGY97TJ5dCVOB92ZO88o1wxzorKAxMwqgm8_-MP5bQt2pGDWFjF79HVjiUAPboBzapClPmfxoJaANRPWOJcys-DCEnM-XQcowdK72q2wOmJt-ur37X5HOWsft3s1Bw"
+  },
+  "entityKey": "93bdc8427905229dd72acadf56ad57d4f83c81b51aed1defcac384ae46f99d55",
+  "request": {
+    "version": 2,
+    "accountId": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "scope": {
+      "repoId": "01010101010101010101010101010101",
+      "libraryEpoch": "1",
+      "contentGeneration": "2"
+    },
+    "descriptorOid": "repo-descriptor:sha256:6d6a85aa952add4613445662b52a3723f7de516035062f41194c27d02babf637",
+    "recipientDeviceId": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+    "recipientPlatform": "watch",
+    "requestId": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+    "challenge": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+    "wrappingKeyVersion": 1,
+    "expiresAtMillis": 301000
+  },
+  "rejectDelivery": [
+    {
+      "field": "recipientDeviceId",
+      "value": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "field": "accountId",
+      "value": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "field": "challenge",
+      "value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "field": "descriptorOid",
+      "value": "repo-descriptor:sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  ]
+}

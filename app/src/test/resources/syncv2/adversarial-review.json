@@ -1,0 +1,425 @@
+{
+  "format": "wrss.sync.v2.adversarial-review",
+  "version": 1,
+  "syntheticOnly": true,
+  "expectedSource": "Independent review rules; never generated from core output",
+  "cases": [
+    {
+      "id": "A01",
+      "finding": "R12",
+      "probe": "tamper-aad",
+      "input": {},
+      "expected": {
+        "error": "aead_invalid"
+      },
+      "scope": "reference-core"
+    },
+    {
+      "id": "A02",
+      "finding": "R12",
+      "probe": "cross-scope",
+      "input": {},
+      "expected": {
+        "error": "scope_mismatch"
+      },
+      "scope": "reference-core"
+    },
+    {
+      "id": "A03",
+      "finding": "R12",
+      "probe": "signature-high-s",
+      "input": {},
+      "expected": {
+        "returned": false
+      },
+      "scope": "reference-core"
+    },
+    {
+      "id": "A04",
+      "finding": "R12",
+      "probe": "signature-bad-sec1",
+      "input": {},
+      "expected": {
+        "returned": false
+      },
+      "scope": "reference-core"
+    },
+    {
+      "id": "A05",
+      "finding": "R12",
+      "probe": "open-malformed",
+      "input": {
+        "header": {
+          "domain": "wrss.sync.v1/sealed"
+        }
+      },
+      "expected": {
+        "error": "invalid_schema"
+      },
+      "scope": "reference-schema-gap; authenticated sender"
+    },
+    {
+      "id": "A06",
+      "finding": "R12",
+      "probe": "open-malformed",
+      "input": {
+        "header": {
+          "encoding": "brotli"
+        }
+      },
+      "expected": {
+        "error": "invalid_schema"
+      },
+      "scope": "reference-schema-gap; authenticated sender"
+    },
+    {
+      "id": "A07",
+      "finding": "R12",
+      "probe": "open-malformed",
+      "input": {
+        "header": {
+          "keyVersion": 0
+        }
+      },
+      "expected": {
+        "error": "invalid_schema"
+      },
+      "scope": "reference-schema-gap; authenticated sender"
+    },
+    {
+      "id": "A08",
+      "finding": "R12",
+      "probe": "open-malformed",
+      "input": {
+        "header": {
+          "salt": "Mw"
+        }
+      },
+      "expected": {
+        "error": "invalid_encoding"
+      },
+      "scope": "reference-schema-gap; authenticated sender"
+    },
+    {
+      "id": "A09",
+      "finding": "R12",
+      "probe": "open-malformed",
+      "input": {
+        "header": {
+          "nonce": "RERERERERERERERE="
+        }
+      },
+      "expected": {
+        "error": "invalid_encoding"
+      },
+      "scope": "reference-schema-gap; authenticated sender"
+    },
+    {
+      "id": "A10",
+      "finding": "R12",
+      "probe": "open-malformed",
+      "input": {
+        "header": {
+          "encoding": "gzip"
+        },
+        "concatenateGzip": true
+      },
+      "expected": {
+        "error": "invalid_encoding"
+      },
+      "scope": "reference-gzip-boundary-gap; authenticated sender"
+    },
+    {
+      "id": "A11",
+      "finding": "R12",
+      "probe": "open-malformed",
+      "input": {
+        "header": {
+          "encoding": "gzip"
+        },
+        "plainHex": "41"
+      },
+      "expected": {
+        "error": "invalid_schema"
+      },
+      "scope": "reference-schema-gap; authenticated sender"
+    },
+    {
+      "id": "A12",
+      "finding": "R12",
+      "probe": "open-malformed",
+      "input": {
+        "header": {
+          "unregisteredField": true
+        }
+      },
+      "expected": {
+        "error": "invalid_schema"
+      },
+      "scope": "reference-schema-gap; authenticated sender"
+    },
+    {
+      "id": "A13",
+      "finding": "R03",
+      "probe": "index-cache-tamper",
+      "input": {},
+      "expected": {
+        "returned": false
+      },
+      "scope": "reference-core"
+    },
+    {
+      "id": "A14",
+      "finding": "R12",
+      "probe": "duplicate-entity",
+      "input": {},
+      "expected": {
+        "error": "invalid_schema"
+      },
+      "scope": "reference-core"
+    },
+    {
+      "id": "A15",
+      "finding": "R11",
+      "probe": "staged-publish",
+      "input": {},
+      "expected": {
+        "returned": "2"
+      },
+      "scope": "reference-state-model; staged device revision must not change"
+    },
+    {
+      "id": "A16",
+      "finding": "R04",
+      "probe": "pending-choice-restart",
+      "input": {
+        "lastSeen": "2",
+        "current": "2",
+        "dirty": true,
+        "baseGeneration": "0",
+        "awaitingUser": true
+      },
+      "expected": {
+        "returned": "awaiting-user"
+      },
+      "scope": "reference-state-model; missing base/pending inputs"
+    },
+    {
+      "id": "A17",
+      "finding": "R14",
+      "probe": "unknown-age-eviction",
+      "input": {
+        "items": [
+          {
+            "entityKey": "unknown-rss",
+            "bodyRevision": "11111111111111111111111111111111",
+            "kind": "rss",
+            "addedAtMillis": 0,
+            "addedAtSource": "unknown",
+            "lastOpenedAtMillis": null,
+            "localBytes": 100,
+            "openedNow": false,
+            "dirty": false,
+            "completeRemoteCopy": true
+          }
+        ],
+        "now": 1000000000,
+        "needed": 100
+      },
+      "expected": {
+        "returned": []
+      },
+      "scope": "proposed fail-closed rule; planner lacks age provenance"
+    },
+    {
+      "id": "A18",
+      "finding": "R11",
+      "probe": "rollback-vector-binding",
+      "input": {},
+      "expected": {
+        "returned": {
+          "modelKind": "rollback",
+          "signedKind": "rollback",
+          "modelGeneration": "1",
+          "signedGeneration": "1"
+        }
+      },
+      "scope": "cross-vector consistency; no backend execution"
+    },
+    {
+      "id": "A19",
+      "finding": "R12",
+      "probe": "invalid-choice",
+      "input": {
+        "expectedRevision": "1",
+        "currentRevision": "1",
+        "expectedGeneration": "1",
+        "currentGeneration": "1",
+        "currentOid": "c",
+        "cloud": {},
+        "local": {},
+        "choice": "typo",
+        "merge": {
+          "base": {},
+          "local": {},
+          "cloud": {},
+          "ops": []
+        }
+      },
+      "expected": {
+        "error": "invalid_schema"
+      },
+      "scope": "reference-schema-gap; unknown choice enum"
+    },
+    {
+      "id": "A20",
+      "finding": "R11",
+      "probe": "counter-overflow",
+      "input": {},
+      "expected": {
+        "returned": "counter_exhausted"
+      },
+      "scope": "reference-core"
+    }
+  ],
+  "unexecutedIntegrationScenarios": [
+    {
+      "id": "S01",
+      "finding": "R01",
+      "input": {
+        "peerCopy": true,
+        "leaseExpiresAt": 600000,
+        "evictAt": 1,
+        "peerDropsAt": 600001,
+        "cloudCopy": false
+      },
+      "expected": "没有持久 custody pin 时拒绝清理。租约到期不解除保管责任。",
+      "status": "未验证"
+    },
+    {
+      "id": "S02",
+      "finding": "R02",
+      "input": {
+        "currentState": "parent",
+        "encryptedNoteSegments": [
+          "child"
+        ],
+        "publicStateEdges": [],
+        "childAgeDays": 8
+      },
+      "expected": "返回 closure_incomplete；不得发布或清理 child。",
+      "status": "未验证"
+    },
+    {
+      "id": "S03",
+      "finding": "R03",
+      "input": {
+        "knownAccount": "C2",
+        "servedAccount": "C1",
+        "generationUnchanged": true,
+        "serverResignsHigherRevision": true
+      },
+      "expected": "已知祖先回退返回 replay_detected；未知分叉缺少独立见证时停止自动覆盖。",
+      "status": "未验证"
+    },
+    {
+      "id": "S04",
+      "finding": "R04",
+      "input": {
+        "selectedLocalRevision": "7",
+        "newLocalEditRevision": "8",
+        "cloudWindowUnchanged": true
+      },
+      "expected": "不得清除 revision 8；本机变化触发 choice_stale 或保留尾部编辑。",
+      "status": "未验证"
+    },
+    {
+      "id": "S05",
+      "finding": "R05",
+      "input": {
+        "knownKeyFloor": 2,
+        "servedKeyFloor": 1,
+        "historicalCipherKeyVersion": 1
+      },
+      "expected": "新写拒绝降级；经认证的历史读可以用旧钥匙。",
+      "status": "未验证"
+    },
+    {
+      "id": "S06",
+      "finding": "R07",
+      "input": {
+        "legacyPeerGeneration": 0,
+        "currentGeneration": 1,
+        "legacyAddsRolledBackItem": true
+      },
+      "expected": "保留旧通道输入与游标；把受影响云投影置于 awaiting-user，不静默发布。",
+      "status": "未验证"
+    },
+    {
+      "id": "S07",
+      "finding": "R08",
+      "input": {
+        "items": 12000,
+        "crashAfterItem": 6000,
+        "appliedAck": false
+      },
+      "expected": "恢复到完整旧代或完整新代；不得暴露半份库。",
+      "status": "未验证"
+    },
+    {
+      "id": "S08",
+      "finding": "R09",
+      "input": {
+        "legacyProbeSucceeded": true,
+        "v2PeerReadyAck": false,
+        "incomingMagic": "WRP2"
+      },
+      "expected": "不得在旧 JSON 解码器上发送 WRP2。等待双方切换确认。",
+      "status": "未验证"
+    },
+    {
+      "id": "S09",
+      "finding": "R03",
+      "input": {
+        "treeRootVerified": false,
+        "serverCachedRowDeleted": true
+      },
+      "expected": "不得删除本地实体；先验证从签名 commit 到该 row 的树路径与闭包。",
+      "status": "未验证"
+    },
+    {
+      "id": "S10",
+      "finding": "R10",
+      "input": {
+        "serverHasNoBlobKeys": true,
+        "completeBlobRequested": true
+      },
+      "expected": "后端只验 header/hash/长度/公开引用；客户端解密验 schema/指纹。",
+      "status": "未验证"
+    },
+    {
+      "id": "S11",
+      "finding": "R07",
+      "input": {
+        "migrationPhase": "tail",
+        "crash": true,
+        "legacyCursor": "unchanged",
+        "rerun": true
+      },
+      "expected": "identity_map 复用同一个键；扫描检查点与变更日志原子提交；不得重复导入。",
+      "status": "未验证"
+    },
+    {
+      "id": "S12",
+      "finding": "R04",
+      "input": {
+        "selectedCloudRevision": "8",
+        "choiceAckReceived": true,
+        "cloudMovesTo": "9",
+        "networkDisconnects": true
+      },
+      "expected": "应用已确认窗口或保留编辑重试；不得声称本机事务能远程原子 CAS。",
+      "status": "未验证"
+    }
+  ]
+}

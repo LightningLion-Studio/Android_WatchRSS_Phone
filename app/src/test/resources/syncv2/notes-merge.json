@@ -1,0 +1,96 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "source": "evidence/source/phone-vectors.json#/merge",
+  "cases": [
+    {
+      "expected": {
+        "markdown": "b"
+      },
+      "remote": "b",
+      "local": "b",
+      "base": "a"
+    },
+    {
+      "expected": {
+        "markdown": "b"
+      },
+      "remote": "b",
+      "local": "a",
+      "base": "a"
+    },
+    {
+      "expected": {
+        "markdown": "b"
+      },
+      "remote": "a",
+      "local": "b",
+      "base": "a"
+    },
+    {
+      "expected": {
+        "markdown": "ONE\ntwo\nTHREE"
+      },
+      "remote": "one\ntwo\nTHREE",
+      "local": "ONE\ntwo\nthree",
+      "base": "one\ntwo\nthree"
+    },
+    {
+      "expected": {
+        "conflict": true
+      },
+      "remote": "y\nb",
+      "local": "x\nb",
+      "base": "a\nb"
+    },
+    {
+      "expected": {
+        "markdown": "y\nx\na\nb"
+      },
+      "remote": "y\na\nb",
+      "local": "x\na\nb",
+      "base": "a\nb"
+    },
+    {
+      "expected": {
+        "markdown": "a\nc"
+      },
+      "remote": "a\nb\nc",
+      "local": "a",
+      "base": "a\nb"
+    },
+    {
+      "expected": {
+        "markdown": "A\nb\nC"
+      },
+      "remote": "a\r\nb\r\nC",
+      "local": "A\r\nb\r\nc",
+      "base": "a\r\nb\r\nc"
+    },
+    {
+      "expected": {
+        "conflict": true
+      },
+      "remote": "a\nB\nc",
+      "local": "A\nb\nC",
+      "base": "a\nb\nc"
+    },
+    {
+      "expected": {
+        "conflict": true
+      },
+      "remote": "b",
+      "local": "a",
+      "base": ""
+    },
+    {
+      "expected": {
+        "markdown": "A\nx"
+      },
+      "remote": "A\n",
+      "local": "a\nx",
+      "base": "a\n"
+    }
+  ]
+}

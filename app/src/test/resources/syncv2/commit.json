@@ -1,0 +1,41 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "publicKeyHex": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+  "publicFixtureSigningKeyHex": "0000000000000000000000000000000000000000000000000000000000000001",
+  "cases": [
+    {
+      "name": "initial-wide-sequence",
+      "body": {
+        "version": 2,
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "authorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "deviceSequence": "9007199254740993",
+        "previousOwnCommit": null,
+        "mergedParents": [],
+        "treeRoot": "tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02",
+        "requiredFeatures": [],
+        "createdAtMillis": 100,
+        "observedRefs": [],
+        "indexComplete": true,
+        "accountParent": null,
+        "rollbackGeneration": "0",
+        "operation": {
+          "kind": "normal",
+          "rollbackTarget": null,
+          "resolvesGeneration": null
+        }
+      },
+      "expected": {
+        "oid": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+        "canonicalBody": "{\"accountParent\":null,\"authorDeviceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"createdAtMillis\":100,\"deviceSequence\":\"9007199254740993\",\"indexComplete\":true,\"mergedParents\":[],\"observedRefs\":[],\"operation\":{\"kind\":\"normal\",\"resolvesGeneration\":null,\"rollbackTarget\":null},\"previousOwnCommit\":null,\"requiredFeatures\":[],\"rollbackGeneration\":\"0\",\"scope\":{\"contentGeneration\":\"2\",\"libraryEpoch\":\"1\",\"repoId\":\"01010101010101010101010101010101\"},\"treeRoot\":\"tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02\",\"version\":2}",
+        "signature": "jls9QtfdTAX3YhoPzNu2KGfBTwVJo4BhRfnbjPYi5CN2SnAVsBLj0ViGoKmYT3RxsiZn9CfvwoBSgKTs3pcHwg"
+      }
+    }
+  ]
+}

@@ -130,6 +130,8 @@ class PhoneBluetoothSyncManager(
     private val prepareAccountDomain:suspend(String,String?)->Unit={_,_->},
     private val acknowledgeAccountDomain:suspend(String,String)->Unit={_,_->}
 ) {
+    /** P1 optional local projection copy; null leaves the legacy path byte-for-byte unchanged. */
+    internal var recordLegacyProjection:((peer:String,version:Int,cursor:String,payload:JSONObject)->Unit)?=null
     private val appContext = context.applicationContext
     private val assetHashes=NoteAssetHashCache(appContext.getSharedPreferences("watchrss_ble_asset_hashes",android.content.Context.MODE_PRIVATE))
     private val client = PhoneBluetoothSyncClient(appContext, debugLog)
@@ -505,7 +507,12 @@ class PhoneBluetoothSyncManager(
                     val bookSync = BookBluetoothSync(requireNotNull(repository.books), deviceId, File(appContext.cacheDir, "ble-books")) { request ->
                         val finishingBody=request.optString("phase")=="body" && request.optInt("chunkIndex")+1==request.optInt("chunkCount")
                         val timeout=if(request.optString("phase")=="manifest" || finishingBody)LIBRARY_FULL_SYNC_TIMEOUT_MS else READER_EXCHANGE_TIMEOUT_MS
-                        exchange(request,timeoutMs=timeout, deviceAddress = effectiveDevice.address, sessionId = "$sessionId-books", syncSession = syncSession).response
+                        exchange(request,timeoutMs=timeout, deviceAddress = effectiveDevice.address, sessionId = "$sessionId-books", syncSession = syncSession).response.also { response ->
+                            if(recordLegacyProjection!=null && request.optString("phase")!="body") {
+                                requireSuccess(response)
+                                recordLegacyProjection?.invoke(active.response.optString("deviceId"),active.response.optInt("version"),"books:$sessionId:"+com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec.sha256(request.toString().toByteArray()),response)
+                            }
+                        }
                     }
                     bookSync.domainFastPath=fastPath!=null
                     bookSync.onApplied={if(it>0)locallyApplied=true}
@@ -515,7 +522,10 @@ class PhoneBluetoothSyncManager(
                     if(active.capabilities.bookReadingDelta && physicalSession?.isPersistent==true) {
                         bookSync.enableReadingDelta(active.response.getString("deviceId")) { request,validate ->
                             withTimeout(READER_EXCHANGE_TIMEOUT_MS) {
-                                withContext(Dispatchers.IO) { physicalSession.exchangeApplied(request,"$sessionId-books-commit",validate) }
+                                withContext(Dispatchers.IO) { physicalSession.exchangeApplied(request,"$sessionId-books-commit") { response ->
+                                    validate(response)
+                                    recordLegacyProjection?.invoke(active.response.optString("deviceId"),active.response.optInt("version"),"book-reading:$sessionId:"+com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec.sha256(request.toString().toByteArray()),response)
+                                } }
                             }
                         }
                     }
@@ -554,7 +564,7 @@ class PhoneBluetoothSyncManager(
                 noteStats = if(skipped("notes")) NoteSyncStats(0,0,0,0) else recovery.run {
                     reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_NOTES, 0)
                     syncNotes(effectiveDevice.address, sessionId, syncSession, libraryDeclarations?.let { binding().capabilities.withDeclarations(it) } ?: binding().capabilities,
-                        onLocalApplied = { if (it > 0) locallyApplied = true }).also{completedDomains.add("notes")}
+                        onLocalApplied = { if (it > 0) locallyApplied = true }, legacyVersion=binding().response.optInt("version")).also{completedDomains.add("notes")}
                 }
                 runCatching { recovery.run { if(!skipped("usage")){syncLlmTokenUsage(effectiveDevice, syncSession, binding());completedDomains.add("usage")} } }
                     .onFailure { tokenUsageSyncWarning = warningOrThrow(it, "词元用量同步失败") }
@@ -933,6 +943,7 @@ class PhoneBluetoothSyncManager(
                     val window = syncWindow ?: error("同步窗口尚未准备")
                     reportProgress(onProgress, PhoneBluetoothSyncStage.VERIFYING, 90)
                     requireSuccess(exchange.response)
+                    recordLegacyProjection?.invoke(activePeerDeviceId.ifBlank{exchange.deviceAddress},exchange.manifestResponse.optInt("version"),"library:$sessionId:$remoteSeqApplied",JSONObject().put("manifest",exchange.manifestResponse).put("response",exchange.response))
                     val chunkedResponse = exchange.response.optInt("version") > LibrarySyncPayload.LEGACY_PROTOCOL_VERSION &&
                         exchange.response.optJSONArray("articles") != null &&
                         (exchange.response.optJSONArray("articles")?.let { array ->
@@ -1108,7 +1119,8 @@ class PhoneBluetoothSyncManager(
                     deviceAddress = exchange.deviceAddress,
                     parentSessionId = sessionId,
                     syncSession = syncSession,
-                    capabilities = activeBinding.capabilities.withDeclarations(exchange.manifestResponse)
+                    capabilities = activeBinding.capabilities.withDeclarations(exchange.manifestResponse),
+                    legacyVersion=exchange.manifestResponse.optInt("version")
                 ).also {
                     reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_NOTES, 100)
                 }
@@ -1146,7 +1158,8 @@ class PhoneBluetoothSyncManager(
         parentSessionId: String,
         syncSession: PhoneSyncSession? = null,
         capabilities: BleSyncCapabilities = BleSyncCapabilities(),
-        onLocalApplied: (Int) -> Unit = {}
+        onLocalApplied: (Int) -> Unit = {},
+        legacyVersion:Int=14
     ): NoteSyncStats = withContext(Dispatchers.IO) {
         val sessionId="$parentSessionId-notes"
         val localNotes=noteRepository.allNotes()
@@ -1168,6 +1181,7 @@ class PhoneBluetoothSyncManager(
         if(capabilities.noteManifest)require(response.optString("phase")=="delta") { "手表笔记差量响应无效" }
         if(capabilities.noteAssets && !capabilities.noteManifest)remoteAssets=NoteAssetInventoryEntry.read(response.optJSONArray("assetManifest"))
         val remoteDevice=response.optString("deviceId").ifBlank { "watch" }
+        recordLegacyProjection?.invoke(remoteDevice,legacyVersion,"notes:$sessionId",response)
         val incoming=NoteSyncPayload.decodeNotes(response)
         var conflicts=0;var applied=0
         for(note in incoming) {

@@ -1,0 +1,160 @@
+{
+  "syntheticOnly": true,
+  "source": "review/rc4/probe-rc4.ts; original D01-D13 program/input transformations and expected retained",
+  "sourceSha256": "c2e5a9d74b49c07e7baf2e498d14cde64e9fd959cc4aa2399d939858e52ea4c4",
+  "cases": [
+    {
+      "id": "D01",
+      "issue": "M01: cycle and outward edges",
+      "expected": {
+        "affected": [
+          "a",
+          "b",
+          "c",
+          "d"
+        ],
+        "route": "pendingChoice"
+      }
+    },
+    {
+      "id": "D02",
+      "issue": "M01: deep missing and untrusted nodes",
+      "expected": {
+        "missing": null,
+        "incomplete": null,
+        "unauthenticated": null,
+        "route": "pendingChoice"
+      }
+    },
+    {
+      "id": "D03",
+      "issue": "M02: three choices, opaque order, restart and normal tail",
+      "expected": {
+        "afterThird": null,
+        "afterFirst": "z",
+        "afterSecond": "aa",
+        "pending": null,
+        "rows": [
+          "first",
+          "normal",
+          "second",
+          "third"
+        ],
+        "queueLength": 4
+      }
+    },
+    {
+      "id": "D04",
+      "issue": "M03: quota failure with multiple choices",
+      "expected": {
+        "error": "quota_exceeded",
+        "entireStateRetained": true,
+        "pendingCount": 2
+      }
+    },
+    {
+      "id": "D05",
+      "issue": "M04: last valid write then reject before functions/hooks",
+      "expected": {
+        "models": [
+          {
+            "name": "ProjectionAdapter",
+            "atMax": true,
+            "error": "counter_exhausted",
+            "unchanged": true,
+            "callbackRan": false
+          },
+          {
+            "name": "ModeJournal",
+            "atMax": true,
+            "error": "counter_exhausted",
+            "unchanged": true,
+            "callbackRan": false
+          },
+          {
+            "name": "ChoiceJournal",
+            "atMax": true,
+            "error": "counter_exhausted",
+            "unchanged": true,
+            "callbackRan": false
+          }
+        ],
+        "invalidRejected": true
+      }
+    },
+    {
+      "id": "D06",
+      "issue": "M05: independent strict repo-init conflict DTO",
+      "expected": {
+        "valid": 2,
+        "poisonRejected": 8,
+        "producerRejected": 3
+      }
+    },
+    {
+      "id": "D07",
+      "issue": "M03/N07: expiry compaction must preserve live pin association",
+      "expected": {
+        "copies": 1,
+        "livePins": 1,
+        "livePinMatchesCopy": true,
+        "remainingBodyDecrypts": true
+      }
+    },
+    {
+      "id": "D08",
+      "issue": "M02/M03/R08: observed new generation invalidates old cloud selection",
+      "expected": {
+        "error": "choice_stale",
+        "entireLatestStateRetained": true
+      }
+    },
+    {
+      "id": "D09",
+      "issue": "M03: cloud choice, other choice and cumulative gap survive restart",
+      "expected": {
+        "discardApplied": false,
+        "ack": null,
+        "otherReachable": true,
+        "otherApplied": true,
+        "pending": null,
+        "sourceCiphertextRecoverable": true
+      }
+    },
+    {
+      "id": "D10",
+      "issue": "M03: changed closure cannot masquerade as duplicate",
+      "expected": {
+        "error": "idempotency_conflict",
+        "entireStateRetained": true
+      }
+    },
+    {
+      "id": "D11",
+      "issue": "M03/R08: concurrent commit preserves latest choice and all source",
+      "expected": {
+        "error": "choice_stale",
+        "entireLatestStateRetained": true
+      }
+    },
+    {
+      "id": "D12",
+      "issue": "D08 positive controls: main journal rejects stale window; legacy accepts current window",
+      "expected": {
+        "primaryRejected": true,
+        "currentLegacyAccepted": true
+      }
+    },
+    {
+      "id": "D13",
+      "issue": "M01: explicit null adjacency is not a verified absent adjacency",
+      "expected": {
+        "affected": null,
+        "route": "pendingChoice",
+        "absentFieldControl": [
+          "book"
+        ]
+      }
+    }
+  ]
+}

@@ -81,6 +81,10 @@ class PhoneCompanionContainer(context: Context) {
             .build()
     }
 
+    internal val localSyncV2Projection by lazy {
+        com.lightningstudio.watchrss.phone.syncv2.SyncV2ProjectionFactory(appContext, database)
+    }
+
     private val deviceIdentity: PhoneDeviceIdentity by lazy {
         PhoneDeviceIdentity(appContext)
     }
@@ -418,6 +422,10 @@ class PhoneCompanionContainer(context: Context) {
                     oppoReviewCoordinator.onSyncSucceeded()
                 }
             }
-        )
+        ).also { manager ->
+            if(BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION)manager.recordLegacyProjection={peer,version,cursor,payload ->
+                localSyncV2Projection.captureLegacyMetadata(peer,version,cursor,payload)
+            }
+        }
     }
 }

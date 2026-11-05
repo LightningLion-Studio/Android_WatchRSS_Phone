@@ -1,0 +1,206 @@
+{
+  "syntheticOnly": true,
+  "invalidControl": [
+    {
+      "field": "treeRoot",
+      "delete": true,
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "field": "treeRoot",
+      "value": "blob:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "field": "indexComplete",
+      "value": false,
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "field": "deviceSequence",
+      "value": "18446744073709551616",
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "field": "mergedParents",
+      "value": [
+        "commit:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "commit:sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      ],
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "field": "unexpectedControl",
+      "value": 1,
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "field": "operation",
+      "value": {
+        "kind": "normal",
+        "rollbackTarget": "commit:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "resolvesGeneration": null
+      },
+      "expected": {
+        "error": "invalid_schema"
+      }
+    }
+  ],
+  "rollbackErrors": {
+    "missing-header": "object_missing",
+    "missing-lease": "lease_expired",
+    "expired": "lease_expired",
+    "incomplete": "closure_incomplete",
+    "forged-target-complete": "invalid_schema",
+    "history-expired": "snapshot_expired",
+    "wrong-actor": "lease_expired"
+  },
+  "framing": [
+    {
+      "name": "committed H32 handshake",
+      "input": {
+        "authenticated": true,
+        "scopeMatched": true,
+        "ready": true,
+        "commitAck": true,
+        "sessionCommitted": true,
+        "switchId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ackSwitchId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": true
+    },
+    {
+      "name": "commitAck alone is insufficient",
+      "input": {
+        "authenticated": true,
+        "scopeMatched": true,
+        "ready": true,
+        "commitAck": true,
+        "sessionCommitted": false,
+        "switchId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ackSwitchId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": false
+    },
+    {
+      "name": "short IDs",
+      "input": {
+        "authenticated": true,
+        "scopeMatched": true,
+        "ready": true,
+        "commitAck": true,
+        "sessionCommitted": true,
+        "switchId": "a",
+        "ackSwitchId": "a"
+      },
+      "expected": false
+    },
+    {
+      "name": "uppercase IDs",
+      "input": {
+        "authenticated": true,
+        "scopeMatched": true,
+        "ready": true,
+        "commitAck": true,
+        "sessionCommitted": true,
+        "switchId": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "ackSwitchId": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "expected": false
+    }
+  ],
+  "before": {
+    "alias": {},
+    "chapter": {},
+    "asset": {},
+    "old-asset": {},
+    "book": {
+      "state": 1,
+      "dependencies": [
+        "alias",
+        "chapter",
+        "asset"
+      ]
+    },
+    "stable": {
+      "state": 1
+    }
+  },
+  "target": {
+    "alias": {},
+    "chapter": {},
+    "asset": {},
+    "old-asset": {},
+    "book": {
+      "state": 0,
+      "dependencies": [
+        "chapter",
+        "old-asset"
+      ]
+    },
+    "stable": {
+      "state": 1
+    }
+  },
+  "affected": [
+    "alias",
+    "asset",
+    "book",
+    "chapter",
+    "old-asset"
+  ],
+  "legacy": {
+    "peer": "peer",
+    "version": 14,
+    "cursor": "7",
+    "entityKeys": [
+      "chapter"
+    ],
+    "body": {
+      "chapter": {
+        "progress": 99
+      }
+    }
+  },
+  "scanRows": [
+    {
+      "kind": "article",
+      "logicalId": "existing-a"
+    },
+    {
+      "kind": "note",
+      "logicalId": "existing-n"
+    }
+  ],
+  "recoveryExpected": {
+    "version": 2,
+    "changes": [
+      {
+        "id": "modified",
+        "kind": "set",
+        "value": {
+          "text": "mine"
+        }
+      }
+    ],
+    "editBase": {
+      "accountOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+      "generation": "0"
+    },
+    "bodyRefs": [
+      "recipe:sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    ]
+  }
+}

@@ -54,6 +54,8 @@ android {
         targetSdk = 36
         versionCode = 108
         versionName = "1.3.0-48"
+        // P1 is local-only and opt-in. This flag never enables cloud/apply/GC.
+        buildConfigField("boolean", "SYNC_OBJECTS_V2_LOCAL_PROJECTION", providers.gradleProperty("syncObjectsV2LocalProjection").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         // Implementation approval does not enable production writes or delegated conversion.
         buildConfigField("boolean", "CLOUD_FORMAT_R48_WRITE_V1", providers.gradleProperty("cloudFormatR48WriteV1").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("String", "R48_WORKER_TRUST_JSON", productionSetting("WATCHRSS_R48_WORKER_TRUST_JSON").asBuildConfigString())
@@ -230,6 +232,8 @@ val prepareQrNativeTests by tasks.registering(Exec::class) {
     commandLine("python3", file("src/test/native/qr/build.py"), output.get().asFile, System.getProperty("java.home"))
 }
 tasks.withType<Test>().configureEach {
+    inputs.property("syncV2CrashBoundary", providers.environmentVariable("WRSS_P1_CRASH_AT").orNull ?: "")
+    inputs.property("syncV2CrashJournal", providers.environmentVariable("WRSS_P1_CRASH_JOURNAL").orNull ?: "")
     dependsOn(prepareQrNativeTests)
     systemProperty("java.library.path", layout.buildDirectory.dir("qr-native-tests").get().asFile.absolutePath)
     systemProperty("robolectric.dependency.repo.url", "https://repo.maven.apache.org/maven2")

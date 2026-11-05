@@ -1,0 +1,157 @@
+{
+  "syntheticOnly": true,
+  "source": "review/rc5/probe-rc5.ts; E-series stays directly on the strict entry, original expected unchanged",
+  "sourceSha256": "d72bd8fc34030804ee1bd3348a1d96759352e3c9a29c425aaa72808afbbafc8a",
+  "cases": [
+    {
+      "id": "E01",
+      "issue": "V01: old shorthand borrows refreshed pending token after another input",
+      "expected": {
+        "fullError": "choice_stale",
+        "fullRetained": true,
+        "shortError": "choice_stale",
+        "shortRetained": true
+      }
+    },
+    {
+      "id": "E02",
+      "issue": "V01: stale shorthand after local edit, refreshed token, JSON restart",
+      "expected": {
+        "error": "choice_stale",
+        "entireLatestStateRetained": true
+      }
+    },
+    {
+      "id": "E03",
+      "issue": "V01 controls: no refreshed token rejects stale shorthand; fresh full confirmation succeeds",
+      "expected": {
+        "withoutRefreshError": "choice_stale",
+        "withoutRefreshRetained": true,
+        "freshFullSucceeds": true
+      }
+    },
+    {
+      "id": "E04",
+      "issue": "V01: complete capture without observed account must fail closed",
+      "expected": {
+        "captureHelperError": "choice_stale",
+        "resolveError": "choice_stale",
+        "entireStateRetained": true
+      }
+    },
+    {
+      "id": "E05",
+      "issue": "V01: each captured field stale before preparation and at final commit",
+      "expected": {
+        "beforeRejected": 5,
+        "beforeUnchanged": 5,
+        "finalRejected": 5,
+        "finalLatestRetained": 5,
+        "partialRejected": 2
+      }
+    },
+    {
+      "id": "E06",
+      "issue": "V02: copyId and AAD checked with independent AES-GCM",
+      "expected": {
+        "independentPlaintextMatches": true,
+        "outerMismatchRejected": true,
+        "bothIdsChangedRejected": true,
+        "swappedCiphertextRejected": true
+      }
+    },
+    {
+      "id": "E07",
+      "issue": "V02: purge, append, reorder, restart and later expiries",
+      "expected": {
+        "stableSecond": true,
+        "newIdUnique": true,
+        "noPersistedIndex": true,
+        "restartAssociation": true,
+        "thirdSurvivesSecondExpiry": true,
+        "allExpiredTogether": true
+      }
+    },
+    {
+      "id": "E08",
+      "issue": "V02: failed purge hook preserves copies, pins, inbox and edits",
+      "expected": {
+        "models": [
+          {
+            "name": "ProjectionAdapter",
+            "error": "persist_failed",
+            "entireStateRetained": true
+          },
+          {
+            "name": "ChoiceJournal",
+            "error": "persist_failed",
+            "entireStateRetained": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "E09",
+      "issue": "V02: competing purge/commit keeps complete latest state",
+      "expected": {
+        "models": [
+          {
+            "name": "ProjectionAdapter",
+            "error": "choice_stale",
+            "latestRetained": true,
+            "liveAssociation": true
+          },
+          {
+            "name": "ChoiceJournal",
+            "error": "choice_stale",
+            "latestRetained": true,
+            "liveAssociation": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "E10",
+      "issue": "V02: invalid copy/pin metadata and old positional record refuse purge",
+      "expected": {
+        "rejected": 4,
+        "unchanged": 4
+      }
+    },
+    {
+      "id": "E11",
+      "issue": "V02: main ChoiceJournal creates same stable pin/AAD schema",
+      "expected": {
+        "applied": true,
+        "oneCopyOnePin": true,
+        "idsMatch": true,
+        "payloadMatchesPin": true,
+        "allExpiredTogether": true
+      }
+    },
+    {
+      "id": "E12",
+      "issue": "V03: explicit null differs from absent/empty and unchanged null fails closed",
+      "expected": {
+        "changedNull": null,
+        "unchangedNull": null,
+        "absent": [
+          "a"
+        ],
+        "empty": [
+          "a"
+        ],
+        "route": "pendingChoice"
+      }
+    },
+    {
+      "id": "E13",
+      "issue": "V03: non-null malformed adjacency on unchanged related graph",
+      "expected": {
+        "wrongType": null,
+        "invalidElement": null,
+        "route": "pendingChoice"
+      }
+    }
+  ]
+}

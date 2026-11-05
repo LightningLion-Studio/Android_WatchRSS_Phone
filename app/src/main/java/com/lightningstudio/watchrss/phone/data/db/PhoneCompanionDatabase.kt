@@ -83,6 +83,7 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
             override fun onOpen(db:SupportSQLiteDatabase) {
                 installArticleProvenanceWitnesses(db)
                 installCloudLocalChanges(db)
+                com.lightningstudio.watchrss.phone.syncv2.SyncV2Schema.onOpen(db)
             }
         }
         val MIGRATION_18_19=object:Migration(18,19) {

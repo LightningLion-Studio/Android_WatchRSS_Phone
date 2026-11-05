@@ -1,0 +1,292 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "scope": {
+    "repoId": "01010101010101010101010101010101",
+    "libraryEpoch": "1",
+    "contentGeneration": "2"
+  },
+  "initial": {
+    "account": {
+      "oid": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+      "revision": "1",
+      "generation": "0"
+    },
+    "device": {
+      "oid": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+      "revision": "1"
+    },
+    "authorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "deviceSequence": "9007199254740993"
+  },
+  "cases": [
+    {
+      "input": {
+        "requestId": "01010101010101010101010101010101",
+        "generation": "0",
+        "expectedAccountOid": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+        "expectedAccountRevision": "1",
+        "expectedDeviceOid": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+        "expectedDeviceRevision": "1",
+        "newOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+        "kind": "normal",
+        "signedCommit": {
+          "body": {
+            "version": 2,
+            "scope": {
+              "repoId": "01010101010101010101010101010101",
+              "libraryEpoch": "1",
+              "contentGeneration": "2"
+            },
+            "authorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "deviceSequence": "9007199254740994",
+            "previousOwnCommit": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+            "mergedParents": [],
+            "treeRoot": "tree:sha256:9defb3271d3ee6e1ff372b8419f0a1adecaf77c916b44ce78ff27e215e60a72d",
+            "requiredFeatures": [],
+            "createdAtMillis": 100,
+            "observedRefs": [],
+            "indexComplete": true,
+            "accountParent": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+            "rollbackGeneration": "0",
+            "operation": {
+              "kind": "normal",
+              "rollbackTarget": null,
+              "resolvesGeneration": null
+            }
+          },
+          "oid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+          "canonicalBody": "{\"accountParent\":\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\",\"authorDeviceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"createdAtMillis\":100,\"deviceSequence\":\"9007199254740994\",\"indexComplete\":true,\"mergedParents\":[],\"observedRefs\":[],\"operation\":{\"kind\":\"normal\",\"resolvesGeneration\":null,\"rollbackTarget\":null},\"previousOwnCommit\":\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\",\"requiredFeatures\":[],\"rollbackGeneration\":\"0\",\"scope\":{\"contentGeneration\":\"2\",\"libraryEpoch\":\"1\",\"repoId\":\"01010101010101010101010101010101\"},\"treeRoot\":\"tree:sha256:9defb3271d3ee6e1ff372b8419f0a1adecaf77c916b44ce78ff27e215e60a72d\",\"version\":2}",
+          "signature": "HHO-pXDni-99puUNRBYp8SBfmpO07TJgHRw51Z5lXusdzWj6oOKh_FzpD5qHywCyxOcd3HBwNxRqSRDjwN7y1w"
+        },
+        "publicKeyHex": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+      },
+      "expected": {
+        "ok": true,
+        "account": {
+          "oid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+          "revision": "2",
+          "generation": "0"
+        },
+        "device": {
+          "oid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+          "revision": "2"
+        }
+      }
+    },
+    {
+      "input": {
+        "requestId": "02020202020202020202020202020202",
+        "generation": "0",
+        "expectedAccountOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+        "expectedAccountRevision": "2",
+        "expectedDeviceOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+        "expectedDeviceRevision": "2",
+        "newOid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+        "kind": "rollback",
+        "signedCommit": {
+          "body": {
+            "version": 2,
+            "scope": {
+              "repoId": "01010101010101010101010101010101",
+              "libraryEpoch": "1",
+              "contentGeneration": "2"
+            },
+            "authorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "deviceSequence": "9007199254740995",
+            "previousOwnCommit": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+            "mergedParents": [
+              "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045"
+            ],
+            "treeRoot": "tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02",
+            "requiredFeatures": [],
+            "createdAtMillis": 100,
+            "observedRefs": [],
+            "indexComplete": true,
+            "accountParent": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+            "rollbackGeneration": "1",
+            "operation": {
+              "kind": "rollback",
+              "rollbackTarget": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+              "resolvesGeneration": null
+            }
+          },
+          "oid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+          "canonicalBody": "{\"accountParent\":\"commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790\",\"authorDeviceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"createdAtMillis\":100,\"deviceSequence\":\"9007199254740995\",\"indexComplete\":true,\"mergedParents\":[\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\"],\"observedRefs\":[],\"operation\":{\"kind\":\"rollback\",\"resolvesGeneration\":null,\"rollbackTarget\":\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\"},\"previousOwnCommit\":\"commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790\",\"requiredFeatures\":[],\"rollbackGeneration\":\"1\",\"scope\":{\"contentGeneration\":\"2\",\"libraryEpoch\":\"1\",\"repoId\":\"01010101010101010101010101010101\"},\"treeRoot\":\"tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02\",\"version\":2}",
+          "signature": "45RIfhLMCZm-cg3x0cS9AFrkx81VvibPHPeO45PEOcN1SpJ0o3-F_Zybfz4jyZDbvx7nye8u0lnlCC9oiA4Zxg"
+        },
+        "publicKeyHex": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+        "restoreLeaseId": "fefefefefefefefefefefefefefefefe"
+      },
+      "expected": {
+        "ok": true,
+        "account": {
+          "oid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+          "revision": "3",
+          "generation": "1"
+        },
+        "device": {
+          "oid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+          "revision": "3"
+        }
+      }
+    },
+    {
+      "input": {
+        "requestId": "03030303030303030303030303030303",
+        "generation": "0",
+        "expectedAccountOid": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+        "expectedAccountRevision": "1",
+        "expectedDeviceOid": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+        "expectedDeviceRevision": "1",
+        "newOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+        "kind": "normal",
+        "signedCommit": {
+          "body": {
+            "version": 2,
+            "scope": {
+              "repoId": "01010101010101010101010101010101",
+              "libraryEpoch": "1",
+              "contentGeneration": "2"
+            },
+            "authorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "deviceSequence": "9007199254740994",
+            "previousOwnCommit": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+            "mergedParents": [],
+            "treeRoot": "tree:sha256:9defb3271d3ee6e1ff372b8419f0a1adecaf77c916b44ce78ff27e215e60a72d",
+            "requiredFeatures": [],
+            "createdAtMillis": 100,
+            "observedRefs": [],
+            "indexComplete": true,
+            "accountParent": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+            "rollbackGeneration": "0",
+            "operation": {
+              "kind": "normal",
+              "rollbackTarget": null,
+              "resolvesGeneration": null
+            }
+          },
+          "oid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+          "canonicalBody": "{\"accountParent\":\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\",\"authorDeviceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"createdAtMillis\":100,\"deviceSequence\":\"9007199254740994\",\"indexComplete\":true,\"mergedParents\":[],\"observedRefs\":[],\"operation\":{\"kind\":\"normal\",\"resolvesGeneration\":null,\"rollbackTarget\":null},\"previousOwnCommit\":\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\",\"requiredFeatures\":[],\"rollbackGeneration\":\"0\",\"scope\":{\"contentGeneration\":\"2\",\"libraryEpoch\":\"1\",\"repoId\":\"01010101010101010101010101010101\"},\"treeRoot\":\"tree:sha256:9defb3271d3ee6e1ff372b8419f0a1adecaf77c916b44ce78ff27e215e60a72d\",\"version\":2}",
+          "signature": "HHO-pXDni-99puUNRBYp8SBfmpO07TJgHRw51Z5lXusdzWj6oOKh_FzpD5qHywCyxOcd3HBwNxRqSRDjwN7y1w"
+        },
+        "publicKeyHex": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+      },
+      "expected": {
+        "error": "rollback_conflict"
+      }
+    },
+    {
+      "input": {
+        "requestId": "02020202020202020202020202020202",
+        "generation": "0",
+        "expectedAccountOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+        "expectedAccountRevision": "2",
+        "expectedDeviceOid": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+        "expectedDeviceRevision": "2",
+        "newOid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+        "kind": "rollback",
+        "signedCommit": {
+          "body": {
+            "version": 2,
+            "scope": {
+              "repoId": "01010101010101010101010101010101",
+              "libraryEpoch": "1",
+              "contentGeneration": "2"
+            },
+            "authorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "deviceSequence": "9007199254740995",
+            "previousOwnCommit": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+            "mergedParents": [
+              "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045"
+            ],
+            "treeRoot": "tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02",
+            "requiredFeatures": [],
+            "createdAtMillis": 100,
+            "observedRefs": [],
+            "indexComplete": true,
+            "accountParent": "commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790",
+            "rollbackGeneration": "1",
+            "operation": {
+              "kind": "rollback",
+              "rollbackTarget": "commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045",
+              "resolvesGeneration": null
+            }
+          },
+          "oid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+          "canonicalBody": "{\"accountParent\":\"commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790\",\"authorDeviceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"createdAtMillis\":100,\"deviceSequence\":\"9007199254740995\",\"indexComplete\":true,\"mergedParents\":[\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\"],\"observedRefs\":[],\"operation\":{\"kind\":\"rollback\",\"resolvesGeneration\":null,\"rollbackTarget\":\"commit:sha256:a39abb899f5bce06d98b6b740ed8a666bfae05db6748ca6da9ddd526dd634045\"},\"previousOwnCommit\":\"commit:sha256:48733c663469de3e96984840b16300a045788495dcc80f1b6ad2d5fc22350790\",\"requiredFeatures\":[],\"rollbackGeneration\":\"1\",\"scope\":{\"contentGeneration\":\"2\",\"libraryEpoch\":\"1\",\"repoId\":\"01010101010101010101010101010101\"},\"treeRoot\":\"tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02\",\"version\":2}",
+          "signature": "45RIfhLMCZm-cg3x0cS9AFrkx81VvibPHPeO45PEOcN1SpJ0o3-F_Zybfz4jyZDbvx7nye8u0lnlCC9oiA4Zxg"
+        },
+        "publicKeyHex": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+        "restoreLeaseId": "fefefefefefefefefefefefefefefefe"
+      },
+      "expected": {
+        "ok": true,
+        "account": {
+          "oid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+          "revision": "3",
+          "generation": "1"
+        },
+        "device": {
+          "oid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+          "revision": "3"
+        }
+      }
+    },
+    {
+      "input": {
+        "requestId": "04040404040404040404040404040404",
+        "generation": "1",
+        "expectedAccountOid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+        "expectedAccountRevision": "3",
+        "expectedDeviceOid": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+        "expectedDeviceRevision": "3",
+        "newOid": "commit:sha256:42be9f85d91080da94dae0a31e213a9059f9c383c59f9e145cd89df708c2e327",
+        "kind": "resolve-local",
+        "signedCommit": {
+          "body": {
+            "version": 2,
+            "scope": {
+              "repoId": "01010101010101010101010101010101",
+              "libraryEpoch": "1",
+              "contentGeneration": "2"
+            },
+            "authorDeviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "deviceSequence": "9007199254740996",
+            "previousOwnCommit": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+            "mergedParents": [],
+            "treeRoot": "tree:sha256:9defb3271d3ee6e1ff372b8419f0a1adecaf77c916b44ce78ff27e215e60a72d",
+            "requiredFeatures": [],
+            "createdAtMillis": 100,
+            "observedRefs": [],
+            "indexComplete": true,
+            "accountParent": "commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503",
+            "rollbackGeneration": "1",
+            "operation": {
+              "kind": "resolve-local",
+              "rollbackTarget": null,
+              "resolvesGeneration": "1"
+            }
+          },
+          "oid": "commit:sha256:42be9f85d91080da94dae0a31e213a9059f9c383c59f9e145cd89df708c2e327",
+          "canonicalBody": "{\"accountParent\":\"commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503\",\"authorDeviceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"createdAtMillis\":100,\"deviceSequence\":\"9007199254740996\",\"indexComplete\":true,\"mergedParents\":[],\"observedRefs\":[],\"operation\":{\"kind\":\"resolve-local\",\"resolvesGeneration\":\"1\",\"rollbackTarget\":null},\"previousOwnCommit\":\"commit:sha256:fd8d5f0fc1416df19b44f7652da413e96e2392f048a1b373dda68701ecc71503\",\"requiredFeatures\":[],\"rollbackGeneration\":\"1\",\"scope\":{\"contentGeneration\":\"2\",\"libraryEpoch\":\"1\",\"repoId\":\"01010101010101010101010101010101\"},\"treeRoot\":\"tree:sha256:9defb3271d3ee6e1ff372b8419f0a1adecaf77c916b44ce78ff27e215e60a72d\",\"version\":2}",
+          "signature": "CuJDurPXhaPbTk2-E1CgvfErIYHLmC5bbzE2lxGHLvFBcquNa_454IhY2Fk-WBk_PTiSIZcX4T59UqjYfXRtGw"
+        },
+        "publicKeyHex": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+      },
+      "expected": {
+        "ok": true,
+        "account": {
+          "oid": "commit:sha256:42be9f85d91080da94dae0a31e213a9059f9c383c59f9e145cd89df708c2e327",
+          "revision": "4",
+          "generation": "1"
+        },
+        "device": {
+          "oid": "commit:sha256:42be9f85d91080da94dae0a31e213a9059f9c383c59f9e145cd89df708c2e327",
+          "revision": "4"
+        }
+      }
+    }
+  ]
+}

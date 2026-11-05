@@ -1,0 +1,1558 @@
+{
+  "version": "v2-rc6b",
+  "syntheticOnly": true,
+  "expectedSource": "Written from NC01-NC03 requirements; size calculation independently uses Python JSON/hash and no TS reference output.",
+  "planner": [
+    {
+      "id": "local-open-in-real-planner",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 0
+                }
+              ]
+            }
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "ops": [
+          {
+            "id": "n",
+            "kind": "update",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ],
+        "noteConflictGenerations": {
+          "base": "2",
+          "local": "2",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "note_conflict"
+      }
+    },
+    {
+      "id": "open-incident-outside-ops",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nc"
+          },
+          "other": {
+            "identity": "other-note",
+            "markdown": "same",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          },
+          "other": {
+            "identity": "other-note",
+            "markdown": "same",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "other-note",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 0
+                }
+              ]
+            }
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          },
+          "other": {
+            "identity": "other-note",
+            "markdown": "same",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "ops": [
+          {
+            "id": "n",
+            "kind": "update",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ],
+        "noteConflictGenerations": {
+          "base": "2",
+          "local": "2",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "note_conflict"
+      }
+    },
+    {
+      "id": "preserve-local-resolved-incident",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "ops": [
+          {
+            "id": "n",
+            "kind": "update",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ],
+        "noteConflictGenerations": {
+          "base": "2",
+          "local": "2",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": true,
+        "tree": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "union-both-resolved-sets",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "b",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 4,
+                  "resolvedAt": 10
+                }
+              ]
+            }
+          }
+        },
+        "ops": [
+          {
+            "id": "n",
+            "kind": "update",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ],
+        "noteConflictGenerations": {
+          "base": "2",
+          "local": "2",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": true,
+        "tree": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                },
+                {
+                  "conflictId": "b",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 4,
+                  "resolvedAt": 10
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "base-tombstone-not-erased-by-empty-set",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "ops": [
+          {
+            "id": "n",
+            "kind": "update",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ],
+        "noteConflictGenerations": {
+          "base": "2",
+          "local": "2",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": true,
+        "tree": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "union-is-not-an-editable-LWW-field",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "b",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 4,
+                  "resolvedAt": 10
+                }
+              ]
+            }
+          }
+        },
+        "ops": [
+          {
+            "id": "n",
+            "kind": "update",
+            "fields": [
+              "markdown",
+              "noteConflicts"
+            ],
+            "complete": true
+          }
+        ],
+        "noteConflictGenerations": {
+          "base": "2",
+          "local": "2",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": true,
+        "tree": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                },
+                {
+                  "conflictId": "b",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 4,
+                  "resolvedAt": 10
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "nonempty-metadata-requires-generation-proof",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "ops": [
+          {
+            "id": "n",
+            "kind": "update",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ]
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "missing_base"
+      }
+    },
+    {
+      "id": "cross-generation-markers-never-silently-union",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "ops": [
+          {
+            "id": "n",
+            "kind": "update",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ],
+        "noteConflictGenerations": {
+          "base": "2",
+          "local": "1",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "note_conflict"
+      }
+    },
+    {
+      "id": "same-ID-different-content-refused",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "different",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "ops": [
+          {
+            "id": "n",
+            "kind": "update",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ],
+        "noteConflictGenerations": {
+          "base": "2",
+          "local": "2",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "identity_conflict"
+      }
+    },
+    {
+      "id": "explicit-null-not-empty",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": null
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "ops": [
+          {
+            "id": "n",
+            "kind": "update",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ],
+        "noteConflictGenerations": {
+          "base": "2",
+          "local": "2",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "unsupported_feature"
+      }
+    },
+    {
+      "id": "resolved-records-retained-outside-ops",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "ops": [],
+        "noteConflictGenerations": {
+          "base": "2",
+          "local": "2",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": true,
+        "tree": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "cannot-attach-records-to-other-owner",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "other",
+            "markdown": "a\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "ops": [],
+        "noteConflictGenerations": {
+          "base": "2",
+          "local": "2",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "identity_conflict"
+      }
+    },
+    {
+      "id": "missing-candidate-does-not-drop-local-records",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "cloud": {},
+        "ops": [],
+        "noteConflictGenerations": {
+          "base": "2",
+          "local": "2",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "missing_content"
+      }
+    },
+    {
+      "id": "equal-create-body-unions-incidents",
+      "input": {
+        "base": {},
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "same",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "same",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "b",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 4,
+                  "resolvedAt": 10
+                }
+              ]
+            }
+          }
+        },
+        "ops": [
+          {
+            "id": "n",
+            "kind": "create",
+            "complete": true
+          }
+        ],
+        "noteConflictGenerations": {
+          "base": "2",
+          "local": "2",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": true,
+        "tree": {
+          "n": {
+            "identity": "n",
+            "markdown": "same",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                },
+                {
+                  "conflictId": "b",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 4,
+                  "resolvedAt": 10
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "delete-keeps-resolved-incidents",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "same",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "same",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "ops": [
+          {
+            "id": "n",
+            "kind": "delete",
+            "complete": true
+          }
+        ],
+        "noteConflictGenerations": {
+          "base": "2",
+          "local": "2",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": true,
+        "tree": {
+          "n": {
+            "identity": "n",
+            "markdown": "same",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            },
+            "deleted": true
+          }
+        }
+      }
+    },
+    {
+      "id": "generation-over-D64-refused",
+      "input": {
+        "base": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "local": {
+          "n": {
+            "identity": "n",
+            "markdown": "A\nb\nc",
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "a",
+                  "noteId": "n",
+                  "baseMarkdown": "base",
+                  "localMarkdown": "local",
+                  "remoteMarkdown": "remote",
+                  "remoteDeviceId": "old-device",
+                  "createdAt": 3,
+                  "resolvedAt": 9
+                }
+              ]
+            }
+          }
+        },
+        "cloud": {
+          "n": {
+            "identity": "n",
+            "markdown": "a\nb\nC",
+            "noteConflicts": {
+              "version": 1,
+              "records": []
+            }
+          }
+        },
+        "ops": [
+          {
+            "id": "n",
+            "kind": "update",
+            "fields": [
+              "markdown"
+            ],
+            "complete": true
+          }
+        ],
+        "noteConflictGenerations": {
+          "base": "18446744073709551616",
+          "local": "2",
+          "cloud": "2"
+        }
+      },
+      "expected": {
+        "canMerge": false,
+        "reason": "missing_base"
+      }
+    }
+  ],
+  "budget": {
+    "input": {
+      "stateVersion": "4",
+      "account": {
+        "oid": "commit:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "revision": "3",
+        "generation": "1"
+      },
+      "rollbackGeneration": "1",
+      "localChangeRevision": "7",
+      "editBase": {
+        "accountOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "generation": "1"
+      },
+      "pendingChoice": null,
+      "note": {
+        "noteId": "备忘录-N",
+        "markdown": "live newer ![x](assets/live.png)\r\n",
+        "baseMarkdown": "edit ancestor",
+        "updatedAt": 90000,
+        "modifiedBy": "old-source",
+        "deleted": false,
+        "title": "unchanged title"
+      },
+      "conflicts": {
+        "version": 1,
+        "records": [
+          {
+            "conflictId": "c-0",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "![old](assets/resolved.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote A ![r](assets/remote.png)",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 100,
+            "resolvedAt": 7
+          },
+          {
+            "conflictId": "c-a",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "base ![b](assets/base.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote A ![r](assets/remote.png)",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 10,
+            "resolvedAt": 0
+          },
+          {
+            "conflictId": "c-b",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "base ![b](assets/base.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote B\r\n尾",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 50,
+            "resolvedAt": 0
+          }
+        ]
+      },
+      "outbox": [],
+      "applied": {
+        "cursor": "5"
+      },
+      "inbox": {
+        "unapplied": "retain"
+      },
+      "draft": {
+        "markdown": "unsaved draft"
+      },
+      "resolutionClosures": [
+        {
+          "oid": "recipe:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "storedBytes": 2048
+        },
+        {
+          "oid": "blob:sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "storedBytes": 4096
+        },
+        {
+          "oid": "recipe:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "storedBytes": 2048
+        }
+      ]
+    },
+    "expected": {
+      "root": {
+        "version": 2,
+        "entityKey": "0000000000000000000000000000000000000000000000000000000000000000",
+        "requiredFeatures": [
+          "note-conflicts.v1"
+        ],
+        "payload": {
+          "markdown": "live newer ![x](assets/live.png)\r\n",
+          "baseMarkdown": "live newer ![x](assets/live.png)\r\n",
+          "updatedAt": 90001,
+          "modifiedBy": "new-source",
+          "deleted": false,
+          "contentHash": "953f4df8e235ff9fdee0bdd52af88da8eaae923534f41a4c344f2ad06c58e566",
+          "baseContentHash": "953f4df8e235ff9fdee0bdd52af88da8eaae923534f41a4c344f2ad06c58e566",
+          "noteConflicts": {
+            "version": 1,
+            "records": [
+              {
+                "conflictId": "c-0",
+                "noteId": "备忘录-N",
+                "baseMarkdown": "![old](assets/resolved.png)",
+                "localMarkdown": "saved local ![l](assets/local.png)",
+                "remoteMarkdown": "remote A ![r](assets/remote.png)",
+                "remoteDeviceId": "旧端-来源",
+                "createdAt": 100,
+                "resolvedAt": 7
+              },
+              {
+                "conflictId": "c-a",
+                "noteId": "备忘录-N",
+                "baseMarkdown": "base ![b](assets/base.png)",
+                "localMarkdown": "saved local ![l](assets/local.png)",
+                "remoteMarkdown": "remote A ![r](assets/remote.png)",
+                "remoteDeviceId": "旧端-来源",
+                "createdAt": 10,
+                "resolvedAt": 100
+              },
+              {
+                "conflictId": "c-b",
+                "noteId": "备忘录-N",
+                "baseMarkdown": "base ![b](assets/base.png)",
+                "localMarkdown": "saved local ![l](assets/local.png)",
+                "remoteMarkdown": "remote B\r\n尾",
+                "remoteDeviceId": "旧端-来源",
+                "createdAt": 50,
+                "resolvedAt": 100
+              }
+            ]
+          }
+        },
+        "noteSegments": []
+      },
+      "rootPlainBytes": 1292,
+      "rootStoredBytesUpperBound": 5412,
+      "rootRefsBytesUpperBound": 354,
+      "closureStoredBytes": 11910,
+      "journalWorstBytes": 12604,
+      "requiredBytes": 24514
+    }
+  },
+  "segmented": {
+    "context": {
+      "entityKey": "1111111111111111111111111111111111111111111111111111111111111111",
+      "noteId": "n"
+    },
+    "state": {
+      "version": 2,
+      "entityKey": "1111111111111111111111111111111111111111111111111111111111111111",
+      "requiredFeatures": [
+        "note-segments.v1"
+      ],
+      "payload": {
+        "segmentedNote": true,
+        "noteRevision": "22222222222222222222222222222222",
+        "segmentCount": 1,
+        "plaintextSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "metadata": {
+          "updatedAt": 1
+        }
+      },
+      "noteSegments": [
+        "state:sha256:4444444444444444444444444444444444444444444444444444444444444444"
+      ]
+    },
+    "conflicts": {
+      "version": 1,
+      "records": [
+        {
+          "conflictId": "a",
+          "noteId": "n",
+          "baseMarkdown": "base",
+          "localMarkdown": "local",
+          "remoteMarkdown": "remote",
+          "remoteDeviceId": "old-device",
+          "createdAt": 3,
+          "resolvedAt": 9
+        }
+      ]
+    },
+    "invalid": [
+      {
+        "id": "missing-segment-declaration",
+        "path": [
+          "requiredFeatures"
+        ],
+        "value": [],
+        "expected": "invalid_schema"
+      },
+      {
+        "id": "segment-count-mismatch",
+        "path": [
+          "payload",
+          "segmentCount"
+        ],
+        "value": 2,
+        "expected": "invalid_schema"
+      },
+      {
+        "id": "zero-segments-not-segmented-parent",
+        "path": [
+          "payload",
+          "segmentCount"
+        ],
+        "value": 0,
+        "expected": "invalid_schema"
+      },
+      {
+        "id": "null-metadata",
+        "path": [
+          "payload",
+          "metadata"
+        ],
+        "value": null,
+        "expected": "invalid_schema"
+      },
+      {
+        "id": "bad-revision",
+        "path": [
+          "payload",
+          "noteRevision"
+        ],
+        "value": "x",
+        "expected": "invalid_schema"
+      },
+      {
+        "id": "bad-sha",
+        "path": [
+          "payload",
+          "plaintextSha256"
+        ],
+        "value": "x",
+        "expected": "invalid_schema"
+      },
+      {
+        "id": "extra-parent-key",
+        "path": [
+          "payload",
+          "extra"
+        ],
+        "value": 1,
+        "expected": "invalid_schema"
+      },
+      {
+        "id": "wrong-OID-type",
+        "path": [
+          "noteSegments",
+          0
+        ],
+        "value": "blob:sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "expected": "invalid_schema"
+      }
+    ]
+  },
+  "bodyGrowth": {
+    "bytes": 131000,
+    "expected": "object_too_large"
+  },
+  "choiceExpected": {
+    "error": "merge_unavailable",
+    "reason": "note_conflict",
+    "localEditsRetained": true
+  },
+  "growth": {
+    "recordCount": 1024,
+    "initialWireBytes": 261000,
+    "now": 1700000000000,
+    "expected": {
+      "error": "object_too_large",
+      "stateUnchanged": true,
+      "hookCalled": false
+    }
+  },
+  "resolutionFailures": [
+    {
+      "id": "no-space",
+      "field": "resolutionAvailableBytes",
+      "value": 0,
+      "expected": "storage_pressure"
+    },
+    {
+      "id": "missing-closure",
+      "field": "resolutionBodyClosuresReady",
+      "value": false,
+      "expected": "closure_incomplete"
+    },
+    {
+      "id": "null-closure-list",
+      "field": "resolutionClosures",
+      "value": null,
+      "expected": "invalid_schema"
+    },
+    {
+      "id": "duplicate-closure-wrong-size",
+      "field": "resolutionClosures",
+      "value": [
+        {
+          "oid": "blob:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "storedBytes": 1
+        },
+        {
+          "oid": "blob:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "storedBytes": 2
+        }
+      ],
+      "expected": "closure_incomplete"
+    },
+    {
+      "id": "overflow-closure-sum",
+      "field": "resolutionClosures",
+      "value": [
+        {
+          "oid": "blob:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "storedBytes": 9007199254740991
+        }
+      ],
+      "expected": "object_too_large"
+    }
+  ]
+}

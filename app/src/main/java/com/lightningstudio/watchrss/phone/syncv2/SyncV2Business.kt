@@ -18,7 +18,7 @@ internal object SyncV2Business {
     val assetFields = fields("assetId mime originalFilename updatedAt sourceDeviceId deleted deletedAt")
     fun allowed(kind: String) = when(kind) {
         "article" -> articleFields; "source" -> sourceFields; "book" -> bookFields
-        "book-reading" -> readingFields; "note" -> noteFields; "folder" -> folderFields
+        "book-reading" -> readingFields; "note" -> noteFields + "noteConflicts"; "folder" -> folderFields
         "asset" -> assetFields; "rss-state" -> readingFields - setOf("bookId", "chapterIndex") + setOf("sourceId", "articleIdHash")
         else -> SyncV2Codec.fail("unsupported_feature")
     }
@@ -30,6 +30,7 @@ internal object SyncV2Business {
         for (key in input.keys()) {
             val value = input.get(key)
             when {
+                key == "noteConflicts" -> SyncV2NoteConflicts.validate(input.getJSONObject(key),input.getString("noteId"))
                 key in booleans -> if(value !is Boolean) SyncV2Codec.fail("invalid_schema")
                 key in numbers -> {
                     if(value !is Int && value !is Long) SyncV2Codec.fail("invalid_schema")
@@ -76,7 +77,7 @@ internal object SyncV2Business {
             "article" -> fields("articleId sourceDeviceId url title updatedAt")
             "book" -> fields("bookId fingerprint title chapterCount deletedChapters deletionClock deleted deletedAt updatedAt sourceDeviceId")
             "book-reading" -> fields("bookId chapterIndex isRead readingProgress readingPositionBytes readingPositionContentHash readingPositionChangedAt sourceDeviceId")
-            "note" -> noteFields; "folder" -> folderFields; "asset" -> assetFields
+            "note" -> noteFields + "noteConflicts"; "folder" -> folderFields; "asset" -> assetFields
             "source" -> fields("url title updatedAt sourceDeviceId")
             else -> emptySet()
         }
@@ -94,7 +95,8 @@ internal object SyncV2Business {
             .put("addedAtSource",if(addedAt==null)"unknown" else "original").put("requiredFeatures",JSONArray()).put("payload",meta)
         val s=JSONObject().put("version",2).put("entityKey",entityKey).put("requiredFeatures",JSONArray()).put("payload",state).put("noteSegments",JSONArray())
         for(obj in listOf(m,s)) if(SyncV2Codec.utf8(SyncV2Codec.canonical(obj)).size>262144) SyncV2Codec.fail("object_too_large")
-        return PairObjects(m,s)
+        s.getJSONObject("payload").remove("noteConflicts")
+        return PairObjects(m,if(kind=="note" && value.has("noteConflicts")) SyncV2NoteConflicts.attach(s,logicalId,entityKey,value.getJSONObject("noteConflicts")) else s)
     }
     fun join(kind: String, meta: JSONObject, state: JSONObject): JSONObject {
         val m=meta.getJSONObject("payload"); val s=state.getJSONObject("payload")

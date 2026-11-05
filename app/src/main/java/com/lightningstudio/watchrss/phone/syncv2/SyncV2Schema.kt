@@ -40,6 +40,9 @@ internal object SyncV2Schema {
         db.beginTransaction()
         try {
             listOf(
+                "CREATE TABLE IF NOT EXISTS syncv2_cloud_rows(scope TEXT NOT NULL,entity_key TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,entity_key))",
+                "CREATE TABLE IF NOT EXISTS syncv2_cloud_objects(scope TEXT NOT NULL,oid TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,oid))",
+                "CREATE TABLE IF NOT EXISTS syncv2_wire_candidates(scope TEXT NOT NULL,entity_key TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,entity_key))",
                 "CREATE TABLE IF NOT EXISTS syncv2_control(id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL,library_id TEXT NOT NULL,active_scope TEXT,failure_code TEXT)",
                 "CREATE TABLE IF NOT EXISTS syncv2_state(scope TEXT PRIMARY KEY NOT NULL,state_version TEXT NOT NULL,local_revision TEXT NOT NULL,body BLOB NOT NULL,identity BLOB NOT NULL,descriptor_pin TEXT NOT NULL,account_id TEXT NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS syncv2_identity_map(library_id TEXT NOT NULL,repo_id TEXT NOT NULL,kind TEXT NOT NULL,logical_id TEXT NOT NULL,entity_key TEXT NOT NULL,mapping_version INTEGER NOT NULL CHECK(mapping_version=2),PRIMARY KEY(library_id,repo_id,kind,logical_id),UNIQUE(library_id,repo_id,entity_key))",

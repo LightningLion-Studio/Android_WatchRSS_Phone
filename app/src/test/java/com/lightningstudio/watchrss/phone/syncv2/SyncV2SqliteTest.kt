@@ -454,5 +454,17 @@ class SyncV2SqliteTest {
         val status=File("/proc/self/status").readLines().firstOrNull{it.startsWith("VmHWM:")};db.openHelper.writableDatabase.query("SELECT COUNT(*),SUM(length(body)) FROM syncv2_tree_nodes").use{it.moveToFirst();evidence.put("localCandidateTreeNodes",it.getLong(0)).put("localCandidateTreeBytes",it.getLong(1))}
         evidence.put("processPeakRss",status?:"unavailable").put("bridgeCalls","not applicable: JVM native SQLite host").put("databaseBytes",path.length())
         SyncV2Fixtures.evidence("12500.json",evidence)
+        val wireStart=System.nanoTime()
+        val signing=SyncV2Signing.fromPrivate(ByteArray(31)+byteArrayOf(1),"aa".repeat(16),"ab".repeat(16))
+        val wire=a.prepareWireIndex(signing,ByteArray(32){0x22},1)
+        assertEquals(12500,SyncV2Index.read(JSONObject(a.scope),wire.tree.root,wire.objects::getValue).size)
+        val wireEvidence=JSONObject().put("platform","JVM/native SQLite; no physical phone or network")
+            .put("entities",12500).put("wireObjects",wire.objects.size).put("stateRefs",wire.refs.size)
+            .put("wireElapsedMillis",(System.nanoTime()-wireStart)/1000000)
+            .put("processPeakRss",File("/proc/self/status").readLines().firstOrNull{it.startsWith("VmHWM:")})
+            .put("bridgeCalls","not applicable: JVM/native SQLite").put("bodyWorkerCalls",0)
+        for(type in listOf("meta","state","tree","state-refs"))wireEvidence.put(type+"Bytes",wire.objects.filterKeys{it.startsWith("$type:")}.values.sumOf{it.size.toLong()})
+        SyncV2Fixtures.evidence("p2-12500.json",wireEvidence)
+
     }
 }

@@ -1,0 +1,485 @@
+{
+  "version": "v2-rc6c",
+  "syntheticOnly": true,
+  "expectedSource": "NB01/Q01-authored literal semantics plus independent Python JSON/SHA proof binding; not TS observed outputs.",
+  "saved": {
+    "stateVersion": "9",
+    "revision": "9",
+    "localChangeRevision": "9",
+    "account": {
+      "oid": "commit:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision": "7",
+      "generation": "2"
+    },
+    "rollbackKnown": true,
+    "rollbackGeneration": "2",
+    "editBase": {
+      "accountOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "generation": "2"
+    },
+    "rows": {
+      "n": {
+        "identity": "note-n",
+        "markdown": "same",
+        "noteConflicts": {
+          "version": 1,
+          "records": [
+            {
+              "conflictId": "resolved",
+              "noteId": "note-n",
+              "baseMarkdown": "base",
+              "localMarkdown": "local",
+              "remoteMarkdown": "remote",
+              "remoteDeviceId": "peer-old",
+              "createdAt": 10,
+              "resolvedAt": 77
+            }
+          ]
+        }
+      },
+      "other": {
+        "identity": "other",
+        "value": 5
+      }
+    },
+    "edits": []
+  },
+  "message": {
+    "peer": "legacy",
+    "version": 14,
+    "cursor": "1",
+    "entityKeys": [
+      "n"
+    ],
+    "body": {
+      "n": {
+        "identity": "note-n",
+        "markdown": "same"
+      }
+    }
+  },
+  "key": "legacy:14:1",
+  "afterReceive": {
+    "stateVersion": "10",
+    "revision": "9",
+    "identityMap": {},
+    "log": [],
+    "scan": {
+      "R0": "0",
+      "R1": null,
+      "page": 0
+    },
+    "legacyInbox": {
+      "legacy:14:1": {
+        "hash": "6cd4470df62771e2e57e611d690185ab02d8a1ff011e307dbad50e18db535c2c",
+        "body": {
+          "n": {
+            "identity": "note-n",
+            "markdown": "same"
+          }
+        },
+        "entityKeys": [
+          "n"
+        ],
+        "removedEntityKeys": [],
+        "bodyRefsByEntity": {},
+        "peer": "legacy",
+        "cursor": "1",
+        "route": "pendingChoice",
+        "applied": false
+      }
+    },
+    "legacyQueues": {
+      "legacy": [
+        "legacy:14:1"
+      ]
+    },
+    "legacyAckIndex": {},
+    "received": {
+      "legacy": "1"
+    },
+    "applied": {},
+    "pendingChoice": {
+      "generation": "2",
+      "inboxKeys": [
+        "legacy:14:1"
+      ]
+    },
+    "rows": {
+      "n": {
+        "identity": "note-n",
+        "markdown": "same",
+        "noteConflicts": {
+          "version": 1,
+          "records": [
+            {
+              "conflictId": "resolved",
+              "noteId": "note-n",
+              "baseMarkdown": "base",
+              "localMarkdown": "local",
+              "remoteMarkdown": "remote",
+              "remoteDeviceId": "peer-old",
+              "createdAt": 10,
+              "resolvedAt": 77
+            }
+          ]
+        }
+      },
+      "other": {
+        "identity": "other",
+        "value": 5
+      }
+    },
+    "localChangeRevision": "9",
+    "account": {
+      "oid": "commit:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision": "7",
+      "generation": "2"
+    },
+    "rollbackKnown": true,
+    "rollbackGeneration": "2",
+    "editBase": {
+      "accountOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "generation": "2"
+    },
+    "edits": []
+  },
+  "proofExpected": {
+    "kind": "legacy-merge.v1",
+    "inboxKey": "legacy:14:1",
+    "capture": {
+      "stateVersion": "10",
+      "accountOid": "commit:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "accountRevision": "7",
+      "generation": "2",
+      "localChangeRevision": "9"
+    },
+    "sourceHash": "0c0f19dc8d8a5efc3c018f58a36e093c4f8002e349c9de9b973964d7cbec63f0",
+    "snapshotsHash": "53d8120b7ea47d67b466f9bde7aa9c60a1d48b21f6b20cedb02be59e9b081390",
+    "candidateHash": "6fdbe6c373f8f385accc61f590aae785a6283062f6aa35e3e82c0ef5840c4d49"
+  },
+  "rowsExpected": {
+    "n": {
+      "identity": "note-n",
+      "markdown": "same",
+      "noteConflicts": {
+        "version": 1,
+        "records": [
+          {
+            "conflictId": "resolved",
+            "noteId": "note-n",
+            "baseMarkdown": "base",
+            "localMarkdown": "local",
+            "remoteMarkdown": "remote",
+            "remoteDeviceId": "peer-old",
+            "createdAt": 10,
+            "resolvedAt": 77
+          }
+        ]
+      }
+    },
+    "other": {
+      "identity": "other",
+      "value": 5
+    }
+  },
+  "resultExpected": {
+    "operation": "resolve-merge",
+    "applied": true
+  },
+  "unsupported": [
+    {
+      "id": "body-edit-has-no-trusted-ancestor",
+      "path": [
+        "body",
+        "n",
+        "markdown"
+      ],
+      "value": "different",
+      "expected": {
+        "error": "merge_not_safe",
+        "stateUnchanged": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "new-entity",
+      "replaceBody": {
+        "brandNew": {
+          "identity": "new",
+          "markdown": "new"
+        }
+      },
+      "expected": {
+        "error": "merge_not_safe",
+        "stateUnchanged": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "incoming-nonempty-conflicts-have-no-generation",
+      "path": [
+        "body",
+        "n",
+        "noteConflicts"
+      ],
+      "value": {
+        "version": 1,
+        "records": [
+          {
+            "conflictId": "resolved",
+            "noteId": "note-n",
+            "baseMarkdown": "base",
+            "localMarkdown": "local",
+            "remoteMarkdown": "remote",
+            "remoteDeviceId": "peer-old",
+            "createdAt": 10,
+            "resolvedAt": 77
+          }
+        ]
+      },
+      "expected": {
+        "error": "merge_not_safe",
+        "stateUnchanged": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "explicit-null-channel",
+      "path": [
+        "body",
+        "n",
+        "noteConflicts"
+      ],
+      "value": null,
+      "expected": {
+        "error": "merge_not_safe",
+        "stateUnchanged": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "incoming-delete",
+      "replaceBody": {},
+      "removed": [
+        "n"
+      ],
+      "expected": {
+        "error": "merge_not_safe",
+        "stateUnchanged": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "nonobject-row",
+      "path": [
+        "body",
+        "n"
+      ],
+      "value": null,
+      "expected": {
+        "error": "merge_not_safe",
+        "stateUnchanged": true,
+        "ackUnchanged": true
+      }
+    }
+  ],
+  "stale": [
+    {
+      "id": "local-edit",
+      "path": [
+        "rows",
+        "n",
+        "markdown"
+      ],
+      "value": "latest",
+      "bump": true,
+      "expected": {
+        "error": "choice_stale",
+        "latestRetained": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "new-open-conflict",
+      "path": [
+        "rows",
+        "n",
+        "noteConflicts",
+        "records",
+        0,
+        "resolvedAt"
+      ],
+      "value": 0,
+      "bump": true,
+      "expected": {
+        "error": "choice_stale",
+        "latestRetained": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "other-entity-edit",
+      "path": [
+        "rows",
+        "other",
+        "value"
+      ],
+      "value": 6,
+      "bump": true,
+      "expected": {
+        "error": "choice_stale",
+        "latestRetained": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "account-OID",
+      "path": [
+        "account",
+        "oid"
+      ],
+      "value": "commit:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "bump": false,
+      "expected": {
+        "error": "choice_stale",
+        "latestRetained": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "account-revision",
+      "path": [
+        "account",
+        "revision"
+      ],
+      "value": "8",
+      "bump": false,
+      "expected": {
+        "error": "choice_stale",
+        "latestRetained": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "shared-version",
+      "path": [
+        "stateVersion"
+      ],
+      "value": "11",
+      "bump": false,
+      "expected": {
+        "error": "choice_stale",
+        "latestRetained": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "local-revision",
+      "path": [
+        "localChangeRevision"
+      ],
+      "value": "10",
+      "bump": false,
+      "expected": {
+        "error": "choice_stale",
+        "latestRetained": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "cursor",
+      "path": [
+        "scan",
+        "page"
+      ],
+      "value": 1,
+      "bump": true,
+      "expected": {
+        "error": "choice_stale",
+        "latestRetained": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "edit-baseline-without-counter",
+      "path": [
+        "editBase",
+        "accountOid"
+      ],
+      "value": "commit:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "bump": false,
+      "expected": {
+        "error": "choice_stale",
+        "latestRetained": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "raw-inbox-without-counter",
+      "path": [
+        "legacyInbox",
+        "legacy:14:1",
+        "body",
+        "n",
+        "markdown"
+      ],
+      "value": "tampered",
+      "bump": false,
+      "expected": {
+        "error": "choice_stale",
+        "latestRetained": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "closure-witness-without-counter",
+      "path": [
+        "legacyInbox",
+        "legacy:14:1",
+        "bodyRefsByEntity"
+      ],
+      "value": {
+        "n": [
+          "recipe:sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        ]
+      },
+      "bump": false,
+      "expected": {
+        "error": "choice_stale",
+        "latestRetained": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "flag-change-without-counter",
+      "path": [
+        "legacyInbox",
+        "legacy:14:1",
+        "mergeable"
+      ],
+      "value": true,
+      "bump": false,
+      "expected": {
+        "error": "choice_stale",
+        "latestRetained": true,
+        "ackUnchanged": true
+      }
+    }
+  ],
+  "booleanMarkers": [
+    false,
+    true,
+    0,
+    1,
+    "true"
+  ],
+  "hiddenCaptureExpected": {
+    "error": "choice_stale",
+    "stateUnchanged": true,
+    "hookCalled": false
+  },
+  "replayExpected": "choice_stale",
+  "unsafeExpected": "merge_not_safe",
+  "counterExpected": "counter_exhausted"
+}

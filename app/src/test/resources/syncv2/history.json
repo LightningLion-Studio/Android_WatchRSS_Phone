@@ -1,0 +1,63 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "cases": [
+    {
+      "input": {
+        "now": 604800000,
+        "historyFloorRevision": "1",
+        "cursor": "0",
+        "retiredAt": 0,
+        "current": false,
+        "lease": false
+      },
+      "expected": {
+        "eventExpired": true,
+        "canDeleteObject": true
+      }
+    },
+    {
+      "input": {
+        "now": 604799999,
+        "historyFloorRevision": "1",
+        "cursor": "1",
+        "retiredAt": 0,
+        "current": false,
+        "lease": false
+      },
+      "expected": {
+        "eventExpired": false,
+        "canDeleteObject": false
+      }
+    },
+    {
+      "input": {
+        "now": 999999999,
+        "historyFloorRevision": "1",
+        "cursor": "0",
+        "retiredAt": 0,
+        "current": true,
+        "lease": false
+      },
+      "expected": {
+        "eventExpired": true,
+        "canDeleteObject": false
+      }
+    },
+    {
+      "input": {
+        "now": 999999999,
+        "historyFloorRevision": "1",
+        "cursor": "0",
+        "retiredAt": 0,
+        "current": false,
+        "lease": true
+      },
+      "expected": {
+        "eventExpired": true,
+        "canDeleteObject": false
+      }
+    }
+  ]
+}

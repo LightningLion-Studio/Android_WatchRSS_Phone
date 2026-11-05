@@ -34,6 +34,27 @@ internal class SyncV2Identity private constructor(
         return JSONObject(body.toString())
     }
 
+    fun signingBinding(signer: SyncV2Signing, authorizedAt: Long, revocationRevision: String): JSONObject {
+        val b = JSONObject().put("version", 2).put("scope", scope).put("deviceId", signer.deviceId)
+            .put("keyId", signer.keyId).put("publicKey", SyncV2Codec.b64(SyncV2Codec.unhex(signer.publicHex, 65)))
+            .put("authorizedAtMillis", authorizedAt).put("revocationRevision", revocationRevision)
+        val proof = mac(identityKey, "wrss.sync.v2/signing-key-bind", b)
+        return JSONObject().put("body", b).put("bindingProof", proof).put("possessionSignature", signer.sign(
+            SyncV2Codec.lp(SyncV2Codec.utf8("wrss.sync.v2/signing-key-possession"), SyncV2Codec.utf8(SyncV2Codec.canonical(b)), SyncV2Codec.utf8(proof))))
+    }
+    fun verifySigningBinding(value: JSONObject, revision: String) {
+        SyncV2Codec.exact(value, setOf("body", "bindingProof", "possessionSignature"))
+        val b = value.getJSONObject("body")
+        SyncV2Codec.exact(b, setOf("version", "scope", "deviceId", "keyId", "publicKey", "authorizedAtMillis", "revocationRevision"))
+        if (b.get("version") != 2 || SyncV2Codec.scope(b.getJSONObject("scope")) != scopeJson) SyncV2Codec.fail("scope_mismatch")
+        SyncV2Codec.unhex(SyncV2Wire.string(b, "deviceId"), 16); SyncV2Codec.unhex(SyncV2Wire.string(b, "keyId"), 16)
+        SyncV2Wire.uint(b, "authorizedAtMillis"); SyncV2Codec.d64(SyncV2Wire.string(b, "revocationRevision")); SyncV2Codec.d64(revision)
+        val proof = SyncV2Wire.string(value, "bindingProof")
+        if (b.getString("revocationRevision") != revision || !MessageDigest.isEqual(SyncV2Codec.decode64(proof, 32), SyncV2Codec.decode64(mac(identityKey, "wrss.sync.v2/signing-key-bind", b), 32))) SyncV2Codec.fail("authentication_required")
+        val pub = SyncV2Codec.hex(SyncV2Codec.decode64(SyncV2Wire.string(b, "publicKey"), 65))
+        if (!verifySignature(pub, SyncV2Codec.lp(SyncV2Codec.utf8("wrss.sync.v2/signing-key-possession"), SyncV2Codec.utf8(SyncV2Codec.canonical(b)), SyncV2Codec.utf8(proof)), SyncV2Wire.string(value, "possessionSignature"))) SyncV2Codec.fail("signature_invalid")
+    }
+
     companion object {
         fun restoreInstalled(bytes:ByteArray,localKey:ByteArray,scope:String,account:String,pin:String):SyncV2Identity {
             val p=JSONObject(SyncV2Codec.openLocal(localKey,scope,"identity",bytes))

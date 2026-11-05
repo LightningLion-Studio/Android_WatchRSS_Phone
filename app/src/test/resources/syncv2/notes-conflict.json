@@ -1,0 +1,1536 @@
+{
+  "version": "v2-rc6a",
+  "syntheticOnly": true,
+  "expectedProvenance": "Semantic expected values authored from section 22. Crypto/hash/J bytes independently computed in Python; never obtained from TS reference outputs.",
+  "sourceCommit": "9030f187ba0e9e6584cd832b191f40c720103938",
+  "context": {
+    "entityKey": "534a3cb5629e3fae42b0786d4673778d57b6e150bbb9881e66cb25f14ecfff4c",
+    "noteId": "备忘录-N"
+  },
+  "baseState": {
+    "version": 2,
+    "entityKey": "534a3cb5629e3fae42b0786d4673778d57b6e150bbb9881e66cb25f14ecfff4c",
+    "requiredFeatures": [],
+    "payload": {
+      "markdown": "current",
+      "baseMarkdown": "base",
+      "updatedAt": 50
+    },
+    "noteSegments": []
+  },
+  "sets": {
+    "empty": {
+      "version": 1,
+      "records": []
+    },
+    "one": {
+      "version": 1,
+      "records": [
+        {
+          "conflictId": "c-a",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 10,
+          "resolvedAt": 0
+        }
+      ]
+    },
+    "all": {
+      "version": 1,
+      "records": [
+        {
+          "conflictId": "c-0",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "![old](assets/resolved.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 100,
+          "resolvedAt": 7
+        },
+        {
+          "conflictId": "c-a",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 10,
+          "resolvedAt": 0
+        },
+        {
+          "conflictId": "c-b",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote B\r\n尾",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 50,
+          "resolvedAt": 0
+        }
+      ]
+    },
+    "resolved": {
+      "version": 1,
+      "records": [
+        {
+          "conflictId": "c-a",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 10,
+          "resolvedAt": 1
+        }
+      ]
+    },
+    "earlier": {
+      "version": 1,
+      "records": [
+        {
+          "conflictId": "c-a",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 3,
+          "resolvedAt": 0
+        }
+      ]
+    },
+    "laterResolved": {
+      "version": 1,
+      "records": [
+        {
+          "conflictId": "c-a",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 25,
+          "resolvedAt": 2
+        }
+      ]
+    }
+  },
+  "canonical": {
+    "input": {
+      "version": 1,
+      "records": [
+        {
+          "conflictId": "opaque ID-É",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "é\r\n\u0000",
+          "localMarkdown": "é\n😀",
+          "remoteMarkdown": "\r尾 ",
+          "remoteDeviceId": "not-a-H32",
+          "createdAt": 10,
+          "resolvedAt": 0
+        }
+      ]
+    },
+    "expected": "{\"records\":[{\"baseMarkdown\":\"é\\r\\n\\u0000\",\"conflictId\":\"opaque ID-É\",\"createdAt\":10,\"localMarkdown\":\"é\\n😀\",\"noteId\":\"备忘录-N\",\"remoteDeviceId\":\"not-a-H32\",\"remoteMarkdown\":\"\\r尾 \",\"resolvedAt\":0}],\"version\":1}"
+  },
+  "invalid": [
+    {
+      "id": "missing-resolvedAt",
+      "path": [
+        "records",
+        0,
+        "resolvedAt"
+      ],
+      "remove": true,
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "null-resolvedAt",
+      "path": [
+        "records",
+        0,
+        "resolvedAt"
+      ],
+      "value": null,
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "string-time",
+      "path": [
+        "records",
+        0,
+        "createdAt"
+      ],
+      "value": "10",
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "negative-time",
+      "path": [
+        "records",
+        0,
+        "createdAt"
+      ],
+      "value": -1,
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "fractional-time",
+      "path": [
+        "records",
+        0,
+        "createdAt"
+      ],
+      "value": 0.5,
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "u53-overflow",
+      "path": [
+        "records",
+        0,
+        "resolvedAt"
+      ],
+      "value": 9007199254740992,
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "unknown-field",
+      "path": [
+        "records",
+        0,
+        "extra"
+      ],
+      "value": true,
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "wrong-note-owner",
+      "path": [
+        "records",
+        0,
+        "noteId"
+      ],
+      "value": "other-note",
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "empty-conflict-id",
+      "path": [
+        "records",
+        0,
+        "conflictId"
+      ],
+      "value": "",
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "array-body",
+      "path": [
+        "records",
+        0,
+        "remoteMarkdown"
+      ],
+      "value": [],
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "boolean-device",
+      "path": [
+        "records",
+        0,
+        "remoteDeviceId"
+      ],
+      "value": true,
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "null-records",
+      "path": [
+        "records"
+      ],
+      "value": null,
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "duplicate-record",
+      "path": [
+        "records"
+      ],
+      "value": [
+        {
+          "conflictId": "c-a",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 10,
+          "resolvedAt": 0
+        },
+        {
+          "conflictId": "c-a",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 10,
+          "resolvedAt": 0
+        }
+      ],
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "unsorted-records",
+      "path": [
+        "records"
+      ],
+      "value": [
+        {
+          "conflictId": "c-b",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote B\r\n尾",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 50,
+          "resolvedAt": 0
+        },
+        {
+          "conflictId": "c-a",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 10,
+          "resolvedAt": 0
+        }
+      ],
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "unknown-container-field",
+      "path": [
+        "extra"
+      ],
+      "value": false,
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "wrong-version",
+      "path": [
+        "version"
+      ],
+      "value": 2,
+      "expected": {
+        "error": "invalid_schema"
+      }
+    },
+    {
+      "id": "null-record",
+      "path": [
+        "records"
+      ],
+      "value": [
+        null
+      ],
+      "expected": {
+        "error": "invalid_schema"
+      }
+    }
+  ],
+  "merges": [
+    {
+      "id": "union-open",
+      "left": "one",
+      "right": "all",
+      "expected": {
+        "version": 1,
+        "records": [
+          {
+            "conflictId": "c-0",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "![old](assets/resolved.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote A ![r](assets/remote.png)",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 100,
+            "resolvedAt": 7
+          },
+          {
+            "conflictId": "c-a",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "base ![b](assets/base.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote A ![r](assets/remote.png)",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 10,
+            "resolvedAt": 0
+          },
+          {
+            "conflictId": "c-b",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "base ![b](assets/base.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote B\r\n尾",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 50,
+            "resolvedAt": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "empty-does-not-delete",
+      "left": "all",
+      "right": "empty",
+      "expected": {
+        "version": 1,
+        "records": [
+          {
+            "conflictId": "c-0",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "![old](assets/resolved.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote A ![r](assets/remote.png)",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 100,
+            "resolvedAt": 7
+          },
+          {
+            "conflictId": "c-a",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "base ![b](assets/base.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote A ![r](assets/remote.png)",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 10,
+            "resolvedAt": 0
+          },
+          {
+            "conflictId": "c-b",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "base ![b](assets/base.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote B\r\n尾",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 50,
+            "resolvedAt": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "min-created-max-resolved",
+      "left": "earlier",
+      "right": "laterResolved",
+      "expected": {
+        "version": 1,
+        "records": [
+          {
+            "conflictId": "c-a",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "base ![b](assets/base.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote A ![r](assets/remote.png)",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 3,
+            "resolvedAt": 2
+          }
+        ]
+      }
+    },
+    {
+      "id": "resolved-beats-open-replay",
+      "left": "resolved",
+      "right": "one",
+      "expected": {
+        "version": 1,
+        "records": [
+          {
+            "conflictId": "c-a",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "base ![b](assets/base.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote A ![r](assets/remote.png)",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 10,
+            "resolvedAt": 1
+          }
+        ]
+      }
+    }
+  ],
+  "legacy": [
+    {
+      "id": "watch",
+      "client": "watch",
+      "rows": [
+        {
+          "conflict_id": "c-a",
+          "note_id": "备忘录-N",
+          "base_markdown": "base ![b](assets/base.png)",
+          "local_markdown": "saved local ![l](assets/local.png)",
+          "remote_markdown": "remote A ![r](assets/remote.png)",
+          "remote_device_id": "旧端-来源",
+          "created_at": 10
+        }
+      ],
+      "expected": {
+        "version": 1,
+        "records": [
+          {
+            "conflictId": "c-a",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "base ![b](assets/base.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote A ![r](assets/remote.png)",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 10,
+            "resolvedAt": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phone",
+      "client": "phone",
+      "rows": [
+        {
+          "conflictId": "c-a",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 10,
+          "resolvedAt": 0
+        },
+        {
+          "conflictId": "c-0",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "![old](assets/resolved.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 100,
+          "resolvedAt": 7
+        }
+      ],
+      "expected": {
+        "version": 1,
+        "records": [
+          {
+            "conflictId": "c-0",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "![old](assets/resolved.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote A ![r](assets/remote.png)",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 100,
+            "resolvedAt": 7
+          },
+          {
+            "conflictId": "c-a",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "base ![b](assets/base.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote A ![r](assets/remote.png)",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 10,
+            "resolvedAt": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "mini",
+      "client": "mini",
+      "rows": [
+        {
+          "conflictId": "c-a",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 10
+        },
+        {
+          "conflictId": "c-0",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "![old](assets/resolved.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 100,
+          "resolvedAt": 7
+        }
+      ],
+      "expected": {
+        "version": 1,
+        "records": [
+          {
+            "conflictId": "c-0",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "![old](assets/resolved.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote A ![r](assets/remote.png)",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 100,
+            "resolvedAt": 7
+          },
+          {
+            "conflictId": "c-a",
+            "noteId": "备忘录-N",
+            "baseMarkdown": "base ![b](assets/base.png)",
+            "localMarkdown": "saved local ![l](assets/local.png)",
+            "remoteMarkdown": "remote A ![r](assets/remote.png)",
+            "remoteDeviceId": "旧端-来源",
+            "createdAt": 10,
+            "resolvedAt": 0
+          }
+        ]
+      }
+    }
+  ],
+  "initial": {
+    "stateVersion": "4",
+    "account": {
+      "oid": "commit:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision": "3",
+      "generation": "1"
+    },
+    "rollbackGeneration": "1",
+    "localChangeRevision": "7",
+    "editBase": {
+      "accountOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "generation": "1"
+    },
+    "pendingChoice": null,
+    "note": {
+      "noteId": "备忘录-N",
+      "markdown": "live newer ![x](assets/live.png)\r\n",
+      "baseMarkdown": "edit ancestor",
+      "updatedAt": 90000,
+      "modifiedBy": "old-source",
+      "deleted": false,
+      "title": "unchanged title"
+    },
+    "conflicts": {
+      "version": 1,
+      "records": [
+        {
+          "conflictId": "c-0",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "![old](assets/resolved.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 100,
+          "resolvedAt": 7
+        },
+        {
+          "conflictId": "c-a",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 10,
+          "resolvedAt": 0
+        },
+        {
+          "conflictId": "c-b",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote B\r\n尾",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 50,
+          "resolvedAt": 0
+        }
+      ]
+    },
+    "outbox": [],
+    "applied": {
+      "cursor": "5"
+    },
+    "inbox": {
+      "unapplied": "retain"
+    },
+    "draft": {
+      "markdown": "unsaved draft"
+    }
+  },
+  "resolutions": [
+    {
+      "id": "local",
+      "choice": "local",
+      "manual": null,
+      "now": 100,
+      "device": "new-source",
+      "expected": {
+        "choice": "local",
+        "markdown": "live newer ![x](assets/live.png)\r\n",
+        "baseMarkdown": "live newer ![x](assets/live.png)\r\n",
+        "updatedAt": 90001,
+        "resolvedConflictIds": [
+          "c-a",
+          "c-b"
+        ]
+      },
+      "expectedHashes": {
+        "contentHash": "953f4df8e235ff9fdee0bdd52af88da8eaae923534f41a4c344f2ad06c58e566",
+        "baseContentHash": "953f4df8e235ff9fdee0bdd52af88da8eaae923534f41a4c344f2ad06c58e566"
+      },
+      "expectedResolvedAt": [
+        7,
+        100,
+        100
+      ],
+      "expectedCounters": {
+        "stateVersion": "5",
+        "localChangeRevision": "8"
+      }
+    },
+    {
+      "id": "remote",
+      "choice": "remote",
+      "manual": null,
+      "now": 100,
+      "device": "new-source",
+      "expected": {
+        "choice": "remote",
+        "markdown": "remote B\n尾",
+        "baseMarkdown": "remote B\n尾",
+        "updatedAt": 90001,
+        "resolvedConflictIds": [
+          "c-a",
+          "c-b"
+        ]
+      },
+      "expectedHashes": {
+        "contentHash": "077363a791ae7e739859b83bb90d593aa785530195969b69941f06b00663c52c",
+        "baseContentHash": "077363a791ae7e739859b83bb90d593aa785530195969b69941f06b00663c52c"
+      },
+      "expectedResolvedAt": [
+        7,
+        100,
+        100
+      ],
+      "expectedCounters": {
+        "stateVersion": "5",
+        "localChangeRevision": "8"
+      }
+    },
+    {
+      "id": "manual",
+      "choice": "manual",
+      "manual": "manual\r\n尾",
+      "now": 100,
+      "device": "new-source",
+      "expected": {
+        "choice": "manual",
+        "markdown": "manual\n尾",
+        "baseMarkdown": "manual\n尾",
+        "updatedAt": 90001,
+        "resolvedConflictIds": [
+          "c-a",
+          "c-b"
+        ]
+      },
+      "expectedHashes": {
+        "contentHash": "9a43d786570a42a95e8b99190ed00d970622ecb223df36e4431d11ef28b18215",
+        "baseContentHash": "9a43d786570a42a95e8b99190ed00d970622ecb223df36e4431d11ef28b18215"
+      },
+      "expectedResolvedAt": [
+        7,
+        100,
+        100
+      ],
+      "expectedCounters": {
+        "stateVersion": "5",
+        "localChangeRevision": "8"
+      }
+    }
+  ],
+  "stale": [
+    {
+      "id": "edit-before-prepare",
+      "path": [
+        "note",
+        "markdown"
+      ],
+      "value": "newest body",
+      "bumpVersion": true,
+      "expected": {
+        "error": "choice_stale",
+        "latestPreserved": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "revision-before-prepare",
+      "path": [
+        "account",
+        "revision"
+      ],
+      "value": "4",
+      "bumpVersion": true,
+      "expected": {
+        "error": "choice_stale",
+        "latestPreserved": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "account-before-prepare",
+      "path": [
+        "account",
+        "oid"
+      ],
+      "value": "commit:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "bumpVersion": true,
+      "expected": {
+        "error": "choice_stale",
+        "latestPreserved": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "generation-before-prepare",
+      "path": [
+        "account",
+        "generation"
+      ],
+      "value": "2",
+      "bumpVersion": true,
+      "expected": {
+        "error": "choice_stale",
+        "latestPreserved": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "local-revision-before-prepare",
+      "path": [
+        "localChangeRevision"
+      ],
+      "value": "8",
+      "bumpVersion": false,
+      "expected": {
+        "error": "choice_stale",
+        "latestPreserved": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "unknown-account",
+      "path": [
+        "account"
+      ],
+      "value": null,
+      "bumpVersion": false,
+      "expected": {
+        "error": "choice_stale",
+        "latestPreserved": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "inconsistent-account",
+      "path": [
+        "rollbackGeneration"
+      ],
+      "value": "0",
+      "bumpVersion": false,
+      "expected": {
+        "error": "choice_stale",
+        "latestPreserved": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "note-version-without-writer-bump",
+      "path": [
+        "note",
+        "updatedAt"
+      ],
+      "value": 90001,
+      "bumpVersion": false,
+      "expected": {
+        "error": "notes_stale",
+        "latestPreserved": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "deleted-note",
+      "path": [
+        "note",
+        "deleted"
+      ],
+      "value": true,
+      "bumpVersion": false,
+      "expected": {
+        "error": "notes_stale",
+        "latestPreserved": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "new-conflict-before-prepare",
+      "path": [
+        "conflicts",
+        "records"
+      ],
+      "value": [
+        {
+          "conflictId": "c-0",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "![old](assets/resolved.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 100,
+          "resolvedAt": 7
+        },
+        {
+          "conflictId": "c-a",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 10,
+          "resolvedAt": 0
+        },
+        {
+          "conflictId": "c-b",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote B\r\n尾",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 50,
+          "resolvedAt": 0
+        },
+        {
+          "conflictId": "c-c",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 99,
+          "resolvedAt": 0
+        }
+      ],
+      "bumpVersion": true,
+      "expected": {
+        "error": "choice_stale",
+        "latestPreserved": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "changed-captured-set-without-writer-bump",
+      "path": [
+        "conflicts",
+        "records"
+      ],
+      "value": [
+        {
+          "conflictId": "c-0",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "![old](assets/resolved.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 100,
+          "resolvedAt": 7
+        },
+        {
+          "conflictId": "c-a",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 10,
+          "resolvedAt": 0
+        }
+      ],
+      "bumpVersion": false,
+      "expected": {
+        "error": "notes_stale",
+        "latestPreserved": true,
+        "ackUnchanged": true
+      }
+    },
+    {
+      "id": "pending-account-choice",
+      "path": [
+        "pendingChoice"
+      ],
+      "value": {
+        "generation": "1"
+      },
+      "bumpVersion": true,
+      "expected": {
+        "error": "choice_stale",
+        "latestPreserved": true,
+        "ackUnchanged": true
+      }
+    }
+  ],
+  "races": [
+    {
+      "id": "edit-during-prepare",
+      "path": [
+        "note",
+        "markdown"
+      ],
+      "value": "latest concurrent body",
+      "expected": {
+        "error": "choice_stale",
+        "latestPreserved": true
+      }
+    },
+    {
+      "id": "new-conflict-during-prepare",
+      "path": [
+        "conflicts",
+        "records"
+      ],
+      "value": [
+        {
+          "conflictId": "c-0",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "![old](assets/resolved.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 100,
+          "resolvedAt": 7
+        },
+        {
+          "conflictId": "c-a",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 10,
+          "resolvedAt": 0
+        },
+        {
+          "conflictId": "c-b",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote B\r\n尾",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 50,
+          "resolvedAt": 0
+        },
+        {
+          "conflictId": "c-c",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "base ![b](assets/base.png)",
+          "localMarkdown": "saved local ![l](assets/local.png)",
+          "remoteMarkdown": "remote A ![r](assets/remote.png)",
+          "remoteDeviceId": "旧端-来源",
+          "createdAt": 999,
+          "resolvedAt": 0
+        }
+      ],
+      "expected": {
+        "error": "choice_stale",
+        "latestPreserved": true
+      }
+    },
+    {
+      "id": "observe-during-prepare",
+      "path": [
+        "account",
+        "revision"
+      ],
+      "value": "4",
+      "expected": {
+        "error": "choice_stale",
+        "latestPreserved": true
+      }
+    },
+    {
+      "id": "cursor-during-prepare",
+      "path": [
+        "applied",
+        "cursor"
+      ],
+      "value": "6",
+      "expected": {
+        "error": "choice_stale",
+        "latestPreserved": true
+      }
+    }
+  ],
+  "recovery": {
+    "input": {
+      "local": {
+        "534a3cb5629e3fae42b0786d4673778d57b6e150bbb9881e66cb25f14ecfff4c": {
+          "version": 2,
+          "entityKey": "534a3cb5629e3fae42b0786d4673778d57b6e150bbb9881e66cb25f14ecfff4c",
+          "requiredFeatures": [
+            "note-conflicts.v1"
+          ],
+          "payload": {
+            "markdown": "current",
+            "baseMarkdown": "base",
+            "updatedAt": 50,
+            "noteConflicts": {
+              "version": 1,
+              "records": [
+                {
+                  "conflictId": "c-0",
+                  "noteId": "备忘录-N",
+                  "baseMarkdown": "![old](assets/resolved.png)",
+                  "localMarkdown": "saved local ![l](assets/local.png)",
+                  "remoteMarkdown": "remote A ![r](assets/remote.png)",
+                  "remoteDeviceId": "旧端-来源",
+                  "createdAt": 100,
+                  "resolvedAt": 7
+                },
+                {
+                  "conflictId": "c-a",
+                  "noteId": "备忘录-N",
+                  "baseMarkdown": "base ![b](assets/base.png)",
+                  "localMarkdown": "saved local ![l](assets/local.png)",
+                  "remoteMarkdown": "remote A ![r](assets/remote.png)",
+                  "remoteDeviceId": "旧端-来源",
+                  "createdAt": 10,
+                  "resolvedAt": 0
+                },
+                {
+                  "conflictId": "c-b",
+                  "noteId": "备忘录-N",
+                  "baseMarkdown": "base ![b](assets/base.png)",
+                  "localMarkdown": "saved local ![l](assets/local.png)",
+                  "remoteMarkdown": "remote B\r\n尾",
+                  "remoteDeviceId": "旧端-来源",
+                  "createdAt": 50,
+                  "resolvedAt": 0
+                }
+              ]
+            }
+          },
+          "noteSegments": []
+        },
+        "unchanged": {
+          "markdown": "same"
+        }
+      },
+      "editBase": {
+        "accountOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "generation": "1"
+      },
+      "bodyRefsByEntity": {
+        "534a3cb5629e3fae42b0786d4673778d57b6e150bbb9881e66cb25f14ecfff4c": [
+          "blob:sha256:6666666666666666666666666666666666666666666666666666666666666666",
+          "recipe:sha256:5555555555555555555555555555555555555555555555555555555555555555"
+        ],
+        "unchanged": [
+          "recipe:sha256:7777777777777777777777777777777777777777777777777777777777777777"
+        ]
+      }
+    },
+    "cloud": {
+      "534a3cb5629e3fae42b0786d4673778d57b6e150bbb9881e66cb25f14ecfff4c": {
+        "version": 2,
+        "entityKey": "534a3cb5629e3fae42b0786d4673778d57b6e150bbb9881e66cb25f14ecfff4c",
+        "requiredFeatures": [
+          "note-conflicts.v1"
+        ],
+        "payload": {
+          "markdown": "chosen cloud",
+          "baseMarkdown": "base",
+          "updatedAt": 50,
+          "noteConflicts": {
+            "version": 1,
+            "records": []
+          }
+        },
+        "noteSegments": []
+      },
+      "unchanged": {
+        "markdown": "same"
+      }
+    },
+    "capturedEntityKeys": [
+      "534a3cb5629e3fae42b0786d4673778d57b6e150bbb9881e66cb25f14ecfff4c",
+      "unchanged"
+    ],
+    "expected": {
+      "version": 2,
+      "changes": [
+        {
+          "id": "534a3cb5629e3fae42b0786d4673778d57b6e150bbb9881e66cb25f14ecfff4c",
+          "kind": "set",
+          "value": {
+            "version": 2,
+            "entityKey": "534a3cb5629e3fae42b0786d4673778d57b6e150bbb9881e66cb25f14ecfff4c",
+            "requiredFeatures": [
+              "note-conflicts.v1"
+            ],
+            "payload": {
+              "markdown": "current",
+              "baseMarkdown": "base",
+              "updatedAt": 50,
+              "noteConflicts": {
+                "version": 1,
+                "records": [
+                  {
+                    "conflictId": "c-0",
+                    "noteId": "备忘录-N",
+                    "baseMarkdown": "![old](assets/resolved.png)",
+                    "localMarkdown": "saved local ![l](assets/local.png)",
+                    "remoteMarkdown": "remote A ![r](assets/remote.png)",
+                    "remoteDeviceId": "旧端-来源",
+                    "createdAt": 100,
+                    "resolvedAt": 7
+                  },
+                  {
+                    "conflictId": "c-a",
+                    "noteId": "备忘录-N",
+                    "baseMarkdown": "base ![b](assets/base.png)",
+                    "localMarkdown": "saved local ![l](assets/local.png)",
+                    "remoteMarkdown": "remote A ![r](assets/remote.png)",
+                    "remoteDeviceId": "旧端-来源",
+                    "createdAt": 10,
+                    "resolvedAt": 0
+                  },
+                  {
+                    "conflictId": "c-b",
+                    "noteId": "备忘录-N",
+                    "baseMarkdown": "base ![b](assets/base.png)",
+                    "localMarkdown": "saved local ![l](assets/local.png)",
+                    "remoteMarkdown": "remote B\r\n尾",
+                    "remoteDeviceId": "旧端-来源",
+                    "createdAt": 50,
+                    "resolvedAt": 0
+                  }
+                ]
+              }
+            },
+            "noteSegments": []
+          }
+        }
+      ],
+      "editBase": {
+        "accountOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "generation": "1"
+      },
+      "bodyRefs": [
+        "blob:sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "recipe:sha256:5555555555555555555555555555555555555555555555555555555555555555"
+      ]
+    },
+    "equalExpected": {
+      "version": 2,
+      "changes": [],
+      "editBase": {
+        "accountOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "generation": "1"
+      },
+      "bodyRefs": []
+    }
+  },
+  "noteMerge": [
+    {
+      "id": "open-blocks-disjoint",
+      "base": "a\nb",
+      "local": "A\nb",
+      "remote": "a\nB",
+      "known": [
+        "one"
+      ],
+      "expected": {
+        "conflict": true
+      }
+    },
+    {
+      "id": "resolved-allows-disjoint",
+      "base": "a\nb",
+      "local": "A\nb",
+      "remote": "a\nB",
+      "known": [
+        "resolved"
+      ],
+      "expected": {
+        "markdown": "A\nB"
+      }
+    },
+    {
+      "id": "different-resolutions-preserve-conflict",
+      "base": "base",
+      "local": "local resolution",
+      "remote": "remote resolution",
+      "known": [
+        "resolved"
+      ],
+      "expected": {
+        "conflict": true
+      }
+    }
+  ],
+  "prepareFailures": [
+    {
+      "input": "simulated_crash",
+      "expected": {
+        "error": "simulated_crash",
+        "stateUnchanged": true
+      }
+    },
+    {
+      "input": "closure_incomplete",
+      "expected": {
+        "error": "closure_incomplete",
+        "stateUnchanged": true
+      }
+    },
+    {
+      "input": "storage_pressure",
+      "expected": {
+        "error": "storage_pressure",
+        "stateUnchanged": true
+      }
+    }
+  ],
+  "identityCollision": {
+    "left": {
+      "version": 1,
+      "records": [
+        {
+          "conflictId": "e290fd1038004d7c02ae075141d118e32f3a32e9f4f0884be411477c97e3254d",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "a\u0000b",
+          "localMarkdown": "c",
+          "remoteMarkdown": "r",
+          "remoteDeviceId": "d",
+          "createdAt": 10,
+          "resolvedAt": 0
+        }
+      ]
+    },
+    "right": {
+      "version": 1,
+      "records": [
+        {
+          "conflictId": "e290fd1038004d7c02ae075141d118e32f3a32e9f4f0884be411477c97e3254d",
+          "noteId": "备忘录-N",
+          "baseMarkdown": "a",
+          "localMarkdown": "b\u0000c",
+          "remoteMarkdown": "r",
+          "remoteDeviceId": "d",
+          "createdAt": 10,
+          "resolvedAt": 0
+        }
+      ]
+    },
+    "expected": {
+      "sameCreationId": "e290fd1038004d7c02ae075141d118e32f3a32e9f4f0884be411477c97e3254d",
+      "error": "conflict_identity_mismatch"
+    }
+  },
+  "wire": {
+    "expected": {
+      "version": 2,
+      "entityKey": "534a3cb5629e3fae42b0786d4673778d57b6e150bbb9881e66cb25f14ecfff4c",
+      "requiredFeatures": [
+        "note-conflicts.v1"
+      ],
+      "payload": {
+        "markdown": "current",
+        "baseMarkdown": "base",
+        "updatedAt": 50,
+        "noteConflicts": {
+          "version": 1,
+          "records": [
+            {
+              "conflictId": "c-0",
+              "noteId": "备忘录-N",
+              "baseMarkdown": "![old](assets/resolved.png)",
+              "localMarkdown": "saved local ![l](assets/local.png)",
+              "remoteMarkdown": "remote A ![r](assets/remote.png)",
+              "remoteDeviceId": "旧端-来源",
+              "createdAt": 100,
+              "resolvedAt": 7
+            },
+            {
+              "conflictId": "c-a",
+              "noteId": "备忘录-N",
+              "baseMarkdown": "base ![b](assets/base.png)",
+              "localMarkdown": "saved local ![l](assets/local.png)",
+              "remoteMarkdown": "remote A ![r](assets/remote.png)",
+              "remoteDeviceId": "旧端-来源",
+              "createdAt": 10,
+              "resolvedAt": 0
+            },
+            {
+              "conflictId": "c-b",
+              "noteId": "备忘录-N",
+              "baseMarkdown": "base ![b](assets/base.png)",
+              "localMarkdown": "saved local ![l](assets/local.png)",
+              "remoteMarkdown": "remote B\r\n尾",
+              "remoteDeviceId": "旧端-来源",
+              "createdAt": 50,
+              "resolvedAt": 0
+            }
+          ]
+        }
+      },
+      "noteSegments": []
+    }
+  },
+  "crypto": [
+    {
+      "id": "all-records",
+      "input": {
+        "idKeyHex": "1111111111111111111111111111111111111111111111111111111111111111",
+        "contentKeyHex": "2222222222222222222222222222222222222222222222222222222222222222",
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "1"
+        },
+        "keyVersion": 1,
+        "type": "state",
+        "encoding": "identity",
+        "saltHex": "3333333333333333333333333333333333333333333333333333333333333333",
+        "nonceHex": "444444444444444444444444",
+        "plainHex": "7b22656e746974794b6579223a2235333461336362353632396533666165343262303738366434363733373738643537623665313530626262393838316536366362323566313465636666663463222c226e6f74655365676d656e7473223a5b5d2c227061796c6f6164223a7b22626173654d61726b646f776e223a2262617365222c226d61726b646f776e223a2263757272656e74222c226e6f7465436f6e666c69637473223a7b227265636f726473223a5b7b22626173654d61726b646f776e223a22215b6f6c645d286173736574732f7265736f6c7665642e706e6729222c22636f6e666c6963744964223a22632d30222c22637265617465644174223a3130302c226c6f63616c4d61726b646f776e223a227361766564206c6f63616c20215b6c5d286173736574732f6c6f63616c2e706e6729222c226e6f74654964223a22e5a487e5bf98e5bd952d4e222c2272656d6f74654465766963654964223a22e697a7e7abaf2de69da5e6ba90222c2272656d6f74654d61726b646f776e223a2272656d6f7465204120215b725d286173736574732f72656d6f74652e706e6729222c227265736f6c7665644174223a377d2c7b22626173654d61726b646f776e223a226261736520215b625d286173736574732f626173652e706e6729222c22636f6e666c6963744964223a22632d61222c22637265617465644174223a31302c226c6f63616c4d61726b646f776e223a227361766564206c6f63616c20215b6c5d286173736574732f6c6f63616c2e706e6729222c226e6f74654964223a22e5a487e5bf98e5bd952d4e222c2272656d6f74654465766963654964223a22e697a7e7abaf2de69da5e6ba90222c2272656d6f74654d61726b646f776e223a2272656d6f7465204120215b725d286173736574732f72656d6f74652e706e6729222c227265736f6c7665644174223a307d2c7b22626173654d61726b646f776e223a226261736520215b625d286173736574732f626173652e706e6729222c22636f6e666c6963744964223a22632d62222c22637265617465644174223a35302c226c6f63616c4d61726b646f776e223a227361766564206c6f63616c20215b6c5d286173736574732f6c6f63616c2e706e6729222c226e6f74654964223a22e5a487e5bf98e5bd952d4e222c2272656d6f74654465766963654964223a22e697a7e7abaf2de69da5e6ba90222c2272656d6f74654d61726b646f776e223a2272656d6f746520425c725c6ee5b0be222c227265736f6c7665644174223a307d5d2c2276657273696f6e223a317d2c22757064617465644174223a35307d2c2272657175697265644665617475726573223a5b226e6f74652d636f6e666c696374732e7631225d2c2276657273696f6e223a327d"
+      },
+      "expected": {
+        "canonicalPlaintext": "{\"entityKey\":\"534a3cb5629e3fae42b0786d4673778d57b6e150bbb9881e66cb25f14ecfff4c\",\"noteSegments\":[],\"payload\":{\"baseMarkdown\":\"base\",\"markdown\":\"current\",\"noteConflicts\":{\"records\":[{\"baseMarkdown\":\"![old](assets/resolved.png)\",\"conflictId\":\"c-0\",\"createdAt\":100,\"localMarkdown\":\"saved local ![l](assets/local.png)\",\"noteId\":\"备忘录-N\",\"remoteDeviceId\":\"旧端-来源\",\"remoteMarkdown\":\"remote A ![r](assets/remote.png)\",\"resolvedAt\":7},{\"baseMarkdown\":\"base ![b](assets/base.png)\",\"conflictId\":\"c-a\",\"createdAt\":10,\"localMarkdown\":\"saved local ![l](assets/local.png)\",\"noteId\":\"备忘录-N\",\"remoteDeviceId\":\"旧端-来源\",\"remoteMarkdown\":\"remote A ![r](assets/remote.png)\",\"resolvedAt\":0},{\"baseMarkdown\":\"base ![b](assets/base.png)\",\"conflictId\":\"c-b\",\"createdAt\":50,\"localMarkdown\":\"saved local ![l](assets/local.png)\",\"noteId\":\"备忘录-N\",\"remoteDeviceId\":\"旧端-来源\",\"remoteMarkdown\":\"remote B\\r\\n尾\",\"resolvedAt\":0}],\"version\":1},\"updatedAt\":50},\"requiredFeatures\":[\"note-conflicts.v1\"],\"version\":2}",
+        "header": {
+          "domain": "wrss.sync.v2/sealed",
+          "version": 2,
+          "scope": {
+            "repoId": "01010101010101010101010101010101",
+            "libraryEpoch": "1",
+            "contentGeneration": "1"
+          },
+          "keyVersion": 1,
+          "type": "state",
+          "opaqueContentId": "d26145ee4afc455e91f9c5c73fc8c373993f409bfc876ee37b55409e7e2bd0d3",
+          "encoding": "identity",
+          "plainBytes": 1016,
+          "encodedBytes": 1016,
+          "salt": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM",
+          "nonce": "RERERERERERERERE"
+        },
+        "aadHex": "7b22646f6d61696e223a22777273732e73796e632e76322f7365616c6564222c22656e636f6465644279746573223a313031362c22656e636f64696e67223a226964656e74697479222c226b657956657273696f6e223a312c226e6f6e6365223a2252455245524552455245524552455245222c226f7061717565436f6e74656e744964223a2264323631343565653461666334353565393166396335633733666338633337333939336634303962666338373665653337623535343039653765326264306433222c22706c61696e4279746573223a313031362c2273616c74223a224d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d222c2273636f7065223a7b22636f6e74656e7447656e65726174696f6e223a2231222c226c69627261727945706f6368223a2231222c227265706f4964223a223031303130313031303130313031303130313031303130313031303130313031227d2c2274797065223a227374617465222c2276657273696f6e223a327d",
+        "sealedHex": "575253320000018c7b22646f6d61696e223a22777273732e73796e632e76322f7365616c6564222c22656e636f6465644279746573223a313031362c22656e636f64696e67223a226964656e74697479222c226b657956657273696f6e223a312c226e6f6e6365223a2252455245524552455245524552455245222c226f7061717565436f6e74656e744964223a2264323631343565653461666334353565393166396335633733666338633337333939336634303962666338373665653337623535343039653765326264306433222c22706c61696e4279746573223a313031362c2273616c74223a224d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d222c2273636f7065223a7b22636f6e74656e7447656e65726174696f6e223a2231222c226c69627261727945706f6368223a2231222c227265706f4964223a223031303130313031303130313031303130313031303130313031303130313031227d2c2274797065223a227374617465222c2276657273696f6e223a327d47988e1e7aecc1d0a1fac49cbf8c25e4cf6c574108e1177ff72002563acc17c73429e4f8540ce3230b94ede92c4c3240579d71626062669ef156c2d2fb0fb4e473fc8e99819a8631672aba778297e3dd6ab3338d59f5a9cafa3f19f5dc509bc31d9e11470ba12182beec8213536dc750f7ff37389b5fbd74edb454d4666fbfed7882183e673768f07fe5e678f8fba7ce297f6147414d4b3f7b333771f118e38a2db3a04a6e47dce8f963ede06650395ff860b726f2657551e76aa692a68919a1e86e4aeddf919bb96ae65d8e8f71269ab3641ce35691805c738fce7ecc7963029db6b194ea9971f24b4e342f18000f908c78f2930ac49e1f0613f391824f7089438287dfee6168391caf85bf23b1e2fd8be3c6643f2fe4e76ac80da56cc95293832f1ce2270ddfeac223483bb067560e43d034b47dd887b60407dd0223fe04853e31408042fea5e1704410868fb32f98d2857ad76051e8c27a5eb385b232b70bc0890eda38cb0be52c4dd92175a0b02336be752f117e537b610dcd59a00acf8144566bd913eaf75499b44911e20026dee04e72e6599f829efe27e2e3026b879dda7c89c51677458fba422e96fa3f09181595d7c4130d29947e05c1358049967a18fb6909a30b048101e3b7be2ecf8e00c379c199fe7b679b752f4ea8df4d82f41c675b6defb2cd613bed42d15cebd5c9dda05ae93306e6f1f0ba85161f11a495e604573c7a40839c430cf41bc7bc466e2285a6cd3de995f6a5b6702892ebef1bb92b87c1518a1bc9e3159d34c43973d5fb5e01addcb483101a59e5c66f28f130586adfca770fe3687b616452c58079e410659525c3f48f88c0ad56da2e62b64ac7ed77fff7b7a9b0671a0de87b376dfac3f95900bfe6dc2fb1c0571459401f859ed08997c810c5603e3ae18a730ad1aa80dd711f4fb3a8c377521812855489dc5eabf61a1dd1cf006a8087ad84b45e122dce0a51f70da4e60e7f851c3b560878fe6d37e79c5868723e8b2d68daa8fdfc1ebb822c833ddac472914a8a5a0e50c3d09a6ee91fe5be02af28598c0569b2cbde79678b0a76bc524d1be593634bd84577ddc4dd92ba21ffd53d65802dfa403441988ba604b2ebf8817f07279f8fe6362bfdbfc9176bc62cf2009fc74022b966d5877d077447ddeac5f6f72b3a7675e05e871bd0b3ec822bbb66639b4fc5fc7dff3f693cf697f8d7b8a50d3096c8f54e48058abc2ab2191bc5fc59ab7507500a9b27657500c3bab6ac0f612928007894baf7d3597401da9596cc6ba1ec7bc5d6ca872b5a3b93eb269adf6166048718c52e510b6037763c0a78059f0c853efffe6daa761141b211a5e5987c94b8ae1c6f917383a436f278d8639e15d9032f60470b9e238037303c34e31787bc131d32dd8b02a0cbdb66036a74cc63c0354ed5d1f7574b951669266d337b2f9699d886ae69a3cc2ac74deab6",
+        "oid": "state:sha256:aeb9fac95268d0704891e6c50780bd421c3b0212a326cfd9de7825cdf2b62044"
+      }
+    }
+  ],
+  "pointerFaults": [
+    {
+      "step": "state-write",
+      "expected": "before"
+    },
+    {
+      "step": "state-fsync",
+      "expected": "before"
+    },
+    {
+      "step": "state-dir",
+      "expected": "before"
+    },
+    {
+      "step": "intent-write",
+      "expected": "before"
+    },
+    {
+      "step": "intent-fsync",
+      "expected": "before"
+    },
+    {
+      "step": "pointer-write",
+      "expected": "before"
+    },
+    {
+      "step": "pointer-fsync",
+      "expected": "before"
+    },
+    {
+      "step": "pointer-rename",
+      "expected": "after"
+    },
+    {
+      "step": "pointer-dir",
+      "expected": "after"
+    }
+  ],
+  "specialExpected": {
+    "noFeature": null,
+    "cliUnsupported": "unsupported_feature",
+    "missingFeatureField": "invalid_schema",
+    "wrongEntity": "invalid_schema",
+    "oversize": "object_too_large",
+    "pendingChoice": "choice_pending",
+    "mutableCapture": "choice_stale",
+    "missingSyncCapture": "choice_stale",
+    "captureRecordSetMismatch": "notes_stale",
+    "counterExhausted": "counter_exhausted",
+    "bodyTooLong": "invalid_schema",
+    "badUnicode": "invalid_encoding",
+    "badNegativeZero": "invalid_schema",
+    "latestConflictId": "c-b",
+    "allRetainedAssetKeys": [
+      "base.png",
+      "live.png",
+      "local.png",
+      "remote.png",
+      "resolved.png"
+    ]
+  }
+}

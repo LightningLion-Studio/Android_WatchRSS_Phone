@@ -1,0 +1,57 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "publicKeyHex": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+  "publicFixtureSigningKeyHex": "0000000000000000000000000000000000000000000000000000000000000001",
+  "scope": {
+    "repoId": "01010101010101010101010101010101",
+    "libraryEpoch": "1",
+    "contentGeneration": "2"
+  },
+  "row": {
+    "entityKey": "93bdc8427905229dd72acadf56ad57d4f83c81b51aed1defcac384ae46f99d55",
+    "metaOid": "meta:sha256:8703a70a6493686083b2c28ffc0eb4db93b68f703aff95f40a90d55a512bee7e",
+    "stateOid": "state:sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    "addedAtMillis": 100,
+    "rowSequence": "1",
+    "deleted": false,
+    "bodyRevision": "66666666666666666666666666666666",
+    "promiseId": "77777777777777777777777777777777",
+    "recipeOid": null,
+    "opaqueContentId": null,
+    "contentBytes": null,
+    "requiredFeatures": []
+  },
+  "expected": {
+    "canonicalRow": "{\"addedAtMillis\":100,\"bodyRevision\":\"66666666666666666666666666666666\",\"contentBytes\":null,\"deleted\":false,\"entityKey\":\"93bdc8427905229dd72acadf56ad57d4f83c81b51aed1defcac384ae46f99d55\",\"metaOid\":\"meta:sha256:8703a70a6493686083b2c28ffc0eb4db93b68f703aff95f40a90d55a512bee7e\",\"opaqueContentId\":null,\"promiseId\":\"77777777777777777777777777777777\",\"recipeOid\":null,\"requiredFeatures\":[],\"rowSequence\":\"1\",\"stateOid\":\"state:sha256:5555555555555555555555555555555555555555555555555555555555555555\"}",
+    "treeRoot": "tree:sha256:be691adef99869c8261bb0b1129c25e3d1943ac1bd81da96de8eebd5c2111f02",
+    "treeBody": {
+      "version": 2,
+      "scope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "form": "leaf",
+      "prefix": "",
+      "rows": [
+        {
+          "entityKey": "93bdc8427905229dd72acadf56ad57d4f83c81b51aed1defcac384ae46f99d55",
+          "metaOid": "meta:sha256:8703a70a6493686083b2c28ffc0eb4db93b68f703aff95f40a90d55a512bee7e",
+          "stateOid": "state:sha256:5555555555555555555555555555555555555555555555555555555555555555",
+          "addedAtMillis": 100,
+          "rowSequence": "1",
+          "deleted": false,
+          "bodyRevision": "66666666666666666666666666666666",
+          "promiseId": "77777777777777777777777777777777",
+          "recipeOid": null,
+          "opaqueContentId": null,
+          "contentBytes": null,
+          "requiredFeatures": []
+        }
+      ]
+    },
+    "signature": "Xm0nPsaPbVb8-zFMcrFXRsE-0TUqvJlz6LHGfNf2oB5xMEg7BXRGtCzvdNlo7OCUNnnOrju3167yOFOPt-6--A"
+  }
+}

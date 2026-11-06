@@ -121,4 +121,20 @@ class SyncV2P2ReviewRegressionTest {
             code("invalid_schema"){closure(kind,"outer-identity",value)}
         }
     }
+    private fun assertBusinessSurvivesClosure(kind:String,logicalId:String,value:JSONObject) {
+        val row=closure(kind,logicalId,value).rows.single()
+        val restored=SyncV2Business.join(kind,row.getJSONObject("meta"),row.getJSONObject("state"))
+        assertEquals(SyncV2Codec.canonical(value),SyncV2Codec.canonical(restored))
+    }
+    @Test fun n02ValidArticleGuidMustRemainReadable() {
+        // Exact legal input from P2R section 10's independent ReviewBusinessJUnit.
+        val value=JSONObject().put("articleId","a").put("url","https://synthetic.invalid/a").put("guid","g")
+        SyncV2Business.validate("article",value)
+        assertBusinessSurvivesClosure("article","a",value)
+    }
+    @Test fun n02ValidRssDeletionMustRemainReadable() {
+        val value=JSONObject().put("sourceId","s").put("articleIdHash","ab".repeat(32)).put("deleted",true).put("deletedAt",1)
+        SyncV2Business.validate("rss-state",value)
+        assertBusinessSurvivesClosure("rss-state","s:"+"ab".repeat(32),value)
+    }
 }

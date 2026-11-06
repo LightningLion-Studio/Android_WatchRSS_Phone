@@ -1,0 +1,184 @@
+{
+  "syntheticOnly": true,
+  "source": "sync-v2.md section 14; frozen source-manifest: cloud-compatibility.ts recordFields, book-protocol.ts, notes-types.ts; rc6c noteConflicts",
+  "records": [
+    {
+      "kind": "article",
+      "value": {
+        "articleId": "a",
+        "sourceDeviceId": "legacy-phone",
+        "url": "https://synthetic.invalid/a",
+        "title": "Title\n原字节",
+        "siteName": "Site",
+        "excerpt": "Excerpt",
+        "imageUrl": null,
+        "contentHash": "content-hash",
+        "importedAt": 0,
+        "updatedAt": 1,
+        "independentSaved": true,
+        "independentChangedAt": 1,
+        "independentSortOrder": -1,
+        "rssSourceUrl": null,
+        "rssSourceTitle": null,
+        "favoriteSaved": true,
+        "favoriteChangedAt": 2,
+        "favoriteSortOrder": -2,
+        "watchLaterSaved": false,
+        "watchLaterChangedAt": 3,
+        "watchLaterSortOrder": -3,
+        "deleted": false,
+        "deletedAt": 0,
+        "readingProgress": 0.123456,
+        "isRead": false,
+        "readingPositionBytes": 123,
+        "readingPositionContentHash": "content-hash",
+        "readingPositionChangedAt": 4,
+        "rssIndexRetired": false,
+        "bookIndexRetired": false,
+        "guid": "GUID:\r\n原字节",
+        "registerSources": {
+          "metadata": "legacy-phone",
+          "reading": "legacy-reader",
+          "independent": "legacy-independent",
+          "favorite": "legacy-favorite",
+          "watchLater": "legacy-later",
+          "deletion": "legacy-delete"
+        }
+      }
+    },
+    {
+      "kind": "source",
+      "value": {
+        "url": "https://synthetic.invalid/feed",
+        "sourceId": "s",
+        "title": "Feed",
+        "description": "Description",
+        "siteUrl": null,
+        "imageUrl": null,
+        "createdAt": 0,
+        "updatedAt": 1,
+        "sortOrder": -9007199254740991,
+        "isPinned": true,
+        "deleted": false,
+        "deletedAt": 0,
+        "sourceDeviceId": "legacy-source",
+        "useOriginalContent": true,
+        "continuePlaybackInBackground": false
+      }
+    },
+    {
+      "kind": "book",
+      "value": {
+        "bookId": "a55641a2e12b4841265bdf738ade38d0ab5623633b490ff44c8e0a29f16b607c",
+        "fingerprint": "8195126b4f7c71a1f30eb39366562ef17cd6ae46966642697d556d89aaf62137",
+        "title": "Book",
+        "chapterCount": 2,
+        "deletedChapters": [
+          1
+        ],
+        "deletionClock": 1,
+        "deleted": false,
+        "deletedAt": 0,
+        "updatedAt": 1,
+        "sourceDeviceId": "legacy-book",
+        "sourceUrl": "https://synthetic.invalid/book",
+        "kind": "epub",
+        "lifecycle": {
+          "generation": 1,
+          "operationId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "startedAt": 0
+        },
+        "instanceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "kind": "book-reading",
+      "value": {
+        "bookId": "a55641a2e12b4841265bdf738ade38d0ab5623633b490ff44c8e0a29f16b607c",
+        "chapterIndex": 2,
+        "isRead": false,
+        "readingProgress": 0.654321,
+        "readingPositionBytes": 123,
+        "readingPositionContentHash": "chapter-hash",
+        "readingPositionChangedAt": 1,
+        "sourceDeviceId": "legacy-reader",
+        "favoriteSaved": true,
+        "favoriteChangedAt": 2,
+        "favoriteSortOrder": -4,
+        "favoriteSourceDeviceId": "legacy-favorite",
+        "watchLaterSaved": false,
+        "watchLaterChangedAt": 3,
+        "watchLaterSortOrder": -5,
+        "watchLaterSourceDeviceId": "legacy-later"
+      }
+    },
+    {
+      "kind": "rss-state",
+      "value": {
+        "sourceId": "s",
+        "articleIdHash": "abababababababababababababababababababababababababababababababab",
+        "sourceDeviceId": "legacy-rss",
+        "deleted": true,
+        "deletedAt": 1,
+        "isRead": false,
+        "readingProgress": 0.234567,
+        "readingPositionBytes": 123,
+        "readingPositionContentHash": "rss-hash",
+        "readingPositionChangedAt": 2,
+        "favoriteSaved": true,
+        "favoriteChangedAt": 3,
+        "favoriteSortOrder": -6,
+        "watchLaterSaved": false,
+        "watchLaterChangedAt": 4,
+        "watchLaterSortOrder": -7
+      }
+    },
+    {
+      "kind": "note",
+      "value": {
+        "noteId": "n",
+        "folderId": null,
+        "title": "Note",
+        "markdown": "a\r\nb",
+        "plainText": "a\r\nb",
+        "contentHash": "note-hash",
+        "baseContentHash": "base-hash",
+        "baseMarkdown": "base\r\n",
+        "pinned": false,
+        "createdAt": 0,
+        "updatedAt": 1,
+        "modifiedBy": "legacy-note",
+        "deleted": false,
+        "deletedAt": 0,
+        "noteConflicts": {
+          "version": 1,
+          "records": []
+        }
+      }
+    },
+    {
+      "kind": "folder",
+      "value": {
+        "folderId": "f",
+        "name": "Folder",
+        "sortOrder": -8,
+        "updatedAt": 0,
+        "modifiedBy": "legacy-folder",
+        "deleted": false,
+        "deletedAt": 0
+      }
+    },
+    {
+      "kind": "asset",
+      "value": {
+        "assetId": "x",
+        "mime": "image/png",
+        "originalFilename": "image.png",
+        "updatedAt": 0,
+        "sourceDeviceId": "legacy-asset",
+        "deleted": false,
+        "deletedAt": 0
+      }
+    }
+  ]
+}

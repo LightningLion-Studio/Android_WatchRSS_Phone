@@ -128,6 +128,19 @@ class SyncV2SqliteTest {
         sql.execSQL("UPDATE phone_articles SET title=title WHERE articleId='big'")
         assertEquals(old,scalar(sql,"SELECT COUNT(*) FROM syncv2_outbox"))
     }
+    @Test fun n02WireGuidDoesNotBecomeARoomColumnOrChangeLocalBusinessRows() {
+        val db=room();put(db,article("local"));val sql=db.openHelper.writableDatabase
+        val before=businessDigest(sql);val a=adapter(db);a.install()
+        val page=a.scanPage("phone_articles");assertTrue(page.complete);assertEquals(1,page.rows)
+        val pair=a.candidate("article","local")!!
+        val value=SyncV2Business.join("article",pair.first,pair.second)
+        assertFalse(value.has("guid"))
+        assertEquals("local",value.getString("articleId"))
+        assertEquals(before,businessDigest(sql))
+        val columns=sql.query("PRAGMA table_info(phone_articles)").use{c->buildList{while(c.moveToNext())add(c.getString(1))}}
+        assertFalse(columns.contains("guid"))
+        assertEquals(1,scalar(sql,"SELECT COUNT(*) FROM phone_articles"))
+    }
     @Test fun scanMappingLogAndCheckpointRollbackAtEveryPrecommitBoundary() {
         val stages=listOf("begin","before-map","after-map","before-log","after-log","before-checkpoint","after-checkpoint","before-state","before-commit","after-transaction")
         val results=JSONArray()

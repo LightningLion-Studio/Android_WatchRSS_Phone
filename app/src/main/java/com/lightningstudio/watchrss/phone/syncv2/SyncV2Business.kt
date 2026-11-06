@@ -9,17 +9,19 @@ import org.json.JSONObject
 internal object SyncV2Business {
     private fun fields(s: String) = s.split(' ').toSet()
     val metaFields = fields("articleId url title siteName excerpt imageUrl rssSourceUrl rssSourceTitle contentHash importedAt guid sourceUrl sourceId description siteUrl createdAt fingerprint chapterCount kind instanceId bookId articleIdHash chapterIndex noteId folderId name assetId mime originalFilename")
-    val articleFields = fields("articleId sourceDeviceId url title siteName excerpt imageUrl contentHash importedAt updatedAt independentSaved independentChangedAt independentSortOrder rssSourceUrl rssSourceTitle favoriteSaved favoriteChangedAt favoriteSortOrder watchLaterSaved watchLaterChangedAt watchLaterSortOrder deleted deletedAt readingProgress isRead readingPositionBytes readingPositionContentHash readingPositionChangedAt rssIndexRetired bookIndexRetired registerSources")
+    val articleFields = fields("articleId sourceDeviceId url title siteName excerpt imageUrl contentHash importedAt guid updatedAt independentSaved independentChangedAt independentSortOrder rssSourceUrl rssSourceTitle favoriteSaved favoriteChangedAt favoriteSortOrder watchLaterSaved watchLaterChangedAt watchLaterSortOrder deleted deletedAt readingProgress isRead readingPositionBytes readingPositionContentHash readingPositionChangedAt rssIndexRetired bookIndexRetired registerSources")
     val sourceFields = fields("url sourceId title description siteUrl imageUrl createdAt updatedAt sortOrder isPinned deleted deletedAt sourceDeviceId useOriginalContent continuePlaybackInBackground")
     val bookFields = fields("bookId fingerprint title chapterCount deletedChapters deletionClock deleted deletedAt updatedAt sourceDeviceId sourceUrl kind lifecycle instanceId")
     val readingFields = fields("bookId chapterIndex isRead readingProgress readingPositionBytes readingPositionContentHash readingPositionChangedAt sourceDeviceId favoriteSaved favoriteChangedAt favoriteSortOrder favoriteSourceDeviceId watchLaterSaved watchLaterChangedAt watchLaterSortOrder watchLaterSourceDeviceId")
+    // RSS tombstones are part of its frozen schema; book save provenance is not.
+    val rssStateFields = fields("sourceId articleIdHash sourceDeviceId isRead readingProgress readingPositionBytes readingPositionContentHash readingPositionChangedAt favoriteSaved favoriteChangedAt favoriteSortOrder watchLaterSaved watchLaterChangedAt watchLaterSortOrder deleted deletedAt")
     val noteFields = fields("noteId folderId title markdown plainText contentHash baseContentHash baseMarkdown pinned createdAt updatedAt modifiedBy deleted deletedAt")
     val folderFields = fields("folderId name sortOrder updatedAt modifiedBy deleted deletedAt")
     val assetFields = fields("assetId mime originalFilename updatedAt sourceDeviceId deleted deletedAt")
     fun allowed(kind: String) = when(kind) {
         "article" -> articleFields; "source" -> sourceFields; "book" -> bookFields
         "book-reading" -> readingFields; "note" -> noteFields + "noteConflicts"; "folder" -> folderFields
-        "asset" -> assetFields; "rss-state" -> readingFields - setOf("bookId", "chapterIndex") + setOf("sourceId", "articleIdHash")
+        "asset" -> assetFields; "rss-state" -> rssStateFields
         else -> SyncV2Codec.fail("unsupported_feature")
     }
     private val booleans = fields("independentSaved favoriteSaved watchLaterSaved deleted isRead rssIndexRetired bookIndexRetired isPinned useOriginalContent continuePlaybackInBackground pinned")

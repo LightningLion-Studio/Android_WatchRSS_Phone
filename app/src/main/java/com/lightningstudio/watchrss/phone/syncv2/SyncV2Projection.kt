@@ -620,7 +620,8 @@ internal class SyncV2Projection(
         refreshPending(st.body);entries.size
     }
     private fun columns(d: SyncV2Schema.Domain): String = when(d.table) {
-        "phone_articles" -> SyncV2Business.articleFields.filterNot{it in setOf("rssIndexRetired","bookIndexRetired","registerSources")}.sorted().joinToString(","){"`$it`"}
+        // guid is valid wire metadata but is not stored by PhoneArticleEntity.
+        "phone_articles" -> SyncV2Business.articleFields.filterNot{it in setOf("guid","rssIndexRetired","bookIndexRetired","registerSources")}.sorted().joinToString(","){"`$it`"}
         "phone_rss_sources" -> (SyncV2Business.sourceFields-setOf("sourceId")).sorted().joinToString(","){"`$it`"}
         "imported_books", "imported_book_reading" -> "stateJson"
         "notes" -> SyncV2Business.noteFields.sorted().joinToString(","){"`$it`"}

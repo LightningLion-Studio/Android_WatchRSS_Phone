@@ -13,7 +13,8 @@ internal class SyncV2ContentWorker(private val client:SyncV2CloudClient,private 
     private val store:SyncV2ContentStore,private val signals:()->SyncV2TransportSignals,
     private val allowChargingCellular:()->Boolean={true},private val enabled:Boolean=BuildConfig.SYNC_OBJECTS_V2_CONTENT,
     private val clock:()->Long={System.nanoTime()/1000000},private val now:()->Long={System.currentTimeMillis()},
-    private val yieldControl:()->Unit={Thread.yield()},private val approvedDevice:(String)->Boolean={false}) {
+    private val yieldControl:()->Unit={Thread.yield()},private val approvedDevice:(String)->Boolean={false},
+    private val reserveRequestId:()->String={SyncV2Codec.hex(SyncV2Codec.random(16))}) {
     data class Budget(val millis:Long=300000,val reserveMillis:Long=10000,val bytes:Long=32L*1024*1024) {
         init {require(millis in 1..300000 && reserveMillis in 0 until millis && bytes in 1..32L*1024*1024)}
     }
@@ -91,32 +92,39 @@ internal class SyncV2ContentWorker(private val client:SyncV2CloudClient,private 
                     val batch=(listOf(oid)+pending.filter{it.oid !in transfers && it.oid !in exactCache}.map{it.oid}).distinct().take(64)
                     exactCache.putAll(haveBatch(window,batch.map{it to store.objectSize(it)}))
                 }
-                val exact=exactCache.getValue(oid)
+                var exact=exactCache.getValue(oid)
+                var reservationId:String?=null
+                if(exact.first!="present") {
+                    val reservation=client.reserve(reserveRequestId(),listOf(oid to total),"content")
+                    reservation.getJSONArray("objects").singleObject(oid,total)
+                    reservationId=SyncV2Wire.string(reservation,"reservationId");SyncV2Codec.unhex(reservationId,16)
+                    // C11: this exact read occurs AFTER reserve, including an idempotent replay.
+                    // Never turn reserve.objects[].durableOffset into a transfer position.
+                    exact=haveBatch(window,listOf(oid to total)).getValue(oid)
+                }
+                val offset=reconcilePrefix(oid,total,exact)
                 if(exact.first=="present") {
                     if(store.load("upload-start/$oid")!=null) {
                         if(store.completeUpload(oid,exact.second!!,rank))advance(0,true)
                     } else store.save("receipt/$oid",exact.second!!)
                     done.add(oid);yieldControl()
                     null
-                } else {
-                    val reservation=client.reserve(id(),listOf(oid to total),"content")
-                    val row=reservation.getJSONArray("objects").singleObject(oid,total)
-                    val offset=SyncV2Wire.uint(row,"durableOffset",total.toLong()).toInt();validateOffset(offset,total)
-                    val reservationId=SyncV2Wire.string(reservation,"reservationId");SyncV2Codec.unhex(reservationId,16)
-                    Transfer(total,reservationId,offset).also{transfers[oid]=it}
-                }
+                } else Transfer(total,requireNotNull(reservationId),offset).also{transfers[oid]=it}
             }
             if(transfer==null)continue
             if(transfer.offset<transfer.total) {
                 val n=minOf(65536,transfer.total-transfer.offset)
                 if(remaining()<n)return@window "budget_paused"
+                val checkpoint=uploadCheckpoint(oid,transfer.total)
+                val replay=minOf(n,(checkpoint.offset-transfer.offset).coerceAtLeast(0))
+                if(replay>0)persistCheckpoint(oid,transfer.total,checkpoint.offset,replay)
                 val bytes=store.objectPart(oid,transfer.offset,n)
-                store.save("upload-start/$oid",JSONObject().put("offset",transfer.offset).put("bytes",n))
+                store.save("upload-start/$oid",JSONObject().put("offset",transfer.offset).put("bytes",n).put("partSha256",SyncV2Codec.hex(SyncV2Codec.sha(bytes))))
                 val reply=network{client.put(oid,transfer.offset,transfer.reservation,id(),bytes)};store.counts.networkBytes+=bytes.size
                 if(reply.get("oid")!=oid || SyncV2Wire.uint(reply,"durableOffset")!=(transfer.offset+n).toLong())SyncV2Codec.fail("offset_conflict")
                 client.verifyReceipt(reply.getJSONObject("receipt"),oid,transfer.total.toLong(),(transfer.offset+n).toLong(),now())
                 transfer.offset+=n
-                store.save("upload/$oid",JSONObject().put("offset",transfer.offset).put("total",transfer.total));advance(n.toLong(),false);yieldControl()
+                persistCheckpoint(oid,transfer.total,transfer.offset);advance(n.toLong(),false);yieldControl()
             }
             if(transfer.offset==transfer.total) {
                 gate();val completed=client.complete(oid,transfer.reservation,id(),transfer.total)
@@ -158,25 +166,51 @@ internal class SyncV2ContentWorker(private val client:SyncV2CloudClient,private 
         store.savePlain(oid,plain);yieldControl();return plain
     }
     private fun haveBatch(window:String,expected:List<Pair<String,Int>>):Map<String,Pair<String,JSONObject?>> {
-        if(expected.size !in 1..64 || expected.map{it.first}.distinct().size!=expected.size)SyncV2Codec.fail("invalid_schema")
-        val sorted=expected.sortedBy{it.first};store.counts.metadataBatches++
-        val response=network{client.haveWant(window,sorted.map{it.first})}
-        if(response.get("windowId")!=window)SyncV2Codec.fail("invalid_schema")
-        val objects=response.getJSONArray("objects");if(objects.length()!=sorted.size)SyncV2Codec.fail("invalid_schema")
-        return sorted.mapIndexed { index,(oid,total) ->
-            val row=objects.getJSONObject(index);SyncV2Codec.exact(row,setOf("oid","status","totalBytes","durableOffset","receipt"))
-            if(row.get("oid")!=oid)SyncV2Codec.fail("invalid_schema")
-            val status=SyncV2Wire.string(row,"status");val offset=SyncV2Wire.uint(row,"durableOffset",total.toLong()).toInt()
-            if(status=="missing") {
-                if(!row.isNull("totalBytes") || offset!=0 || !row.isNull("receipt"))SyncV2Codec.fail("invalid_schema")
-                oid to (status to null)
-            } else {
-                if(status !in setOf("present","partial") || SyncV2Wire.uint(row,"totalBytes")!=total.toLong() || (status=="present")!=(offset==total))SyncV2Codec.fail("invalid_schema")
-                validateOffset(offset,total)
-                client.verifyReceipt(row.getJSONObject("receipt"),oid,total.toLong(),offset.toLong(),now())
-                oid to (status to row.getJSONObject("receipt"))
+        store.counts.metadataBatches++
+        return network{client.verifiedHaveWant(window,expected,now())}.mapValues { (_,row) ->
+            row.getString("status") to if(row.isNull("receipt"))null else row.getJSONObject("receipt")
+        }
+    }
+    private data class UploadCheckpoint(val offset:Int,val replayedBytes:Int)
+    private fun uploadCheckpoint(oid:String,total:Int):UploadCheckpoint {
+        val value=store.load("upload/$oid")?:return UploadCheckpoint(0,0)
+        val fields=value.keys().asSequence().toSet()
+        if(!fields.containsAll(setOf("offset","total")) || (fields-setOf("offset","total","replayedBytes")).isNotEmpty() || SyncV2Wire.uint(value,"total")!=total.toLong())SyncV2Codec.fail("invalid_schema")
+        val offset=SyncV2Wire.uint(value,"offset",total.toLong()).toInt();validateOffset(offset,total)
+        return UploadCheckpoint(offset,if(value.has("replayedBytes"))SyncV2Wire.uint(value,"replayedBytes",65536).toInt()else 0)
+    }
+    private fun persistCheckpoint(oid:String,total:Int,offset:Int,replayedBytes:Int=0) {
+        val old=uploadCheckpoint(oid,total);validateOffset(offset,total)
+        val replay=old.replayedBytes+replayedBytes
+        if(replayedBytes<0 || replay>65536)throw SyncV2CloudError("offset_conflict")
+        val confirmed=maxOf(offset,old.offset)
+        if(confirmed!=old.offset || replay!=old.replayedBytes)
+            store.save("upload/$oid",JSONObject().put("offset",confirmed).put("total",total).put("replayedBytes",replay))
+    }
+    private fun reconcilePrefix(oid:String,total:Int,remote:Pair<String,JSONObject?>):Int {
+        // haveBatch has authenticated the service receipt's scope/OID/length/prefix binding.
+        val offset=remote.second?.getJSONObject("body")?.getInt("durableOffset")?:0
+        validateOffset(offset,total)
+        val checkpoint=uploadCheckpoint(oid,total)
+        if(checkpoint.offset-offset>65536)throw SyncV2CloudError("offset_conflict")
+        if(remote.first!="present" && offset>checkpoint.offset) {
+            // An uncertain fine frame also has a local immutable-byte anchor. Old checkpoints
+            // without this additive field still rely on the authenticated prefix receipt.
+            val pending=store.load("upload-start/$oid")
+            if(pending!=null) {
+                SyncV2Codec.exact(pending,if(pending.has("partSha256"))setOf("offset","bytes","partSha256")else setOf("offset","bytes"))
+                val at=SyncV2Wire.uint(pending,"offset",total.toLong()).toInt();val size=SyncV2Wire.uint(pending,"bytes",65536).toInt()
+                if(at%65536!=0 || size==0 || size>total-at)SyncV2Codec.fail("invalid_schema")
+                if(at+size<=offset && pending.has("partSha256")) {
+                    val expected=SyncV2Wire.string(pending,"partSha256");SyncV2Codec.unhex(expected,32)
+                    if(expected!=SyncV2Codec.hex(SyncV2Codec.sha(store.objectPart(oid,at,size))))SyncV2Codec.fail("hash_mismatch")
+                }
             }
-        }.toMap()
+        }
+        // Never lower the local confirmation high-water mark. Replay budget is persisted
+        // before a PUT so another lost response cannot buy a second 64 KiB replay window.
+        persistCheckpoint(oid,total,offset)
+        return offset
     }
     private fun window(budget:Budget,work:(String,()->Long,(Long,Boolean)->Unit)->String):Result {
         if(!running.compareAndSet(false,true))return Result("library_busy",0,0,0)
@@ -212,6 +246,7 @@ internal class SyncV2ContentWorker(private val client:SyncV2CloudClient,private 
         if(length()!=1)SyncV2Codec.fail("invalid_schema")
         val row=getJSONObject(0);SyncV2Codec.exact(row,setOf("oid","totalBytes","durableOffset"))
         if(row.get("oid")!=oid || SyncV2Wire.uint(row,"totalBytes")!=total.toLong())SyncV2Codec.fail("invalid_schema")
+        SyncV2Wire.uint(row,"durableOffset",total.toLong()) // Schema only; never a resume authority.
         return row
     }
     private fun validateOffset(offset:Int,total:Int) {if(offset !in 0..total || offset!=total && offset%65536!=0)SyncV2Codec.fail("invalid_schema")}

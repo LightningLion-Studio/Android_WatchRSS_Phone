@@ -188,6 +188,42 @@ class SyncV2P2StorageTest {
             SyncV2Fixtures.evidence("p2-http-rollback.json",JSONObject().put("status",poll.getString("status")).put("calls",JSONObject(calls as Map<*,*>)).put("bodyWorkerCalls",0).put("businessAppliedAckCalls",0))
         }finally{server.shutdown()}
     }
+    @Test fun c11ControlPublicationQueriesCurrentPrefixAfterHistoricalReserveBeforePut() {
+        val db=room(root().resolve("phone.db"));seed(db);val p=adapter(db);p.install();p.scanPage("notes")
+        SyncV2P3Fixture().use { f ->
+            val calls=mutableListOf<String>()
+            val mapping=JSONObject().put("scope",identity.scope).put("deviceId",f.signer.deviceId).put("keyId",f.signer.keyId)
+                .put("legacyDeviceId","synthetic-phone").put("approvalRevision","1")
+            val binding=identity.signingBinding(f.signer,f.now,"0").put("deviceMapping",f.signer.signed("wrss.sync.v2/device-mapping",mapping))
+            f.route={ r ->
+                val path=r.requestUrl!!.encodedPath.substringAfter("/functions/v1/sync/v2/")
+                when {
+                    path=="capabilities" ->f.response(f.dto().put("minVersion",2).put("maxVersion",2).put("maxPartBytes",65536).put("historyDays",7).put("features",JSONArray())
+                        .put("receiptKeyId",f.bootstrap.getString("receiptKeyId")).put("receiptSigningPublicKey",f.bootstrap.getString("receiptSigningPublicKey"))
+                        .put("flags",JSONObject().put("read",true).put("indexWrite",true)))
+                    path=="negotiate" ->f.response(f.dto().put("windowId","12".repeat(16)).put("expiresAtMillis",f.now+300000).put("serverRevision","0").put("historyFloorRevision","0")
+                        .put("refs",JSONArray()).put("account",JSONObject().put("commitOid",JSONObject.NULL).put("revision","0").put("rollbackGeneration","0")))
+                    path=="devices/signing-keys" ->f.response(f.dto().put("bindings",JSONArray().put(binding)).put("revocationRevision","0"))
+                    path=="objects/reserve" -> {
+                        calls.add("reserve");val body=SyncV2Wire.parse(r.body.readByteArray());assertEquals("control",body.getString("channel"))
+                        val rows=body.getJSONArray("objects")
+                        for(i in 0 until rows.length())rows.getJSONObject(i).put("durableOffset",rows.getJSONObject(i).getInt("totalBytes"))
+                        f.response(f.dto().put("reservationId","34".repeat(16)).put("expiresAtMillis",f.now+600000).put("reservedBytes",0).put("objects",rows))
+                    }
+                    path=="objects/have-want" -> {calls.add("have");null}
+                    "/parts/" in path -> {
+                        calls.add("put");assertTrue(path.endsWith("/parts/0"))
+                        f.response(JSONObject().put("error",JSONObject().put("code","cloud_account_busy").put("retryable",true).put("retryAfterMillis",1000).put("details",JSONObject()))).setResponseCode(503)
+                    }
+                    else ->null
+                }
+            }
+            val sync=SyncV2CloudSync(f.client(),identity,p,{it=="synthetic-phone"},{contentKey},{f.now})
+            try{sync.publishIndex(f.signer,contentKey,1);fail("expected synthetic stop after first PUT")}
+            catch(e:SyncV2CloudError){assertEquals("cloud_account_busy",e.code)}
+            assertEquals(listOf("reserve","have","put"),calls);assertNull(p.pendingPublish());assertTrue(f.putOffsets.isEmpty())
+        }
+    }
     @Test fun definitiveCasRejectionDropsOnlyAttemptAndAllowsFreshRequest() {
         val db=room(root().resolve("phone.db"));val p=adapter(db);p.install()
         fun request(id:String)=JSONObject().put("account",JSONObject().put("body",JSONObject().put("requestId",id)))

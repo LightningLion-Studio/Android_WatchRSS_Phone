@@ -45,6 +45,16 @@ A crash between those writes replays at most one fine frame. On upload uncertain
 window queries exact have/want before sending bytes. Under C8, a complete durable prefix is
 settled by the backend and returned as present; the client does not retransmit it.
 
+C11 treats an idempotent reserve response as reservation identity only. Both content and control
+uploads query current signed have/want after reserve. Content uploads reconcile its scope, OID,
+total length and durable offset with the persistent checkpoint. A larger server prefix wins;
+an uncertain local frame also checks its saved SHA-256 against the immutable staged range.
+Partial-prefix receipts authenticate the offset binding; whole-object hash verification belongs
+to backend settlement. A smaller server prefix may replay at most 65,536 confirmed bytes.
+The local confirmed offset never decreases, and a cumulative replay allowance is persisted
+before PUT, including uncertain PUT outcomes. A larger rollback or exhausted allowance returns
+offset_conflict and retains the queue and original bytes. Existing checkpoints remain readable.
+
 A recoverable completion journal commits fairness and object receipt together. Eight completed
 rank0 blobs permit one ordinary blob; ordinary turns rotate 1–4. Current demand is read at window
 start, at most 30 seconds apart at frame/work boundaries, and after successful POST. Only approved

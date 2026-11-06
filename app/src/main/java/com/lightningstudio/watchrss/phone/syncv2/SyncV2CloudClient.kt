@@ -139,6 +139,28 @@ internal class SyncV2CloudClient(
     fun refs(window:String,page:String?=null)=get("refs",mapOf("windowId" to window)+if(page==null)emptyMap()else mapOf("pageToken" to page))
     fun diff(window:String,root:String,known:JSONArray=JSONArray(),page:String?=null)=post("trees/diff",JSONObject().put("windowId",window).put("treeRoot",root).put("knownNodes",known).put("pageToken",page?:JSONObject.NULL))
     fun haveWant(window:String,oids:List<String>)=post("objects/have-want",JSONObject().put("windowId",window).put("oids",JSONArray(oids)))
+    /** Exact authenticated status is current progress. A reserve replay is only an identity receipt. */
+    fun verifiedHaveWant(window:String,objects:List<Pair<String,Int>>,now:Long):Map<String,JSONObject> {
+        if(objects.size !in 1..64 || objects.map{it.first}.distinct().size!=objects.size)SyncV2Codec.fail("invalid_schema")
+        val sorted=objects.sortedBy{it.first}
+        for((oid,total)in sorted){SyncV2Wire.oid(oid);if(total !in 1..266264)SyncV2Codec.fail("invalid_schema")}
+        val response=haveWant(window,sorted.map{it.first})
+        SyncV2Codec.exact(response,setOf("version","scope","windowId","objects"))
+        if(response.get("windowId")!=window)SyncV2Codec.fail("invalid_schema")
+        val rows=response.getJSONArray("objects");if(rows.length()!=sorted.size)SyncV2Codec.fail("invalid_schema")
+        return sorted.mapIndexed { index,(oid,total) ->
+            val row=rows.getJSONObject(index);SyncV2Codec.exact(row,setOf("oid","status","totalBytes","durableOffset","receipt"))
+            if(row.get("oid")!=oid)SyncV2Codec.fail("invalid_schema")
+            val status=SyncV2Wire.string(row,"status");val offset=SyncV2Wire.uint(row,"durableOffset",total.toLong())
+            if(status=="missing") {
+                if(!row.isNull("totalBytes") || offset!=0L || !row.isNull("receipt"))SyncV2Codec.fail("invalid_schema")
+            } else {
+                if(status !in setOf("present","partial") || SyncV2Wire.uint(row,"totalBytes")!=total.toLong() || (status=="present")!=(offset==total.toLong()) || offset!=total.toLong() && offset%65536!=0L)SyncV2Codec.fail("invalid_schema")
+                verifyReceipt(row.getJSONObject("receipt"),oid,total.toLong(),offset,now)
+            }
+            oid to row
+        }.toMap()
+    }
     fun reserve(request:String,objects:List<Pair<String,Int>>,channel:String="control"):JSONObject {
         if(channel !in setOf("control","content"))SyncV2Codec.fail("invalid_schema")
         if(channel=="content" && !contentWrite)SyncV2Codec.fail("feature_disabled")

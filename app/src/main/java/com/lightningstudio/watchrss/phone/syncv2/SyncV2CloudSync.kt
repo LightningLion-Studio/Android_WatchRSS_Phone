@@ -151,9 +151,12 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         // Each reservation is bounded. Control upload never requests a content slot.
         for(batch in objects.entries.filter{it.key.substringBefore(':') in setOf("meta","state","tree","commit")}.sortedBy{it.key}.chunked(64)) {
             val reserve=client.reserve(randomId(),batch.map{it.key to it.value.size});val reservation=reserve.getString("reservationId")
-            val entries=reserve.getJSONArray("objects")
+            // C11 also applies to control objects: only a current authenticated status
+            // query may establish an offset, never an idempotent reserve response.
+            val entries=client.verifiedHaveWant(window.getString("windowId"),batch.map{it.key to it.value.size},now())
             for(item in batch) {
-                val prior=(0 until entries.length()).map{entries.getJSONObject(it)}.singleOrNull{it.getString("oid")==item.key}?:SyncV2Codec.fail("invalid_schema")
+                val prior=entries.getValue(item.key)
+                if(prior.getString("status")=="present")continue
                 var offset=SyncV2Wire.uint(prior,"durableOffset",item.value.size.toLong()).toInt()
                 if(offset%65536!=0 && offset!=item.value.size)SyncV2Codec.fail("invalid_schema")
                 while(offset<item.value.size) {

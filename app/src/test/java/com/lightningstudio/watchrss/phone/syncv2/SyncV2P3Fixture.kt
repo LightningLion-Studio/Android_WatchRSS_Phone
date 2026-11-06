@@ -21,6 +21,10 @@ internal class SyncV2P3Fixture:AutoCloseable {
     val putOffsets=mutableListOf<Int>();val putOids=mutableListOf<String>()
     var completed=0;var ranges=0;var dropAck=false;var busy=false;var wrongRange=false;var partDelay=0L
     var requests=0;var controlRequests=0
+    var replayReserve=false
+    var afterReserve:(()->Unit)?=null
+    val reserveIds=mutableListOf<String>();val reserveOffsets=mutableListOf<Int>()
+    private val reserved=mutableMapOf<String,Pair<String,JSONObject>>()
     val now=100000L
     private val algorithm=AlgorithmIdentifier(ASN1ObjectIdentifier("1.2.840.10045.2.1"),ASN1ObjectIdentifier("1.2.840.10045.3.1.7"))
     val bootstrap=JSONObject().put("algorithm","ES256").put("receiptKeyId","cd".repeat(16))
@@ -57,16 +61,28 @@ internal class SyncV2P3Fixture:AutoCloseable {
             }
             if(path=="objects/reserve") {
                 val body=SyncV2Wire.parse(request.body.readByteArray());assert(body.getString("channel")=="content")
-                val rows=body.getJSONArray("objects");for(i in 0 until rows.length())rows.getJSONObject(i).put("durableOffset",prefix[rows.getJSONObject(i).getString("oid")]?.size?:0)
-                return response(dto().put("reservationId","34".repeat(16)).put("expiresAtMillis",now+600000).put("reservedBytes",0).put("objects",rows))
+                val requestId=body.getString("requestId");val hash=SyncV2Codec.hash(body);reserveIds.add(requestId)
+                val previous=if(replayReserve)reserved[requestId]else null
+                if(previous!=null && previous.first!=hash)return response(JSONObject().put("error",JSONObject().put("code","idempotency_conflict").put("retryable",false).put("retryAfterMillis",JSONObject.NULL).put("details",JSONObject()))).setResponseCode(409)
+                val value=previous?.second?:run {
+                    val rows=body.getJSONArray("objects");for(i in 0 until rows.length())rows.getJSONObject(i).put("durableOffset",prefix[rows.getJSONObject(i).getString("oid")]?.size?:0)
+                    dto().put("reservationId","34".repeat(16)).put("expiresAtMillis",now+600000).put("reservedBytes",0).put("objects",rows)
+                }
+                if(replayReserve && previous==null)reserved[requestId]=hash to JSONObject(value.toString())
+                reserveOffsets.add(value.getJSONArray("objects").getJSONObject(0).getInt("durableOffset"))
+                afterReserve?.invoke()
+                return response(value)
             }
             if(path.startsWith("objects/") && "/parts/" in path) {
                 val oid=path.substringAfter("objects/").substringBefore("/parts/");val offset=path.substringAfter("/parts/").toInt()
                 val bytes=request.body.readByteArray();putOffsets.add(offset);putOids.add(oid)
                 if(partDelay>0)Thread.sleep(partDelay)
-                val prior=prefix[oid]?:ByteArray(0);check(offset==prior.size);prefix[oid]=prior+bytes
+                val prior=prefix[oid]?:ByteArray(0)
+                if(offset<prior.size)check(offset+bytes.size<=prior.size && prior.copyOfRange(offset,offset+bytes.size).contentEquals(bytes))
+                else {check(offset==prior.size);prefix[oid]=prior+bytes}
+                val durable=prefix[oid]!!.size
                 if(dropAck){dropAck=false;return MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST)}
-                return response(dto().put("oid",oid).put("durableOffset",offset+bytes.size).put("receipt",receipt(oid,objects[oid]!!.size,offset+bytes.size)))
+                return response(dto().put("oid",oid).put("durableOffset",durable).put("receipt",receipt(oid,objects[oid]!!.size,durable)))
             }
             if(path.endsWith("/complete")) {
                 val oid=path.substringAfter("objects/").substringBefore("/complete");val bytes=prefix[oid]!!

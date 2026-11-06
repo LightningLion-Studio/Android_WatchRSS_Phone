@@ -291,3 +291,16 @@ tasks.register<Test>("syncV2P3JointTest") {
     environment("WATCHRSS_P3_PHONE_JOINT",providers.environmentVariable("WATCHRSS_P3_PHONE_JOINT").orNull ?: "")
     outputs.upToDateWhen {false}
 }
+
+tasks.register<Test>("syncV2P3ForeignReadTest") {
+    val unit=tasks.named<Test>("testDebugUnitTest").get()
+    dependsOn(unit.testClassesDirs.buildDependencies)
+    testClassesDirs=unit.testClassesDirs
+    classpath=unit.classpath
+    systemProperties(unit.systemProperties)
+    jvmArgs(unit.jvmArgs ?: emptyList<String>())
+    maxHeapSize=unit.maxHeapSize
+    filter.includeTestsMatching("com.lightningstudio.watchrss.phone.syncv2.SyncV2P3JointIntegrationTest.phoneP3ForeignAllPublishedBodiesRangeResumeAndBl03")
+    environment("WATCHRSS_P3_PHONE_JOINT",providers.environmentVariable("WATCHRSS_P3_PHONE_JOINT").orNull ?: "")
+    outputs.upToDateWhen {false}
+}

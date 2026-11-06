@@ -44,7 +44,7 @@ import java.util.concurrent.atomic.AtomicInteger
 @Config(manifest=Config.NONE,sdk=[35])
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 class SyncV2P3JointIntegrationTest {
-    private val evidence=File("/home/wilf/data/OPPO_Develop/.codex-tmp/cloud-v2/evidence/T-SYNCGIT-P3A/phone/joint")
+    private var evidence=File("/home/wilf/data/OPPO_Develop/.codex-tmp/cloud-v2/evidence/T-SYNCGIT-P3A/phone/joint")
     private val result=JSONObject().put("platform","JVM/native SQLite + real isolated P3A backend").put("productionAccess",false)
     private var phase="initial"
     private val started=System.nanoTime()
@@ -60,8 +60,9 @@ class SyncV2P3JointIntegrationTest {
         val headers=f.getJSONObject("headers");for(k in headers.keys())r.header(k,headers.getString(k))
         return http().newCall(r.build()).execute().use{need(it.code==200,"bootstrap_http_${it.code}");SyncV2Wire.parse(it.body!!.bytes())}
     }
-    private class Relay:AutoCloseable {
+    private class Relay(private val readOnly:Boolean=false):AutoCloseable {
         val server=MockWebServer();val requests=AtomicInteger();val drops=AtomicInteger()
+        val blockedMutations=AtomicInteger()
         val partOrder=java.util.Collections.synchronizedList(mutableListOf<Pair<String,Int>>())
         val partBytes=ConcurrentHashMap<String,AtomicInteger>();val routeCounts=ConcurrentHashMap<String,AtomicInteger>()
         val partCalls=ConcurrentHashMap<String,AtomicInteger>();val responseCodes=ConcurrentHashMap<String,Int>()
@@ -85,6 +86,9 @@ class SyncV2P3JointIntegrationTest {
                         tail.startsWith("recipe-refs/")->"recipe-refs/get"
                         tail.startsWith("state-refs/")->"state-refs/get"
                         else->tail
+                    }
+                    if(readOnly && request.method!="GET" && !(request.method=="POST" && tail in setOf("negotiate","objects/have-want","objects/batch-get","availability/check"))) {
+                        blockedMutations.incrementAndGet();return MockResponse().setResponseCode(403)
                     }
                     routeCounts.computeIfAbsent(route){AtomicInteger()}.incrementAndGet()
                     if(tail=="account/publish" && publishOnce.compareAndSet(false,true))beforePublish?.invoke()
@@ -155,6 +159,137 @@ class SyncV2P3JointIntegrationTest {
         val value=JSONObject().put("deviceId",signer.deviceId).put("reservedThrough",(base+BigInteger.valueOf(4096)).toString())
         val tmp=File(evidence,"phone-sequence-watermark.next");FileOutputStream(tmp).use{it.write(SyncV2Codec.utf8(SyncV2Codec.canonical(value)));it.fd.sync()}
         Files.move(tmp.toPath(),file.toPath(),StandardCopyOption.REPLACE_EXISTING,StandardCopyOption.ATOMIC_MOVE);projection.reserveDeviceSequence(base.toString())
+    }
+    /** Follow-up is read-only at the account/object layer: consume every foreign row, not
+     * one sample per author. The proxy prevents accidentally rerunning publication work. */
+    @Test fun phoneP3ForeignAllPublishedBodiesRangeResumeAndBl03() {
+        need(System.getenv("WATCHRSS_P3_PHONE_JOINT")=="1","joint_not_enabled")
+        evidence=File(evidence.parentFile,"foreign-all");evidence.mkdirs()
+        val fixture=File("/home/wilf/data/OPPO_Develop/.codex-tmp/cloud-v2/integration/phone.json")
+        val fixtureHash=SyncV2Codec.hex(SyncV2Codec.sha(fixture.readBytes()));val f=SyncV2Wire.parse(fixture.readBytes())
+        need(f.getBoolean("syntheticOnly") && f.getString("platform")=="phone" && f.getString("baseUrl")=="http://127.0.0.1:18942","fixture_scope_invalid")
+        val local=File((RuntimeEnvironment.getApplication() as Context).cacheDir,"p3-foreign-${System.nanoTime()}").also{it.mkdirs()}
+        val wrap=SyncV2Codec.unhex(f.getJSONObject("crypto").getString("contentKeyHex"),32);val localKey=SyncV2Codec.random(32)
+        var db:PhoneCompanionDatabase?=null;var relay:Relay?=null
+        try {
+            mark("foreign-bootstrap-c3-c4")
+            val boot=bootstrap(f);val approved=boot.getJSONArray("devices").let{a->(0 until a.length()).map{a.getJSONObject(it)}.filter{d->
+                d.isNull("revokedAt") && d.optInt("attestationKeyVersion")==1 && d.optString("attestation")==CloudProtocolV2.attestation(wrap,f.getString("userId"),f.getString("legacyLibraryEpoch"),d.getString("deviceId"),Base64.getDecoder().decode(d.getString("publicKeySpki")))
+            }}
+            val approvedLegacy=approved.map{it.getString("deviceId")}.toSet();need(approvedLegacy.size==4,"approved_roster_invalid")
+            val profile=approved.associate{it.getString("deviceId") to it.optString("platform","unknown")}
+            val pin=SyncV2Wire.parse(File("/home/wilf/data/OPPO_Develop/.codex-tmp/cloud-v2/integration/bootstrap-public.json").readBytes()).getJSONObject("syncV2")
+            val trust=SyncV2ServiceTrust.fromBootstrap(f.getString("accountId"),boot.getJSONObject("syncV2"),pin){SyncV2Codec.fail("pin_rewritten")}
+            need(trust.keyId=="b73621a8ae71467db3a89da4c5ba659d","service_key_changed")
+            val h=f.getJSONObject("headers");val session=SyncV2CloudClient.Session(f.getString("userId"),f.getString("legacyDeviceId"),f.getString("legacyLibraryEpoch"),f.getString("legacyContentGeneration"),SyncV2Codec.scope(f.getJSONObject("scope")),f.getString("syncDeviceId"),h.getString("Authorization").removePrefix("Bearer "),"",h.getString("x-watchrss-device-authorization"))
+            relay=Relay(readOnly=true);val proxy=relay
+            fun client()=SyncV2CloudClient(proxy.base,{session},trust,true,http())
+            val control=client();control.capabilities()
+            val descriptor=control.descriptor();val recovery=SyncV2Wire.parse(control.recovery(descriptor.getString("recoveryOid")),8192,true)
+            need(SyncV2Codec.oid("id-key-recovery",recovery)==descriptor.getString("recoveryOid"),"hash_mismatch")
+            val identity=SyncV2Identity.recover(recovery,descriptor.getJSONObject("descriptor"),wrap,f.getString("accountId"),f.getJSONObject("scope"),descriptor.getString("descriptorOid"))
+            val window=control.negotiate();val registrations=control.signingKeys(window.getString("windowId"));val bindings=registrations.getJSONArray("bindings")
+            val authors=control.authors(identity){it in approvedLegacy};val platforms=mutableMapOf<String,String>()
+            for(i in 0 until bindings.length()) {
+                val binding=bindings.getJSONObject(i);authors.accept(binding,registrations.getString("revocationRevision"))
+                val m=binding.getJSONObject("deviceMapping").getJSONObject("body");platforms[m.getString("deviceId")]=profile[m.getString("legacyDeviceId")]?:"unknown"
+            }
+            val approvedSync=platforms.keys.toSet();need(approvedSync.size==4,"binding_roster_invalid")
+            val signing=f.getJSONObject("signingKey");val signer=SyncV2Signing.fromPrivate(SyncV2Codec.unhex(signing.getString("privateKeyHex"),32),session.deviceId,signing.getString("keyId"))
+            need(signer.publicHex==authors.publicKey(signer.deviceId,signer.keyId),"identity_conflict")
+            db=Room.databaseBuilder(RuntimeEnvironment.getApplication(),PhoneCompanionDatabase::class.java,File(local,"phone.db").absolutePath).allowMainThreadQueries().build()
+            val projection=SyncV2Projection(db.openHelper.writableDatabase,identity,localKey,true).also{it.install()}
+            val sync=SyncV2CloudSync(control,identity,projection,{it in approvedLegacy},{v->need(v==1L,"unsupported_feature");wrap})
+            need(sync.readCurrent()=="metadata-ready","current_index_not_ready")
+            val account=JSONObject(projection.state().body.getJSONObject("account").toString())
+            val allRows=projection.cloudRows().map{it.getJSONObject("row")};val rows=mutableListOf<JSONObject>();val inventory=JSONArray()
+            val authorByRecipe=mutableMapOf<String,String>();val w=control.negotiate().getString("windowId")
+            for(row in allRows.sortedBy{it.getString("entityKey")}) {
+                if(row.getBoolean("deleted") || row.isNull("recipeOid"))continue
+                val oid=row.getString("recipeOid");val mapping=control.reference(oid,w).apply{remove("version")}
+                val raw=control.raw(mapping.getString("refsOid"),w);val refs=SyncV2Wire.parse(raw,262144,true)
+                SyncV2ContentCodec.verifyRefs(identity,authors,oid,refs.getJSONObject("body").getJSONArray("blobOids"),mapping,raw)
+                val author=mapping.getString("authorDeviceId");need(author in approvedSync,"unapproved_content_author")
+                if(author==signer.deviceId)continue
+                authorByRecipe[oid]=author;rows.add(row)
+                inventory.put(JSONObject().put("authorDeviceId",author).put("entityKey",row.getString("entityKey")).put("bodyRevision",row.getString("bodyRevision")).put("recipeOid",oid))
+            }
+            need(authorByRecipe.values.toSet()==approvedSync-signer.deviceId,"three_foreign_content_authors_not_ready")
+            record("accountSnapshot",account);record("currentRows",allRows.size);record("foreignInventory",inventory)
+            record("foreignAuthors",authorByRecipe.values.toSet().size);record("foreignPublishedBodies",rows.size)
+            mark("foreign-all-range-reopen")
+            val dir=File(local,"content");val counts=SyncV2ContentStore.Counts();val proofs=JSONArray();var paused=0;var resumedInsideObject=0
+            fun store()=SyncV2ContentStore(dir,identity.scopeJson,localKey,counts)
+            fun download(row:JSONObject,budget:Long):SyncV2ContentSession.DownloadOutcome {
+                val destination=store();val dc=client()
+                val worker=SyncV2ContentWorker(dc,identity,destination,{SyncV2TransportSignals(wifi=true,internet=true,cellular=false)},enabled=true,approvedDevice={it in approvedSync})
+                val receiver=SyncV2ContentReceive(identity,authors,destination,worker,dc,{v->need(v==1L,"unsupported_feature");wrap})
+                val content=SyncV2ContentSession(identity,destination,worker,dc,signer,SyncV2ContentExport(identity,wrap,1,destination))
+                var bound=0
+                val outcome=content.downloadPage(listOf(row),receiver,System::currentTimeMillis,{entity->allRows.singleOrNull{it.getString("entityKey")==entity}},{bound++},SyncV2ContentWorker.Budget(bytes=budget))
+                if(outcome.status=="complete")need(bound==1 && outcome.completeBodies==1,"foreign_body_not_bound")
+                return outcome
+            }
+            for((index,row)in rows.withIndex()) {
+                val windows=JSONArray();var complete=false
+                repeat(4096){n->if(!complete) {
+                    val rangeAt=proxy.rangeOrder.size;val previous=proxy.rangeOrder.lastOrNull()
+                    val r=download(row,196608);need(r.status in setOf("budget_paused","complete"),"foreign_resume_status_${r.status}")
+                    if(r.status=="budget_paused"){need(r.transferredBytes>0,"foreign_window_no_progress");paused++}
+                    val windowProof=JSONObject().put("window",n+1).put("status",r.status).put("bytes",r.transferredBytes)
+                    if(proxy.rangeOrder.size>rangeAt) {
+                        val first=proxy.rangeOrder[rangeAt];val last=proxy.rangeOrder.last()
+                        windowProof.put("firstRangeOid",first.first).put("firstRangeOffset",first.second).put("lastRangeOid",last.first).put("lastRangeEnd",last.third)
+                        if(n>0 && previous!=null && first.first==previous.first && first.second==previous.third+1)resumedInsideObject++
+                        if(r.status=="budget_paused")need(store().load("prefix/${last.first}")!!.getInt("offset")==last.third+1,"range_checkpoint_not_durable")
+                    }
+                    windows.put(windowProof);complete=r.status=="complete"
+                }}
+                need(complete,"foreign_resume_incomplete")
+                val destination=store();val recipe=destination.load("recipe/${row.getString("entityKey")}/${row.getString("bodyRevision")}")!!.getJSONObject("recipe")
+                SyncV2ContentCodec.matchRow(recipe,row)
+                SyncV2ContentCodec.verifyBody(identity,recipe,{b->destination.plain(b.getString("oid"))})
+                val blockProofs=JSONArray();val blocks=recipe.getJSONArray("blocks")
+                for(i in 0 until blocks.length()) {
+                    val block=blocks.getJSONObject(i);val oid=block.getString("oid");val sealed=destination.objectBytes(oid);val plain=destination.plain(oid)
+                    need(oid=="blob:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(sealed))}","hash_mismatch")
+                    blockProofs.put(JSONObject().put("index",i).put("oid",oid).put("plainBytes",plain.size).put("plaintextSha256",SyncV2Codec.hex(SyncV2Codec.sha(plain))).put("opaqueContentIdVerified",identity.opaque("blob",plain)==block.getString("opaqueContentId")))
+                }
+                val oid=row.getString("recipeOid");need(oid=="recipe:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(destination.objectBytes(oid)))}","hash_mismatch")
+                val author=authorByRecipe.getValue(oid)
+                proofs.put(JSONObject().put("authorDeviceId",author).put("platform",platforms[author]).put("entityKey",row.getString("entityKey")).put("bodyRevision",row.getString("bodyRevision"))
+                    .put("recipeOid",oid).put("plainBytes",recipe.getLong("totalPlainBytes")).put("plaintextSha256",recipe.getString("plaintextSha256")).put("blocks",blockProofs).put("windows",windows)
+                    .put("recipeFieldsVerified",true).put("recipeRefsSignatureVerified",true).put("availabilitySignatureVerified",true).put("allBlocksAndWholeBodyVerified",true))
+                record("foreignBodies",proofs);record("completedBodies",index+1)
+            }
+            need(paused>0 && resumedInsideObject>0,"range_resume_not_exercised")
+            val ranges=proxy.rangeOrder.groupBy{it.first}
+            need(ranges.values.all{r->r.first().second==0 && r.zipWithNext().all{(a,b)->b.second==a.third+1}},"range_confirmed_bytes_replayed")
+            record("rangeRequests",proxy.rangeOrder.size);record("rangeObjects",ranges.size);record("rangeReplayBytes",0);record("pausedWindows",paused)
+            record("resumedInsideObject",resumedInsideObject)
+            record("rangeAudit",JSONArray(ranges.map{(oid,r)->JSONObject().put("oid",oid).put("requests",r.size).put("firstOffset",r.first().second).put("endExclusive",r.last().third+1).put("replayBytes",0)}))
+            record("firstPassCounts",counts.json())
+            mark("foreign-bl03-reopen-all")
+            val before=counts.json();val rangesBefore=proxy.rangeOrder.size
+            for(row in rows)need(download(row,32L*1024*1024).transferredBytes==0L,"bl03_cached_body_transferred")
+            val after=counts.json();val delta=JSONObject()
+            for(k in listOf("sourceReadBytes","exports","seals","authentications","decompressBytes","hashBytes","networkBytes","fileReadBytes"))delta.put(k,after.getLong(k)-before.getLong(k))
+            need(listOf("sourceReadBytes","exports","seals","authentications","decompressBytes","hashBytes","networkBytes").all{delta.getLong(it)==0L},"bl03_repeated_body_work")
+            need(proxy.rangeOrder.size==rangesBefore,"bl03_repeated_range")
+            record("bl03Delta",delta);record("bl03ReopenedBodies",rows.size)
+            mark("foreign-final-current-tree-audit")
+            need(sync.readCurrent()=="metadata-ready","current_index_not_ready")
+            need(SyncV2Codec.canonical(account)==SyncV2Codec.canonical(projection.state().body.getJSONObject("account")),"account_changed_during_foreign_download")
+            need(allRows.associate{it.getString("entityKey") to SyncV2Codec.canonical(it)}==projection.cloudRows().associate{it.getJSONObject("row").getString("entityKey") to SyncV2Codec.canonical(it.getJSONObject("row"))},"current_rows_changed")
+            need(proxy.blockedMutations.get()==0 && proxy.partOrder.isEmpty() && proxy.completeCalls.get()==0,"foreign_test_attempted_mutation")
+            need(fixtureHash==SyncV2Codec.hex(SyncV2Codec.sha(fixture.readBytes())),"fixture_changed")
+            record("currentTreeUnchanged",true);record("fixtureUnchanged",true);record("publicationRequests",0);record("businessAppliedAck",false)
+            record("proxyRoutes",JSONObject(proxy.routeCounts.mapValues{it.value.get()}));record("status","passed")
+        }catch(t:Throwable) {
+            val raw=t.message.orEmpty();val safe=if(Regex("[a-z][a-z0-9_]{0,100}").matches(raw))raw else t.javaClass.simpleName
+            result.put("status","failed").put("errorPhase",phase).put("errorCode",safe).put("errorFrames",JSONArray(t.stackTrace.filter{it.className.startsWith("com.lightningstudio.watchrss.phone.syncv2")}.take(10).map{"${it.className.substringAfterLast('.')}::${it.methodName}:${it.lineNumber}"}));save()
+            throw AssertionError("p3 foreign phase=$phase code=$safe")
+        }finally {db?.close();relay?.close();wrap.fill(0);localKey.fill(0);local.deleteRecursively()}
     }
     @Test fun phoneP3RealBackendContentCasAvailabilityForeignDownloadResumeDemandAndCache() {
         need(System.getenv("WATCHRSS_P3_PHONE_JOINT")=="1","joint_not_enabled");evidence.mkdirs()

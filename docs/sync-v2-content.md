@@ -72,3 +72,15 @@ no deletion, custody-release, GC or eviction code.
 
 The host must retain the queue and report space pressure if content storage cannot grow.
 Staged ciphertext is retained in P3A; no cleanup is authorized by a receipt or a short lease.
+
+## Isolated foreign-body follow-up
+
+With an authorized, unchanged phone fixture and the loopback backend running, use
+`WATCHRSS_P3_PHONE_JOINT=1 ./gradlew :app:syncV2P3ForeignReadTest --max-workers=2`.
+This opt-in task authenticates the current account tree and downloads every recipe-backed,
+non-deleted row authored by the other three approved signing devices. It reopens the content
+store between 192 KiB windows, verifies recipe fields, signed refs/availability, all encrypted
+object hashes, block fingerprints and plaintextSha256, then reopens and checks cache reuse.
+Its relay rejects publication, upload and CAS requests. The final audit requires the account
+head and every current row to match the initial snapshot. Evidence is written separately from
+the original P3A joint run, under `phone/foreign-all` in the task evidence directory.

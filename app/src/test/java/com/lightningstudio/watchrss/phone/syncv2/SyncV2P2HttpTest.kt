@@ -163,4 +163,47 @@ class SyncV2P2HttpTest {
         val c=client(s);c.capabilities();val pool=Executors.newFixedThreadPool(2)
         try {val events=pool.submit<JSONObject>{c.events("9007199254740992")};assertTrue(entered.await(2,TimeUnit.SECONDS));val fast=pool.submit<JSONObject>{c.negotiate()};assertTrue(finished.await(2,TimeUnit.SECONDS));assertFalse(events.isDone);fast.get(2,TimeUnit.SECONDS);release.countDown();events.get(2,TimeUnit.SECONDS)}finally{release.countDown();pool.shutdownNow()}
     }
+
+    private fun checkpointBody(now:Long):JSONObject=JSONObject().put("scope",JSONObject(scope.toString())).put("checkpointId","11".repeat(16)).put("serverRevision","9007199254740994")
+        .put("historyFloorRevision","9007199254740992").put("historyFloorMillis",0).put("windowId","22".repeat(16)).put("issuedAtMillis",now-10).put("expiresAtMillis",now+30000)
+        .put("refs",JSONArray().put(JSONObject().put("deviceId","aa".repeat(16)).put("commitOid","commit:sha256:"+"1".repeat(64)).put("refRevision","9007199254740993")))
+        .put("account",JSONObject().put("commitOid","commit:sha256:"+"1".repeat(64)).put("revision","9007199254740993").put("rollbackGeneration","0"))
+    private fun signedCheckpoint(body:JSONObject):JSONObject=signer().signed("wrss.sync.v2/checkpoint-sign",body).put("version",2).put("scope",scope)
+    @Test fun r03ProductCheckpointVerifiesC5SignatureCompleteSchemaAndExactD64() {
+        val now=1000000L;val wire=signedCheckpoint(checkpointBody(now));val s=server{response(wire)};val c=client(s);c.capabilities()
+        val result=c.checkpoint(now);assertEquals(SyncV2Codec.canonical(wire),SyncV2Codec.canonical(result))
+        assertEquals("9007199254740993",result.getJSONObject("body").getJSONArray("refs").getJSONObject(0).getString("refRevision"))
+    }
+    @Test fun r03ProductCheckpointRejectsTheOriginalInvalidSignatureCounterexample() {
+        for(signature in listOf("invalid",SyncV2Codec.b64(ByteArray(64)))) {
+            val wire=dto().put("body",JSONObject().put("scope",scope)).put("signature",signature)
+            val s=server{response(wire)};val c=client(s);c.capabilities();assertEquals("signature_invalid",code{c.checkpoint(1000000)})
+        }
+    }
+    @Test fun r03EvenServiceSignedCheckpointRejectsMalformedRefsAccountAndWindow() {
+        val now=1000000L
+        val mutations=listOf<Pair<String,(JSONObject)->Unit>>(
+            "invalid_schema" to {it.remove("historyFloorMillis");Unit},
+            "invalid_schema" to {it.put("unexpected",true);Unit},
+            "invalid_schema" to {it.put("refs",JSONArray().put(JSONObject().put("unexpected",true)));Unit},
+            "invalid_schema" to {it.getJSONArray("refs").put(JSONObject(it.getJSONArray("refs").getJSONObject(0).toString()));Unit},
+            "invalid_schema" to {val r=it.getJSONArray("refs").getJSONObject(0);it.put("refs",JSONArray().put(JSONObject(r.toString()).put("deviceId","bb".repeat(16))).put(r));Unit},
+            "invalid_schema" to {it.getJSONArray("refs").getJSONObject(0).put("refRevision","0");Unit},
+            "invalid_oid" to {it.getJSONArray("refs").getJSONObject(0).put("commitOid","tree:sha256:"+"1".repeat(64));Unit},
+            "invalid_schema" to {it.getJSONArray("refs").getJSONObject(0).put("ref","refs/account/current");Unit},
+            "invalid_schema" to {it.getJSONObject("account").put("revision",1);Unit},
+            "invalid_schema" to {it.getJSONObject("account").put("commitOid",JSONObject.NULL);Unit},
+            "invalid_schema" to {it.put("historyFloorRevision","9007199254740995");Unit},
+            "scope_mismatch" to {it.getJSONObject("scope").put("repoId","ee".repeat(16));Unit},
+            "replay_detected" to {it.put("expiresAtMillis",now);Unit},
+            "replay_detected" to {it.put("expiresAtMillis",now+300001).put("issuedAtMillis",now);Unit},
+            "replay_detected" to {it.put("issuedAtMillis",now+30001).put("expiresAtMillis",now+60000);Unit}
+        )
+        for((expected,change)in mutations) {
+            val body=checkpointBody(now);change(body);val wire=signedCheckpoint(body);val s=server{response(wire)};val c=client(s);c.capabilities()
+            assertEquals(expected,code{c.checkpoint(now)})
+        }
+        val extra=signedCheckpoint(checkpointBody(now)).put("extra",true);val s=server{response(extra)};val c=client(s);c.capabilities()
+        assertEquals("invalid_schema",code{c.checkpoint(now)})
+    }
 }

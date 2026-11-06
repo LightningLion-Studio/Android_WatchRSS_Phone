@@ -109,12 +109,30 @@ internal class SyncV2Projection(
         } finally { db.endTransaction(); if(started)fault("after-transaction") }
     }
     /** Authenticated-window boundary. Caller must finish HeadPins verification before this call. */
-    fun observeVerified(window: JSONObject, headers: List<JSONObject>, verifyHeader:(JSONObject)->JSONObject = identity::verifyHeader) {
+    private fun authenticateHeads(observed:JSONObject,headers:List<JSONObject>,before:State,verifyHeader:(JSONObject)->JSONObject,
+        readHeader:((String)->JSONObject)?):SyncV2HeadPins.Proof {
+        val upgraded=before.body.optString("headerAuthentication")==SyncV2HeadPins.schema
+        val saved=before.body.optJSONArray("knownControlHeaders")?:JSONArray()
+        val accountHeaders=before.body.optJSONArray("knownAccountParents")?:JSONArray()
+        val known=(0 until saved.length()).map{saved.getJSONObject(it)}+(0 until accountHeaders.length()).map{accountHeaders.getJSONObject(it).getJSONObject("header")}
+        val proof=SyncV2HeadPins.authenticate(identity,observed,headers,if(upgraded)before.body.optJSONObject("account")else null,
+            verifyHeader,readHeader,if(upgraded)before.body.optJSONObject("knownAuthors")?:JSONObject()else JSONObject(),known)
+        val previous=before.body.optJSONObject("account")
+        if(!upgraded && previous!=null && (0 until proof.path.length()).none{proof.path.getJSONObject(it).getString("oid")==previous.getString("oid")})SyncV2Codec.fail("replay_detected")
+        return proof
+    }
+    private fun retainControlHeaders(body:JSONObject,proof:SyncV2HeadPins.Proof) {
+        val previous=body.optJSONArray("knownControlHeaders")?:JSONArray();val saved=linkedMapOf<String,JSONObject>()
+        for(i in 0 until previous.length())previous.getJSONObject(i).let{saved[SyncV2Codec.oid("commit",it.getJSONObject("body"))]=it}
+        for(header in proof.headers)saved[SyncV2Codec.oid("commit",header.getJSONObject("body"))]=header
+        body.put("knownControlHeaders",JSONArray(saved.values.toList())).put("headerAuthentication",SyncV2HeadPins.schema)
+    }
+    fun observeVerified(window: JSONObject, headers: List<JSONObject>, verifyHeader:(JSONObject)->JSONObject = identity::verifyHeader,readHeader:((String)->JSONObject)?=null) {
         val observed=validAccount(window)
         val before=state()
-        val proof=SyncV2HeadPins.verify(identity,observed,headers,before.body.optJSONObject("account"),verifyHeader)
+        val proof=authenticateHeads(observed,headers,before,verifyHeader,readHeader)
         writer(before.version) { st ->
-            observeInto(st,observed,proof)
+            observeInto(st,observed,proof.path);retainControlHeaders(st.body,proof)
         }
     }
     private fun observeInto(st:State,observed:JSONObject,proof:JSONArray) {
@@ -149,17 +167,17 @@ internal class SyncV2Projection(
     }
     /** P2 owns only current authenticated control content; never sends business applied ACK. */
     fun installCloudIndex(window:JSONObject,headers:List<JSONObject>,verified:SyncV2ControlClosure.Verified,
-        verifyHeader:(JSONObject)->JSONObject,serverRevision:String?=null) {
+        verifyHeader:(JSONObject)->JSONObject,serverRevision:String?=null,readHeader:((String)->JSONObject)?=null) {
         requireWorkerContext();val observed=validAccount(window);val before=state()
         if(verified.commitOid!=observed.getString("oid"))SyncV2Codec.fail("hash_mismatch")
-        val proof=SyncV2HeadPins.verify(identity,observed,headers,before.body.optJSONObject("account"),verifyHeader)
+        val proof=authenticateHeads(observed,headers,before,verifyHeader,readHeader)
         writer(before.version) { st ->
-            observeInto(st,observed,proof)
+            observeInto(st,observed,proof.path);retainControlHeaders(st.body,proof)
             db.execSQL("DELETE FROM syncv2_cloud_rows WHERE scope=?",arrayOf(scope))
             db.execSQL("DELETE FROM syncv2_cloud_objects WHERE scope=?",arrayOf(scope))
             for((oid,bytes)in verified.objects) db.execSQL("INSERT INTO syncv2_cloud_objects VALUES(?,?,?)",arrayOf(scope,oid,bytes))
             for(value in verified.rows) db.execSQL("INSERT INTO syncv2_cloud_rows VALUES(?,?,?)",arrayOf(scope,value.getJSONObject("row").getString("entityKey"),seal("cloud-row",value)))
-            st.body.put("metadataAccount",observed).put("metadataStatus","metadata-ready").put("metadataSchema","rc6c-c4-index-v1").put("metadataRows",verified.rows.size)
+            st.body.put("metadataAccount",observed).put("metadataStatus","metadata-ready").put("metadataSchema",SyncV2HeadPins.schema).put("metadataRows",verified.rows.size)
             if(serverRevision!=null){SyncV2Codec.d64(serverRevision);st.body.put("metadataServerRevision",serverRevision)}
             // pendingChoice and all local edits remain; P1 product apply gate is not relaxed here.
             fault("cloud-index-ready")
@@ -168,7 +186,7 @@ internal class SyncV2Projection(
     fun reuseCloudIndex(window:JSONObject,serverRevision:String):Boolean {
         val observed=validAccount(window);val before=state();val accepted=before.body.optJSONObject("account")?:return false
         val metadata=before.body.optJSONObject("metadataAccount")?:return false
-        if(before.body.optString("metadataSchema")!="rc6c-c4-index-v1" || metadata.getString("oid")!=observed.getString("oid") || accepted.getString("oid")!=observed.getString("oid"))return false
+        if(before.body.optString("metadataSchema")!=SyncV2HeadPins.schema || metadata.getString("oid")!=observed.getString("oid") || accepted.getString("oid")!=observed.getString("oid"))return false
         if(observed.getString("generation")!=accepted.getString("generation"))SyncV2Codec.fail("replay_detected")
         val count=db.query("SELECT COUNT(*) FROM syncv2_cloud_rows WHERE scope=?",arrayOf(scope)).use{it.moveToFirst();it.getInt(0)}
         if(count!=before.body.getInt("metadataRows"))return false

@@ -164,7 +164,7 @@ internal class SyncV2CloudClient(
         SyncV2Codec.d64(after);require(waitMillis in 0..25000)
         return get("events",mapOf("after" to after,"waitMillis" to waitMillis.toString())).also(::window)
     }
-    fun checkpoint()=get("checkpoint")
+    fun checkpoint(now:Long=System.currentTimeMillis())=get("checkpoint").also{serviceTrust.checkpoint(it,scope,now)}
     fun account()=get("account").also(::window)
     fun ancestry(head:String,stop:String?)=get("account/ancestry",mapOf("head" to head,"limit" to "64")+if(stop==null)emptyMap()else mapOf("stop" to stop))
     fun history(page:String?=null)=get("history",if(page==null)emptyMap()else mapOf("pageToken" to page))

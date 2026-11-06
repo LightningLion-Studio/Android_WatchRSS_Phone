@@ -25,7 +25,8 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
     }
     fun readCurrent():String {
         client.capabilities() // Every error, including busy, ends this round. No catch-and-continue.
-        val window=client.negotiate();fresh(window);val id=window.getString("windowId")
+        // Use the authenticated checkpoint's own fixed window. A later negotiate may legitimately race it.
+        val window=client.checkpoint(now()).getJSONObject("body");fresh(window);val id=window.getString("windowId")
         keys(id)
         val account=window.getJSONObject("account")
         if(account.isNull("commitOid")) {
@@ -59,7 +60,15 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             client.reference(parent,id).let { JSONObject(it.toString()).apply { remove("version") } }
         }
         fresh(window)
-        projection.installCloudIndex(observation,headers,verified,authors::header,window.getString("serverRevision"))
+        projection.installCloudIndex(observation,headers,verified,authors::header,window.getString("serverRevision")) { oid ->
+            // Permanent signed headers remain available after historical content has expired.
+            val page=client.ancestry(oid,null);val values=page.getJSONArray("headers")
+            if(page.getString("head")!=oid || !page.isNull("stop") || values.length() !in 1..64)SyncV2Codec.fail("ref_continuity_unavailable")
+            val first=values.getJSONObject(0);SyncV2Codec.exact(first,setOf("commitOid","headerOid","body","signature"))
+            val envelope=JSONObject().put("body",first.getJSONObject("body")).put("signature",first.getString("signature"))
+            if(first.getString("commitOid")!=oid || SyncV2Codec.oid("commit-header",envelope)!=first.getString("headerOid"))SyncV2Codec.fail("hash_mismatch")
+            fresh(window);envelope
+        }
         return if(projection.status()=="awaiting-user")"awaiting-user" else "metadata-ready"
     }
     fun resumePublish():JSONObject? {

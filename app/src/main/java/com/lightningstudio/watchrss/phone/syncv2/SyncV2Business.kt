@@ -92,6 +92,18 @@ internal object SyncV2Business {
         }
     }
     data class PairObjects(val meta: JSONObject, val state: JSONObject)
+    /** Frozen business identity, distinct from a signed outer logicalId supplied by a peer. */
+    fun logicalId(kind:String,value:JSONObject):String = when(kind) {
+        "article" -> SyncV2Wire.string(value,"articleId")
+        "source" -> SyncV2Wire.string(value,"url")
+        "book" -> SyncV2Wire.string(value,"bookId")
+        "book-reading" -> SyncV2Wire.string(value,"bookId")+":"+SyncV2Wire.uint(value,"chapterIndex",100000)
+        "note" -> SyncV2Wire.string(value,"noteId")
+        "folder" -> SyncV2Wire.string(value,"folderId")
+        "asset" -> SyncV2Wire.string(value,"assetId")
+        "rss-state" -> SyncV2Wire.string(value,"sourceId")+":"+SyncV2Wire.string(value,"articleIdHash")
+        else -> SyncV2Codec.fail("unsupported_feature")
+    }
     fun split(kind: String, logicalId: String, entityKey: String, value: JSONObject, addedAt: Long?): PairObjects {
         validate(kind,value)
         // A missing channel is readable unknown data, never permission to rewrite an empty set.

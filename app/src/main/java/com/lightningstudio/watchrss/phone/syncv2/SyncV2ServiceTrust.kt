@@ -30,6 +30,34 @@ internal class SyncV2ServiceTrust private constructor(val accountId:String,val k
         val created=SyncV2Wire.uint(body,"createdAtMillis");val expires=SyncV2Wire.uint(body,"expiresAtMillis")
         if(expires<=created || expires-created>604800000 || expires<=now || created>now+30000)SyncV2Codec.fail("replay_detected")
     }
+    /** C5 authenticates the complete fixed window; it does not replace author or content verification. */
+    fun checkpoint(value:JSONObject,scope:JSONObject,now:Long):JSONObject = SyncV2Wire.schema {
+        SyncV2Codec.exact(value,setOf("version","scope","body","signature"))
+        if(value.get("version")!=2 || SyncV2Codec.scope(value.getJSONObject("scope"))!=SyncV2Codec.scope(scope))SyncV2Codec.fail("scope_mismatch")
+        val body=verify("wrss.sync.v2/checkpoint-sign",JSONObject().put("body",value.getJSONObject("body")).put("signature",value.get("signature")))
+        SyncV2Codec.exact(body,setOf("scope","checkpointId","serverRevision","refs","account","historyFloorRevision","historyFloorMillis","windowId","issuedAtMillis","expiresAtMillis"))
+        if(SyncV2Codec.scope(body.getJSONObject("scope"))!=SyncV2Codec.scope(scope))SyncV2Codec.fail("scope_mismatch")
+        SyncV2Codec.unhex(SyncV2Wire.string(body,"checkpointId"),16);SyncV2Codec.unhex(SyncV2Wire.string(body,"windowId"),16)
+        val revision=SyncV2Codec.d64(SyncV2Wire.string(body,"serverRevision"))
+        if(SyncV2Codec.d64(SyncV2Wire.string(body,"historyFloorRevision"))>revision)SyncV2Codec.fail("invalid_schema")
+        SyncV2Wire.uint(body,"historyFloorMillis")
+        val issued=SyncV2Wire.uint(body,"issuedAtMillis");val expires=SyncV2Wire.uint(body,"expiresAtMillis")
+        if(expires<=issued || expires-issued>300000 || expires<=now || issued>now+30000)SyncV2Codec.fail("replay_detected")
+        val refs=body.getJSONArray("refs");if(refs.length()>64)SyncV2Codec.fail("invalid_schema")
+        var previous=""
+        for(i in 0 until refs.length()) {
+            val ref=refs.getJSONObject(i);SyncV2Codec.exact(ref,setOf("deviceId","commitOid","refRevision"))
+            val device=SyncV2Wire.string(ref,"deviceId");SyncV2Codec.unhex(device,16)
+            if(device<=previous)SyncV2Codec.fail("invalid_schema");previous=device
+            SyncV2Wire.oid(SyncV2Wire.string(ref,"commitOid"),"commit")
+            if(SyncV2Codec.d64(SyncV2Wire.string(ref,"refRevision")).signum()==0)SyncV2Codec.fail("invalid_schema")
+        }
+        val account=body.getJSONObject("account");SyncV2Codec.exact(account,setOf("commitOid","revision","rollbackGeneration"))
+        val accountRevision=SyncV2Codec.d64(SyncV2Wire.string(account,"revision"));val generation=SyncV2Codec.d64(SyncV2Wire.string(account,"rollbackGeneration"))
+        if(account.isNull("commitOid")) {if(accountRevision.signum()!=0 || generation.signum()!=0)SyncV2Codec.fail("invalid_schema")}
+        else {SyncV2Wire.oid(SyncV2Wire.string(account,"commitOid"),"commit");if(accountRevision.signum()==0)SyncV2Codec.fail("invalid_schema")}
+        body
+    }
     companion object {
         /** Explicit storage port lets synthetic HTTP tests inject a test bootstrap and durable test pin. */
         fun fromBootstrap(accountId:String,syncV2:JSONObject,pinned:JSONObject?,save:(JSONObject)->Unit):SyncV2ServiceTrust {

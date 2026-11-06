@@ -51,6 +51,7 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
             val pub=authors.publicKey(SyncV2Wire.string(mapping,"authorDeviceId"),SyncV2Wire.string(mapping,"keyId"),true)
             if(!SyncV2Identity.verifySignature(pub,SyncV2Codec.lp(SyncV2Codec.utf8("wrss.sync.v2/state-refs-sign"),SyncV2Codec.utf8(SyncV2Codec.canonical(body))),SyncV2Wire.string(signed,"signature")))SyncV2Codec.fail("signature_invalid")
             val business=SyncV2Business.join(kind,meta,state)
+            if(SyncV2Business.logicalId(kind,business)!=logicalId)SyncV2Codec.fail("invalid_schema")
             if(business.optBoolean("deleted",false)!=row.getBoolean("deleted"))SyncV2Codec.fail("invalid_schema")
             decoded.add(JSONObject().put("row",row).put("meta",meta).put("state",state))
         }

@@ -274,3 +274,20 @@ tasks.register<Test>("syncV2P2JointTest") {
     environment("WATCHRSS_P2_PHONE_JOINT",providers.environmentVariable("WATCHRSS_P2_PHONE_JOINT").orNull ?: "")
     outputs.upToDateWhen {false}
 }
+
+// Explicit opt-in: real loopback P3A backend. Ordinary unit tests never open this service.
+tasks.withType<Test>().configureEach {
+    if(name == "testDebugUnitTest") exclude("**/SyncV2P3JointIntegrationTest*")
+}
+tasks.register<Test>("syncV2P3JointTest") {
+    val unit=tasks.named<Test>("testDebugUnitTest").get()
+    dependsOn(unit.testClassesDirs.buildDependencies)
+    testClassesDirs=unit.testClassesDirs
+    classpath=unit.classpath
+    systemProperties(unit.systemProperties)
+    jvmArgs(unit.jvmArgs ?: emptyList<String>())
+    maxHeapSize=unit.maxHeapSize
+    filter.includeTestsMatching("com.lightningstudio.watchrss.phone.syncv2.SyncV2P3JointIntegrationTest")
+    environment("WATCHRSS_P3_PHONE_JOINT",providers.environmentVariable("WATCHRSS_P3_PHONE_JOINT").orNull ?: "")
+    outputs.upToDateWhen {false}
+}

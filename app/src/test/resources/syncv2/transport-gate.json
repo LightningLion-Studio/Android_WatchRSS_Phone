@@ -1,0 +1,85 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "cases": [
+    {
+      "input": {
+        "charging": true,
+        "wifi": false,
+        "bluetooth": false,
+        "internet": true,
+        "cellular": true,
+        "localRoute": false,
+        "allowChargingCellular": true
+      },
+      "expected": {
+        "largeEligible": true,
+        "cloudAllowed": true,
+        "localAllowed": false
+      }
+    },
+    {
+      "input": {
+        "charging": true,
+        "wifi": false,
+        "bluetooth": false,
+        "internet": true,
+        "cellular": true,
+        "localRoute": false,
+        "allowChargingCellular": false
+      },
+      "expected": {
+        "largeEligible": true,
+        "cloudAllowed": false,
+        "localAllowed": false
+      }
+    },
+    {
+      "input": {
+        "charging": false,
+        "wifi": false,
+        "bluetooth": true,
+        "internet": true,
+        "cellular": true,
+        "localRoute": true,
+        "allowChargingCellular": false
+      },
+      "expected": {
+        "largeEligible": true,
+        "cloudAllowed": true,
+        "localAllowed": true
+      }
+    },
+    {
+      "input": {
+        "charging": null,
+        "wifi": null,
+        "bluetooth": false,
+        "internet": true,
+        "cellular": true,
+        "localRoute": false
+      },
+      "expected": {
+        "largeEligible": false,
+        "cloudAllowed": false,
+        "localAllowed": false
+      }
+    },
+    {
+      "input": {
+        "charging": false,
+        "wifi": true,
+        "bluetooth": false,
+        "internet": false,
+        "cellular": false,
+        "localRoute": true
+      },
+      "expected": {
+        "largeEligible": true,
+        "cloudAllowed": false,
+        "localAllowed": true
+      }
+    }
+  ]
+}

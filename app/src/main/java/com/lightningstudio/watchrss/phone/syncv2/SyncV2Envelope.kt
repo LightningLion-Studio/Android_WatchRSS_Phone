@@ -18,6 +18,7 @@ internal object SyncV2Envelope {
         version: Long, type: String, plain: ByteArray, salt: ByteArray, nonce: ByteArray,
         encoding: String = "identity", encoded: ByteArray = plain): Sealed {
         SyncV2Codec.scope(scope)
+        if(plain.size>262144 || encoded.size>262144)SyncV2Codec.fail("object_too_large")
         if (key.size != 32 || salt.size != 32 || nonce.size != 12 || version !in 1..4294967295L ||
             type !in setOf("meta", "state", "blob", "recipe")) SyncV2Codec.fail("invalid_schema")
         val h = JSONObject().put("domain", "wrss.sync.v2/sealed").put("version", 2).put("scope", scope)
@@ -32,10 +33,11 @@ internal object SyncV2Envelope {
             SyncV2Codec.encrypt(derived, nonce, aad, encoded) } finally { derived.fill(0) }
         return Sealed("$type:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(bytes))}", bytes, h)
     }
-    fun open(identity: SyncV2Identity, key: ByteArray, oid: String, bytes: ByteArray, expectedVersion: Long? = null): ByteArray =
-        open(identity.scope, { t, p -> identity.opaque(t, p) }, key, oid, bytes, expectedVersion)
+    fun open(identity: SyncV2Identity, key: ByteArray, oid: String, bytes: ByteArray, expectedVersion: Long? = null, stage:((String,Long)->Unit)?=null): ByteArray =
+        open(identity.scope, { t, p -> identity.opaque(t, p) }, key, oid, bytes, expectedVersion,stage)
     internal fun open(scope: JSONObject, opaque: (String, ByteArray) -> String, key: ByteArray, oid: String,
-        bytes: ByteArray, expectedVersion: Long? = null): ByteArray {
+        bytes: ByteArray, expectedVersion: Long? = null,stage:((String,Long)->Unit)?=null): ByteArray {
+        val authAt=System.nanoTime()
         if(key.size!=32)SyncV2Codec.fail("authentication_required")
         if (bytes.size !in 24..266264 || !bytes.copyOfRange(0, 4).contentEquals("WRS2".toByteArray())) SyncV2Codec.fail("invalid_encoding")
         val length = ByteBuffer.wrap(bytes, 4, 4).int
@@ -49,7 +51,10 @@ internal object SyncV2Envelope {
         if (bytes.size != 8 + length + h.getInt("encodedBytes") + 16 || expectedVersion != null && h.getLong("keyVersion") != expectedVersion) SyncV2Codec.fail("invalid_schema")
         val derived = SyncV2Codec.hkdf(key, SyncV2Codec.decode64(h.getString("salt"), 32), SyncV2Codec.lp(SyncV2Codec.utf8("wrss.sync.v2/aead"), SyncV2Codec.sha(aad)))
         val encoded = try { SyncV2Codec.decrypt(derived, SyncV2Codec.decode64(h.getString("nonce"), 12), aad, bytes.copyOfRange(8 + length, bytes.size)) } finally { derived.fill(0) }
+        stage?.invoke("authentication",System.nanoTime()-authAt)
+        val decompressAt=System.nanoTime()
         val plain = if (h.getString("encoding") == "identity") encoded else gunzip(encoded, h.getInt("plainBytes"))
+        if(h.getString("encoding")=="gzip")stage?.invoke("decompression",System.nanoTime()-decompressAt)
         if (plain.size != h.getInt("plainBytes")) SyncV2Codec.fail("invalid_encoding")
         if (opaque(type, plain) != h.getString("opaqueContentId")) SyncV2Codec.fail("fingerprint_mismatch")
         if (type != "blob") SyncV2Wire.parse(plain, 262144, true)

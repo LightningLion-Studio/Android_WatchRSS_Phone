@@ -18,6 +18,10 @@ internal class SyncV2Identity private constructor(
     val repoId get() = scope.getString("repoId")
     fun entity(kind: String, id: String) = SyncV2Codec.entity(identityKey, repoId, kind, id)
     fun opaque(type: String, bytes: ByteArray) = SyncV2Codec.opaque(identityKey, scope, type, bytes)
+    internal fun opaqueDigest(type:String,digest:ByteArray):String {
+        if(digest.size!=32)SyncV2Codec.fail("invalid_schema")
+        return SyncV2Codec.hex(SyncV2Codec.hmac(identityKey,SyncV2Codec.lp(SyncV2Codec.utf8("wrss.sync.v2/content"),SyncV2Codec.utf8(scopeJson),SyncV2Codec.utf8(type),digest)))
+    }
     internal fun encryptedRecord(localKey: ByteArray): ByteArray = SyncV2Codec.sealLocal(localKey, scopeJson, "identity",
         JSONObject().put("accountId", accountId).put("descriptorOid", descriptorOid).put("idKeyHex", SyncV2Codec.hex(identityKey)).put("creator",creator).put("creatorPublicKey",creatorPublicKey))
 

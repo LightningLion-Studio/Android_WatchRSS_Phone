@@ -1,0 +1,206 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "cases": [
+    {
+      "now": 100,
+      "items": [
+        {
+          "entityKey": "a",
+          "kind": "file",
+          "importedFile": true,
+          "addedAtMillis": 40,
+          "complete": true
+        },
+        {
+          "entityKey": "b",
+          "kind": "file",
+          "importedFile": true,
+          "addedAtMillis": 30
+        },
+        {
+          "entityKey": "c",
+          "kind": "file",
+          "importedFile": true,
+          "addedAtMillis": 20
+        },
+        {
+          "entityKey": "d",
+          "kind": "memo",
+          "addedAtMillis": 1
+        },
+        {
+          "entityKey": "e",
+          "kind": "rss",
+          "addedAtMillis": 50
+        },
+        {
+          "entityKey": "f",
+          "kind": "file",
+          "addedAtMillis": 0,
+          "demand": {
+            "demandAtMillis": 90,
+            "expiresAtMillis": 200
+          }
+        },
+        {
+          "entityKey": "g",
+          "kind": "file",
+          "addedAtMillis": 60,
+          "demand": {
+            "demandAtMillis": 90,
+            "expiresAtMillis": 200
+          }
+        },
+        {
+          "entityKey": "h",
+          "kind": "memo",
+          "parentKind": "memo",
+          "addedAtMillis": 1
+        }
+      ],
+      "expected": [
+        {
+          "entityKey": "f",
+          "rank": 0
+        },
+        {
+          "entityKey": "g",
+          "rank": 0
+        },
+        {
+          "entityKey": "d",
+          "rank": 1
+        },
+        {
+          "entityKey": "h",
+          "rank": 1
+        },
+        {
+          "entityKey": "b",
+          "rank": 2
+        },
+        {
+          "entityKey": "e",
+          "rank": 3
+        },
+        {
+          "entityKey": "c",
+          "rank": 4
+        }
+      ]
+    },
+    {
+      "now": 300,
+      "items": [
+        {
+          "entityKey": "a",
+          "kind": "file",
+          "importedFile": true,
+          "addedAtMillis": 40,
+          "complete": true
+        },
+        {
+          "entityKey": "b",
+          "kind": "file",
+          "importedFile": true,
+          "addedAtMillis": 30
+        },
+        {
+          "entityKey": "c",
+          "kind": "file",
+          "importedFile": true,
+          "addedAtMillis": 20
+        },
+        {
+          "entityKey": "d",
+          "kind": "memo",
+          "addedAtMillis": 1
+        },
+        {
+          "entityKey": "e",
+          "kind": "rss",
+          "addedAtMillis": 50
+        },
+        {
+          "entityKey": "f",
+          "kind": "file",
+          "addedAtMillis": 0,
+          "demand": {
+            "demandAtMillis": 90,
+            "expiresAtMillis": 200
+          }
+        },
+        {
+          "entityKey": "g",
+          "kind": "file",
+          "addedAtMillis": 60,
+          "demand": {
+            "demandAtMillis": 90,
+            "expiresAtMillis": 200
+          }
+        },
+        {
+          "entityKey": "h",
+          "kind": "memo",
+          "parentKind": "memo",
+          "addedAtMillis": 1
+        }
+      ],
+      "expected": [
+        {
+          "entityKey": "d",
+          "rank": 1
+        },
+        {
+          "entityKey": "h",
+          "rank": 1
+        },
+        {
+          "entityKey": "b",
+          "rank": 2
+        },
+        {
+          "entityKey": "e",
+          "rank": 3
+        },
+        {
+          "entityKey": "g",
+          "rank": 4
+        },
+        {
+          "entityKey": "c",
+          "rank": 4
+        },
+        {
+          "entityKey": "f",
+          "rank": 4
+        }
+      ]
+    }
+  ],
+  "fairness": {
+    "rule": "8 demanded blobs, 1 ordinary blob; ordinary ranks round robin",
+    "expectedRanks": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      2
+    ]
+  }
+}

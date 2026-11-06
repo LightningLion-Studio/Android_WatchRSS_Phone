@@ -37,7 +37,16 @@ internal class SyncV2CloudClient(
         }
         fun fence() = listOf(accountId, legacyDeviceId, legacyEpoch, legacyGeneration, scopeJson, deviceId)
     }
+    private val executionDeadline=ThreadLocal<Long?>()
+    /** Nested host/content budgets only shorten the deadline. Control clients have their own scope. */
+    fun <T> withinBudget(millis:Long,work:()->T):T {
+        if(millis<=0)SyncV2Codec.fail("budget_paused")
+        val previous=executionDeadline.get();val next=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(millis)
+        executionDeadline.set(if(previous==null)next else minOf(previous,next))
+        try{return work()}finally{if(previous==null)executionDeadline.remove()else executionDeadline.set(previous)}
+    }
     private var capabilitiesChecked=false
+    private var contentWrite=false
     private val owner: List<String>
     init {
         // Claude must supply a separately reviewed isolated address before broadening this allowlist.
@@ -70,7 +79,13 @@ internal class SyncV2CloudClient(
         s.deviceAuthorization?.let { builder.header("x-watchrss-device-authorization",it) }
         headers.forEach { (k,v) -> builder.header(k,v) }
         val request = builder.method(method, body?.toRequestBody((if(raw || method=="PUT")"application/octet-stream" else "application/json").toMediaType())).build()
-        http.newCall(request).execute().use { response ->
+        val call=http.newCall(request)
+        executionDeadline.get()?.let { deadline ->
+            val remaining=deadline-System.nanoTime()
+            if(remaining<=0)SyncV2Codec.fail("budget_paused")
+            call.timeout().timeout(minOf(TimeUnit.SECONDS.toNanos(30),remaining),TimeUnit.NANOSECONDS)
+        }
+        call.execute().use { response ->
             val limit = if(raw && response.isSuccessful) 266264 else 1048576
             val data = response.body?.byteStream()?.use { input ->
                 val out=java.io.ByteArrayOutputStream();val block=ByteArray(8192)
@@ -87,6 +102,7 @@ internal class SyncV2CloudClient(
                 throw SyncV2CloudError(code,error.getBoolean("retryable"),delay)
             }
             if(raw) {
+                if(response.code != if(headers.containsKey("Range"))206 else 200)SyncV2Codec.fail("invalid_range")
                 if(response.header("ETag")?.removeSurrounding("\"") != path.removePrefix("objects/"))SyncV2Codec.fail("hash_mismatch")
                 if(response.header("Content-Length")?.toLongOrNull()!=data.size.toLong())SyncV2Codec.fail("invalid_encoding")
             }
@@ -98,7 +114,7 @@ internal class SyncV2CloudClient(
         val request=JSONObject(value.toString())
         // Request version belongs only inside the explicitly versioned signed bodies.
         // The backend's complete request schemas do not allow a generic top-level version.
-        val signed=path in setOf("devices/signing-key","state-refs","refs/cas","account/publish","repo/init")
+        val signed=path in setOf("devices/signing-key","state-refs","recipe-refs","refs/cas","account/publish","repo/init")
         if(!signed && !request.has("scope"))request.put("scope",scope)
         return check(SyncV2Wire.parse(bytes("POST",path,SyncV2Codec.utf8(SyncV2Codec.canonical(request))).first))
     }
@@ -111,7 +127,7 @@ internal class SyncV2CloudClient(
         if(SyncV2Wire.uint(it,"minVersion",4294967295)>2 || SyncV2Wire.uint(it,"maxVersion",4294967295)<2)throw SyncV2CloudError("upgrade_required")
         SyncV2Wire.features(it.getJSONArray("features"))
         if(SyncV2Wire.uint(it,"maxPartBytes")!=65536L || SyncV2Wire.uint(it,"historyDays")!=7L)SyncV2Codec.fail("invalid_schema")
-        serviceTrust.capabilities(it); capabilitiesChecked=true
+        serviceTrust.capabilities(it); contentWrite=it.optJSONObject("flags")?.opt("contentWrite")==true; capabilitiesChecked=true
     }
     fun authors(identity:SyncV2Identity,approvedLegacyDevice:(String)->Boolean):SyncV2Authors {
         if(identity.accountId!=session().accountId)SyncV2Codec.fail("authentication_required")
@@ -123,8 +139,12 @@ internal class SyncV2CloudClient(
     fun refs(window:String,page:String?=null)=get("refs",mapOf("windowId" to window)+if(page==null)emptyMap()else mapOf("pageToken" to page))
     fun diff(window:String,root:String,known:JSONArray=JSONArray(),page:String?=null)=post("trees/diff",JSONObject().put("windowId",window).put("treeRoot",root).put("knownNodes",known).put("pageToken",page?:JSONObject.NULL))
     fun haveWant(window:String,oids:List<String>)=post("objects/have-want",JSONObject().put("windowId",window).put("oids",JSONArray(oids)))
-    fun reserve(request:String,objects:List<Pair<String,Int>>)=post("objects/reserve",JSONObject().put("requestId",request).put("channel","control").put("leaseMillis",600000)
+    fun reserve(request:String,objects:List<Pair<String,Int>>,channel:String="control"):JSONObject {
+        if(channel !in setOf("control","content"))SyncV2Codec.fail("invalid_schema")
+        if(channel=="content" && !contentWrite)SyncV2Codec.fail("feature_disabled")
+        return post("objects/reserve",JSONObject().put("requestId",request).put("channel",channel).put("leaseMillis",600000)
         .put("objects",JSONArray(objects.sortedBy{it.first}.map{JSONObject().put("oid",it.first).put("totalBytes",it.second)})))
+    }
     fun put(oid:String,offset:Int,reservation:String,request:String,part:ByteArray):JSONObject {
         SyncV2Wire.oid(oid);SyncV2Codec.unhex(reservation,16);SyncV2Codec.unhex(request,16)
         if(offset<0 || offset%65536!=0 || part.size !in 1..65536)SyncV2Codec.fail("invalid_schema")
@@ -137,6 +157,20 @@ internal class SyncV2CloudClient(
     fun verifyReceipt(value:JSONObject,oid:String,total:Long,offset:Long,now:Long) = serviceTrust.receipt(value,scope,oid,total,offset,now)
     fun complete(oid:String,reservation:String,request:String,total:Int)=post("objects/$oid/complete",JSONObject().put("reservationId",reservation).put("requestId",request).put("totalBytes",total))
     fun stateRefs(value:JSONObject)=post("state-refs",value)
+    fun recipeRefs(value:JSONObject)=post("recipe-refs",value)
+    fun demand(value:JSONObject)=post("demand",value)
+    fun demands()=get("demand")
+    fun availability(entity:String,revision:String,recipe:String)=post("availability/check",JSONObject().put("entityKey",entity).put("bodyRevision",revision).put("recipeOid",recipe))
+    fun verifyAvailability(value:JSONObject,entity:String,revision:String,recipe:String,blobs:JSONArray,now:Long)=serviceTrust.availability(value,scope,entity,revision,recipe,blobs,now)
+    fun range(oid:String,window:String,start:Int,end:Int,total:Int):ByteArray {
+        SyncV2Wire.oid(oid)
+        if(start<0 || end<start || end>=total || end-start>=65536)SyncV2Codec.fail("invalid_range")
+        val result=bytes("GET","objects/$oid",headers=mapOf("Range" to "bytes=$start-$end"),query=mapOf("windowId" to window),raw=true)
+        val contentRange=result.second.entries.firstOrNull{it.key.equals("Content-Range",true)}?.value
+        if(contentRange!="bytes $start-$end/$total" || result.first.size!=end-start+1)SyncV2Codec.fail("invalid_range")
+        return result.first
+    }
+
     fun reference(parent:String,window:String):JSONObject {
         val type=parent.substringBefore(':');if(type !in setOf("state","recipe"))SyncV2Codec.fail("invalid_oid")
         return get("$type-refs/$parent",mapOf("windowId" to window))

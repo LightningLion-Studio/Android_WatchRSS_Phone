@@ -1,0 +1,63 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "contract": "C9",
+  "clockBaseMillis": 2000000000000,
+  "rows": [
+    {
+      "entityKey": "1111111111111111111111111111111111111111111111111111111111111111",
+      "bodyRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "demandId": "01010101010101010101010101010101",
+      "requesterDeviceId": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "demandAtOffsetMillis": -100,
+      "expiresOffsetMillis": 100000
+    },
+    {
+      "entityKey": "2222222222222222222222222222222222222222222222222222222222222222",
+      "bodyRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "demandId": "02020202020202020202020202020202",
+      "requesterDeviceId": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "demandAtOffsetMillis": -100,
+      "expiresOffsetMillis": 100000
+    },
+    {
+      "entityKey": "1111111111111111111111111111111111111111111111111111111111111111",
+      "bodyRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "demandId": "03030303030303030303030303030303",
+      "requesterDeviceId": "b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+      "demandAtOffsetMillis": -100,
+      "expiresOffsetMillis": 100000
+    },
+    {
+      "entityKey": "3333333333333333333333333333333333333333333333333333333333333333",
+      "bodyRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "demandId": "04040404040404040404040404040404",
+      "requesterDeviceId": "b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4",
+      "demandAtOffsetMillis": 0,
+      "expiresOffsetMillis": 100000
+    },
+    {
+      "entityKey": "4444444444444444444444444444444444444444444444444444444444444444",
+      "bodyRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "demandId": "05050505050505050505050505050505",
+      "requesterDeviceId": "b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5",
+      "demandAtOffsetMillis": -1000,
+      "expiresOffsetMillis": 0
+    }
+  ],
+  "expected": {
+    "activeDemandIds": [
+      "04040404040404040404040404040404",
+      "01010101010101010101010101010101",
+      "03030303030303030303030303030303",
+      "02020202020202020202020202020202"
+    ],
+    "maxActive": 32,
+    "expiredExcluded": true,
+    "crossScopeVisible": false,
+    "latestMergeKeepsRequester": true,
+    "unknownQueryError": "invalid_schema",
+    "closedGateError": "feature_disabled"
+  }
+}

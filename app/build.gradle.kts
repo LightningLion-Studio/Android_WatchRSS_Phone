@@ -55,6 +55,7 @@ android {
         versionCode = 108
         versionName = "1.3.0-48"
         // P1 is local-only and opt-in. This flag never enables cloud/apply/GC.
+        buildConfigField("boolean", "SYNC_OBJECTS_V2_CONTENT", providers.gradleProperty("syncObjectsV2Content").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_CLOUD_INDEX", providers.gradleProperty("syncObjectsV2CloudIndex").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_LOCAL_PROJECTION", providers.gradleProperty("syncObjectsV2LocalProjection").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         // Implementation approval does not enable production writes or delegated conversion.

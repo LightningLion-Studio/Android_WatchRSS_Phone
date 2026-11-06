@@ -1,0 +1,72 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "contract": "C8",
+  "sourceVector": "have-want-parts.json",
+  "cases": [
+    {
+      "name": "full-prefix-final-ack-lost",
+      "durableOffset": 65958,
+      "totalBytes": 65958,
+      "verified": false,
+      "validReservation": true,
+      "expected": {
+        "status": "present",
+        "durableOffset": 65958,
+        "fullHashVerified": true,
+        "receiptReused": true,
+        "serverRevisionChanged": false
+      }
+    },
+    {
+      "name": "incomplete-prefix",
+      "durableOffset": 65536,
+      "totalBytes": 65958,
+      "verified": false,
+      "validReservation": true,
+      "expected": {
+        "status": "partial",
+        "durableOffset": 65536
+      }
+    },
+    {
+      "name": "full-prefix-expired-reservation",
+      "durableOffset": 65958,
+      "totalBytes": 65958,
+      "verified": false,
+      "validReservation": false,
+      "expected": {
+        "error": "reservation_expired"
+      }
+    },
+    {
+      "name": "full-prefix-hash-mismatch",
+      "durableOffset": 65958,
+      "totalBytes": 65958,
+      "verified": false,
+      "validReservation": true,
+      "corruptLastByte": true,
+      "expected": {
+        "error": "hash_mismatch",
+        "nextStatus": "missing",
+        "prefixDiscarded": true
+      }
+    },
+    {
+      "name": "complete-after-have",
+      "expected": {
+        "sameReceipt": true,
+        "serverRevisionChanged": false
+      }
+    },
+    {
+      "name": "duplicate-complete-request",
+      "expected": {
+        "sameResponse": true,
+        "sameReceipt": true,
+        "serverRevisionChanged": false
+      }
+    }
+  ]
+}

@@ -30,6 +30,23 @@ internal class SyncV2ServiceTrust private constructor(val accountId:String,val k
         val created=SyncV2Wire.uint(body,"createdAtMillis");val expires=SyncV2Wire.uint(body,"expiresAtMillis")
         if(expires<=created || expires-created>604800000 || expires<=now || created>now+30000)SyncV2Codec.fail("replay_detected")
     }
+    fun availability(value:JSONObject,scope:JSONObject,entity:String,revision:String,recipe:String,blobs:org.json.JSONArray,now:Long):String {
+        val body=verify("wrss.sync.v2/availability-sign",value)
+        SyncV2Codec.exact(body,setOf("version","scope","entityKey","bodyRevision","recipeOid","status","blobOidsHash","storeId","receiptRevision","createdAtMillis","expiresAtMillis"))
+        if(body.get("version")!=2 || SyncV2Codec.scope(body.getJSONObject("scope"))!=SyncV2Codec.scope(scope) || body.get("entityKey")!=entity || body.get("bodyRevision")!=revision || body.get("recipeOid")!=recipe)SyncV2Codec.fail("invalid_schema")
+        SyncV2Codec.unhex(entity,32);SyncV2Codec.unhex(revision,16);SyncV2Wire.oid(recipe,"recipe")
+        SyncV2Codec.unhex(SyncV2Wire.string(body,"storeId"),16)
+        if(SyncV2Codec.d64(SyncV2Wire.string(body,"receiptRevision")).signum()==0)SyncV2Codec.fail("invalid_schema")
+        val status=SyncV2Wire.string(body,"status")
+        if(status !in setOf("cloud-ready","source-pending","source-unavailable"))SyncV2Codec.fail("invalid_schema")
+        if(status=="cloud-ready") {
+            val hash=SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.utf8(SyncV2Codec.canonical(blobs))))
+            if(body.get("blobOidsHash")!=hash)SyncV2Codec.fail("hash_mismatch")
+        } else if(!body.isNull("blobOidsHash"))SyncV2Codec.fail("invalid_schema")
+        val created=SyncV2Wire.uint(body,"createdAtMillis");val expires=SyncV2Wire.uint(body,"expiresAtMillis")
+        if(expires<=created || expires-created>604800000 || expires<=now || created>now+30000)SyncV2Codec.fail("replay_detected")
+        return status
+    }
     /** C5 authenticates the complete fixed window; it does not replace author or content verification. */
     fun checkpoint(value:JSONObject,scope:JSONObject,now:Long):JSONObject = SyncV2Wire.schema {
         SyncV2Codec.exact(value,setOf("version","scope","body","signature"))

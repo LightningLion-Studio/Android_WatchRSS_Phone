@@ -196,6 +196,28 @@ internal class SyncV2Projection(
         }
         return true
     }
+    /** Paging descriptors never SELECTs the original body. */
+    fun cloudRowsPage(after:String="",limit:Int=64):List<JSONObject> {
+        require(limit in 1..64);ensureActive()
+        return db.query("SELECT body FROM syncv2_cloud_rows WHERE scope=? AND entity_key>? ORDER BY entity_key LIMIT ?",arrayOf<Any>(scope,after,limit)).use { c -> buildList {while(c.moveToNext())add(open("cloud-row",c.getBlob(0)))} }
+    }
+    fun wireContentRow(entity:String):JSONObject? {
+        SyncV2Codec.unhex(entity,32);ensureActive()
+        return db.query("SELECT body FROM syncv2_wire_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())open("wire-candidate",it.getBlob(0)).getJSONObject("row")else null}
+    }
+    /** CPU, HTTP and file work finishes before this short writer. No business body is replaced. */
+    fun attachContentRecipe(captured:JSONObject,recipeOid:String,recipe:JSONObject) {
+        SyncV2Wire.oid(recipeOid,"recipe");SyncV2ContentCodec.recipe(recipe)
+        val entity=captured.getString("entityKey")
+        writer { _ ->
+            val value=db.query("SELECT body FROM syncv2_wire_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())open("wire-candidate",it.getBlob(0))else SyncV2Codec.fail("body_revision_changed")}
+            val row=value.getJSONObject("row")
+            if(row.getBoolean("deleted") || listOf("entityKey","bodyRevision","rowSequence").any{row.get(it)!=captured.get(it)} || recipe.get("entityKey")!=entity || recipe.get("bodyRevision")!=row.get("bodyRevision"))SyncV2Codec.fail("body_revision_changed")
+            row.put("recipeOid",recipeOid).put("promiseId",JSONObject.NULL).put("opaqueContentId",recipe.get("opaqueContentId")).put("contentBytes",recipe.get("totalPlainBytes"))
+                .put("rowSequence",SyncV2Codec.next(row.getString("rowSequence")))
+            db.execSQL("UPDATE syncv2_wire_candidates SET body=? WHERE scope=? AND entity_key=?",arrayOf(seal("wire-candidate",value),scope,entity))
+        }
+    }
     fun cloudRows():List<JSONObject> {
         ensureActive();return db.query("SELECT body FROM syncv2_cloud_rows WHERE scope=? ORDER BY entity_key",arrayOf(scope)).use { c -> buildList {while(c.moveToNext())add(open("cloud-row",c.getBlob(0)))} }
     }
@@ -279,6 +301,10 @@ internal class SyncV2Projection(
             // Revalidate persisted candidates before reusing a pre-upgrade sealed cache.
             SyncV2Business.join(c[1] as String,meta,state)
             val prior=db.query("SELECT body FROM syncv2_wire_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())open("wire-candidate",it.getBlob(0))else null}
+            val bodyBinding=SyncV2Codec.hash(JSONObject().put("kind",c[1]).put("logicalId",c[2])
+                .put("bodyHash",meta.getJSONObject("payload").opt("contentHash")?:meta.getJSONObject("payload").opt("fingerprint")?:JSONObject.NULL)
+                .put("assetVersion",if(c[1]=="asset")state.getJSONObject("payload").opt("updatedAt")?:JSONObject.NULL else JSONObject.NULL)
+                .put("deleted",state.getJSONObject("payload").optBoolean("deleted",false)))
             val value=if(prior!=null && prior.getString("sourceHash")==hash && prior.getLong("keyVersion")==keyVersion)prior else {
                 val sealedMeta=SyncV2Envelope.seal(identity,contentKey,keyVersion,"meta",SyncV2Codec.utf8(SyncV2Codec.canonical(meta)))
                 val sealedState=SyncV2Envelope.seal(identity,contentKey,keyVersion,"state",SyncV2Codec.utf8(SyncV2Codec.canonical(state)))
@@ -289,7 +315,11 @@ internal class SyncV2Projection(
                     .put("bodyRevision",if(body)SyncV2Codec.hex(SyncV2Codec.random(16))else JSONObject.NULL)
                     .put("promiseId",if(body)SyncV2Codec.hex(SyncV2Codec.random(16))else JSONObject.NULL).put("recipeOid",JSONObject.NULL)
                     .put("opaqueContentId",JSONObject.NULL).put("contentBytes",JSONObject.NULL).put("requiredFeatures",JSONArray())
-                JSONObject().put("sourceHash",hash).put("keyVersion",keyVersion).put("row",row)
+                if(prior?.optString("bodyBinding")==bodyBinding && prior.getLong("keyVersion")==keyVersion) {
+                    val old=prior.getJSONObject("row")
+                    for(field in listOf("bodyRevision","promiseId","recipeOid","opaqueContentId","contentBytes"))row.put(field,old.get(field))
+                }
+                JSONObject().put("sourceHash",hash).put("bodyBinding",bodyBinding).put("keyVersion",keyVersion).put("row",row)
                     .put("meta",SyncV2Codec.b64(sealedMeta.bytes)).put("state",SyncV2Codec.b64(sealedState.bytes))
                     .put("refs",SyncV2Index.refs(identity,signer,sealedState.oid))
             }

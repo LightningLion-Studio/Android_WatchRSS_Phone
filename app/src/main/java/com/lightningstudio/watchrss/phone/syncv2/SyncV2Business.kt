@@ -107,6 +107,8 @@ internal object SyncV2Business {
         else -> SyncV2Codec.fail("unsupported_feature")
     }
     fun split(kind: String, logicalId: String, entityKey: String, value: JSONObject, addedAt: Long?): PairObjects {
+        // C7: P3A never segments or replaces an oversized original note.
+        if(kind=="note" && listOf("markdown","plainText","baseMarkdown").any{val text=value.opt(it);text is String && SyncV2Codec.utf8(text).size>245760})SyncV2Codec.fail("object_too_large")
         validate(kind,value)
         // A missing channel is readable unknown data, never permission to rewrite an empty set.
         if(kind=="note" && !value.has("noteConflicts"))SyncV2Codec.fail("unsupported_feature")

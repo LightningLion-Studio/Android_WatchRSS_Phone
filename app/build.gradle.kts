@@ -55,6 +55,7 @@ android {
         versionCode = 108
         versionName = "1.3.0-48"
         // P1 is local-only and opt-in. This flag never enables cloud/apply/GC.
+        buildConfigField("boolean", "SYNC_OBJECTS_V2_CLOUD_INDEX", providers.gradleProperty("syncObjectsV2CloudIndex").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_LOCAL_PROJECTION", providers.gradleProperty("syncObjectsV2LocalProjection").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         // Implementation approval does not enable production writes or delegated conversion.
         buildConfigField("boolean", "CLOUD_FORMAT_R48_WRITE_V1", providers.gradleProperty("cloudFormatR48WriteV1").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
@@ -253,5 +254,22 @@ tasks.register<Test>("r48JointLocalTest") {
     maxHeapSize=unit.maxHeapSize
     filter.includeTestsMatching("com.lightningstudio.watchrss.phone.cloud.R48JointLocalIntegrationTest")
     environment("WATCHRSS_R48_JOINT_ENV",providers.environmentVariable("WATCHRSS_R48_JOINT_ENV").orNull ?: "")
+    outputs.upToDateWhen {false}
+}
+
+// Opt-in only. Credentials remain in the per-phone private fixture, never JVM command arguments.
+tasks.withType<Test>().configureEach {
+    if(name == "testDebugUnitTest") exclude("**/SyncV2P2JointIntegrationTest*")
+}
+tasks.register<Test>("syncV2P2JointTest") {
+    val unit=tasks.named<Test>("testDebugUnitTest").get()
+    dependsOn(unit.testClassesDirs.buildDependencies)
+    testClassesDirs=unit.testClassesDirs
+    classpath=unit.classpath
+    systemProperties(unit.systemProperties)
+    jvmArgs(unit.jvmArgs ?: emptyList<String>())
+    maxHeapSize=unit.maxHeapSize
+    filter.includeTestsMatching("com.lightningstudio.watchrss.phone.syncv2.SyncV2P2JointIntegrationTest")
+    environment("WATCHRSS_P2_PHONE_JOINT",providers.environmentVariable("WATCHRSS_P2_PHONE_JOINT").orNull ?: "")
     outputs.upToDateWhen {false}
 }

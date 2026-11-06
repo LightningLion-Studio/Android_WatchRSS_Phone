@@ -63,7 +63,9 @@ class SyncV2SqliteTest {
         val book=SyncV2Fixtures.vector("book-merge").getJSONArray("cases").getJSONObject(0).getJSONObject("left")
         sql.execSQL("INSERT INTO imported_books VALUES(?,?,'hash',5)",arrayOf(book.getString("bookId"),book.toString()))
         val copy=JSONObject(SyncV2Fixtures.vector("book-merge").getJSONArray("cases").getJSONObject(0).getJSONObject("right").toString()).put("instanceId","ab".repeat(16))
-        sql.execSQL("INSERT INTO imported_books VALUES('copy',?,'hash',5)",arrayOf(copy.toString()))
+        val copyId=SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.lp(SyncV2Codec.utf8("watchrss/book/instance-id/v1"),SyncV2Codec.utf8(copy.getString("fingerprint")),SyncV2Codec.utf8(copy.getString("instanceId")))))
+        copy.put("bookId",copyId)
+        sql.execSQL("INSERT INTO imported_books VALUES(?,?,'hash',5)",arrayOf(copyId,copy.toString()))
         val countsBefore=businessCounts(sql)
         val before=businessDigest(sql);val a=adapter(db);a.install()
         for(d in SyncV2Schema.domains)while(!a.scanPage(d.table).complete){}
@@ -76,7 +78,7 @@ class SyncV2SqliteTest {
         assertEquals("remote",a.sourceProvenance("note","note")!!.getJSONArray("conflicts").getJSONObject(0).getString("remoteMarkdown"))
         assertEquals("unknown",pair.first.getString("addedAtSource"))
         assertTrue(a.candidate("book",book.getString("bookId"))!!.second.getJSONObject("payload").getBoolean("deleted"))
-        assertEquals("ab".repeat(16),a.candidate("book","copy")!!.first.getJSONObject("payload").getString("instanceId"))
+        assertEquals("ab".repeat(16),a.candidate("book",copyId)!!.first.getJSONObject("payload").getString("instanceId"))
         assertEquals(87,db.syncPeerStateDao().get("paired-peer")!!.lastRemoteSeqApplied)
         SyncV2Fixtures.evidence("domain-preservation.json",JSONObject().put("countsBefore",countsBefore).put("countsAfter",businessCounts(sql)).put("beforeSha256",before).put("afterSha256",businessDigest(sql)).put("oldRemoteCursor",87).put("candidateCount",scalar(sql,"SELECT COUNT(*) FROM syncv2_candidates")))
     }
@@ -125,6 +127,19 @@ class SyncV2SqliteTest {
         val old=scalar(sql,"SELECT COUNT(*) FROM syncv2_outbox")
         sql.execSQL("UPDATE phone_articles SET title=title WHERE articleId='big'")
         assertEquals(old,scalar(sql,"SELECT COUNT(*) FROM syncv2_outbox"))
+    }
+    @Test fun n02WireGuidDoesNotBecomeARoomColumnOrChangeLocalBusinessRows() {
+        val db=room();put(db,article("local"));val sql=db.openHelper.writableDatabase
+        val before=businessDigest(sql);val a=adapter(db);a.install()
+        val page=a.scanPage("phone_articles");assertTrue(page.complete);assertEquals(1,page.rows)
+        val pair=a.candidate("article","local")!!
+        val value=SyncV2Business.join("article",pair.first,pair.second)
+        assertFalse(value.has("guid"))
+        assertEquals("local",value.getString("articleId"))
+        assertEquals(before,businessDigest(sql))
+        val columns=sql.query("PRAGMA table_info(phone_articles)").use{c->buildList{while(c.moveToNext())add(c.getString(1))}}
+        assertFalse(columns.contains("guid"))
+        assertEquals(1,scalar(sql,"SELECT COUNT(*) FROM phone_articles"))
     }
     @Test fun scanMappingLogAndCheckpointRollbackAtEveryPrecommitBoundary() {
         val stages=listOf("begin","before-map","after-map","before-log","after-log","before-checkpoint","after-checkpoint","before-state","before-commit","after-transaction")
@@ -454,5 +469,17 @@ class SyncV2SqliteTest {
         val status=File("/proc/self/status").readLines().firstOrNull{it.startsWith("VmHWM:")};db.openHelper.writableDatabase.query("SELECT COUNT(*),SUM(length(body)) FROM syncv2_tree_nodes").use{it.moveToFirst();evidence.put("localCandidateTreeNodes",it.getLong(0)).put("localCandidateTreeBytes",it.getLong(1))}
         evidence.put("processPeakRss",status?:"unavailable").put("bridgeCalls","not applicable: JVM native SQLite host").put("databaseBytes",path.length())
         SyncV2Fixtures.evidence("12500.json",evidence)
+        val wireStart=System.nanoTime()
+        val signing=SyncV2Signing.fromPrivate(ByteArray(31)+byteArrayOf(1),"aa".repeat(16),"ab".repeat(16))
+        val wire=a.prepareWireIndex(signing,ByteArray(32){0x22},1)
+        assertEquals(12500,SyncV2Index.read(JSONObject(a.scope),wire.tree.root,wire.objects::getValue).size)
+        val wireEvidence=JSONObject().put("platform","JVM/native SQLite; no physical phone or network")
+            .put("entities",12500).put("wireObjects",wire.objects.size).put("stateRefs",wire.refs.size)
+            .put("wireElapsedMillis",(System.nanoTime()-wireStart)/1000000)
+            .put("processPeakRss",File("/proc/self/status").readLines().firstOrNull{it.startsWith("VmHWM:")})
+            .put("bridgeCalls","not applicable: JVM/native SQLite").put("bodyWorkerCalls",0)
+        for(type in listOf("meta","state","tree","state-refs"))wireEvidence.put(type+"Bytes",wire.objects.filterKeys{it.startsWith("$type:")}.values.sumOf{it.size.toLong()})
+        SyncV2Fixtures.evidence("p2-12500.json",wireEvidence)
+
     }
 }

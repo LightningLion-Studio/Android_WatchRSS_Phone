@@ -1,0 +1,78 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "cases": [
+    {
+      "input": {
+        "requestId": "11111111111111111111111111111111",
+        "expectedOid": null,
+        "expectedRevision": "0",
+        "newCommitOid": "commit:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "ok": true,
+        "current": {
+          "oid": "commit:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "1"
+        }
+      }
+    },
+    {
+      "input": {
+        "requestId": "22222222222222222222222222222222",
+        "expectedOid": null,
+        "expectedRevision": "0",
+        "newCommitOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "expected": {
+        "error": "ref_conflict",
+        "current": {
+          "oid": "commit:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "1"
+        }
+      }
+    },
+    {
+      "input": {
+        "requestId": "11111111111111111111111111111111",
+        "expectedOid": null,
+        "expectedRevision": "0",
+        "newCommitOid": "commit:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "ok": true,
+        "current": {
+          "oid": "commit:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "1"
+        }
+      }
+    },
+    {
+      "input": {
+        "requestId": "11111111111111111111111111111111",
+        "expectedOid": null,
+        "expectedRevision": "0",
+        "newCommitOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "expected": {
+        "error": "idempotency_conflict"
+      }
+    },
+    {
+      "input": {
+        "requestId": "33333333333333333333333333333333",
+        "expectedOid": "commit:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "expectedRevision": "1",
+        "newCommitOid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "expected": {
+        "ok": true,
+        "current": {
+          "oid": "commit:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "revision": "2"
+        }
+      }
+    }
+  ]
+}

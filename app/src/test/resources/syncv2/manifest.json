@@ -1,5 +1,5 @@
 {
-  "source": "syncv2/vectors (v2-rc6), fixed original bytes; do not regenerate expected",
+  "source": "syncv2/vectors (v2-rc6c), fixed original bytes; do not regenerate expected",
   "sha256": {
     "derivation.json": "d88975adb9f11141723ad9ee5544eaf598981c8b2dfbe40eb9a53ffcc45426e7",
     "book-merge.json": "afccc4efad252519bebab6452572d56e45b4bdb4d4dd387fc98df3ea5b3304c8",
@@ -15,6 +15,18 @@
     "rc5-review.json": "34aa8b66eee60f69001564e7325cd9faaf97f9be8e193edb3d7d2f4089455a52",
     "rc6-review.json": "9183a74c1b6ed81d09991512a3a11cc3457f04a7c54505344b4dd9aa424f5b18",
     "rc5-contracts.json": "26842d6fbcbe763ce10a89b20225c9e4782b14715383c0217617f231bc62fbb7",
-    "rc6-contracts.json": "67f8d4b000689dd810384a9ff1eaa692d05310b80033f8c1f5278eacc63d67d0"
+    "rc6-contracts.json": "67f8d4b000689dd810384a9ff1eaa692d05310b80033f8c1f5278eacc63d67d0",
+    "envelope.json": "d305837ad20903197c65f1eef1488ade65cd2335c7e788c3e63fac863c3880ab",
+    "index-signature.json": "88d5f44c947ca96c86d0ee7db3676472d0927513a9aff77cc56c85ec191b22bd",
+    "control-signatures.json": "8b92f76cd93486ebe260272ebdc80e5dfd10474121c48e4fc2f19e5976d97898",
+    "cas.json": "f973b979b3a1ddb95117843a960f95d467be33346751676b682ae00655d2bc22",
+    "account-cas.json": "0adc145e75a42bcc613116c65c7ed049aa19f8336b8d19eff614c64160333d4e",
+    "notes-conflict.json": "0b9ef9eba353c7828a567ef2a5f3f5fd1df56380e24a9ef94102f29ca5c3c71f",
+    "rc6b-contracts.json": "8623b207731ca3526dfa19c12fc658c79e810384b3ce5014eb858d1db5b3aeca",
+    "rc6c-contracts.json": "d59f44bfaaa299901c9c629b35c4618b727acac8281a5b69866b2ba7f39afa0b",
+    "negotiation.json": "4c7b445487f1650dbf7584fda1eb31e6a2c36f7cfee45580536db033ae624e66",
+    "have-want-parts.json": "3e0a025aa212a460070b7c674ef2e44792281fe8c0d113295a3940e55d9fa3c6",
+    "history.json": "01668531301fa5c0d8282d94450d4c40716debf9c907855581fa9f655f154786",
+    "device-mapping.json": "00cb2af108e8414539f159484ce7ff676f52aaacb7fcffe552001309da8c3230"
   }
 }

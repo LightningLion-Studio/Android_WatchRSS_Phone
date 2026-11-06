@@ -85,8 +85,8 @@ internal object SyncV2Codec {
     }
     fun scope(value: JSONObject): String {
         exact(value, setOf("repoId", "libraryEpoch", "contentGeneration"))
-        unhex(value.getString("repoId"), 16)
-        for (field in listOf("libraryEpoch", "contentGeneration")) if (d64(value.getString(field)) < BigInteger.ONE) fail("invalid_schema")
+        unhex(SyncV2Wire.string(value,"repoId"), 16)
+        for (field in listOf("libraryEpoch", "contentGeneration")) if (d64(SyncV2Wire.string(value,field)) < BigInteger.ONE) fail("invalid_schema")
         return canonical(value)
     }
     fun entity(key: ByteArray, repo: String, kind: String, logicalId: String): String {

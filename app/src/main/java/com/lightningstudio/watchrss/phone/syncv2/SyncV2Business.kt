@@ -9,17 +9,19 @@ import org.json.JSONObject
 internal object SyncV2Business {
     private fun fields(s: String) = s.split(' ').toSet()
     val metaFields = fields("articleId url title siteName excerpt imageUrl rssSourceUrl rssSourceTitle contentHash importedAt guid sourceUrl sourceId description siteUrl createdAt fingerprint chapterCount kind instanceId bookId articleIdHash chapterIndex noteId folderId name assetId mime originalFilename")
-    val articleFields = fields("articleId sourceDeviceId url title siteName excerpt imageUrl contentHash importedAt updatedAt independentSaved independentChangedAt independentSortOrder rssSourceUrl rssSourceTitle favoriteSaved favoriteChangedAt favoriteSortOrder watchLaterSaved watchLaterChangedAt watchLaterSortOrder deleted deletedAt readingProgress isRead readingPositionBytes readingPositionContentHash readingPositionChangedAt rssIndexRetired bookIndexRetired registerSources")
+    val articleFields = fields("articleId sourceDeviceId url title siteName excerpt imageUrl contentHash importedAt guid updatedAt independentSaved independentChangedAt independentSortOrder rssSourceUrl rssSourceTitle favoriteSaved favoriteChangedAt favoriteSortOrder watchLaterSaved watchLaterChangedAt watchLaterSortOrder deleted deletedAt readingProgress isRead readingPositionBytes readingPositionContentHash readingPositionChangedAt rssIndexRetired bookIndexRetired registerSources")
     val sourceFields = fields("url sourceId title description siteUrl imageUrl createdAt updatedAt sortOrder isPinned deleted deletedAt sourceDeviceId useOriginalContent continuePlaybackInBackground")
     val bookFields = fields("bookId fingerprint title chapterCount deletedChapters deletionClock deleted deletedAt updatedAt sourceDeviceId sourceUrl kind lifecycle instanceId")
     val readingFields = fields("bookId chapterIndex isRead readingProgress readingPositionBytes readingPositionContentHash readingPositionChangedAt sourceDeviceId favoriteSaved favoriteChangedAt favoriteSortOrder favoriteSourceDeviceId watchLaterSaved watchLaterChangedAt watchLaterSortOrder watchLaterSourceDeviceId")
+    // RSS tombstones are part of its frozen schema; book save provenance is not.
+    val rssStateFields = fields("sourceId articleIdHash sourceDeviceId isRead readingProgress readingPositionBytes readingPositionContentHash readingPositionChangedAt favoriteSaved favoriteChangedAt favoriteSortOrder watchLaterSaved watchLaterChangedAt watchLaterSortOrder deleted deletedAt")
     val noteFields = fields("noteId folderId title markdown plainText contentHash baseContentHash baseMarkdown pinned createdAt updatedAt modifiedBy deleted deletedAt")
     val folderFields = fields("folderId name sortOrder updatedAt modifiedBy deleted deletedAt")
     val assetFields = fields("assetId mime originalFilename updatedAt sourceDeviceId deleted deletedAt")
     fun allowed(kind: String) = when(kind) {
         "article" -> articleFields; "source" -> sourceFields; "book" -> bookFields
-        "book-reading" -> readingFields; "note" -> noteFields; "folder" -> folderFields
-        "asset" -> assetFields; "rss-state" -> readingFields - setOf("bookId", "chapterIndex") + setOf("sourceId", "articleIdHash")
+        "book-reading" -> readingFields; "note" -> noteFields + "noteConflicts"; "folder" -> folderFields
+        "asset" -> assetFields; "rss-state" -> rssStateFields
         else -> SyncV2Codec.fail("unsupported_feature")
     }
     private val booleans = fields("independentSaved favoriteSaved watchLaterSaved deleted isRead rssIndexRetired bookIndexRetired isPinned useOriginalContent continuePlaybackInBackground pinned")
@@ -30,6 +32,7 @@ internal object SyncV2Business {
         for (key in input.keys()) {
             val value = input.get(key)
             when {
+                key == "noteConflicts" -> SyncV2NoteConflicts.validate(input.getJSONObject(key),input.getString("noteId"))
                 key in booleans -> if(value !is Boolean) SyncV2Codec.fail("invalid_schema")
                 key in numbers -> {
                     if(value !is Int && value !is Long) SyncV2Codec.fail("invalid_schema")
@@ -73,18 +76,40 @@ internal object SyncV2Business {
             }
         }
         val required=when(kind) {
-            "article" -> fields("articleId sourceDeviceId url title updatedAt")
+            "article" -> if(input.has("registerSources")) fields("articleId sourceDeviceId url contentHash updatedAt registerSources") else fields("articleId url")
             "book" -> fields("bookId fingerprint title chapterCount deletedChapters deletionClock deleted deletedAt updatedAt sourceDeviceId")
             "book-reading" -> fields("bookId chapterIndex isRead readingProgress readingPositionBytes readingPositionContentHash readingPositionChangedAt sourceDeviceId")
             "note" -> noteFields; "folder" -> folderFields; "asset" -> assetFields
-            "source" -> fields("url title updatedAt sourceDeviceId")
+            "source" -> fields("url")
+            "rss-state" -> fields("sourceId articleIdHash")
             else -> emptySet()
         }
         if(required.any { !input.has(it) }) SyncV2Codec.fail("invalid_schema")
+        if(kind=="book") {
+            val fingerprint=input.getString("fingerprint");val id=input.getString("bookId")
+            if(!Regex("[0-9a-f]{64}").matches(fingerprint) || !Regex("[0-9a-f]{64}").matches(id))SyncV2Codec.fail("invalid_schema")
+            val instance=input.optString("instanceId","")
+            val fields=if(input.has("instanceId"))listOf("watchrss/book/instance-id/v1",fingerprint,instance) else listOf("watchrss/book/id/v1",fingerprint)
+            if(SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.lp(*fields.map(SyncV2Codec::utf8).toTypedArray())))!=id)SyncV2Codec.fail("invalid_schema")
+        }
     }
     data class PairObjects(val meta: JSONObject, val state: JSONObject)
+    /** Frozen business identity, distinct from a signed outer logicalId supplied by a peer. */
+    fun logicalId(kind:String,value:JSONObject):String = when(kind) {
+        "article" -> SyncV2Wire.string(value,"articleId")
+        "source" -> SyncV2Wire.string(value,"url")
+        "book" -> SyncV2Wire.string(value,"bookId")
+        "book-reading" -> SyncV2Wire.string(value,"bookId")+":"+SyncV2Wire.uint(value,"chapterIndex",100000)
+        "note" -> SyncV2Wire.string(value,"noteId")
+        "folder" -> SyncV2Wire.string(value,"folderId")
+        "asset" -> SyncV2Wire.string(value,"assetId")
+        "rss-state" -> SyncV2Wire.string(value,"sourceId")+":"+SyncV2Wire.string(value,"articleIdHash")
+        else -> SyncV2Codec.fail("unsupported_feature")
+    }
     fun split(kind: String, logicalId: String, entityKey: String, value: JSONObject, addedAt: Long?): PairObjects {
         validate(kind,value)
+        // A missing channel is readable unknown data, never permission to rewrite an empty set.
+        if(kind=="note" && !value.has("noteConflicts"))SyncV2Codec.fail("unsupported_feature")
         val meta=JSONObject(); val state=JSONObject()
         for(key in value.keys()) {
             if(key=="readingProgress") state.put("readingProgressMicros",kotlin.math.floor(value.getDouble(key)*1000000.0+0.5).toLong())
@@ -94,7 +119,8 @@ internal object SyncV2Business {
             .put("addedAtSource",if(addedAt==null)"unknown" else "original").put("requiredFeatures",JSONArray()).put("payload",meta)
         val s=JSONObject().put("version",2).put("entityKey",entityKey).put("requiredFeatures",JSONArray()).put("payload",state).put("noteSegments",JSONArray())
         for(obj in listOf(m,s)) if(SyncV2Codec.utf8(SyncV2Codec.canonical(obj)).size>262144) SyncV2Codec.fail("object_too_large")
-        return PairObjects(m,s)
+        s.getJSONObject("payload").remove("noteConflicts")
+        return PairObjects(m,if(kind=="note" && value.has("noteConflicts")) SyncV2NoteConflicts.attach(s,logicalId,entityKey,value.getJSONObject("noteConflicts")) else s)
     }
     fun join(kind: String, meta: JSONObject, state: JSONObject): JSONObject {
         val m=meta.getJSONObject("payload"); val s=state.getJSONObject("payload")

@@ -1,0 +1,192 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "cases": [
+    {
+      "a": {
+        "legacyMax": 14,
+        "supportsSyncObjectsV2": true,
+        "versions": [
+          2
+        ],
+        "required": [],
+        "supported": []
+      },
+      "b": {
+        "legacyMax": 14,
+        "supportsSyncObjectsV2": true,
+        "versions": [
+          2
+        ],
+        "required": [],
+        "supported": []
+      },
+      "scopeEqual": true,
+      "safeLegacy": true,
+      "expected": "objects-v2"
+    },
+    {
+      "a": {
+        "legacyMax": 14,
+        "supportsSyncObjectsV2": true,
+        "versions": [
+          2
+        ],
+        "required": [],
+        "supported": []
+      },
+      "b": {
+        "legacyMax": 14
+      },
+      "scopeEqual": true,
+      "safeLegacy": true,
+      "expected": "legacy-v14"
+    },
+    {
+      "a": {
+        "legacyMax": 14
+      },
+      "b": {
+        "legacyMax": 14,
+        "supportsSyncObjectsV2": true,
+        "versions": [
+          2
+        ],
+        "required": [],
+        "supported": []
+      },
+      "scopeEqual": true,
+      "safeLegacy": true,
+      "expected": "legacy-v14"
+    },
+    {
+      "a": {
+        "legacyMax": 14,
+        "supportsSyncObjectsV2": true,
+        "versions": [
+          2
+        ],
+        "required": [],
+        "supported": []
+      },
+      "b": {
+        "legacyMax": 13
+      },
+      "scopeEqual": true,
+      "safeLegacy": true,
+      "expected": "legacy-v13"
+    },
+    {
+      "a": {
+        "legacyMax": 14,
+        "supportsSyncObjectsV2": true,
+        "versions": [
+          2
+        ],
+        "required": [],
+        "supported": []
+      },
+      "b": {
+        "legacyMax": 14,
+        "supportsSyncObjectsV2": true,
+        "versions": [
+          2
+        ],
+        "required": [],
+        "supported": []
+      },
+      "scopeEqual": false,
+      "safeLegacy": true,
+      "expected": "legacy-v14"
+    },
+    {
+      "a": {
+        "legacyMax": 14,
+        "supportsSyncObjectsV2": true,
+        "versions": [
+          2
+        ],
+        "required": [
+          "book-lifecycle.v1"
+        ],
+        "supported": []
+      },
+      "b": {
+        "legacyMax": 14,
+        "supportsSyncObjectsV2": true,
+        "versions": [
+          2
+        ],
+        "required": [],
+        "supported": []
+      },
+      "scopeEqual": true,
+      "safeLegacy": false,
+      "expected": "upgrade_required"
+    },
+    {
+      "a": {
+        "legacyMax": 12
+      },
+      "b": {
+        "legacyMax": 14,
+        "supportsSyncObjectsV2": true,
+        "versions": [
+          2
+        ],
+        "required": [],
+        "supported": []
+      },
+      "scopeEqual": true,
+      "safeLegacy": true,
+      "expected": "upgrade_required"
+    },
+    {
+      "a": {
+        "legacyMax": 14,
+        "supportsSyncObjectsV2": true,
+        "versions": [
+          2
+        ],
+        "required": [],
+        "supported": []
+      },
+      "b": {
+        "legacyMax": 14,
+        "supportsSyncObjectsV2": false,
+        "versions": [
+          2
+        ],
+        "required": [],
+        "supported": []
+      },
+      "scopeEqual": true,
+      "safeLegacy": true,
+      "expected": "legacy-v14"
+    },
+    {
+      "a": {
+        "legacyMax": 14,
+        "supportsSyncObjectsV2": true,
+        "versions": [
+          2
+        ],
+        "required": [],
+        "supported": []
+      },
+      "b": {
+        "legacyMax": 14,
+        "supportsSyncObjectsV2": true,
+        "versions": [
+          3
+        ],
+        "required": [],
+        "supported": []
+      },
+      "scopeEqual": true,
+      "safeLegacy": true,
+      "expected": "legacy-v14"
+    }
+  ]
+}

@@ -1,0 +1,194 @@
+{
+  "format": "wrss.sync.v2.public-test-vectors",
+  "version": 1,
+  "syntheticOnly": true,
+  "service": {
+    "receiptKeyId": "4e6d8a916396398d6b1a87920ba7dc0d",
+    "receiptSigningPublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEVbu0rVXmBW1cEXAQupqeVmO5l1d9Bwm692DZbQQk2C44UzRjyH4K-nWvWOZ-kcPXMRNEPVVae6w5Q48t4TKqXw",
+    "algorithm": "ES256"
+  },
+  "mapping": {
+    "body": {
+      "scope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "deviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "keyId": "abababababababababababababababab",
+      "legacyDeviceId": "synthetic-old-approved-device-1",
+      "approvalRevision": "9007199254740993"
+    },
+    "signature": "ZcZuUSKQcTKwq0lGQFvfVS4oVgBK0vJMmLkLbioqwUEr7WFKpnuxWSKhyxA9cziQyvBK2RiIwDE-3PiwRXNa9Q"
+  },
+  "expected": {
+    "canonicalBody": "{\"approvalRevision\":\"9007199254740993\",\"deviceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyId\":\"abababababababababababababababab\",\"legacyDeviceId\":\"synthetic-old-approved-device-1\",\"scope\":{\"contentGeneration\":\"2\",\"libraryEpoch\":\"1\",\"repoId\":\"01010101010101010101010101010101\"}}",
+    "canonicalBodyHex": "7b22617070726f76616c5265766973696f6e223a2239303037313939323534373430393933222c226465766963654964223a226161616161616161616161616161616161616161616161616161616161616161222c226b65794964223a226162616261626162616261626162616261626162616261626162616261626162222c226c65676163794465766963654964223a2273796e7468657469632d6f6c642d617070726f7665642d6465766963652d31222c2273636f7065223a7b22636f6e74656e7447656e65726174696f6e223a2232222c226c69627261727945706f6368223a2231222c227265706f4964223a223031303130313031303130313031303130313031303130313031303130313031227d7d",
+    "lpHex": "0000001b777273732e73796e632e76322f6465766963652d6d617070696e67000001147b22617070726f76616c5265766973696f6e223a2239303037313939323534373430393933222c226465766963654964223a226161616161616161616161616161616161616161616161616161616161616161222c226b65794964223a226162616261626162616261626162616261626162616261626162616261626162222c226c65676163794465766963654964223a2273796e7468657469632d6f6c642d617070726f7665642d6465766963652d31222c2273636f7065223a7b22636f6e74656e7447656e65726174696f6e223a2232222c226c69627261727945706f6368223a2231222c227265706f4964223a223031303130313031303130313031303130313031303130313031303130313031227d7d",
+    "signature": "ZcZuUSKQcTKwq0lGQFvfVS4oVgBK0vJMmLkLbioqwUEr7WFKpnuxWSKhyxA9cziQyvBK2RiIwDE-3PiwRXNa9Q"
+  },
+  "rejectCases": [
+    {
+      "name": "tampered-deviceId",
+      "mapping": {
+        "body": {
+          "approvalRevision": "9007199254740993",
+          "deviceId": "ffffffffffffffffffffffffffffffff",
+          "keyId": "abababababababababababababababab",
+          "legacyDeviceId": "synthetic-old-approved-device-1",
+          "scope": {
+            "contentGeneration": "2",
+            "libraryEpoch": "1",
+            "repoId": "01010101010101010101010101010101"
+          }
+        },
+        "signature": "ZcZuUSKQcTKwq0lGQFvfVS4oVgBK0vJMmLkLbioqwUEr7WFKpnuxWSKhyxA9cziQyvBK2RiIwDE-3PiwRXNa9Q"
+      },
+      "domain": "wrss.sync.v2/device-mapping",
+      "expectedScope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "expected": {
+        "accepted": false,
+        "code": "signature_invalid"
+      }
+    },
+    {
+      "name": "tampered-keyId",
+      "mapping": {
+        "body": {
+          "approvalRevision": "9007199254740993",
+          "deviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "keyId": "ffffffffffffffffffffffffffffffff",
+          "legacyDeviceId": "synthetic-old-approved-device-1",
+          "scope": {
+            "contentGeneration": "2",
+            "libraryEpoch": "1",
+            "repoId": "01010101010101010101010101010101"
+          }
+        },
+        "signature": "ZcZuUSKQcTKwq0lGQFvfVS4oVgBK0vJMmLkLbioqwUEr7WFKpnuxWSKhyxA9cziQyvBK2RiIwDE-3PiwRXNa9Q"
+      },
+      "domain": "wrss.sync.v2/device-mapping",
+      "expectedScope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "expected": {
+        "accepted": false,
+        "code": "signature_invalid"
+      }
+    },
+    {
+      "name": "tampered-legacyDeviceId",
+      "mapping": {
+        "body": {
+          "approvalRevision": "9007199254740993",
+          "deviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "keyId": "abababababababababababababababab",
+          "legacyDeviceId": "unapproved-synthetic-device",
+          "scope": {
+            "contentGeneration": "2",
+            "libraryEpoch": "1",
+            "repoId": "01010101010101010101010101010101"
+          }
+        },
+        "signature": "ZcZuUSKQcTKwq0lGQFvfVS4oVgBK0vJMmLkLbioqwUEr7WFKpnuxWSKhyxA9cziQyvBK2RiIwDE-3PiwRXNa9Q"
+      },
+      "domain": "wrss.sync.v2/device-mapping",
+      "expectedScope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "expected": {
+        "accepted": false,
+        "code": "signature_invalid"
+      }
+    },
+    {
+      "name": "tampered-approvalRevision",
+      "mapping": {
+        "body": {
+          "approvalRevision": "9007199254740994",
+          "deviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "keyId": "abababababababababababababababab",
+          "legacyDeviceId": "synthetic-old-approved-device-1",
+          "scope": {
+            "contentGeneration": "2",
+            "libraryEpoch": "1",
+            "repoId": "01010101010101010101010101010101"
+          }
+        },
+        "signature": "ZcZuUSKQcTKwq0lGQFvfVS4oVgBK0vJMmLkLbioqwUEr7WFKpnuxWSKhyxA9cziQyvBK2RiIwDE-3PiwRXNa9Q"
+      },
+      "domain": "wrss.sync.v2/device-mapping",
+      "expectedScope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "expected": {
+        "accepted": false,
+        "code": "signature_invalid"
+      }
+    },
+    {
+      "name": "wrong-domain",
+      "mapping": {
+        "body": {
+          "scope": {
+            "repoId": "01010101010101010101010101010101",
+            "libraryEpoch": "1",
+            "contentGeneration": "2"
+          },
+          "deviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "keyId": "abababababababababababababababab",
+          "legacyDeviceId": "synthetic-old-approved-device-1",
+          "approvalRevision": "9007199254740993"
+        },
+        "signature": "ZcZuUSKQcTKwq0lGQFvfVS4oVgBK0vJMmLkLbioqwUEr7WFKpnuxWSKhyxA9cziQyvBK2RiIwDE-3PiwRXNa9Q"
+      },
+      "domain": "wrss.sync.v2/device-mapping-wrong",
+      "expectedScope": {
+        "repoId": "01010101010101010101010101010101",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "expected": {
+        "accepted": false,
+        "code": "signature_invalid"
+      }
+    },
+    {
+      "name": "wrong-scope",
+      "mapping": {
+        "body": {
+          "scope": {
+            "repoId": "01010101010101010101010101010101",
+            "libraryEpoch": "1",
+            "contentGeneration": "2"
+          },
+          "deviceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "keyId": "abababababababababababababababab",
+          "legacyDeviceId": "synthetic-old-approved-device-1",
+          "approvalRevision": "9007199254740993"
+        },
+        "signature": "ZcZuUSKQcTKwq0lGQFvfVS4oVgBK0vJMmLkLbioqwUEr7WFKpnuxWSKhyxA9cziQyvBK2RiIwDE-3PiwRXNa9Q"
+      },
+      "domain": "wrss.sync.v2/device-mapping",
+      "expectedScope": {
+        "repoId": "ffffffffffffffffffffffffffffffff",
+        "libraryEpoch": "1",
+        "contentGeneration": "2"
+      },
+      "expected": {
+        "accepted": false,
+        "code": "scope_mismatch"
+      }
+    }
+  ]
+}

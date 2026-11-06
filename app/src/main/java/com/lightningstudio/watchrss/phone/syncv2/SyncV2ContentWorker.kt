@@ -72,7 +72,24 @@ internal class SyncV2ContentWorker(private val client:SyncV2CloudClient,private 
     fun uploadScheduled(items:()->List<Upload>,budget:Budget=Budget()):Result = window(budget) { window,remaining,advance ->
         data class Transfer(val total:Int,val reservation:String,var offset:Int)
         val transfers=mutableMapOf<String,Transfer>();val done=mutableSetOf<String>();val exactCache=mutableMapOf<String,Pair<String,JSONObject?>>()
+        val renewed=mutableMapOf<String,String>();val forceRenew=mutableSetOf<String>();val expiryRetries=mutableMapOf<String,Int>()
+        fun reserve(oid:String,total:Int,fresh:Boolean):String {
+            val response=client.reserve(if(fresh)id()else reserveRequestId(),listOf(oid to total),"content")
+            response.getJSONArray("objects").singleObject(oid,total)
+            if(SyncV2Wire.uint(response,"expiresAtMillis")<=now())throw SyncV2CloudError("reservation_expired")
+            return SyncV2Wire.string(response,"reservationId").also{SyncV2Codec.unhex(it,16)}
+        }
+        fun exact(expected:List<Pair<String,Int>>):Map<String,Pair<String,JSONObject?>> = try {haveBatch(window,expected)}catch(e:SyncV2CloudError) {
+            if(e.code!="reservation_expired")throw e
+            // C8 cannot settle a full prefix without this actor's live reservation. Renew
+            // before querying again, retaining the same OID, bytes and confirmation ledger.
+            expected.associate { (oid,total) ->
+                renewed[oid]=reserve(oid,total,true)
+                oid to haveBatch(window,listOf(oid to total)).getValue(oid)
+            }
+        }
         store.recoverUploadCompletion()
+        store.recoverDownloadAcceptance()
         while(true) {
             gate()
             if(remaining()<=0)return@window "budget_paused"
@@ -86,18 +103,18 @@ internal class SyncV2ContentWorker(private val client:SyncV2CloudClient,private 
             val rank=fairness.choose(pending.map{it.rank}.toSet())?:break
             val item=pending.filter{it.rank==rank}.sortedWith(compareByDescending<Upload>{if(rank==0)it.demandAtMillis else it.addedAtMillis}.thenBy{it.entity}.thenBy{it.blockIndex}).first()
             val oid=item.oid
+            try {
             val transfer=transfers[oid]?:run {
                 val total=store.objectSize(oid)
+                if(forceRenew.remove(oid))renewed[oid]=reserve(oid,total,true)
                 if(oid !in exactCache) {
                     val batch=(listOf(oid)+pending.filter{it.oid !in transfers && it.oid !in exactCache}.map{it.oid}).distinct().take(64)
-                    exactCache.putAll(haveBatch(window,batch.map{it to store.objectSize(it)}))
+                    exactCache.putAll(exact(batch.map{it to store.objectSize(it)}))
                 }
                 var exact=exactCache.getValue(oid)
                 var reservationId:String?=null
                 if(exact.first!="present") {
-                    val reservation=client.reserve(reserveRequestId(),listOf(oid to total),"content")
-                    reservation.getJSONArray("objects").singleObject(oid,total)
-                    reservationId=SyncV2Wire.string(reservation,"reservationId");SyncV2Codec.unhex(reservationId,16)
+                    reservationId=renewed.remove(oid)?:reserve(oid,total,false)
                     // C11: this exact read occurs AFTER reserve, including an idempotent replay.
                     // Never turn reserve.objects[].durableOffset into a transfer position.
                     exact=haveBatch(window,listOf(oid to total)).getValue(oid)
@@ -133,6 +150,11 @@ internal class SyncV2ContentWorker(private val client:SyncV2CloudClient,private 
                 if(store.completeUpload(oid,completed.getJSONObject("receipt"),rank))advance(0,true)
                 done.add(oid)
             }
+            }catch(e:SyncV2CloudError) {
+                if(e.code!="reservation_expired" || (expiryRetries[oid]?:0)>=2)throw e
+                expiryRetries[oid]=(expiryRetries[oid]?:0)+1
+                transfers.remove(oid);exactCache.remove(oid);forceRenew.add(oid)
+            }
         };"complete"
     }
     /** Downloads immutable objects into the v2 cache; original business files never enter this path. */
@@ -140,6 +162,7 @@ internal class SyncV2ContentWorker(private val client:SyncV2CloudClient,private 
         for((oid,total) in oids) {
             gate();SyncV2Wire.oid(oid)
             if(total !in 1..266264)SyncV2Codec.fail("object_too_large")
+            store.recoverDownload(oid)
             if(store.load("download/$oid")!=null)continue
             var offset=store.prefix(oid,total)
             while(offset<total) {
@@ -152,6 +175,8 @@ internal class SyncV2ContentWorker(private val client:SyncV2CloudClient,private 
         };"complete"
     }
     fun authenticate(oid:String,key:(Long)->ByteArray):ByteArray {
+        store.recoverDownload(oid)
+        try {
         if(store.checked(oid))return store.plain(oid)
         gate();val bytes=store.objectBytes(oid)
         if(bytes.size<24)SyncV2Codec.fail("invalid_encoding")
@@ -164,6 +189,10 @@ internal class SyncV2ContentWorker(private val client:SyncV2CloudClient,private 
         };store.counts.authentications++
         if(header.getString("encoding")=="gzip")store.counts.decompressBytes+=plain.size
         store.savePlain(oid,plain);yieldControl();return plain
+        }catch(e:IllegalStateException) {
+            if(e.message in setOf("hash_mismatch","aead_invalid","invalid_encoding","fingerprint_mismatch"))store.quarantineDownload(oid,e.message!!)
+            throw e
+        }
     }
     private fun haveBatch(window:String,expected:List<Pair<String,Int>>):Map<String,Pair<String,JSONObject?>> {
         store.counts.metadataBatches++

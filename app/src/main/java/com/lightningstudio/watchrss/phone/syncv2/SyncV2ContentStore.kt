@@ -59,6 +59,7 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
     }
     fun objectSize(oid:String):Int {counts.metadataStats++;SyncV2Wire.oid(oid);val size=file(oid,".object").length();if(size !in 1..266264)SyncV2Codec.fail("object_missing");return size.toInt()}
     fun prefix(oid:String,total:Int):Int {
+        recoverDownload(oid)
         val meta=load("prefix/$oid")?:return 0
         if(meta.getInt("total")!=total)SyncV2Codec.fail("invalid_schema")
         val offset=meta.getInt("offset");val file=file(oid,".part")
@@ -75,7 +76,30 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
     }
     fun finish(oid:String,total:Int) {
         if(prefix(oid,total)!=total)SyncV2Codec.fail("closure_incomplete")
-        putObject(oid,read(file(oid,".part")))
+        try {putObject(oid,read(file(oid,".part")))}catch(e:IllegalStateException) {
+            if(e.message=="hash_mismatch")quarantineDownload(oid,e.message!!)
+            throw e
+        }
+    }
+    /** Only derived bytes for this OID are quarantined. A durable intent precedes every
+     * rename/invalidation so reopening cannot reuse the bad total-length prefix. */
+    fun quarantineDownload(oid:String,reason:String) {
+        SyncV2Wire.oid(oid)
+        save("quarantine/$oid",JSONObject().put("pending",true).put("reason",reason))
+        fault("quarantine");recoverDownload(oid)
+    }
+    fun recoverDownload(oid:String) {
+        val intent=load("quarantine/$oid")?:return
+        if(!intent.getBoolean("pending"))return
+        for(ext in listOf(".part",".object",".checked")) {
+            val source=file(oid,ext)
+            if(source.exists() && !source.renameTo(file(oid,"$ext.bad")))SyncV2Codec.fail("storage_pressure")
+        }
+        for(key in listOf("prefix/$oid","download/$oid","checked/$oid")) {
+            val metadata=file(key,".meta")
+            if(metadata.exists() && !metadata.delete())SyncV2Codec.fail("storage_pressure")
+        }
+        syncDirectory();save("quarantine/$oid",intent.put("pending",false))
     }
     fun savePlain(oid:String,plain:ByteArray) {
         val nonce=SyncV2Codec.random(12)
@@ -104,7 +128,8 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
             else->SyncV2Codec.fail("replay_detected")
         }
         val oid=intent.getString("oid")
-        save("receipt/$oid",intent.getJSONObject("receipt"));save("upload-complete/$oid",JSONObject().put("complete",true))
+        if(intent.optString("kind","upload")=="download")save("download-fairness/$oid",JSONObject().put("complete",true))
+        else {save("receipt/$oid",intent.getJSONObject("receipt"));save("upload-complete/$oid",JSONObject().put("complete",true))}
         save("completion-intent",JSONObject().put("applied",true))
     }
     fun completeUpload(oid:String,receipt:JSONObject,rank:Int):Boolean {
@@ -117,6 +142,27 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
         val after=JSONObject().put("revision",SyncV2Codec.next(revision)).put("demanded",fairness.demanded).put("nextOrdinary",fairness.nextOrdinary)
         save("completion-intent",JSONObject().put("beforeRevision",revision).put("fairness",after).put("oid",oid).put("receipt",receipt))
         recoverUploadCompletion();return true
+    }
+    fun completeDownload(oid:String,rank:Int):Boolean {
+        if(!oid.startsWith("blob:"))return false
+        recoverUploadCompletion()
+        if(load("download-fairness/$oid")!=null)return false
+        val state=load("fairness")?:JSONObject().put("revision","0").put("demanded",0).put("nextOrdinary",1)
+        val fairness=SyncV2ContentPriority.Fairness(state.getInt("demanded"),state.getInt("nextOrdinary"));fairness.completed(rank)
+        val after=JSONObject().put("revision",SyncV2Codec.next(state.getString("revision"))).put("demanded",fairness.demanded).put("nextOrdinary",fairness.nextOrdinary)
+        save("completion-intent",JSONObject().put("kind","download").put("oid",oid).put("beforeRevision",state.getString("revision")).put("fairness",after))
+        recoverUploadCompletion();return true
+    }
+    fun beginDownloadAcceptance(recipe:String,oid:String,index:Int,rank:Int) {
+        save("download-accept-intent",JSONObject().put("recipe",recipe).put("oid",oid).put("index",index).put("rank",rank).put("applied",false))
+    }
+    fun recoverDownloadAcceptance() {
+        val intent=load("download-accept-intent")?:return
+        if(intent.getBoolean("applied"))return
+        val accepted=load("receive/${intent.getString("recipe")}")?:return
+        if(accepted.getInt("index")<=intent.getInt("index"))return
+        completeDownload(intent.getString("oid"),intent.getInt("rank"))
+        save("download-accept-intent",intent.put("applied",true))
     }
     /** Bounded metadata batch. Native Kotlin has no cross-bridge calls to claim as savings. */
     fun metadata(keys:List<String>):List<JSONObject?> {

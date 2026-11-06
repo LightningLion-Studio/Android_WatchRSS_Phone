@@ -25,7 +25,7 @@ internal class SyncV2P3Fixture:AutoCloseable {
     var afterReserve:(()->Unit)?=null
     val reserveIds=mutableListOf<String>();val reserveOffsets=mutableListOf<Int>()
     private val reserved=mutableMapOf<String,Pair<String,JSONObject>>()
-    val now=100000L
+    var now=100000L
     private val algorithm=AlgorithmIdentifier(ASN1ObjectIdentifier("1.2.840.10045.2.1"),ASN1ObjectIdentifier("1.2.840.10045.3.1.7"))
     val bootstrap=JSONObject().put("algorithm","ES256").put("receiptKeyId","cd".repeat(16))
         .put("receiptSigningPublicKey",SyncV2Codec.b64(SubjectPublicKeyInfo(algorithm,SyncV2Codec.unhex(signer.publicHex,65)).encoded))

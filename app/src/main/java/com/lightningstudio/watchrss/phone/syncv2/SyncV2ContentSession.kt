@@ -61,10 +61,11 @@ internal class SyncV2ContentSession(private val identity:SyncV2Identity,private 
         if(remaining<=budget.reserveMillis)return Outcome("budget_paused",store.counts.sourceBytes-before,0,0,ready)
         val tasks=mutableListOf<SyncV2ContentWorker.Upload>()
         val priority=queue.localPriorities(jobs,recentUniverse,System.currentTimeMillis(),includeDemands=false).associate{it.first.getJSONObject("row").getString("entityKey") to it.second}
+        val added=jobs.associate{it.getJSONObject("row").getString("entityKey") to it.getLong("addedAtMillis")}
         for(p in ready) {
             val recipe=p.descriptor.getJSONObject("recipe");val blocks=recipe.getJSONArray("blocks");val entity=p.capturedRow.getString("entityKey");val rank=priority[entity]?:4
-            for(i in 0 until blocks.length())tasks.add(SyncV2ContentWorker.Upload(blocks.getJSONObject(i).getString("oid"),rank,entity,blockIndex=i,revision=p.capturedRow.getString("bodyRevision")))
-            tasks.add(SyncV2ContentWorker.Upload(p.descriptor.getString("recipeOid"),rank,entity,blockIndex=blocks.length(),revision=p.capturedRow.getString("bodyRevision")))
+            for(i in 0 until blocks.length())tasks.add(SyncV2ContentWorker.Upload(blocks.getJSONObject(i).getString("oid"),rank,entity,addedAtMillis=added.getValue(entity),blockIndex=i,revision=p.capturedRow.getString("bodyRevision")))
+            tasks.add(SyncV2ContentWorker.Upload(p.descriptor.getString("recipeOid"),rank,entity,addedAtMillis=added.getValue(entity),blockIndex=blocks.length(),revision=p.capturedRow.getString("bodyRevision")))
         }
         val result=worker.uploadScheduled({tasks},budget.copy(millis=remaining,reserveMillis=budget.reserveMillis.coerceAtMost(remaining-1)))
         if(result.status!="complete")return Outcome(result.status,store.counts.sourceBytes-before,result.durableBytes,result.completed,ready)
@@ -80,53 +81,72 @@ internal class SyncV2ContentSession(private val identity:SyncV2Identity,private 
         return Outcome(if(preparationPaused)"budget_paused" else if(sourcePending)"source_pending" else "objects-complete",store.counts.sourceBytes-before,result.durableBytes,result.completed,ready)
     }
     data class DownloadOutcome(val status:String,val transferredBytes:Long,val completeBodies:Int)
-    /** All rows come from the already authenticated current control tree. This entry point
-     * fills the v2 body cache only; the host's callback may record availability, not replace originals. */
+    /** Classification stays local. Unknown classifications default to rank4. Supply the full
+     * recent import universe (including cached imports) to preserve the two recent slots. */
     fun downloadPage(rows:List<JSONObject>,receiver:SyncV2ContentReceive,now:()->Long,
         currentRow:(String)->JSONObject?,cacheReady:(SyncV2ContentReceive.Verified)->Unit,
-        budget:SyncV2ContentWorker.Budget=SyncV2ContentWorker.Budget()):DownloadOutcome {
-        return client.withinBudget(budget.millis-budget.reserveMillis) {downloadWindow(rows,receiver,now,currentRow,cacheReady,budget)}
+        budget:SyncV2ContentWorker.Budget=SyncV2ContentWorker.Budget(),priorities:List<SyncV2ContentPriority.Item> = emptyList()):DownloadOutcome {
+        return client.withinBudget(budget.millis-budget.reserveMillis) {downloadWindow(rows,receiver,now,currentRow,cacheReady,budget,priorities)}
     }
     private fun downloadWindow(rows:List<JSONObject>,receiver:SyncV2ContentReceive,now:()->Long,currentRow:(String)->JSONObject?,
-        cacheReady:(SyncV2ContentReceive.Verified)->Unit,budget:SyncV2ContentWorker.Budget):DownloadOutcome {
-        require(rows.size<=64);val start=clock();var transferred=0L;var complete=0;var sourcePending=false
-        worker.gate();client.capabilities();val window=client.negotiate().getString("windowId")
+        cacheReady:(SyncV2ContentReceive.Verified)->Unit,budget:SyncV2ContentWorker.Budget,priorities:List<SyncV2ContentPriority.Item>):DownloadOutcome {
+        require(rows.size<=64);val start=clock();var transferred=0L;var complete=0
+        data class Job(val row:JSONObject,var recipe:SyncV2ContentReceive.Recipe?=null)
+        val jobs=rows.filter{!it.getBoolean("deleted") && !it.isNull("bodyRevision") && !it.isNull("recipeOid")}.map{Job(it)}.toMutableList()
+        var sourcePending=rows.any{!it.getBoolean("deleted") && !it.isNull("bodyRevision") && it.isNull("recipeOid")}
+        worker.startWindow();store.recoverUploadCompletion();store.recoverDownloadAcceptance();val window=client.negotiate().getString("windowId")
+        val known=priorities.associateBy{it.entityKey};val sizeCache=mutableMapOf<String,Int>()
         fun left():SyncV2ContentWorker.Budget? {
             val millis=budget.millis-(clock()-start);val bytes=budget.bytes-transferred
             if(millis<=budget.reserveMillis || bytes<=0)return null
-            return budget.copy(millis=millis,bytes=bytes)
+            return budget.copy(millis=millis,bytes=minOf(bytes,65536))
         }
-        for(row in rows) {
-            worker.gate()
-            if(row.getBoolean("deleted") || row.isNull("bodyRevision"))continue
-            if(row.isNull("recipeOid")){sourcePending=true;continue}
+        fun frame(oid:String):SyncV2ContentWorker.Result? {
+            val allowance=left()?:return null
+            val total=sizeCache[oid]?:sizes(window,listOf(oid),now()).single().second.also{sizeCache[oid]=it}
+            return worker.download(listOf(oid to total),allowance).also{transferred+=it.durableBytes}
+        }
+        while(jobs.isNotEmpty()) {
+            worker.gate();val demand=worker.pollDemands()
+            val local=jobs.map{j->val entity=j.row.getString("entityKey")
+                (known[entity]?:SyncV2ContentPriority.Item(entity,"unknown",0)).copy(complete=false,deleted=false,demandAtMillis=null,demandExpiresAtMillis=null)}
+            val universe=priorities.filter{p->local.none{it.entityKey==p.entityKey}}+local
+            val ranks=SyncV2ContentPriority.order(universe,now()).associate{it.first.entityKey to it.second}
+            val active=jobs.associateWith{j->demand.firstOrNull{it.get("entityKey")==j.row.get("entityKey") && it.get("bodyRevision")==j.row.get("bodyRevision")}}
+            val assigned=jobs.associateWith{if(active[it]!=null)0 else ranks.getValue(it.row.getString("entityKey"))}
+            val saved=store.load("fairness");val fairness=SyncV2ContentPriority.Fairness(saved?.getInt("demanded")?:0,saved?.getInt("nextOrdinary")?:1)
+            val rank=fairness.choose(assigned.values.toSet())!!
+            val job=jobs.filter{assigned[it]==rank}.sortedWith(compareByDescending<Job>{if(rank==0)active[it]!!.getLong("demandAtMillis")else known[it.row.getString("entityKey")]?.addedAtMillis?:0}
+                .thenBy{it.row.getString("entityKey")}).first()
+            val row=job.row
             try {
-            val recipeOid=row.getString("recipeOid")
-            val recipeSizes=sizes(window,listOf(recipeOid),now())
-            val first=worker.download(recipeSizes,left()?:return DownloadOutcome("budget_paused",transferred,complete))
-            transferred+=first.durableBytes
-            if(first.status!="complete")return DownloadOutcome(first.status,transferred,complete)
-            val recipe=receiver.recipe(row,window)
-            val blocks=JSONObject(recipe.value).getJSONArray("blocks")
-            var at=0
-            while(at<blocks.length()) {
-                val batch=(at until minOf(at+64,blocks.length())).map{blocks.getJSONObject(it).getString("oid")}.distinct()
-                val wanted=sizes(window,batch,now())
-                val result=worker.download(wanted,left()?:return DownloadOutcome("budget_paused",transferred,complete))
-                transferred+=result.durableBytes
-                if(result.status!="complete")return DownloadOutcome(result.status,transferred,complete)
-                at+=64
-            }
-            var verified:SyncV2ContentReceive.Verified?=null
-            while(verified==null) {
-                if(left()==null)return DownloadOutcome("budget_paused",transferred,complete)
-                verified=receiver.step(row,recipe);Thread.yield()
-            }
-            val current=currentRow(row.getString("entityKey"))?:SyncV2Codec.fail("body_revision_changed")
-            val accepted=requireNotNull(verified)
-            accepted.bind(current){cacheReady(accepted)};complete++
-            } catch(e:IllegalStateException) {
-                if(e.message in setOf("source_pending","source_unavailable"))sourcePending=true else throw e
+                if(job.recipe==null) {
+                    val result=frame(row.getString("recipeOid"))?:return DownloadOutcome("budget_paused",transferred,complete)
+                    if(result.status !in setOf("complete","budget_paused"))return DownloadOutcome(result.status,transferred,complete)
+                    if(result.status=="complete")job.recipe=receiver.recipe(row,window)
+                    else if(result.durableBytes==0L)return DownloadOutcome("budget_paused",transferred,complete)
+                    continue
+                }
+                val recipe=job.recipe!!;val blocks=JSONObject(recipe.value).getJSONArray("blocks")
+                val accepted=store.load("receive/${row.getString("recipeOid")}")
+                val index=accepted?.getInt("index")?:0
+                if(index<blocks.length()) {
+                    val oid=blocks.getJSONObject(index).getString("oid")
+                    val result=frame(oid)?:return DownloadOutcome("budget_paused",transferred,complete)
+                    if(result.status !in setOf("complete","budget_paused"))return DownloadOutcome(result.status,transferred,complete)
+                    if(result.status=="complete") {
+                        store.beginDownloadAcceptance(row.getString("recipeOid"),oid,index,rank)
+                        receiver.step(row,recipe);store.recoverDownloadAcceptance()
+                    }else if(result.durableBytes==0L)return DownloadOutcome("budget_paused",transferred,complete)
+                    // Re-select demand/rank after exactly one fine frame. Partial blobs retain
+                    // their durable offset; only authenticated complete blobs affect fairness.
+                    continue
+                }
+                val verified=receiver.step(row,recipe)?:SyncV2Codec.fail("closure_incomplete")
+                val current=currentRow(row.getString("entityKey"))?:SyncV2Codec.fail("body_revision_changed")
+                verified.bind(current){cacheReady(verified)};complete++;jobs.remove(job)
+            }catch(e:IllegalStateException) {
+                if(e.message in setOf("source_pending","source_unavailable")){sourcePending=true;jobs.remove(job)}else throw e
             }
         }
         return DownloadOutcome(if(sourcePending)"source_pending" else "complete",transferred,complete)

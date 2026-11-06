@@ -73,6 +73,18 @@ no deletion, custody-release, GC or eviction code.
 The host must retain the queue and report space pressure if content storage cannot grow.
 Staged ciphertext is retained in P3A; no cleanup is authorized by a receipt or a short lease.
 
+Hash/AEAD failures quarantine only the affected derived OID cache. A durable intent precedes
+renaming its bad bytes and invalidating its download/checked/prefix metadata; reopening finishes
+interrupted invalidation and starts at offset zero. Business originals and other OIDs remain intact.
+Expired upload reservations are renewed by the worker, including C8 full-prefix settlement and
+expiry during PUT/complete. Renewal retains the immutable object and C11 confirmation/replay ledger.
+
+`downloadPage` reselects a row at every fine-frame boundary using approved active demand and the
+same rank/fairness rules as upload. Pass local `priorities`, including the complete recent import
+universe, for rank1–4 and addedAtMillis ordering; unknown classification defaults to rank4.
+Blob acceptance and fairness use recoverable journals. Reopening reconciles a committed receive
+digest before selecting more work, and cached blobs never increment fairness twice.
+
 ## Isolated foreign-body follow-up
 
 With an authorized, unchanged phone fixture and the loopback backend running, use

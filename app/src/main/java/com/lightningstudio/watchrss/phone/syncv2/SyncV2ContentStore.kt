@@ -77,25 +77,38 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
     fun finish(oid:String,total:Int) {
         if(prefix(oid,total)!=total)SyncV2Codec.fail("closure_incomplete")
         try {putObject(oid,read(file(oid,".part")))}catch(e:IllegalStateException) {
-            if(e.message=="hash_mismatch")quarantineDownload(oid,e.message!!)
+            if(e.message=="hash_mismatch")quarantineDownload(oid,e.message!!,QuarantineTarget.PART)
             throw e
         }
     }
-    /** Only derived bytes for this OID are quarantined. A durable intent precedes every
-     * rename/invalidation so reopening cannot reuse the bad total-length prefix. */
-    fun quarantineDownload(oid:String,reason:String) {
+    enum class QuarantineTarget { PART, OBJECT, CHECKED }
+    /** Failure of a new prefix says nothing about an existing authenticated copy. Persist
+     * the failed representation before invalidation; recovery must not widen that scope. */
+    fun quarantineDownload(oid:String,reason:String,target:QuarantineTarget=QuarantineTarget.PART) {
         SyncV2Wire.oid(oid)
-        save("quarantine/$oid",JSONObject().put("pending",true).put("reason",reason))
+        save("quarantine/$oid",JSONObject().put("pending",true).put("reason",reason).put("target",target.name))
         fault("quarantine");recoverDownload(oid)
     }
     fun recoverDownload(oid:String) {
         val intent=load("quarantine/$oid")?:return
         if(!intent.getBoolean("pending"))return
-        for(ext in listOf(".part",".object",".checked")) {
+        // Old unscoped intents prove only that the in-flight prefix failed. They cannot
+        // authorize moving a previously authenticated object or plaintext out of its path.
+        val target=QuarantineTarget.entries.singleOrNull{it.name==intent.optString("target","PART")}?:SyncV2Codec.fail("invalid_schema")
+        val extensions=when(target) {
+            QuarantineTarget.PART->listOf(".part")
+            QuarantineTarget.OBJECT->listOf(".part",".object")
+            QuarantineTarget.CHECKED->listOf(".checked")
+        }
+        val keys=when(target) {
+            QuarantineTarget.PART,QuarantineTarget.OBJECT->listOf("prefix/$oid","download/$oid")
+            QuarantineTarget.CHECKED->listOf("checked/$oid")
+        }
+        for(ext in extensions) {
             val source=file(oid,ext)
             if(source.exists() && !source.renameTo(file(oid,"$ext.bad")))SyncV2Codec.fail("storage_pressure")
         }
-        for(key in listOf("prefix/$oid","download/$oid","checked/$oid")) {
+        for(key in keys) {
             val metadata=file(key,".meta")
             if(metadata.exists() && !metadata.delete())SyncV2Codec.fail("storage_pressure")
         }

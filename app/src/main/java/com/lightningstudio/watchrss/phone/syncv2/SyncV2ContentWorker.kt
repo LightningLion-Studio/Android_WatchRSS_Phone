@@ -176,8 +176,10 @@ internal class SyncV2ContentWorker(private val client:SyncV2CloudClient,private 
     }
     fun authenticate(oid:String,key:(Long)->ByteArray):ByteArray {
         store.recoverDownload(oid)
+        var failed=SyncV2ContentStore.QuarantineTarget.CHECKED
         try {
         if(store.checked(oid))return store.plain(oid)
+        failed=SyncV2ContentStore.QuarantineTarget.OBJECT
         gate();val bytes=store.objectBytes(oid)
         if(bytes.size<24)SyncV2Codec.fail("invalid_encoding")
         val length=java.nio.ByteBuffer.wrap(bytes,4,4).int
@@ -190,7 +192,7 @@ internal class SyncV2ContentWorker(private val client:SyncV2CloudClient,private 
         if(header.getString("encoding")=="gzip")store.counts.decompressBytes+=plain.size
         store.savePlain(oid,plain);yieldControl();return plain
         }catch(e:IllegalStateException) {
-            if(e.message in setOf("hash_mismatch","aead_invalid","invalid_encoding","fingerprint_mismatch"))store.quarantineDownload(oid,e.message!!)
+            if(e.message in setOf("hash_mismatch","aead_invalid","invalid_encoding","fingerprint_mismatch"))store.quarantineDownload(oid,e.message!!,failed)
             throw e
         }
     }

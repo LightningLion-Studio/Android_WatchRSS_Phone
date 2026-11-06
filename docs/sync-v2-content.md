@@ -73,9 +73,12 @@ no deletion, custody-release, GC or eviction code.
 The host must retain the queue and report space pressure if content storage cannot grow.
 Staged ciphertext is retained in P3A; no cleanup is authorized by a receipt or a short lease.
 
-Hash/AEAD failures quarantine only the affected derived OID cache. A durable intent precedes
-renaming its bad bytes and invalidating its download/checked/prefix metadata; reopening finishes
-interrupted invalidation and starts at offset zero. Business originals and other OIDs remain intact.
+Quarantine is scoped to the failed representation and recorded in a durable intent. A bad new
+prefix moves only `.part` and invalidates its prefix/download state; the same OID's authenticated
+`.object`, `.checked`, checked marker and body references retain their paths and bytes. A failed
+object never invalidates checked plaintext; a failed checked file retains the immutable object
+for local reauthentication. Reopening resumes only the recorded scope. Legacy unscoped intents
+default to prefix-only invalidation. Business originals and other OIDs remain intact.
 Expired upload reservations are renewed by the worker, including C8 full-prefix settlement and
 expiry during PUT/complete. Renewal retains the immutable object and C11 confirmation/replay ledger.
 

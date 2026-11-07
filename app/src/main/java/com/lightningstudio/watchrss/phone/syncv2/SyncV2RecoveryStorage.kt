@@ -32,8 +32,8 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             "article"->{
                 // CursorWindow must never hold a whole imported body. Read bounded BLOB slices,
                 // then preserve both original text fields in the private recovery envelope.
-                val lengths=db.query("SELECT length(CAST(contentText AS BLOB)),length(CAST(contentHtml AS BLOB)) FROM phone_articles WHERE articleId=?",arrayOf(id)).use{c->
-                    if(!c.moveToFirst())SyncV2Codec.fail("closure_incomplete")
+                val lengths=db.query("SELECT length(CAST(contentText AS BLOB)),length(CAST(contentHtml AS BLOB)),contentHash FROM phone_articles WHERE articleId=?",arrayOf(id)).use{c->
+                    if(!c.moveToFirst() || value.optString("contentHash")!=c.getString(2))SyncV2Codec.fail("closure_incomplete")
                     c.getLong(0) to if(c.isNull(1))null else c.getLong(1)
                 }
                 if(lengths.first+(lengths.second?:0)>quotaBytes)SyncV2Codec.fail("quota_exceeded")
@@ -137,19 +137,32 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
     fun pins():List<JSONObject> = db.query("SELECT copy_id,pin FROM syncv2_recovery_copies WHERE scope=? ORDER BY copy_id",arrayOf(scope)).use{c->buildList{while(c.moveToNext()) {
         val id=c.getString(0);val head=projection.accountOpen("recovery-pin-head",c.getBlob(1));add(projection.accountOpen("recovery-pin",chunks(id,"pin",head.getJSONObject("payload"))))
     }}}
+    private fun heads(copyId:String):Pair<ByteArray,ByteArray> = db.query("SELECT body,pin FROM syncv2_recovery_copies WHERE scope=? AND copy_id=?",arrayOf(scope,copyId)).use{c->
+        if(!c.moveToFirst())SyncV2Codec.fail("snapshot_expired");c.getBlob(0) to c.getBlob(1)
+    }
     fun open(copyId:String):JSONObject {
-        SyncV2Codec.unhex(copyId,16);val head=descriptors().singleOrNull{it.getString("copyId")==copyId}?:SyncV2Codec.fail("snapshot_expired")
+        SyncV2Codec.unhex(copyId,16);val head=projection.accountOpen("recovery-copy-head",heads(copyId).first)
+        if(head.getString("copyId")!=copyId)SyncV2Codec.fail("closure_incomplete")
         val copy=JSONObject().put("copyId",copyId).put("header",head.getJSONObject("header")).put("nonce",head.getString("nonce")).put("ciphertext",SyncV2Codec.b64(chunks(copyId,"ciphertext",head.getJSONObject("payload"))))
         val key=projection.recoveryKey();try{return SyncV2Recovery.open(copy,key)}finally{key.fill(0)}
     }
     /** No file IO here. SQLite's commit protects the ciphertext, pin and active business state. */
-    private fun checkQuota(bundle:Bundle) {
+    private fun checkQuota(bundle:Bundle)=checkBundles(listOf(bundle))
+    fun checkBundles(bundles:List<Bundle>) {
+        if(bundles.map{it.copy.getString("copyId")}.distinct().size!=bundles.size)SyncV2Codec.fail("identity_conflict")
         val used=db.query("SELECT COALESCE(SUM(length(body)+length(pin)),0) FROM syncv2_recovery_copies WHERE scope=?",arrayOf(scope)).use{it.moveToFirst();it.getLong(0)}+
-            db.query("SELECT COALESCE(SUM(length(body)),0) FROM syncv2_recovery_objects WHERE scope=?",arrayOf(scope)).use{it.moveToFirst();it.getLong(0)}
-        val newBytes=bundle.objects.filterKeys{oid->!db.query("SELECT 1 FROM syncv2_recovery_objects WHERE scope=? AND oid=?",arrayOf(scope,oid)).use{it.moveToFirst()}}.values.sumOf{it.size.toLong()}
-        val chunkBytes=db.query("SELECT COALESCE(SUM(length(bytes)),0) FROM syncv2_recovery_chunks WHERE scope=?",arrayOf(scope)).use{it.moveToFirst();it.getLong(0)}
-        val cipher=SyncV2Codec.decode64(bundle.copy.getString("ciphertext"));val pinBytes=projection.accountSeal("recovery-pin",bundle.pin)
-        if(used+chunkBytes+newBytes+cipher.size+pinBytes.size+4096>quotaBytes)SyncV2Codec.fail("quota_exceeded")
+            db.query("SELECT COALESCE(SUM(length(body)),0) FROM syncv2_recovery_objects WHERE scope=?",arrayOf(scope)).use{it.moveToFirst();it.getLong(0)}+
+            db.query("SELECT COALESCE(SUM(length(bytes)),0) FROM syncv2_recovery_chunks WHERE scope=?",arrayOf(scope)).use{it.moveToFirst();it.getLong(0)}
+        var required=used;val unique=linkedMapOf<String,ByteArray>()
+        for(bundle in bundles) {
+            for((oid,bytes)in bundle.objects) {
+                if(unique[oid]?.contentEquals(bytes)==false)SyncV2Codec.fail("idempotency_conflict")
+                unique[oid]=bytes
+            }
+            required=Math.addExact(required,SyncV2Codec.decode64(bundle.copy.getString("ciphertext")).size.toLong()+projection.accountSeal("recovery-pin",bundle.pin).size+4096)
+        }
+        for((oid,bytes)in unique)if(!db.query("SELECT 1 FROM syncv2_recovery_objects WHERE scope=? AND oid=?",arrayOf(scope,oid)).use{it.moveToFirst()})required=Math.addExact(required,bytes.size.toLong())
+        if(required>quotaBytes)SyncV2Codec.fail("quota_exceeded")
     }
     fun commit(bundle:Bundle) {
         check(db.inTransaction());checkQuota(bundle)
@@ -171,23 +184,54 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
     }
     /** Explicit recovery reads yield necessary original bytes; callers create NEW local edits.
      * These bytes never update a cloud ref, and a recipe from another copy cannot be substituted. */
+    private data class ReadSession(val headHash:String,val recipe:JSONObject,val refs:Set<String>)
+    private val readSessions=object:LinkedHashMap<String,ReadSession>(8,0.75f,true) {
+        override fun removeEldestEntry(eldest:MutableMap.MutableEntry<String,ReadSession>?)=size>8
+    }
     fun readPart(copyId:String,recipeOid:String,offset:Long,maxBytes:Int):ByteArray {
         if(offset<0 || maxBytes !in 1..65536)SyncV2Codec.fail("invalid_range")
-        SyncV2Wire.oid(recipeOid,"recipe");val delta=open(copyId);val refs=SyncV2Wire.strings(delta.getJSONArray("bodyRefs"),100000,false).toSet()
-        if(recipeOid !in refs)SyncV2Codec.fail("closure_incomplete")
+        SyncV2Codec.unhex(copyId,16);SyncV2Wire.oid(recipeOid,"recipe")
+        // Durable ownership is checked on EVERY slice. A session cannot survive deletion,
+        // replacement, another copy's pin or a modified authenticated descriptor.
+        val heads=heads(copyId);val head=projection.accountOpen("recovery-copy-head",heads.first)
+        val pinHead=projection.accountOpen("recovery-pin-head",heads.second)
+        if(head.getString("copyId")!=copyId)SyncV2Codec.fail("closure_incomplete")
+        val headHash=SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.lp(heads.first,heads.second)))
+        val sessionId="$copyId/$recipeOid"
         fun raw(oid:String)=db.query("SELECT body FROM syncv2_recovery_objects WHERE scope=? AND oid=?",arrayOf(scope,oid)).use{if(it.moveToFirst())it.getBlob(0)else SyncV2Codec.fail("closure_incomplete")}
         val key=projection.recoveryKey()
         try {
-            val recipe=SyncV2Wire.parse(SyncV2Envelope.open(identity,key,recipeOid,raw(recipeOid),1),262144,true);SyncV2ContentCodec.recipe(recipe)
-            val parts=mutableListOf<ByteArray>();var position=0L;var total=0
-            if(offset>recipe.getLong("totalPlainBytes"))SyncV2Codec.fail("invalid_range")
-            SyncV2ContentCodec.verifyBody(identity,recipe,{block->
-                val oid=block.getString("oid");if(oid !in refs)SyncV2Codec.fail("closure_incomplete")
-                val bytes=SyncV2Envelope.open(identity,key,oid,raw(oid),1);val begin=maxOf(offset-position,0).coerceAtMost(bytes.size.toLong()).toInt()
-                val count=minOf(bytes.size-begin,maxBytes-total)
-                if(position+bytes.size>offset && count>0){parts.add(bytes.copyOfRange(begin,begin+count));total+=count};position+=bytes.size;bytes
-            })
-            return ByteArray(total).also{out->var at=0;for(part in parts){part.copyInto(out,at);at+=part.size}}
+            fun block(recipeBlock:JSONObject,refs:Set<String>):ByteArray {
+                val oid=recipeBlock.getString("oid");if(oid !in refs)SyncV2Codec.fail("closure_incomplete")
+                val bytes=SyncV2Envelope.open(identity,key,oid,raw(oid),1)
+                if(bytes.size!=recipeBlock.getInt("plainBytes") || identity.opaque("blob",bytes)!=recipeBlock.getString("opaqueContentId"))SyncV2Codec.fail("fingerprint_mismatch")
+                return bytes
+            }
+            val cached=synchronized(readSessions){readSessions[sessionId]}
+            val session=if(cached?.headHash==headHash)cached else {
+                val delta=open(copyId);val refs=SyncV2Wire.strings(delta.getJSONArray("bodyRefs"),100000,false).toSet()
+                val pin=projection.accountOpen("recovery-pin",chunks(copyId,"pin",pinHead.getJSONObject("payload")))
+                SyncV2Codec.exact(pin,setOf("copyId","bodyRefs","expiresAtMillis"))
+                if(pin.getString("copyId")!=copyId || pin.getLong("expiresAtMillis")!=head.getJSONObject("header").getLong("expiresAtMillis") ||
+                    SyncV2Codec.canonical(pin.getJSONArray("bodyRefs"))!=SyncV2Codec.canonical(delta.getJSONArray("bodyRefs")) || recipeOid !in refs)SyncV2Codec.fail("closure_incomplete")
+                val recipe=SyncV2Wire.parse(SyncV2Envelope.open(identity,key,recipeOid,raw(recipeOid),1),262144,true)
+                SyncV2ContentCodec.verifyBody(identity,recipe,{block(it,refs)})
+                ReadSession(headHash,recipe,refs).also{synchronized(readSessions){readSessions[sessionId]=it}}
+            }
+            val recipe=session.recipe;val total=recipe.getLong("totalPlainBytes")
+            if(offset>total)SyncV2Codec.fail("invalid_range")
+            val out=java.io.ByteArrayOutputStream(maxBytes);var position=0L;val blocks=recipe.getJSONArray("blocks")
+            for(i in 0 until blocks.length()) {
+                val entry=blocks.getJSONObject(i);val end=position+entry.getLong("plainBytes")
+                if(end>offset && position<offset+maxBytes) {
+                    // Previously verified full-body hashes authorize the immutable recipe;
+                    // each returned block still passes its own AEAD and opaque-ID checks.
+                    val bytes=block(entry,session.refs);val begin=maxOf(offset-position,0).toInt()
+                    val count=minOf(bytes.size-begin,maxBytes-out.size());if(count>0)out.write(bytes,begin,count)
+                }
+                position=end;if(out.size()==maxBytes)break
+            }
+            return out.toByteArray()
         } finally {key.fill(0)}
     }
     fun purge(trustedNow:Long?) {

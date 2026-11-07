@@ -130,11 +130,20 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         for(cloud in projection.cloudRows()) {
             val meta=cloud.getJSONObject("meta");val remoteState=cloud.getJSONObject("state");val row=cloud.getJSONObject("row");val entity=row.getString("entityKey")
             val candidate=projection.candidate(meta.getString("kind"),meta.getString("logicalId"))
-            if(candidate!=null && (SyncV2Codec.canonical(candidate.first)!=SyncV2Codec.canonical(meta) || SyncV2Codec.canonical(candidate.second)!=SyncV2Codec.canonical(remoteState)))SyncV2Codec.fail("merge_unavailable")
+            var preservesConflictFacts=false
+            if(candidate!=null && (SyncV2Codec.canonical(candidate.first)!=SyncV2Codec.canonical(meta) || SyncV2Codec.canonical(candidate.second)!=SyncV2Codec.canonical(remoteState))) {
+                if(meta.getString("kind")=="note" && SyncV2Codec.canonical(candidate.first)==SyncV2Codec.canonical(meta) && st.body.optString("activeGeneration")==account.getString("rollbackGeneration")) {
+                    val local=SyncV2Business.join("note",candidate.first,candidate.second);val remote=SyncV2Business.join("note",meta,remoteState)
+                    val merged=SyncV2NoteConflicts.merge(local.getJSONObject("noteConflicts"),remote.getJSONObject("noteConflicts"),meta.getString("logicalId"))
+                    val localSet=local.remove("noteConflicts");remote.remove("noteConflicts")
+                    preservesConflictFacts=SyncV2LocalJson.canonical(local)==SyncV2LocalJson.canonical(remote) && SyncV2Codec.canonical(localSet)==SyncV2Codec.canonical(merged)
+                }
+                if(!preservesConflictFacts)SyncV2Codec.fail("merge_unavailable")
+            }
             val ready=mergedRows[entity]
             val fulfillsPromise=ready!=null && !row.isNull("promiseId") && ready.isNull("promiseId") && !ready.isNull("recipeOid") &&
                 listOf("bodyRevision","metaOid","stateOid").all{ready.get(it)==row.get(it)} && SyncV2Codec.d64(ready.getString("rowSequence"))>SyncV2Codec.d64(row.getString("rowSequence"))
-            mergedRows[entity]=if(fulfillsPromise)ready!!else row
+            mergedRows[entity]=if(fulfillsPromise || preservesConflictFacts)ready?:SyncV2Codec.fail("closure_incomplete")else row
         }
         val tree=SyncV2Index.build(identity.scope,mergedRows.values.toList());mergedObjects.putAll(tree.objects)
         val reachable=mutableSetOf<String>();reachable.addAll(tree.objects.keys)
@@ -160,7 +169,8 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val signed=signer.commit(body);val oid=SyncV2Codec.oid("commit",body)
         val objects=index.objects.toMutableMap();objects[oid]=SyncV2Codec.utf8(SyncV2Codec.canonical(signed))
         // Each reservation is bounded. Control upload never requests a content slot.
-        for(batch in objects.entries.filter{it.key.substringBefore(':') in setOf("meta","state","tree","commit")}.sortedBy{it.key}.chunked(64)) {
+        val currentOids=projection.cloudObjects().keys
+        for(batch in objects.entries.filter{it.key !in currentOids && it.key.substringBefore(':') in setOf("meta","state","tree","commit")}.sortedBy{it.key}.chunked(64)) {
             val reserve=client.reserve(randomId(),batch.map{it.key to it.value.size});val reservation=reserve.getString("reservationId")
             // C11 also applies to control objects: only a current authenticated status
             // query may establish an offset, never an idempotent reserve response.
@@ -181,7 +191,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
                 client.verifyReceipt(complete.getJSONObject("receipt"),item.key,item.value.size.toLong(),item.value.size.toLong(),now())
             }
         }
-        for(ref in index.refs)client.stateRefs(ref)
+        for(ref in index.refs)if(SyncV2Codec.oid("state-refs",ref) !in currentOids)client.stateRefs(ref)
         fresh(window)
         val publishState=projection.state()
         if(publishState.revision!=st.revision)SyncV2Codec.fail("choice_stale")

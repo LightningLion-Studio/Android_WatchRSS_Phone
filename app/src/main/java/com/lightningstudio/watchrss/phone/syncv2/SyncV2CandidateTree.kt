@@ -19,6 +19,21 @@ internal class SyncV2CandidateTree(private val db:SupportSQLiteDatabase,private 
     }
     private fun leaf(prefix:String,rows:List<JSONObject>)=JSONObject().put("domain","wrss.sync.v2/local-candidate-tree").put("scope",JSONObject(scope)).put("prefix",prefix).put("form","leaf").put("rows",JSONArray(rows.sortedBy{it.getString("entityKey")}))
     fun update(summary:JSONObject):String {rewritten=0;return updateAt("",summary)}
+    fun remove(entity:String):String? {rewritten=0;return removeAt("",entity)}
+    private fun removeAt(prefix:String,entity:String):String? {
+        val old=load(prefix)?:return null
+        if(old.getString("form")=="leaf") {
+            val rows=old.getJSONArray("rows");val kept=(0 until rows.length()).map{rows.getJSONObject(it)}.filterNot{it.getString("entityKey")==entity}
+            if(kept.size==rows.length())return SyncV2Codec.hash(old)
+            if(kept.isEmpty()){db.execSQL("DELETE FROM syncv2_tree_nodes WHERE scope=? AND prefix=?",arrayOf(scope,prefix));return null}
+            return save(prefix,leaf(prefix,kept))
+        }
+        val children=old.getJSONObject("children");val digit=entity[prefix.length].toString()
+        val child=removeAt(prefix+digit,entity)
+        if(child==null)children.remove(digit)else children.put(digit,child)
+        if(children.length()==0){db.execSQL("DELETE FROM syncv2_tree_nodes WHERE scope=? AND prefix=?",arrayOf(scope,prefix));return null}
+        return save(prefix,old)
+    }
     private fun updateAt(prefix:String,row:JSONObject):String {
         val old=load(prefix)
         if(old==null || old.getString("form")=="leaf") {

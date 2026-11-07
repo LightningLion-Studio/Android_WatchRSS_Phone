@@ -46,7 +46,7 @@ internal object SyncV2LocalProtocol {
     fun framingAllowed(v:JSONObject):Boolean = listOf("authenticated","scopeMatched","ready","commitAck","sessionCommitted").all{v.opt(it)==true} &&
         (v.opt("switchId") as? String)?.let{Regex("[0-9a-f]{32}").matches(it) && it==v.opt("ackSwitchId")}==true
     fun writeJson(output:OutputStream,value:JSONObject) {val raw=bytes(value);if(raw.size>262144)SyncV2Codec.fail("object_too_large");DataOutputStream(output).apply{writeInt(raw.size);write(raw);flush()}}
-    fun readJson(input:InputStream):JSONObject {val data=DataInputStream(input);val length=data.readInt();if(length !in 2..262144)SyncV2Codec.fail("invalid_encoding");return SyncV2Wire.parse(ByteArray(length).also(data::readFully),262144)}
+    fun readJson(input:InputStream):JSONObject {val data=DataInputStream(input);val raw=SyncV2LocalProfile.time("control.read.wait"){val length=data.readInt();if(length !in 2..262144)SyncV2Codec.fail("invalid_encoding");ByteArray(length).also(data::readFully)};return SyncV2Wire.parse(raw,262144)}
 }
 
 /** One instance per authenticated old socket. Never survives reconnect or owns legacy cursors.
@@ -136,7 +136,7 @@ internal object SyncV2Wrp2 {
     data class Frame(val header:JSONObject,val payload:ByteArray)
     fun write(output:OutputStream,session:SyncV2LocalSession,oid:String,total:Int,offset:Int,transferId:String,payload:ByteArray) {
         session.requireFraming();val header=JSONObject().put("scope",session.scope).put("sessionId",session.sessionId).put("oid",oid)
-            .put("totalBytes",total).put("offset",offset).put("partBytes",payload.size).put("partSha256",SyncV2Codec.hex(SyncV2Codec.sha(payload))).put("transferId",transferId)
+            .put("totalBytes",total).put("offset",offset).put("partBytes",payload.size).put("partSha256",SyncV2Codec.hex(SyncV2Codec.sha(payload,"sha256.frame"))).put("transferId",transferId)
         validate(session,header,payload);val raw=SyncV2LocalProtocol.bytes(header);if(raw.size>4096)SyncV2Codec.fail("object_too_large")
         DataOutputStream(output).apply{writeBytes("WRP2");writeInt(raw.size);write(raw);write(payload);flush()}
     }
@@ -156,6 +156,6 @@ internal object SyncV2Wrp2 {
         SyncV2LocalProtocol.id(SyncV2Wire.string(h,"transferId"));SyncV2Wire.oid(SyncV2Wire.string(h,"oid"))
         val total=SyncV2Wire.uint(h,"totalBytes",266264);val offset=SyncV2Wire.uint(h,"offset",266264)
         if(total==0L || payload.size !in 1..65536 || h.get("partBytes")!=payload.size || offset+payload.size>total)SyncV2Codec.fail("invalid_range")
-        if(h.get("partSha256")!=SyncV2Codec.hex(SyncV2Codec.sha(payload)))SyncV2Codec.fail("hash_mismatch")
+        if(h.get("partSha256")!=SyncV2Codec.hex(SyncV2Codec.sha(payload,"sha256.frame")))SyncV2Codec.fail("hash_mismatch")
     }
 }

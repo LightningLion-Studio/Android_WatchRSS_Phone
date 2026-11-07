@@ -78,4 +78,23 @@ class SyncV2P4StreamTest {
             future.get(5,TimeUnit.SECONDS);assertEquals(0,store.prefix(oid,raw.size));assertNull(store.load("local-upload/$oid"))
         }}finally{server.close();executor.shutdownNow()}
     }}
+    @Test fun ackWaitsForDurablePointAndFreshReaderSeesEveryAcknowledgedByte() {SyncV2P4Fixture().use{f->
+        val server=ServerSocket(0,1,InetAddress.getLoopbackAddress());val executor=Executors.newFixedThreadPool(2)
+        val reached=java.util.concurrent.CountDownLatch(1);val release=java.util.concurrent.CountDownLatch(1)
+        val cap=SyncV2LocalProtocol.capability(f.identity.scope,SyncV2LocalProtocol.Gates(true));val (oid,raw)=f.blob()
+        val source=f.store("ack-fsync"){point->if(point=="frame"){reached.countDown();check(release.await(5,TimeUnit.SECONDS))}}
+        val receive=executor.submit<Unit>{server.accept().use{socket->
+            val s=f.session(f.b,f.a,close={socket.close()});val port=SyncV2LocalObjects(s,source);val c=SyncV2LocalConnection(s,socket.getInputStream(),socket.getOutputStream())
+            c.respondHandshake(cap,cap,port);c.serveOne(port)
+        }}
+        try {Socket(InetAddress.getLoopbackAddress(),server.localPort).use{socket->
+            socket.soTimeout=5000;val s=f.session(close={socket.close()});val c=SyncV2LocalConnection(s,socket.getInputStream(),socket.getOutputStream());c.initiate(cap,cap)
+            val send=executor.submit<JSONObject>{c.putPart(oid,raw.size,0,raw.copyOf(65536))}
+            check(reached.await(5,TimeUnit.SECONDS));assertFalse(send.isDone);assertEquals(0,f.store("ack-fsync").prefix(oid,raw.size))
+            release.countDown();assertEquals(65536,send.get(5,TimeUnit.SECONDS).getInt("durableOffset"))
+            val reopened=f.store("ack-fsync");assertEquals(65536,reopened.prefix(oid,raw.size));assertArrayEquals(raw.copyOf(65536),reopened.partialBytes(oid,0,65536))
+            receive.get(5,TimeUnit.SECONDS)
+        }}finally{release.countDown();server.close();executor.shutdownNow()}
+    }}
+
 }

@@ -50,7 +50,7 @@ internal class SyncV2LocalObjects(private val session:SyncV2LocalSession,private
         if(body.get("kind")!="local")SyncV2Codec.fail("invalid_schema")
         val oid=SyncV2Wire.oid(body.getString("oid"));val total=SyncV2Wire.uint(body,"totalBytes",266264)
         if(total==0L || SyncV2Wire.uint(body,"durableOffset",total)>total)SyncV2Codec.fail("invalid_schema")
-        store.save("peer-local-receipt/${session.peerDeviceId}/$oid",JSONObject().put("sessionId",session.sessionId).put("receipt",body))
+        store.save("peer-local-receipt/${session.peerDeviceId}/$oid",boundReceipt(body))
     }
     fun complete(body:JSONObject):JSONObject {
         session.requireFraming();SyncV2Codec.exact(body,setOf("scope","transferId","oid","totalBytes"))
@@ -92,11 +92,13 @@ internal class SyncV2LocalObjects(private val session:SyncV2LocalSession,private
     }
     /** Local receive receipts are not SignedAvailability or a custody authorization. */
     private fun receipt(oid:String,total:Int,offset:Int,persist:Boolean=true):JSONObject {
-        val value=scope().put("sessionId",session.sessionId).put("holderDeviceId",session.selfDeviceId).put("peerDeviceId",session.peerDeviceId)
-            .put("oid",oid).put("totalBytes",total).put("durableOffset",offset)
-        if(persist)store.save("local-receipt/${session.peerDeviceId}/$oid",value)
+        val value=JSONObject().put("kind","local").put("oid",oid).put("totalBytes",total).put("durableOffset",offset)
+        if(persist)store.save("local-receipt/${session.peerDeviceId}/$oid",boundReceipt(value))
         return value
     }
+    /** C30: context is durable internal metadata, never part of the local wire receipt. */
+    private fun boundReceipt(value:JSONObject)=scope().put("sessionId",session.sessionId)
+        .put("holderDeviceId",session.selfDeviceId).put("peerDeviceId",session.peerDeviceId).put("receipt",value)
     fun haveWant(body:JSONObject):JSONObject {
         window(body);SyncV2Codec.exact(body,setOf("scope","windowId","oids"))
         val rows=JSONArray();for(oid in SyncV2Wire.strings(body.getJSONArray("oids"),512)) {
@@ -189,7 +191,7 @@ internal class SyncV2LocalObjects(private val session:SyncV2LocalSession,private
             if(offset+frame.payload.size>prefix)SyncV2Codec.fail("part_conflict")
             val bytes=if(size!=null)store.objectPart(oid,offset,frame.payload.size) else store.partialBytes(oid,offset,frame.payload.size)
             if(!bytes.contentEquals(frame.payload))SyncV2Codec.fail("part_conflict")
-        }else store.appendLocal(oid,total,offset,frame.payload,receipt(oid,total,offset+frame.payload.size,false))
+        }else store.appendLocal(oid,total,offset,frame.payload,boundReceipt(receipt(oid,total,offset+frame.payload.size,false)))
         val end=maxOf(prefix,offset+frame.payload.size)
         if(end==total && size==null)store.finish(oid,total,verifyCommit)
         return receipt(oid,total,end,offset<prefix)

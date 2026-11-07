@@ -12,6 +12,15 @@ import java.nio.file.StandardOpenOption
  * One content worker owns a store. Neither directory scans nor whole-cache reads are needed. */
 internal class SyncV2ContentStore(private val root:File,private val scope:String,private val localKey:ByteArray,
     val counts:Counts=Counts(),private val fault:(String)->Unit={}) {
+    private data class DurablePrefix(val total:Int,val offset:Int)
+    // One store has one writer. Cache only offsets already made durable, never network data or
+    // plaintext. Eviction/reopen revalidates disk records. Every payload read still checks AEAD/SHA.
+    private val durablePrefixes=object:LinkedHashMap<String,DurablePrefix>(128,0.75f,true) {
+        override fun removeEldestEntry(eldest:MutableMap.MutableEntry<String,DurablePrefix>?)=size>128
+    }
+    private val names=object:LinkedHashMap<String,String>(128,0.75f,true) {
+        override fun removeEldestEntry(eldest:MutableMap.MutableEntry<String,String>?)=size>128
+    }
     data class Counts(var readBytes:Long=0,var writeBytes:Long=0,var reads:Long=0,var writes:Long=0,
         var checkpoints:Long=0,var sourceBytes:Long=0,var exports:Long=0,var seals:Long=0,
         var authentications:Long=0,var decompressBytes:Long=0,var networkBytes:Long=0,var hashBytes:Long=0) {
@@ -24,18 +33,18 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
             .put("preparationMillis",preparationNanos/1000000).put("checkpointMillis",checkpointNanos/1000000).put("fileIOMillis",fileNanos/1000000).put("metadataBatches",metadataBatches).put("metadataStats",metadataStats)
     }
     init {SyncV2Codec.scope(JSONObject(scope));require(localKey.size==32);if(!root.isDirectory && !root.mkdirs())SyncV2Codec.fail("storage_pressure")}
-    private fun file(key:String,ext:String):File=File(root,SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.utf8("$scope/$key")))+ext)
+    private fun file(key:String,ext:String):File=File(root,(names[key]?:SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.utf8("$scope/$key"),"sha256.filename")).also{names[key]=it})+ext)
     private fun read(file:File,offset:Int=0,size:Int=file.length().toInt()):ByteArray {
         if(size !in 0..1048576 || offset<0 || offset.toLong()+size>file.length())SyncV2Codec.fail("invalid_schema")
-        val at=System.nanoTime();val out=ByteArray(size);RandomAccessFile(file,"r").use{it.seek(offset.toLong());it.readFully(out)}
+        val at=System.nanoTime();val out=ByteArray(size);SyncV2LocalProfile.time("file.read",size.toLong()){RandomAccessFile(file,"r").use{it.seek(offset.toLong());it.readFully(out)}}
         counts.reads++;counts.readBytes+=size;counts.fileNanos+=System.nanoTime()-at;return out
     }
-    private fun syncDirectory() {FileChannel.open(root.toPath(),StandardOpenOption.READ).use{it.force(true)}}
+    private fun syncDirectory() {SyncV2LocalProfile.time("fsync.directory"){FileChannel.open(root.toPath(),StandardOpenOption.READ).use{it.force(true)}}}
     private fun atomic(file:File,bytes:ByteArray) {
         if(bytes.size>1048576)SyncV2Codec.fail("object_too_large")
         val at=System.nanoTime();val pending=File(file.path+".next")
-        FileOutputStream(pending).use{it.write(bytes);it.fd.sync()};counts.writes++;counts.writeBytes+=bytes.size
-        if(!pending.renameTo(file))SyncV2Codec.fail("storage_pressure")
+        FileOutputStream(pending).use{out->SyncV2LocalProfile.time("file.write",bytes.size.toLong()){out.write(bytes)};SyncV2LocalProfile.time("fsync.file"){out.fd.sync()}};counts.writes++;counts.writeBytes+=bytes.size
+        if(!SyncV2LocalProfile.time("file.rename"){pending.renameTo(file)})SyncV2Codec.fail("storage_pressure")
         syncDirectory();counts.fileNanos+=System.nanoTime()-at
     }
     fun load(key:String):JSONObject? {
@@ -43,6 +52,7 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
         return SyncV2Wire.parse(SyncV2Codec.utf8(SyncV2Codec.openLocal(localKey,scope,"content/$key",read(f))),1048576,true)
     }
     fun save(key:String,value:JSONObject) {
+        if(key.startsWith("prefix/") || key.startsWith("quarantine/"))durablePrefixes.remove(key.substringAfter('/'))
         val at=System.nanoTime();atomic(file(key,".meta"),SyncV2Codec.sealLocal(localKey,scope,"content/$key",value));counts.checkpoints++;counts.checkpointNanos+=System.nanoTime()-at;fault("checkpoint")
     }
     fun putObject(oid:String,bytes:ByteArray,verifyCommit:((JSONObject)->Unit)?=null) {
@@ -54,12 +64,12 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
             SyncV2HeadPins.validateBody(value.getJSONObject("body"))
             if(SyncV2Codec.oid("commit",value.getJSONObject("body"))!=oid)SyncV2Codec.fail("hash_mismatch")
             (verifyCommit?:SyncV2Codec.fail("authentication_required"))(value)
-        }else if(oid!="${oid.substringBefore(':')}:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(bytes))}")SyncV2Codec.fail("hash_mismatch")
+        }else if(oid!="${oid.substringBefore(':')}:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(bytes,"sha256.object"))}")SyncV2Codec.fail("hash_mismatch")
         val f=file(oid,".object")
         if(f.exists())return // immutable, accepted only through this verified write path
         atomic(f,bytes);fault("object")
     }
-    fun objectBytes(oid:String):ByteArray=read(file(oid,".object"))
+    fun objectBytes(oid:String):ByteArray {val f=file(oid,".object");if(!f.exists())SyncV2Codec.fail("object_missing");return read(f)}
     fun objectPart(oid:String,start:Int,length:Int):ByteArray {
         if(length !in 1..65536)SyncV2Codec.fail("invalid_schema")
         return read(file(oid,".object"),start,length)
@@ -73,12 +83,14 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
     fun objectSize(oid:String):Int {counts.metadataStats++;SyncV2Wire.oid(oid);val size=file(oid,".object").length();if(size !in 1..266264)SyncV2Codec.fail("object_missing");return size.toInt()}
     fun prefix(oid:String,total:Int):Int {
         recoverDownload(oid)
+        durablePrefixes[oid]?.let{if(it.total!=total)SyncV2Codec.fail("invalid_schema");return it.offset}
         var offset=oldPrefix(oid,total)
         while(offset<total) {
             val part=localPart(oid,offset)?:break
             if(part.first.getInt("total")!=total)SyncV2Codec.fail("part_conflict")
             offset+=part.second.size
         }
+        if(offset>0)durablePrefixes[oid]=DurablePrefix(total,offset)
         return offset
     }
     private fun oldPrefix(oid:String,total:Int):Int {
@@ -92,19 +104,33 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
      * fsync publishes both. At most five records exist for a bounded wire object; no directory
      * scan, plaintext body, JSON/base64 payload, or independent receipt write is necessary. */
     private fun localPart(oid:String,offset:Int):Pair<JSONObject,ByteArray>? {
-        val f=file(oid,".local-$offset");if(!f.exists())return null
-        val encrypted=read(f);if(encrypted.size<28)SyncV2Codec.fail("invalid_encoding")
-        val raw=SyncV2Codec.decrypt(localKey,encrypted.copyOf(12),SyncV2Codec.utf8("$scope/local-part/$oid/$offset"),encrypted.copyOfRange(12,encrypted.size))
-        if(raw.size<4)SyncV2Codec.fail("invalid_encoding")
-        val length=java.nio.ByteBuffer.wrap(raw,0,4).int
-        if(length !in 2..4096 || 4+length>raw.size)SyncV2Codec.fail("invalid_encoding")
-        val header=SyncV2Wire.parse(raw.copyOfRange(4,4+length),4096,true);val payload=raw.copyOfRange(4+length,raw.size)
+        val current=file(oid,".local2-$offset");val legacy=file(oid,".local-$offset")
+        val header:JSONObject;val payload:ByteArray
+        if(current.exists()) {
+            if(legacy.exists())SyncV2Codec.fail("part_conflict")
+            val raw=read(current);if(raw.size<32)SyncV2Codec.fail("invalid_encoding")
+            val length=java.nio.ByteBuffer.wrap(raw,0,4).int
+            if(length !in 30..4124 || 4+length>raw.size)SyncV2Codec.fail("invalid_encoding")
+            val metadata=SyncV2Codec.decrypt(localKey,SyncV2LocalProfile.copy(raw,4,16),SyncV2Codec.utf8("$scope/local-part-v2/$oid/$offset"),SyncV2LocalProfile.copy(raw,16,4+length))
+            header=SyncV2Wire.parse(metadata,4096,true);payload=SyncV2LocalProfile.copy(raw,4+length,raw.size)
+        }else {
+            if(!legacy.exists())return null
+            // P4 v1 records remain readable. Never rewrite a retained custody copy to migrate it.
+            val encrypted=read(legacy);if(encrypted.size<28)SyncV2Codec.fail("invalid_encoding")
+            val raw=SyncV2Codec.decrypt(localKey,SyncV2LocalProfile.copy(encrypted,0,12),SyncV2Codec.utf8("$scope/local-part/$oid/$offset"),SyncV2LocalProfile.copy(encrypted,12,encrypted.size))
+            if(raw.size<4)SyncV2Codec.fail("invalid_encoding")
+            val length=java.nio.ByteBuffer.wrap(raw,0,4).int
+            if(length !in 2..4096 || 4+length>raw.size)SyncV2Codec.fail("invalid_encoding")
+            header=SyncV2Wire.parse(SyncV2LocalProfile.copy(raw,4,4+length),4096,true);payload=SyncV2LocalProfile.copy(raw,4+length,raw.size)
+        }
         val total=SyncV2Wire.uint(header,"total",266264).toInt()
-        if(offset<0 || offset>=total || payload.size!=minOf(65536,total-offset) || header.get("offset")!=offset || header.get("hash")!=SyncV2Codec.hex(SyncV2Codec.sha(payload)))SyncV2Codec.fail("hash_mismatch")
+        if(offset<0 || offset>=total || payload.size!=minOf(65536,total-offset) || header.get("offset")!=offset || header.get("hash")!=SyncV2Codec.hex(SyncV2Codec.sha(payload,"sha256.record")))SyncV2Codec.fail("hash_mismatch")
         return header to payload
     }
     fun localTotal(oid:String):Int? {
         SyncV2Wire.oid(oid)
+        recoverDownload(oid)
+        durablePrefixes[oid]?.let{return it.total}
         for(offset in 0..262144 step 65536)localPart(oid,offset)?.let{return it.first.getInt("total")}
         return load("local-upload/$oid")?.getInt("total")
     }
@@ -112,21 +138,31 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
         val base=oldPrefix(oid,total);val out=java.io.ByteArrayOutputStream()
         if(base>0)out.write(read(file(oid,".part"),0,base))
         var offset=base
-        while(offset<total) {val part=localPart(oid,offset)?:break;if(part.first.getInt("total")!=total)SyncV2Codec.fail("part_conflict");out.write(part.second);offset+=part.second.size}
-        return out.toByteArray()
+        while(offset<total) {val part=localPart(oid,offset)?:break;if(part.first.getInt("total")!=total)SyncV2Codec.fail("part_conflict");SyncV2LocalProfile.count("payload.stream.copy",part.second.size.toLong());out.write(part.second);offset+=part.second.size}
+        SyncV2LocalProfile.count("payload.stream.copy",out.size().toLong());return out.toByteArray()
     }
     fun appendLocal(oid:String,total:Int,offset:Int,bytes:ByteArray,receipt:JSONObject) {
         SyncV2Wire.oid(oid)
         if(total !in 1..266264 || offset!=prefix(oid,total) || offset%65536!=0 || bytes.size!=minOf(65536,total-offset))SyncV2Codec.fail("offset_conflict")
-        val header=SyncV2LocalProtocol.bytes(JSONObject().put("total",total).put("offset",offset).put("hash",SyncV2Codec.hex(SyncV2Codec.sha(bytes))).put("receipt",receipt))
-        val nonce=SyncV2Codec.random(12);val raw=java.nio.ByteBuffer.allocate(4).putInt(header.size).array()+header+bytes
+        val header=SyncV2LocalProtocol.bytes(JSONObject().put("total",total).put("offset",offset).put("hash",SyncV2Codec.hex(SyncV2Codec.sha(bytes,"sha256.record"))).put("receipt",receipt))
+        // Payload already is the exact end-to-end object ciphertext (as in .object files).
+        // Authenticate its SHA/offset/total/receipt in a small encrypted metadata envelope;
+        // retaining raw ciphertext avoids encrypting/decrypting the whole payload a second time.
+        val nonce=SyncV2Codec.random(12)
+        val metadata=SyncV2Codec.encrypt(localKey,nonce,SyncV2Codec.utf8("$scope/local-part-v2/$oid/$offset"),header)
+        val raw=java.nio.ByteBuffer.allocate(4+nonce.size+metadata.size+bytes.size).putInt(nonce.size+metadata.size).put(nonce).put(metadata).put(bytes).array()
+        SyncV2LocalProfile.count("payload.copy",bytes.size.toLong())
+        SyncV2LocalProfile.count("record.metadata.copy",nonce.size.toLong());SyncV2LocalProfile.count("record.metadata.copy",metadata.size.toLong())
         fault("frame")
-        atomic(file(oid,".local-$offset"),nonce+SyncV2Codec.encrypt(localKey,nonce,SyncV2Codec.utf8("$scope/local-part/$oid/$offset"),raw))
+        durablePrefixes.remove(oid)
+        atomic(file(oid,".local2-$offset"),raw)
+        durablePrefixes[oid]=DurablePrefix(total,offset+bytes.size)
         fault("checkpoint")
     }
     fun append(oid:String,total:Int,offset:Int,bytes:ByteArray) {
         SyncV2Wire.oid(oid)
         if(total !in 1..266264 || offset!=prefix(oid,total) || offset%65536!=0 || bytes.size!=minOf(65536,total-offset))SyncV2Codec.fail("offset_conflict")
+        durablePrefixes.remove(oid)
         // One materialization at a local -> cloud handoff retains the exact sealed prefix.
         if(oldPrefix(oid,total)<offset) {
             val prefix=prefixBytes(oid,total)
@@ -137,6 +173,7 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
         RandomAccessFile(f,"rw").use{it.setLength(offset.toLong());it.seek(offset.toLong());it.write(bytes);it.fd.sync()}
         counts.writes++;counts.writeBytes+=bytes.size;fault("frame")
         save("prefix/$oid",JSONObject().put("total",total).put("offset",offset+bytes.size))
+        durablePrefixes[oid]=DurablePrefix(total,offset+bytes.size)
     }
     fun finish(oid:String,total:Int,verifyCommit:((JSONObject)->Unit)?=null) {
         if(prefix(oid,total)!=total)SyncV2Codec.fail("closure_incomplete")
@@ -156,6 +193,7 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
     fun recoverDownload(oid:String) {
         val intent=load("quarantine/$oid")?:return
         if(!intent.getBoolean("pending"))return
+        durablePrefixes.remove(oid)
         // Old unscoped intents prove only that the in-flight prefix failed. They cannot
         // authorize moving a previously authenticated object or plaintext out of its path.
         val target=QuarantineTarget.entries.singleOrNull{it.name==intent.optString("target","PART")}?:SyncV2Codec.fail("invalid_schema")
@@ -165,10 +203,10 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
             QuarantineTarget.CHECKED->listOf(".checked")
         }
         val keys=when(target) {
-            QuarantineTarget.PART,QuarantineTarget.OBJECT->listOf("prefix/$oid","download/$oid")
+            QuarantineTarget.PART,QuarantineTarget.OBJECT->listOf("prefix/$oid","download/$oid","local-upload/$oid")
             QuarantineTarget.CHECKED->listOf("checked/$oid")
         }
-        for(ext in extensions+if(target!=QuarantineTarget.CHECKED)(0..262144 step 65536).map{".local-$it"}else emptyList()) {
+        for(ext in extensions+if(target!=QuarantineTarget.CHECKED)(0..262144 step 65536).flatMap{listOf(".local-$it",".local2-$it")}else emptyList()) {
             val source=file(oid,ext)
             if(source.exists() && !source.renameTo(file(oid,"$ext.bad")))SyncV2Codec.fail("storage_pressure")
         }

@@ -35,12 +35,17 @@ internal object SyncV2Codec {
         ByteArray(b.remaining()).also { b.get(it) }
     } catch (_: Exception) { fail("invalid_encoding") }
     fun text(value: String, limit: Int): String = value.also { if (utf8(it).size > limit) fail("invalid_schema") }
-    fun hex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
+    private const val hexDigits="0123456789abcdef"
+    fun hex(bytes: ByteArray) = SyncV2LocalProfile.time("hex",bytes.size.toLong()){
+        val chars=CharArray(bytes.size*2)
+        for(i in bytes.indices){val b=bytes[i].toInt() and 255;chars[2*i]=hexDigits[b ushr 4];chars[2*i+1]=hexDigits[b and 15]}
+        String(chars)
+    }
     fun unhex(value: String, size: Int): ByteArray {
         if (!Regex("[0-9a-f]{${size * 2}}").matches(value)) fail("invalid_encoding")
         return ByteArray(size) { value.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
     }
-    fun sha(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes)
+    fun sha(bytes: ByteArray,purpose:String="sha256") = SyncV2LocalProfile.time(purpose,bytes.size.toLong()){MessageDigest.getInstance("SHA-256").digest(bytes)}
     fun hash(value: Any?) = hex(sha(utf8(canonical(value))))
     fun lp(vararg parts: ByteArray): ByteArray = ByteArrayOutputStream().also { out ->
         DataOutputStream(out).use { data -> parts.forEach { data.writeInt(it.size); data.write(it) } }
@@ -58,7 +63,8 @@ internal object SyncV2Codec {
     fun exact(obj: JSONObject, keys: Set<String>) {
         if (obj.keys().asSequence().toSet() != keys) fail("invalid_schema")
     }
-    fun canonical(value: Any?): String = when (value) {
+    fun canonical(value: Any?): String = SyncV2LocalProfile.time("json.canonical"){canonicalValue(value)}
+    private fun canonicalValue(value:Any?):String=when(value) {
         null, JSONObject.NULL -> "null"
         is String -> quote(value)
         is Boolean -> value.toString()
@@ -66,9 +72,9 @@ internal object SyncV2Codec {
             if (it !in -9_007_199_254_740_991L..9_007_199_254_740_991L) fail("invalid_encoding")
         }.toString()
         is JSONObject -> value.keys().asSequence().toList().sorted().joinToString(",", "{", "}") {
-            quote(it) + ":" + canonical(value.get(it))
+            quote(it) + ":" + canonicalValue(value.get(it))
         }
-        is JSONArray -> (0 until value.length()).joinToString(",", "[", "]") { canonical(value.get(it)) }
+        is JSONArray -> (0 until value.length()).joinToString(",", "[", "]") { canonicalValue(value.get(it)) }
         else -> fail("invalid_encoding")
     }
     private fun quote(value: String): String {
@@ -100,13 +106,13 @@ internal object SyncV2Codec {
     fun commitOid(value: String) { if (!Regex("commit:sha256:[a-f0-9]{64}").matches(value)) fail("invalid_schema") }
     fun random(size: Int) = ByteArray(size).also { SecureRandom().nextBytes(it) }
     fun encrypt(key: ByteArray, nonce: ByteArray, aad: ByteArray, bytes: ByteArray): ByteArray =
-        Cipher.getInstance("AES/GCM/NoPadding").run {
+        SyncV2LocalProfile.time("aead",bytes.size.toLong()){Cipher.getInstance("AES/GCM/NoPadding").run {
             init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce)); updateAAD(aad); doFinal(bytes)
-        }
+        }}
     fun decrypt(key: ByteArray, nonce: ByteArray, aad: ByteArray, bytes: ByteArray): ByteArray = try {
-        Cipher.getInstance("AES/GCM/NoPadding").run {
+        SyncV2LocalProfile.time("aead",bytes.size.toLong()){Cipher.getInstance("AES/GCM/NoPadding").run {
             init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce)); updateAAD(aad); doFinal(bytes)
-        }
+        }}
     } catch (_: Exception) { fail("aead_invalid") }
 
     /** Independent device-local key, purpose and scope, never the content/identity key. */

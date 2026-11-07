@@ -218,6 +218,7 @@ internal class SyncV2CloudClient(
         }
     }
     fun stage(value:JSONObject)=post("refs/cas",value)
+    fun requestResult(requestId:String):JSONObject {SyncV2LocalProtocol.id(requestId);return get("requests/$requestId")}
     fun events(after:String,waitMillis:Int=25000):JSONObject {
         SyncV2Codec.d64(after);require(waitMillis in 0..25000)
         return get("events",mapOf("after" to after,"waitMillis" to waitMillis.toString())).also(::window)

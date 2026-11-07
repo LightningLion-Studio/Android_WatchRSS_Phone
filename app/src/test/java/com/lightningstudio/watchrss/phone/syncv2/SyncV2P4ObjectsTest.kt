@@ -8,6 +8,33 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 
 class SyncV2P4ObjectsTest {
+    @Test fun c30J01PartialPresentAndLostCompleteAckUseOnlyFourWireFieldsAfterReconnect() {SyncV2P4Fixture().use{f->
+        val name="c30-reconnect";val (oid,raw)=f.blob(150000)
+        val (first,_)=f.pair();SyncV2LocalObjects(first,f.store(name)).putPart(frame(f,first,oid,raw,0));first.close()
+        fun row(port:SyncV2LocalObjects)=port.haveWant(JSONObject().put("scope",f.identity.scope)
+            .put("windowId",port.openWindow().getString("windowId")).put("oids",JSONArray(listOf(oid))))
+            .getJSONArray("objects").getJSONObject(0)
+        fun assertReceipt(row:JSONObject,offset:Int,status:String) {
+            assertEquals(status,row.getString("status"));assertEquals(offset,row.getInt("durableOffset"))
+            val value=row.getJSONObject("receipt")
+            SyncV2Codec.exact(value,setOf("kind","oid","durableOffset","totalBytes"))
+            assertEquals("local",value.getString("kind"));assertEquals(oid,value.getString("oid"))
+            assertEquals(raw.size,value.getInt("totalBytes"));assertEquals(offset,value.getInt("durableOffset"))
+        }
+        val (next,_)=f.pair();val reopened=f.store(name);val port=SyncV2LocalObjects(next,reopened)
+        assertReceipt(row(port),65536,"partial")
+        val bound=reopened.load("local-receipt/${next.peerDeviceId}/$oid")!!
+        assertEquals(next.sessionId,bound.getString("sessionId"));assertEquals(next.selfDeviceId,bound.getString("holderDeviceId"))
+        assertEquals(next.peerDeviceId,bound.getString("peerDeviceId"));assertEquals(SyncV2Codec.canonical(f.identity.scope),SyncV2Codec.canonical(bound.getJSONObject("scope")))
+        val transfer="66".repeat(16)
+        // Resume from the acknowledged offset only; the first frame is never resent.
+        for(offset in 65536 until raw.size step 65536)port.putPart(frame(f,next,oid,raw,offset,transfer))
+        assertReceipt(row(port),raw.size,"present")
+        port.complete(JSONObject().put("scope",f.identity.scope).put("transferId",transfer).put("oid",oid).put("totalBytes",raw.size))
+        next.close() // Drop the final complete ACK; a new store and session must agree.
+        val (last,_)=f.pair();assertReceipt(row(SyncV2LocalObjects(last,f.store(name))),raw.size,"present")
+        assertArrayEquals(raw,f.store(name).objectBytes(oid))
+    }}
     private fun frame(f:SyncV2P4Fixture,s:SyncV2LocalSession,oid:String,raw:ByteArray,offset:Int,transfer:String="44".repeat(16)):SyncV2Wrp2.Frame {
         val out=ByteArrayOutputStream();SyncV2Wrp2.write(out,s,oid,raw.size,offset,transfer,raw.copyOfRange(offset,minOf(raw.size,offset+65536)))
         return SyncV2Wrp2.read(ByteArrayInputStream(out.toByteArray()),s)

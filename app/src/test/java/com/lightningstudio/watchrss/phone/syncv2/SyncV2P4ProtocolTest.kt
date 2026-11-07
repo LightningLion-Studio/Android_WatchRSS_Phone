@@ -63,7 +63,7 @@ class SyncV2P4ProtocolTest {
         p4Error("upgrade_required"){enabled.initiate(cap,JSONObject())};assertEquals(0,output.size())
     }}
     @Test fun wrp2RejectsHashScopeAndOldSessionBeforePersistence() {SyncV2P4Fixture().use{f->
-        val (s,_)=f.pair();val (oid,raw)=f.blob();val out=ByteArrayOutputStream();SyncV2Wrp2.write(out,s,oid,raw.size,0,"33".repeat(16),raw.copyOf(65536))
+        val (s,_)=f.pair();val (oid,raw)=f.blob();val out=ByteArrayOutputStream();SyncV2Wrp2.write(out,s,oid,raw.size,0,raw.copyOf(65536))
         val good=out.toByteArray();val corrupt=good.copyOf().also{it[it.lastIndex]=(it.last()+1).toByte()}
         p4Error("hash_mismatch"){SyncV2Wrp2.read(ByteArrayInputStream(corrupt),s)}
         s.close();p4Error("authentication_required"){SyncV2Wrp2.read(ByteArrayInputStream(good),s)}

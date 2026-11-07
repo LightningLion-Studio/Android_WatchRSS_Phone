@@ -18,8 +18,8 @@ internal class SyncV2LocalObjects(private val session:SyncV2LocalSession,private
     fun openWindow(body:JSONObject=JSONObject().put("scope",session.scope).put("knownRefs",JSONArray()).put("features",JSONArray())):JSONObject {
         session.requireProof();SyncV2Codec.exact(body,setOf("scope","knownRefs","features"))
         if(SyncV2Codec.scope(body.getJSONObject("scope"))!=SyncV2Codec.scope(session.scope))SyncV2Codec.fail("scope_mismatch")
-        if(body.getJSONArray("knownRefs").length()>64)SyncV2Codec.fail("invalid_schema")
-        session.requireNegotiatedFeatures(SyncV2Wire.features(body.getJSONArray("features")))
+        knownRefs(body.opt("knownRefs"))
+        session.requireNegotiatedFeatures(SyncV2Wire.features(body.optJSONArray("features")?:SyncV2Codec.fail("invalid_schema")))
         windows.entries.removeAll{it.value<=now()}
         if(windows.size>=4)SyncV2Codec.fail("window_limit")
         val id=SyncV2Codec.hex(SyncV2Codec.random(16));val expiry=now()+300000;windows[id]=expiry
@@ -36,6 +36,24 @@ internal class SyncV2LocalObjects(private val session:SyncV2LocalSession,private
             SyncV2Wire.oid(row.getString("commitOid"),"commit");if(SyncV2Codec.d64(row.getString("refRevision")).signum()==0)SyncV2Codec.fail("invalid_schema")
         }
         return result
+    }
+    /** C33: same rows and 65-entry bound as cloud /negotiate (account + 64 devices). */
+    private fun knownRefs(value:Any?) {
+        val rows=value as? JSONArray?:SyncV2Codec.fail("invalid_schema")
+        if(rows.length()>65)SyncV2Codec.fail("invalid_schema")
+        for(i in 0 until rows.length()) {
+            val row=rows.opt(i) as? JSONObject?:SyncV2Codec.fail("invalid_schema")
+            SyncV2Codec.exact(row,setOf("ref","oid","revision"));SyncV2Wire.string(row,"ref")
+            if(!row.isNull("oid"))runCatching{SyncV2Wire.oid(SyncV2Wire.string(row,"oid"),"commit")}.getOrElse{SyncV2Codec.fail("invalid_schema")}
+            SyncV2Codec.d64(SyncV2Wire.string(row,"revision"))
+        }
+    }
+    private fun finish(oid:String,total:Int) {
+        try {store.finish(oid,total,verifyCommit,"local-receipt/${session.peerDeviceId}/$oid")}
+        catch(e:IllegalStateException) {
+            if(SyncV2ContentStore.rejectedPrefix(e))transfers.entries.removeAll{it.value.first==oid}
+            throw e
+        }
     }
     private fun window(body:JSONObject) {
         session.requireFraming()
@@ -59,7 +77,7 @@ internal class SyncV2LocalObjects(private val session:SyncV2LocalSession,private
         if(transfers[id]!=(oid to total))SyncV2Codec.fail("invalid_schema")
         val existing=try{store.objectSize(oid)}catch(e:IllegalStateException){if(e.message!="object_missing")throw e;null}
         if(existing!=null && existing!=total)SyncV2Codec.fail("part_conflict")
-        if(existing==null)store.finish(oid,total,verifyCommit)
+        if(existing==null)finish(oid,total)
         receipt(oid,total,total,false)
         return JSONObject().put("kind","local").put("oid",oid).put("durableOffset",total).put("totalBytes",total)
     }
@@ -104,12 +122,12 @@ internal class SyncV2LocalObjects(private val session:SyncV2LocalSession,private
         val rows=JSONArray();for(oid in SyncV2Wire.strings(body.getJSONArray("oids"),512)) {
             SyncV2Wire.oid(oid)
             val size=try{store.objectSize(oid)}catch(e:IllegalStateException){if(e.message!="object_missing")throw e;null}
-            val partial=store.localTotal(oid)
+            val partial=if(size==null)store.localTotal(oid)else null
             if(size!=null)rows.put(JSONObject().put("oid",oid).put("status","present").put("totalBytes",size).put("durableOffset",size).put("receipt",receipt(oid,size,size)))
             else if(partial!=null) {
                 val total=partial;val offset=store.prefix(oid,total)
                 // C8: complete final durable prefix before reporting present after ACK loss.
-                if(offset==total)store.finish(oid,total,verifyCommit)
+                if(offset==total)finish(oid,total)
                 rows.put(JSONObject().put("oid",oid).put("status",if(offset==total)"present" else "partial").put("totalBytes",total).put("durableOffset",offset).put("receipt",receipt(oid,total,offset)))
             }else rows.put(JSONObject().put("oid",oid).put("status","missing").put("totalBytes",JSONObject.NULL).put("durableOffset",0).put("receipt",JSONObject.NULL))
         }
@@ -157,9 +175,9 @@ internal class SyncV2LocalObjects(private val session:SyncV2LocalSession,private
     }
     fun send(read:Read,out:OutputStream) {
         var at=read.start
-        while(at<=read.end){session.requireFraming();val part=store.objectPart(read.oid,at,minOf(65536,read.end-at+1));SyncV2Wrp2.write(out,session,read.oid,read.total,at,read.transferId,part);at+=part.size;Thread.yield()}
+        while(at<=read.end){session.requireFraming();val part=store.objectPart(read.oid,at,minOf(65536,read.end-at+1));SyncV2Wrp2.write(out,session,read.oid,read.total,at,part);at+=part.size;Thread.yield()}
     }
-    /** The expected transfer comes from this session's objectGet response, never its header. */
+    /** C33: a serialized control response pairs with its following seven-field data frames. */
     fun receive(input:InputStream,expected:Read):Int {
         session.requireFraming();val frame=SyncV2Wrp2.read(input,session);return receive(frame,expected)
     }
@@ -168,24 +186,24 @@ internal class SyncV2LocalObjects(private val session:SyncV2LocalSession,private
         // Public Frame constructors are not authentication evidence. Revalidate the complete wire.
         SyncV2Wrp2.validate(session,h,frame.payload)
         val offset=h.getInt("offset")
-        if(h.get("oid")!=expected.oid || h.getInt("totalBytes")!=expected.total || h.get("transferId")!=expected.transferId || offset<expected.start || offset+frame.payload.size-1>expected.end)SyncV2Codec.fail("invalid_range")
+        if(h.get("oid")!=expected.oid || h.getInt("totalBytes")!=expected.total || offset<expected.start || offset+frame.payload.size-1>expected.end)SyncV2Codec.fail("invalid_range")
         store.append(expected.oid,expected.total,offset,frame.payload)
-        if(offset+frame.payload.size==expected.total)store.finish(expected.oid,expected.total,verifyCommit)
+        if(offset+frame.payload.size==expected.total)finish(expected.oid,expected.total)
         receipt(expected.oid,expected.total,offset+frame.payload.size);return frame.payload.size
     }
     /** putPart transfers exactly one fine frame. Duplicate bytes must match the durable prefix. */
-    @Synchronized fun putPart(frame:SyncV2Wrp2.Frame):JSONObject {
+    @Synchronized fun putPart(frame:SyncV2Wrp2.Frame,transferId:String):JSONObject {
         session.requireFraming();val h=frame.header;val oid=SyncV2Wire.oid(h.getString("oid"));val total=h.getInt("totalBytes");val offset=h.getInt("offset")
         if(h.get("sessionId")!=session.sessionId || SyncV2Codec.scope(h.getJSONObject("scope"))!=SyncV2Codec.scope(session.scope))SyncV2Codec.fail("proof_invalid")
         SyncV2Wrp2.validate(session,h,frame.payload)
-        val transfer=h.getString("transferId")
+        val transfer=SyncV2LocalProtocol.id(transferId)
         if(transfers[transfer]?.let{it!=(oid to total)}==true)SyncV2Codec.fail("part_conflict")
         if(offset%65536!=0 || frame.payload.size!=minOf(65536,total-offset))SyncV2Codec.fail("offset_conflict")
         if(transfers.size>=512 && transfer !in transfers)SyncV2Codec.fail("window_limit")
         transfers[transfer]=oid to total
-        val prior=store.localTotal(oid)
-        if(prior!=null && prior!=total)SyncV2Codec.fail("part_conflict")
         val size=try{store.objectSize(oid)}catch(e:IllegalStateException){if(e.message!="object_missing")throw e;null}
+        val prior=if(size==null)store.localTotal(oid)else size
+        if(prior!=null && prior!=total)SyncV2Codec.fail("part_conflict")
         val prefix=if(size!=null)size else store.prefix(oid,total)
         if(offset<prefix) {
             if(offset+frame.payload.size>prefix)SyncV2Codec.fail("part_conflict")
@@ -193,7 +211,7 @@ internal class SyncV2LocalObjects(private val session:SyncV2LocalSession,private
             if(!bytes.contentEquals(frame.payload))SyncV2Codec.fail("part_conflict")
         }else store.appendLocal(oid,total,offset,frame.payload,boundReceipt(receipt(oid,total,offset+frame.payload.size,false)))
         val end=maxOf(prefix,offset+frame.payload.size)
-        if(end==total && size==null)store.finish(oid,total,verifyCommit)
+        if(end==total && size==null)finish(oid,total)
         return receipt(oid,total,end,offset<prefix)
     }
 }

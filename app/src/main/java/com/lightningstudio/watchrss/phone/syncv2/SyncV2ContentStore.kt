@@ -58,7 +58,7 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
     fun putObject(oid:String,bytes:ByteArray,verifyCommit:((JSONObject)->Unit)?=null) {
         SyncV2Wire.oid(oid)
         if(bytes.size>266264)SyncV2Codec.fail("object_too_large")
-        if(oid.startsWith("commit:")) {
+        if(oid.startsWith("commit:")) SyncV2Wire.schema {
             val value=SyncV2Wire.parse(bytes,262144,true)
             SyncV2Codec.exact(value,setOf("body","signature"))
             SyncV2HeadPins.validateBody(value.getJSONObject("body"))
@@ -175,19 +175,25 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
         save("prefix/$oid",JSONObject().put("total",total).put("offset",offset+bytes.size))
         durablePrefixes[oid]=DurablePrefix(total,offset+bytes.size)
     }
-    fun finish(oid:String,total:Int,verifyCommit:((JSONObject)->Unit)?=null) {
+    fun finish(oid:String,total:Int,verifyCommit:((JSONObject)->Unit)?=null,receiveStateKey:String?=null) {
         if(prefix(oid,total)!=total)SyncV2Codec.fail("closure_incomplete")
         try {putObject(oid,prefixBytes(oid,total),verifyCommit)}catch(e:IllegalStateException) {
-            if(e.message=="hash_mismatch")quarantineDownload(oid,e.message!!,QuarantineTarget.PART)
+            if(rejectedPrefix(e))quarantineDownload(oid,e.message!!,QuarantineTarget.PART,receiveStateKey)
             throw e
         }
+    }
+    companion object {
+        // Byte/schema/signature rejection invalidates this representation. Missing authority,
+        // revoked membership and unsupported features do not prove the retained bytes invalid.
+        fun rejectedPrefix(e:IllegalStateException)=e.message in setOf("hash_mismatch","signature_invalid","invalid_schema","invalid_encoding","invalid_oid")
     }
     enum class QuarantineTarget { PART, OBJECT, CHECKED }
     /** Failure of a new prefix says nothing about an existing authenticated copy. Persist
      * the failed representation before invalidation; recovery must not widen that scope. */
-    fun quarantineDownload(oid:String,reason:String,target:QuarantineTarget=QuarantineTarget.PART) {
+    fun quarantineDownload(oid:String,reason:String,target:QuarantineTarget=QuarantineTarget.PART,receiveStateKey:String?=null) {
         SyncV2Wire.oid(oid)
-        save("quarantine/$oid",JSONObject().put("pending",true).put("reason",reason).put("target",target.name))
+        if(receiveStateKey!=null && !Regex("local-receipt/[0-9a-f]{32}/${Regex.escape(oid)}").matches(receiveStateKey))SyncV2Codec.fail("invalid_schema")
+        save("quarantine/$oid",JSONObject().put("pending",true).put("reason",reason).put("target",target.name).put("receiveStateKey",receiveStateKey?:JSONObject.NULL))
         fault("quarantine");recoverDownload(oid)
     }
     fun recoverDownload(oid:String) {
@@ -202,10 +208,12 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
             QuarantineTarget.OBJECT->listOf(".part",".object")
             QuarantineTarget.CHECKED->listOf(".checked")
         }
+        val receipt=if(intent.isNull("receiveStateKey"))null else intent.getString("receiveStateKey").also{
+            if(!Regex("local-receipt/[0-9a-f]{32}/${Regex.escape(oid)}").matches(it))SyncV2Codec.fail("invalid_schema")}
         val keys=when(target) {
             QuarantineTarget.PART,QuarantineTarget.OBJECT->listOf("prefix/$oid","download/$oid","local-upload/$oid")
             QuarantineTarget.CHECKED->listOf("checked/$oid")
-        }
+        }+listOfNotNull(receipt)
         for(ext in extensions+if(target!=QuarantineTarget.CHECKED)(0..262144 step 65536).flatMap{listOf(".local-$it",".local2-$it")}else emptyList()) {
             val source=file(oid,ext)
             if(source.exists() && !source.renameTo(file(oid,"$ext.bad")))SyncV2Codec.fail("storage_pressure")

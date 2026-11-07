@@ -13,9 +13,9 @@ import java.io.ByteArrayOutputStream
 import java.io.OutputStream
 
 class SyncV2P4StreamTest {
-    private fun <T> sockets(f:SyncV2P4Fixture,operations:Int,serverSetup:(SyncV2LocalObjects)->Unit={},block:(SyncV2LocalConnection,SyncV2ContentStore)->T):T {
+    private fun <T> sockets(f:SyncV2P4Fixture,operations:Int,serverSetup:(SyncV2LocalObjects)->Unit={},capabilityFeatures:List<String> = emptyList(),block:(SyncV2LocalConnection,SyncV2ContentStore)->T):T {
         val server=ServerSocket(0,1,InetAddress.getLoopbackAddress());val executor=Executors.newSingleThreadExecutor()
-        val capability=SyncV2LocalProtocol.capability(f.identity.scope,SyncV2LocalProtocol.Gates(true))
+        val capability=SyncV2LocalProtocol.capability(f.identity.scope,SyncV2LocalProtocol.Gates(true),supported=capabilityFeatures)
         val source=f.store("stream-source")
         val future=executor.submit<Unit>{server.accept().use{socket->
             socket.soTimeout=5000;socket.tcpNoDelay=true
@@ -30,15 +30,19 @@ class SyncV2P4StreamTest {
             c.initiate(capability,capability);assertTrue(session.isCommitted);val result=block(c,source);future.get(10,TimeUnit.SECONDS);result
         }}finally{server.close();executor.shutdownNow()}
     }
+    @Test fun thirdRoundUsesFirstHelloIntersectionInsteadOfOlderProbeFeatures() {SyncV2P4Fixture().use{f->
+        sockets(f,0,capabilityFeatures=listOf("witness")){c,_->assertNotNull(c.negotiatedWindow)}
+    }}
     @Test fun twoRoundHandshakePutCompleteAndRawGetWorkOnRealLoopbackStreams() {SyncV2P4Fixture().use{f->
         val (oid,raw)=f.blob();val frames=(raw.size+65535)/65536
         sockets(f,frames+3){c,source->
             val transfer="99".repeat(16)
-            for(offset in raw.indices step 65536)c.putPart(oid,raw.size,offset,raw.copyOfRange(offset,minOf(offset+65536,raw.size)),transfer)
+            for(offset in raw.indices step 65536)assertEquals(transfer,c.putPart(oid,raw.size,offset,raw.copyOfRange(offset,minOf(offset+65536,raw.size)),transfer).getString("transferId"))
             val complete=c.exchange("syncObjectsV2.complete",JSONObject().put("scope",f.identity.scope).put("transferId",transfer).put("oid",oid).put("totalBytes",raw.size))
             assertEquals("local",complete.getString("kind"));assertArrayEquals(raw,source.objectBytes(oid))
             val window=c.exchange("syncObjectsV2.negotiate",JSONObject().put("scope",f.identity.scope).put("knownRefs",JSONArray()).put("features",JSONArray())).getString("windowId")
-            val read=ByteArrayOutputStream();c.get(f.body(oid,window)){frame,_->read.write(frame.payload)}
+            val read=ByteArrayOutputStream();val response=c.get(f.body(oid,window)){frame,_->assertFalse(frame.header.has("transferId"));read.write(frame.payload)}
+            SyncV2LocalProtocol.id(response.getString("transferId"))
             assertArrayEquals(raw,read.toByteArray())
         }
     }}
@@ -73,7 +77,7 @@ class SyncV2P4StreamTest {
             val transfer="77".repeat(16);val part=raw.copyOf(65536)
             val body=JSONObject().put("scope",f.identity.scope).put("transferId",transfer).put("oid",oid).put("totalBytes",raw.size).put("offset",65536).put("partBytes",part.size).put("partSha256",SyncV2Codec.hex(SyncV2Codec.sha(part)))
             SyncV2LocalProtocol.writeJson(socket.getOutputStream(),JSONObject().put("requestId","88".repeat(16)).put("action","syncObjectsV2.putPart").put("body",body))
-            SyncV2Wrp2.write(socket.getOutputStream(),s,oid,raw.size,0,transfer,part)
+            SyncV2Wrp2.write(socket.getOutputStream(),s,oid,raw.size,0,part)
             val error=SyncV2LocalProtocol.readJson(socket.getInputStream()).getJSONObject("error");assertEquals("offset_conflict",error.getString("code"));assertTrue(error.getBoolean("retryable"))
             future.get(5,TimeUnit.SECONDS);assertEquals(0,store.prefix(oid,raw.size));assertNull(store.load("local-upload/$oid"))
         }}finally{server.close();executor.shutdownNow()}

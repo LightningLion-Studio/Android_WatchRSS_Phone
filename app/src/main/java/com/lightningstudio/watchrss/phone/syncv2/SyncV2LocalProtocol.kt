@@ -67,7 +67,7 @@ internal class SyncV2LocalSession(scope:JSONObject,val sessionId:String,val self
     init {SyncV2Codec.scope(scope);SyncV2LocalProtocol.id(sessionId);SyncV2LocalProtocol.id(selfDeviceId)
         SyncV2Wire.features(JSONArray(required));SyncV2Wire.features(JSONArray(supported))}
     fun requireAuthenticated() {if(!gates.localObjects)SyncV2Codec.fail("feature_disabled");if(closed || !alive())SyncV2Codec.fail("authentication_required");checkMember(selfDeviceId)}
-    private fun checkMember(device:String) {when(member(device)){"active"->Unit;"revoked"->SyncV2Codec.fail("member_revoked");else->SyncV2Codec.fail("member_unknown")}}
+    private fun checkMember(device:String) {when(member(device)){"active"->Unit;"revoked"->{runCatching{close()};SyncV2Codec.fail("member_revoked")};else->{runCatching{close()};SyncV2Codec.fail("member_unknown")}}}
     fun hello(nonce:String=SyncV2Codec.hex(SyncV2Codec.random(16))):JSONObject {
         requireAuthenticated();if(selfHello!=null)SyncV2Codec.fail("proof_invalid")
         SyncV2LocalProtocol.id(nonce);if(!nonces.add(nonce))SyncV2Codec.fail("proof_invalid")
@@ -115,12 +115,16 @@ internal class SyncV2LocalSession(scope:JSONObject,val sessionId:String,val self
     fun requireFraming() {requireProof();if(!isCommitted)SyncV2Codec.fail("framing_not_committed")}
     fun requireFeature(feature:String) {
         requireFraming()
-        if(feature !in supported || !(peerHello?.getJSONArray("features")?.let{SyncV2Wire.features(it)}?:emptyList()).contains(feature))SyncV2Codec.fail("feature_missing")
+        requireNegotiatedFeatures(listOf(feature))
     }
     fun requireNegotiatedFeatures(features:List<String>) {
+        if(!negotiatedFeatures().containsAll(features))SyncV2Codec.fail("feature_missing")
+    }
+    fun negotiatedFeatures():List<String> {
         requireProof()
+        val self=SyncV2Wire.features(selfHello!!.getJSONArray("features"))
         val peer=SyncV2Wire.features(peerHello!!.getJSONArray("features"))
-        if(!supported.containsAll(features) || !peer.containsAll(features))SyncV2Codec.fail("feature_missing")
+        return self.intersect(peer.toSet()).sorted()
     }
     fun proofBody()=JSONObject().put("scope",scope).put("proof",ownProof())
     fun receiveProofBody(value:JSONObject) {
@@ -134,9 +138,9 @@ internal class SyncV2LocalSession(scope:JSONObject,val sessionId:String,val self
 
 internal object SyncV2Wrp2 {
     data class Frame(val header:JSONObject,val payload:ByteArray)
-    fun write(output:OutputStream,session:SyncV2LocalSession,oid:String,total:Int,offset:Int,transferId:String,payload:ByteArray) {
+    fun write(output:OutputStream,session:SyncV2LocalSession,oid:String,total:Int,offset:Int,payload:ByteArray) {
         session.requireFraming();val header=JSONObject().put("scope",session.scope).put("sessionId",session.sessionId).put("oid",oid)
-            .put("totalBytes",total).put("offset",offset).put("partBytes",payload.size).put("partSha256",SyncV2Codec.hex(SyncV2Codec.sha(payload,"sha256.frame"))).put("transferId",transferId)
+            .put("totalBytes",total).put("offset",offset).put("partBytes",payload.size).put("partSha256",SyncV2Codec.hex(SyncV2Codec.sha(payload,"sha256.frame")))
         validate(session,header,payload);val raw=SyncV2LocalProtocol.bytes(header);if(raw.size>4096)SyncV2Codec.fail("object_too_large")
         DataOutputStream(output).apply{writeBytes("WRP2");writeInt(raw.size);write(raw);write(payload);flush()}
     }
@@ -150,10 +154,10 @@ internal object SyncV2Wrp2 {
     }
     fun validate(session:SyncV2LocalSession,h:JSONObject,payload:ByteArray) {
         session.requireFraming()
-        SyncV2Codec.exact(h,setOf("scope","sessionId","oid","totalBytes","offset","partBytes","partSha256","transferId"))
+        SyncV2Codec.exact(h,setOf("scope","sessionId","oid","totalBytes","offset","partBytes","partSha256"))
         if(SyncV2Codec.scope(h.getJSONObject("scope"))!=SyncV2Codec.scope(session.scope))SyncV2Codec.fail("scope_mismatch")
         if(h.get("sessionId")!=session.sessionId)SyncV2Codec.fail("proof_invalid")
-        SyncV2LocalProtocol.id(SyncV2Wire.string(h,"transferId"));SyncV2Wire.oid(SyncV2Wire.string(h,"oid"))
+        SyncV2Wire.oid(SyncV2Wire.string(h,"oid"))
         val total=SyncV2Wire.uint(h,"totalBytes",266264);val offset=SyncV2Wire.uint(h,"offset",266264)
         if(total==0L || payload.size !in 1..65536 || h.get("partBytes")!=payload.size || offset+payload.size>total)SyncV2Codec.fail("invalid_range")
         if(h.get("partSha256")!=SyncV2Codec.hex(SyncV2Codec.sha(payload,"sha256.frame")))SyncV2Codec.fail("hash_mismatch")

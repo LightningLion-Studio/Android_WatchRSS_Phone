@@ -58,7 +58,7 @@ internal class SyncV2LocalConnection(val session:SyncV2LocalSession,private val 
         deadline(millis) {
             session.receiveHello(response(request("syncObjectsV2.negotiate",session.hello())))
             session.receiveProofBody(response(request("syncObjectsV2.negotiate",session.proofBody())))
-            val features=SyncV2Wire.features(ownCapability.getJSONArray("supportedFeatures")).intersect(SyncV2Wire.features(peerCapability.getJSONArray("supportedFeatures")).toSet()).sorted()
+            val features=session.negotiatedFeatures()
             val window=response(request("syncObjectsV2.negotiate",JSONObject().put("scope",session.scope).put("knownRefs",org.json.JSONArray()).put("features",org.json.JSONArray(features))))
             SyncV2CloudClient.window(window)
             if(SyncV2Codec.scope(window.getJSONObject("scope"))!=SyncV2Codec.scope(session.scope))SyncV2Codec.fail("scope_mismatch")
@@ -95,8 +95,9 @@ internal class SyncV2LocalConnection(val session:SyncV2LocalSession,private val 
         session.requireFraming();val body=JSONObject().put("scope",session.scope).put("transferId",transferId).put("oid",oid).put("totalBytes",total).put("offset",offset)
             .put("partBytes",payload.size).put("partSha256",SyncV2Codec.hex(SyncV2Codec.sha(payload,"sha256.frame")))
         // Validate before emitting the control request, including payload size and scope.
-        val header=JSONObject(body.toString()).put("sessionId",session.sessionId);SyncV2Wrp2.validate(session,header,payload)
-        val id=request("syncObjectsV2.putPart",body);SyncV2Wrp2.write(output,session,oid,total,offset,transferId,payload)
+        SyncV2LocalProtocol.id(transferId)
+        val header=JSONObject(body.toString()).apply{remove("transferId")}.put("sessionId",session.sessionId);SyncV2Wrp2.validate(session,header,payload)
+        val id=request("syncObjectsV2.putPart",body);SyncV2Wrp2.write(output,session,oid,total,offset,payload)
         response(id).also{r->SyncV2Codec.exact(r,setOf("transferId","oid","durableOffset"));if(r.get("transferId")!=transferId || r.get("oid")!=oid || SyncV2Wire.uint(r,"durableOffset",total.toLong())<offset+payload.size)SyncV2Codec.fail("offset_conflict")}
     }
     fun get(body:JSONObject,accept:(SyncV2Wrp2.Frame,SyncV2LocalObjects.Read)->Unit):JSONObject=failClosed {
@@ -110,7 +111,7 @@ internal class SyncV2LocalConnection(val session:SyncV2LocalSession,private val 
         var offset=start
         while(offset<=end) {
             val frame=SyncV2LocalProfile.time("data.read.wait"){SyncV2Wrp2.read(input,session)};val h=frame.header
-            if(h.get("transferId")!=transfer || h.get("oid")!=read.oid || h.getInt("totalBytes")!=total || h.getInt("offset")!=offset || offset+frame.payload.size-1>end)SyncV2Codec.fail("invalid_range")
+            if(h.get("oid")!=read.oid || h.getInt("totalBytes")!=total || h.getInt("offset")!=offset || offset+frame.payload.size-1>end)SyncV2Codec.fail("invalid_range")
             accept(frame,read);offset+=frame.payload.size
         }
         r
@@ -130,9 +131,10 @@ internal class SyncV2LocalConnection(val session:SyncV2LocalSession,private val 
             "syncObjectsV2.objectGet"->{val read=objects.objectGet(body);reply(id,read.body);objects.send(read,output);return@failClosed}
             "syncObjectsV2.putPart"->{
                 SyncV2Codec.exact(body,setOf("scope","transferId","oid","totalBytes","offset","partBytes","partSha256"))
+                val transfer=SyncV2LocalProtocol.id(SyncV2Wire.string(body,"transferId"))
                 val frame=SyncV2LocalProfile.time("data.read.wait"){SyncV2Wrp2.read(input,session)}
-                for(field in body.keys())if(SyncV2Codec.canonical(body.get(field))!=SyncV2Codec.canonical(frame.header.get(field)))SyncV2Codec.fail(if(field=="partSha256")"hash_mismatch" else "offset_conflict")
-                val receipt=objects.putPart(frame)
+                for(field in body.keys().asSequence().filter{it!="transferId"})if(SyncV2Codec.canonical(body.get(field))!=SyncV2Codec.canonical(frame.header.get(field)))SyncV2Codec.fail(if(field=="partSha256")"hash_mismatch" else "offset_conflict")
+                val receipt=objects.putPart(frame,transfer)
                 JSONObject().put("transferId",body.get("transferId")).put("oid",body.get("oid")).put("durableOffset",receipt.get("durableOffset"))
             }
             "syncObjectsV2.receipt"->when(body.getString("kind")) {

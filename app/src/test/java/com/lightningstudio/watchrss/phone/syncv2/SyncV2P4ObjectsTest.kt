@@ -10,7 +10,7 @@ import java.io.ByteArrayOutputStream
 class SyncV2P4ObjectsTest {
     @Test fun c30J01PartialPresentAndLostCompleteAckUseOnlyFourWireFieldsAfterReconnect() {SyncV2P4Fixture().use{f->
         val name="c30-reconnect";val (oid,raw)=f.blob(150000)
-        val (first,_)=f.pair();SyncV2LocalObjects(first,f.store(name)).putPart(frame(f,first,oid,raw,0));first.close()
+        val (first,_)=f.pair();SyncV2LocalObjects(first,f.store(name)).putPart(frame(f,first,oid,raw,0),"44".repeat(16));first.close()
         fun row(port:SyncV2LocalObjects)=port.haveWant(JSONObject().put("scope",f.identity.scope)
             .put("windowId",port.openWindow().getString("windowId")).put("oids",JSONArray(listOf(oid))))
             .getJSONArray("objects").getJSONObject(0)
@@ -28,20 +28,20 @@ class SyncV2P4ObjectsTest {
         assertEquals(next.peerDeviceId,bound.getString("peerDeviceId"));assertEquals(SyncV2Codec.canonical(f.identity.scope),SyncV2Codec.canonical(bound.getJSONObject("scope")))
         val transfer="66".repeat(16)
         // Resume from the acknowledged offset only; the first frame is never resent.
-        for(offset in 65536 until raw.size step 65536)port.putPart(frame(f,next,oid,raw,offset,transfer))
+        for(offset in 65536 until raw.size step 65536)port.putPart(frame(f,next,oid,raw,offset),transfer)
         assertReceipt(row(port),raw.size,"present")
         port.complete(JSONObject().put("scope",f.identity.scope).put("transferId",transfer).put("oid",oid).put("totalBytes",raw.size))
         next.close() // Drop the final complete ACK; a new store and session must agree.
         val (last,_)=f.pair();assertReceipt(row(SyncV2LocalObjects(last,f.store(name))),raw.size,"present")
         assertArrayEquals(raw,f.store(name).objectBytes(oid))
     }}
-    private fun frame(f:SyncV2P4Fixture,s:SyncV2LocalSession,oid:String,raw:ByteArray,offset:Int,transfer:String="44".repeat(16)):SyncV2Wrp2.Frame {
-        val out=ByteArrayOutputStream();SyncV2Wrp2.write(out,s,oid,raw.size,offset,transfer,raw.copyOfRange(offset,minOf(raw.size,offset+65536)))
+    private fun frame(f:SyncV2P4Fixture,s:SyncV2LocalSession,oid:String,raw:ByteArray,offset:Int):SyncV2Wrp2.Frame {
+        val out=ByteArrayOutputStream();SyncV2Wrp2.write(out,s,oid,raw.size,offset,raw.copyOfRange(offset,minOf(raw.size,offset+65536)))
         return SyncV2Wrp2.read(ByteArrayInputStream(out.toByteArray()),s)
     }
     @Test fun finalAckLossResumesWithoutResendAndCompleteIsLocalOnly() {SyncV2P4Fixture().use{f->
         val (s,_)=f.pair();val store=f.store("receive");val port=SyncV2LocalObjects(s,store);val (oid,raw)=f.blob()
-        for(offset in raw.indices step 65536)port.putPart(frame(f,s,oid,raw,offset))
+        for(offset in raw.indices step 65536)port.putPart(frame(f,s,oid,raw,offset),"44".repeat(16))
         // Drop all returned ACKs, construct a fresh adapter over the persisted store.
         val (next,_)=f.pair();val recovered=SyncV2LocalObjects(next,f.store("receive"));val window=recovered.openWindow().getString("windowId")
         val result=recovered.haveWant(JSONObject().put("scope",f.identity.scope).put("windowId",window).put("oids",JSONArray(listOf(oid)))).getJSONArray("objects").getJSONObject(0)
@@ -55,17 +55,17 @@ class SyncV2P4ObjectsTest {
         store.append(oid,raw.size,0,raw.copyOf(65536))
         val (s,_)=f.pair();val local=SyncV2LocalObjects(s,store)
         val at=store.prefix(oid,raw.size);assertEquals(65536,at)
-        local.putPart(frame(f,s,oid,raw,at));s.close()
+        local.putPart(frame(f,s,oid,raw,at),"44".repeat(16));s.close()
         val (lan,_)=f.pair();val lanPort=SyncV2LocalObjects(lan,f.store("switch"))
-        for(offset in 131072 until raw.size step 65536)lanPort.putPart(frame(f,lan,oid,raw,offset,"55".repeat(16)))
+        for(offset in 131072 until raw.size step 65536)lanPort.putPart(frame(f,lan,oid,raw,offset),"55".repeat(16))
         assertArrayEquals(raw,f.store("switch").objectBytes(oid));assertEquals(0L,store.counts.seals)
     }}
     @Test fun duplicateMismatchGapAndWrongTotalCannotAdvancePrefix() {SyncV2P4Fixture().use{f->
         val (s,_)=f.pair();val store=f.store("dup");val port=SyncV2LocalObjects(s,store);val (oid,raw)=f.blob(230000)
-        val first=frame(f,s,oid,raw,0);port.putPart(first);port.putPart(first)
+        val first=frame(f,s,oid,raw,0);port.putPart(first,"44".repeat(16));port.putPart(first,"44".repeat(16))
         assertEquals(65536,store.prefix(oid,raw.size))
-        val changed=raw.copyOf().also{it[0]=(it[0]+1).toByte()};p4Error("part_conflict"){port.putPart(frame(f,s,oid,changed,0))}
-        p4Error("offset_conflict"){port.putPart(frame(f,s,oid,raw,131072))};assertEquals(65536,store.prefix(oid,raw.size))
+        val changed=raw.copyOf().also{it[0]=(it[0]+1).toByte()};p4Error("part_conflict"){port.putPart(frame(f,s,oid,changed,0),"44".repeat(16))}
+        p4Error("offset_conflict"){port.putPart(frame(f,s,oid,raw,131072),"44".repeat(16))};assertEquals(65536,store.prefix(oid,raw.size))
     }}
     @Test fun rawRangeReturnsExactSignedRefsBytesAndMappingIsImmutable() {SyncV2P3Fixture().use{cloud->SyncV2P4Fixture().use{f->
         val (s,_)=f.pair();val store=f.store("refs");val port=SyncV2LocalObjects(s,store,contentKey={f.key})
@@ -91,18 +91,18 @@ class SyncV2P4ObjectsTest {
         p4Error("object_missing"){port.objectGet(f.body("blob:sha256:"+"00".repeat(32),window))}
         now=300001;p4Error("window_expired"){port.objectGet(f.body(oid,window))}
     }}
-    @Test fun transferIdAndOldSessionCannotWriteUnderNewRead() {SyncV2P4Fixture().use{f->
+    @Test fun wrongObjectAndOldSessionCannotWriteUnderNewRead() {SyncV2P4Fixture().use{f->
         val (s,_)=f.pair();val store=f.store("read");val port=SyncV2LocalObjects(s,store);val (oid,raw)=f.blob()
-        val expected=SyncV2LocalObjects.Read(JSONObject(),oid,raw.size,0,raw.size-1,"55".repeat(16))
+        val expected=SyncV2LocalObjects.Read(JSONObject(),"blob:sha256:"+"ff".repeat(32),raw.size,0,raw.size-1,"55".repeat(16))
         p4Error("invalid_range"){port.receive(frame(f,s,oid,raw,0),expected)};assertEquals(0,store.prefix(oid,raw.size))
-        val stale=frame(f,s,oid,raw,0);s.close();p4Error("authentication_required"){port.putPart(stale)}
+        val stale=frame(f,s,oid,raw,0);s.close();p4Error("authentication_required"){port.putPart(stale,"44".repeat(16))}
     }}
     @Test fun storageFailureBeforeAckRecoversCompleteDurablePrefix() {SyncV2P4Fixture().use{f->
         val (s,_)=f.pair();var fail=true;val store=f.store("crash"){at->if(at=="frame" && fail){fail=false;throw IllegalStateException("simulated_crash")}}
         val port=SyncV2LocalObjects(s,store);val (oid,raw)=f.blob(40)
-        p4Error("simulated_crash"){port.putPart(frame(f,s,oid,raw,0))}
+        p4Error("simulated_crash"){port.putPart(frame(f,s,oid,raw,0),"44".repeat(16))}
         assertEquals(0,f.store("crash").prefix(oid,raw.size))
-        val recovered=SyncV2LocalObjects(s,f.store("crash"));recovered.putPart(frame(f,s,oid,raw,0));assertArrayEquals(raw,store.objectBytes(oid))
+        val recovered=SyncV2LocalObjects(s,f.store("crash"));recovered.putPart(frame(f,s,oid,raw,0),"44".repeat(16));assertArrayEquals(raw,store.objectBytes(oid))
     }}
     @Test fun treeDiffSkipsKnownImmutableNodes() {SyncV2P4Fixture().use{f->
         val (s,_)=f.pair();val store=f.store("trees");val port=SyncV2LocalObjects(s,store);val tree=SyncV2Index.build(f.identity.scope,emptyList())
@@ -125,12 +125,12 @@ class SyncV2P4ObjectsTest {
     }}
     @Test fun localPrefixHandsBackToCloudAndAtomicFrameCheckpointSurvivesCrash() {SyncV2P4Fixture().use{f->
         val (s,_)=f.pair();val store=f.store("handoff");val port=SyncV2LocalObjects(s,store);val (oid,raw)=f.blob(230000)
-        port.putPart(frame(f,s,oid,raw,0))
+        port.putPart(frame(f,s,oid,raw,0),"44".repeat(16))
         val reopened=f.store("handoff");assertEquals(65536,reopened.prefix(oid,raw.size))
         for(offset in 65536 until raw.size step 65536)reopened.append(oid,raw.size,offset,raw.copyOfRange(offset,minOf(raw.size,offset+65536)))
         reopened.finish(oid,raw.size);assertArrayEquals(raw,reopened.objectBytes(oid))
         var crash=true;val other=f.store("local-checkpoint"){if(it=="checkpoint" && crash){crash=false;throw IllegalStateException("simulated_crash")}}
-        val (small,bytes)=f.blob(10);p4Error("simulated_crash"){SyncV2LocalObjects(s,other).putPart(frame(f,s,small,bytes,0))}
+        val (small,bytes)=f.blob(10);p4Error("simulated_crash"){SyncV2LocalObjects(s,other).putPart(frame(f,s,small,bytes,0),"44".repeat(16))}
         val recovery=f.store("local-checkpoint");assertEquals(bytes.size,recovery.prefix(small,bytes.size))
         val recovered=SyncV2LocalObjects(s,recovery);val window=recovered.openWindow().getString("windowId")
         assertEquals("present",recovered.haveWant(JSONObject().put("scope",f.identity.scope).put("windowId",window).put("oids",JSONArray(listOf(small)))).getJSONArray("objects").getJSONObject(0).getString("status"))

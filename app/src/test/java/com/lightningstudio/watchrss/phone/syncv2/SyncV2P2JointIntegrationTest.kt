@@ -33,7 +33,13 @@ import java.util.concurrent.atomic.AtomicInteger
 @Config(manifest=Config.NONE,sdk=[35])
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 class SyncV2P2JointIntegrationTest {
-    private val root=File("/home/wilf/data/OPPO_Develop/.codex-tmp/cloud-v2/evidence/T-SYNCGIT-P2/phone")
+    private lateinit var root:File
+    private lateinit var fixtureRoot:File
+    @org.junit.Before fun configureJointEnvironment() {
+        org.junit.Assume.assumeTrue(System.getenv("WATCHRSS_P2_PHONE_JOINT")=="1")
+        fixtureRoot=SyncV2JointEnvironment.directory("WATCHRSS_P2_FIXTURE_DIR")
+        root=SyncV2JointEnvironment.directory("WRSS_P2_EVIDENCE")
+    }
     private val summary=JSONObject().put("platform","JVM/native SQLite + isolated real backend").put("productionAccess",false)
     private var phase="initial"
     private fun record(name:String,value:Any) {summary.put(name,value);save()}
@@ -178,7 +184,7 @@ class SyncV2P2JointIntegrationTest {
     @Test fun aServiceBootstrapAndCapabilitiesPinWithoutDeviceRosterDependency() {
         root.mkdirs()
         requireThat(System.getenv("WATCHRSS_P2_PHONE_JOINT")=="1","joint_not_enabled")
-        val f=SyncV2Wire.parse(File("/home/wilf/data/OPPO_Develop/.codex-tmp/cloud-v2/integration/phone.json").readBytes())
+        val f=SyncV2Wire.parse(File(fixtureRoot,"phone.json").readBytes())
         val bootstrap=publicHttp(f,"/functions/v1/cloud/bootstrap",true)
         val pinFile=File.createTempFile("phone-p2-service-pin-",".json")
         try {
@@ -218,7 +224,7 @@ class SyncV2P2JointIntegrationTest {
     }
     @Test fun cLegacyRecordsRequireUpgradeInsteadOfReturningEmptyLibrary() {
         requireThat(System.getenv("WATCHRSS_P2_PHONE_JOINT")=="1","joint_not_enabled")
-        val f=SyncV2Wire.parse(File("/home/wilf/data/OPPO_Develop/.codex-tmp/cloud-v2/integration/phone.json").readBytes())
+        val f=SyncV2Wire.parse(File(fixtureRoot,"phone.json").readBytes())
         requireThat(f.getString("baseUrl")=="http://127.0.0.1:18942","isolated_backend_required")
         val headers=f.getJSONObject("headers")
         val session=PhoneAccountSession(f.getString("userId"),"synthetic",headers.getString("Authorization").removePrefix("Bearer "),"",f.getLong("expiresAtMillis"))
@@ -245,7 +251,7 @@ class SyncV2P2JointIntegrationTest {
     }
     @Test fun phoneRealBackendC3C4PublishReadConcurrencyLostResponseAndWrongGeneration() {
         requireThat(System.getenv("WATCHRSS_P2_PHONE_JOINT")=="1","joint_not_enabled")
-        val fixture=File("/home/wilf/data/OPPO_Develop/.codex-tmp/cloud-v2/integration/phone.json")
+        val fixture=File(fixtureRoot,"phone.json")
         val f=SyncV2Wire.parse(fixture.readBytes());requireThat(f.getBoolean("syntheticOnly") && f.getString("platform")=="phone","fixture_scope_invalid")
         val local=File((RuntimeEnvironment.getApplication() as Context).cacheDir,"p2-live-${System.nanoTime()}").also{it.mkdirs()}
         val wrap=SyncV2Codec.unhex(f.getJSONObject("crypto").getString("contentKeyHex"),32)

@@ -44,7 +44,13 @@ import java.util.concurrent.atomic.AtomicInteger
 @Config(manifest=Config.NONE,sdk=[35])
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 class SyncV2P3JointIntegrationTest {
-    private var evidence=File("/home/wilf/data/OPPO_Develop/.codex-tmp/cloud-v2/evidence/T-SYNCGIT-P3A/phone/joint")
+    private lateinit var evidence:File
+    private lateinit var fixtureRoot:File
+    @org.junit.Before fun configureJointEnvironment() {
+        org.junit.Assume.assumeTrue(System.getenv("WATCHRSS_P3_PHONE_JOINT")=="1")
+        fixtureRoot=SyncV2JointEnvironment.directory("WATCHRSS_P3_FIXTURE_DIR")
+        evidence=SyncV2JointEnvironment.directory("WRSS_P3_EVIDENCE")
+    }
     private val result=JSONObject().put("platform","JVM/native SQLite + real isolated P3A backend").put("productionAccess",false)
     private var phase="initial"
     private val started=System.nanoTime()
@@ -164,8 +170,8 @@ class SyncV2P3JointIntegrationTest {
      * one sample per author. The proxy prevents accidentally rerunning publication work. */
     @Test fun phoneP3ForeignAllPublishedBodiesRangeResumeAndBl03() {
         need(System.getenv("WATCHRSS_P3_PHONE_JOINT")=="1","joint_not_enabled")
-        evidence=File(evidence.parentFile,"foreign-all");evidence.mkdirs()
-        val fixture=File("/home/wilf/data/OPPO_Develop/.codex-tmp/cloud-v2/integration/phone.json")
+        evidence=File(evidence,"foreign-all");evidence.mkdirs()
+        val fixture=File(fixtureRoot,"phone.json")
         val fixtureHash=SyncV2Codec.hex(SyncV2Codec.sha(fixture.readBytes()));val f=SyncV2Wire.parse(fixture.readBytes())
         need(f.getBoolean("syntheticOnly") && f.getString("platform")=="phone" && f.getString("baseUrl")=="http://127.0.0.1:18942","fixture_scope_invalid")
         val local=File((RuntimeEnvironment.getApplication() as Context).cacheDir,"p3-foreign-${System.nanoTime()}").also{it.mkdirs()}
@@ -178,7 +184,7 @@ class SyncV2P3JointIntegrationTest {
             }}
             val approvedLegacy=approved.map{it.getString("deviceId")}.toSet();need(approvedLegacy.size==4,"approved_roster_invalid")
             val profile=approved.associate{it.getString("deviceId") to it.optString("platform","unknown")}
-            val pin=SyncV2Wire.parse(File("/home/wilf/data/OPPO_Develop/.codex-tmp/cloud-v2/integration/bootstrap-public.json").readBytes()).getJSONObject("syncV2")
+            val pin=SyncV2Wire.parse(File(fixtureRoot,"bootstrap-public.json").readBytes()).getJSONObject("syncV2")
             val trust=SyncV2ServiceTrust.fromBootstrap(f.getString("accountId"),boot.getJSONObject("syncV2"),pin){SyncV2Codec.fail("pin_rewritten")}
             need(trust.keyId=="b73621a8ae71467db3a89da4c5ba659d","service_key_changed")
             val h=f.getJSONObject("headers");val session=SyncV2CloudClient.Session(f.getString("userId"),f.getString("legacyDeviceId"),f.getString("legacyLibraryEpoch"),f.getString("legacyContentGeneration"),SyncV2Codec.scope(f.getJSONObject("scope")),f.getString("syncDeviceId"),h.getString("Authorization").removePrefix("Bearer "),"",h.getString("x-watchrss-device-authorization"))
@@ -293,7 +299,7 @@ class SyncV2P3JointIntegrationTest {
     }
     @Test fun phoneP3RealBackendContentCasAvailabilityForeignDownloadResumeDemandAndCache() {
         need(System.getenv("WATCHRSS_P3_PHONE_JOINT")=="1","joint_not_enabled");evidence.mkdirs()
-        val fixture=File("/home/wilf/data/OPPO_Develop/.codex-tmp/cloud-v2/integration/phone.json")
+        val fixture=File(fixtureRoot,"phone.json")
         val fixtureHash=SyncV2Codec.hex(SyncV2Codec.sha(fixture.readBytes()));val f=SyncV2Wire.parse(fixture.readBytes())
         need(f.getBoolean("syntheticOnly") && f.getString("platform")=="phone" && f.getString("baseUrl")=="http://127.0.0.1:18942","fixture_scope_invalid")
         val local=File((RuntimeEnvironment.getApplication() as Context).cacheDir,"p3-joint-${System.nanoTime()}").also{it.mkdirs()}
@@ -306,7 +312,7 @@ class SyncV2P3JointIntegrationTest {
             }}
             val approvedLegacy=approved.map{it.getString("deviceId")}.toSet();need(approvedLegacy.size==4,"approved_roster_invalid")
             val profile=approved.associate{it.getString("deviceId") to it.optString("platform","unknown")}
-            val pin=SyncV2Wire.parse(File("/home/wilf/data/OPPO_Develop/.codex-tmp/cloud-v2/integration/bootstrap-public.json").readBytes()).getJSONObject("syncV2")
+            val pin=SyncV2Wire.parse(File(fixtureRoot,"bootstrap-public.json").readBytes()).getJSONObject("syncV2")
             val trust=SyncV2ServiceTrust.fromBootstrap(f.getString("accountId"),boot.getJSONObject("syncV2"),pin){SyncV2Codec.fail("pin_rewritten")}
             need(trust.keyId=="b73621a8ae71467db3a89da4c5ba659d","service_key_changed")
             val h=f.getJSONObject("headers");val session=SyncV2CloudClient.Session(f.getString("userId"),f.getString("legacyDeviceId"),f.getString("legacyLibraryEpoch"),f.getString("legacyContentGeneration"),SyncV2Codec.scope(f.getJSONObject("scope")),f.getString("syncDeviceId"),h.getString("Authorization").removePrefix("Bearer "),"",h.getString("x-watchrss-device-authorization"))

@@ -18,8 +18,9 @@ import java.util.concurrent.TimeUnit
 class SyncV2P4JointIntegrationTest {
     private fun id()=SyncV2Codec.hex(SyncV2Codec.random(16))
     @Test fun phoneRelayCustodyAndBackendRefusalMatrix() {
-        val root=File(System.getenv("WATCHRSS_P4_PHONE_JOINT")?:error("explicit P4 fixture required"))
-        val evidence=File(System.getenv("WRSS_P4_EVIDENCE")?:error("explicit evidence directory required"))
+        val root=SyncV2JointEnvironment.directory("WATCHRSS_P4_PHONE_JOINT")
+        val evidence=SyncV2JointEnvironment.directory("WRSS_P4_EVIDENCE")
+        val environment=SyncV2JointEnvironment.directory("WATCHRSS_P4_ENVIRONMENT")
         val owner=SyncV2Wire.parse(File(root,".owner.json").readBytes())
         check(owner.getBoolean("phoneP4Owned") && owner.getInt("backendPort")==18962)
         val fixtures=listOf("phone","watch","mini","cli").associateWith{p->SyncV2Wire.parse(File(root,"$p.json").readBytes())}
@@ -51,7 +52,7 @@ class SyncV2P4JointIntegrationTest {
         fun reject(name:String,code:String,block:()->Unit) {val failure=runCatching(block).exceptionOrNull();assertTrue("$name must return $code",failure is SyncV2CloudError && failure.code==code);errors.put(name,code);save()}
         fun mutate(operation:String) {
             val helper=listOf(File("src/test/python/syncv2_p4_fixture.py"),File("app/src/test/python/syncv2_p4_fixture.py")).first{it.isFile}.absolutePath
-            val command=listOf("python3",helper,operation,"--environment","/home/wilf/data/OPPO_Develop/.codex-tmp/cloud-v2/integration-p4","--scratch",root.absolutePath)
+            val command=listOf("python3",helper,operation,"--environment",environment.absolutePath,"--scratch",root.absolutePath)
             val p=ProcessBuilder(command).redirectErrorStream(true).start();p.inputStream.use{it.readBytes()};check(p.waitFor()==0){"owned synthetic fixture update failed"}
         }
         fun upload(oid:String,raw:ByteArray,channel:String="control") {

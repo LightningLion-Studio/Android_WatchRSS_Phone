@@ -34,6 +34,13 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             return "empty-account"
         }
         val observation=JSONObject().put("oid",account.getString("commitOid")).put("revision",account.getString("revision")).put("generation",account.getString("rollbackGeneration"))
+        val known=projection.state().body
+        val prior=known.optJSONObject("account")
+        if(prior!=null) {
+            if(SyncV2Codec.d64(observation.getString("generation"))<SyncV2Codec.d64(prior.getString("generation")) || SyncV2Codec.d64(observation.getString("revision"))<SyncV2Codec.d64(prior.getString("revision")))SyncV2Codec.fail("replay_detected")
+            val accepted=known.optJSONArray("knownAccountParents")?:JSONArray()
+            if(observation.getString("oid")!=prior.getString("oid") && (0 until accepted.length()).any{accepted.getJSONObject(it).getString("oid")==observation.getString("oid")})SyncV2Codec.fail("replay_detected")
+        }
         if(projection.reuseCloudIndex(observation,window.getString("serverRevision")))return if(projection.status()=="awaiting-user")"awaiting-user" else "metadata-ready"
         val head=account.getString("commitOid");val pin=projection.state().body.optJSONObject("account")?.getString("oid")
         val headers=mutableListOf<JSONObject>();var at:String?=head;val visited=mutableSetOf<String>()
@@ -81,6 +88,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         throw e
     }
     fun poll():JSONObject {
+        client.capabilities()
         val before=projection.state().body
         val cursor=before.optString("eventCursor","0")
         val events=try{client.events(cursor)}catch(e:SyncV2CloudError){
@@ -123,7 +131,10 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             val meta=cloud.getJSONObject("meta");val remoteState=cloud.getJSONObject("state");val row=cloud.getJSONObject("row");val entity=row.getString("entityKey")
             val candidate=projection.candidate(meta.getString("kind"),meta.getString("logicalId"))
             if(candidate!=null && (SyncV2Codec.canonical(candidate.first)!=SyncV2Codec.canonical(meta) || SyncV2Codec.canonical(candidate.second)!=SyncV2Codec.canonical(remoteState)))SyncV2Codec.fail("merge_unavailable")
-            mergedRows[entity]=row
+            val ready=mergedRows[entity]
+            val fulfillsPromise=ready!=null && !row.isNull("promiseId") && ready.isNull("promiseId") && !ready.isNull("recipeOid") &&
+                listOf("bodyRevision","metaOid","stateOid").all{ready.get(it)==row.get(it)} && SyncV2Codec.d64(ready.getString("rowSequence"))>SyncV2Codec.d64(row.getString("rowSequence"))
+            mergedRows[entity]=if(fulfillsPromise)ready!!else row
         }
         val tree=SyncV2Index.build(identity.scope,mergedRows.values.toList());mergedObjects.putAll(tree.objects)
         val reachable=mutableSetOf<String>();reachable.addAll(tree.objects.keys)

@@ -113,6 +113,14 @@ internal object CloudExportFileWitness {
     fun observePrivate(filesDir:File):PrivateObservation=locked(filesDir){_,state->
         PrivateObservation(state.record.revision.privateFiles,state.incarnation,state.privateInstalls)
     }
+    /** A P5 preview arms the next durable mutation token without acknowledging any old
+     * export. A process restart also arms it, so the token remains sufficient after restart. */
+    fun captureForProjection(filesDir:File):Revision = locked(filesDir){_,state->
+        state.notesNeedsBump=true;state.privateNeedsBump=true;state.record.revision
+    }
+    fun <T> withProjectionCapture(filesDir:File,expected:Revision,commit:()->T):T = locked(filesDir){_,state->
+        check(state.record.revision==expected){"choice_stale"};commit()
+    }
     fun privateFilesPending(filesDir:File):Boolean = locked(filesDir){_,state->state.privatePending}
     fun complete(filesDir:File,expected:Observation,published:Revision,commit:()->Boolean):Boolean = locked(filesDir) { _,state ->
         if(Observation(state.record.revision,state.mutations,state.incarnation)!=expected)return@locked false

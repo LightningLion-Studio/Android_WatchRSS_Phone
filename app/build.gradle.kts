@@ -62,6 +62,7 @@ android {
         buildConfigField("boolean", "SYNC_OBJECTS_V2_LOCAL_OBJECTS", "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_RELAY", "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_WITNESS", "false")
+        buildConfigField("boolean", "SYNC_OBJECTS_V2_HISTORY_RESTORE", "false")
         // Implementation approval does not enable production writes or delegated conversion.
         buildConfigField("boolean", "CLOUD_FORMAT_R48_WRITE_V1", providers.gradleProperty("cloudFormatR48WriteV1").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("String", "R48_WORKER_TRUST_JSON", productionSetting("WATCHRSS_R48_WORKER_TRUST_JSON").asBuildConfigString())
@@ -278,6 +279,8 @@ tasks.register<Test>("syncV2P2JointTest") {
     maxHeapSize=unit.maxHeapSize
     filter.includeTestsMatching("com.lightningstudio.watchrss.phone.syncv2.SyncV2P2JointIntegrationTest")
     environment("WATCHRSS_P2_PHONE_JOINT",providers.environmentVariable("WATCHRSS_P2_PHONE_JOINT").orNull ?: "")
+    environment("WATCHRSS_P2_FIXTURE_DIR",providers.environmentVariable("WATCHRSS_P2_FIXTURE_DIR").orNull ?: "")
+    environment("WRSS_P2_EVIDENCE",providers.environmentVariable("WRSS_P2_EVIDENCE").orNull ?: "")
     outputs.upToDateWhen {false}
 }
 
@@ -295,6 +298,8 @@ tasks.register<Test>("syncV2P3JointTest") {
     maxHeapSize=unit.maxHeapSize
     filter.includeTestsMatching("com.lightningstudio.watchrss.phone.syncv2.SyncV2P3JointIntegrationTest")
     environment("WATCHRSS_P3_PHONE_JOINT",providers.environmentVariable("WATCHRSS_P3_PHONE_JOINT").orNull ?: "")
+    environment("WATCHRSS_P3_FIXTURE_DIR",providers.environmentVariable("WATCHRSS_P3_FIXTURE_DIR").orNull ?: "")
+    environment("WRSS_P3_EVIDENCE",providers.environmentVariable("WRSS_P3_EVIDENCE").orNull ?: "")
     outputs.upToDateWhen {false}
 }
 
@@ -308,6 +313,8 @@ tasks.register<Test>("syncV2P3ForeignReadTest") {
     maxHeapSize=unit.maxHeapSize
     filter.includeTestsMatching("com.lightningstudio.watchrss.phone.syncv2.SyncV2P3JointIntegrationTest.phoneP3ForeignAllPublishedBodiesRangeResumeAndBl03")
     environment("WATCHRSS_P3_PHONE_JOINT",providers.environmentVariable("WATCHRSS_P3_PHONE_JOINT").orNull ?: "")
+    environment("WATCHRSS_P3_FIXTURE_DIR",providers.environmentVariable("WATCHRSS_P3_FIXTURE_DIR").orNull ?: "")
+    environment("WRSS_P3_EVIDENCE",providers.environmentVariable("WRSS_P3_EVIDENCE").orNull ?: "")
     outputs.upToDateWhen {false}
 }
 
@@ -325,6 +332,25 @@ tasks.register<Test>("syncV2P4JointTest") {
     maxHeapSize=unit.maxHeapSize
     filter.includeTestsMatching("com.lightningstudio.watchrss.phone.syncv2.SyncV2P4JointIntegrationTest")
     environment("WATCHRSS_P4_PHONE_JOINT",providers.environmentVariable("WATCHRSS_P4_PHONE_JOINT").orNull ?: "")
+    environment("WATCHRSS_P4_ENVIRONMENT",providers.environmentVariable("WATCHRSS_P4_ENVIRONMENT").orNull ?: "")
     environment("WRSS_P4_EVIDENCE",providers.environmentVariable("WRSS_P4_EVIDENCE").orNull ?: "")
+    outputs.upToDateWhen {false}
+}
+
+// P5 uses a freshly provisioned phone-owned synthetic account, with explicit paths only.
+tasks.withType<Test>().configureEach {
+    if(name == "testDebugUnitTest") exclude("**/SyncV2P5JointIntegrationTest*")
+}
+tasks.register<Test>("syncV2P5JointTest") {
+    val unit=tasks.named<Test>("testDebugUnitTest").get()
+    dependsOn(unit.testClassesDirs.buildDependencies)
+    testClassesDirs=unit.testClassesDirs
+    classpath=unit.classpath
+    systemProperties(unit.systemProperties)
+    jvmArgs(unit.jvmArgs ?: emptyList<String>())
+    maxHeapSize=unit.maxHeapSize
+    filter.includeTestsMatching("com.lightningstudio.watchrss.phone.syncv2.SyncV2P5JointIntegrationTest")
+    for(variable in listOf("WATCHRSS_P5_PHONE_JOINT","WRSS_P5_EVIDENCE","WATCHRSS_P5_SAMPLES"))
+        environment(variable,providers.environmentVariable(variable).orNull ?: "")
     outputs.upToDateWhen {false}
 }

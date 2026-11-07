@@ -15,7 +15,7 @@ internal object SyncV2Planner {
         }
         val ops=input.getJSONArray("ops")
         fun without(row:JSONObject)=JSONObject(row.toString()).apply{remove("noteConflicts")}
-        fun same(a:Any?,b:Any?)=SyncV2Codec.canonical(a)==SyncV2Codec.canonical(b)
+        fun same(a:Any?,b:Any?)=SyncV2LocalJson.canonical(a)==SyncV2LocalJson.canonical(b)
         for(i in 0 until ops.length()) {
             val op=ops.getJSONObject(i);val id=op.getString("id");val b=base.optJSONObject(id);val l=local.optJSONObject(id);val c=cloud.optJSONObject(id)
             val kind=op.getString("kind")
@@ -35,13 +35,24 @@ internal object SyncV2Planner {
             if(kind=="delete") {if(!same(c,b))return no("delete_edit_conflict");c.put("deleted",true);continue}
             if(l==null)return no("missing_content")
             if(c.opt("identity")!=b.opt("identity") || l.opt("identity")!=b.opt("identity"))return no("identity_conflict")
-            for(field in SyncV2Wire.strings(op.getJSONArray("fields"),1000,false)) {
-                if(field=="noteConflicts")continue
+            val changedFields=SyncV2Wire.strings(op.getJSONArray("fields"),1000,false)
+            val fullNote=SyncV2Business.noteFields.all{l.has(it) && b.has(it) && c.has(it)}
+            val derived=setOf("plainText","contentHash","baseMarkdown","baseContentHash","updatedAt","modifiedBy")
+            for(field in changedFields) {
+                if(field=="noteConflicts" || fullNote && field in derived)continue
                 if(!b.has(field)||!l.has(field))return no("missing_base")
                 if(field=="markdown") {
                     val result=SyncV2Business.mergeNote(b.getString(field),l.getString(field),c.getString(field))
                     if(result.has("conflict"))return no("note_conflict");c.put(field,result.getString("markdown"))
                 } else if(same(c.opt(field),b.get(field)) || same(c.opt(field),l.get(field)))c.put(field,l.get(field)) else return no("identity_conflict")
+            }
+            if(fullNote) {
+                if("markdown" in changedFields) {
+                    val markdown=c.getString("markdown");val hash=com.lightningstudio.watchrss.phone.data.note.MarkdownNoteCodec.sha256(markdown)
+                    c.put("plainText",com.lightningstudio.watchrss.phone.data.note.MarkdownNoteCodec.toPlainText(markdown)).put("contentHash",hash).put("baseMarkdown",markdown).put("baseContentHash",hash)
+                }
+                val winner=if(compareValuesBy(l,c,{it.getLong("updatedAt")},{it.getString("modifiedBy")})>=0)l else c
+                c.put("updatedAt",winner.getLong("updatedAt")).put("modifiedBy",winner.getString("modifiedBy"))
             }
         }
         for((id,set)in sets) {

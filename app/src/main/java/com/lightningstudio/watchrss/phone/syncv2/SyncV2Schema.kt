@@ -40,6 +40,12 @@ internal object SyncV2Schema {
         db.beginTransaction()
         try {
             listOf(
+                "CREATE TABLE IF NOT EXISTS syncv2_p5_objects(scope TEXT NOT NULL,action_id TEXT NOT NULL,oid TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,action_id,oid))",
+                "CREATE TABLE IF NOT EXISTS syncv2_p5_rows(scope TEXT NOT NULL,action_id TEXT NOT NULL,entity_key TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,action_id,entity_key))",
+                "CREATE TABLE IF NOT EXISTS syncv2_recovery_chunks(scope TEXT NOT NULL,copy_id TEXT NOT NULL,kind TEXT NOT NULL,ordinal INTEGER NOT NULL,bytes BLOB NOT NULL,PRIMARY KEY(scope,copy_id,kind,ordinal))",
+                "CREATE TABLE IF NOT EXISTS syncv2_recovery_copies(scope TEXT NOT NULL,copy_id TEXT NOT NULL,body BLOB NOT NULL,pin BLOB NOT NULL,PRIMARY KEY(scope,copy_id))",
+                "CREATE TABLE IF NOT EXISTS syncv2_recovery_objects(scope TEXT NOT NULL,oid TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,oid))",
+                "CREATE TABLE IF NOT EXISTS syncv2_p5_bindings(scope TEXT NOT NULL,entity_key TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,entity_key))",
                 "CREATE TABLE IF NOT EXISTS syncv2_cloud_rows(scope TEXT NOT NULL,entity_key TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,entity_key))",
                 "CREATE TABLE IF NOT EXISTS syncv2_cloud_objects(scope TEXT NOT NULL,oid TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,oid))",
                 "CREATE TABLE IF NOT EXISTS syncv2_wire_candidates(scope TEXT NOT NULL,entity_key TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,entity_key))",

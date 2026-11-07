@@ -11,7 +11,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-internal class SyncV2CloudError(val code: String, val retryable: Boolean = false, val retryAfterMillis: Long? = null) : IOException(code) {
+internal class SyncV2CloudError(val code: String, val retryable: Boolean = false, val retryAfterMillis: Long? = null, val details:JSONObject = JSONObject()) : IOException(code) {
     val display: String get() = when(code) {
         "upgrade_required", "unsupported_feature" -> "云资料格式需要升级"
         "cloud_account_busy", "library_busy" -> "同步忙，请稍后重试"
@@ -99,7 +99,7 @@ internal class SyncV2CloudClient(
                 val code=SyncV2Wire.string(error,"code")
                 if(!Regex("[a-z][a-z0-9_]{0,63}").matches(code) || error.get("retryable") !is Boolean)SyncV2Codec.fail("invalid_schema")
                 val delay=if(error.isNull("retryAfterMillis"))null else SyncV2Wire.uint(error,"retryAfterMillis",60000)
-                throw SyncV2CloudError(code,error.getBoolean("retryable"),delay)
+                throw SyncV2CloudError(code,error.getBoolean("retryable"),delay,JSONObject(error.getJSONObject("details").toString()))
             }
             if(raw) {
                 if(response.code != if(headers.containsKey("Range"))206 else 200)SyncV2Codec.fail("invalid_range")
@@ -226,7 +226,34 @@ internal class SyncV2CloudClient(
     fun checkpoint(now:Long=System.currentTimeMillis())=get("checkpoint").also{serviceTrust.checkpoint(it,scope,now)}
     fun account()=get("account").also(::window)
     fun ancestry(head:String,stop:String?)=get("account/ancestry",mapOf("head" to head,"limit" to "64")+if(stop==null)emptyMap()else mapOf("stop" to stop))
-    fun history(page:String?=null)=get("history",if(page==null)emptyMap()else mapOf("pageToken" to page))
+    fun history(page:String?=null)=get("history",if(page==null)emptyMap()else mapOf("pageToken" to page)).also { response ->
+        val items=response.getJSONArray("items");if(items.length()>100)SyncV2Codec.fail("invalid_schema")
+        var previous:Pair<Long,String>?=null;val seen=mutableSetOf<String>()
+        for(i in 0 until items.length()) {
+            val item=items.getJSONObject(i);SyncV2Codec.exact(item,setOf("commitOid","retiredAtMillis","expiresAtMillis","authorDeviceId"))
+            val oid=SyncV2Wire.oid(SyncV2Wire.string(item,"commitOid"),"commit");val retired=SyncV2Wire.uint(item,"retiredAtMillis")
+            if(SyncV2Wire.uint(item,"expiresAtMillis")-retired!=604800000L || !seen.add(oid))SyncV2Codec.fail("invalid_schema")
+            SyncV2Codec.unhex(SyncV2Wire.string(item,"authorDeviceId"),16)
+            previous?.let{if(retired>it.first || retired==it.first && oid<=it.second)SyncV2Codec.fail("invalid_schema")};previous=retired to oid
+        }
+        if(!response.isNull("pageToken"))SyncV2Codec.text(SyncV2Wire.string(response,"pageToken"),2048)
+    }
+    private fun recoverableMutation(path:String,request:JSONObject):JSONObject = try{post(path,request)}catch(e:SyncV2CloudError){throw e}catch(e:IOException) {
+        val result=requestResult(request.getString("requestId"))
+        if(result.getString("status")=="succeeded")result.getJSONObject("response")else throw e
+    }
+    fun prepareHistory(request:JSONObject)=recoverableMutation("history/prepare",request).also {
+        if(it.get("targetCommitOid")!=request.get("targetCommitOid"))SyncV2Codec.fail("invalid_schema")
+        SyncV2Wire.oid(SyncV2Wire.string(it,"treeRoot"),"tree");SyncV2Codec.unhex(SyncV2Wire.string(it,"leaseId"),16);SyncV2Wire.uint(it,"expiresAtMillis")
+    }
+    fun chooseCloud(request:JSONObject)=recoverableMutation("choices/cloud",request).also {
+        if(it.get("choiceId")!=request.get("choiceId"))SyncV2Codec.fail("invalid_schema")
+        val a=it.getJSONObject("confirmedAccount");SyncV2Codec.exact(a,setOf("commitOid","revision","rollbackGeneration"))
+        SyncV2Wire.oid(SyncV2Wire.string(a,"commitOid"),"commit");SyncV2Codec.d64(SyncV2Wire.string(it,"auditRevision"))
+        if(a.get("revision")!=request.get("expectedAccountRevision") || a.get("rollbackGeneration")!=request.get("expectedRollbackGeneration"))SyncV2Codec.fail("choice_stale")
+    }
+    fun applied(request:JSONObject)=recoverableMutation("acks/applied",request).also{if(it.get("accepted")!=true)SyncV2Codec.fail("invalid_schema");SyncV2Codec.d64(SyncV2Wire.string(it,"serverRevision"))}
+
     fun repoInit(descriptor:JSONObject,recovery:JSONObject)=post("repo/init",JSONObject().put("descriptor",descriptor).put("recoveryCapsule",recovery))
     // A losing repo creator must authenticate the winning descriptor, whose scope can differ.
     fun descriptor():JSONObject {

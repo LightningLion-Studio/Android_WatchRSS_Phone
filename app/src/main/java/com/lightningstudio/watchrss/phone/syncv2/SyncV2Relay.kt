@@ -21,13 +21,24 @@ internal class SyncV2Relay(private val identity:SyncV2Identity,private val autho
         if(SyncV2Codec.scope(client.scope)!=identity.scopeJson)SyncV2Codec.fail("scope_mismatch")
         val publication=account?.let{JSONObject().put("account",it).put("device",device).put("relayGrant",grant)}
         val b=if(publication==null)validate(grant,commit,device,now)else proof().publication(publication,commit,now)
+        val references=SyncV2Wire.strings(b.getJSONArray("objectOids"),512).filter{it.substringBefore(':') in setOf("state-refs","recipe-refs")}
+        // C32: reject a forged/out-of-grant table before any persistent or network write.
+        references.forEach{referenceRequest(it,b,grant)}
         // Persist the exact original signed payload before the network call. No author bearer.
         val job=JSONObject().put("commit",commit).put("device",device).put("account",account?:JSONObject.NULL).put("relayGrant",grant)
         val key="relay/${b.getString("authorDeviceId")}/${device.getJSONObject("body").getString("requestId")}";val old=store.load(key)
         fun core(value:JSONObject)=JSONObject(value.toString()).apply{remove("relayGrant")}
         if(old!=null && SyncV2Codec.canonical(core(old))!=SyncV2Codec.canonical(core(job)))SyncV2Codec.fail("idempotency_conflict")
         if(old==null || SyncV2Codec.canonical(old)!=SyncV2Codec.canonical(job))store.save(key,job)
-        client.withinBudget(budget.millis-budget.reserveMillis){uploadOriginals(b,commit,now,budget.bytes)}
+        client.withinBudget(budget.millis-budget.reserveMillis){
+            uploadOriginals(b,commit,now,budget.bytes)
+            // An existing raw object does not prove the public parent mapping was registered.
+            // Register after every parent/child upload and before the final CAS/publication.
+            for(oid in references) {
+                val request=referenceRequest(oid,b,grant)
+                if(oid.startsWith("state-refs:"))client.stateRefs(request)else client.recipeRefs(request)
+            }
+        }
         if(publication==null)validate(grant,commit,device,now)else proof().publication(publication,commit,now)
         val request=if(account==null)JSONObject(device.toString()).put("relayGrant",grant)
             else JSONObject().put("account",account).put("device",device).put("relayGrant",grant)
@@ -68,6 +79,25 @@ internal class SyncV2Relay(private val identity:SyncV2Identity,private val autho
         if(account.get("rollbackGeneration")!=generation)SyncV2Codec.fail("replay_detected")
         for(value in listOf(account.getString("revision"),device.getString("revision"),result.getString("serverRevision")))if(SyncV2Codec.d64(value).signum()==0)SyncV2Codec.fail("invalid_schema")
     }
+    private fun referenceRequest(oid:String,grant:JSONObject,signedGrant:JSONObject):JSONObject {
+        val type=oid.substringBefore(':').removeSuffix("-refs")
+        val raw=store.objectBytes(oid)
+        if(oid!="$type-refs:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(raw))}")SyncV2Codec.fail("hash_mismatch")
+        val signed=SyncV2Wire.parse(raw,262144,true);SyncV2Codec.exact(signed,setOf("body","signature"))
+        val body=signed.getJSONObject("body");val field=if(type=="state")"segmentOids" else "blobOids"
+        SyncV2Codec.exact(body,setOf("scope","${type}Oid",field))
+        if(SyncV2Codec.scope(body.getJSONObject("scope"))!=identity.scopeJson)SyncV2Codec.fail("scope_mismatch")
+        val parent=SyncV2Wire.oid(SyncV2Wire.string(body,"${type}Oid"),type)
+        val children=SyncV2Wire.strings(body.getJSONArray(field),2048,false)
+        children.forEach{SyncV2Wire.oid(it,if(type=="state")"state" else "blob")}
+        if(type=="state" && children.distinct().size!=children.size)SyncV2Codec.fail("invalid_schema")
+        val permitted=SyncV2Wire.strings(grant.getJSONArray("objectOids"),512).toSet()
+        if(parent !in permitted || children.any{it !in permitted})SyncV2Codec.fail("relay_denied")
+        val pub=authors.publicKey(grant.getString("authorDeviceId"))
+        if(!SyncV2Identity.verifySignature(pub,SyncV2Codec.lp(SyncV2Codec.utf8("wrss.sync.v2/$type-refs-sign"),SyncV2LocalProtocol.bytes(body)),SyncV2Wire.string(signed,"signature")))SyncV2Codec.fail("signature_invalid")
+        // Keep the immutable object bytes/signature unchanged; grant is an HTTP envelope only.
+        return JSONObject().put("body",body).put("signature",signed.get("signature")).put("relayGrant",signedGrant)
+    }
     private fun uploadOriginals(grant:JSONObject,commit:JSONObject,now:Long,maxBytes:Long) {
         val capabilities=client.capabilities()
         if(capabilities.getJSONObject("flags").opt("relay")!=true)SyncV2Codec.fail("feature_disabled")
@@ -76,6 +106,9 @@ internal class SyncV2Relay(private val identity:SyncV2Identity,private val autho
         val oids=(SyncV2Wire.strings(grant.getJSONArray("objectOids"),512)+oid).distinct().sorted()
         var sent=0L
         for(objectId in oids) {
+            // C32 endpoints create immutable refs objects and parent mappings together.
+            // The generic object reservation endpoint deliberately rejects these types.
+            if(objectId.substringBefore(':') in setOf("state-refs","recipe-refs"))continue
             val raw=if(objectId==oid)SyncV2LocalProtocol.bytes(commit)else store.objectBytes(objectId)
             if(objectId!=oid && objectId!="${objectId.substringBefore(':')}:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(raw))}")SyncV2Codec.fail("hash_mismatch")
             val status=client.verifiedHaveWant(window,listOf(objectId to raw.size),now).getValue(objectId)

@@ -61,7 +61,26 @@ class SyncV2P4JointIntegrationTest {
         }
         try {
             val store=SyncV2ContentStore(dir,identity.scopeJson,localKey)
-            val tree=SyncV2Index.build(scope,emptyList());tree.objects.forEach{(oid,raw)->store.putObject(oid,raw)}
+            val records=javaClass.classLoader!!.getResourceAsStream("syncv2-business-schema.json")!!.bufferedReader().use{JSONObject(it.readText())}.getJSONArray("records")
+            val note=(0 until records.length()).map{records.getJSONObject(it)}.single{it.getString("kind")=="note"}.getJSONObject("value")
+            val entity=identity.entity("note",note.getString("noteId"))
+            // C32 uses the original watch signatures for real parent/blob objects.
+            val exporter=SyncV2ContentExport(identity,contentKey,1,store)
+            val binding=SyncV2ContentExport.Binding(entity,id(),exporter.authenticationBinding)
+            val source=object:SyncV2ContentExport.Source {override val size=270000L;override val version="p4-c32-original";override fun read(offset:Long,maxBytes:Int)=ByteArray(maxBytes){((it+offset)%251).toByte()}}
+            while(!exporter.step(binding,source)){}
+            val body=exporter.descriptor(binding)!!;val recipe=body.getJSONObject("recipe");val recipeOid=body.getString("recipeOid");val blobs=JSONArray();val blocks=recipe.getJSONArray("blocks")
+            for(i in 0 until blocks.length())blobs.put(blocks.getJSONObject(i).getString("oid"))
+            val split=SyncV2Business.split("note",note.getString("noteId"),entity,note,null)
+            val meta=SyncV2Envelope.seal(identity,contentKey,1,"meta",SyncV2LocalProtocol.bytes(split.meta))
+            val state=SyncV2Envelope.seal(identity,contentKey,1,"state",SyncV2LocalProtocol.bytes(split.state))
+            store.putObject(meta.oid,meta.bytes);store.putObject(state.oid,state.bytes)
+            val row=JSONObject().put("entityKey",entity).put("metaOid",meta.oid).put("stateOid",state.oid).put("addedAtMillis",0).put("rowSequence","1").put("deleted",false).put("requiredFeatures",JSONArray())
+                .put("bodyRevision",binding.revision).put("promiseId",JSONObject.NULL).put("recipeOid",recipeOid).put("opaqueContentId",recipe.get("opaqueContentId")).put("contentBytes",recipe.get("totalPlainBytes"))
+            val tree=SyncV2Index.build(scope,listOf(row));tree.objects.forEach{(oid,raw)->store.putObject(oid,raw)}
+            val originalTables=listOf(SyncV2Index.refs(identity,authorSigner,state.oid),SyncV2ContentCodec.refs(identity,authorSigner,recipeOid,blobs))
+            val referenceOids=originalTables.map{table->val type=if(table.getJSONObject("body").has("stateOid"))"state-refs" else "recipe-refs"
+                val raw=SyncV2LocalProtocol.bytes(table);val refOid="$type:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(raw))}";store.putObject(refOid,raw);refOid}
             val now=System.currentTimeMillis()
             val cb=JSONObject().put("version",2).put("scope",scope).put("authorDeviceId",authorSigner.deviceId).put("deviceSequence","1").put("previousOwnCommit",JSONObject.NULL).put("mergedParents",JSONArray())
                 .put("treeRoot",tree.root).put("requiredFeatures",JSONArray()).put("createdAtMillis",now).put("observedRefs",JSONArray()).put("indexComplete",true).put("accountParent",JSONObject.NULL).put("rollbackGeneration","0")
@@ -78,11 +97,12 @@ class SyncV2P4JointIntegrationTest {
             val signed=authorSigner.commit(cb);val oid=SyncV2Codec.oid("commit",cb);val rid=id();val ref="refs/devices/${authorSigner.deviceId}/index"
             val device=SyncV2CloudClient.refUpdate(authorSigner,scope,ref,previous,ownRevision,oid,rid,now)
             val account=SyncV2CloudClient.refUpdate(authorSigner,scope,"refs/account/current",priorAccount,accountState.getString("revision"),oid,rid,now)
+            val relayObjects=(listOf(oid,tree.root,meta.oid,state.oid,recipeOid)+referenceOids+(0 until blobs.length()).map{blobs.getString(it)}).distinct().sorted()
             val grantBody=JSONObject().put("version",2).put("scope",scope).put("authorDeviceId",authorSigner.deviceId).put("relayDeviceId",phoneSigner.deviceId).put("ref",ref).put("commitOid",oid)
-                .put("objectOids",JSONArray(listOf(oid,tree.root).sorted())).put("expiresAtMillis",now+600000).put("grantId",id())
+                .put("objectOids",JSONArray(relayObjects)).put("expiresAtMillis",now+600000).put("grantId",id())
             fun grant(body:JSONObject)=authorSigner.signed("wrss.sync.v2/relay-grant-sign",body)
             val validGrant=grant(grantBody)
-            val relay=SyncV2Relay(identity,authors,cloud,store,true)
+            val relay=SyncV2Relay(identity,authors,cloud,store,true,signals={SyncV2TransportSignals(wifi=true,internet=true,cellular=false)})
             store.putObject(oid,SyncV2LocalProtocol.bytes(signed)){authors.header(it,false)}
             val relaySid=id();val members=fixtures.values.map{it.getString("syncDeviceId")}.toSet()
             fun relayLocal(self:String)=SyncV2LocalSession(scope,relaySid,self,{contentKey},{if(it in members)"active" else "unknown"},{true},{},SyncV2LocalProtocol.Gates(true))
@@ -106,6 +126,28 @@ class SyncV2P4JointIntegrationTest {
             val before=cloud.account().getJSONObject("account").getString("revision")
             relay.forward(signed,device,validGrant,account,now)
             assertEquals(before,cloud.account().getJSONObject("account").getString("revision"));result.put("relayIdempotentAndOriginalSignatures",true)
+            val refsWindow=cloud.negotiate().getString("windowId")
+            for((index,parent)in listOf(state.oid,recipeOid).withIndex()) {
+                val mapped=cloud.reference(parent,refsWindow)
+                assertEquals(authorSigner.deviceId,mapped.getString("authorDeviceId"));assertEquals(authorSigner.keyId,mapped.getString("keyId"));assertEquals(referenceOids[index],mapped.getString("refsOid"))
+                assertArrayEquals(SyncV2LocalProtocol.bytes(originalTables[index]),cloud.raw(mapped.getString("refsOid"),refsWindow))
+            }
+            val closure=SyncV2ControlClosure(identity,authors){contentKey}.verify(signed,{cloud.raw(it,refsWindow)},{cloud.reference(it,refsWindow).apply{remove("version")}})
+            assertEquals(1,closure.rows.size);assertEquals(note.getString("noteId"),closure.rows.single().getJSONObject("meta").getJSONObject("payload").getString("noteId"))
+            result.put("c32NonemptyNoteControlClosure",true)
+            result.put("c32OriginalAuthorAndKeyIdRetained",true).put("c32OriginalSignedTablesReadableWithoutGrant",true).put("c32TablesRegisteredBeforePublication",true)
+            fun relayedTable(table:JSONObject,g:JSONObject=validGrant)=JSONObject().put("body",table.get("body")).put("signature",table.get("signature")).put("relayGrant",g)
+            reject("c32-original-author-without-grant","signature_invalid"){cloud.stateRefs(originalTables[0])}
+            reject("c32-wrong-table-signature","signature_invalid"){cloud.stateRefs(relayedTable(JSONObject(originalTables[0].toString()).put("signature",phoneSigner.sign(byteArrayOf(1)))))}
+            reject("c32-parent-not-granted","relay_denied"){cloud.stateRefs(relayedTable(originalTables[0],grant(JSONObject(grantBody.toString()).put("objectOids",JSONArray(relayObjects.filter{it!=state.oid})))))}
+            reject("c32-child-not-granted","relay_denied"){cloud.recipeRefs(relayedTable(originalTables[1],grant(JSONObject(grantBody.toString()).put("objectOids",JSONArray(relayObjects.filter{it!=blobs.getString(0)})))))}
+            reject("c32-expired-grant","relay_denied"){cloud.recipeRefs(relayedTable(originalTables[1],grant(JSONObject(grantBody.toString()).put("expiresAtMillis",now-60000))))}
+            reject("c32-wrong-grant-scope","scope_mismatch"){cloud.stateRefs(relayedTable(originalTables[0],grant(JSONObject(grantBody.toString()).put("scope",JSONObject(scope.toString()).put("contentGeneration","999")))))}
+            reject("c32-wrong-grant-relay","relay_denied"){cloud.recipeRefs(relayedTable(originalTables[1],grant(JSONObject(grantBody.toString()).put("relayDeviceId",fixtures.getValue("cli").getString("syncDeviceId")))))}
+            reject("c32-wrong-grant-signature","signature_invalid"){cloud.stateRefs(relayedTable(originalTables[0],JSONObject(validGrant.toString()).put("signature",phoneSigner.sign(byteArrayOf(1)))))}
+            val reversed=JSONArray((0 until blobs.length()).map{blobs.getString(it)}.reversed())
+            reject("c32-immutable-overwrite","idempotency_conflict"){cloud.recipeRefs(relayedTable(SyncV2ContentCodec.refs(identity,authorSigner,recipeOid,reversed)))}
+            assertArrayEquals(SyncV2LocalProtocol.bytes(originalTables[1]),cloud.raw(referenceOids[1],cloud.negotiate().getString("windowId")))
             // Each rejection reaches the real backend, rather than stopping at the local guard.
             fun stage(g:JSONObject)=cloud.stage(JSONObject(device.toString()).put("relayGrant",g))
             reject("expired-grant","relay_denied"){stage(grant(JSONObject(grantBody.toString()).put("expiresAtMillis",now-60000).put("grantId",id())))}
@@ -118,16 +160,9 @@ class SyncV2P4JointIntegrationTest {
             val unsupportedSigned=JSONObject().put("body",unsupported).put("signature",authorSigner.sign(SyncV2Codec.lp(SyncV2Codec.utf8("wrss.sync.v2/commit-sign"),SyncV2Codec.utf8(unsupportedOid))))
             upload(unsupportedOid,SyncV2LocalProtocol.bytes(unsupportedSigned))
             val unsupportedUpdate=SyncV2CloudClient.refUpdate(authorSigner,scope,ref,oid,SyncV2Codec.next(ownRevision),unsupportedOid,id(),now)
-            val unsupportedGrant=grant(JSONObject(grantBody.toString()).put("commitOid",unsupportedOid).put("objectOids",JSONArray(listOf(unsupportedOid,tree.root).sorted())).put("grantId",id()))
+            val unsupportedGrant=grant(JSONObject(grantBody.toString()).put("commitOid",unsupportedOid).put("objectOids",JSONArray((relayObjects.filter{it!=oid}+unsupportedOid).sorted())).put("grantId",id()))
             reject("missing-feature","unsupported_feature"){cloud.stage(JSONObject(unsupportedUpdate.toString()).put("relayGrant",unsupportedGrant))}
-            // Correct product AEAD/recipe/ordered refs, retained locally before holder signs.
-            val exporter=SyncV2ContentExport(identity,contentKey,1,store)
-            val binding=SyncV2ContentExport.Binding("11".repeat(32),id(),exporter.authenticationBinding)
-            val source=object:SyncV2ContentExport.Source {override val size=270000L;override val version="p4-joint-original";override fun read(offset:Long,maxBytes:Int)=ByteArray(maxBytes){((it+offset)%251).toByte()}}
-            while(!exporter.step(binding,source)){}
-            val body=exporter.descriptor(binding)!!;val recipe=body.getJSONObject("recipe");val recipeOid=body.getString("recipeOid");val blobs=JSONArray();val blocks=recipe.getJSONArray("blocks")
-            for(i in 0 until blocks.length()){val b=blocks.getJSONObject(i).getString("oid");blobs.put(b);upload(b,store.objectBytes(b),"content")};upload(recipeOid,store.objectBytes(recipeOid),"content")
-            val refs=SyncV2ContentCodec.refs(identity,phoneSigner,recipeOid,blobs);cloud.recipeRefs(refs)
+            // C32 already transferred the product recipe and its original watch-signed refs.
             val w=cloud.negotiate().getString("windowId");val mapping=cloud.reference(recipeOid,w).apply{remove("version")};val raw=cloud.raw(mapping.getString("refsOid"),w)
             val sid=id();val memberIds=fixtures.values.map{it.getString("syncDeviceId")}.toSet()
             fun local(self:String)=SyncV2LocalSession(scope,sid,self,{contentKey},{if(it in memberIds)"active" else "unknown"},{true},{},SyncV2LocalProtocol.Gates(true))
@@ -146,8 +181,12 @@ class SyncV2P4JointIntegrationTest {
             assertEquals(SyncV2Codec.canonical(first.get("result")),SyncV2Codec.canonical(cloud.custody(pin).get("result")))
             mutate("remove-author-cloud-key");reject("author-without-cloud-key","relay_denied"){stage(validGrant)}
             mutate("revoke-author");reject("revoked-author","device_revoked"){stage(validGrant)}
+            reject("c32-revoked-author-state","device_revoked"){cloud.stateRefs(relayedTable(originalTables[0]))}
+            reject("c32-revoked-author-recipe","device_revoked"){cloud.recipeRefs(relayedTable(originalTables[1]))}
             mutate("revoke-relay");reject("revoked-relay","device_revoked"){stage(validGrant)}
-            result.put("status","passed").put("backendSourceCommit","6c26228113e65e028e3e753c426259c445098462");save()
+            reject("c32-revoked-relay-state","device_revoked"){cloud.stateRefs(relayedTable(originalTables[0]))}
+            reject("c32-revoked-relay-recipe","device_revoked"){cloud.recipeRefs(relayedTable(originalTables[1]))}
+            result.put("status","passed").put("backendSourceCommit",System.getenv("WATCHRSS_P4_BACKEND_COMMIT")?:"6c26228113e65e028e3e753c426259c445098462");save()
         }finally{contentKey.fill(0);localKey.fill(0);dir.deleteRecursively();http.connectionPool.evictAll();http.dispatcher.executorService.shutdown()}
     }
 }

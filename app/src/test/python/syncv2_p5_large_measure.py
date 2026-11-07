@@ -138,8 +138,9 @@ def main():
         assert after_source == source and not after_dirty
         assert before_shared == shared()
         write(args.evidence / 'shared-after.json', shared())
+        assert result.returncode == 0, 'measurement failed; inspect the archived Gradle/JUnit report'
         summary = json.loads((args.evidence / 'large-p99-summary.json').read_text())
-        assert result.returncode == 0 and summary['status'] == 'passed'
+        assert summary['status'] == 'passed'
         assert summary['p99Reported'] == (args.samples >= 1000)
         events = [json.loads(line) for line in (args.evidence / 'large-p99-events.ndjson').read_text().splitlines()]
         assert len(events) == args.samples * len(args.modes.split(','))

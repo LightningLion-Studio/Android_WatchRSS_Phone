@@ -57,9 +57,12 @@ class SyncV2P5LargeP99Test {
         val phone=SyncV2Wire.parse(File(fixture,"phone.json").readBytes());check(phone.getBoolean("syntheticOnly")&&phone.getString("baseUrl")=="http://127.0.0.1:18972")
         var httpCalls=0L;var httpNanos=0L;var putObjects=0L;var putBytes=0L;var measuring=false
         val http=OkHttpClient.Builder().retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false).callTimeout(30,TimeUnit.SECONDS)
-            .addInterceptor{chain->val r=chain.request();val start=System.nanoTime();val out=chain.proceed(r)
-                if(measuring){httpCalls++;httpNanos+=System.nanoTime()-start;if(r.method=="PUT"){putObjects++;putBytes+=r.body!!.contentLength()}}
-                out}.build()
+            .eventListenerFactory{object:okhttp3.EventListener(){
+                private var captured=false;private var started=0L
+                override fun callStart(call:okhttp3.Call){captured=measuring;started=System.nanoTime()}
+                override fun requestBodyEnd(call:okhttp3.Call,byteCount:Long){if(captured&&call.request().method=="PUT"){putObjects++;putBytes+=byteCount}}
+                override fun responseHeadersEnd(call:okhttp3.Call,response:okhttp3.Response){if(captured){httpCalls++;httpNanos+=System.nanoTime()-started}}
+            }}.build()
         val bootstrap=Request.Builder().url("http://127.0.0.1:18972/functions/v1/cloud/bootstrap").post("{}".toRequestBody("application/json".toMediaType()))
         val headers=phone.getJSONObject("headers");for(k in headers.keys())bootstrap.header(k,headers.getString(k))
         val boot=http.newCall(bootstrap.build()).execute().use{check(it.code==200);SyncV2Wire.parse(it.body!!.bytes())}
@@ -166,7 +169,7 @@ class SyncV2P5LargeP99Test {
                     val result=actions.choose(preview,mode);val chosen=System.nanoTime();measuring=false;val choiceBlobs=reads.blobs-preBlobs;val choiceStrings=reads.strings-preStrings;val choiceQueries=reads.queries-preQueries
                     assertTrue(result.getBoolean("localCommitted"));assertFalse(result.getBoolean("appliedAckPending"));assertTrue(projection.state().body.isNull("pendingChoice"))
                     val post=projection.runWindow();assertFalse(post.paused);assertEquals(0,post.rows);assertEquals(0,post.tailEntries);val end=System.nanoTime();reads.active=false
-                    assertEquals(0,sourceReads.databaseBytes);assertEquals(0,sourceReads.fileBytes);assertTrue("bounded action BLOB returns $choiceBlobs",choiceBlobs<4L*1024*1024);assertTrue(putObjects<=8)
+                    assertEquals(0,sourceReads.databaseBytes);assertEquals(0,sourceReads.fileBytes);assertTrue("bounded action BLOB returns $choiceBlobs",choiceBlobs<4L*1024*1024);assertTrue(putObjects in 1..8);assertTrue(putBytes>0)
                     val event=JSONObject().put("choice",mode).put("event",index+1).put("previewNs",previewed-eventStart).put("chooseNs",chosen-previewed).put("previewChooseNs",chosen-eventStart).put("editProjectionNs",edited-fullStart).put("receiveLegacyNs",received-edited).put("postProjectionNs",end-chosen).put("fullCycleNs",end-fullStart).put("postProjectionRows",post.rows).put("postProjectionTail",post.tailEntries).put("appliedAckPending",false).put("marksNs",JSONObject(marks.toString())).put("sqlQueries",choiceQueries).put("blobBytes",choiceBlobs).put("stringUtf8Bytes",choiceStrings).put("fullCycleSqlQueries",reads.queries).put("fullCycleBlobBytes",reads.blobs).put("fullCycleStringUtf8Bytes",reads.strings).put("sourceReads",sourceReads.json()).put("httpCalls",httpCalls).put("httpHeadersNs",httpNanos).put("uploadedObjects",putObjects).put("uploadedBytes",putBytes).put("accountRevision",projection.state().body.getJSONObject("account").getString("revision"))
                     values.add(event);out.write(event.toString());out.newLine();out.flush()
                     summary.put("completed-$mode",index+1);if((index+1)%10==0)save()

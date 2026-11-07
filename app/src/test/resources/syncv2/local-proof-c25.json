@@ -1,0 +1,248 @@
+{
+  "format": "wrss.sync.v2.local-proof-c25",
+  "version": 1,
+  "syntheticOnly": true,
+  "derivation": {
+    "repoKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "saltHex": "",
+    "info": "wrss.sync.v2/local-proof",
+    "proofKeyHex": "877d1c4a022193bbbf89271b40f14731be9d7e05fe2c7a436d9bc87640dbbe97"
+  },
+  "transcript": {
+    "lpHex": "00000018777273732e73796e632e76322f6c6f63616c2d70726f6f66000000587b22636f6e74656e7447656e65726174696f6e223a2232222c226c69627261727945706f6368223a2231222c227265706f4964223a223031303130313031303130313031303130313031303130313031303130313031227d000000203130313031303130313031303130313031303130313031303130313031303130000000203230323032303230323032303230323032303230323032303230323032303230000000203330333033303330333033303330333033303330333033303330333033303330000000203430343034303430343034303430343034303430343034303430343034303430000000203530353035303530353035303530353035303530353035303530353035303530",
+    "proofBase64": "t87x1yMo7lUArzfd26Dq9iULQ4VFuKxc6tTSUg0l2zQ"
+  },
+  "cases": [
+    {
+      "id": "success",
+      "input": {
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "expectedScope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "sessionId": "10101010101010101010101010101010",
+        "selfDeviceId": "20202020202020202020202020202020",
+        "peerDeviceId": "30303030303030303030303030303030",
+        "selfNonce": "40404040404040404040404040404040",
+        "peerNonce": "50505050505050505050505050505050",
+        "memberStatus": "active",
+        "requiredFeatures": [
+          "book-lifecycle.v1"
+        ],
+        "supportedFeatures": [
+          "book-lifecycle.v1"
+        ],
+        "seenNonces": [],
+        "proofBase64": "t87x1yMo7lUArzfd26Dq9iULQ4VFuKxc6tTSUg0l2zQ"
+      },
+      "expected": {
+        "accepted": true,
+        "error": null
+      }
+    },
+    {
+      "id": "scope_mismatch",
+      "input": {
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "3"
+        },
+        "expectedScope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "sessionId": "10101010101010101010101010101010",
+        "selfDeviceId": "20202020202020202020202020202020",
+        "peerDeviceId": "30303030303030303030303030303030",
+        "selfNonce": "40404040404040404040404040404040",
+        "peerNonce": "50505050505050505050505050505050",
+        "memberStatus": "active",
+        "requiredFeatures": [
+          "book-lifecycle.v1"
+        ],
+        "supportedFeatures": [
+          "book-lifecycle.v1"
+        ],
+        "seenNonces": [],
+        "proofBase64": "t87x1yMo7lUArzfd26Dq9iULQ4VFuKxc6tTSUg0l2zQ"
+      },
+      "expected": {
+        "accepted": false,
+        "error": "scope_mismatch"
+      }
+    },
+    {
+      "id": "member_unknown",
+      "input": {
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "expectedScope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "sessionId": "10101010101010101010101010101010",
+        "selfDeviceId": "20202020202020202020202020202020",
+        "peerDeviceId": "30303030303030303030303030303030",
+        "selfNonce": "40404040404040404040404040404040",
+        "peerNonce": "50505050505050505050505050505050",
+        "memberStatus": "unknown",
+        "requiredFeatures": [
+          "book-lifecycle.v1"
+        ],
+        "supportedFeatures": [
+          "book-lifecycle.v1"
+        ],
+        "seenNonces": [],
+        "proofBase64": "t87x1yMo7lUArzfd26Dq9iULQ4VFuKxc6tTSUg0l2zQ"
+      },
+      "expected": {
+        "accepted": false,
+        "error": "member_unknown"
+      }
+    },
+    {
+      "id": "member_revoked",
+      "input": {
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "expectedScope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "sessionId": "10101010101010101010101010101010",
+        "selfDeviceId": "20202020202020202020202020202020",
+        "peerDeviceId": "30303030303030303030303030303030",
+        "selfNonce": "40404040404040404040404040404040",
+        "peerNonce": "50505050505050505050505050505050",
+        "memberStatus": "revoked",
+        "requiredFeatures": [
+          "book-lifecycle.v1"
+        ],
+        "supportedFeatures": [
+          "book-lifecycle.v1"
+        ],
+        "seenNonces": [],
+        "proofBase64": "t87x1yMo7lUArzfd26Dq9iULQ4VFuKxc6tTSUg0l2zQ"
+      },
+      "expected": {
+        "accepted": false,
+        "error": "member_revoked"
+      }
+    },
+    {
+      "id": "proof_invalid",
+      "input": {
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "expectedScope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "sessionId": "10101010101010101010101010101010",
+        "selfDeviceId": "20202020202020202020202020202020",
+        "peerDeviceId": "30303030303030303030303030303030",
+        "selfNonce": "40404040404040404040404040404040",
+        "peerNonce": "50505050505050505050505050505050",
+        "memberStatus": "active",
+        "requiredFeatures": [
+          "book-lifecycle.v1"
+        ],
+        "supportedFeatures": [
+          "book-lifecycle.v1"
+        ],
+        "seenNonces": [],
+        "proofBase64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "expected": {
+        "accepted": false,
+        "error": "proof_invalid"
+      }
+    },
+    {
+      "id": "feature_missing",
+      "input": {
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "expectedScope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "sessionId": "10101010101010101010101010101010",
+        "selfDeviceId": "20202020202020202020202020202020",
+        "peerDeviceId": "30303030303030303030303030303030",
+        "selfNonce": "40404040404040404040404040404040",
+        "peerNonce": "50505050505050505050505050505050",
+        "memberStatus": "active",
+        "requiredFeatures": [
+          "book-lifecycle.v1"
+        ],
+        "supportedFeatures": [],
+        "seenNonces": [],
+        "proofBase64": "t87x1yMo7lUArzfd26Dq9iULQ4VFuKxc6tTSUg0l2zQ"
+      },
+      "expected": {
+        "accepted": false,
+        "error": "feature_missing"
+      }
+    },
+    {
+      "id": "nonce_reuse",
+      "input": {
+        "scope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "expectedScope": {
+          "repoId": "01010101010101010101010101010101",
+          "libraryEpoch": "1",
+          "contentGeneration": "2"
+        },
+        "sessionId": "10101010101010101010101010101010",
+        "selfDeviceId": "20202020202020202020202020202020",
+        "peerDeviceId": "30303030303030303030303030303030",
+        "selfNonce": "40404040404040404040404040404040",
+        "peerNonce": "50505050505050505050505050505050",
+        "memberStatus": "active",
+        "requiredFeatures": [
+          "book-lifecycle.v1"
+        ],
+        "supportedFeatures": [
+          "book-lifecycle.v1"
+        ],
+        "seenNonces": [
+          "40404040404040404040404040404040"
+        ],
+        "proofBase64": "t87x1yMo7lUArzfd26Dq9iULQ4VFuKxc6tTSUg0l2zQ"
+      },
+      "expected": {
+        "accepted": false,
+        "error": "proof_invalid"
+      }
+    }
+  ]
+}

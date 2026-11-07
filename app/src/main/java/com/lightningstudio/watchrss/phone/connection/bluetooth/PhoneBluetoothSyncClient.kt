@@ -340,10 +340,37 @@ internal class PhoneSyncSession internal constructor(
 
 class PhoneBluetoothSyncClient(
     private val context: Context,
-    private val debugLog: BluetoothDebugLog
+    private val debugLog: BluetoothDebugLog,
+    // Installed repo only. The default leaves every legacy probe byte unchanged.
+    private val syncObjectsCapability: (() -> JSONObject?)? = null
 ) {
     private val capabilitiesByAddress = mutableMapOf<String, PhoneWatchCapabilities>()
     private val connectionMutex = Mutex()
+
+    private fun withSyncObjectsProbe(request:JSONObject):JSONObject {
+        if(!com.lightningstudio.watchrss.phone.BuildConfig.SYNC_OBJECTS_V2_LOCAL_OBJECTS)return request
+        val capability=syncObjectsCapability?.invoke()?:return request
+        if(capability.opt("supportsSyncObjectsV2")!=true)return request
+        com.lightningstudio.watchrss.phone.syncv2.SyncV2Codec.exact(capability,setOf("supportsSyncObjectsV2","syncObjectsVersions","requiredFeatures","supportedFeatures","scope","maxPartBytes"))
+        for(key in capability.keys())request.put(key,capability.get(key))
+        return request
+    }
+
+    /** Dedicated content client only. Consume this socket exclusively; never transparently
+     * replay a framing switch. The host supplies repo/member evidence from its binding gate.
+     * Closing retains all legacy pairing, business data and durable cursor state. */
+    internal suspend fun <T> withSyncObjectsTransport(session:PhoneSyncSession,sessionId:String,
+        open:(InputStream,OutputStream,()->Unit)->com.lightningstudio.watchrss.phone.syncv2.SyncV2LocalConnection,
+        block:(com.lightningstudio.watchrss.phone.syncv2.SyncV2LocalConnection)->T):T = withContext(Dispatchers.IO) {
+        if(!com.lightningstudio.watchrss.phone.BuildConfig.SYNC_OBJECTS_V2_LOCAL_OBJECTS)com.lightningstudio.watchrss.phone.syncv2.SyncV2Codec.fail("feature_disabled")
+        check(session.isPersistent && !session.legacyFallback && session.bindingProbe?.optBoolean("success")==true){"authenticated persistent probe required"}
+        executeSessionOperation(session,sessionId,"syncObjectsV2.negotiate",allowTransparentReplay=false) {
+            connectionMutex.withLock {
+                val transport=session.transport?:error("persistent transport closed")
+                try {open(transport.inputStream,transport.outputStream,session::close).use(block)}finally{session.close()}
+            }
+        }
+    }
     internal var probeSocketFactory: (BluetoothDevice) -> BluetoothSocket = {
         it.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
     }
@@ -627,7 +654,7 @@ class PhoneBluetoothSyncClient(
                 // can invalidate the first signed address before the asynchronous watch dial.
                 debugLog.appendEvent("sync.session.ip-upgrade.refresh",sessionId)
                 val refreshed=withTimeout(DIRECT_PROBE_TIMEOUT_MS) {
-                    session.exchange(LibrarySyncPayload.buildProbeRequest(session.localDeviceId).put(FIELD_IP_ENDPOINT_DESCRIPTOR,descriptor),"$sessionId-refresh")
+                    session.exchange(withSyncObjectsProbe(LibrarySyncPayload.buildProbeRequest(session.localDeviceId)).put(FIELD_IP_ENDPOINT_DESCRIPTOR,descriptor),"$sessionId-refresh")
                 }.response
                 require(refreshed.opt("success")==true && refreshed.optString("deviceId")==remoteDeviceId) {"IP 路由刷新返回了其他设备"}
                 if(refreshed.opt(FIELD_IP_UPGRADE_ACCEPTED)==true)ipSession=awaitSession(remoteDeviceId,IP_UPGRADE_WAIT_MS)
@@ -2028,7 +2055,7 @@ class PhoneBluetoothSyncClient(
             connectLogged(created, sessionId, device)
             stage = "read"
             val request = BluetoothSyncProtocol.withPersistentSessionRequest(
-                LibrarySyncPayload.buildProbeRequest(deviceId)
+                withSyncObjectsProbe(LibrarySyncPayload.buildProbeRequest(deviceId))
             ).apply {
                 if(allowIpUpgrade)(context.applicationContext as? PhoneCompanionApplication)
                     ?.currentIpEndpointDescriptorForSync()
@@ -2103,7 +2130,7 @@ class PhoneBluetoothSyncClient(
             val result = runCatching {
                 withTimeout(DIRECT_PROBE_TIMEOUT_MS) {
                     exchange(
-                        request = LibrarySyncPayload.buildProbeRequest(deviceId).apply {
+                        request = withSyncObjectsProbe(LibrarySyncPayload.buildProbeRequest(deviceId)).apply {
                             (context.applicationContext as? PhoneCompanionApplication)
                                 ?.currentIpEndpointDescriptorForSync()
                                 ?.let { put(FIELD_IP_ENDPOINT_DESCRIPTOR, it) }

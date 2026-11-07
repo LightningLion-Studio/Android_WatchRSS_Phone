@@ -114,7 +114,7 @@ internal class SyncV2CloudClient(
         val request=JSONObject(value.toString())
         // Request version belongs only inside the explicitly versioned signed bodies.
         // The backend's complete request schemas do not allow a generic top-level version.
-        val signed=path in setOf("devices/signing-key","state-refs","recipe-refs","refs/cas","account/publish","repo/init")
+        val signed=path in setOf("devices/signing-key","state-refs","recipe-refs","refs/cas","account/publish","repo/init","availability/custody")
         if(!signed && !request.has("scope"))request.put("scope",scope)
         return check(SyncV2Wire.parse(bytes("POST",path,SyncV2Codec.utf8(SyncV2Codec.canonical(request))).first))
     }
@@ -180,6 +180,8 @@ internal class SyncV2CloudClient(
     fun complete(oid:String,reservation:String,request:String,total:Int)=post("objects/$oid/complete",JSONObject().put("reservationId",reservation).put("requestId",request).put("totalBytes",total))
     fun stateRefs(value:JSONObject)=post("state-refs",value)
     fun recipeRefs(value:JSONObject)=post("recipe-refs",value)
+    fun custody(value:JSONObject)=post("availability/custody",value)
+    fun custody(pinId:String):JSONObject {SyncV2LocalProtocol.id(pinId);return get("availability/custody/$pinId")}
     fun demand(value:JSONObject)=post("demand",value)
     fun demands()=get("demand")
     fun availability(entity:String,revision:String,recipe:String)=post("availability/check",JSONObject().put("entityKey",entity).put("bodyRevision",revision).put("recipeOid",recipe))

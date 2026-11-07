@@ -58,6 +58,10 @@ android {
         buildConfigField("boolean", "SYNC_OBJECTS_V2_CONTENT", providers.gradleProperty("syncObjectsV2Content").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_CLOUD_INDEX", providers.gradleProperty("syncObjectsV2CloudIndex").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_LOCAL_PROJECTION", providers.gradleProperty("syncObjectsV2LocalProjection").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
+        // P4 gates are independent from cloud. Peer acceptance is required before rollout.
+        buildConfigField("boolean", "SYNC_OBJECTS_V2_LOCAL_OBJECTS", "false")
+        buildConfigField("boolean", "SYNC_OBJECTS_V2_RELAY", "false")
+        buildConfigField("boolean", "SYNC_OBJECTS_V2_WITNESS", "false")
         // Implementation approval does not enable production writes or delegated conversion.
         buildConfigField("boolean", "CLOUD_FORMAT_R48_WRITE_V1", providers.gradleProperty("cloudFormatR48WriteV1").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("String", "R48_WORKER_TRUST_JSON", productionSetting("WATCHRSS_R48_WORKER_TRUST_JSON").asBuildConfigString())
@@ -302,5 +306,23 @@ tasks.register<Test>("syncV2P3ForeignReadTest") {
     maxHeapSize=unit.maxHeapSize
     filter.includeTestsMatching("com.lightningstudio.watchrss.phone.syncv2.SyncV2P3JointIntegrationTest.phoneP3ForeignAllPublishedBodiesRangeResumeAndBl03")
     environment("WATCHRSS_P3_PHONE_JOINT",providers.environmentVariable("WATCHRSS_P3_PHONE_JOINT").orNull ?: "")
+    outputs.upToDateWhen {false}
+}
+
+// P4 runs against an explicitly provisioned phone-owned synthetic account on 18962 only.
+tasks.withType<Test>().configureEach {
+    if(name == "testDebugUnitTest") exclude("**/SyncV2P4JointIntegrationTest*")
+}
+tasks.register<Test>("syncV2P4JointTest") {
+    val unit=tasks.named<Test>("testDebugUnitTest").get()
+    dependsOn(unit.testClassesDirs.buildDependencies)
+    testClassesDirs=unit.testClassesDirs
+    classpath=unit.classpath
+    systemProperties(unit.systemProperties)
+    jvmArgs(unit.jvmArgs ?: emptyList<String>())
+    maxHeapSize=unit.maxHeapSize
+    filter.includeTestsMatching("com.lightningstudio.watchrss.phone.syncv2.SyncV2P4JointIntegrationTest")
+    environment("WATCHRSS_P4_PHONE_JOINT",providers.environmentVariable("WATCHRSS_P4_PHONE_JOINT").orNull ?: "")
+    environment("WRSS_P4_EVIDENCE",providers.environmentVariable("WRSS_P4_EVIDENCE").orNull ?: "")
     outputs.upToDateWhen {false}
 }

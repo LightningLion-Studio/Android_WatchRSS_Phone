@@ -5,6 +5,14 @@ import org.json.JSONObject
 import java.security.MessageDigest
 
 internal object SyncV2ContentCodec {
+    fun openStored(identity:SyncV2Identity,store:SyncV2ContentStore,oid:String,key:(Long)->ByteArray):ByteArray {
+        val raw=store.objectBytes(oid)
+        if(raw.size<24)SyncV2Codec.fail("invalid_encoding")
+        val length=java.nio.ByteBuffer.wrap(raw,4,4).int
+        if(length !in 1..4096 || length+24>raw.size)SyncV2Codec.fail("invalid_encoding")
+        val header=SyncV2Wire.parse(raw.copyOfRange(8,8+length),4096,true)
+        return SyncV2Envelope.open(identity,key(header.getLong("keyVersion")),oid,raw)
+    }
     const val BLOCK=262144
     const val FRAME=65536
     fun recipe(value:JSONObject):JSONObject = SyncV2Wire.schema {

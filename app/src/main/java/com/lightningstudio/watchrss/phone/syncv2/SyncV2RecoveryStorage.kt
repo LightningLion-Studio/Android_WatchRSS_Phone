@@ -9,7 +9,14 @@ import java.security.MessageDigest
 /** N07 uses the existing recovery envelope and the SAME SQLite stateVersion commit.
  * This depot owns only local encrypted recovery bytes. It never uploads them or deletes originals. */
 internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,private val identity:SyncV2Identity,
-    private val files:File,private val quotaBytes:Long=32L*1024*1024) {
+    private val files:File,private val quotaBytes:Long=32L*1024*1024,private val sourceReads:SourceReads?=null) {
+    /** Optional host diagnostics, not persisted state and never an apply/ACK authority. */
+    class SourceReads {var databaseBytes=0L;var fileBytes=0L;var operations=0L
+        fun database(n:Int){databaseBytes+=n;operations++}
+        fun file(n:Int){fileBytes+=n;operations++}
+        fun reset(){databaseBytes=0;fileBytes=0;operations=0}
+        fun json()=JSONObject().put("databaseBytes",databaseBytes).put("fileBytes",fileBytes).put("operations",operations)
+    }
     init {if(quotaBytes !in 1L..64L*1024*1024)SyncV2Codec.fail("invalid_schema")}
     private val db get()=projection.accountDatabase
     private val scope get()=projection.scope
@@ -19,10 +26,10 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
     private fun fileSource(file:File,expected:String?=null,maxBytes:Long?=null):Source {
         if(!file.isFile)SyncV2Codec.fail("closure_incomplete")
         val size=file.length();val modified=file.lastModified();if(maxBytes!=null && size>maxBytes)SyncV2Codec.fail("quota_exceeded")
-        if(expected!=null && file.inputStream().use{input->val d=MessageDigest.getInstance("SHA-256");val b=ByteArray(65536);while(true){val n=input.read(b);if(n<0)break;d.update(b,0,n)};SyncV2Codec.hex(d.digest())}!=expected)SyncV2Codec.fail("closure_incomplete")
+        if(expected!=null && file.inputStream().use{input->val d=MessageDigest.getInstance("SHA-256");val b=ByteArray(65536);while(true){val n=input.read(b);if(n<0)break;sourceReads?.file(n);d.update(b,0,n)};SyncV2Codec.hex(d.digest())}!=expected)SyncV2Codec.fail("closure_incomplete")
         return object:Source {override val size=size;override fun read(offset:Long,n:Int):ByteArray {
             if(file.length()!=size || file.lastModified()!=modified)SyncV2Codec.fail("choice_stale")
-            return ByteArray(n).also{out->RandomAccessFile(file,"r").use{it.seek(offset);it.readFully(out)}}
+            return ByteArray(n).also{out->RandomAccessFile(file,"r").use{it.seek(offset);it.readFully(out);sourceReads?.file(n)}}
         }}
     }
     private fun sources(record:JSONObject,maxBytes:Long?=null):List<Pair<String,Source>> {
@@ -42,7 +49,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                     while(offset<length) {
                         val n=minOf(65536L,length-offset).toInt()
                         val bytes=db.query("SELECT substr(CAST($column AS BLOB),?,?) FROM phone_articles WHERE articleId=?",arrayOf<Any>(offset+1,n,id)).use{c->if(!c.moveToFirst() || c.isNull(0))SyncV2Codec.fail("choice_stale");c.getBlob(0)}
-                        if(bytes.size!=n)SyncV2Codec.fail("choice_stale");out.write(bytes);offset+=n
+                        if(bytes.size!=n)SyncV2Codec.fail("choice_stale");sourceReads?.database(n);out.write(bytes);offset+=n
                     }
                     return out.toByteArray().toString(Charsets.UTF_8)
                 }

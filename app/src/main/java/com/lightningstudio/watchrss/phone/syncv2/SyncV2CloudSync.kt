@@ -39,7 +39,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         if(prior!=null) {
             if(SyncV2Codec.d64(observation.getString("generation"))<SyncV2Codec.d64(prior.getString("generation")) || SyncV2Codec.d64(observation.getString("revision"))<SyncV2Codec.d64(prior.getString("revision")))SyncV2Codec.fail("replay_detected")
             val accepted=known.optJSONArray("knownAccountParents")?:JSONArray()
-            if(observation.getString("oid")!=prior.getString("oid") && (0 until accepted.length()).any{accepted.getJSONObject(it).getString("oid")==observation.getString("oid")})SyncV2Codec.fail("replay_detected")
+            if(observation.getString("oid")!=prior.getString("oid") && ((0 until accepted.length()).any{accepted.getJSONObject(it).getString("oid")==observation.getString("oid")} || projection.accountKnownHistoricalOid(observation.getString("oid"))))SyncV2Codec.fail("replay_detected")
         }
         if(projection.reuseCloudIndex(observation,window.getString("serverRevision")))return if(projection.status()=="awaiting-user")"awaiting-user" else "metadata-ready"
         val head=account.getString("commitOid");val pin=projection.state().body.optJSONObject("account")?.getString("oid")

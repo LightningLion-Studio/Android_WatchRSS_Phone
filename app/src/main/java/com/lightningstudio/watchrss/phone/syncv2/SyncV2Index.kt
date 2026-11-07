@@ -22,7 +22,7 @@ internal object SyncV2Index {
         } else if (r.isNull("recipeOid") == r.isNull("promiseId")) SyncV2Codec.fail("invalid_schema")
         SyncV2Wire.features(r.getJSONArray("requiredFeatures"))
     }
-    fun build(scope: JSONObject, rows: List<JSONObject>): Tree {
+    fun build(scope: JSONObject, rows: List<JSONObject>, prefix:String=""): Tree {
         SyncV2Codec.scope(scope)
         if (rows.size > 1000000) SyncV2Codec.fail("object_too_large")
         rows.forEach(::row)
@@ -43,7 +43,7 @@ internal object SyncV2Index {
             val bytes = SyncV2Codec.utf8(SyncV2Codec.canonical(value))
             val oid = "tree:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(bytes))}"; objects[oid] = bytes; return oid
         }
-        return Tree(node("", sorted), objects)
+        return Tree(node(prefix, sorted), objects)
     }
     /** Rebuild verifies canonical split/count/prefix rules as well as hashes. */
     fun read(scope: JSONObject, root: String, get: (String)->ByteArray): List<JSONObject> {
@@ -83,6 +83,74 @@ internal object SyncV2Index {
         val rebuilt = build(scope, rows)
         if (rebuilt.root != root || actual.keys != rebuilt.objects.keys) SyncV2Codec.fail("invalid_schema")
         return rows
+    }
+    data class Edit(val tree:Tree,val retired:Set<String>)
+    /** The old root must already have passed ControlClosure. Read only affected paths;
+     * all reused bytes remain anchored by that authenticated root. */
+    fun edit(scope:JSONObject,root:String,changes:Map<String,JSONObject?>,get:(String)->ByteArray):Edit {
+        val objects=linkedMapOf<String,ByteArray>();val retired=linkedSetOf<String>()
+        fun read(oid:String,prefix:String):JSONObject {
+            val bytes=objects[oid]?:get(oid)
+            if("tree:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(bytes))}"!=oid)SyncV2Codec.fail("hash_mismatch")
+            val n=SyncV2Wire.parse(bytes,262144,true)
+            if(n.get("version")!=2 || n.get("prefix")!=prefix || SyncV2Codec.scope(n.getJSONObject("scope"))!=SyncV2Codec.scope(scope))SyncV2Codec.fail("invalid_schema")
+            if(n.getString("form")=="leaf") {
+                SyncV2Codec.exact(n,setOf("version","scope","form","prefix","rows"));val rows=n.getJSONArray("rows")
+                if(rows.length()>256)SyncV2Codec.fail("invalid_schema");var previous=""
+                for(i in 0 until rows.length()){val r=rows.getJSONObject(i);row(r);val entity=r.getString("entityKey");if(!entity.startsWith(prefix)||entity<=previous)SyncV2Codec.fail("invalid_schema");previous=entity}
+            }else {
+                SyncV2Codec.exact(n,setOf("version","scope","form","prefix","children"));val children=n.getJSONArray("children");var previous=""
+                if(n.getString("form")!="node"||prefix.length>=64||children.length() !in 1..16)SyncV2Codec.fail("invalid_schema")
+                for(i in 0 until children.length()){val c=children.getJSONObject(i);SyncV2Codec.exact(c,setOf("digit","oid","count"));val digit=c.getString("digit");if(!Regex("[0-9a-f]").matches(digit)||digit<=previous)SyncV2Codec.fail("invalid_schema");previous=digit;SyncV2Wire.oid(c.getString("oid"),"tree");if(SyncV2Wire.uint(c,"count",1000000)==0L)SyncV2Codec.fail("invalid_schema")}
+            };return n
+        }
+        fun collect(oid:String,prefix:String):List<JSONObject> {
+            val n=read(oid,prefix);retired.add(oid)
+            return if(n.getString("form")=="leaf")n.getJSONArray("rows").let{a->(0 until a.length()).map{a.getJSONObject(it)}}else n.getJSONArray("children").let{a->(0 until a.length()).flatMap{val c=a.getJSONObject(it);collect(c.getString("oid"),prefix+c.getString("digit"))}}
+        }
+        fun count(n:JSONObject)=if(n.getString("form")=="leaf")n.getJSONArray("rows").length()else n.getJSONArray("children").let{a->(0 until a.length()).sumOf{a.getJSONObject(it).getInt("count")}}
+        fun patch(oid:String?,prefix:String,delta:Map<String,JSONObject?>):Pair<String,Int> {
+            val old=oid?.let{read(it,prefix)}
+            if(old==null || old.getString("form")=="leaf") {
+                val rows=old?.getJSONArray("rows")?.let{a->(0 until a.length()).associate{a.getJSONObject(it).getString("entityKey") to a.getJSONObject(it)}.toMutableMap()}?:mutableMapOf()
+                for((id,value)in delta)if(value==null)rows.remove(id)else {row(value);if(value.getString("entityKey")!=id)SyncV2Codec.fail("identity_conflict");rows[id]=value}
+                val tree=build(scope,rows.values.toList(),prefix)
+                if(tree.root!=oid){objects.putAll(tree.objects);if(oid!=null)retired.add(oid)}
+                return tree.root to rows.size
+            }
+            val children=old.getJSONArray("children").let{a->(0 until a.length()).associate{a.getJSONObject(it).getString("digit") to a.getJSONObject(it)}.toMutableMap()}
+            for((digit,items)in delta.entries.groupBy{it.key[prefix.length].toString()}) {
+                val child=patch(children[digit]?.getString("oid"),prefix+digit,items.associate{it.key to it.value})
+                if(child.second==0)children.remove(digit)else children[digit]=JSONObject().put("digit",digit).put("oid",child.first).put("count",child.second)
+            }
+            val total=children.values.sumOf{it.getInt("count")};if(total>1000000)SyncV2Codec.fail("object_too_large")
+            val tree=if(total<=256)build(scope,children.toSortedMap().values.flatMap{collect(it.getString("oid"),prefix+it.getString("digit"))},prefix)else {
+                val node=JSONObject().put("version",2).put("scope",scope).put("form","node").put("prefix",prefix).put("children",JSONArray(children.toSortedMap().values.toList()))
+                val bytes=SyncV2Codec.utf8(SyncV2Codec.canonical(node));val next="tree:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(bytes))}";Tree(next,mapOf(next to bytes))
+            }
+            if(tree.root!=oid){objects.putAll(tree.objects);retired.add(oid)}
+            return tree.root to total
+        }
+        for(id in changes.keys)SyncV2Codec.unhex(id,32)
+        val next=if(changes.isEmpty())root else patch(root,"",changes).first
+        if(next==root)return Edit(Tree(root,emptyMap()),emptySet())
+        val reachable=mutableSetOf<String>()
+        fun mark(oid:String){val bytes=objects[oid]?:return;if(!reachable.add(oid))return;val n=SyncV2Wire.parse(bytes,262144,true);if(n.getString("form")=="node"){val a=n.getJSONArray("children");for(i in 0 until a.length())mark(a.getJSONObject(i).getString("oid"))}}
+        mark(next)
+        return Edit(Tree(next,objects.filterKeys{it in reachable}),retired-reachable)
+    }
+    /** A point lookup under an already authenticated root, including hash/prefix checks. */
+    fun find(scope:JSONObject,root:String,entity:String,get:(String)->ByteArray):JSONObject? {
+        SyncV2Codec.unhex(entity,32);var oid=root;var prefix=""
+        repeat(65) {
+            val bytes=get(oid);if("tree:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(bytes))}"!=oid)SyncV2Codec.fail("hash_mismatch")
+            val n=SyncV2Wire.parse(bytes,262144,true)
+            if(n.get("prefix")!=prefix||SyncV2Codec.scope(n.getJSONObject("scope"))!=SyncV2Codec.scope(scope))SyncV2Codec.fail("invalid_schema")
+            if(n.getString("form")=="leaf")return n.getJSONArray("rows").let{a->(0 until a.length()).map{a.getJSONObject(it)}.firstOrNull{it.getString("entityKey")==entity}}?.also(::row)
+            if(n.getString("form")!="node"||prefix.length>=64)SyncV2Codec.fail("invalid_schema")
+            val children=n.getJSONArray("children");val child=(0 until children.length()).map{children.getJSONObject(it)}.firstOrNull{it.getString("digit")==entity[prefix.length].toString()}?:return null
+            prefix+=child.getString("digit");oid=child.getString("oid")
+        };SyncV2Codec.fail("invalid_schema")
     }
     fun refs(identity: SyncV2Identity, signer: SyncV2Signing, stateOid: String, segments: JSONArray = JSONArray()): JSONObject {
         SyncV2Wire.oid(stateOid, "state")

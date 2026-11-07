@@ -41,7 +41,7 @@ internal class SyncV2Projection(
             } else {
                 val body=JSONObject().put("rollbackGeneration","0").put("account",JSONObject.NULL)
                     .put("pendingChoice",JSONObject.NULL).put("editBase",JSONObject.NULL).put("received",JSONObject())
-                    .put("applied",JSONObject()).put("activeGeneration",JSONObject.NULL).put("appliedAccount",JSONObject.NULL).put("keepDiscardedLocalChanges7Days",true)
+                    .put("applied",JSONObject()).put("activeGeneration",JSONObject.NULL).put("appliedAccount",JSONObject.NULL).put("keepDiscardedLocalChanges7Days",true).put("p5CatalogSchema",6)
                 val edits=SyncV2BusinessWitness.initialEdits(db)
                 val unknown=edits.getBoolean("unknownV2Base")
                 body.put("bootstrapEdits",edits).put("unknownEditBase",unknown).put("businessStamp",SyncV2BusinessWitness.read(db).encoded())
@@ -100,9 +100,11 @@ internal class SyncV2Projection(
             val old=readState(); val following=SyncV2Codec.next(old.version) // before callbacks and fault hooks
             if(expected!=null && old.version!=expected) SyncV2Codec.fail("choice_stale")
             if(old.body.optString("businessStamp")!=SyncV2BusinessWitness.read(db).encoded())SyncV2Codec.fail("choice_stale")
+            accountCatalog.begin(old.body)
             started=true
             fault("begin")
             val result=body(old)
+            accountCatalog.finish(old.body)
             fault("before-state")
             db.execSQL("UPDATE syncv2_state SET state_version=?,body=? WHERE scope=? AND state_version=?",arrayOf(following,seal("state",old.body),scope,old.version))
             if(db.query("SELECT changes()").use { it.moveToFirst(); it.getInt(0) }!=1) SyncV2Codec.fail("choice_stale")
@@ -117,7 +119,7 @@ internal class SyncV2Projection(
         val accountHeaders=before.body.optJSONArray("knownAccountParents")?:JSONArray()
         val known=(0 until saved.length()).map{saved.getJSONObject(it)}+(0 until accountHeaders.length()).map{accountHeaders.getJSONObject(it).getJSONObject("header")}
         val proof=SyncV2HeadPins.authenticate(identity,observed,headers,if(upgraded)before.body.optJSONObject("account")else null,
-            verifyHeader,readHeader,if(upgraded)before.body.optJSONObject("knownAuthors")?:JSONObject()else JSONObject(),known)
+            verifyHeader,{oid->accountCatalog.header(oid)?.getJSONObject("header")?:readHeader?.invoke(oid)?:SyncV2Codec.fail("object_missing")},if(upgraded)before.body.optJSONObject("knownAuthors")?:JSONObject()else JSONObject(),known)
         val previous=before.body.optJSONObject("account")
         if(!upgraded && previous!=null && (0 until proof.path.length()).none{proof.path.getJSONObject(it).getString("oid")==previous.getString("oid")})SyncV2Codec.fail("replay_detected")
         return proof
@@ -214,8 +216,8 @@ internal class SyncV2Projection(
             db.execSQL("UPDATE syncv2_wire_candidates SET body=? WHERE scope=? AND entity_key=?",arrayOf(seal("wire-candidate",value),scope,entity))
         }
     }
-    fun cloudRows():List<JSONObject> {
-        ensureActive();return db.query("SELECT body FROM syncv2_cloud_rows WHERE scope=? ORDER BY entity_key",arrayOf(scope)).use { c -> buildList {while(c.moveToNext())add(open("cloud-row",c.getBlob(0)))} }
+    fun cloudRows(ids:Set<String>?=null):List<JSONObject> {
+        ensureActive();val selected=selection(ids);return db.query("SELECT body FROM syncv2_cloud_rows WHERE scope=?${selected.first} ORDER BY entity_key",selected.second).use { c -> buildList {while(c.moveToNext())add(open("cloud-row",c.getBlob(0)))} }
     }
     fun saveSigningBindings(bindings:JSONArray,revocationRevision:String) = writer { st ->
         SyncV2Codec.d64(revocationRevision)
@@ -282,7 +284,7 @@ internal class SyncV2Projection(
         if(SyncV2Codec.d64(cursor)<SyncV2Codec.d64(st.body.optString("eventCursor","0")))SyncV2Codec.fail("replay_detected")
         st.body.put("eventCursor",cursor)
     }
-    data class WireIndex(val tree:SyncV2Index.Tree,val objects:Map<String,ByteArray>,val refs:List<JSONObject>,val reused:Set<String> = emptySet())
+    data class WireIndex(val tree:SyncV2Index.Tree,val objects:Map<String,ByteArray>,val refs:List<JSONObject>,val reused:Set<String> = emptySet(),val retiredTrees:Set<String> = emptySet())
     fun prepareWireIndex(signer:SyncV2Signing,contentKey:ByteArray,keyVersion:Long):WireIndex {
         val before=state();val rows=mutableListOf<JSONObject>();val objects=linkedMapOf<String,ByteArray>();val refs=mutableListOf<JSONObject>()
         // At most one candidate is decrypted at a time. No article/book body SELECT occurs here.
@@ -343,6 +345,36 @@ internal class SyncV2Projection(
     }
     /** P5 shares the existing SQLite writer and secure local key; no second state journal. */
     internal val accountDatabase:SupportSQLiteDatabase get()=db
+    private val catalog by lazy{SyncV2AccountCatalog(db,scope,::accountSeal,::accountOpen){readState().body}}
+    internal val accountCatalog get()=catalog
+    internal fun accountKnownHistoricalOid(oid:String)=accountCatalog.header(oid)?.optBoolean("accountPath")==true
+    internal fun accountCacheRow(value:JSONObject)=seal("cloud-row",value)
+    internal fun accountObject(oid:String):ByteArray = db.query("SELECT body FROM syncv2_cloud_objects WHERE scope=? AND oid=?",arrayOf(scope,oid)).use{c->if(!c.moveToFirst())SyncV2Codec.fail("closure_incomplete");c.getBlob(0).also{if(oid.substringAfter(":sha256:")!=SyncV2Codec.hex(SyncV2Codec.sha(it)))SyncV2Codec.fail("hash_mismatch")}}
+    internal fun accountEnsureCatalog() {
+        val st=state();if(st.body.optInt("p5CatalogSchema")==6)return
+        accountWriter(st.version){current->
+            val catalog=accountCatalog
+            for(table in listOf("syncv2_p5_catalog","syncv2_p5_channels","syncv2_p5_ref_index"))db.execSQL("DELETE FROM $table WHERE scope=?",arrayOf(scope))
+            db.execSQL("DELETE FROM syncv2_p5_selector_nodes WHERE scope=? AND kind!='headers'",arrayOf(scope))
+            catalog.reset()
+            for(side in listOf("candidate","cloud","binding")) {
+                val table=when(side){"candidate"->"syncv2_candidates";"cloud"->"syncv2_cloud_rows";else->"syncv2_p5_bindings"}
+                db.execSQL("DELETE FROM syncv2_p5_channels WHERE scope=? AND side=?",arrayOf(scope,side))
+                db.query(if(side=="candidate")"SELECT meta,state FROM $table WHERE scope=?"else"SELECT body FROM $table WHERE scope=?",arrayOf(scope)).use{c->while(c.moveToNext()) {
+                    val record=if(side=="candidate")JSONObject().put("meta",open("meta",c.getBlob(0))).put("state",open("candidate-state",c.getBlob(1)))else if(side=="cloud")open("cloud-row",c.getBlob(0))else accountOpen("binding",c.getBlob(0))
+                    if(side=="cloud")catalog.setCloudRow(record,null)else catalog.put(side,record)
+                }}
+            }
+            db.query("SELECT oid,body FROM syncv2_cloud_objects WHERE scope=? AND oid LIKE 'state-refs:%'",arrayOf(scope)).use{c->while(c.moveToNext()){val bytes=c.getBlob(1);if(c.getString(0)!=SyncV2Codec.oid("state-refs",SyncV2Wire.parse(bytes,262144,true)))SyncV2Codec.fail("hash_mismatch");val value=SyncV2Wire.parse(bytes,262144,true);catalog.putRefs(value.getJSONObject("body").getString("stateOid"),c.getString(0))}}
+            val rows=cloudRows();if(rows.isNotEmpty() || current.body.has("metadataAccount"))current.body.put("metadataTreeRoot",SyncV2Index.build(identity.scope,rows.map{it.getJSONObject("row")}).root)
+            current.body.put("p5CatalogSchema",6)
+        }
+    }
+    private fun selection(ids:Set<String>?):Pair<String,Array<out Any>> {
+        if(ids==null)return "" to arrayOf(scope)
+        if(ids.isEmpty())return " AND 0" to arrayOf(scope)
+        return " AND entity_key IN (${ids.joinToString(","){"?"}})" to (listOf(scope)+ids.sorted()).toTypedArray()
+    }
     internal fun accountSeal(purpose:String,value:Any?)=seal("p5/$purpose",JSONObject().put("json",SyncV2LocalJson.canonical(value)))
     internal fun accountOpen(purpose:String,bytes:ByteArray)=JSONObject(open("p5/$purpose",bytes).getString("json"))
     internal fun recoveryKey():ByteArray=SyncV2Codec.hmac(key,SyncV2Codec.lp(SyncV2Codec.utf8("wrss.sync.v2/local-recovery-key"),SyncV2Codec.utf8(scope)))
@@ -360,8 +392,8 @@ internal class SyncV2Projection(
         if(requirePending && st.body.optJSONObject("pendingChoice")?.optString("generation")!=c.generation)SyncV2Codec.fail("choice_stale")
     }
     /** Values are always from the current local projection, never a browsable old cloud cache. */
-    internal fun accountLocalRows():List<JSONObject> {
-        state();val records=db.query("SELECT kind,logical_id,meta,state FROM syncv2_candidates WHERE scope=? ORDER BY entity_key",arrayOf(scope)).use{c->buildList {
+    internal fun accountLocalRows(ids:Set<String>?=null):List<JSONObject> {
+        state();val selected=selection(ids);val records=db.query("SELECT kind,logical_id,meta,state FROM syncv2_candidates WHERE scope=?${selected.first} ORDER BY entity_key",selected.second).use{c->buildList {
             while(c.moveToNext()) {
                 val meta=open("meta",c.getBlob(2));val value=open("candidate-state",c.getBlob(3))
                 if(value.has("projectionRemoved"))continue
@@ -399,18 +431,18 @@ internal class SyncV2Projection(
     /** Called only after business apply in this SAME writer. Generated business logs become the
      * new authenticated baseline; original legacy transport cursors are deliberately untouched. */
     internal fun accountBinding(entity:String):JSONObject?=db.query("SELECT body FROM syncv2_p5_bindings WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{c->if(c.moveToFirst())accountOpen("binding",c.getBlob(0))else null}
-    internal fun accountBindings():Map<String,JSONObject> = db.query("SELECT entity_key,body FROM syncv2_p5_bindings WHERE scope=?",arrayOf(scope)).use{c->buildMap{while(c.moveToNext())put(c.getString(0),accountOpen("binding",c.getBlob(1)))}}
+    internal fun accountBindings(ids:Set<String>?=null):Map<String,JSONObject> {val selected=selection(ids);return db.query("SELECT entity_key,body FROM syncv2_p5_bindings WHERE scope=?${selected.first}",selected.second).use{c->buildMap{while(c.moveToNext())put(c.getString(0),accountOpen("binding",c.getBlob(1)))}}}
     internal fun accountApplied(st:State,account:JSONObject,rows:List<JSONObject>,requestId:String,
-        beforeRows:List<JSONObject>?=null,rssApplied:SyncV2RssApply?=null,acknowledgedRevision:String=st.revision,virtualBaseline:Boolean=false) {
+        beforeRows:List<JSONObject>?=null,rssApplied:SyncV2RssApply?=null,acknowledgedRevision:String=st.revision,virtualBaseline:Boolean=false,sparseIds:Set<String>?=null) {
         check(db.inTransaction());if(SyncV2Codec.d64(acknowledgedRevision)>SyncV2Codec.d64(st.revision))SyncV2Codec.fail("choice_stale")
-        val stamp=SyncV2BusinessWitness.read(db);val encoded=stamp.encoded();val bindings=accountBindings()
+        val stamp=SyncV2BusinessWitness.read(db);val encoded=stamp.encoded();val bindings=accountBindings(sparseIds)
         val before=(beforeRows?:db.query("SELECT kind,logical_id,meta,state FROM syncv2_candidates WHERE scope=?",arrayOf(scope)).use{c->buildList{
             while(c.moveToNext()){val m=open("meta",c.getBlob(2));val state=open("candidate-state",c.getBlob(3));if(!state.optBoolean("projectionRemoved"))add(JSONObject().put("meta",m).put("state",state).put("value",SyncV2Business.join(c.getString(0),m,state)))}
         }}).associateBy{it.getJSONObject("meta").getString("entityKey")}
         val desired=rows.map{it.getJSONObject("meta").getString("entityKey")}.toSet()
         for(entity in (bindings.keys+before.keys)-desired) {
             for(table in listOf("syncv2_candidates","syncv2_provenance","syncv2_wire_candidates","syncv2_p5_bindings"))db.execSQL("DELETE FROM $table WHERE scope=? AND entity_key=?",arrayOf(scope,entity))
-            SyncV2CandidateTree(db,scope).remove(entity)
+            SyncV2CandidateTree(db,scope).remove(entity);accountCatalog.remove("candidate",entity);accountCatalog.remove("binding",entity)
         }
         val rss=rssApplied?:if(rows.any{it.getJSONObject("meta").getString("kind")=="rss-state"})SyncV2RssApply(db,rows)else null
         val baselineRss=if(virtualBaseline)rss?.baselineStates(rows).orEmpty()else emptyMap()
@@ -439,8 +471,9 @@ internal class SyncV2Projection(
                 }
                 db.execSQL("INSERT OR REPLACE INTO syncv2_p5_bindings VALUES(?,?,?)",arrayOf(scope,entity,accountSeal("binding",source.put("localValue",footprint))))
             }
+            accountCatalog.put("binding",value)
             if(previous==null || !same(previous.getJSONObject("meta"),m) || !same(previous.getJSONObject("state"),value.getJSONObject("state")))
-                project(d,id,value.getJSONObject("value"),acknowledgedRevision)
+                project(d,id,value.getJSONObject("value"),acknowledgedRevision)else accountCatalog.put("candidate",value)
         }
         st.body.put("businessStamp",encoded).put("acknowledgedLocalRevision",acknowledgedRevision)
             .put("unknownEditBase",false).put("tailChoicePending",false).put("contentPendingIds",JSONArray()).put("editBase",JSONObject.NULL).put("appliedAccount",account)
@@ -547,6 +580,10 @@ internal class SyncV2Projection(
             val entity=r.getJSONObject("meta").getString("entityKey");val value=normalized(r)
             if(SyncV2Codec.canonical(previous[entity])!=SyncV2Codec.canonical(value))db.execSQL("INSERT OR REPLACE INTO syncv2_cloud_rows VALUES(?,?,?)",arrayOf(scope,entity,seal("cloud-row",value)))
         }
+        for(record in rows){val normalized=normalized(record);accountCatalog.setCloudRow(normalized,null)}
+        for(entity in previous.keys-keep)accountCatalog.remove("cloud",entity)
+        for((oid,bytes)in available)if(oid in needed && oid.startsWith("state-refs:")){val signed=SyncV2Wire.parse(bytes,262144,true);accountCatalog.putRefs(signed.getJSONObject("body").getString("stateOid"),oid)}
+        st.body.put("metadataTreeRoot",root)
         st.body.put("metadataAccount",account).put("metadataStatus","metadata-ready").put("metadataSchema",SyncV2HeadPins.schema)
             .put("metadataRows",rows.size).put("metadataServerRevision",serverRevision)
     }
@@ -1019,6 +1056,7 @@ internal class SyncV2Projection(
         val sourceHash=SyncV2Codec.hash(JSONObject().put("meta",objects.meta).put("state",objects.state).put("provenance",provenance))
         val previous=db.query("SELECT source_hash FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())it.getString(0) else null}
         if(previous==sourceHash) return
+        accountCatalog.put("candidate",JSONObject().put("meta",objects.meta).put("state",objects.state))
         val base=eventAccount?.let { JSONObject().put("accountOid",it.getString("oid")).put("generation",it.getString("generation")) }
         if(base!=null) {
             db.execSQL("INSERT OR IGNORE INTO syncv2_edit_base SELECT scope,entity_key,?,meta,state FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(seal("edit-base",base),scope,entity))
@@ -1063,6 +1101,7 @@ internal class SyncV2Projection(
     }
     private fun markRemoved(d: SyncV2Schema.Domain,id: String,revision: String) {
         val entity=identity.entity(d.kind,id)
+        accountCatalog.remove("candidate",entity)
         val prior=db.query("SELECT meta,state FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())it.getBlob(0) to it.getBlob(1) else null}
         if(prior!=null && open("candidate-state",prior.second).optBoolean("projectionRemoved"))return
         val account=readState().body.optJSONObject("appliedAccount")?:readState().body.optJSONObject("account")

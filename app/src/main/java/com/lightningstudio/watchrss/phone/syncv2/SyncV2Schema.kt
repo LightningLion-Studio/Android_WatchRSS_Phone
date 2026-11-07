@@ -40,6 +40,12 @@ internal object SyncV2Schema {
         db.beginTransaction()
         try {
             listOf(
+                "CREATE TABLE IF NOT EXISTS syncv2_p5_selector_nodes(scope TEXT NOT NULL,kind TEXT NOT NULL,prefix TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(scope,kind,prefix))",
+                "CREATE TABLE IF NOT EXISTS syncv2_p5_header_archive(scope TEXT NOT NULL,oid TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,oid))",
+                "CREATE TABLE IF NOT EXISTS syncv2_p5_catalog(scope TEXT NOT NULL,entity_key TEXT NOT NULL,kind TEXT NOT NULL,candidate_hash TEXT,cloud_hash TEXT,binding_hash TEXT,cloud_row_hash TEXT,refs_oid TEXT,needs_choice INTEGER NOT NULL DEFAULT 0,auth BLOB,PRIMARY KEY(scope,entity_key))",
+                "CREATE TABLE IF NOT EXISTS syncv2_p5_channels(scope TEXT NOT NULL,side TEXT NOT NULL,entity_key TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,side,entity_key))",
+                "CREATE TABLE IF NOT EXISTS syncv2_p5_ref_index(scope TEXT NOT NULL,parent_oid TEXT NOT NULL,refs_oid TEXT NOT NULL,body BLOB,PRIMARY KEY(scope,parent_oid))",
+                "CREATE TABLE IF NOT EXISTS syncv2_p5_detached(scope TEXT NOT NULL,action_id TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,action_id))",
                 "CREATE TABLE IF NOT EXISTS syncv2_p5_objects(scope TEXT NOT NULL,action_id TEXT NOT NULL,oid TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,action_id,oid))",
                 "CREATE TABLE IF NOT EXISTS syncv2_p5_rows(scope TEXT NOT NULL,action_id TEXT NOT NULL,entity_key TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,action_id,entity_key))",
                 "CREATE TABLE IF NOT EXISTS syncv2_recovery_chunks(scope TEXT NOT NULL,copy_id TEXT NOT NULL,kind TEXT NOT NULL,ordinal INTEGER NOT NULL,bytes BLOB NOT NULL,PRIMARY KEY(scope,copy_id,kind,ordinal))",
@@ -62,6 +68,14 @@ internal object SyncV2Schema {
                 "CREATE TABLE IF NOT EXISTS syncv2_scan(scope TEXT NOT NULL,domain TEXT NOT NULL,binding TEXT NOT NULL,r0 TEXT NOT NULL,r1 TEXT,page_key TEXT NOT NULL,tail_seq INTEGER NOT NULL,complete INTEGER NOT NULL,PRIMARY KEY(scope,domain))",
                 "CREATE TABLE IF NOT EXISTS syncv2_legacy_inbox(scope TEXT NOT NULL,peer TEXT NOT NULL,version INTEGER NOT NULL,cursor TEXT NOT NULL,arrival INTEGER NOT NULL,body_hash TEXT NOT NULL,body BLOB NOT NULL,route TEXT NOT NULL,applied INTEGER NOT NULL,PRIMARY KEY(scope,peer,version,cursor),UNIQUE(scope,peer,version,arrival))"
             ).forEach(db::execSQL)
+            if(!hasColumn(db,"syncv2_p5_catalog","auth"))db.execSQL("ALTER TABLE syncv2_p5_catalog ADD COLUMN auth BLOB")
+            if(!hasColumn(db,"syncv2_p5_ref_index","body"))db.execSQL("ALTER TABLE syncv2_p5_ref_index ADD COLUMN body BLOB")
+            if(!hasColumn(db,"syncv2_p5_catalog","needs_choice")) {
+                db.execSQL("ALTER TABLE syncv2_p5_catalog ADD COLUMN needs_choice INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE syncv2_p5_catalog SET needs_choice=(candidate_hash IS NOT cloud_hash OR candidate_hash IS NOT binding_hash)")
+            }
+            db.execSQL("CREATE INDEX IF NOT EXISTS syncv2_p5_catalog_choice ON syncv2_p5_catalog(scope,needs_choice,entity_key)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS syncv2_p5_catalog_kind ON syncv2_p5_catalog(scope,kind,entity_key)")
             db.execSQL("INSERT OR IGNORE INTO syncv2_control(id,enabled,library_id,active_scope,failure_code) VALUES(1,0,?,NULL,NULL)", arrayOf(SyncV2Codec.hex(SyncV2Codec.random(16))))
             for((column,type)in listOf("witness_epoch" to "TEXT NOT NULL DEFAULT ''","witness_coverage" to "TEXT NOT NULL DEFAULT ''"))
                 if(!hasColumn(db,"syncv2_control",column))db.execSQL("ALTER TABLE syncv2_control ADD COLUMN $column $type")

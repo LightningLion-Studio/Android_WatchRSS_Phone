@@ -102,7 +102,7 @@ internal class SyncV2P5Fixture:AutoCloseable {
     fun note(title:String="title",markdown:String="base\nline\n")=JSONObject().put("noteId","note").put("folderId",JSONObject.NULL).put("title",title).put("markdown",markdown).put("plainText",markdown)
         .put("contentHash","hash").put("baseContentHash","hash").put("baseMarkdown","base\nline\n").put("pinned",false).put("createdAt",0).put("updatedAt",0).put("modifiedBy","synthetic").put("deleted",false).put("deletedAt",0).put("noteConflicts",JSONObject().put("version",1).put("records",JSONArray()))
     fun commit(values:List<JSONObject>,parent:String?,generation:String,kind:String,target:String?):String {
-        val rows=values.map{v->val kind=if(v.has("noteId"))"note"else if(v.has("folderId"))"folder"else"article";val id=SyncV2Business.logicalId(kind,v);val entity=identity.entity(kind,id)
+        val rows=values.map{v->val kind=when{v.has("noteId")->"note";v.has("folderId")->"folder";v.has("articleId")->"article";v.has("assetId")->"asset";v.has("chapterIndex")->"book-reading";v.has("bookId")->"book";v.has("articleIdHash")->"rss-state";else->"source"};val id=SyncV2Business.logicalId(kind,v);val entity=identity.entity(kind,id)
             val p=SyncV2Business.split(kind,id,entity,v,null);val meta=SyncV2Envelope.seal(identity,key,1,"meta",SyncV2Codec.utf8(SyncV2Codec.canonical(p.meta)));val state=SyncV2Envelope.seal(identity,key,1,"state",SyncV2Codec.utf8(SyncV2Codec.canonical(p.state)))
             f.objects[meta.oid]=meta.bytes;f.objects[state.oid]=state.bytes
             val reference=SyncV2Index.refs(identity,f.signer,state.oid);val refOid=SyncV2Codec.oid("state-refs",reference);f.objects[refOid]=SyncV2Codec.utf8(SyncV2Codec.canonical(reference));refs[state.oid]=mapping(state.oid,refOid,f.objects.getValue(refOid).size)
@@ -118,7 +118,7 @@ internal class SyncV2P5Fixture:AutoCloseable {
     fun rollbackRemote(values:List<JSONObject> = listOf(note("old title"))):String {
         val oid=commit(values,current.getString("commitOid"),SyncV2Codec.next(current.getString("rollbackGeneration")),"rollback",target);setCurrent(oid,SyncV2Codec.next(current.getString("revision")));return oid
     }
-    fun actions(enabled:Boolean=true,quota:Long=32L*1024*1024,fault:(String)->Unit={})=SyncV2AccountActions(f.client(),identity,projection,f.signer,{key},{it=="synthetic-phone"},root,enabled,{f.now},quota,fault)
+    fun actions(enabled:Boolean=true,quota:Long=32L*1024*1024,fault:(String)->Unit={})=SyncV2AccountActions(f.client(),identity,projection,f.signer,{key},{it=="synthetic-phone"},root,enabled,{f.now},quota,fault=fault)
     fun start() {actions().refresh();drain()}
     fun drain(){repeat(20){if(!projection.runWindow().paused)return};error("scan did not finish")}
     fun edit(text:String="offline\nline\n") {sql.execSQL("UPDATE notes SET markdown=?,plainText=?,updatedAt=updatedAt+1 WHERE noteId='note'",arrayOf(text,text));drain()}

@@ -340,6 +340,21 @@ tasks.register<Test>("syncV2P4JointTest") {
 // P5 uses a freshly provisioned phone-owned synthetic account, with explicit paths only.
 tasks.withType<Test>().configureEach {
     if(name == "testDebugUnitTest") exclude("**/SyncV2P5JointIntegrationTest*")
+    if(name == "testDebugUnitTest") exclude("**/SyncV2P5LargeP99Test*")
+}
+
+tasks.register<Test>("syncV2P5LargeP99Test") {
+    val unit=tasks.named<Test>("testDebugUnitTest").get()
+    dependsOn(unit.testClassesDirs.buildDependencies)
+    testClassesDirs=unit.testClassesDirs
+    classpath=unit.classpath
+    systemProperties(unit.systemProperties)
+    jvmArgs(unit.jvmArgs ?: emptyList<String>())
+    maxHeapSize=unit.maxHeapSize
+    filter.includeTestsMatching("com.lightningstudio.watchrss.phone.syncv2.SyncV2P5LargeP99Test")
+    for(variable in listOf("WATCHRSS_P5_PHONE_JOINT","WRSS_P5_EVIDENCE","WRSS_P5_LARGE_SAMPLES","WRSS_P5_LARGE_MODES","WRSS_P5_LARGE_FOLDERS"))
+        environment(variable,providers.environmentVariable(variable).orNull ?: "")
+    outputs.upToDateWhen {false}
 }
 tasks.register<Test>("syncV2P5JointTest") {
     val unit=tasks.named<Test>("testDebugUnitTest").get()

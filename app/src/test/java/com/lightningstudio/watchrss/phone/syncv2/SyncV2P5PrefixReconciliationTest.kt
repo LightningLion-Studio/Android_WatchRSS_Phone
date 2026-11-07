@@ -68,10 +68,10 @@ class SyncV2P5PrefixReconciliationTest {
         assertTrue(reconcile(w.actions()).getBoolean("localCommitted"));assertEquals("old title",w.sql.query("SELECT title FROM notes").use{it.moveToFirst();it.getString(0)})
     }
     @Test fun unknownPublishOutcomeCannotDropStagedCandidateOrTail():Unit=SyncV2P5Fixture().use{w->
-        w.pending();val a=w.actions{if(it=="action-staged")throw java.io.IOException("staged only")};val p=a.preview()
+        w.pending();val a=w.actions{if(it=="publication-attempted")throw java.io.IOException("attempt fenced")};val p=a.preview()
         assertNotNull(runCatching{a.choose(p,"local")}.exceptionOrNull());w.sql.execSQL("UPDATE notes SET pinned=1 WHERE noteId='note'")
         val before=w.current.toString();val result=reconcile(w.actions());assertEquals("unknown",result.getString("status"));assertEquals("request_outcome_unknown",result.getString("reason"))
-        assertFalse(w.projection.state().body.isNull("pendingAccountAction"));assertEquals(before,w.current.toString());assertEquals(0,w.publishCalls)
+        assertTrue(result.getBoolean("detached"));assertTrue(w.projection.state().body.isNull("pendingAccountAction"));assertEquals(1,w.sql.query("SELECT COUNT(*) FROM syncv2_p5_detached").use{it.moveToFirst();it.getInt(0)});assertEquals(before,w.current.toString());assertEquals(0,w.publishCalls)
         assertEquals(1,w.sql.query("SELECT pinned FROM notes").use{it.moveToFirst();it.getInt(0)})
     }
     @Test fun newlyImportedTailBodySurvivesPublishedPrefixAndItsNextExplicitChoice():Unit=SyncV2P5Fixture().use{w->

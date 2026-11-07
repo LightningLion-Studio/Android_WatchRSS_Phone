@@ -81,7 +81,7 @@ class SyncV2P5LargeP99Test {
         var phase="setup";var eventStart=0L;val marks=JSONObject()
         val actions=SyncV2AccountActions(client,identity,projection,signer,{key},{it in approved},originals,true,{now()},recoveryReads=sourceReads,fault={mark->if(measuring && mark in setOf("before-action-stage","action-staged","publication-attempted","server-confirmed","business-applied","after-account-commit"))marks.put(mark,System.nanoTime()-eventStart)})
         fun drain(){repeat(40){if(!projection.runWindow().paused)return};error("projection_incomplete")}
-        val summary=JSONObject().put("backend",pin).put("platform","JVM/native Room sdk35; not a physical phone").put("unchangedFolders",folderCount).put("untouchedArticles",4).put("untouchedBooks",2).put("untouchedNotes",256).put("untouchedRssStates",128).put("requestedPerMode",samples).put("modes",JSONArray(modes)).put("p99Reported",false)
+        val summary=JSONObject().put("backend",pin).put("platform","JVM/native Room sdk35; not a physical phone").put("unchangedFolders",folderCount).put("untouchedArticles",4).put("untouchedBooks",2).put("untouchedNotes",256).put("untouchedRssStates",0).put("requestedPerMode",samples).put("modes",JSONArray(modes)).put("p99Reported",false)
         fun save(){File(evidence,"large-p99-summary.json").writeText(summary.put("phase",phase).toString(2)+"\n")}
         val raw=File(evidence,"large-p99-events.ndjson");check(!raw.exists());val results=mutableMapOf<String,MutableList<JSONObject>>()
         try {
@@ -94,12 +94,12 @@ class SyncV2P5LargeP99Test {
             val bookBytes="unchanged original book\n".repeat(10000).toByteArray()
             val books=(0 until 2).map{i->val v=value("book");val instance=(i+1).toString(16).padStart(32,'0');v.put("instanceId",instance).put("bookId",SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.lp(*listOf("watchrss/book/instance-id/v1",v.getString("fingerprint"),instance).map(SyncV2Codec::utf8).toTypedArray()))))}
             val notes=(0 until 256).map{value("note").put("noteId","large-untouched-note-$it")}
-            val rss=(0 until 128).map{value("rss-state").put("articleIdHash",SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.utf8("large-unrelated-rss-$it"))))}
-            val all=fs+articles+books+notes+rss+note
             fun row(v:JSONObject):JSONObject {val kind=when{v.has("noteId")->"note";v.has("folderId")->"folder";v.has("articleId")->"article";v.has("articleIdHash")->"rss-state";else->"book"};val id=SyncV2Business.logicalId(kind,v);val p=SyncV2Business.split(kind,id,identity.entity(kind,id),v,null);return JSONObject().put("meta",p.meta).put("state",p.state).put("value",v)}
-            val business=all.map(::row);sql.beginTransaction();try{SyncV2PhoneApply(sql).apply(emptyList(),business);sql.setTransactionSuccessful()}finally{sql.endTransaction()}
-            for(a in articles)sql.execSQL("UPDATE phone_articles SET contentText=? WHERE articleId=?",arrayOf("unchanged source article ".repeat(5000),a.getString("articleId")))
-            for(b in books){File(originals,"imported_books/${b.getString("bookId")}.jsonl").also{it.parentFile!!.mkdirs();it.writeBytes(bookBytes)};sql.execSQL("UPDATE imported_books SET packageSha256=?,packageBytes=? WHERE bookId=?",arrayOf(SyncV2Codec.hex(SyncV2Codec.sha(bookBytes)),bookBytes.size,b.getString("bookId")))}
+            // History restoration requires a complete target. Establish the real
+            // rollback using body-less records; import the original-bearing rows
+            // after that baseline, through normal publication and an actual choice.
+            val business=(fs+notes+note).map(::row);sql.beginTransaction();try{SyncV2PhoneApply(sql).apply(emptyList(),business);sql.setTransactionSuccessful()}finally{sql.endTransaction()}
+            for(b in books)File(originals,"imported_books/${b.getString("bookId")}.jsonl").also{it.parentFile!!.mkdirs();it.writeBytes(bookBytes)}
             drain();phase="seed-real-control-publication";save()
             // Normal product publisher uploads the seed and verifies real service receipts.
             // Preserve its exact prepared ciphertext for local authentication during setup.
@@ -145,16 +145,26 @@ class SyncV2P5LargeP99Test {
             val old=response.getJSONObject("account");val lease=client.prepareHistory(JSONObject().put("requestId",randomId()).put("targetCommitOid",firstOid).put("expectedAccountRevision",old.getString("revision")).put("expectedRollbackGeneration",old.getString("rollbackGeneration")))
             assertEquals(seed!!.tree.root,lease.getString("treeRoot"));val header=setupCommit("rollback",firstOid)
             val account=response.getJSONObject("account");val oid=account.getString("commitOid");assertEquals("1",account.getString("rollbackGeneration"));summary.put("rollbackGeneration","1").put("setupCommitCount",3)
-            val authors=client.authors(identity){it in approved};val saved=projection.state().body;val bindings=saved.getJSONArray("signingBindings")
-            for(i in 0 until bindings.length())authors.accept(bindings.getJSONObject(i),saved.getString("revocationRevision"))
-            val refs=seed!!.refs.associate{r->val parent=r.getJSONObject("body").getString("stateOid");val ref=SyncV2Codec.oid("state-refs",r);parent to JSONObject().put("scope",identity.scope).put("parentOid",parent).put("refsOid",ref).put("authorDeviceId",signer.deviceId).put("keyId",signer.keyId).put("totalBytes",seed!!.objects.getValue(ref).size)}
-            val verified=SyncV2ControlClosure(identity,authors,{key}).verify(header,{seed!!.objects.getValue(it)},{refs.getValue(it)})
-            projection.installCloudIndex(JSONObject().put("oid",oid).put("revision",account.getString("revision")).put("generation",account.getString("rollbackGeneration")),setupHeaders.reversed(),verified,authors::header,response.getString("serverRevision"),{h->SyncV2Wire.parse(client.raw(h),262144,true)})
+            fun installOwn(response:JSONObject,headers:List<JSONObject>,index:SyncV2Projection.WireIndex) {
+                val a=response.getJSONObject("account");val h=headers.first();assertEquals(index.tree.root,h.getJSONObject("body").getString("treeRoot"))
+                val authors=client.authors(identity){it in approved};val saved=projection.state().body;val bindings=saved.getJSONArray("signingBindings")
+                for(i in 0 until bindings.length())authors.accept(bindings.getJSONObject(i),saved.getString("revocationRevision"))
+                val refs=index.objects.filterKeys{it.startsWith("state-refs:")}.map{(oid,bytes)->val ref=SyncV2Wire.parse(bytes,262144,true);ref.getJSONObject("body").getString("stateOid") to JSONObject().put("scope",identity.scope).put("parentOid",ref.getJSONObject("body").getString("stateOid")).put("refsOid",oid).put("authorDeviceId",signer.deviceId).put("keyId",signer.keyId).put("totalBytes",bytes.size)}.toMap()
+                val verified=SyncV2ControlClosure(identity,authors,{key}).verify(h,{index.objects.getValue(it)},{refs.getValue(it)})
+                projection.installCloudIndex(JSONObject().put("oid",a.getString("commitOid")).put("revision",a.getString("revision")).put("generation",a.getString("rollbackGeneration")),headers,verified,authors::header,response.getString("serverRevision"),{parent->SyncV2Wire.parse(client.raw(parent),262144,true)})
+            }
+            installOwn(response,setupHeaders.reversed(),seed!!)
             seed=null
             fun pending(cursor:String){val local=projection.accountLocalRows(setOf(entity)).single().getJSONObject("value");assertEquals("pendingChoice",projection.receiveLegacy(SyncV2Projection.LegacyInput("synthetic-large-measurement",14,cursor,JSONObject().put(entity,local)),null,true))}
             // Establish the authenticated business baseline and ACK through the actual
             // product choice once, outside the measured steady-state events.
             phase="baseline-choice";save();pending("warmup");actions.choose(actions.preview(),"local");drain()
+            phase="original-bearing-records";save();sql.beginTransaction();try{SyncV2PhoneApply(sql).apply(emptyList(),(articles+books).map(::row));sql.setTransactionSuccessful()}finally{sql.endTransaction()}
+            for(a in articles)sql.execSQL("UPDATE phone_articles SET contentText=? WHERE articleId=?",arrayOf("unchanged source article ".repeat(5000),a.getString("articleId")))
+            for(b in books)sql.execSQL("UPDATE imported_books SET packageSha256=?,packageBytes=? WHERE bookId=?",arrayOf(SyncV2Codec.hex(SyncV2Codec.sha(bookBytes)),bookBytes.size,b.getString("bookId")))
+            drain();var bodyIndex:SyncV2Projection.WireIndex?=projection.prepareWireIndex(signer,key,1);val bodyResponse=publisher.publishIndex(signer,key,1)
+            val bodyHeader=SyncV2Wire.parse(client.raw(bodyResponse.getJSONObject("account").getString("commitOid")),262144,true);installOwn(bodyResponse,listOf(bodyHeader),bodyIndex!!);bodyIndex=null
+            pending("body-warmup");actions.choose(actions.preview(),"local");drain();assertEquals(folderCount+263,projection.state().body.getInt("metadataRows"));summary.put("verifiedLibraryRows",folderCount+263).put("setupCommitCount",6)
             val folderProof=sql.query("SELECT entity_key,source_hash,meta,state FROM syncv2_candidates WHERE kind='folder' ORDER BY entity_key").use{c->buildMap{while(c.moveToNext())put(c.getString(0),c.getString(1)+SyncV2Codec.hex(SyncV2Codec.sha(c.getBlob(2)))+SyncV2Codec.hex(SyncV2Codec.sha(c.getBlob(3))))}}
             fun folderWires()=projection.cloudRows().filter{it.getJSONObject("meta").getString("kind")=="folder"}.associate{it.getJSONObject("meta").getString("entityKey") to SyncV2Codec.hash(it.getJSONObject("row"))}
             val wireProof=folderWires()
@@ -179,7 +189,7 @@ class SyncV2P5LargeP99Test {
             assertEquals(folderProof,after);assertEquals(wireProof,folderWires());assertEquals(folderCount,wireProof.size);assertEquals(0,sql.query("SELECT COUNT(*) FROM p99_folder_writes").use{it.moveToFirst();it.getInt(0)})
             val stats=JSONObject();for((mode,values)in results){val s=JSONObject().put("events",values.size);for(field in listOf("previewNs","chooseNs","previewChooseNs","editProjectionNs","receiveLegacyNs","postProjectionNs","fullCycleNs")){val sorted=values.map{it.getLong(field)}.sorted();s.put(field,JSONObject().put("min",sorted.first()).put("p50",sorted[(sorted.size+1)/2-1]).put("max",sorted.last()).also{if(sorted.size>=1000)it.put("p99",sorted[(sorted.size*99+99)/100-1])})};stats.put(mode,s)}
             summary.put("results",stats).put("p99Reported",results.values.all{it.size>=1000}).put("changedFolderCandidates",0).put("businessFolderUpdates",0).put("status","passed");phase="complete";save()
-        }catch(e:Throwable){summary.put("status","failed").put("error",if(e is SyncV2CloudError)e.code else e.message?.takeIf{Regex("[a-z][a-z0-9_]{0,63}").matches(it)}?:e.javaClass.simpleName).put("frames",JSONArray(e.stackTrace.filter{it.className.startsWith("com.lightningstudio.watchrss.phone.syncv2")}.take(8).map{"${it.className.substringAfterLast('.')}::${it.methodName}:${it.lineNumber}"}));save();throw AssertionError("large measurement failed at $phase; see safe summary")}
+        }catch(e:Throwable){if(e is SyncV2CloudError)e.details.optJSONArray("missing")?.let{a->summary.put("missingObjectCount",a.length()).put("missingObjectTypes",JSONArray((0 until a.length()).map{a.getString(it).substringBefore(':')}.distinct().sorted()))};summary.put("status","failed").put("error",if(e is SyncV2CloudError)e.code else e.message?.takeIf{Regex("[a-z][a-z0-9_]{0,63}").matches(it)}?:e.javaClass.simpleName).put("frames",JSONArray(e.stackTrace.filter{it.className.startsWith("com.lightningstudio.watchrss.phone.syncv2")}.take(8).map{"${it.className.substringAfterLast('.')}::${it.methodName}:${it.lineNumber}"}));save();throw AssertionError("large measurement failed at $phase; see safe summary")}
         finally{room.close();key.fill(0);root.deleteRecursively()}
     }
 }

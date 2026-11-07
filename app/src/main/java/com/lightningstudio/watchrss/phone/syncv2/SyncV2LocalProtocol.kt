@@ -59,7 +59,7 @@ internal class SyncV2LocalSession(scope:JSONObject,val sessionId:String,val self
     private val scopeJson=SyncV2Codec.scope(scope)
     val scope:JSONObject get()=JSONObject(scopeJson)
     private var selfHello:JSONObject?=null;private var peerHello:JSONObject?=null
-    private val nonces=mutableSetOf<String>();private var proofAccepted=false;private var closed=false
+    private val nonces=mutableSetOf<String>();private var proofAccepted=false;private var closed=false;private var socketClosed=false
     private var switch:String?=null;private var ready=false;private var committed=false
     private var initiator=false;private var readyAcknowledged=false;private var commitReceived=false
     var peerDeviceId:String?=null;private set
@@ -67,7 +67,7 @@ internal class SyncV2LocalSession(scope:JSONObject,val sessionId:String,val self
     init {SyncV2Codec.scope(scope);SyncV2LocalProtocol.id(sessionId);SyncV2LocalProtocol.id(selfDeviceId)
         SyncV2Wire.features(JSONArray(required));SyncV2Wire.features(JSONArray(supported))}
     fun requireAuthenticated() {if(!gates.localObjects)SyncV2Codec.fail("feature_disabled");if(closed || !alive())SyncV2Codec.fail("authentication_required");checkMember(selfDeviceId)}
-    private fun checkMember(device:String) {when(member(device)){"active"->Unit;"revoked"->{runCatching{close()};SyncV2Codec.fail("member_revoked")};else->{runCatching{close()};SyncV2Codec.fail("member_unknown")}}}
+    private fun checkMember(device:String) {when(member(device)){"active"->Unit;"revoked"->{invalidate();SyncV2Codec.fail("member_revoked")};else->{invalidate();SyncV2Codec.fail("member_unknown")}}}
     fun hello(nonce:String=SyncV2Codec.hex(SyncV2Codec.random(16))):JSONObject {
         requireAuthenticated();if(selfHello!=null)SyncV2Codec.fail("proof_invalid")
         SyncV2LocalProtocol.id(nonce);if(!nonces.add(nonce))SyncV2Codec.fail("proof_invalid")
@@ -132,8 +132,10 @@ internal class SyncV2LocalSession(scope:JSONObject,val sessionId:String,val self
         if(SyncV2Codec.scope(value.getJSONObject("scope"))!=SyncV2Codec.scope(scope))SyncV2Codec.fail("scope_mismatch")
         receiveProof(SyncV2Wire.string(value,"proof"))
     }
-    /** Timeout, malformed ACK, cancellation or disconnect closes this socket; no cursor writes. */
-    override fun close() {if(closed)return;closed=true;committed=false;ready=false;readyAcknowledged=false;commitReceived=false;switch=null;proofAccepted=false;closeSocket()}
+    /** Denial invalidates proof/windows immediately. The connection still owns the transport
+     * until it has flushed the error for a fully decoded request (P4R-06). No cursor writes. */
+    private fun invalidate() {closed=true;committed=false;ready=false;readyAcknowledged=false;commitReceived=false;switch=null;proofAccepted=false}
+    override fun close() {invalidate();if(socketClosed)return;socketClosed=true;closeSocket()}
 }
 
 internal object SyncV2Wrp2 {

@@ -137,7 +137,7 @@ class SyncV2P4RIndependentTest {
             val store=f.store("p4r-revoked-$action");store.save("legacy-cursor",JSONObject().put("received","R").put("applied","A"))
             val port=SyncV2LocalObjects(a,store);val request=JSONObject().put("scope",a.scope).put("windowId",port.openWindow().getString("windowId"));val writes=store.counts.writes;revoked=true
             p4Error("member_revoked"){when(action){"window"->port.openWindow();"haveWant"->port.haveWant(request);"objectGet"->port.objectGet(request);"reference"->port.reference("syncObjectsV2.stateRefsGet",request);else->port.treeDiff(request)}}
-            assertTrue(closed);assertFalse(a.isCommitted);assertEquals(writes,store.counts.writes);revoked=false
+            assertFalse(closed);assertFalse(a.isCommitted);a.close();assertTrue(closed);assertEquals(writes,store.counts.writes);revoked=false
             p4Error("authentication_required"){port.haveWant(request)};assertEquals("A",store.load("legacy-cursor")!!.getString("applied"))
         }
     }}

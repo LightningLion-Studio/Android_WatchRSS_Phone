@@ -21,9 +21,12 @@ internal class SyncV2LocalConnection(val session:SyncV2LocalSession,private val 
         val code=if(t is IllegalStateException && Regex("[a-z][a-z0-9_]{0,63}").matches(t.message?:""))t.message!! else "invalid_schema"
         val retryable=code in setOf("ref_conflict","offset_conflict","closure_incomplete","window_expired","quota_exceeded","storage_pressure","feature_disabled","temporarily_unavailable","rate_limited")
         val retryAfter=if(code in setOf("feature_disabled","temporarily_unavailable","rate_limited"))1000 else JSONObject.NULL
-        inboundId?.let{id->runCatching{SyncV2LocalProtocol.writeJson(output,JSONObject().put("requestId",id).put("ok",false).put("body",JSONObject.NULL)
-            .put("error",JSONObject().put("code",code).put("retryable",retryable).put("retryAfterMillis",retryAfter).put("details",JSONObject())))}}
-        close();throw t
+        // Membership failure has already invalidated proof/windows, but not the socket.
+        // Flush one precise response only when a complete request supplied a valid ID.
+        try {inboundId?.let{id->runCatching{SyncV2LocalProtocol.writeJson(output,JSONObject().put("requestId",id).put("ok",false).put("body",JSONObject.NULL)
+            .put("error",JSONObject().put("code",code).put("retryable",retryable).put("retryAfterMillis",retryAfter).put("details",JSONObject())))}}}
+        finally {runCatching{close()}}
+        throw t
     }finally{inboundId=null}
     private fun <T> deadline(millis:Long,block:()->T):T {
         require(millis in 1..30000)
@@ -47,9 +50,16 @@ internal class SyncV2LocalConnection(val session:SyncV2LocalSession,private val 
     private fun reply(id:String,body:JSONObject) {SyncV2LocalProtocol.writeJson(output,JSONObject().put("requestId",id).put("ok",true).put("body",body).put("error",JSONObject.NULL));inboundId=null}
     private fun readRequest():JSONObject=SyncV2LocalProtocol.readJson(input).also{r->
         SyncV2Codec.exact(r,setOf("requestId","action","body"));SyncV2LocalProtocol.id(r.getString("requestId"));inboundId=r.getString("requestId");SyncV2Wire.string(r,"action");r.getJSONObject("body")}
+    private fun handshakeAuthentication() {
+        try {session.requireAuthenticated()}catch(t:Throwable) {
+            // No request has been read at this boundary. Preserve soft capability fallback.
+            if(t is IllegalStateException && t.message in setOf("member_revoked","member_unknown"))runCatching{close()}
+            throw t
+        }
+    }
     /** capability is the response from the old read-only probe, never an optimistic default. */
     fun initiate(ownCapability:JSONObject,peerCapability:JSONObject,millis:Long=5000) {
-        session.requireAuthenticated()
+        handshakeAuthentication()
         if(ownCapability.opt("supportsSyncObjectsV2")!=true || peerCapability.opt("supportsSyncObjectsV2")!=true)SyncV2Codec.fail("upgrade_required")
         val equal=runCatching{SyncV2Codec.scope(ownCapability.getJSONObject("scope"))==SyncV2Codec.scope(session.scope) && SyncV2Codec.scope(peerCapability.getJSONObject("scope"))==SyncV2Codec.scope(session.scope)}.getOrDefault(false)
         if(!equal)SyncV2Codec.fail("scope_mismatch")
@@ -72,7 +82,7 @@ internal class SyncV2LocalConnection(val session:SyncV2LocalSession,private val 
     }
     /** Called only after BOTH old probe capabilities are true; no new bytes reach an old peer. */
     fun respondHandshake(ownCapability:JSONObject,peerCapability:JSONObject,objects:SyncV2LocalObjects,millis:Long=5000) {
-        session.requireAuthenticated()
+        handshakeAuthentication()
         if(ownCapability.opt("supportsSyncObjectsV2")!=true || peerCapability.opt("supportsSyncObjectsV2")!=true)SyncV2Codec.fail("upgrade_required")
         val equal=runCatching{SyncV2Codec.scope(ownCapability.getJSONObject("scope"))==SyncV2Codec.scope(session.scope) && SyncV2Codec.scope(peerCapability.getJSONObject("scope"))==SyncV2Codec.scope(session.scope)}.getOrDefault(false)
         if(!equal)SyncV2Codec.fail("scope_mismatch")

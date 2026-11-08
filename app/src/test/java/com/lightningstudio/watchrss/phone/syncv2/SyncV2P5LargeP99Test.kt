@@ -101,15 +101,29 @@ class SyncV2P5LargeP99Test {
             val business=(fs+notes+note).map(::row);sql.beginTransaction();try{SyncV2PhoneApply(sql).apply(emptyList(),business);sql.setTransactionSuccessful()}finally{sql.endTransaction()}
             for(b in books)File(originals,"imported_books/${b.getString("bookId")}.jsonl").also{it.parentFile!!.mkdirs();it.writeBytes(bookBytes)}
             drain();phase="seed-real-control-publication";save()
-            // Normal product publisher uploads the seed and verifies real service receipts.
+            // The seed uses product projection/crypto/transport and real service receipts.
             // Preserve its exact prepared ciphertext for local authentication during setup.
             var seed:SyncV2Projection.WireIndex?=projection.prepareWireIndex(signer,key,1)
+            var registrations=client.signingKeys(client.negotiate().getString("windowId"))
+            if((0 until registrations.getJSONArray("bindings").length()).none{registrations.getJSONArray("bindings").getJSONObject(it).getJSONObject("body").getString("deviceId")==signer.deviceId}) {
+                client.registerSigningKey(projection.prepareOwnSigningBinding(signer,now(),registrations.getString("revocationRevision")))
+                registrations=client.signingKeys(client.negotiate().getString("windowId"))
+            }
+            val registeredAuthors=client.authors(identity){it in approved};val registered=registrations.getJSONArray("bindings")
+            for(i in 0 until registered.length())registeredAuthors.accept(registered.getJSONObject(i),registrations.getString("revocationRevision"))
+            projection.saveSigningBindings(registered,registrations.getString("revocationRevision"))
             // The large cold seed can span more than one five-minute read window.
             // Pre-fill immutable control bytes with bounded product-client batches;
             // the normal publisher then rechecks have/want and commits the real root.
             fun randomId()=SyncV2Codec.hex(SyncV2Codec.random(16))
+            fun <T> prepareBatches(items:List<T>,progress:String,work:(List<T>)->Unit) {
+                val pool=java.util.concurrent.Executors.newFixedThreadPool(4);val done=java.util.concurrent.atomic.AtomicInteger()
+                val futures=items.chunked(64).map{batch->pool.submit(java.util.concurrent.Callable{work(batch);done.addAndGet(batch.size)})}
+                try{for((i,future)in futures.withIndex()){try{future.get()}catch(e:java.util.concurrent.ExecutionException){throw e.cause?:e};summary.put(progress,done.get());if(i%10==0)save()}}
+                finally{futures.filter{!it.isDone}.forEach{it.cancel(true)};pool.shutdownNow();pool.awaitTermination(40,TimeUnit.SECONDS)}
+            }
             val seedControls=seed!!.objects.entries.filter{it.key.substringBefore(':') in setOf("meta","state","tree")};summary.put("seedControlObjects",seedControls.size)
-            for((batchIndex,batch)in seedControls.chunked(64).withIndex()) {
+            prepareBatches(seedControls,"seedControlsReady") { batch->
                 val window=client.negotiate();val reservation=client.reserve(randomId(),batch.map{it.key to it.value.size}).getString("reservationId")
                 val status=client.verifiedHaveWant(window.getString("windowId"),batch.map{it.key to it.value.size},now())
                 for((objectId,bytes)in batch) {
@@ -118,10 +132,21 @@ class SyncV2P5LargeP99Test {
                     while(offset<bytes.size){val part=bytes.copyOfRange(offset,minOf(offset+65536,bytes.size));val receipt=client.put(objectId,offset,reservation,randomId(),part);offset+=part.size;client.verifyReceipt(receipt.getJSONObject("receipt"),objectId,bytes.size.toLong(),offset.toLong(),now())}
                     val complete=client.complete(objectId,reservation,randomId(),bytes.size);client.verifyReceipt(complete.getJSONObject("receipt"),objectId,bytes.size.toLong(),bytes.size.toLong(),now())
                 }
-                summary.put("seedControlsReady",minOf(seedControls.size,(batchIndex+1)*64));if(batchIndex%10==0)save()
             }
-            var response=publisher.publishIndex(signer,key,1);val firstOid=response.getJSONObject("account").getString("commitOid")
-            val firstHeader=SyncV2Wire.parse(client.raw(firstOid),262144,true);check(firstHeader.getJSONObject("body").getString("treeRoot")==seed!!.tree.root)
+            summary.put("seedStateRefs",seed!!.refs.size);prepareBatches(seed!!.refs,"seedStateRefsReady"){batch->for(ref in batch)client.stateRefs(ref)}
+            // A fresh window is acquired AFTER the immutable seed has been durably
+            // prepared. Do not make a large cold setup depend on one 5-minute window.
+            val empty=client.negotiate().getJSONObject("account");assertTrue(empty.isNull("commitOid"));assertEquals("0",empty.getString("revision"))
+            val initialBody=JSONObject().put("version",2).put("scope",identity.scope).put("authorDeviceId",signer.deviceId).put("deviceSequence",projection.reserveDeviceSequence()).put("previousOwnCommit",JSONObject.NULL)
+                .put("mergedParents",JSONArray()).put("treeRoot",seed!!.tree.root).put("requiredFeatures",JSONArray()).put("createdAtMillis",now()).put("observedRefs",JSONArray()).put("indexComplete",true)
+                .put("accountParent",JSONObject.NULL).put("rollbackGeneration","0").put("operation",JSONObject().put("kind","normal").put("rollbackTarget",JSONObject.NULL).put("resolvesGeneration",JSONObject.NULL))
+            val firstHeader=signer.commit(initialBody);val firstOid=SyncV2Codec.oid("commit",initialBody);val firstBytes=SyncV2Codec.utf8(SyncV2Codec.canonical(firstHeader))
+            val firstReservation=client.reserve(randomId(),listOf(firstOid to firstBytes.size)).getString("reservationId");val firstStatus=client.verifiedHaveWant(client.negotiate().getString("windowId"),listOf(firstOid to firstBytes.size),now()).getValue(firstOid);assertEquals(0,firstStatus.getInt("durableOffset"))
+            client.verifyReceipt(client.put(firstOid,0,firstReservation,randomId(),firstBytes).getJSONObject("receipt"),firstOid,firstBytes.size.toLong(),firstBytes.size.toLong(),now())
+            client.verifyReceipt(client.complete(firstOid,firstReservation,randomId(),firstBytes.size).getJSONObject("receipt"),firstOid,firstBytes.size.toLong(),firstBytes.size.toLong(),now())
+            val firstRequest=randomId();var response=client.publish(JSONObject().put("account",SyncV2CloudClient.refUpdate(signer,identity.scope,"refs/account/current",null,"0",firstOid,firstRequest,now()))
+                .put("device",SyncV2CloudClient.refUpdate(signer,identity.scope,"refs/devices/${signer.deviceId}/index",null,"0",firstOid,firstRequest,now())).put("relayGrant",JSONObject.NULL))
+            assertEquals(firstOid,response.getJSONObject("account").getString("commitOid"));summary.put("seedPreparationConcurrency",4)
             val setupHeaders=mutableListOf(firstHeader)
             // Retire the seed with an identical-tree normal commit, then prepare and
             // publish an actual service-validated rollback. These setup headers use

@@ -118,8 +118,18 @@ class SyncV2P5LargeP99Test {
             fun randomId()=SyncV2Codec.hex(SyncV2Codec.random(16))
             fun <T> prepareBatches(items:List<T>,progress:String,work:(List<T>)->Unit) {
                 val pool=java.util.concurrent.Executors.newFixedThreadPool(4);val done=java.util.concurrent.atomic.AtomicInteger()
-                val futures=items.chunked(64).map{batch->pool.submit(java.util.concurrent.Callable{work(batch);done.addAndGet(batch.size)})}
-                try{for((i,future)in futures.withIndex()){try{future.get()}catch(e:java.util.concurrent.ExecutionException){throw e.cause?:e};summary.put(progress,done.get());if(i%10==0)save()}}
+                val retries=java.util.concurrent.ConcurrentHashMap<String,java.util.concurrent.atomic.AtomicInteger>()
+                val futures=items.chunked(64).map{batch->pool.submit(java.util.concurrent.Callable{
+                    var attempt=0
+                    while(true)try{work(batch);done.addAndGet(batch.size);break}catch(e:SyncV2CloudError){
+                        if(!e.retryable || e.code !in setOf("temporarily_unavailable","cloud_account_busy","library_busy","rate_limited","window_expired") || ++attempt>=8)throw e
+                        retries.computeIfAbsent(e.code){java.util.concurrent.atomic.AtomicInteger()}.incrementAndGet()
+                        // SETUP ONLY. Repeat from a fresh window/reservation and an
+                        // authenticated have/want; never replay an assumed offset.
+                        Thread.sleep(e.retryAfterMillis?.coerceIn(250,4000)?:minOf(4000L,250L shl(attempt-1)))
+                    }
+                })}
+                try{for((i,future)in futures.withIndex()){try{future.get()}catch(e:java.util.concurrent.ExecutionException){throw e.cause?:e};summary.put(progress,done.get()).put("coldRetries/$progress",JSONObject(retries.mapValues{it.value.get()}));if(i%10==0)save()}}
                 finally{futures.filter{!it.isDone}.forEach{it.cancel(true)};pool.shutdownNow();pool.awaitTermination(40,TimeUnit.SECONDS)}
             }
             val seedControls=seed!!.objects.entries.filter{it.key.substringBefore(':') in setOf("meta","state","tree")};summary.put("seedControlObjects",seedControls.size)

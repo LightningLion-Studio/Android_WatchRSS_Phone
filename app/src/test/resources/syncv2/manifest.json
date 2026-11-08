@@ -27,6 +27,7 @@
     "negotiation.json": "4c7b445487f1650dbf7584fda1eb31e6a2c36f7cfee45580536db033ae624e66",
     "have-want-parts.json": "3e0a025aa212a460070b7c674ef2e44792281fe8c0d113295a3940e55d9fa3c6",
     "history.json": "01668531301fa5c0d8282d94450d4c40716debf9c907855581fa9f655f154786",
-    "device-mapping.json": "00cb2af108e8414539f159484ce7ff676f52aaacb7fcffe552001309da8c3230"
+    "device-mapping.json": "00cb2af108e8414539f159484ce7ff676f52aaacb7fcffe552001309da8c3230",
+    "note-segments-rc7.json": "efc12ee53c0a1d85160ab03afef247cdcfd281fa7bc88f1187c3b416ce732b08"
   }
 }

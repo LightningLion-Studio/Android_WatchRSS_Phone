@@ -77,6 +77,7 @@ internal object SyncV2Codec {
         is JSONArray -> (0 until value.length()).joinToString(",", "[", "]") { canonicalValue(value.get(it)) }
         else -> fail("invalid_encoding")
     }
+    internal fun quotePublic(value: String): String = quote(value)
     private fun quote(value: String): String {
         utf8(value)
         return buildString {

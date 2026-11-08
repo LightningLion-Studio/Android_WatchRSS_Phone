@@ -40,9 +40,11 @@ def main():
     parser.add_argument('--samples', type=int, default=1000)
     parser.add_argument('--folders', type=int, default=12500)
     parser.add_argument('--modes', default='local,merge')
+    parser.add_argument('--inject-transient-once', action='store_true')
     args = parser.parse_args()
     assert 1 <= args.samples <= 1000 and 32 <= args.folders <= 12500
     assert args.samples < 1000 or args.folders == 12500
+    assert not args.inject_transient_once or args.samples < 1000
     os.umask(0o077)
     assert not args.scratch.exists() and not args.evidence.exists()
     args.evidence.mkdir(parents=True)
@@ -92,7 +94,7 @@ def main():
     source = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=args.repo, text=True).strip()
     dirty = subprocess.check_output(['git', 'status', '--porcelain'], cwd=args.repo, text=True)
     write(args.evidence / 'invocation.json', {'utc': utc(), 'sourceCommit': source, 'dirty': dirty,
-          'samplesPerMode': args.samples, 'folders': args.folders, 'modes': args.modes,
+          'injectedTransientOnce': args.inject_transient_once, 'samplesPerMode': args.samples, 'folders': args.folders, 'modes': args.modes,
           'p99Rule': 'nearest rank ceil(0.99*N); no discarded events; each mode separately',
           'host': {'uname': list(os.uname()), 'cpuOnline': os.cpu_count(),
                    'cpuModel': next((x.split(':', 1)[1].strip() for x in (proc / 'cpuinfo').read_text().splitlines() if x.startswith('model name')), None)},
@@ -121,7 +123,8 @@ def main():
     thread = threading.Thread(target=monitor, daemon=True)
     env = dict(os.environ, WATCHRSS_P5_PHONE_JOINT=str(args.scratch), WRSS_P5_EVIDENCE=str(args.evidence),
                WRSS_P5_LARGE_SAMPLES=str(args.samples), WRSS_P5_LARGE_MODES=args.modes,
-               WRSS_P5_LARGE_FOLDERS=str(args.folders))
+               WRSS_P5_LARGE_FOLDERS=str(args.folders),
+               WRSS_P5_LARGE_TRANSIENT_ONCE="1" if args.inject_transient_once else "0")
     try:
         with (args.evidence / 'provision.log').open('w') as log:
             subprocess.run(['python3', str(args.repo / 'app/src/test/python/syncv2_p5_fixture.py'), 'create',
@@ -140,12 +143,15 @@ def main():
         write(args.evidence / 'shared-after.json', shared())
         assert result.returncode == 0, 'measurement failed; inspect the archived Gradle/JUnit report'
         summary = json.loads((args.evidence / 'large-p99-summary.json').read_text())
+        if args.inject_transient_once:
+            assert summary['transientInjected'] and summary['measuredRetries'] >= 1
         assert summary['status'] == 'passed'
         assert summary['p99Reported'] == (args.samples >= 1000)
         events = [json.loads(line) for line in (args.evidence / 'large-p99-events.ndjson').read_text().splitlines()]
         assert len(events) == args.samples * len(args.modes.split(','))
         audit = {'sourceCommit': source, 'backendCommit': COMMIT, 'backendBinarySha256': BINARY,
-                 'events': len(events), 'outliersDiscarded': 0, 'results': {}}
+                 'events': len(events), 'outliersDiscarded': 0, 'measuredRetries': sum(len(e['retries']) for e in events),
+                 'measuredRetrySleepNs': sum(e['retrySleepNs'] for e in events), 'results': {}}
 
         def stats(values):
             ordered = sorted(values)
@@ -161,6 +167,8 @@ def main():
                 assert e['sourceReads']['databaseBytes'] == e['sourceReads']['fileBytes'] == 0
                 assert e['blobBytes'] < 4*1024*1024 and e['uploadedObjects'] <= 8
                 assert e['postProjectionRows'] == e['postProjectionTail'] == 0 and not e['appliedAckPending']
+                assert e['retrySleepNs'] == sum(r['sleepNs'] for r in e['retries'])
+                assert e['previewChooseNs'] >= e['retrySleepNs']
                 marks = e['marksNs']
                 e['prepareNs'] = marks['before-action-stage'] - e['previewNs']
                 e['stageNs'] = marks['action-staged'] - marks['before-action-stage']

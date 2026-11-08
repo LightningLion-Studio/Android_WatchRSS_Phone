@@ -50,6 +50,8 @@ class SyncV2P5LargeP99Test {
         val evidence=SyncV2JointEnvironment.directory("WRSS_P5_EVIDENCE")
         val samples=(System.getenv("WRSS_P5_LARGE_SAMPLES")?.toIntOrNull()?:1000).also{require(it in 1..1000)}
         val folderCount=(System.getenv("WRSS_P5_LARGE_FOLDERS")?.toIntOrNull()?:12500).also{require(it in 32..12500);if(samples>=1000)require(it==12500)}
+        val injectTransient=System.getenv("WRSS_P5_LARGE_TRANSIENT_ONCE")=="1";require(!injectTransient||samples<1000)
+        var transientInjected=false
         val modes=(System.getenv("WRSS_P5_LARGE_MODES")?.takeIf{it.isNotBlank()}?:"local,merge").split(',').also{require(it.distinct()==it && it.all{m->m in setOf("local","merge")})}
         val owner=SyncV2Wire.parse(File(fixture,".owner.json").readBytes());check(owner.getBoolean("phoneP5Owned")&&owner.getInt("backendPort")==18972)
         val pin=SyncV2Wire.parse(File(evidence,"backend-pin.json").readBytes())
@@ -79,10 +81,25 @@ class SyncV2P5LargeP99Test {
         val sql=room.openHelper.writableDatabase;val reads=Reads();val projection=SyncV2Projection(reads.wrap(sql),identity,SyncV2Codec.random(32),true).also{it.install()}
         val originals=File(root,"files").also{it.mkdirs()};val sourceReads=SyncV2RecoveryStorage.SourceReads()
         var phase="setup";var eventStart=0L;val marks=JSONObject()
-        val actions=SyncV2AccountActions(client,identity,projection,signer,{key},{it in approved},originals,true,{now()},recoveryReads=sourceReads,fault={mark->if(measuring && mark in setOf("before-action-stage","action-staged","publication-attempted","server-confirmed","business-applied","after-account-commit"))marks.put(mark,System.nanoTime()-eventStart)})
+        val actions=SyncV2AccountActions(client,identity,projection,signer,{key},{it in approved},originals,true,{now()},recoveryReads=sourceReads,fault={mark->if(measuring && mark in setOf("before-action-stage","action-staged","publication-attempted","server-confirmed","business-applied","after-account-commit")){if(!marks.has(mark))marks.put(mark,System.nanoTime()-eventStart);if(injectTransient&&!transientInjected&&mark=="publication-attempted"){transientInjected=true;throw SyncV2CloudError("temporarily_unavailable",true,1000)}}})
         fun drain(){repeat(40){if(!projection.runWindow().paused)return};error("projection_incomplete")}
         val summary=JSONObject().put("backend",pin).put("platform","JVM/native Room sdk35; not a physical phone").put("unchangedFolders",folderCount).put("untouchedArticles",4).put("untouchedBooks",2).put("untouchedNotes",256).put("untouchedRssStates",0).put("requestedPerMode",samples).put("modes",JSONArray(modes)).put("p99Reported",false)
         fun save(){File(evidence,"large-p99-summary.json").writeText(summary.put("phase",phase).toString(2)+"\n")}
+        var retryTotal=0;var retrySleepTotal=0L
+        fun <T> measuredRetry(retries:JSONArray,operation:()->T):T {
+            var attempt=0;var stagedId:String?=null
+            while(true)try{val pendingId=projection.state().body.optJSONObject("pendingAccountAction")?.getString("id");if(stagedId!=null)check(pendingId==stagedId);return operation()}catch(e:java.io.IOException){
+                val cloud=e as? SyncV2CloudError
+                if(cloud!=null&&(!cloud.retryable||cloud.code !in setOf("temporarily_unavailable","cloud_account_busy","library_busy","rate_limited")))throw e
+                if(++attempt>=8)throw e
+                val delay=cloud?.retryAfterMillis?.coerceIn(250,60000)?:minOf(4000L,250L shl(attempt-1))
+                val pendingId=projection.state().body.optJSONObject("pendingAccountAction")?.getString("id");if(stagedId!=null)check(pendingId==stagedId);stagedId=pendingId
+                val entry=JSONObject().put("stagedRequestId",pendingId?:JSONObject.NULL).put("code",cloud?.code?:"io_exception").put("attempt",attempt).put("atNs",System.nanoTime()-eventStart).put("delayMillis",delay)
+                retries.put(entry);summary.put("activeEventRetries",JSONArray(retries.toString()));save()
+                val sleepStart=System.nanoTime();Thread.sleep(delay);val slept=System.nanoTime()-sleepStart
+                entry.put("sleepNs",slept);retryTotal++;retrySleepTotal+=slept
+            }
+        }
         val raw=File(evidence,"large-p99-events.ndjson");check(!raw.exists());val results=mutableMapOf<String,MutableList<JSONObject>>()
         try {
             save();val publisher=SyncV2CloudSync(client,identity,projection,{it in approved},{key},now={now()});assertEquals("empty-account",publisher.readCurrent())
@@ -210,14 +227,17 @@ class SyncV2P5LargeP99Test {
                     for(k in marks.keys().asSequence().toList())marks.remove(k)
                     reads.active=true;val fullStart=System.nanoTime();val text="large-$mode-event-${index+1}\n";sql.execSQL("UPDATE notes SET markdown=?,plainText=?,contentHash=?,updatedAt=? WHERE noteId=?",arrayOf(text,text,com.lightningstudio.watchrss.phone.data.note.MarkdownNoteCodec.sha256(text),now(),noteId));drain();val edited=System.nanoTime()
                     pending("$mode-${index+1}");val received=System.nanoTime();val preBlobs=reads.blobs;val preStrings=reads.strings;val preQueries=reads.queries;measuring=true;eventStart=System.nanoTime()
-                    val preview=actions.preview();val previewed=System.nanoTime();assertTrue(preview.reason,preview.canMerge)
-                    val result=actions.choose(preview,mode);val chosen=System.nanoTime();measuring=false;val choiceBlobs=reads.blobs-preBlobs;val choiceStrings=reads.strings-preStrings;val choiceQueries=reads.queries-preQueries
-                    assertTrue(result.getBoolean("localCommitted"));assertFalse(result.getBoolean("appliedAckPending"));assertTrue(projection.state().body.isNull("pendingChoice"))
+                    val retries=JSONArray();val preview=measuredRetry(retries){actions.preview()};val previewed=System.nanoTime();assertTrue(preview.reason,preview.canMerge)
+                    val result=measuredRetry(retries){if(projection.state().body.isNull("pendingAccountAction"))actions.choose(preview,mode) else actions.resume()?:error("missing_staged_action")}
+                    assertTrue(result.getBoolean("localCommitted"))
+                    measuredRetry(retries){actions.flushAppliedAck()}
+                    val chosen=System.nanoTime();measuring=false;val choiceBlobs=reads.blobs-preBlobs;val choiceStrings=reads.strings-preStrings;val choiceQueries=reads.queries-preQueries
+                    assertTrue(projection.state().body.isNull("pendingAppliedAck"));assertTrue(projection.state().body.isNull("pendingChoice"))
                     val post=projection.runWindow();assertFalse(post.paused);assertEquals(0,post.rows);assertEquals(0,post.tailEntries);val end=System.nanoTime();reads.active=false
                     assertEquals(0,sourceReads.databaseBytes);assertEquals(0,sourceReads.fileBytes);assertTrue("bounded action BLOB returns $choiceBlobs",choiceBlobs<4L*1024*1024);assertTrue(putObjects in 1..8);assertTrue(putBytes>0)
-                    val event=JSONObject().put("choice",mode).put("event",index+1).put("previewNs",previewed-eventStart).put("chooseNs",chosen-previewed).put("previewChooseNs",chosen-eventStart).put("editProjectionNs",edited-fullStart).put("receiveLegacyNs",received-edited).put("postProjectionNs",end-chosen).put("fullCycleNs",end-fullStart).put("postProjectionRows",post.rows).put("postProjectionTail",post.tailEntries).put("appliedAckPending",false).put("marksNs",JSONObject(marks.toString())).put("sqlQueries",choiceQueries).put("blobBytes",choiceBlobs).put("stringUtf8Bytes",choiceStrings).put("fullCycleSqlQueries",reads.queries).put("fullCycleBlobBytes",reads.blobs).put("fullCycleStringUtf8Bytes",reads.strings).put("sourceReads",sourceReads.json()).put("httpCalls",httpCalls).put("httpHeadersNs",httpNanos).put("uploadedObjects",putObjects).put("uploadedBytes",putBytes).put("accountRevision",projection.state().body.getJSONObject("account").getString("revision"))
+                    val event=JSONObject().put("choice",mode).put("event",index+1).put("retries",retries).put("retrySleepNs",(0 until retries.length()).sumOf{retries.getJSONObject(it).getLong("sleepNs")}).put("previewNs",previewed-eventStart).put("chooseNs",chosen-previewed).put("previewChooseNs",chosen-eventStart).put("editProjectionNs",edited-fullStart).put("receiveLegacyNs",received-edited).put("postProjectionNs",end-chosen).put("fullCycleNs",end-fullStart).put("postProjectionRows",post.rows).put("postProjectionTail",post.tailEntries).put("appliedAckPending",false).put("marksNs",JSONObject(marks.toString())).put("sqlQueries",choiceQueries).put("blobBytes",choiceBlobs).put("stringUtf8Bytes",choiceStrings).put("fullCycleSqlQueries",reads.queries).put("fullCycleBlobBytes",reads.blobs).put("fullCycleStringUtf8Bytes",reads.strings).put("sourceReads",sourceReads.json()).put("httpCalls",httpCalls).put("httpHeadersNs",httpNanos).put("uploadedObjects",putObjects).put("uploadedBytes",putBytes).put("accountRevision",projection.state().body.getJSONObject("account").getString("revision"))
                     values.add(event);out.write(event.toString());out.newLine();out.flush()
-                    summary.put("completed-$mode",index+1);if((index+1)%10==0)save()
+                    summary.remove("activeEventRetries");summary.put("measuredRetries",retryTotal).put("measuredRetrySleepNs",retrySleepTotal).put("transientInjected",transientInjected);summary.put("completed-$mode",index+1);if((index+1)%10==0)save()
                 }
             }}
             val after=sql.query("SELECT entity_key,source_hash,meta,state FROM syncv2_candidates WHERE kind='folder' ORDER BY entity_key").use{c->buildMap{while(c.moveToNext())put(c.getString(0),c.getString(1)+SyncV2Codec.hex(SyncV2Codec.sha(c.getBlob(2)))+SyncV2Codec.hex(SyncV2Codec.sha(c.getBlob(3))))}}

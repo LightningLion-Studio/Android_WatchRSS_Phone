@@ -352,7 +352,7 @@ tasks.register<Test>("syncV2P5LargeP99Test") {
     jvmArgs(unit.jvmArgs ?: emptyList<String>())
     maxHeapSize=unit.maxHeapSize
     filter.includeTestsMatching("com.lightningstudio.watchrss.phone.syncv2.SyncV2P5LargeP99Test")
-    for(variable in listOf("WATCHRSS_P5_PHONE_JOINT","WRSS_P5_EVIDENCE","WRSS_P5_LARGE_SAMPLES","WRSS_P5_LARGE_MODES","WRSS_P5_LARGE_FOLDERS"))
+    for(variable in listOf("WATCHRSS_P5_PHONE_JOINT","WRSS_P5_EVIDENCE","WRSS_P5_LARGE_SAMPLES","WRSS_P5_LARGE_MODES","WRSS_P5_LARGE_FOLDERS","WRSS_P5_LARGE_TRANSIENT_ONCE"))
         environment(variable,providers.environmentVariable(variable).orNull ?: "")
     outputs.upToDateWhen {false}
 }

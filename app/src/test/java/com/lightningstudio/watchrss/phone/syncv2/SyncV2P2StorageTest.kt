@@ -321,7 +321,19 @@ class SyncV2P2StorageTest {
                 if(mode=="valid") {
                     assertNull(failure);assertEquals(oid(head),p.state().body.getJSONObject("account").getString("oid"))
                     assertEquals("3",p.state().body.getJSONObject("knownAuthors").getJSONObject(signer().deviceId).getString("sequence"))
-                    assertEquals(3,p.state().body.getJSONArray("knownControlHeaders").length())
+                    // N01 contract change: the state body only caches the most recent 2 control
+                    // headers (the RR02 read-volume bound). Authenticating the staged predecessor
+                    // and any older already-authenticated header is the header archive's job, so
+                    // the regression asserts the behaviour instead of a body retention count:
+                    // every header that authenticated stays resolvable through the sealed archive,
+                    // and only real account-path entries carry their historical replay pin.
+                    // End-to-end acceptance / forgery / replay proofs: SyncV2P5HeaderArchiveAuthTest.
+                    assertEquals(2,p.state().body.getJSONArray("knownControlHeaders").length())
+                    val archivedHead=p.accountCatalog.header(oid(head))!!;val archivedStaged=p.accountCatalog.header(oid(staged))!!
+                    assertEquals(SyncV2Codec.canonical(head),SyncV2Codec.canonical(archivedHead.getJSONObject("header")))
+                    assertTrue(archivedHead.getBoolean("accountPath"));assertFalse(archivedStaged.getBoolean("accountPath"))
+                    assertTrue(p.accountKnownHistoricalOid(oid(head)))
+                    assertFalse(p.accountKnownHistoricalOid(oid(staged)))
                     val objects=calls.count{it.startsWith("objects/")};sync.readCurrent();assertEquals(objects,calls.count{it.startsWith("objects/")})
                 }else {
                     assertEquals(if(mode=="missing-own")"object_missing"else"replay_detected",failure?.message)

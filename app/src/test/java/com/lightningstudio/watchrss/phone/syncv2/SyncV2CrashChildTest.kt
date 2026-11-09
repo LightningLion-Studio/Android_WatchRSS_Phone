@@ -35,9 +35,9 @@ class SyncV2CrashChildTest {
         db.syncPeerStateDao().upsert(SyncPeerStateEntity("peer",8,7,0,14,0))
         a.scanPage("phone_articles",limit=1) // a real persisted prefix must survive every later crash.
         File(root,"ready.json").writeText(JSONObject().put("prefix",1).put("oldCursor",7).put("journal",System.getenv("WRSS_P1_CRASH_JOURNAL")).toString())
-        val crashing=SyncV2Projection(db.openHelper.writableDatabase,SyncV2Fixtures.identity(),SyncV2Fixtures.localKey,true){point->
+        val crashing=SyncV2Projection(db.openHelper.writableDatabase,SyncV2Fixtures.identity(),SyncV2Fixtures.localKey,true,fault={point->
             if(point==stage)Runtime.getRuntime().halt(73)
-        }
+        })
         if(stage=="after-tail-entry")crashing.catchUp(1)else crashing.scanPage("phone_articles",limit=1)
         error("crash boundary did not execute")
     }

@@ -11,7 +11,8 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     private val projection:SyncV2Projection,private val signer:SyncV2Signing,private val contentKey:(Long)->ByteArray,
     private val approved:(String)->Boolean,private val files:File,private val enabled:Boolean=BuildConfig.SYNC_OBJECTS_V2_HISTORY_RESTORE,
     private val trustedNow:()->Long?={null},recoveryQuotaBytes:Long=32L*1024*1024,
-    recoveryReads:SyncV2RecoveryStorage.SourceReads?=null,private val fault:(String)->Unit={}) {
+    recoveryReads:SyncV2RecoveryStorage.SourceReads?=null,private val fault:(String)->Unit={},
+    private val noteSegmentsRead:Boolean=BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS) {
     private val db get()=projection.accountDatabase
     private val scope get()=projection.scope
     private val recovery=SyncV2RecoveryStorage(projection,identity,files,recoveryQuotaBytes,recoveryReads)
@@ -23,9 +24,14 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     private fun now():Long=trustedNow()?.also{if(it !in 0..9007199254740991L)SyncV2Codec.fail("invalid_schema")}?:SyncV2Codec.fail("trusted_time_unavailable")
     private fun account(a:JSONObject)=JSONObject().put("oid",a.getString("commitOid")).put("revision",a.getString("revision")).put("generation",a.getString("rollbackGeneration"))
     private fun values(rows:List<JSONObject>,planner:Boolean=false)=JSONObject().also{out->for(r in rows) {
+        if(!r.has("value")||r.has(SyncV2NoteWiring.ISOLATED_KEY))continue
         val m=r.getJSONObject("meta");val v=copy(r.getJSONObject("value"));if(planner)v.put("identity",m.getString("logicalId"));out.put(m.getString("entityKey"),v)
     }}
-    private fun cloudRows(ids:Set<String>?=null)=projection.cloudRows(ids).map{r->r.put("value",SyncV2Business.join(r.getJSONObject("meta").getString("kind"),r.getJSONObject("meta"),r.getJSONObject("state")))}
+    private fun cloudRows(ids:Set<String>?=null)=projection.cloudRows(ids).map{r->
+        // F1/W3: an isolated segmented row has no reassemblable body; it is never joined and never
+        // offered to the planner. The stored bytes survive untouched for verbatim carry-back (R3).
+        if(r.has(SyncV2NoteWiring.ISOLATED_KEY))r else r.put("value",SyncV2Business.join(r.getJSONObject("meta").getString("kind"),r.getJSONObject("meta"),r.getJSONObject("state")))
+    }
     private fun same(a:Any?,b:Any?)=SyncV2LocalJson.canonical(a)==SyncV2LocalJson.canonical(b)
     private fun complete(){if(!projection.isWindowComplete())SyncV2Codec.fail("projection_incomplete")}
     init {if(enabled){projection.accountEnsureCatalog();projection.bindLegacyCloudResolver {capture->
@@ -120,6 +126,23 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             .put("lastSeen",st.body.optString("lastSeen","0")).put("stateVersion",st.version).put("localChangeRevision",st.revision)
             .put("pendingChoice",st.body.optJSONObject("pendingChoice")?:JSONObject.NULL).put("actionPending",!st.body.isNull("pendingAccountAction")).put("lastAction",st.body.optJSONObject("accountActionReceipt")?:JSONObject.NULL)
     }
+    /** F1/W3 status surface for the (later) UI: openable or note_unopenable with reason. */
+    fun noteStatus(logicalId:String):JSONObject {
+        val entity=identity.entity("note",logicalId)
+        val isolation=projection.noteIsolation().optJSONObject(entity)
+        return if(isolation==null)JSONObject().put("openable",true)
+        else JSONObject().put("openable",false).put("error","note_unopenable").put("reason",isolation.getString("reason"))
+            .put("stateOid",isolation.getString("stateOid")).put("forkedAs",projection.noteFork(logicalId)?:JSONObject.NULL)
+    }
+    /** R2: fork an isolated note's current local content under a fresh noteId. Both copies survive:
+     * the isolated remote row keeps being carried verbatim while the fork is a new entity. */
+    fun forkNote(logicalId:String):JSONObject {
+        gate();val entity=identity.entity("note",logicalId)
+        if(!projection.noteIsolation().has(entity))SyncV2Codec.fail("invalid_schema")
+        val forked=projection.forkIsolatedNote(entity,logicalId,now())
+        return JSONObject().put("forked",true).put("sourceLogicalId",logicalId).put("forkLogicalId",forked.getString("logicalId"))
+            .put("forkEntityKey",forked.getString("entityKey")).put("noteRevision",JSONObject.NULL)
+    }
     /** Register before presenting a capture; this setup action may advance stateVersion. */
     fun prepareSigning() {
         gate();client.capabilities();val window=client.negotiate();val keys=client.signingKeys(window.getString("windowId"));val bindings=keys.getJSONArray("bindings")
@@ -152,7 +175,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         if(!r.has("value"))r.put("value",SyncV2Business.join(r.getJSONObject("meta").getString("kind"),r.getJSONObject("meta"),r.getJSONObject("state")))
     }}}
     private fun rowsJson(rows:List<JSONObject>)=JSONArray(rows.map{r->JSONObject().also{out->
-        for(key in listOf("meta","state","row"))if(r.has(key))out.put(key,r.get(key))
+        for(key in listOf("meta","state","row",SyncV2NoteWiring.ISOLATED_KEY))if(r.has(key))out.put(key,r.get(key))
     }}).toString()
     /** One unique planner entry, including all nonempty/unknown note conflict channels and authenticated bases. */
     fun preview(legacyKeys:Set<String>?=null):Preview {
@@ -211,7 +234,8 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                 candidate=result.getJSONObject("tree").let{tree->remote.filter{it.getJSONObject("meta").getString("entityKey") !in planningIds}.map{snapshotRow(it,"target")}+tree.keys().asSequence().filter{root==null || it in scopeIds}.sorted().map { entity ->
                     val original=originals[entity]?:SyncV2Codec.fail("identity_conflict");val m=original.getJSONObject("meta");val v=copy(tree.getJSONObject(entity)).apply{remove("identity")}
                     record(m.getString("kind"),m.getString("logicalId"),entity,v).also{it.getJSONObject("meta").put("addedAtSource",m.getString("addedAtSource"))}
-                }.toList()};business.validate(candidate);wireIndex(candidate,1,remote,root,scopeIds) // final full wire/refs budget, before showing canMerge.
+                }.toList()};business.validate(candidate);client.capabilities().also{projection.noteSegmentsServerAnnounced=client.noteSegmentsWrite()}
+                wireIndex(candidate,1,remote,root,scopeIds,client.authors(identity,approved),mutableSetOf()) // final full wire/refs budget, before showing canMerge.
             }catch(e:Exception){if(e.message=="object_too_large")throw e;candidate=null;reason=when(e.message){"storage_pressure"->"storage_pressure";"closure_incomplete"->"missing_content";else->"unsupported_feature"}}
         }
         projection.accountCheck(projection.state(),capture)
@@ -227,12 +251,14 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     }
     private fun <T> fileGuard(token:JSONObject,work:()->T):T = com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.withProjectionCapture(files,
         com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.Revision(token.getString("notes"),token.getString("privateFiles")),work)
-    private fun record(kind:String,logicalId:String,entity:String,value:JSONObject):JSONObject {
+    internal fun record(kind:String,logicalId:String,entity:String,value:JSONObject):JSONObject {
+        // R2/F1: an isolated note is unopenable on this device; edits enter through forkNote().
+        if(kind=="note"&&projection.noteIsolation().has(entity))SyncV2Codec.fail("note_unopenable")
         val pair=SyncV2Business.split(kind,logicalId,entity,value,null)
         return JSONObject().put("meta",pair.meta).put("state",pair.state).put("value",SyncV2Business.join(kind,pair.meta,pair.state))
     }
     private fun bodyIdentity(r:JSONObject):String {
-        val m=r.getJSONObject("meta");val v=r.getJSONObject("value")
+        val m=r.getJSONObject("meta");val v=r.optJSONObject("value")?:JSONObject()
         return SyncV2Codec.hash(JSONObject().put("kind",m.getString("kind")).put("id",m.getString("logicalId"))
             .put("body",when(m.getString("kind")){"article"->v.opt("contentHash");"book"->v.opt("fingerprint");"asset"->v.opt("updatedAt");else->JSONObject.NULL}))
     }
@@ -247,14 +273,25 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                 (next==null || next.getJSONObject("value").optBoolean("deleted") || bodyIdentity(r)!=bodyIdentity(next))
         }.map{it.getJSONObject("meta").getString("entityKey")}.toSet()
     }
-    private fun wireIndex(records:List<JSONObject>,version:Long,current:List<JSONObject>?=null,sparseRoot:String?=null,scopeIds:Set<String> = emptySet()):SyncV2Projection.WireIndex {
+    private fun wireIndex(records:List<JSONObject>,version:Long,current:List<JSONObject>?=null,sparseRoot:String?=null,scopeIds:Set<String> = emptySet(),
+        authors:SyncV2Authors?=null,excluded:MutableSet<String>?=null):SyncV2Projection.WireIndex {
         val objects=linkedMapOf<String,ByteArray>();val refs=mutableListOf<JSONObject>();val rows=mutableListOf<JSONObject>()
-        val candidates=(current?:cloudRows()).associateBy{it.getJSONObject("meta").getString("entityKey")}
+        val candidates=(current?:projection.cloudRows()).associateBy{it.getJSONObject("meta").getString("entityKey")}
         val currentObjects=if(sparseRoot==null)projection.cloudObjects()else emptyMap()
         val reused=mutableSetOf<String>();val readCache=mutableMapOf<String,ByteArray>()
         fun raw(oid:String):ByteArray {reused.add(oid);return currentObjects[oid]?:readCache.getOrPut(oid){projection.accountObject(oid)}}
         for(r in records) {
             val m=r.getJSONObject("meta");val entity=m.getString("entityKey");val kind=m.getString("kind");val remote=candidates[entity]
+            if(kind=="note"&&remote?.has(SyncV2NoteWiring.ISOLATED_KEY)==true) {
+                // R3: an isolated row is carried back verbatim under every choice, never re-sealed.
+                val row=remote.getJSONObject("row")
+                if(sparseRoot==null)for(field in listOf("metaOid","stateOid")) {
+                    val oid=row.getString(field);val bytes=raw(oid)
+                    if(oid.substringAfter(":sha256:")!=SyncV2Codec.hex(SyncV2Codec.sha(bytes)))SyncV2Codec.fail("hash_mismatch")
+                    objects[oid]=bytes
+                }
+                rows.add(row);r.put("row",row).remove("wire");continue
+            }
             if(kind !in setOf("article","book","asset") && remote!=null && same(remote.getJSONObject("meta"),m) && same(remote.getJSONObject("state"),r.getJSONObject("state"))) {
                 val row=remote.getJSONObject("row")
                 if(sparseRoot==null)for(field in listOf("metaOid","stateOid")) {
@@ -279,7 +316,33 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                 }
                 return sealed.oid
             }
-            val metaOid=part("meta",m);val stateOid=part("state",r.getJSONObject("state"))
+            val metaOid=part("meta",m)
+            val noteWire=if(kind=="note"&&authors!=null&&remote?.optJSONObject("payload")==null&&r.optJSONObject("value")!=null) try {
+                SyncV2NoteWiring.seal(identity,signer,contentKey(version),version,db,scope,entity,r.getJSONObject("state"),
+                    client.noteSegmentsWrite(),authors,
+                    remote?.optString(SyncV2NoteWiring.REVISION_KEY)?.takeIf{it.matches(Regex("[0-9a-f]{32}"))},
+                    remote?.optJSONArray(SyncV2NoteWiring.SEGMENTS_KEY)?.let{a->(0 until a.length()).map{a.getString(it)}}?:emptyList(),
+                    remote?.optJSONObject(SyncV2NoteWiring.REFS_MAPS_KEY),SyncV2NoteWiring.outboxOwned(db,scope,entity))
+            } catch (e:IllegalStateException) { when(e.message) {
+                // The closed write gate fails the publish attempt itself (25.8: feature_disabled keeps
+                // the queue). Over-budget or structurally oversized notes only withhold this entity
+                // (F2/R4): an unchanged remote row is carried verbatim, a new note is skipped.
+                "storage_pressure","object_too_large"-> {
+                    if(remote!=null) {
+                        val row=remote.getJSONObject("row")
+                        for(field in listOf("metaOid","stateOid")) {
+                            val oid=row.getString(field);val bytes=raw(oid)
+                            if(oid.substringAfter(":sha256:")!=SyncV2Codec.hex(SyncV2Codec.sha(bytes)))SyncV2Codec.fail("hash_mismatch")
+                            objects[oid]=bytes
+                        }
+                        rows.add(row);r.put("row",row).remove("wire")
+                    } else excluded?.add(entity)
+                    null
+                }
+                else->throw e
+            } } else null
+            val stateOid=noteWire?.parentOid?:part("state",r.getJSONObject("state"))
+            noteWire?.let{w->objects.putAll(w.objects);refs.add(w.parentRefs);refs.addAll(w.childRefs)}
             val cached=projection.accountWireRowFor(r)
             val bodySources=listOfNotNull(remote,known,cached?.let{copy(r).put("row",it)}).filter{it.has("row") && bodyIdentity(it)==bodyIdentity(r)}
             val source=bodySources.maxWithOrNull(compareBy<JSONObject>{!it.getJSONObject("row").isNull("recipeOid")}.thenBy{SyncV2Codec.d64(it.getJSONObject("row").getString("rowSequence"))})
@@ -335,7 +398,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         }
         fileGuard(plan.files){}
         val context=context(c);val local=rows(plan.local);val remote=rows(plan.cloud);val target=when(choice){"cloud"->remote;"local"->local;else->rows(plan.candidate?:SyncV2Codec.fail("choice_stale"))}
-        business.validate(target)
+        business.validate(target.filter{it.has("value")})
         val bundles=mutableListOf<SyncV2RecoveryStorage.Bundle>()
         if(choice=="cloud" && keepDiscardedLocalChanges7Days()) {
             val base=projection.state().body.optJSONObject("editBase")?:JSONObject().put("accountOid",c.accountOid).put("generation",c.generation)
@@ -368,23 +431,26 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         }
         val requestId=id();val action=JSONObject().put("id",requestId).put("kind",choice).put("capture",c.json()).put("serverTime",now()).put("fileCapture",plan.files).put("legacySelected",JSONArray(plan.legacySelected))
         if(plan.root!=null)action.put("sparseBaseRoot",plan.root).put("sparseIds",JSONArray(plan.scopeIds.sorted()))
-        val index=if(choice=="cloud")null else wireIndex(target,keyVersion,remote,plan.root,plan.scopeIds)
+        val excluded=mutableSetOf<String>()
+        val index=if(choice=="cloud")null else wireIndex(target,keyVersion,remote,plan.root,plan.scopeIds,context.authors,excluded)
         if(index!=null && plan.root!=null)action.put("retiredTrees",JSONArray(index.retiredTrees.sorted()))
         val objects=index?.objects?.filterKeys{it !in index.reused}?.toMutableMap()?:linkedMapOf()
         if(index==null)action.put("request",JSONObject().put("requestId",requestId).put("choiceId",requestId).put("expectedAccountRevision",c.accountRevision).put("expectedRollbackGeneration",c.generation).put("selectedLocalChangeRevision",c.localChangeRevision))
         else publication(action,c,context,index,objects,if(choice=="local")"resolve-local"else"resolve-merge",null)
         val captured=if(choice=="cloud")null else if(plan.actual===plan.local)local else rows(plan.actual)
-        stage(c,action,if(choice=="cloud")emptyList()else target,objects,bundles,true,captured);plans.remove(preview);fault("action-staged")
+        val publishTarget=if(choice=="cloud")emptyList() else target.filter{it.getJSONObject("meta").getString("entityKey") !in excluded}
+        stage(c,action,publishTarget,objects,bundles,true,captured);plans.remove(preview);fault("action-staged")
     }
     fun rollback(capture:ChoiceCapture,targetOid:String):JSONObject {
         gate();syncFiles();complete();projection.accountCheck(projection.state(),capture,false);SyncV2Codec.next(capture.stateVersion);SyncV2Codec.commitOid(targetOid)
         val fileToken=fileCapture();val context=context(capture)
         val requestId=id();val prepared=client.prepareHistory(JSONObject().put("requestId",requestId).put("targetCommitOid",targetOid).put("expectedAccountRevision",capture.accountRevision).put("expectedRollbackGeneration",capture.generation))
         if(prepared.getLong("expiresAtMillis")<=now())SyncV2Codec.fail("snapshot_expired")
-        val envelope=header(targetOid);val verified=SyncV2ControlClosure(identity,context.authors,contentKey).verify(envelope,{client.raw(it,context.window.getString("windowId"))}){p->client.reference(p,context.window.getString("windowId")).let{copy(it).apply{remove("version")}}}
+        val envelope=header(targetOid);val verified=SyncV2ControlClosure(identity,context.authors,contentKey,noteSegmentsRead).verify(envelope,{client.raw(it,context.window.getString("windowId"))}){p->client.reference(p,context.window.getString("windowId")).let{copy(it).apply{remove("version")}}}
         if(verified.commitOid!=targetOid || envelope.getJSONObject("body").getString("treeRoot")!=prepared.getString("treeRoot"))SyncV2Codec.fail("hash_mismatch")
-        val target=verified.rows.map{copy(it).put("value",SyncV2Business.join(it.getJSONObject("meta").getString("kind"),it.getJSONObject("meta"),it.getJSONObject("state")))}
-        business.validate(target)
+        val target=verified.rows.map{if(it.has(SyncV2NoteWiring.ISOLATED_KEY))copy(it)
+            else copy(it).put("value",SyncV2Business.join(it.getJSONObject("meta").getString("kind"),it.getJSONObject("meta"),it.getJSONObject("state")))}
+        business.validate(target.filter{it.has("value")})
         val tree=SyncV2Index.Tree(prepared.getString("treeRoot"),emptyMap())
         val index=SyncV2Projection.WireIndex(tree,verified.objects,emptyList());val objects=verified.objects.toMutableMap()
         val action=JSONObject().put("id",id()).put("kind","rollback").put("capture",capture.json()).put("serverTime",now()).put("restoreLease",prepared).put("fileCapture",fileToken)

@@ -58,10 +58,13 @@ class SyncV2P3PolicyTest {
         val note=(0 until resource.length()).map{resource.getJSONObject(it)}.first{it.getString("kind")=="note"}.getJSONObject("value")
         note.put("markdown","x".repeat(140000)).put("plainText","x".repeat(140000))
         val original=SyncV2Codec.canonical(note)
-        error("object_too_large"){SyncV2Business.split("note",note.getString("noteId"),"aa".repeat(32),note,0)}
+        // C7: the business layer keeps the full original; the wire layer segments it. With the
+        // product switch closed, publication attempts fail with feature_disabled (see C7 tests).
+        SyncV2Business.split("note",note.getString("noteId"),"aa".repeat(32),note,0)
         assertEquals(original,SyncV2Codec.canonical(note))
         note.put("markdown","x".repeat(262145))
-        error("object_too_large"){SyncV2Business.split("note",note.getString("noteId"),"aa".repeat(32),note,0)}
+        val measure=SyncV2NoteSegments.measure("aa".repeat(32),SyncV2Business.split("note",note.getString("noteId"),"aa".repeat(32),note,0).state.getJSONObject("payload"),org.json.JSONArray())
+        assertTrue(measure.shortPlainBytes>SyncV2NoteSegments.LIMIT)
         assertEquals(262145,note.getString("markdown").length)
     }
 }

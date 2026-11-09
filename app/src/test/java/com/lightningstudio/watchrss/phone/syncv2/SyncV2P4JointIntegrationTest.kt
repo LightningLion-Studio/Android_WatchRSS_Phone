@@ -133,7 +133,7 @@ class SyncV2P4JointIntegrationTest {
                 assertEquals(authorSigner.deviceId,mapped.getString("authorDeviceId"));assertEquals(authorSigner.keyId,mapped.getString("keyId"));assertEquals(referenceOids[index],mapped.getString("refsOid"))
                 assertArrayEquals(SyncV2LocalProtocol.bytes(originalTables[index]),cloud.raw(mapped.getString("refsOid"),refsWindow))
             }
-            val closure=SyncV2ControlClosure(identity,authors){contentKey}.verify(signed,{cloud.raw(it,refsWindow)},{cloud.reference(it,refsWindow).apply{remove("version")}})
+            val closure=SyncV2ControlClosure(identity,authors,{contentKey},false).verify(signed,{cloud.raw(it,refsWindow)},{cloud.reference(it,refsWindow).apply{remove("version")}})
             assertEquals(1,closure.rows.size);assertEquals(note.getString("noteId"),closure.rows.single().getJSONObject("meta").getJSONObject("payload").getString("noteId"))
             result.put("c32NonemptyNoteControlClosure",true)
             result.put("c32OriginalAuthorAndKeyIdRetained",true).put("c32OriginalSignedTablesReadableWithoutGrant",true).put("c32TablesRegisteredBeforePublication",true)

@@ -63,11 +63,14 @@ internal object SyncV2Business {
                     for(f in sources.keys()) if(sources.get(f) !is String) SyncV2Codec.fail("invalid_schema") else SyncV2Codec.text(sources.getString(f),1024)
                 }
                 value === JSONObject.NULL && key in nullable -> Unit
+                // Spec 25.1: the three note texts are exempt from the Text(245760) threshold; their
+                // real limits are the segmentation constants enforced by the wire codec (25.2-25.4).
+                kind=="note" && key in setOf("markdown","plainText","baseMarkdown") -> if(value !is String) SyncV2Codec.fail("invalid_schema")
                 else -> {
                     if(value !is String) SyncV2Codec.fail("invalid_schema")
                     val limit=when {
                         key in setOf("url","sourceUrl","guid","imageUrl","siteUrl","rssSourceUrl") -> 8192
-                        key in setOf("title","name","description","excerpt","siteName","markdown","plainText","baseMarkdown") -> 245760
+                        key == "title" || key == "name" || key == "description" || key == "excerpt" || key == "siteName" -> 245760
                         else -> 1024
                     }
                     SyncV2Codec.text(value,limit)
@@ -107,26 +110,28 @@ internal object SyncV2Business {
         else -> SyncV2Codec.fail("unsupported_feature")
     }
     fun split(kind: String, logicalId: String, entityKey: String, value: JSONObject, addedAt: Long?): PairObjects {
-        // C7: P3A never segments or replaces an oversized original note.
-        if(kind=="note" && listOf("markdown","plainText","baseMarkdown").any{val text=value.opt(it);text is String && SyncV2Codec.utf8(text).size>245760})SyncV2Codec.fail("object_too_large")
         validate(kind,value)
         // A missing channel is readable unknown data, never permission to rewrite an empty set.
         if(kind=="note" && !value.has("noteConflicts"))SyncV2Codec.fail("unsupported_feature")
         val meta=JSONObject(); val state=JSONObject()
         for(key in value.keys()) {
             if(key=="readingProgress") state.put("readingProgressMicros",kotlin.math.floor(value.getDouble(key)*1000000.0+0.5).toLong())
+            // Spec 25.2: note content hashes live with the state so the segmented metadata keeps them.
+            else if(kind=="note" && key in setOf("contentHash","baseContentHash")) state.put(key,value.get(key))
             else (if(key in metaFields) meta else state).put(key,value.get(key))
         }
         val m=JSONObject().put("version",2).put("entityKey",entityKey).put("kind",kind).put("logicalId",logicalId)
             .put("addedAtSource",if(addedAt==null)"unknown" else "original").put("requiredFeatures",JSONArray()).put("payload",meta)
         val s=JSONObject().put("version",2).put("entityKey",entityKey).put("requiredFeatures",JSONArray()).put("payload",state).put("noteSegments",JSONArray())
-        for(obj in listOf(m,s)) if(SyncV2Codec.utf8(SyncV2Codec.canonical(obj)).size>262144) SyncV2Codec.fail("object_too_large")
+        for(obj in listOf(m,s)) if(SyncV2Codec.utf8(SyncV2Codec.canonical(obj)).size>262144 && !(kind=="note" && obj===s &&
+            // The oversized ordinary body is not a rejection: it is exactly the segmentation input (25.1).
+            listOf("markdown","plainText","baseMarkdown").any{val text=value.opt(it);text is String && SyncV2Codec.utf8(text).size>65536})) SyncV2Codec.fail("object_too_large")
         s.getJSONObject("payload").remove("noteConflicts")
         return PairObjects(m,if(kind=="note" && value.has("noteConflicts")) SyncV2NoteConflicts.attach(s,logicalId,entityKey,value.getJSONObject("noteConflicts")) else s)
     }
     fun join(kind: String, meta: JSONObject, state: JSONObject): JSONObject {
         val m=meta.getJSONObject("payload"); val s=state.getJSONObject("payload")
-        if(m.keys().asSequence().any(s::has)) SyncV2Codec.fail("invalid_schema")
+        if(m.keys().asSequence().any{s.has(it) && !(it in setOf("contentHash","baseContentHash") && m.get(it)==s.get(it))}) SyncV2Codec.fail("invalid_schema")
         val out=JSONObject(m.toString())
         for(key in s.keys()) {
             if(key=="readingProgressMicros") {

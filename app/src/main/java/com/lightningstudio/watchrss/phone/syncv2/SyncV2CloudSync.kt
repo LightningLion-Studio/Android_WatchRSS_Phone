@@ -8,6 +8,9 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
     private val projection:SyncV2Projection,approvedLegacyDevice:(String)->Boolean,private val contentKey:(Long)->ByteArray,
     private val now:()->Long=System::currentTimeMillis) {
     private val authors=client.authors(identity,approvedLegacyDevice)
+    /** Capabilities are the only source for the C7 server announcement (25.8 negotiation). */
+    private fun capabilities():JSONObject=client.capabilities().also{projection.noteSegmentsServerAnnounced=client.noteSegmentsWrite()}
+    internal fun clientCapabilities():JSONObject=capabilities()
     init {
         val saved=projection.state().body.optJSONArray("signingBindings")?:JSONArray()
         for(i in 0 until saved.length())authors.restorePinned(saved.getJSONObject(i))
@@ -24,7 +27,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         return response
     }
     fun readCurrent():String {
-        client.capabilities() // Every error, including busy, ends this round. No catch-and-continue.
+        capabilities() // Every error, including busy, ends this round. No catch-and-continue.
         // Use the authenticated checkpoint's own fixed window. A later negotiate may legitimately race it.
         val window=client.checkpoint(now()).getJSONObject("body");fresh(window);val id=window.getString("windowId")
         keys(id)
@@ -62,7 +65,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             val next=if(page.isNull("nextOid"))null else page.getString("nextOid")
             if(next!=at || page.get("complete")!=(at==pin))SyncV2Codec.fail("ref_continuity_unavailable")
         }
-        val closure=SyncV2ControlClosure(identity,authors,contentKey)
+        val closure=SyncV2ControlClosure(identity,authors,contentKey,client.noteSegmentsRead())
         val verified=closure.verify(headers.first(),{oid->client.raw(oid,id)}) { parent ->
             client.reference(parent,id).let { JSONObject(it.toString()).apply { remove("version") } }
         }
@@ -80,7 +83,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
     }
     fun resumePublish():JSONObject? {
         val request=projection.pendingPublish()?:return null
-        client.capabilities() // A restart has not authenticated this HTTP client's capabilities yet.
+        capabilities() // A restart has not authenticated this HTTP client's capabilities yet.
         val response=publishAttempt(request);projection.confirmPublish(request,response);return response
     }
     private fun publishAttempt(request:JSONObject):JSONObject = try{client.publish(request)}catch(e:SyncV2CloudError) {
@@ -88,7 +91,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         throw e
     }
     fun poll():JSONObject {
-        client.capabilities()
+        capabilities()
         val before=projection.state().body
         val cursor=before.optString("eventCursor","0")
         val events=try{client.events(cursor)}catch(e:SyncV2CloudError){
@@ -106,7 +109,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
     /** P2 normal publication only. Rollback/choice/history write paths remain closed. */
     fun publishIndex(signer:SyncV2Signing,contentKey:ByteArray,keyVersion:Long):JSONObject {
         resumePublish()?.let{return it}
-        val caps=client.capabilities()
+        val caps=capabilities()
         if(caps.getJSONObject("flags").get("indexWrite")!=true)throw SyncV2CloudError("feature_disabled",true,1000)
         if(signer.deviceId!=client.deviceId)SyncV2Codec.fail("authentication_required")
         var window=client.negotiate();fresh(window)
@@ -148,10 +151,27 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val tree=SyncV2Index.build(identity.scope,mergedRows.values.toList());mergedObjects.putAll(tree.objects)
         val reachable=mutableSetOf<String>();reachable.addAll(tree.objects.keys)
         for(row in mergedRows.values){reachable.add(row.getString("metaOid"));reachable.add(row.getString("stateOid"))}
-        for(ref in newRefs)if(ref.getJSONObject("body").getString("stateOid") in reachable)reachable.add(SyncV2Codec.oid("state-refs",ref))
-        for((oid,bytes)in mergedObjects)if(oid.startsWith("state-refs:")) {
-            val ref=SyncV2Wire.parse(bytes,262144,true)
-            if(ref.getJSONObject("body").getString("stateOid") in reachable)reachable.add(oid)
+        // A segmented parent's sealed children are reachable only through its refs table: the
+        // closure walk carries child refs and child bytes (25.4/25.7), iterating to a fixpoint.
+        var carry=true
+        while(carry) {
+            carry=false
+            for(ref in newRefs)if(ref.getJSONObject("body").getString("stateOid") in reachable) {
+                if(reachable.add(SyncV2Codec.oid("state-refs",ref))) {
+                    val children=ref.getJSONObject("body").getJSONArray("segmentOids")
+                    for(i in 0 until children.length())reachable.add(children.getString(i))
+                    carry=true
+                }
+            }
+            for((oid,bytes)in mergedObjects)if(oid.startsWith("state-refs:")&&oid !in reachable) {
+                val ref=SyncV2Wire.parse(bytes,262144,true)
+                if(ref.getJSONObject("body").getString("stateOid") in reachable) {
+                    reachable.add(oid)
+                    val children=ref.getJSONObject("body").getJSONArray("segmentOids")
+                    for(i in 0 until children.length())reachable.add(children.getString(i))
+                    carry=true
+                }
+            }
         }
         val index=SyncV2Projection.WireIndex(tree,mergedObjects.filterKeys{it in reachable},newRefs.filter{it.getJSONObject("body").getString("stateOid") in reachable})
         val refs=window.getJSONArray("refs");var own:String?=null;var revision="0"
@@ -170,7 +190,8 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val objects=index.objects.toMutableMap();objects[oid]=SyncV2Codec.utf8(SyncV2Codec.canonical(signed))
         // Each reservation is bounded. Control upload never requests a content slot.
         val currentOids=projection.cloudObjects().keys
-        for(batch in objects.entries.filter{it.key !in currentOids && it.key.substringBefore(':') in setOf("meta","state","tree","commit")}.sortedBy{it.key}.chunked(64)) {
+        val toUpload=objects.entries.filter{it.key !in currentOids && it.key.substringBefore(':') in setOf("meta","state","tree","commit")}.sortedBy{it.key}
+        for(batch in toUpload.chunked(64)) {
             val reserve=client.reserve(randomId(),batch.map{it.key to it.value.size});val reservation=reserve.getString("reservationId")
             // C11 also applies to control objects: only a current authenticated status
             // query may establish an offset, never an idempotent reserve response.

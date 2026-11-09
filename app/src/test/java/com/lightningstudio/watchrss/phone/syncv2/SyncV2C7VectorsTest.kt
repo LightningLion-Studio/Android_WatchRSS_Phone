@@ -286,6 +286,43 @@ class SyncV2C7VectorsTest {
             readCase(outcome.closure!!, supportedFull)
         }
     }
+    /** Acceptance 6: dumps byte-level codec output for five long notes so the mini reference
+     *  implementation (WatchRSS_WeChat @ 5e168f9) can be diffed byte-for-byte out-of-band. */
+    @Test fun crossEndDumpForTheFiveLongNotes() {
+        val dir = System.getenv("WRSS_C7_CROSSEND_DIR") ?: return
+        val wanted = setOf("empty-fields-with-long-markdown","three-long-fields","unicode-scalar-boundary","crlf-and-mixed-newlines","json-escape-budget")
+        val cases = fixture.getJSONArray("cases")
+        for (index in 0 until cases.length()) {
+            val case = cases.getJSONObject(index); val id = case.getString("id")
+            if (id !in wanted) continue
+            val input = JSONObject(case.getJSONObject("input").toString())
+            if (case.has("expandConflictText") && input.has("metadata")) {
+                val records = input.getJSONObject("metadata").getJSONObject("noteConflicts").getJSONArray("records")
+                for (i in 0 until records.length()) { val r = records.getJSONObject(i)
+                    for (key in listOf("baseMarkdown","localMarkdown","remoteMarkdown")) r.put(key, materialize(r.get(key))) }
+            }
+            val seed = if (input.has("sealSeed")) input.getString("sealSeed") else "initial"
+            val revision = if (input.has("noteRevision")) input.getString("noteRevision") else boundRevision
+            val sealedSegments = mutableMapOf<Int, JSONObject>()
+            val seal = { value: JSONObject, segIndex: Int ->
+                val entry = sealEntry(value, "$seed/segment/$segIndex")
+                sealedSegments[segIndex] = JSONObject().put("index", segIndex).put("plainHex", SyncV2Codec.hex(entry.plain))
+                    .put("sealedHex", SyncV2Codec.hex(entry.sealed)).put("oid", entry.oid)
+                entry.oid
+            }
+            val encoded = SyncV2NoteSegments.encode(entityKey, metadataOf(input, sourcesOf(input)), sourcesOf(input),
+                if (input.has("features")) input.getJSONArray("features") else JSONArray(), revision, scope, Long.MAX_VALUE, seal)
+            require(encoded.form == "segmented") { id }
+            val root = sealEntry(encoded.state, "$seed/root")
+            val dump = JSONObject().put("id", id).put("form", encoded.form).put("noteRevision", revision)
+                .put("plaintextSha256", encoded.plaintextSha256).put("segmentCount", encoded.segmentCount)
+                .put("rootPlainHex", SyncV2Codec.hex(SyncV2Codec.utf8(SyncV2Codec.canonical(encoded.state))))
+                .put("rootSealedHex", SyncV2Codec.hex(root.sealed)).put("rootOid", root.oid)
+                .put("segments", JSONArray((0 until encoded.segmentCount).map{sealedSegments.getValue(it)}))
+            java.io.File(dir).mkdirs(); java.io.File(dir, "phone-$id.json").writeText(dump.toString()+"\n")
+        }
+    }
+
     @Test fun independentEncapsulationNeverGuessesOids() {
         val expected = fixture.getJSONObject("independentEncapsulation").getJSONObject("expected")
         val source = closureSourceInput()

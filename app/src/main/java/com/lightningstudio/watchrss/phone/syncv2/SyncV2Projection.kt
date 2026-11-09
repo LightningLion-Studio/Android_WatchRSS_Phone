@@ -13,8 +13,11 @@ import org.json.JSONObject
 internal class SyncV2Projection(
     private val db: SupportSQLiteDatabase, private val identity: SyncV2Identity,
     localKey: ByteArray, private val enabled: Boolean = BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION,
-    private val fault: (String) -> Unit = {}
+    private val fault: (String) -> Unit = {},
+    private val noteSegments: Boolean = BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS
 ) {
+    /** Server announcement captured by the cloud layer; the write gate is the AND of both (25.8). */
+    internal var noteSegmentsServerAnnounced = false
     private val key=localKey.copyOf()
     val scope=identity.scopeJson
     init { require(key.size==32) }
@@ -284,6 +287,7 @@ internal class SyncV2Projection(
         if(SyncV2Codec.d64(cursor)<SyncV2Codec.d64(st.body.optString("eventCursor","0")))SyncV2Codec.fail("replay_detected")
         st.body.put("eventCursor",cursor)
     }
+    internal var lastWireIndex:WireIndex?=null
     data class WireIndex(val tree:SyncV2Index.Tree,val objects:Map<String,ByteArray>,val refs:List<JSONObject>,val reused:Set<String> = emptySet(),val retiredTrees:Set<String> = emptySet())
     fun prepareWireIndex(signer:SyncV2Signing,contentKey:ByteArray,keyVersion:Long):WireIndex {
         val before=state();val rows=mutableListOf<JSONObject>();val objects=linkedMapOf<String,ByteArray>();val refs=mutableListOf<JSONObject>()
@@ -313,6 +317,33 @@ internal class SyncV2Projection(
                     .put("meta",SyncV2Codec.b64(currentObjects[row.getString("metaOid")]?:SyncV2Codec.fail("closure_incomplete")))
                     .put("state",SyncV2Codec.b64(currentObjects[row.getString("stateOid")]?:SyncV2Codec.fail("closure_incomplete")))
                     .put("refs",currentRefs[row.getString("stateOid")]?:SyncV2Codec.fail("closure_incomplete")).put("postRefs",false)
+            }else if(c[1]=="note" && remote?.has(SyncV2NoteWiring.ISOLATED_KEY)==true) {
+                // R3: an isolated remote note is carried back verbatim under every choice. The
+                // authenticated row bytes are reused byte-identically; no re-seal and no tombstone.
+                val row=remote.getJSONObject("row")
+                JSONObject().put("sourceHash",hash).put("bodyBinding",bodyBinding).put("keyVersion",keyVersion).put("row",row)
+                    .put("meta",SyncV2Codec.b64(currentObjects[row.getString("metaOid")]?:SyncV2Codec.fail("closure_incomplete")))
+                    .put("state",SyncV2Codec.b64(currentObjects[row.getString("stateOid")]?:SyncV2Codec.fail("closure_incomplete")))
+                    .put("refs",currentRefs[row.getString("stateOid")]?:SyncV2Codec.fail("closure_incomplete")).put("postRefs",false)
+            }else if(c[1]=="note" && remote?.optJSONObject("payload")==null && SyncV2NoteSegments.measure(entity,state.getJSONObject("payload"),state.getJSONArray("requiredFeatures")).shortPlainBytes>SyncV2NoteSegments.LIMIT) {
+                // 25.8 write gate: an oversized note is segmented only when the product switch is on;
+                // a closed gate ends this publish attempt with feature_disabled and keeps the body.
+                if(!noteSegments||!noteSegmentsServerAnnounced)SyncV2Codec.fail("feature_disabled")
+                val sealedMeta=SyncV2Envelope.seal(identity,contentKey,keyVersion,"meta",SyncV2Codec.utf8(SyncV2Codec.canonical(meta)))
+                val wired=SyncV2NoteWiring.seal(identity,signer,contentKey,keyVersion,db,scope,entity,state,noteSegments,null,
+                    remote?.optString(SyncV2NoteWiring.REVISION_KEY)?.takeIf{it.matches(Regex("[0-9a-f]{32}"))},
+                    remote?.optJSONArray(SyncV2NoteWiring.SEGMENTS_KEY)?.let{a->(0 until a.length()).map{a.getString(it)}}?:emptyList(),
+                    remote?.optJSONObject(SyncV2NoteWiring.REFS_MAPS_KEY),outboxOwned(entity))?:SyncV2Codec.fail("invalid_schema")
+                val installed=db.query("SELECT body FROM syncv2_p5_bindings WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())accountOpen("binding",it.getBlob(0)).optJSONObject("row")else null}
+                val priorRow=listOfNotNull(prior?.optJSONObject("row"),installed,remote?.optJSONObject("row")).maxByOrNull{SyncV2Codec.d64(it.getString("rowSequence"))}
+                val row=JSONObject().put("entityKey",entity).put("metaOid",sealedMeta.oid).put("stateOid",wired.parentOid).put("addedAtMillis",priorRow?.optLong("addedAtMillis")?:0)
+                    .put("rowSequence",SyncV2Codec.next(priorRow?.optString("rowSequence")?:"0"))
+                    .put("deleted",state.getJSONObject("payload").optBoolean("deleted",false))
+                    .put("bodyRevision",JSONObject.NULL).put("promiseId",JSONObject.NULL).put("recipeOid",JSONObject.NULL)
+                    .put("opaqueContentId",JSONObject.NULL).put("contentBytes",JSONObject.NULL).put("requiredFeatures",JSONArray())
+                JSONObject().put("sourceHash",hash).put("bodyBinding",bodyBinding).put("keyVersion",keyVersion).put("row",row)
+                    .put("meta",SyncV2Codec.b64(sealedMeta.bytes)).put("state",SyncV2Codec.b64(wired.parentBytes))
+                    .put("refs",wired.parentRefs).put("childRefs",JSONArray(wired.childRefs)).put("extraObjects",JSONObject().also{extra->for((oid,bytes)in wired.objects)extra.put(oid,SyncV2Codec.b64(bytes))})
             }else {
                 val sealedMeta=SyncV2Envelope.seal(identity,contentKey,keyVersion,"meta",SyncV2Codec.utf8(SyncV2Codec.canonical(meta)))
                 val sealedState=SyncV2Envelope.seal(identity,contentKey,keyVersion,"state",SyncV2Codec.utf8(SyncV2Codec.canonical(state)))
@@ -335,14 +366,26 @@ internal class SyncV2Projection(
             }
             val row=value.getJSONObject("row");rows.add(row)
             objects[row.getString("metaOid")]=SyncV2Codec.decode64(value.getString("meta"));objects[row.getString("stateOid")]=SyncV2Codec.decode64(value.getString("state"))
+            value.optJSONObject("extraObjects")?.let{extra->for(oid in extra.keys())objects[oid]=SyncV2Codec.decode64(extra.getString(oid))}
+            // Registration order matters against the real backend: a segmented parent's refs table
+            // may only register after every child segment's own refs table exists (children gate).
+            value.optJSONArray("childRefs")?.let{list->for(i in 0 until list.length()) {
+                val child=list.getJSONObject(i);refs.add(child)
+                objects[SyncV2Codec.oid("state-refs",child)]=SyncV2Codec.utf8(SyncV2Codec.canonical(child))
+            }}
             val signed=value.getJSONObject("refs");if(value.opt("postRefs")!=false)refs.add(signed)
             objects[SyncV2Codec.oid("state-refs",signed)]=SyncV2Codec.utf8(SyncV2Codec.canonical(signed))
             if(value.opt("postRefs")!=false && SyncV2Codec.canonical(value)!=SyncV2Codec.canonical(prior))prepared.add(entity to value)
         }
         val tree=SyncV2Index.build(identity.scope,rows);objects.putAll(tree.objects)
         if(prepared.isNotEmpty())writer(before.version) { _ -> for((entity,value)in prepared)db.execSQL("INSERT OR REPLACE INTO syncv2_wire_candidates VALUES(?,?,?)",arrayOf(scope,entity,seal("wire-candidate",value))) }
-        return WireIndex(tree,objects,refs,objects.keys.intersect(currentObjects.keys))
+        val built=WireIndex(tree,objects,refs,objects.keys.intersect(currentObjects.keys))
+        lastWireIndex=built
+        return built
     }
+    private fun outboxOwned(entity: String) = SyncV2NoteWiring.outboxOwned(db, scope, entity)
+    /** F1/W3 exposure: an isolated note is unopenable on this device until its row re-verifies. */
+    fun noteIsolation(): JSONObject = readState().body.optJSONObject("noteIsolation") ?: JSONObject()
     /** P5 shares the existing SQLite writer and secure local key; no second state journal. */
     internal val accountDatabase:SupportSQLiteDatabase get()=db
     private val catalog by lazy{SyncV2AccountCatalog(db,scope,::accountSeal,::accountOpen){readState().body}}
@@ -533,6 +576,7 @@ internal class SyncV2Projection(
     internal fun accountStoreOwnWireRows(rows:List<JSONObject>,objects:Map<String,ByteArray>,changedOids:Set<String> = objects.keys) {
         val references=objects.filterKeys{it.startsWith("state-refs:")}.values.map{SyncV2Wire.parse(it,262144,true)}.associateBy{it.getJSONObject("body").getString("stateOid")}
         for(record in rows) {
+            if(record.has(SyncV2NoteWiring.ISOLATED_KEY))continue // verbatim remote rows are never owned wire rows
             val m=record.getJSONObject("meta");val entity=m.getString("entityKey");val row=record.getJSONObject("row");val kind=m.getString("kind")
             val old=db.query("SELECT body FROM syncv2_wire_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())open("wire-candidate",it.getBlob(0))else null}
             if(row.getString("metaOid") !in changedOids && row.getString("stateOid") !in changedOids && old==null)continue
@@ -560,13 +604,19 @@ internal class SyncV2Projection(
         val indexed=SyncV2Index.read(identity.scope,root,{oid->needed.add(oid);available[oid]?:SyncV2Codec.fail("closure_incomplete")})
         if(SyncV2Codec.canonical(JSONArray(indexed))!=SyncV2Codec.canonical(JSONArray(rows.map{it.getJSONObject("row")}.sortedBy{it.getString("entityKey")})))SyncV2Codec.fail("hash_mismatch")
         for(r in rows)for(field in listOf("metaOid","stateOid"))needed.add(r.getJSONObject("row").getString(field))
-        val states=rows.map{it.getJSONObject("row").getString("stateOid")}.toSet()
+        // Segmented rows keep their authenticated children and refs; verbatim reuse depends on them.
+        // An isolated row fetched before the read gate opened may legitimately lack children locally;
+        // keep only objects that are actually present so the round never dies on them (F1).
+        val states=rows.flatMap{r->listOf(r.getJSONObject("row").getString("stateOid"))+
+            (r.optJSONArray(SyncV2NoteWiring.SEGMENTS_KEY)?.let{a->(0 until a.length()).map{a.getString(it)}}?:emptyList())
+                .filter{it in available||it in previousObjects}}.toSet()
         val referenced=mutableSetOf<String>()
         for((oid,bytes)in available)if(oid.startsWith("state-refs:")) {
             val state=SyncV2Wire.parse(bytes,262144,true).getJSONObject("body").getString("stateOid")
             if(state in states){needed.add(oid);referenced.add(state)}
         }
         if(!referenced.containsAll(states))SyncV2Codec.fail("closure_incomplete")
+        needed+=states // segmented children (and their parent state) survive the object GC
         for(oid in needed) {
             val bytes=available[oid]?:SyncV2Codec.fail("closure_incomplete")
             if(previousObjects[oid]?.contentEquals(bytes)!=true)db.execSQL("INSERT OR REPLACE INTO syncv2_cloud_objects VALUES(?,?,?)",arrayOf(scope,oid,bytes))
@@ -580,9 +630,28 @@ internal class SyncV2Projection(
             val entity=r.getJSONObject("meta").getString("entityKey");val value=normalized(r)
             if(SyncV2Codec.canonical(previous[entity])!=SyncV2Codec.canonical(value))db.execSQL("INSERT OR REPLACE INTO syncv2_cloud_rows VALUES(?,?,?)",arrayOf(scope,entity,seal("cloud-row",value)))
         }
-        for(record in rows){val normalized=normalized(record);accountCatalog.setCloudRow(normalized,null)}
+        // Isolated wire parents are opaque to the business catalog; only ordinary bodies enter it.
+        for(record in rows){val normalized=normalized(record)
+            if(normalized.has(SyncV2NoteWiring.ISOLATED_KEY))accountCatalog.remove("cloud",normalized.getJSONObject("meta").getString("entityKey"))
+            else accountCatalog.setCloudRow(normalized,null)}
         for(entity in previous.keys-keep)accountCatalog.remove("cloud",entity)
         for((oid,bytes)in available)if(oid in needed && oid.startsWith("state-refs:")){val signed=SyncV2Wire.parse(bytes,262144,true);accountCatalog.putRefs(signed.getJSONObject("body").getString("stateOid"),oid)}
+        SyncV2NoteWiring.observeBindings(db,scope,rows){r->
+            val m=r.getJSONObject("meta");val c=candidate(m.getString("kind"),m.getString("logicalId"))
+            c!=null&&(SyncV2Codec.canonical(c.first)!=SyncV2Codec.canonical(m)||SyncV2Codec.canonical(c.second)!=SyncV2Codec.canonical(r.getJSONObject("state")))
+        }
+        // F1/W3 isolation registry. Entities absent from this commit keep their previous mark
+        // (Q1: a rollback that drops rows is not a delete and must never tombstone a binding).
+        val isolated=JSONObject();for(r in rows)if(r.has(SyncV2NoteWiring.ISOLATED_KEY))
+            isolated.put(r.getJSONObject("meta").getString("entityKey"),JSONObject().put("reason",r.getString(SyncV2NoteWiring.ISOLATED_KEY))
+                .put("stateOid",r.getJSONObject("row").getString("stateOid")).put("noteRevision",r.opt(SyncV2NoteWiring.REVISION_KEY)?:JSONObject.NULL))
+        if(rows.isNotEmpty()||isolated.length()>0) {
+            val previous=st.body.optJSONObject("noteIsolation")?:JSONObject()
+            val merged=JSONObject(previous.toString());val seen=rows.map{it.getJSONObject("meta").getString("entityKey")}.toSet()
+            for(entity in seen)if(!isolated.has(entity))merged.remove(entity)
+            for(entity in isolated.keys())merged.put(entity,isolated.getJSONObject(entity))
+            st.body.put("noteIsolation",merged)
+        }
         st.body.put("metadataTreeRoot",root)
         st.body.put("metadataAccount",account).put("metadataStatus","metadata-ready").put("metadataSchema",SyncV2HeadPins.schema)
             .put("metadataRows",rows.size).put("metadataServerRevision",serverRevision)
@@ -935,7 +1004,9 @@ internal class SyncV2Projection(
                 if(rows==limit){exhausted=false;break}
                 val value=db.query("SELECT ${domain.key} AS projection_key,${columns(domain)} FROM `${domain.table}` WHERE (${domain.key})=?",arrayOf(id)).use{c->if(c.moveToFirst())readRecord(domain,c)else null}
                 val size=value?.let{SyncV2Codec.utf8(it.toString()).size}?:0
-                if(size>byteBudget)SyncV2Codec.fail("object_too_large")
+                // C7 25.1: long note rows are legitimate local data; the row-size gate for them is
+                // the 2 MiB sealed-note budget, not the ordinary page byte budget.
+                if(size.toLong()>(if(domain.table=="notes")SyncV2NoteSegments.maxNoteBytes+65536 else byteBudget.toLong()))SyncV2Codec.fail("object_too_large")
                 if(rows>0 && bytes+size>byteBudget){exhausted=false;break}
                 if(value!=null)project(domain,id,value,st.revision,st.body.optJSONObject("appliedAccount")?:st.body.optJSONObject("account"),true,st.body)
                 else markRemoved(domain,id,st.revision)
@@ -1041,18 +1112,32 @@ internal class SyncV2Projection(
         return out
     }
     private fun project(d: SyncV2Schema.Domain,id: String,value: JSONObject,revision: String,eventAccount: JSONObject?=null,enqueue:Boolean=false,sourceState:JSONObject?=null) {
-        val entity=identity.entity(d.kind,id)
+        var id2=id; var value2=value
+        if(d.kind=="note") readState().body.optJSONObject("noteIsolation")?.let{iso->
+            val source=identity.entity(d.kind,id)
+            if(iso.has(source)) {
+                // R2: an isolated note keeps carrying its remote row verbatim; any local edit is
+                // re-homed under a fresh logical id so both copies survive (never the isolated row).
+                val forkId=db.query("SELECT fork_logical_id FROM syncv2_note_forks WHERE scope=? AND entity_key=?",arrayOf(scope,source)).use{if(it.moveToFirst())it.getString(0) else null}
+                    ?:("syncv2-fork-"+SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.utf8(source+SyncV2Codec.canonical(value))))).take(40)
+                db.execSQL("INSERT OR REPLACE INTO syncv2_note_forks VALUES(?,?,?)",arrayOf(scope,source,forkId))
+                val forked=JSONObject(value.toString()).put("noteId",forkId)
+                    .put("noteConflicts",SyncV2NoteConflicts.phone(JSONArray(),forkId))
+                id2=forkId;value2=forked
+            }
+        }
+        val entity=identity.entity(d.kind,id2)
         val library=db.query("SELECT library_id FROM syncv2_control WHERE id=1").use{it.moveToFirst();it.getString(0)}
-        val prior=db.query("SELECT entity_key FROM syncv2_identity_map WHERE library_id=? AND repo_id=? AND kind=? AND logical_id=?",arrayOf(library,identity.repoId,d.kind,id)).use{if(it.moveToFirst())it.getString(0) else null}
+        val prior=db.query("SELECT entity_key FROM syncv2_identity_map WHERE library_id=? AND repo_id=? AND kind=? AND logical_id=?",arrayOf(library,identity.repoId,d.kind,id2)).use{if(it.moveToFirst())it.getString(0) else null}
         if(prior!=null && prior!=entity) SyncV2Codec.fail("identity_conflict")
         fault("before-map")
-        db.execSQL("INSERT OR IGNORE INTO syncv2_identity_map VALUES(?,?,?,?,?,2)",arrayOf(library,identity.repoId,d.kind,id,entity))
+        db.execSQL("INSERT OR IGNORE INTO syncv2_identity_map VALUES(?,?,?,?,?,2)",arrayOf(library,identity.repoId,d.kind,id2,entity))
         fault("after-map")
         // Historical importedAt is not proof of first personal-library addition. Preserve it encrypted.
-        val objects=SyncV2Business.split(d.kind,id,entity,value,null)
+        val objects=SyncV2Business.split(d.kind,id2,entity,value2,null)
         val installed=db.query("SELECT body FROM syncv2_p5_bindings WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())accountOpen("binding",it.getBlob(0))else null}
         installed?.optJSONObject("meta")?.optString("addedAtSource")?.takeIf{it in setOf("original","unknown")}?.let{objects.meta.put("addedAtSource",it)}
-        val provenance=provenance(d,id)
+        val provenance=provenance(d,if(d.kind=="note"&&id2!=id)"" else id)
         val sourceHash=SyncV2Codec.hash(JSONObject().put("meta",objects.meta).put("state",objects.state).put("provenance",provenance))
         val previous=db.query("SELECT source_hash FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())it.getString(0) else null}
         if(previous==sourceHash) return
@@ -1063,13 +1148,45 @@ internal class SyncV2Projection(
             if(previous==null)db.execSQL("INSERT OR IGNORE INTO syncv2_edit_base VALUES(?,?,?,?,?)",arrayOf(scope,entity,seal("edit-base",base),seal("meta",JSONObject().put("p5Absent",true)),seal("candidate-state",JSONObject())))
         }
         val metaBytes=seal("meta",objects.meta);val stateBytes=seal("candidate-state",objects.state)
-        db.execSQL("INSERT OR REPLACE INTO syncv2_candidates VALUES(?,?,?,?,?,?,?,?)",arrayOf(scope,entity,d.kind,id,revision,metaBytes,stateBytes,sourceHash))
+        db.execSQL("INSERT OR REPLACE INTO syncv2_candidates VALUES(?,?,?,?,?,?,?,?)",arrayOf(scope,entity,d.kind,id2,revision,metaBytes,stateBytes,sourceHash))
         db.execSQL("INSERT OR REPLACE INTO syncv2_provenance VALUES(?,?,?)",arrayOf(scope,entity,seal("provenance",provenance)))
         SyncV2CandidateTree(db,scope).update(JSONObject().put("entityKey",entity).put("metaCandidateSha256",SyncV2Codec.hex(SyncV2Codec.sha(metaBytes))).put("stateCandidateSha256",SyncV2Codec.hex(SyncV2Codec.sha(stateBytes))).put("sourceHash",sourceHash).put("rowSequence",revision).put("addedAtMillis",0))
         fault("before-log")
         db.execSQL("INSERT OR IGNORE INTO syncv2_change_log VALUES(?,?,?)",arrayOf(scope,revision,entity))
         fault("after-log")
-        if(enqueue)db.execSQL("INSERT INTO syncv2_outbox(scope,revision,table_name,logical_id,operation,base_state) VALUES(?,?,?,?,?,?)",arrayOf(scope,revision,d.table,id,"OBSERVE",seal("state",sourceState?:JSONObject())))
+        if(enqueue)db.execSQL("INSERT INTO syncv2_outbox(scope,revision,table_name,logical_id,operation,base_state) VALUES(?,?,?,?,?,?)",arrayOf(scope,revision,d.table,id2,"OBSERVE",seal("state",sourceState?:JSONObject())))
+    }
+    /** Status surface for the later UI: the forked logical id of an isolated note, when present. */
+    fun noteFork(logicalId:String):String? {
+        val entity=identity.entity("note",logicalId);ensureActive()
+        return db.query("SELECT fork_logical_id FROM syncv2_note_forks WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())it.getString(0) else null}
+    }
+    /** R2 explicit fork entry: re-homes the current Room content of an isolated note under a new id. */
+    fun forkIsolatedNote(entity:String,logicalId:String,nowMillis:Long):JSONObject {
+        ensureActive()
+        if(readState().body.optJSONObject("noteIsolation")?.has(entity)!=true)SyncV2Codec.fail("invalid_schema")
+        val row=db.query("SELECT * FROM notes WHERE noteId=?",arrayOf(logicalId)).use{c->if(!c.moveToFirst())SyncV2Codec.fail("invalid_schema") else JSONObject().also{o->
+            for(i in 0 until c.columnCount) when(c.getType(i)) {
+                Cursor.FIELD_TYPE_NULL->o.put(c.getColumnName(i),JSONObject.NULL)
+                Cursor.FIELD_TYPE_INTEGER->o.put(c.getColumnName(i),c.getLong(i))
+                Cursor.FIELD_TYPE_FLOAT->o.put(c.getColumnName(i),c.getDouble(i))
+                else->o.put(c.getColumnName(i),c.getString(i))
+            }
+        }}
+        val st=state();val revision=st.revision
+        val forkId=noteFork(logicalId)?:("syncv2-fork-"+SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.utf8(entity+nowMillis)))).take(40)
+        accountWriter(st.version){ _ ->
+            db.execSQL("INSERT OR REPLACE INTO syncv2_note_forks VALUES(?,?,?)",arrayOf(scope,entity,forkId))
+            val value=JSONObject(row.toString()).put("noteId",forkId)
+            val d=SyncV2Schema.Domain("notes","note","noteId")
+            val objects=SyncV2Business.split(d.kind,forkId,identity.entity("note",forkId),value,null)
+            accountCatalog.put("candidate",JSONObject().put("meta",objects.meta).put("state",objects.state))
+            val metaBytes=seal("meta",objects.meta);val stateBytes=seal("candidate-state",objects.state)
+            db.execSQL("INSERT OR REPLACE INTO syncv2_candidates VALUES(?,?,?,?,?,?,?,?)",arrayOf(scope,identity.entity("note",forkId),d.kind,forkId,revision,metaBytes,stateBytes,SyncV2Codec.hash(JSONObject().put("meta",objects.meta).put("state",objects.state))))
+            db.execSQL("INSERT OR IGNORE INTO syncv2_identity_map VALUES(?,?,?,?,?,2)",arrayOf(readState().body.optString("libraryId"),identity.repoId,d.kind,forkId,identity.entity("note",forkId)))
+            db.execSQL("INSERT INTO syncv2_outbox(scope,revision,table_name,logical_id,operation,base_state) VALUES(?,?,?,?,?,?)",arrayOf(scope,revision,"notes",forkId,"OBSERVE",seal("state",JSONObject())))
+        }
+        return JSONObject().put("logicalId",forkId).put("entityKey",identity.entity("note",forkId))
     }
     /** Bounded encrypted source sidecars retain note conflicts and legacy register ancestry verbatim.
      * These are local candidates, not new wire payload extensions.

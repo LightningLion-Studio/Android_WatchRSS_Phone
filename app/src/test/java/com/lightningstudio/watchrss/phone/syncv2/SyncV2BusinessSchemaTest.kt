@@ -25,8 +25,12 @@ class SyncV2BusinessSchemaTest {
             assertEquals("$kind frozen schema",keys,SyncV2Business.allowed(kind))
             val id=SyncV2Business.logicalId(kind,value)
             val pair=SyncV2Business.split(kind,id,"ab".repeat(32),value,null)
-            assertEquals("$kind meta",keys.intersect(metaFields),pair.meta.getJSONObject("payload").keys().asSequence().toSet())
-            val stateKeys=(keys-metaFields).toMutableSet()
+            // C7 W2/F6 (spec 25.2): the two note content hashes belong to the state so the segmented
+            // parent metadata keeps them; every other kind keeps the frozen P2 partition.
+            val noteHashes=setOf("contentHash","baseContentHash")
+            val metaExpect=if(kind=="note")keys.intersect(metaFields)-noteHashes else keys.intersect(metaFields)
+            assertEquals("$kind meta",metaExpect,pair.meta.getJSONObject("payload").keys().asSequence().toSet())
+            val stateKeys=(if(kind=="note")keys-metaFields+noteHashes.intersect(keys) else (keys-metaFields)).toMutableSet()
             if(stateKeys.remove("readingProgress"))stateKeys.add("readingProgressMicros")
             assertEquals("$kind state",stateKeys,pair.state.getJSONObject("payload").keys().asSequence().toSet())
             // Business readingProgress is fractional; only wire Micros may enter JCS.

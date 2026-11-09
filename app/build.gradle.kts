@@ -63,6 +63,8 @@ android {
         buildConfigField("boolean", "SYNC_OBJECTS_V2_RELAY", "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_WITNESS", "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_HISTORY_RESTORE", "false")
+        // C7 long-note segmentation stays closed until the joint matrix signs off; tests inject the flag.
+        buildConfigField("boolean", "SYNC_OBJECTS_V2_NOTE_SEGMENTS", providers.gradleProperty("syncObjectsV2NoteSegments").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         // Implementation approval does not enable production writes or delegated conversion.
         buildConfigField("boolean", "CLOUD_FORMAT_R48_WRITE_V1", providers.gradleProperty("cloudFormatR48WriteV1").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("String", "R48_WORKER_TRUST_JSON", productionSetting("WATCHRSS_R48_WORKER_TRUST_JSON").asBuildConfigString())

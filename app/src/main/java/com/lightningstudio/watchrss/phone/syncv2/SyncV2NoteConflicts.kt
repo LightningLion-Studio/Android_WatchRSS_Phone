@@ -53,6 +53,19 @@ internal object SyncV2NoteConflicts {
             .sortedWith(compareByDescending<JSONObject> { it.getLong("createdAt") }.thenBy { it.getString("conflictId") })
             .firstOrNull()?.getString("conflictId") ?: SyncV2Codec.fail("notes_stale")
     }
+    /**
+     * The conflict-channel structural budget (spec 14) applies to the container; C7 spec 25.1
+     * exempts the three note texts from the Text(245760) threshold, so a long ordinary note may
+     * legitimately exceed 262144 in total. The exempted texts are measured by the segmentation
+     * constants instead, never here.
+     */
+    private fun measureGuard(state: JSONObject) {
+        val copy = JSONObject(SyncV2Codec.canonical(state))
+        val payload = copy.getJSONObject("payload")
+        listOf("markdown", "plainText", "baseMarkdown").forEach { payload.remove(it) }
+        if (SyncV2Codec.utf8(SyncV2Codec.canonical(copy)).size > 262144) SyncV2Codec.fail("object_too_large")
+    }
+
     /** Shared attach/read structural guard, including malformed segmented parents even when unsupported. */
     private fun slot(state: JSONObject): JSONObject = SyncV2Wire.schema {
         SyncV2Codec.exact(state, setOf("version", "entityKey", "requiredFeatures", "payload", "noteSegments"))
@@ -77,7 +90,7 @@ internal object SyncV2NoteConflicts {
         if(p.has("segmentOf"))SyncV2Codec.fail("invalid_schema")
         p.put("noteConflicts", validate(conflicts, noteId))
         copy.put("requiredFeatures", JSONArray((SyncV2Wire.features(copy.getJSONArray("requiredFeatures")) + feature).distinct().sorted()))
-        if (SyncV2Codec.utf8(SyncV2Codec.canonical(copy)).size > 262144) SyncV2Codec.fail("object_too_large")
+        measureGuard(copy)
         return copy
     }
     fun read(state: JSONObject, noteId: String, entity: String, supported: Set<String> = setOf(feature)): JSONObject? {
@@ -86,7 +99,7 @@ internal object SyncV2NoteConflicts {
         if (state.getString("entityKey") != entity) SyncV2Codec.fail("invalid_schema")
         val features = SyncV2Wire.features(state.getJSONArray("requiredFeatures"))
         if ((feature in features) != p.has("noteConflicts")) SyncV2Codec.fail("invalid_schema")
-        if (SyncV2Codec.utf8(SyncV2Codec.canonical(state)).size > 262144) SyncV2Codec.fail("object_too_large")
+        measureGuard(state)
         if (features.any { it !in supported }) SyncV2Codec.fail("unsupported_feature")
         return if (feature in features) validate(p.getJSONObject("noteConflicts"), noteId) else null
     }

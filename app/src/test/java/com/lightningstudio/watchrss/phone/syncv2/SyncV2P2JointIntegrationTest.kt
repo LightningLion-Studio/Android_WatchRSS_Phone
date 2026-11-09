@@ -139,7 +139,7 @@ class SyncV2P2JointIntegrationTest {
             for((oid,bytes)in newObjects)uploadObject(client,oid,bytes)
             for(ref in refs.values)client.stateRefs(ref)
             val request=controlRequest(client,projection,signer,authors,window,tree.root,account.getString("rollbackGeneration"),verify={ signed ->
-                SyncV2ControlClosure(identity,authors){version->requireThat(version==1L,"unsupported_feature");key}.verify(signed,::fetch){parent ->
+                SyncV2ControlClosure(identity,authors,{version->requireThat(version==1L,"unsupported_feature");key},false).verify(signed,::fetch){parent ->
                     refs[parent]?.let{ref->JSONObject().put("scope",identity.scope).put("parentOid",parent).put("refsOid",SyncV2Codec.oid("state-refs",ref)).put("authorDeviceId",signer.deviceId).put("keyId",signer.keyId).put("totalBytes",SyncV2Codec.utf8(SyncV2Codec.canonical(ref)).size)}
                         ?:client.reference(parent,window.getString("windowId")).let{JSONObject(it.toString()).apply{remove("version")}}
                 }
@@ -333,7 +333,7 @@ class SyncV2P2JointIntegrationTest {
                     val peerOid=ref.getString("commitOid");val envelope=SyncV2Wire.parse(client.raw(peerOid),262144,true)
                     val header=authors.header(envelope)
                     requireThat(header.getString("authorDeviceId")==author && SyncV2Codec.oid("commit",header)==peerOid,"peer_commit_mismatch")
-                    val verified=SyncV2ControlClosure(identity,authors){version->requireThat(version==1L,"unsupported_feature");wrap}.verify(envelope,{oid->client.raw(oid,auditWindow.getString("windowId"))}) { parent ->
+                    val verified=SyncV2ControlClosure(identity,authors,{version->requireThat(version==1L,"unsupported_feature");wrap},false).verify(envelope,{oid->client.raw(oid,auditWindow.getString("windowId"))}) { parent ->
                         client.reference(parent,auditWindow.getString("windowId")).let {JSONObject(it.toString()).apply{remove("version")}}
                     }
                     // Audit device refs without promoting them to account/current. Only authentication evidence survives.

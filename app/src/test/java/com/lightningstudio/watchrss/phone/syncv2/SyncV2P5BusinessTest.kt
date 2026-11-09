@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
 import org.json.JSONObject
+import org.json.JSONArray
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -49,7 +50,11 @@ class SyncV2P5BusinessTest {
     }
     @Test fun malformedFinalWireRollsBackEveryBusinessDomain():Unit=SyncV2P5Fixture().use{w->
         w.start();val st=w.projection.state();val before=w.text();val local=w.projection.accountLocalRows();val malformed=JSONObject(local.single().toString())
-        malformed.getJSONObject("value").put("markdown","x".repeat(262144))
+        // C7 25.4 (spec line 871): long note texts segment; only the non-segmentable conflict container
+        // keeps the frozen 262144 whole-object ceiling, so that is the malformed input here.
+        malformed.getJSONObject("value").put("noteConflicts",JSONObject().put("version",1).put("records",JSONArray(listOf(JSONObject()
+            .put("conflictId","c").put("noteId",malformed.getJSONObject("meta").getString("logicalId")).put("baseMarkdown","x".repeat(245760))
+            .put("localMarkdown","y".repeat(245760)).put("remoteMarkdown","z".repeat(245760)).put("remoteDeviceId","d").put("createdAt",1).put("resolvedAt",0)))))
         assertNotNull(runCatching{w.projection.accountWriter(st.version){SyncV2PhoneApply(w.sql).apply(local,listOf(malformed))}}.exceptionOrNull())
         assertEquals(before,w.text());assertEquals(st.version,w.projection.state().version)
     }

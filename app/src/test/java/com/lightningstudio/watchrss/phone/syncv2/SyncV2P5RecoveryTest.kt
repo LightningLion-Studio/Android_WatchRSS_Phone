@@ -101,7 +101,7 @@ class SyncV2P5RecoveryTest {
     }
     @Test fun purgeFaultRollsBackCopiesPinsAndPrivateObjectsAsOneSQLiteCommit():Unit=SyncV2P5Fixture().use{w->
         w.pending();addArticle(w);val a=w.actions();a.choose(a.preview(),"cloud");val header=a.recoveryCopies().getJSONObject(0);val expires=header.getLong("expiresAtMillis")
-        val faulty=SyncV2Projection(w.sql,w.identity,SyncV2Fixtures.localKey,true){if(it=="before-commit")throw java.io.IOException("purge crash")}
+        val faulty=SyncV2Projection(w.sql,w.identity,SyncV2Fixtures.localKey,true,{if(it=="before-commit")throw java.io.IOException("purge crash")})
         val storage=SyncV2RecoveryStorage(faulty,w.identity,w.root)
         assertNotNull(runCatching{storage.purge(expires)}.exceptionOrNull());assertEquals(1,a.recoveryCopies().length())
         assertEquals(2,w.sql.query("SELECT COUNT(*) FROM syncv2_recovery_objects").use{it.moveToFirst();it.getInt(0)})

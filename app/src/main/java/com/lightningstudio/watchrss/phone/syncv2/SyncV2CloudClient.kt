@@ -123,9 +123,19 @@ internal class SyncV2CloudClient(
         if(SyncV2Codec.scope(value.getJSONObject("scope"))!=owner[4])SyncV2Codec.fail("scope_mismatch")
         return value
     }
+    /** C7 gates mirror the reference client: local product switch AND server announcement. */
+    @Volatile var noteSegmentsLocal=com.lightningstudio.watchrss.phone.BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS
+    @Volatile internal var serverNoteSegments=false
+    @Volatile internal var serverNoteSegmentsFlag=false
+    fun noteSegmentsRead()=noteSegmentsLocal&&serverNoteSegments
+    fun noteSegmentsWrite()=noteSegmentsRead()&&serverNoteSegmentsFlag
     fun capabilities() = get("capabilities").also {
         if(SyncV2Wire.uint(it,"minVersion",4294967295)>2 || SyncV2Wire.uint(it,"maxVersion",4294967295)<2)throw SyncV2CloudError("upgrade_required")
-        SyncV2Wire.features(it.getJSONArray("features"))
+        val announced=SyncV2Wire.features(it.getJSONArray("features"))
+        serverNoteSegments=SyncV2NoteSegments.feature in announced
+        // The C7 backend announces the write gate through the features list only (same contract
+        // as the mini reference client); flags.noteSegments stays honoured when present.
+        serverNoteSegmentsFlag=SyncV2NoteSegments.feature in SyncV2Wire.features(it.getJSONArray("features"))||it.optJSONObject("flags")?.opt("noteSegments")==true
         if(SyncV2Wire.uint(it,"maxPartBytes")!=65536L || SyncV2Wire.uint(it,"historyDays")!=7L)SyncV2Codec.fail("invalid_schema")
         serviceTrust.capabilities(it); contentWrite=it.optJSONObject("flags")?.opt("contentWrite")==true; capabilitiesChecked=true
     }
@@ -178,7 +188,7 @@ internal class SyncV2CloudClient(
     }
     fun verifyReceipt(value:JSONObject,oid:String,total:Long,offset:Long,now:Long) = serviceTrust.receipt(value,scope,oid,total,offset,now)
     fun complete(oid:String,reservation:String,request:String,total:Int)=post("objects/$oid/complete",JSONObject().put("reservationId",reservation).put("requestId",request).put("totalBytes",total))
-    fun stateRefs(value:JSONObject)=post("state-refs",value)
+    fun stateRefs(value:JSONObject):JSONObject = post("state-refs",value)
     fun recipeRefs(value:JSONObject)=post("recipe-refs",value)
     fun custody(value:JSONObject)=post("availability/custody",value)
     fun custody(pinId:String):JSONObject {SyncV2LocalProtocol.id(pinId);return get("availability/custody/$pinId")}

@@ -45,12 +45,15 @@ internal object SyncV2NoteSegments {
         val quoted = SyncV2Codec.quotePublic(text)
         return quoted.substring(1, quoted.length - 1)
     }
-    /** Bytes of the J string encoding minus its two outer quotes, per spec 1 escaping. */
-    fun escapedBytes(source: NoteTextSource): Long {
+    /** Bytes of the J string encoding minus its two outer quotes, per spec 1 escaping.
+     * A caller that only needs a threshold check passes maxBytes: the walk stops as soon as the
+     * running total exceeds it, keeping over-budget classification proportional to the budget. */
+    fun escapedBytes(source: NoteTextSource, maxBytes: Long = Long.MAX_VALUE): Long {
         var total = 0L
         for (b in source.blocks()) {
             SyncV2Codec.utf8(b) // a malformed block fails as invalid_encoding before quoting
             total = add(total, SyncV2Codec.utf8(quoteInner(b)).size.toLong())
+            if (total > maxBytes) return total
         }
         return total
     }
@@ -129,7 +132,7 @@ internal object SyncV2NoteSegments {
         val empty = JSONObject()
         for ((key, value) in fields) {
             empty.put(key, "")
-            extra = add(extra, escapedBytes(value))
+            extra = add(extra, escapedBytes(value,if (maxStreamBytes==Long.MAX_VALUE) Long.MAX_VALUE else maxStreamBytes-extra.coerceAtLeast(0)))
             if (extra > maxStreamBytes) SyncV2Codec.fail("storage_pressure")
         }
         val ordinaryFeatures = SyncV2Wire.features(requiredFeatures).filter { it != feature }

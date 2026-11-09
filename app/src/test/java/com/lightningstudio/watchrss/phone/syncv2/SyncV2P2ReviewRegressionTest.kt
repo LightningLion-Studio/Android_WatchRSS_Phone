@@ -110,7 +110,7 @@ class SyncV2P2ReviewRegressionTest {
         val tree=SyncV2Index.build(identity.scope,listOf(row));val refs=SyncV2Index.refs(identity,a,s.oid)
         val refsOid=SyncV2Codec.oid("state-refs",refs);val raw=SyncV2Codec.utf8(SyncV2Codec.canonical(refs))
         val objects=tree.objects.toMutableMap().apply{put(m.oid,m.bytes);put(s.oid,s.bytes);put(refsOid,raw)}
-        return SyncV2ControlClosure(identity,authors()){key}.verify(commit(tree=tree.root),objects::getValue) {
+        return SyncV2ControlClosure(identity,authors(),{key},false).verify(commit(tree=tree.root),objects::getValue) {
             JSONObject().put("scope",identity.scope).put("parentOid",s.oid).put("refsOid",refsOid).put("authorDeviceId",a.deviceId).put("keyId",a.keyId).put("totalBytes",raw.size)
         }
     }

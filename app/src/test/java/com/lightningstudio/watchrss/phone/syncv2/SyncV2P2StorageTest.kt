@@ -59,7 +59,7 @@ class SyncV2P2StorageTest {
         fun mapping(parent:String):JSONObject {
             val ref=metas.getValue(parent);return JSONObject().put("scope",identity.scope).put("parentOid",parent).put("refsOid",SyncV2Codec.oid("state-refs",ref)).put("authorDeviceId",signer().deviceId).put("keyId",signer().keyId).put("totalBytes",SyncV2Codec.utf8(SyncV2Codec.canonical(ref)).size)
         }
-        val verified=SyncV2ControlClosure(identity,authors){contentKey}.verify(signed,index.objects::getValue,::mapping)
+        val verified=SyncV2ControlClosure(identity,authors,{contentKey},false).verify(signed,index.objects::getValue,::mapping)
         p.installCloudIndex(JSONObject().put("oid",oid).put("revision","9007199254740993").put("generation","0"),listOf(signed),verified,authors::header)
         assertEquals(1,p.cloudRows().size);assertEquals(3,p.cloudRows()[0].getJSONObject("state").getJSONObject("payload").getJSONObject("noteConflicts").getJSONArray("records").length())
         assertTrue(p.state().body.isNull("appliedAccount"));assertEquals(90000,scalar(db,"SELECT updatedAt FROM notes WHERE noteId='note'"))
@@ -75,7 +75,7 @@ class SyncV2P2StorageTest {
         val index=p.prepareWireIndex(signer(),contentKey,1);val body=JSONObject(SyncV2Fixtures.envelope().getJSONObject("body").toString()).put("treeRoot",index.tree.root)
         val signed=signer().commit(body);val authors=SyncV2Authors(identity){true};authors.accept(identity.signingBinding(signer(),100,"0"),"0")
         val before=p.state().version
-        assertEquals("object_missing",code{SyncV2ControlClosure(identity,authors){contentKey}.verify(signed,index.objects::getValue){SyncV2Codec.fail("object_missing")}})
+        assertEquals("object_missing",code{SyncV2ControlClosure(identity,authors,{contentKey},false).verify(signed,index.objects::getValue){SyncV2Codec.fail("object_missing")}})
         assertEquals(before,p.state().version);assertTrue(p.cloudRows().isEmpty())
     }
     @Test fun secondWirePreparationReusesCompleteSealedBytesAndAllReferences() {

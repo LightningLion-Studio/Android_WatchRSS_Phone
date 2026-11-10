@@ -21,13 +21,14 @@ internal class SyncV2CloudError(val code: String, val retryable: Boolean = false
     }
 }
 
-/** P2 is deliberately isolated: no production hostname, redirects, logging interceptor or device API. */
+/** Fixed authenticated v1 origin; no redirects, logging interceptors or device API. */
 internal class SyncV2CloudClient(
     private val base: HttpUrl, private val session: () -> Session,
     private val serviceTrust: SyncV2ServiceTrust,
     private val enabled: Boolean = BuildConfig.SYNC_OBJECTS_V2_CLOUD_INDEX,
     private val http: OkHttpClient = OkHttpClient.Builder().retryOnConnectionFailure(false)
-        .followRedirects(false).followSslRedirects(false).callTimeout(30, TimeUnit.SECONDS).build()
+        .followRedirects(false).followSslRedirects(false).callTimeout(30, TimeUnit.SECONDS).build(),
+    authenticatedBackend: HttpUrl? = null
 ) {
     data class Session(val userId: String, val legacyDeviceId: String, val legacyEpoch: String,
         val legacyGeneration: String, val scopeJson: String, val deviceId: String, val bearer: String, val apiKey: String, val deviceAuthorization: String? = null) {
@@ -49,8 +50,7 @@ internal class SyncV2CloudClient(
     private var contentWrite=false
     private val owner: List<String>
     init {
-        // Claude must supply a separately reviewed isolated address before broadening this allowlist.
-        if (base.host !in setOf("127.0.0.1", "localhost", "::1") || base.username.isNotEmpty() || base.password.isNotEmpty() || base.query != null || base.fragment != null || base.encodedPath != "/functions/v1/sync/v2/") SyncV2Codec.fail("isolated_backend_required")
+        SyncV2Origin.validate(base, authenticatedBackend)
         val s = session(); SyncV2Codec.scope(JSONObject(s.scopeJson)); SyncV2Codec.unhex(s.deviceId,16)
         if (s.legacyDeviceId.isEmpty() || s.legacyEpoch.isEmpty() || s.legacyGeneration.isEmpty()) SyncV2Codec.fail("authentication_required")
         owner = s.fence()

@@ -71,6 +71,57 @@ class SyncV2P5RecoveryTest {
         assertNotNull(a.pendingChoice());assertEquals(1,w.sql.query("SELECT COUNT(*) FROM phone_articles").use{it.moveToFirst();it.getInt(0)})
         a.choose(a.preview(),"cloud");assertEquals(1,a.recoveryCopies().length())
     }
+    @Test fun rollbackCaptureSurvivesRecoveryRefreshAsTrustedTimeAdvances():Unit=SyncV2P5Fixture().use{w->
+        w.start()
+        val actions=w.actions()
+        val capture=actions.captureRollback()
+        w.f.now+=100
+        assertEquals(0,actions.recoveryCopies().length())
+        actions.rollback(capture,w.target)
+        assertEquals("1",w.current.getString("rollbackGeneration"))
+    }
+    @Test fun choicePreviewSurvivesRecoveryRefreshWithAnUnexpiredCopy():Unit=SyncV2P5Fixture().use{w->
+        w.pending()
+        val actions=w.actions()
+        actions.choose(actions.preview(),"cloud")
+        w.edit("another offline edit")
+        w.rollbackRemote();actions.refresh();w.drain()
+        val preview=actions.preview()
+        w.f.now+=100
+        assertEquals(1,actions.recoveryCopies().length())
+        assertTrue(actions.keepDiscardedLocalChanges7Days())
+        actions.choose(preview,"cloud")
+        assertEquals(2,actions.recoveryCopies().length())
+    }
+    @Test fun expiredRecoveryInvalidatesCaptureAndDoesNotReappearAfterClockRollback():Unit=SyncV2P5Fixture().use{w->
+        w.pending();addArticle(w)
+        val actions=w.actions()
+        actions.choose(actions.preview(),"cloud")
+        w.drain()
+        val header=actions.recoveryCopies().getJSONObject(0)
+        val copyId=header.getString("copyId")
+        val expires=header.getLong("expiresAtMillis")
+        val capture=actions.captureRollback()
+        w.f.now=expires
+        assertEquals(0,actions.recoveryCopies().length())
+        assertEquals(SyncV2Codec.next(capture.stateVersion),w.projection.state().version)
+        code("choice_stale"){actions.rollback(capture,w.target)}
+
+        w.f.now=expires-1
+        w.reopen()
+        assertEquals(0,w.actions().recoveryCopies().length())
+        code("snapshot_expired"){w.actions().recoveryDelta(copyId)}
+    }
+    @Test fun unrelatedProjectionWriteStillInvalidatesRollbackCapture():Unit=SyncV2P5Fixture().use{w->
+        w.start()
+        val actions=w.actions()
+        val capture=actions.captureRollback()
+        w.actions().use{other->other.setKeepDiscardedLocalChanges7Days(false)}
+        assertFalse(actions.keepDiscardedLocalChanges7Days())
+        assertEquals(capture.localChangeRevision,w.projection.state().revision)
+        assertEquals(SyncV2Codec.next(capture.stateVersion),w.projection.state().version)
+        code("choice_stale"){actions.rollback(capture,w.target)}
+    }
     @Test fun multiMegabyteArticleAvoidsCursorWindowDuringApplyAndRecovery():Unit=SyncV2P5Fixture().use{w->
         w.pending();val text="正文".repeat(600000)
         runBlocking{w.room.phoneArticleDao().upsert(article("large-article").copy(contentText=text))};w.drain()

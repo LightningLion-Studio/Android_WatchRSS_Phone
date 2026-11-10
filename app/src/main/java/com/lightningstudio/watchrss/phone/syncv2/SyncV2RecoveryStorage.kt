@@ -246,7 +246,8 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
         val st=projection.state();val old=st.body.optLong("recoveryTrustedNow",0)
         if(trustedNow<old || trustedNow<0)return
         val copies=descriptors();val pins=pins();val expired=SyncV2Recovery.expiredPlan(JSONArray(copies),JSONArray(pins),trustedNow,old)
-        if(expired.isEmpty() && trustedNow==old)return
+        // Advance the durable cleanup watermark and projection version only when deleting copies.
+        if(expired.isEmpty())return
         projection.accountWriter(st.version){current->
             for(id in expired) {
                 db.execSQL("DELETE FROM syncv2_recovery_copies WHERE scope=? AND copy_id=?",arrayOf(scope,id))

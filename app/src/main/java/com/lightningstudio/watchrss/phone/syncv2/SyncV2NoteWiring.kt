@@ -71,7 +71,7 @@ internal object SyncV2NoteWiring {
 
     /** True when the entity still has unpublished local edits (outbox journal, ruling M1). */
     fun outboxOwned(db: SupportSQLiteDatabase, scope: String, entity: String): Boolean =
-        db.controlQuery("SELECT 1 FROM syncv2_candidates c JOIN syncv2_outbox o ON o.scope=c.scope AND o.logical_id=c.logical_id WHERE c.scope=? AND c.entity_key=? LIMIT 1",
+        db.controlQuery("SELECT 1 FROM syncv2_candidates c JOIN syncv2_outbox o ON o.scope=c.scope AND o.logical_id=c.logical_id AND o.table_name IN ('notes','note_conflicts') WHERE c.scope=? AND c.entity_key=? AND c.kind='note' LIMIT 1",
             arrayOf(scope, entity)).use { it.moveToFirst() }
 
     private fun storedBytes(db: SupportSQLiteDatabase, scope: String, oid: String): ByteArray? =

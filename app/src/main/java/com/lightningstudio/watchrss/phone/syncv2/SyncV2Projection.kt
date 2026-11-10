@@ -15,7 +15,8 @@ internal class SyncV2Projection(
     localKey: ByteArray, private val enabled: Boolean = BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION,
     private val fault: (String) -> Unit = {},
     private val noteSegments: Boolean = BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,
-    private val lifetime:SyncV2Lifetime?=null
+    private val lifetime:SyncV2Lifetime?=null,
+    private val sequenceAllocator:((String)->String)?=null
 ):AutoCloseable {
     @Volatile private var closed=false
     override fun close() {
@@ -309,7 +310,10 @@ internal class SyncV2Projection(
     fun reserveDeviceSequence(floor:String="0"):String = writer { st ->
         val old=st.body.optString("reservedDeviceSequence","0")
         val maximum=maxOf(SyncV2Codec.d64(old),SyncV2Codec.d64(floor)).toString()
-        SyncV2Codec.next(maximum).also {st.body.put("reservedDeviceSequence",it)}
+        (sequenceAllocator?.invoke(maximum)?:SyncV2Codec.next(maximum)).also {
+            if(SyncV2Codec.d64(it)<=SyncV2Codec.d64(maximum))SyncV2Codec.fail("signing_state_unavailable")
+            st.body.put("reservedDeviceSequence",it)
+        }
     }
     fun persistPublish(request:JSONObject,expectedVersion:String) = writer(expectedVersion) { st ->
         if(!st.body.isNull("pendingChoice"))SyncV2Codec.fail("choice_pending")
@@ -317,7 +321,7 @@ internal class SyncV2Projection(
         val id=request.getJSONObject("account").getJSONObject("body").getString("requestId")
         val pending=st.body.optJSONObject("pendingPublish")
         if(pending!=null && SyncV2Codec.canonical(pending)!=bytes)SyncV2Codec.fail("idempotency_conflict")
-        SyncV2Codec.unhex(id,16);st.body.put("pendingPublish",JSONObject(bytes))
+        SyncV2Codec.unhex(id,16);st.body.put("pendingPublish",JSONObject(bytes)).put("pendingPublishLocalRevision",st.revision)
     }
     fun pendingPublish():JSONObject? = state().body.optJSONObject("pendingPublish")?.let {JSONObject(it.toString())}
     /** Definitive CAS rejection invalidates only this signed attempt, never its edits or sealed objects. */
@@ -332,7 +336,8 @@ internal class SyncV2Projection(
         if(SyncV2Codec.canonical(pending)!=SyncV2Codec.canonical(request))SyncV2Codec.fail("choice_stale")
         val oid=request.getJSONObject("account").getJSONObject("body").getString("newCommitOid")
         if(response.getJSONObject("account").getString("commitOid")!=oid || response.getJSONObject("device").getString("commitOid")!=oid)SyncV2Codec.fail("invalid_schema")
-        st.body.put("publishedReceipt",response).remove("pendingPublish")
+        st.body.put("publishedReceipt",response).put("publishedLocalRevision",st.body.get("pendingPublishLocalRevision")).remove("pendingPublish")
+        st.body.remove("pendingPublishLocalRevision")
         // Signature+ancestry must still authenticate account observation. Never clear edits here.
     }
     fun saveEventCursor(cursor:String) = writer { st ->

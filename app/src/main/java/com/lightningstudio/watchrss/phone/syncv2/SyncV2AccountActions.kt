@@ -12,13 +12,15 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     private val approved:(String)->Boolean,private val files:File,private val enabled:Boolean=BuildConfig.SYNC_OBJECTS_V2_HISTORY_RESTORE,
     private val trustedNow:()->Long?={null},recoveryQuotaBytes:Long=32L*1024*1024,
     recoveryReads:SyncV2RecoveryStorage.SourceReads?=null,private val fault:(String)->Unit={},
-    private val noteSegmentsRead:Boolean=BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS):AutoCloseable {
+    private val noteSegmentsRead:Boolean=BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,
+    private val networkNow:()->Long=System::currentTimeMillis):AutoCloseable {
     private val db get()=projection.accountDatabase
     private val scope get()=projection.scope
     private val recovery=SyncV2RecoveryStorage(projection,identity,files,recoveryQuotaBytes,recoveryReads)
     private val business=SyncV2PhoneApply(db)
-    private val cloud=SyncV2CloudSync(client,identity,projection,approved,contentKey,now={now()})
-    private fun gate(){if(!enabled)SyncV2Codec.fail("feature_disabled")}
+    private val cloud=SyncV2CloudSync(client,identity,projection,approved,contentKey,now={trustedNow()?:networkNow()})
+    @Volatile private var closed=false
+    private fun gate(){if(closed)SyncV2Codec.fail("authentication_required");if(!enabled)SyncV2Codec.fail("feature_disabled")}
     /** 25.8 read gate: the product switch AND the server announcement, identical to CloudSync.
      * A rollback must never diverge from the pull entry when only one door is open. */
     private fun noteSegmentsReadGate():Boolean=noteSegmentsRead&&client.noteSegmentsRead()
@@ -93,21 +95,24 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     /** Read metadata, then scan R0+tail without ever replacing original business rows.
      * Repeated host windows finish a large rebuild; the return value exposes continuation. */
     fun refresh():JSONObject {
-        gate();syncFiles();val status=cloud.readCurrent();projection.accountContact(now());val progress=projection.runWindow()
+        gate();syncFiles();val status=cloud.readCurrent();trustedNow()?.let{projection.accountContact(it)};val progress=projection.runWindow()
         recovery.purge(trustedNow())
         if(!progress.paused)applyObserved()
         return state().put("status",status).put("projectionPaused",progress.paused)
     }
     fun poll():JSONObject {
         gate();syncFiles();val result=cloud.poll()
-        projection.accountContact(now(),result.optBoolean("historyExpired"))
+        trustedNow()?.let{projection.accountContact(it,result.optBoolean("historyExpired"))}
         val progress=projection.runWindow();if(!progress.paused)applyObserved();return result.put("projectionPaused",progress.paused)
     }
     /** A clean device follows the authenticated current account, including a missed rollback.
      * Local dirty/unknown rows always retain their original business state. */
     fun applyObserved():Boolean {
         gate();syncFiles();complete();val fileToken=fileCapture();val st=projection.state();val a=st.body.optJSONObject("account")?:return false
-        if(!st.body.isNull("pendingAccountAction") || !st.body.isNull("pendingChoice") || st.body.optBoolean("unknownEditBase") || st.revision!=st.body.optString("acknowledgedLocalRevision","0"))return false
+        val ownPublished=st.body.optJSONObject("publishedReceipt")?.optJSONObject("account")?.optString("commitOid")==a.getString("oid") &&
+            st.body.optString("publishedLocalRevision")==st.revision
+        if(!st.body.isNull("pendingAccountAction") || !st.body.isNull("pendingChoice") ||
+            !ownPublished && (st.body.optBoolean("unknownEditBase") || st.revision!=st.body.optString("acknowledgedLocalRevision","0")))return false
         if(same(st.body.optJSONObject("appliedAccount"),a))return false
         if(!same(st.body.optJSONObject("metadataAccount"),a))SyncV2Codec.fail("closure_incomplete")
         val before=projection.accountLocalRows()
@@ -184,7 +189,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         val live=plans.values.flatMap{listOfNotNull(it.local,it.cloud,it.input,it.candidate,it.actual)}.map{System.identityHashCode(it)}.toSet()
         for(spool in previewSpools.toList())if(System.identityHashCode(spool) !in live){spool.close();previewSpools.remove(spool)}
     }
-    override fun close(){plans.values.toList().forEach(::release);plans.clear();previewSpools.forEach{it.close()};previewSpools.clear();transientRows.forEach{it.close()};transientRows.clear()}
+    override fun close(){closed=true;plans.values.toList().forEach(::release);plans.clear();previewSpools.forEach{it.close()};previewSpools.clear();transientRows.forEach{it.close()};transientRows.clear()}
     /** Preserve the complete-snapshot conflict-channel guard before accepting any entity's
      * operation result, while opening at most one entity's three snapshots at a time. */
     private fun channelGuard(inputs:List<JSONObject>):String? {

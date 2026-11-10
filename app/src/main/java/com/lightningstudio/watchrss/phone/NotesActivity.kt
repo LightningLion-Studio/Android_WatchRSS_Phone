@@ -34,6 +34,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
@@ -110,7 +111,8 @@ class NotesActivity : ComponentActivity() {
                         repository,
                         ::finish,
                         lifecycleScope,
-                        container.cloudSyncService::syncNow
+                        container.cloudSyncService::syncNow,
+                        com.lightningstudio.watchrss.phone.cloud.rememberSyncV2UnopenableNoteIds(container.cloudSyncService)
                     )
                 }
             }
@@ -125,8 +127,13 @@ private fun NotesScreen(
     repository: NoteRepository,
     onBack: () -> Unit,
     scope: CoroutineScope,
-    syncCloud: suspend () -> Unit
+    syncCloud: suspend () -> Unit,
+    unopenableNoteIds: Set<String> = emptySet()
 ) {
+    // T-SYNCV2-UI §2.4: Sync v2 notes this phone cannot open are marked in the list
+    // and never enter the editor. Empty while Sync v2 is off, so nothing changes.
+    var unopenableNotice by remember { mutableStateOf(false) }
+    if (unopenableNotice) com.lightningstudio.watchrss.phone.cloud.SyncV2UnopenableNoteDialog { unopenableNotice = false }
     val notes by repository.observeNotes().collectAsStateWithLifecycle(emptyList())
     val folders by repository.observeFolders().collectAsStateWithLifecycle(emptyList())
     val conflicts by repository.observeConflicts().collectAsStateWithLifecycle(emptyList())
@@ -331,7 +338,8 @@ private fun NotesScreen(
                 folders = folders,
                 conflicts = conflicts,
                 onBack = onBack,
-                onOpen = openNote,
+                onOpen = { note -> if (note.noteId in unopenableNoteIds) unopenableNotice = true else openNote(note) },
+                unopenableNoteIds = unopenableNoteIds,
                 onTogglePinned = { note ->
                     scope.launch {
                         repository.setPinned(note.noteId, !note.pinned)
@@ -578,7 +586,8 @@ private fun NoteListPage(
     onImportDirectory: () -> Unit,
     onImportMarkdown: () -> Unit,
     onImportZip: () -> Unit,
-    onExportZip: () -> Unit
+    onExportZip: () -> Unit,
+    unopenableNoteIds: Set<String> = emptySet()
 ) {
     Scaffold(
         topBar = {
@@ -617,6 +626,7 @@ private fun NoteListPage(
         NoteList(
             notes = notes,
             folders = folders,
+            unopenableNoteIds = unopenableNoteIds,
             onOpen = onOpen,
             onTogglePinned = onTogglePinned,
             onMove = onMove,
@@ -677,6 +687,7 @@ private fun NoteEditorPage(
 private fun NoteList(
     notes: List<NoteEntity>,
     folders: List<NoteFolderEntity>,
+    unopenableNoteIds: Set<String>,
     onOpen: (NoteEntity) -> Unit,
     onTogglePinned: (NoteEntity) -> Unit,
     onMove: (NoteEntity) -> Unit,
@@ -714,7 +725,7 @@ private fun NoteList(
                 supportingContent = {
                     Column {
                         Text(
-                            text = note.plainText.take(100),
+                            text = if (note.noteId in unopenableNoteIds) "本机无法打开" else note.plainText.take(100),
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -732,7 +743,8 @@ private fun NoteList(
                     }
                 },
                 leadingContent = {
-                    Icon(Icons.Default.Description, contentDescription = null)
+                    if (note.noteId in unopenableNoteIds) Icon(Icons.Default.Lock, contentDescription = "本机无法打开")
+                    else Icon(Icons.Default.Description, contentDescription = null)
                 },
                 trailingContent = {
                     Box {

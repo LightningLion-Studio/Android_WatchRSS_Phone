@@ -23,12 +23,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,6 +39,9 @@ import com.lightningstudio.watchrss.phone.syncv2.SyncV2CloudError
 import com.lightningstudio.watchrss.phone.syncv2.SyncV2PhoneUiPort
 import com.lightningstudio.watchrss.phone.syncv2.SyncV2UiState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 private fun codeOf(error: Throwable): String =
@@ -56,7 +59,7 @@ internal fun SyncV2Section(service: PhoneCloudSyncService) {
     val state by live.state.collectAsState()
     val notices = SyncV2View.notices(state)
     if (notices.isEmpty()) return
-    val scope = rememberCoroutineScope()
+    val alive = rememberAlive()
     var target by remember(live) { mutableStateOf<SyncV2View.Target?>(null) }
     var retrying by remember(live) { mutableStateOf(false) }
 
@@ -78,10 +81,7 @@ internal fun SyncV2Section(service: PhoneCloudSyncService) {
                         notice.target != null -> FilledTonalButton(onClick = { target = notice.target }) { Text(notice.openLabel ?: "查看") }
                         notice.retry != null -> OutlinedButton(enabled = !retrying, onClick = {
                             retrying = true
-                            scope.launch {
-                                try { live.syncNow() } catch (e: CancellationException) { throw e } catch (_: Throwable) { /* state carries the code */ }
-                                finally { retrying = false }
-                            }
+                            launchAction(alive, { live.syncNow() }) { retrying = false } // The state carries any error code.
                         }) { Text(if (retrying) "正在重试…" else notice.retry) }
                     }
                 }
@@ -124,38 +124,73 @@ private fun ConfirmDialog(title: String, text: String, confirm: String, onConfir
     )
 }
 
+/** Liveness of one dialog: results that arrive after it left never touch its state. */
+private class Alive { @Volatile var value = true }
+
+@Composable
+private fun rememberAlive(): Alive {
+    val alive = remember { Alive() }
+    DisposableEffect(alive) { onDispose { alive.value = false } }
+    return alive
+}
+
+/**
+ * Port calls run here, not in a dialog scope: leaving a dialog must neither cancel a
+ * started choice nor drop the close of a preview the dialog still owned.
+ */
+private val syncV2ActionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+private fun <T> launchAction(alive: Alive, work: suspend () -> T, done: (Result<T>) -> Unit) {
+    syncV2ActionScope.launch {
+        val result = try { Result.success(work()) } catch (e: CancellationException) { throw e } catch (e: Throwable) { Result.failure(e) }
+        if (alive.value) done(result)
+    }
+}
+
+private fun closeQuietly(port: SyncV2PhoneUiPort, preview: SyncV2PhoneUiPort.ChoicePreview) {
+    syncV2ActionScope.launch { try { port.closeChoice(preview) } catch (e: CancellationException) { throw e } catch (_: Throwable) { } }
+}
+
 @Composable
 private fun ChoiceDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose: () -> Unit) {
-    val scope = rememberCoroutineScope()
+    val alive = rememberAlive()
     var preview by remember { mutableStateOf<SyncV2PhoneUiPort.ChoicePreview?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var pending by remember { mutableStateOf<SyncV2View.Option?>(null) }
     var reload by remember { mutableStateOf(0) }
 
-    LaunchedEffect(reload) {
+    // The dialog owns at most one preview; leaving for any reason closes it.
+    DisposableEffect(port) { onDispose { preview?.let { closeQuietly(port, it) }; preview = null } }
+    DisposableEffect(reload) {
         error = null
-        try { preview = port.openChoice() } catch (e: CancellationException) { throw e } catch (e: Throwable) { error = SyncV2View.errorText(codeOf(e)) }
+        var opened = true
+        syncV2ActionScope.launch {
+            val result = try { Result.success(port.openChoice()) } catch (e: CancellationException) { throw e } catch (e: Throwable) { Result.failure(e) }
+            result.onSuccess { p -> if (alive.value && opened) preview = p else closeQuietly(port, p) }
+                .onFailure { e -> if (alive.value && opened) error = SyncV2View.errorText(codeOf(e)) }
+        }
+        onDispose { opened = false }
     }
-    fun leave() { preview?.let { p -> preview = null; scope.launch { runCatching { port.closeChoice(p) } } }; onClose() }
     fun choose(option: SyncV2View.Option) {
         val p = preview ?: return
-        preview = null // A choice consumes the preview, success or not.
+        preview = null // The choice consumes the preview; failure closes it below.
         busy = true
-        scope.launch {
-            try {
-                when (option.key) { "cloud" -> port.chooseCloud(p); "local" -> port.chooseLocal(p); else -> port.chooseMerge(p) }
-                onClose()
-            } catch (e: CancellationException) { throw e } catch (e: Throwable) {
+        launchAction(alive, {
+            try { when (option.key) { "cloud" -> port.chooseCloud(p); "local" -> port.chooseLocal(p); else -> port.chooseMerge(p) } }
+            catch (e: CancellationException) { throw e } catch (e: Throwable) { closeQuietly(port, p); throw e }
+        }) { result ->
+            busy = false
+            result.onSuccess { onClose() }.onFailure { e ->
                 val code = codeOf(e)
                 error = SyncV2View.errorText(code)
                 if (code == "choice_stale") reload++
-            } finally { busy = false }
+            }
         }
     }
 
     val title = if (state.choice?.kind == "rollback") "云端已回到较早版本" else "需要选择保留哪一份"
-    SubViewDialog(title, ::leave, error) {
+    SubViewDialog(title, onClose, error) {
         Text("选择前不会上传。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         val p = preview
         if (p == null) { if (error == null) Text("正在比较两边的修改…", style = MaterialTheme.typography.bodySmall); return@SubViewDialog }
@@ -206,17 +241,14 @@ private fun UnopenableDialog(state: SyncV2UiState, onClose: () -> Unit) {
 
 @Composable
 private fun RecoveryDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose: () -> Unit) {
-    val scope = rememberCoroutineScope()
+    val alive = rememberAlive()
     var error by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var restoreId by remember { mutableStateOf<String?>(null) }
-    fun run(work: suspend () -> Unit) {
+    fun run(work: suspend () -> Unit, after: () -> Unit = {}) {
         busy = true; error = null
-        scope.launch {
-            try { work() } catch (e: CancellationException) { throw e } catch (e: Throwable) { error = SyncV2View.errorText(codeOf(e)) }
-            finally { busy = false }
-        }
+        launchAction(alive, work) { result -> busy = false; result.onSuccess { after() }.onFailure { error = SyncV2View.errorText(codeOf(it)) } }
     }
     SubViewDialog("可找回的本机修改", onClose, error) {
         Text("选择保留云端或回到旧版本时，被替换的本机修改保留 7 天。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -237,12 +269,12 @@ private fun RecoveryDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClos
                 Text("保留被替换的修改 7 天", style = MaterialTheme.typography.bodyMedium)
                 Text("关闭后，被替换的本机修改不可找回", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Switch(checked = state.keepDiscardedLocalChanges7Days, enabled = !busy, onCheckedChange = { value -> run { port.setKeepDiscarded(value) } })
+            Switch(checked = state.keepDiscardedLocalChanges7Days, enabled = !busy, onCheckedChange = { value -> run({ port.setKeepDiscarded(value) }) })
         }
     }
     restoreId?.let { id ->
         ConfirmDialog("找回这份修改？", "这份被替换的修改会恢复到本机。", "找回",
-            onConfirm = { restoreId = null; run { port.restoreRecovery(id); notice = "已找回这份修改。" } },
+            onConfirm = { restoreId = null; run({ port.restoreRecovery(id) }) { notice = "已找回这份修改。" } },
             onDismiss = { restoreId = null })
     }
 }
@@ -251,7 +283,7 @@ private data class HistoryRow(val commitOid: String, val time: String, val sourc
 
 @Composable
 private fun HistoryDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose: () -> Unit) {
-    val scope = rememberCoroutineScope()
+    val alive = rememberAlive()
     var rows by remember { mutableStateOf<List<HistoryRow>>(emptyList()) }
     var token by remember { mutableStateOf<String?>(null) }
     var loaded by remember { mutableStateOf(false) }
@@ -260,15 +292,13 @@ private fun HistoryDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose
     var notice by remember { mutableStateOf<String?>(null) }
     var target by remember { mutableStateOf<HistoryRow?>(null) }
 
-    fun run(work: suspend () -> Unit) {
+    fun run(work: suspend () -> Unit, after: () -> Unit = {}) {
         busy = true; error = null
-        scope.launch {
-            try { work() } catch (e: CancellationException) { throw e } catch (e: Throwable) { error = SyncV2View.errorText(codeOf(e)) }
-            finally { busy = false }
-        }
+        launchAction(alive, work) { result -> busy = false; result.onSuccess { after() }.onFailure { error = SyncV2View.errorText(codeOf(it)) } }
     }
-    fun load(next: String?) = run {
-        val page = port.history(next)
+    fun load(next: String?) = launchAction(alive, { port.history(next) }) { result ->
+        busy = false
+        val page = result.getOrElse { error = SyncV2View.errorText(codeOf(it)); return@launchAction }
         val items = page.getJSONArray("items")
         val now = System.currentTimeMillis()
         val add = (0 until items.length()).map { i ->
@@ -280,7 +310,7 @@ private fun HistoryDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose
         token = page.optString("pageToken").takeIf { !page.isNull("pageToken") && it.isNotEmpty() }
         loaded = true
     }
-    LaunchedEffect(Unit) { load(null) }
+    LaunchedEffect(Unit) { busy = true; load(null) }
 
     SubViewDialog("历史版本", onClose, error) {
         Text("每个版本保留 7 天。回到某个版本后，各设备都会同步到该版本。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -295,14 +325,33 @@ private fun HistoryDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose
                 Text("回到这个版本", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
             }
         }
-        token?.let { next -> TextButton(enabled = !busy, onClick = { load(next) }) { Text("加载更早的版本") } }
+        token?.let { next -> TextButton(enabled = !busy, onClick = { busy = true; error = null; load(next) }) { Text("加载更早的版本") } }
     }
     target?.let { row ->
         ConfirmDialog("回到这个版本？", "截至 ${row.time} 的版本。本机未上传的修改会先保存为可找回副本。", "回到此版本",
             onConfirm = {
                 target = null
-                run { val capture = port.captureRollback(); port.rollback(row.commitOid, capture); notice = "已回到这个版本，其他设备会随后同步。" }
+                run({ val capture = port.captureRollback(); port.rollback(row.commitOid, capture) }) { notice = "已回到这个版本，其他设备会随后同步。" }
             },
             onDismiss = { target = null })
     }
+}
+
+/** T-SYNCV2-UI §2.4: note ids this phone cannot open; empty while Sync v2 is off. */
+@Composable
+internal fun rememberSyncV2UnopenableNoteIds(service: PhoneCloudSyncService): Set<String> {
+    val port by service.syncV2UiPort.collectAsState()
+    val live = port ?: return emptySet()
+    val state by live.state.collectAsState()
+    return remember(state) { if (state.enabled) state.unopenableNotes.mapTo(HashSet()) { it.noteId } else emptySet() }
+}
+
+@Composable
+internal fun SyncV2UnopenableNoteDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("本机无法打开") },
+        text = { Text("这条笔记太大，本机无法打开。请在小程序查看，内容已原样保留在云端。") },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("知道了") } }
+    )
 }

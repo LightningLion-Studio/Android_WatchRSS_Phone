@@ -145,6 +145,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             val remoteState=cloud.getJSONObject("state");val row=cloud.getJSONObject("row")
             val candidate=projection.candidate(meta.getString("kind"),meta.getString("logicalId"))
             var preservesConflictFacts=false
+            var localEdit=false
             if(candidate!=null && (SyncV2Codec.canonical(candidate.first)!=SyncV2Codec.canonical(meta) || SyncV2Codec.canonical(candidate.second)!=SyncV2Codec.canonical(remoteState))) {
                 if(meta.getString("kind")=="note" && SyncV2Codec.canonical(candidate.first)==SyncV2Codec.canonical(meta) && st.body.optString("activeGeneration")==account.getString("rollbackGeneration")) {
                     val local=SyncV2Business.join("note",candidate.first,candidate.second);val remote=SyncV2Business.join("note",meta,remoteState)
@@ -152,12 +153,16 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
                     val localSet=local.remove("noteConflicts");remote.remove("noteConflicts")
                     preservesConflictFacts=SyncV2LocalJson.canonical(local)==SyncV2LocalJson.canonical(remote) && SyncV2Codec.canonical(localSet)==SyncV2Codec.canonical(merged)
                 }
-                if(!preservesConflictFacts)SyncV2Codec.fail("merge_unavailable")
+                val base=projection.accountBase(entity)
+                val original=base.second?.let{value->SyncV2Business.split(meta.getString("kind"),meta.getString("logicalId"),entity,value,null)}
+                localEdit=st.body.optJSONObject("editBase")?.optString("accountOid")==account.getString("commitOid") &&
+                    base.first && original!=null && SyncV2Codec.canonical(original.meta)==SyncV2Codec.canonical(meta) && SyncV2Codec.canonical(original.state)==SyncV2Codec.canonical(remoteState)
+                if(!preservesConflictFacts && !localEdit)SyncV2Codec.fail("merge_unavailable")
             }
             val ready=mergedRows[entity]
             val fulfillsPromise=ready!=null && !row.isNull("promiseId") && ready.isNull("promiseId") && !ready.isNull("recipeOid") &&
                 listOf("bodyRevision","metaOid","stateOid").all{ready.get(it)==row.get(it)} && SyncV2Codec.d64(ready.getString("rowSequence"))>SyncV2Codec.d64(row.getString("rowSequence"))
-            mergedRows[entity]=if(fulfillsPromise || preservesConflictFacts)ready?:SyncV2Codec.fail("closure_incomplete")else row
+            mergedRows[entity]=if(fulfillsPromise || preservesConflictFacts || localEdit)ready?:SyncV2Codec.fail("closure_incomplete")else row
         }
         val tree=SyncV2Index.build(identity.scope,mergedRows.values.toList());mergedObjects.putAll(tree.objects)
         val reachable=mutableSetOf<String>();reachable.addAll(tree.objects.keys)

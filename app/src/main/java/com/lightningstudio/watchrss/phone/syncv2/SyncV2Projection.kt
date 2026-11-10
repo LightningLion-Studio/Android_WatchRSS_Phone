@@ -253,6 +253,24 @@ internal class SyncV2Projection(
         SyncV2Codec.unhex(entity,32);ensureActive()
         return db.controlQuery("SELECT body FROM syncv2_wire_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())open("wire-candidate",it.getBlob(0)).getJSONObject("row")else null}
     }
+    /** The article adapter supplies the deterministic revision after reading the actual v1 body. */
+    fun bindArticleRevision(captured:JSONObject,revision:String):JSONObject {
+        SyncV2Codec.unhex(revision,16)
+        return writer {
+            val entity=captured.getString("entityKey")
+            val value=db.controlQuery("SELECT body FROM syncv2_wire_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{c->if(!c.moveToFirst())SyncV2Codec.fail("body_revision_changed");open("wire-candidate",c.getBlob(0))}
+            val row=value.getJSONObject("row")
+            if(SyncV2Codec.canonical(row)!=SyncV2Codec.canonical(captured))SyncV2Codec.fail("body_revision_changed")
+            if(row.getBoolean("deleted"))SyncV2Codec.fail("body_revision_changed")
+            if(row.opt("bodyRevision")!=revision) {
+                row.put("bodyRevision",revision).put("promiseId",SyncV2Codec.hex(SyncV2Codec.random(16))).put("recipeOid",JSONObject.NULL)
+                    .put("opaqueContentId",JSONObject.NULL).put("contentBytes",JSONObject.NULL).put("rowSequence",SyncV2Codec.next(row.getString("rowSequence")))
+                db.execSQL("UPDATE syncv2_wire_candidates SET body=? WHERE scope=? AND entity_key=?",arrayOf(seal("wire-candidate",value),scope,entity))
+            }
+            JSONObject(row.toString())
+        }
+    }
+    fun requestConcurrentChoice()=writer {st->st.body.put("tailChoicePending",true);refreshPending(st.body)}
     /** CPU, HTTP and file work finishes before this short writer. No business body is replaced. */
     fun attachContentRecipe(captured:JSONObject,recipeOid:String,recipe:JSONObject) {
         SyncV2Wire.oid(recipeOid,"recipe");SyncV2ContentCodec.recipe(recipe)

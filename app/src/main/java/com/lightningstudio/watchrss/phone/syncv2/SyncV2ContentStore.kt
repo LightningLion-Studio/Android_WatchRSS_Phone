@@ -11,7 +11,9 @@ import java.nio.file.StandardOpenOption
  * Atomic encrypted descriptors are small; immutable envelopes and durable prefixes are per OID.
  * One content worker owns a store. Neither directory scans nor whole-cache reads are needed. */
 internal class SyncV2ContentStore(private val root:File,private val scope:String,private val localKey:ByteArray,
-    val counts:Counts=Counts(),private val fault:(String)->Unit={}) {
+    val counts:Counts=Counts(),private val fault:(String)->Unit={}):AutoCloseable {
+    @Volatile private var closed=false
+    override fun close(){closed=true;localKey.fill(0);durablePrefixes.clear();names.clear()}
     private data class DurablePrefix(val total:Int,val offset:Int)
     // One store has one writer. Cache only offsets already made durable, never network data or
     // plaintext. Eviction/reopen revalidates disk records. Every payload read still checks AEAD/SHA.
@@ -33,7 +35,10 @@ internal class SyncV2ContentStore(private val root:File,private val scope:String
             .put("preparationMillis",preparationNanos/1000000).put("checkpointMillis",checkpointNanos/1000000).put("fileIOMillis",fileNanos/1000000).put("metadataBatches",metadataBatches).put("metadataStats",metadataStats)
     }
     init {SyncV2Codec.scope(JSONObject(scope));require(localKey.size==32);if(!root.isDirectory && !root.mkdirs())SyncV2Codec.fail("storage_pressure")}
-    private fun file(key:String,ext:String):File=File(root,(names[key]?:SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.utf8("$scope/$key"),"sha256.filename")).also{names[key]=it})+ext)
+    private fun file(key:String,ext:String):File {
+        if(closed)SyncV2Codec.fail("authentication_required")
+        return File(root,(names[key]?:SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.utf8("$scope/$key"),"sha256.filename")).also{names[key]=it})+ext)
+    }
     private fun read(file:File,offset:Int=0,size:Int=file.length().toInt()):ByteArray {
         if(size !in 0..1048576 || offset<0 || offset.toLong()+size>file.length())SyncV2Codec.fail("invalid_schema")
         val at=System.nanoTime();val out=ByteArray(size);SyncV2LocalProfile.time("file.read",size.toLong()){RandomAccessFile(file,"r").use{it.seek(offset.toLong());it.readFully(out)}}

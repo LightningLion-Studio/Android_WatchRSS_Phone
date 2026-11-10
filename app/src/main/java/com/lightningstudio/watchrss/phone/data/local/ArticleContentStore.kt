@@ -190,7 +190,7 @@ fun isArticleContentMarker(value: String?): Boolean {
     return articleContentMarkerFileName(value) != null
 }
 
-private fun articleContentMarkerFileName(value: String?): String? {
+internal fun articleContentMarkerFileName(value: String?): String? {
     if (value == null || !value.startsWith(ARTICLE_CONTENT_MARKER_PREFIX)) return null
     val fileName = value.removePrefix(ARTICLE_CONTENT_MARKER_PREFIX)
     if ('/' in fileName || '\\' in fileName || ".." in fileName) return null

@@ -87,7 +87,8 @@ class PhoneCloudSyncService(
     private val legacyDeviceId: String? = null,
     private val formatWritePolicy:CloudFormatWritePolicy = CloudFormatWritePolicy(),
     private val migrationWorkerTrust:CloudWorkerTrust = CloudWorkerTrust.bundled,
-    private val migrationPreferences:CloudMigrationPreferences = CloudMigrationPreferences(context)
+    private val migrationPreferences:CloudMigrationPreferences = CloudMigrationPreferences(context),
+    private val syncV2Database:(()->com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase)?=null
 ) {
     private val appContext = context.applicationContext
     private val traceLog = com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog(context.applicationContext)
@@ -137,6 +138,23 @@ class PhoneCloudSyncService(
     fun pairingEpoch(): String? = accountRepository.session.value?.let { client.knownEpoch(it) }
     val pairingBackendBaseUrl: String get() = client.backendBaseUrl
     private var trustedBootstrap: CloudBootstrap? = null
+    private val syncV2Product by lazy {
+        com.lightningstudio.watchrss.phone.syncv2.SyncV2PhoneProduct(appContext,{requireNotNull(syncV2Database).invoke()},keyManager,
+            current={
+                val session=accountRepository.session.value
+                val bootstrap=trustedBootstrap
+                val generation= session?.let{client.knownContentGeneration(it)}
+                if(session==null || session.isExpired || bootstrap==null || generation==null)null
+                else client.syncV2Account(session,bootstrap.libraryEpoch,generation)
+            },
+            verifyKeys={account,keys->val bootstrap=trustedBootstrap?:error("authentication_required")
+                CloudKeyTrust.validate(account.userId,bootstrap.libraryEpoch,bootstrap.keyVersionFloor,bootstrap.keyCommitments,keys)},
+            approved={id->val session=accountRepository.session.value;val bootstrap=trustedBootstrap
+                session!=null && bootstrap!=null && bootstrap.devices.any{it.deviceId==id && it.revokedAt==null && deviceAuthenticated(session,bootstrap,it)}})
+    }
+    internal val syncV2UiPort get()=syncV2Product.uiPort
+    internal fun captureSyncV2Legacy(peer:String,version:Int,cursor:String,payload:JSONObject)=syncV2Product.captureLegacyMetadata(peer,version,cursor,payload)
+
     private val approvalMutex = Mutex()
     private var pendingSetup: RecoveryKeySetup? = null
     private var pendingSetupOwner: String? = null
@@ -340,7 +358,9 @@ class PhoneCloudSyncService(
             }
         }
     }
-    internal suspend fun releaseCloudAuthorization(session: PhoneAccountSession) = releaseCloudDevice(
+    internal suspend fun releaseCloudAuthorization(session: PhoneAccountSession) {
+        syncV2Product.release()
+        releaseCloudDevice(
         revokeRemote = {
             val bootstrap = runCatching { client.bootstrap(session) }.getOrNull()
             val expectedEpoch = bootstrap?.libraryEpoch ?: client.knownEpoch(session)
@@ -356,6 +376,7 @@ class PhoneCloudSyncService(
             keyManager.clearDeviceKey(session.userId, deviceId)
             legacyDeviceId?.takeIf { it != deviceId }?.let { keyManager.clearDeviceKey(session.userId, it) }
         })
+    }
     /** R45 clears synchronization bookkeeping, never local data, login or key trust. */
     private fun clearContentSyncState(session: PhoneAccountSession) {
         checkApprovalOwner(session)
@@ -376,6 +397,7 @@ class PhoneCloudSyncService(
         settings.contentGeneration?.let { client.useContentGeneration(session, it) }
     }
     private fun clearCloudScope(session: PhoneAccountSession) {
+        syncV2Product.release()
         currentMigration=null
         _migrationState.value=CloudMigrationUiState("unavailable",errorCode="migration_scope_changed")
         settings.bindScope(client.backendBaseUrl, session.userId)
@@ -1115,7 +1137,7 @@ class PhoneCloudSyncService(
             var retryingTransfer = false
             try {
                 if(!manual && bluetoothFence.active)return@run PhoneCloudSyncResult(0,0,0,false,0)
-                retryDiscardedCloudTransfer(rebuild = { failure ->
+                val legacyResult=retryDiscardedCloudTransfer(rebuild = { failure ->
                     val session = requireSession()
                     if (failure.status == 409) clearContentSyncState(session)
                     // A current-generation expired plan keeps authenticated immutable bytes for
@@ -1133,6 +1155,8 @@ class PhoneCloudSyncService(
                         client.inContentGeneration(session) { syncOnePass(manual, retryingTransfer, bootstrap, admission) }
                     }
                 })
+                if(syncV2Database!=null)syncV2Product.sync(trustedBootstrap?.syncV2)
+                legacyResult
             } catch (error: Exception) {
                 if (error is CancellationException) {
                     update(if (paused.value) CloudSyncPhase.PAUSED else CloudSyncPhase.IDLE, "等待继续同步")

@@ -46,7 +46,8 @@ data class CloudBootstrap(
     val legacyKeyVersions: List<Int> = emptyList(),
     val contentGeneration: String? = null,
     val contentClearedAt: String? = null,
-    val contentEmpty: Boolean = false
+    val contentEmpty: Boolean = false,
+    val syncV2: org.json.JSONObject? = null
 )
 
 data class CloudSnapshotHead(

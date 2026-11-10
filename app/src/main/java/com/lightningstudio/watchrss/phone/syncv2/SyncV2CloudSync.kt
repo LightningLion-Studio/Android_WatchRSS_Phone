@@ -86,6 +86,12 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
     fun resumePublish():JSONObject? {
         val request=projection.pendingPublish()?:return null
         capabilities() // A restart has not authenticated this HTTP client's capabilities yet.
+        val result=client.requestResult(request.getJSONObject("account").getJSONObject("body").getString("requestId"))
+        if(result.getString("status")=="succeeded") {
+            val response=result.getJSONObject("response");projection.confirmPublish(request,response);return response
+        }
+        val state=projection.state()
+        if(state.body.optString("pendingPublishLocalRevision")!=state.revision)SyncV2Codec.fail("source_changed")
         val response=publishAttempt(request);projection.confirmPublish(request,response);return response
     }
     private fun publishAttempt(request:JSONObject):JSONObject = try{client.publish(request)}catch(e:SyncV2CloudError) {
@@ -109,8 +115,12 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         projection.saveEventCursor(SyncV2Wire.string(events,"cursor"));return events
     }
     /** P2 normal publication only. Rollback/choice/history write paths remain closed. */
-    fun publishIndex(signer:SyncV2Signing,contentKey:ByteArray,keyVersion:Long):JSONObject {
+    fun publishIndex(signer:SyncV2Signing,contentKey:ByteArray,keyVersion:Long,scannedRevision:String?=null):JSONObject {
         resumePublish()?.let{return it}
+        fun sourceCurrent() {
+            if(scannedRevision!=null && (projection.state().revision!=scannedRevision || !projection.isWindowComplete()))SyncV2Codec.fail("source_changed")
+        }
+        sourceCurrent()
         val caps=capabilities()
         if(caps.getJSONObject("flags").get("indexWrite")!=true)throw SyncV2CloudError("feature_disabled",true,1000)
         if(signer.deviceId!=client.deviceId)SyncV2Codec.fail("authentication_required")
@@ -121,6 +131,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             client.registerSigningKey(projection.prepareOwnSigningBinding(signer,now(),registrations.getString("revocationRevision")))
             window=client.negotiate();fresh(window);keys(window.getString("windowId"))
         }
+        sourceCurrent()
         val st=projection.state()
         if(!st.body.isNull("pendingChoice"))SyncV2Codec.fail("choice_pending")
         val account=window.getJSONObject("account");val accepted=st.body.optJSONObject("account")
@@ -154,7 +165,9 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
                     preservesConflictFacts=SyncV2LocalJson.canonical(local)==SyncV2LocalJson.canonical(remote) && SyncV2Codec.canonical(localSet)==SyncV2Codec.canonical(merged)
                 }
                 val base=projection.accountBase(entity)
-                val original=base.second?.let{value->SyncV2Business.split(meta.getString("kind"),meta.getString("logicalId"),entity,value,null)}
+                val original=base.second?.let{value->SyncV2Business.split(meta.getString("kind"),meta.getString("logicalId"),entity,value,null).also {
+                    it.meta.put("addedAtSource",meta.getString("addedAtSource"))
+                }}
                 localEdit=st.body.optJSONObject("editBase")?.optString("accountOid")==account.getString("commitOid") &&
                     base.first && original!=null && SyncV2Codec.canonical(original.meta)==SyncV2Codec.canonical(meta) && SyncV2Codec.canonical(original.state)==SyncV2Codec.canonical(remoteState)
                 if(!preservesConflictFacts && !localEdit)SyncV2Codec.fail("merge_unavailable")

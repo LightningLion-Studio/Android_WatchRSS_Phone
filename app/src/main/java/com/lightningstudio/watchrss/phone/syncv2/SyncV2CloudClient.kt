@@ -94,6 +94,7 @@ internal class SyncV2CloudClient(
         try {
         active()
         call.execute().use { response ->
+            if(response.code in 300..399)SyncV2Codec.fail("isolated_backend_required")
             val limit = if(raw && response.isSuccessful) 266264 else 1048576
             val data = response.body?.byteStream()?.use { input ->
                 val out=java.io.ByteArrayOutputStream();val block=ByteArray(8192)
@@ -136,6 +137,7 @@ internal class SyncV2CloudClient(
     @Volatile var noteSegmentsLocal=com.lightningstudio.watchrss.phone.BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS
     @Volatile internal var serverNoteSegments=false
     @Volatile internal var serverNoteSegmentsFlag=false
+    fun contentWriteAllowed():Boolean=contentWrite
     fun noteSegmentsRead()=noteSegmentsLocal&&serverNoteSegments
     fun noteSegmentsWrite()=noteSegmentsRead()&&serverNoteSegmentsFlag
     fun capabilities() = get("capabilities").also {

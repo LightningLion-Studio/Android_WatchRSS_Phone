@@ -354,7 +354,7 @@ internal class SyncV2Projection(
         if(SyncV2Codec.canonical(pending)!=SyncV2Codec.canonical(request))SyncV2Codec.fail("choice_stale")
         val oid=request.getJSONObject("account").getJSONObject("body").getString("newCommitOid")
         if(response.getJSONObject("account").getString("commitOid")!=oid || response.getJSONObject("device").getString("commitOid")!=oid)SyncV2Codec.fail("invalid_schema")
-        st.body.put("publishedReceipt",response).put("publishedLocalRevision",st.body.get("pendingPublishLocalRevision")).remove("pendingPublish")
+        st.body.put("publishedReceipt",response).put("publishedLocalRevision",st.body.opt("pendingPublishLocalRevision")?:JSONObject.NULL).remove("pendingPublish")
         st.body.remove("pendingPublishLocalRevision")
         // Signature+ancestry must still authenticate account observation. Never clear edits here.
     }

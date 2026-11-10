@@ -69,4 +69,30 @@ class SyncV2P6ArticleTest {
             try{source.read(0,1);fail("changed source read")}catch(e:IllegalStateException){assertEquals("body_revision_changed",e.message)}
         }
     }
+    @Test fun authenticatedOriginalAddedAtSourceDoesNotBlockLaterLocalArticleEdits() {
+        SyncV2P5Fixture().use {f->
+            f.start()
+            val records=javaClass.classLoader!!.getResourceAsStream("syncv2-business-schema.json")!!.bufferedReader().use{JSONObject(it.readText())}.getJSONArray("records")
+            val value=(0 until records.length()).map{records.getJSONObject(it)}.single{it.getString("kind")=="article"}.getJSONObject("value")
+            val old=f.commit(listOf(f.note(),value),f.current.getString("commitOid"),"0","normal",null)
+            val originalHeader=f.headers.getValue(old)
+            val rows=SyncV2Index.read(f.identity.scope,originalHeader.getJSONObject("body").getString("treeRoot"),f.f.objects::getValue)
+            val entity=f.identity.entity("article",value.getString("articleId"))
+            val article=rows.single{it.getString("entityKey")==entity}
+            val meta=SyncV2Wire.parse(SyncV2Envelope.open(f.identity,f.key,article.getString("metaOid"),f.f.objects.getValue(article.getString("metaOid"))),262144,true).put("addedAtSource","original")
+            val sealed=SyncV2Envelope.seal(f.identity,f.key,1,"meta",SyncV2Codec.utf8(SyncV2Codec.canonical(meta)));f.f.objects[sealed.oid]=sealed.bytes
+            article.put("metaOid",sealed.oid).put("addedAtMillis",123)
+            val tree=SyncV2Index.build(f.identity.scope,rows);f.f.objects.putAll(tree.objects)
+            val body=JSONObject(originalHeader.getJSONObject("body").toString()).put("treeRoot",tree.root)
+            val signed=f.f.signer.commit(body);val oid=SyncV2Codec.oid("commit",body);f.headers[oid]=signed;f.f.objects[oid]=SyncV2Codec.utf8(SyncV2Codec.canonical(signed))
+            f.deviceOid=oid;f.deviceRevision="3";f.setCurrent(oid,"3");f.actions().refresh();f.drain()
+            assertEquals("original",f.projection.candidate("article",value.getString("articleId"))!!.first.getString("addedAtSource"))
+            f.sql.execSQL("UPDATE phone_articles SET title='local later title' WHERE articleId=?",arrayOf(value.getString("articleId")));f.drain()
+            val cloud=SyncV2CloudSync(f.f.client(),f.identity,f.projection,{true},{f.key},now={f.f.now})
+            cloud.publishIndex(f.f.signer,f.key,1)
+            f.actions().refresh()
+            assertEquals("local later title",f.sql.query("SELECT title FROM phone_articles WHERE articleId=?",arrayOf(value.getString("articleId"))).use{assertTrue(it.moveToFirst());it.getString(0)})
+        }
+    }
+
 }

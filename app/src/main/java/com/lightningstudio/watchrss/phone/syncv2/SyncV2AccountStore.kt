@@ -20,6 +20,7 @@ internal class SyncV2AccountStore(private val keys:CloudKeyManager,private val u
     fun install(descriptor:JSONObject,capsule:JSONObject,descriptorOid:String,recoveryOid:String,contentKeys:SyncV2ContentKeys):SyncV2Identity {
         val body=descriptor.getJSONObject("body")
         val version=SyncV2Wire.uint(body,"wrappingKeyVersion",4294967295)
+        if(version==0L)SyncV2Codec.fail("invalid_schema")
         val account=user.replace("-","").lowercase()
         val scope=body.getJSONObject("scope")
         if(SyncV2Codec.oid("id-key-recovery",capsule)!=recoveryOid)SyncV2Codec.fail("hash_mismatch")

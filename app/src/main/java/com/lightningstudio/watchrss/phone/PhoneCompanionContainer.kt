@@ -306,6 +306,7 @@ class PhoneCompanionContainer(context: Context) {
         val storageSuffix = accountEnvironment.storageSuffix
         PhoneCloudSyncService(
             context = appContext,
+            syncV2Database = { database },
             accountRepository = accountRepository,
             backupService = backupService,
             repository = repository,
@@ -423,8 +424,9 @@ class PhoneCompanionContainer(context: Context) {
                 }
             }
         ).also { manager ->
-            if(BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION)manager.recordLegacyProjection={peer,version,cursor,payload ->
-                localSyncV2Projection.captureLegacyMetadata(peer,version,cursor,payload)
+            if(BuildConfig.SYNC_V2 || BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION)manager.recordLegacyProjection={peer,version,cursor,payload ->
+                if(BuildConfig.SYNC_V2)cloudSyncService.captureSyncV2Legacy(peer,version,cursor,payload)
+                else localSyncV2Projection.captureLegacyMetadata(peer,version,cursor,payload)
             }
         }
     }

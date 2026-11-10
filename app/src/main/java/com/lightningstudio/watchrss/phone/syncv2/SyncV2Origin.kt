@@ -16,7 +16,7 @@ internal object SyncV2Origin {
         // HttpUrl canonicalizes IPv4-mapped IPv6 and numeric IPv4 aliases. They do
         // not widen the exact loopback exception in the configured v1 authority.
         val literal = raw.host.removePrefix("[").removeSuffix("]")
-        if (backend.host in setOf("127.0.0.1", "localhost") && literal != backend.host) bad()
+        if (':' !in literal && literal != backend.host || backend.host in setOf("127.0.0.1", "localhost") && literal != backend.host) bad()
         clean(backend)
         if (backend.encodedPath != "/") bad()
         return backend.newBuilder().encodedPath(path).build().also { validate(it, backend) }

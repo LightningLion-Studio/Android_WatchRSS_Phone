@@ -13,7 +13,8 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     private val trustedNow:()->Long?={null},recoveryQuotaBytes:Long=32L*1024*1024,
     recoveryReads:SyncV2RecoveryStorage.SourceReads?=null,private val fault:(String)->Unit={},
     private val noteSegmentsRead:Boolean=BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,
-    private val networkNow:()->Long=System::currentTimeMillis):AutoCloseable {
+    private val networkNow:()->Long=System::currentTimeMillis,
+    private val currentKeyVersion:()->Long={1}):AutoCloseable {
     private val db get()=projection.accountDatabase
     private val scope get()=projection.scope
     private val recovery=SyncV2RecoveryStorage(projection,identity,files,recoveryQuotaBytes,recoveryReads)
@@ -94,8 +95,8 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     }
     /** Read metadata, then scan R0+tail without ever replacing original business rows.
      * Repeated host windows finish a large rebuild; the return value exposes continuation. */
-    fun refresh():JSONObject {
-        gate();syncFiles();val status=cloud.readCurrent();trustedNow()?.let{projection.accountContact(it)};val progress=projection.runWindow()
+    fun refresh(maxPages:Int=16,budgetMillis:Long=290000):JSONObject {
+        gate();syncFiles();val status=cloud.readCurrent();trustedNow()?.let{projection.accountContact(it)};val progress=projection.runWindow(maxPages,budgetMillis)
         recovery.purge(trustedNow())
         if(!progress.paused)applyObserved()
         return state().put("status",status).put("projectionPaused",progress.paused)
@@ -198,6 +199,52 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         }catch(e:Exception){return when(e.message){"note_conflict"->"note_conflict";"missing_base"->"missing_base";"conflict_identity_mismatch","identity_conflict"->"identity_conflict";else->"unsupported_feature"}}
         return null
     }
+    fun closePreview(preview:Preview) {plans.remove(preview)?.let(::release);prunePreviewSpools()}
+    /** Summaries contain only titles, kinds and counts. No body or internal wire identity leaves here. */
+    fun previewSummary(preview:Preview):JSONObject {
+        gate();val plan=plans[preview]?:SyncV2Codec.fail("choice_stale")
+        val baseline=projection.accountBindings()
+        fun summary(records:List<JSONObject>,local:Boolean):JSONObject {
+            val by=records.indexRows();val changed=(by.keys+baseline.keys).sorted().mapNotNull {id->
+                val row=by[id];val base=baseline[id]
+                if(row?.has(SyncV2NoteWiring.ISOLATED_KEY)==true)return@mapNotNull null
+                if(local && id !in plan.ids)return@mapNotNull null
+                if(row==null && base==null)return@mapNotNull null
+                if(row!=null && base!=null && same(row.getJSONObject("meta"),base.getJSONObject("meta")) && same(row.getJSONObject("state"),base.getJSONObject("state")))return@mapNotNull null
+                val meta=(row?:base!!).getJSONObject("meta")
+                JSONObject().put("title",meta.getJSONObject("payload").optString("title",meta.getString("kind")))
+                    .put("kind",if(row==null || row.optJSONObject("state")?.optJSONObject("payload")?.optBoolean("deleted")==true)"delete"else if(base==null)"add"else"edit")
+            }
+            return JSONObject().put("items",JSONArray(changed.take(50))).put("more",(changed.size-50).coerceAtLeast(0)).put("count",changed.size)
+        }
+        return JSONObject().put("local",summary(plan.local,true)).put("cloud",summary(plan.cloud,false)).put("canMerge",preview.canMerge).put("reason",preview.reason?:JSONObject.NULL)
+    }
+    fun restoreRecovery(copyId:String):JSONObject {
+        gate();now();syncFiles();complete()
+        val delta=recoveryDelta(copyId)
+        // Private file bodies require their own staged restore workflow; never claim metadata
+        // restoration reconstitutes an unavailable original file or release its recovery pin.
+        if(delta.getJSONArray("bodyRefs").length()!=0)SyncV2Codec.fail("unsupported_feature")
+        val before=projection.accountLocalRows();val rows=before.indexRows().toMutableMap()
+        val changes=delta.getJSONArray("changes")
+        for(i in 0 until changes.length()) {
+            val change=changes.getJSONObject(i);val entity=change.getString("id")
+            if(change.getString("kind")=="remove")rows.remove(entity) else {
+                val value=change.getJSONObject("value")
+                val kind=when {value.has("noteId")->"note";value.has("assetId")->"asset";value.has("folderId")->"folder";
+                    value.has("sourceId")&&value.has("articleIdHash")->"rss-state";value.has("articleId")->"article";
+                    value.has("bookId")&&value.has("chapterIndex")->"book-reading";value.has("bookId")->"book";value.has("url")->"source";else->SyncV2Codec.fail("unsupported_feature")}
+                val logical=SyncV2Business.logicalId(kind,value)
+                if(identity.entity(kind,logical)!=entity)SyncV2Codec.fail("identity_conflict")
+                rows[entity]=record(kind,logical,entity,value)
+            }
+        }
+        val target=rows.values.toList();business.validate(target)
+        val st=projection.state()
+        projection.accountWriter(st.version){business.apply(before,target)}
+        projection.runWindow()
+        return JSONObject().put("restoredEdits",changes.length())
+    }
     private fun rows(stored:List<JSONObject>)=stored.mapRows{r->
         if(!r.has("value")&&!r.has(SyncV2NoteWiring.ISOLATED_KEY))r.put("value",SyncV2Business.join(r.getJSONObject("meta").getString("kind"),r.getJSONObject("meta"),r.getJSONObject("state")))
         r
@@ -293,7 +340,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             candidate=object:AbstractList<JSONObject>(){override val size get()=untouched.size+merged.size;override fun get(index:Int)=if(index<untouched.size)untouched[index]else merged[index-untouched.size]}
             try {
                 business.validate(candidate);client.capabilities().also{projection.noteSegmentsServerAnnounced=client.noteSegmentsWrite()}
-                wireIndex(candidate,1,remote,root,scopeIds,client.authors(identity,approved)).also{it.close()}
+                wireIndex(candidate,currentKeyVersion(),remote,root,scopeIds,client.authors(identity,approved)).also{it.close()}
             }catch(e:Exception){if(e.message=="object_too_large")throw e;candidate=null;reason=when(e.message){"storage_pressure"->"storage_pressure";"closure_incomplete"->"missing_content";else->"unsupported_feature"}}
         }
         projection.accountCheck(projection.state(),capture)

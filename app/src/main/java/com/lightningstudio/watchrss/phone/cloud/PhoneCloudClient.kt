@@ -25,6 +25,12 @@ class PhoneCloudClient(
 ) {
     internal var allowR48Writes:()->Boolean = { CloudFormatR48.writeV1 }
     val backendBaseUrl: String get() = environment.backendBaseUrl.trimEnd('/')
+    internal fun syncV2Account(session:PhoneAccountSession,epoch:String,generation:String):com.lightningstudio.watchrss.phone.syncv2.SyncV2PhoneProduct.Account {
+        checkSession(session)
+        return com.lightningstudio.watchrss.phone.syncv2.SyncV2PhoneProduct.Account(session.userId,backendBaseUrl,
+            requireNotNull(currentDeviceId),epoch,generation,session.accessToken,environment.supabaseAnonKey,
+            deviceAccessToken()?.takeIf{it.isNotBlank()}?.let{"Bearer $it"})
+    }
     private val epochs = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val contentGenerations = java.util.concurrent.ConcurrentHashMap<String, String>()
     @Volatile private var http1Uploads = false
@@ -98,7 +104,7 @@ class PhoneCloudClient(
             keyCommitments = parseCommitments(json),
             legacyKeyVersions = json.optJSONArray("legacyKeyVersions")?.let { versions -> (0 until versions.length()).map { versions.getInt(it) } } ?: emptyList(),
             contentGeneration = json.nullableString("contentGeneration"), contentClearedAt = json.nullableString("contentClearedAt"),
-            contentEmpty = json.optBoolean("contentEmpty"))
+            contentEmpty = json.optBoolean("contentEmpty"), syncV2 = json.optJSONObject("syncV2"))
         onBootstrap(session, result)
         observeContentMetadata(session, json, requestedGeneration)
         return result

@@ -3,10 +3,16 @@ package com.lightningstudio.watchrss.phone.syncv2
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
 
 /** Owns only authenticated v1 account-key copies. HKDF separates uses inside each wire codec. */
-internal class SyncV2ContentKeys private constructor(private val keys:Map<Long,ByteArray>):AutoCloseable {
+internal class SyncV2ContentKeys private constructor(private var keys:Map<Long,ByteArray>):AutoCloseable {
     private var closed=false
     val newestVersion:Long get()=synchronized(this) { active();keys.keys.max() }
     @Synchronized fun read(version:Long):ByteArray { active();return keys[version]?:SyncV2Codec.fail("key_unavailable") }
+    fun refreshAuthenticated(manager:CloudKeyManager,userId:String,verify:(Map<Int,ByteArray>)->Unit) {
+        val updated=authenticated(manager,userId,verify)
+        try {
+            synchronized(this) {active();keys.values.forEach{it.fill(0)};keys=updated.keys;updated.keys=emptyMap()}
+        } finally {updated.close()}
+    }
     private fun active(){if(closed)SyncV2Codec.fail("authentication_required")}
     @Synchronized override fun close(){closed=true;keys.values.forEach{it.fill(0)}}
     companion object {

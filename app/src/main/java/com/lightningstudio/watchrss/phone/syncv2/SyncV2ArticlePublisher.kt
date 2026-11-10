@@ -20,7 +20,8 @@ internal class SyncV2ArticlePublisher(private val projection:SyncV2Projection,pr
             if(!row.getBoolean("deleted")) {
                 val revision=projection.state().revision
                 val source=SyncV2ArticleBody.source(projection.accountDatabase,files,id) {
-                    check();if(projection.state().revision!=revision)SyncV2Codec.fail("body_revision_changed")
+                    check();if(monotonic()-started>=budgetMillis)SyncV2Codec.fail("budget_paused")
+                    if(projection.state().revision!=revision)SyncV2Codec.fail("body_revision_changed")
                 }
                 if(source!=null) {
                     row=projection.bindArticleRevision(row,SyncV2ArticleBody.revision(entity,source.sha256))

@@ -84,6 +84,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             life.own(keys.onAccountRelease(account.userId){release()})
             val ring=life.guard {life.own(SyncV2ContentKeys.authenticated(keys,account.userId){verifyKeys(account,it)})}
             val store=SyncV2AccountStore(keys,account.userId,life)
+            val aliases=SyncV2DeviceAlias(store,account.accountId,account.legacyDeviceId,account.epoch,account.generation)
             val trust=SyncV2ServiceTrust.fromBootstrap(account.accountId,syncV2,store.read("service-pin")){store.write("service-pin",it)}
             val time=life.own(SyncV2TrustedTime(clock))
             val base=SyncV2Origin.endpoint(account.backendBaseUrl)
@@ -103,7 +104,10 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             if(initRejected && descriptor==null)SyncV2Codec.fail("object_missing")
             if(descriptor==null) {
                 if(pending==null && store.read("pin")!=null)SyncV2Codec.fail("identity_conflict")
-                val candidate=life.guard {SyncV2RepoBootstrap.prepareStored(account.accountId,account.legacyDeviceId,account.epoch,account.generation,ring.newestVersion,ring::read,store::pending,store::pending)}
+                val candidate=life.guard {
+                    val alias=aliases.bootstrap(pending)
+                    SyncV2RepoBootstrap.prepareStored(account.accountId,account.legacyDeviceId,account.epoch,account.generation,ring.newestVersion,ring::read,store::pending,store::pending) {alias}
+                }
                 discovery=client(candidate.scope,candidate.descriptor.getJSONObject("body").getString("creatorDeviceId"))
                 discovery.capabilities()
                 descriptor=try {
@@ -127,7 +131,28 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             val identity=life.guard {life.own(store.install(descriptor.getJSONObject("descriptor"),recovery,descriptor.getString("descriptorOid"),recoveryOid,ring))}
             val local=life.guard {store.localKey(identity.repoId).also{raw->life.own(AutoCloseable{raw.fill(0)})}}
             val path=SyncV2Codec.hash(JSONObject().put("backend",account.backendBaseUrl).put("account",account.accountId).put("repo",identity.repoId))
-            val vault=life.guard {life.own(SyncV2SigningVault(store,identity.repoId,File(context.noBackupFilesDir,"syncv2/$path.sequence"),life))}
+            val vault=life.guard {life.own(SyncV2SigningVault(store,identity.repoId,File(context.noBackupFilesDir,"syncv2/$path.sequence"),life,aliases.installed(identity.repoId)))}
+            if(vault.signerOrNull()!=null)aliases.reconcile(vault,descriptor.getJSONObject("descriptor")) {author->
+                client(identity.scope,author.deviceId).use {probe->
+                    probe.capabilities();probe.checkpoint()
+                    val window=probe.negotiate();val known=probe.signingKeys(window.getString("windowId"))
+                    val bindings=known.getJSONArray("bindings");val authors=probe.authors(identity,approved)
+                    var registered=false
+                    for(i in 0 until bindings.length()) {
+                        val binding=bindings.getJSONObject(i);authors.accept(binding,known.getString("revocationRevision"))
+                        val b=binding.getJSONObject("body")
+                        if(b.getString("deviceId")==author.deviceId) {
+                            if(b.getString("keyId")!=author.keyId || b.getString("publicKey")!=SyncV2Codec.b64(SyncV2Codec.unhex(author.publicHex,65)) ||
+                                binding.getJSONObject("deviceMapping").getJSONObject("body").getString("legacyDeviceId")!=account.legacyDeviceId)SyncV2Codec.fail("device_alias_recovery_required")
+                            registered=true
+                        }
+                    }
+                    if(registered)true else try {
+                        probe.registerSigningKey(identity.signingBinding(author,time.now()?:SyncV2Codec.fail("trusted_time_unavailable"),known.getString("revocationRevision")))
+                        true
+                    } catch(e:SyncV2CloudError) {if(e.code=="invalid_schema")false else throw e}
+                }
+            }
             val signer=vault.signerOrNull()
             val deviceId=signer?.deviceId?:"00".repeat(16)
             val control=client(identity.scope,deviceId)

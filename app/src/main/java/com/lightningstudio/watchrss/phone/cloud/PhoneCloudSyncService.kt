@@ -1171,7 +1171,7 @@ class PhoneCloudSyncService(
                     invalidateEpoch(requireSession())
                     update(CloudSyncPhase.NEEDS_RECOVERY, "设备身份需要重新验证")
                 } else if (_state.value.phase !in setOf(CloudSyncPhase.NEEDS_RECOVERY,CloudSyncPhase.ERROR)) {
-                    update(CloudSyncPhase.ERROR, error.message ?: "云同步失败")
+                    update(CloudSyncPhase.ERROR, if(error.message=="device_alias_recovery_required")SyncV2View.errorText("device_alias_recovery_required")else error.message ?: "云同步失败")
                 }
                 if(error is CloudFormatUpgradeRequired || error is CloudHttpException && error.status==426) {
                     // Only the authenticated account floor halts same-build background passes.

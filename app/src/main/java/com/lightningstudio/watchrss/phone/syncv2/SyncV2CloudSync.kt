@@ -17,7 +17,12 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
     }
     private fun fresh(window:JSONObject) {
         SyncV2CloudClient.window(window)
-        if(window.getLong("expiresAtMillis")<=now() || window.getLong("expiresAtMillis")>now()+300000)SyncV2Codec.fail("window_expired")
+        val expires=window.getLong("expiresAtMillis")
+        var current=now()
+        // A checkpoint anchors time at receipt, so transport latency can leave it behind
+        // a later negotiate window. Refresh authenticated time before rejecting its horizon.
+        if(expires>current+300000) {client.checkpoint(current);current=now()}
+        if(expires<=current || expires>current+300000)SyncV2Codec.fail("window_expired")
     }
     private fun keys(window:String):JSONObject {
         val response=client.signingKeys(window);val revision=SyncV2Wire.string(response,"revocationRevision");SyncV2Codec.d64(revision)

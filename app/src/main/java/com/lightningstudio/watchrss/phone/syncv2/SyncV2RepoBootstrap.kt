@@ -23,16 +23,23 @@ internal object SyncV2RepoBootstrap {
     }
     /** The secure port commits complete candidate bytes before the first repo-init request. */
     internal fun prepareStored(accountId:String,legacyDeviceId:String,legacyEpoch:String,legacyGeneration:String,
-        version:Long,key:(Long)->ByteArray,load:()->JSONObject?,save:(JSONObject)->Unit):Candidate {
+        version:Long,key:(Long)->ByteArray,load:()->JSONObject?,save:(JSONObject)->Unit):Candidate =
+        prepareStored(accountId,legacyDeviceId,legacyEpoch,legacyGeneration,version,key,load,save) {SyncV2Codec.hex(SyncV2Codec.random(16))}
+
+    internal fun fence(accountId:String,legacyDeviceId:String,legacyEpoch:String,legacyGeneration:String):String =
+        SyncV2Codec.hash(JSONObject().put("accountId",accountId).put("legacyDeviceId",legacyDeviceId).put("libraryEpoch",legacyEpoch).put("contentGeneration",legacyGeneration))
+
+    internal fun prepareStored(accountId:String,legacyDeviceId:String,legacyEpoch:String,legacyGeneration:String,
+        version:Long,key:(Long)->ByteArray,load:()->JSONObject?,save:(JSONObject)->Unit,deviceId:()->String):Candidate {
         SyncV2Codec.unhex(accountId,16)
         if(version !in 1..4294967295L || listOf(legacyDeviceId,legacyEpoch,legacyGeneration).any{it.isEmpty()})SyncV2Codec.fail("authentication_required")
-        val fence=SyncV2Codec.hash(JSONObject().put("accountId",accountId).put("legacyDeviceId",legacyDeviceId).put("libraryEpoch",legacyEpoch).put("contentGeneration",legacyGeneration))
+        val fence=fence(accountId,legacyDeviceId,legacyEpoch,legacyGeneration)
         val pending=load()?:run {
             val raw=SyncV2Signing.randomPrivate()
             try {
                 JSONObject().put("fence",fence).put("repoId",SyncV2Codec.hex(SyncV2Codec.random(16)))
                     .put("creationId",SyncV2Codec.hex(SyncV2Codec.random(16))).put("idKeyHex",SyncV2Codec.hex(SyncV2Codec.random(32)))
-                    .put("creatorPrivateHex",SyncV2Codec.hex(raw)).put("creatorDeviceId",SyncV2Codec.hex(SyncV2Codec.random(16)))
+                    .put("creatorPrivateHex",SyncV2Codec.hex(raw)).put("creatorDeviceId",deviceId())
                     .put("creatorKeyId",SyncV2Codec.hex(SyncV2Codec.random(16))).also(save)
             } finally {raw.fill(0)}
         }

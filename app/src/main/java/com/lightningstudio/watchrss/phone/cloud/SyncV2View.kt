@@ -46,6 +46,7 @@ internal object SyncV2View {
         "feature_disabled" -> "云端暂不支持此操作。"
         "trusted_time_unavailable" -> "暂时无法确认云端时间，请联网后重试。"
         "signing_state_unavailable" -> "本机签名状态不可用，暂时只能接收云端修改。"
+        "device_alias_recovery_required" -> "本机设备身份冲突。请保留应用数据并联系支持核对设备登记。"
         else -> "本机内容已保留，请稍后重试。"
     }
 

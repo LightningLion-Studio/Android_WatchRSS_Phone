@@ -40,6 +40,8 @@ class SyncV2P6ProductTest {
         var descriptorUnavailable=false;var failAfterConflict=false;var dropInit=false;val initBytes=mutableListOf<String>()
         val objects=linkedMapOf<String,ByteArray>();val prefixes=linkedMapOf<String,ByteArray>();val totals=linkedMapOf<String,Int>()
         val bindings=linkedMapOf<String,JSONObject>();val refs=linkedMapOf<String,JSONObject>();val devices=linkedMapOf<String,JSONObject>();val results=linkedMapOf<String,JSONObject>()
+        val boundAliases=linkedMapOf<String,String>();val registrationBodies=mutableListOf<JSONObject>()
+        var negotiateStepMillis=0L;var timeOffsetMillis=0L;var expiredNegotiate=false;var checkpoints=0
         var account=JSONObject().put("commitOid",JSONObject.NULL).put("revision","0").put("rollbackGeneration","0")
         var publishes=0;var acks=0;var inits=0;var queries=0;var dropPublish=false;var failQuery=false
         var block:String?=null;val entered=CountDownLatch(1);val unblock=CountDownLatch(1)
@@ -48,7 +50,7 @@ class SyncV2P6ProductTest {
         fun dto(s:JSONObject)=JSONObject().put("version",2).put("scope",s)
         fun response(v:JSONObject)=MockResponse().setHeader("Content-Type","application/json").setBody(SyncV2Codec.canonical(v))
         fun error(code:String)=response(JSONObject().put("error",JSONObject().put("code",code).put("retryable",code=="ref_conflict").put("retryAfterMillis",JSONObject.NULL).put("details",if(code=="ref_conflict")JSONObject().put("currentOid",account.get("commitOid")).put("currentRevision",account.get("revision"))else JSONObject()))).setResponseCode(if(code=="object_missing")404 else if(code=="temporarily_unavailable")503 else 409)
-        fun window(s:JSONObject)=dto(s).put("windowId","aa".repeat(16)).put("issuedAtMillis",now).put("expiresAtMillis",now+300000)
+        fun window(s:JSONObject)=dto(s).put("windowId","aa".repeat(16)).put("issuedAtMillis",now+timeOffsetMillis).put("expiresAtMillis",now+timeOffsetMillis+300000)
             .put("historyFloorMillis",0).put("historyFloorRevision","0").put("serverRevision",account.get("revision")).put("refs",JSONArray(devices.values.sortedBy{it.getString("deviceId")})).put("account",JSONObject(account.toString()))
         fun receipt(s:JSONObject,oid:String,total:Int,offset:Int)=receipt.signed("wrss.sync.v2/object-receipt-sign",JSONObject().put("version",2).put("scope",s).put("oid",oid).put("totalBytes",total).put("durableOffset",offset)
             .put("storeId","99".repeat(16)).put("receiptRevision","1").put("createdAtMillis",now).put("expiresAtMillis",now+604800000))
@@ -70,13 +72,19 @@ class SyncV2P6ProductTest {
                             inits++;val b=body();initBytes.add(SyncV2Codec.canonical(b));concurrentWinner?.let{descriptor=it.descriptor;capsule=it.recoveryCapsule;concurrentWinner=null}
                             if(descriptor!=null && SyncV2Codec.canonical(descriptor)!=SyncV2Codec.canonical(b.getJSONObject("descriptor")))run{if(failAfterConflict)descriptorUnavailable=true;return error("ref_conflict")}
                             descriptor=b.getJSONObject("descriptor");capsule=b.getJSONObject("recoveryCapsule")
+                            boundAliases[r.getHeader("x-watchrss-cloud-device-id")!!]=descriptor!!.getJSONObject("body").getString("creatorDeviceId")
                             if(dropInit){dropInit=false;return MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)}
                             return response(dto(s).put("descriptorOid",SyncV2Codec.oid("repo-descriptor",descriptor)))
                         }
-                        route=="checkpoint"->{val w=window(s).apply{remove("version")}.put("checkpointId","33".repeat(16));return response(receipt.signed("wrss.sync.v2/checkpoint-sign",w).put("version",2).put("scope",s))}
-                        route=="negotiate" || route=="account"->return response(window(s))
+                        route=="checkpoint"->{checkpoints++;val w=window(s).apply{remove("version")}.put("checkpointId","33".repeat(16));return response(receipt.signed("wrss.sync.v2/checkpoint-sign",w).put("version",2).put("scope",s))}
+                        route=="negotiate"->{timeOffsetMillis+=negotiateStepMillis;return response(window(s).also{if(expiredNegotiate)it.put("expiresAtMillis",now-1)})}
+                        route=="account"->return response(window(s))
                         route=="devices/signing-key"->{
                             val b=body();val v=b.getJSONObject("body");val id=v.getString("deviceId")
+                            registrationBodies.add(JSONObject(b.toString()))
+                            val legacy=r.getHeader("x-watchrss-cloud-device-id")!!
+                            if(boundAliases[legacy]?.let{it!=id}==true || boundAliases.any{it.key!=legacy && it.value==id})return error("invalid_schema").setResponseCode(400)
+                            boundAliases[legacy]=id
                             val map=JSONObject().put("scope",s).put("deviceId",id).put("keyId",v.get("keyId")).put("legacyDeviceId",r.getHeader("x-watchrss-cloud-device-id")).put("approvalRevision","1")
                             bindings[id]=b.put("deviceMapping",receipt.signed("wrss.sync.v2/device-mapping",map));return response(dto(s).put("registered",true))
                         }
@@ -157,9 +165,68 @@ class SyncV2P6ProductTest {
             assertEquals(beforeStorage,SyncV2Codec.hex(SyncV2Codec.sha(h.prefs.all.toString().toByteArray())))
         }}
     }
+    @Test fun p6jPendingCreatorOnlyUpgradesAndRegisters()=legacyAliasUpgrade(pending=true,signer=false)
+    @Test fun p6jInstalledCreatorOnlyRecoversServerAlias()=legacyAliasUpgrade(pending=false,signer=false)
+    @Test fun p6jTwoPersistedAliasesWithPendingUpgradeWithoutReplacingKey()=legacyAliasUpgrade(pending=true,signer=true)
+    @Test fun p6jTwoPersistedAliasesAfterPendingDeletionRecoverWithoutReplacingKey()=legacyAliasUpgrade(pending=false,signer=true)
+    @Test fun p6jSignerOnlyReceiverKeepsItsOwnAlias()=legacyAliasUpgrade(pending=false,signer=true,receiver=true)
+    @Test fun p6jLaterWindowRefreshesVerifiedTimeWithoutExtendingItsLifetime() {
+        Server().use {server->Host(server,"a").use{h->
+            server.negotiateStepMillis=25
+            h.note();assertTrue(h.sync().enabled)
+            assertEquals(1,server.publishes);assertEquals("local",server.values().single().getString("markdown"))
+            assertTrue("server time did not advance",server.timeOffsetMillis>0)
+            assertTrue("missing authenticated time refresh",server.checkpoints>4)
+        }}
+    }
+    @Test fun p6jExpiredWindowStillRejectsPublication() {
+        Server().use {server->Host(server,"a").use{h->
+            server.expiredNegotiate=true;h.note()
+            assertEquals("window_expired",runCatching{h.sync()}.exceptionOrNull()?.message)
+            assertEquals(0,server.publishes);assertEquals("local",h.text())
+        }}
+    }
+    private fun legacyAliasUpgrade(pending:Boolean,signer:Boolean,receiver:Boolean=false) {
+        Server().use {server->Host(server,"a").use {h->
+            val life=SyncV2Lifetime{true};val store=SyncV2AccountStore(h.manager,user,life)
+            try {
+                val candidate=SyncV2RepoBootstrap.prepareStored("12".repeat(16),"a","old-epoch","old-generation",1,{server.wrap},store::pending,store::pending)
+                val repo=candidate.scope.getString("repoId")
+                if(!pending) {
+                    server.descriptor=candidate.descriptor;server.capsule=candidate.recoveryCapsule
+                    server.boundAliases[if(receiver)"other"else"a"]=candidate.descriptor.getJSONObject("body").getString("creatorDeviceId")
+                    store.write("secret/pending",null)
+                }
+                val path=SyncV2Codec.hash(JSONObject().put("backend",server.http.url("/").toString()).put("account","12".repeat(16)).put("repo",repo))
+                val counter=File(h.context.noBackupFilesDir,"syncv2/$path.sequence")
+                val old=if(signer) {
+                    SyncV2SigningVault(store,repo,counter,life).use{assertNotNull(it.signerOrNull())}
+                    store.read("local/signing/$repo")!!
+                }else null
+                h.note();assertTrue(h.sync().enabled);assertEquals(1,server.publishes)
+                val current=store.read("local/signing/$repo")!!
+                if(old!=null) {
+                    assertTrue("migration replaced signing private key",old.getString("privateHex")==current.getString("privateHex"))
+                    assertEquals(old.getString("keyId"),current.getString("keyId"))
+                }
+                val device=current.getString("deviceId")
+                assertEquals(if(receiver)old!!.getString("deviceId")else candidate.descriptor.getJSONObject("body").getString("creatorDeviceId"),device)
+                assertEquals(device,h.product.uiPort.value!!.state.value.ownDeviceId)
+                assertEquals("local",server.values().single().getString("markdown"))
+                val registrations=server.registrationBodies.size
+                h.product.release();h.sync()
+                assertEquals(registrations,server.registrationBodies.size)
+                assertTrue("reopen replaced signing private key",current.getString("privateHex")==store.read("local/signing/$repo")!!.getString("privateHex"))
+            }finally{life.close()}
+        }}
+    }
     @Test fun realCreateScanPublishRoomApplyReceiverAndSubsequentSchedule() {
         Server().use {server->Host(server,"a").use{a->
             a.note();assertTrue(a.sync().enabled);assertEquals(1,server.publishes);assertEquals("local",server.values().single().getString("markdown"));assertTrue(server.acks>0)
+            val creator=server.descriptor!!.getJSONObject("body")
+            val registered=server.registrationBodies.first().getJSONObject("body")
+            assertEquals(creator.getString("creatorDeviceId"),registered.getString("deviceId"))
+            assertNotEquals(creator.getString("creatorPublicKey"),SyncV2Codec.hex(SyncV2Codec.decode64(registered.getString("publicKey"),65)))
             val port=a.product.uiPort.value!!;assertNotNull(port.state.value.ownDeviceId)
             a.room.openHelper.writableDatabase.execSQL("UPDATE notes SET markdown='changed',plainText='changed',updatedAt=updatedAt+1 WHERE noteId='note'")
             a.sync();assertEquals(2,server.publishes);assertEquals("changed",server.values().single().getString("markdown"))

@@ -46,7 +46,8 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
             record.getJSONObject("value").getJSONObject("noteConflicts").getJSONArray("records").length()!=0)SyncV2Codec.fail("closure_incomplete")
         return target.map {incoming->
             val m=incoming.getJSONObject("meta");val old=known[m.getString("entityKey")]
-            if(m.getString("kind")!="note" || old==null)incoming else {
+            // F1/R3: an isolated wire row has no value and never joins, validates or reads a body.
+            if(m.getString("kind")!="note" || old==null || incoming.has(SyncV2NoteWiring.ISOLATED_KEY))incoming else {
                 val value=JSONObject(incoming.getJSONObject("value").toString())
                 val set=SyncV2NoteConflicts.merge(old.getJSONObject("value").getJSONObject("noteConflicts"),value.getJSONObject("noteConflicts"),m.getString("logicalId"))
                 if(SyncV2Codec.canonical(set)==SyncV2Codec.canonical(value.getJSONObject("noteConflicts")))incoming else {
@@ -62,8 +63,13 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
     fun validate(rows:List<JSONObject>) {
         val ids=mutableSetOf<String>()
         for(row in rows) {
-            val meta=row.getJSONObject("meta");val value=row.getJSONObject("value");val kind=meta.getString("kind")
-            if(!ids.add(meta.getString("entityKey")) || SyncV2Business.logicalId(kind,value)!=meta.getString("logicalId"))SyncV2Codec.fail("identity_conflict")
+            val meta=row.getJSONObject("meta")
+            if(!ids.add(meta.getString("entityKey")))SyncV2Codec.fail("identity_conflict")
+            // F1/R3: an isolated row is only a verbatim wire row: never joined, never validated,
+            // never asked for a value. Its identity is authenticated by the closure, not here.
+            if(!row.has("value")||row.has(SyncV2NoteWiring.ISOLATED_KEY))continue
+            val value=row.getJSONObject("value");val kind=meta.getString("kind")
+            if(SyncV2Business.logicalId(kind,value)!=meta.getString("logicalId"))SyncV2Codec.fail("identity_conflict")
             val split=SyncV2Business.split(kind,meta.getString("logicalId"),meta.getString("entityKey"),value,null)
             SyncV2Business.join(kind,split.meta,split.state)
             if(kind!="rss-state" && SyncV2Schema.domains.none{it.kind==kind})SyncV2Codec.fail("unsupported_feature")
@@ -84,7 +90,10 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
         val originals=before.associateBy{it.getJSONObject("meta").getString("entityKey")}
         val notes=target.filter{it.getJSONObject("meta").getString("kind")=="note"}
         for(record in target) {
-            val meta=record.getJSONObject("meta");val kind=meta.getString("kind");val v=JSONObject(record.getJSONObject("value").toString())
+            val meta=record.getJSONObject("meta");val kind=meta.getString("kind")
+            // F1/R3: an isolated row applies no business body: the local Room row survives untouched.
+            if(!record.has("value")||record.has(SyncV2NoteWiring.ISOLATED_KEY))continue
+            val v=JSONObject(record.getJSONObject("value").toString())
             if(SyncV2LocalJson.canonical(originals[meta.getString("entityKey")]?.optJSONObject("value"))==SyncV2LocalJson.canonical(v))continue
             when(kind) {
                 "article"->{

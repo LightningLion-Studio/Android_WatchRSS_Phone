@@ -131,7 +131,14 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val mergedObjects=projection.cloudObjects().toMutableMap().apply{putAll(localIndex.objects)}
         val newRefs=localIndex.refs.toMutableList()
         for(cloud in projection.cloudRows()) {
-            val meta=cloud.getJSONObject("meta");val remoteState=cloud.getJSONObject("state");val row=cloud.getJSONObject("row");val entity=row.getString("entityKey")
+            val meta=cloud.getJSONObject("meta");val entity=meta.getString("entityKey")
+            if(cloud.has(SyncV2NoteWiring.ISOLATED_KEY)) {
+                // F1/R3: an isolated row is already the authenticated verbatim row; the normal
+                // publish keeps it untouched and never interprets the local candidate against it.
+                mergedRows[entity]=cloud.getJSONObject("row")
+                continue
+            }
+            val remoteState=cloud.getJSONObject("state");val row=cloud.getJSONObject("row")
             val candidate=projection.candidate(meta.getString("kind"),meta.getString("logicalId"))
             var preservesConflictFacts=false
             if(candidate!=null && (SyncV2Codec.canonical(candidate.first)!=SyncV2Codec.canonical(meta) || SyncV2Codec.canonical(candidate.second)!=SyncV2Codec.canonical(remoteState))) {

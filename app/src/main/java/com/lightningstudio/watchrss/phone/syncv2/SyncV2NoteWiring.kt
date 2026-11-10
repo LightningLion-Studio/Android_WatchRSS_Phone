@@ -18,6 +18,9 @@ internal object SyncV2NoteWiring {
     const val SEGMENTS_KEY = "wireSegmentOids"
     const val REFS_MAPS_KEY = "wireRefsMaps"
     const val REVISION_KEY = "wireNoteRevision"
+    /** Pull-side per-entity staging marker (F2/R4): the cloud-row body and raw bytes were
+     * handed off while this entity was processed and reach the cache through the staging tables. */
+    const val PULL_STAGED_KEY = "pullStaged"
 
     /** One closure context for both entries so read errors never depend on the caller. */
     fun context(identity: SyncV2Identity, authors: SyncV2Authors?, contentKey: (Long) -> ByteArray, own: SyncV2Signing? = null) =

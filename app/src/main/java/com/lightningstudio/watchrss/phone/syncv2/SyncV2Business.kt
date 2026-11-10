@@ -131,7 +131,10 @@ internal object SyncV2Business {
     }
     fun join(kind: String, meta: JSONObject, state: JSONObject): JSONObject {
         val m=meta.getJSONObject("payload"); val s=state.getJSONObject("payload")
-        if(m.keys().asSequence().any{s.has(it) && !(it in setOf("contentHash","baseContentHash") && m.get(it)==s.get(it))}) SyncV2Codec.fail("invalid_schema")
+        // The duplicate-key exemption exists only for the frozen W2 note hash placement
+        // (contentHash/baseContentHash migrated from meta to state). Any other overlap,
+        // for any kind, stays the invalid_schema violation.
+        if(m.keys().asSequence().any{s.has(it) && !(kind=="note" && it in setOf("contentHash","baseContentHash") && m.get(it)==s.get(it))}) SyncV2Codec.fail("invalid_schema")
         val out=JSONObject(m.toString())
         for(key in s.keys()) {
             if(key=="readingProgressMicros") {

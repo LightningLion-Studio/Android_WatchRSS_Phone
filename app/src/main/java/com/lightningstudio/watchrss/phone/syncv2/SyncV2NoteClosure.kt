@@ -9,7 +9,10 @@ import org.json.JSONObject
  * No business writes and no applied ACK happen here; any failure aborts the caller's round.
  */
 internal object SyncV2NoteClosure {
-    class Mapping(val info: JSONObject, val raw: ByteArray)
+    class Mapping(val info: JSONObject, private val read:()->ByteArray) {
+        constructor(info:JSONObject,raw:ByteArray):this(info,{raw})
+        val raw get()=read()
+    }
     class Segment(val oid: String, val sealed: ByteArray, val plain: ByteArray, val value: JSONObject, val mapping: Mapping)
     class Closed(val ordinary: JSONObject, val streamBytes: Long, val segments: List<Segment>)
     class Context(val scope: JSONObject, val opaque: (String, ByteArray) -> String,
@@ -24,25 +27,27 @@ internal object SyncV2NoteClosure {
         }
         return null
     }
-    private fun stateBounds(bytes: ByteArray, header: JSONObject?) {
+    private fun stateBounds(size: Int, header: JSONObject?) {
         if (header != null && header.has("plainBytes") && SyncV2Wire.uint(header, "plainBytes", Long.MAX_VALUE) > SyncV2NoteSegments.LIMIT ||
-            bytes.size > SyncV2NoteSegments.LIMIT + SyncV2NoteSegments.SEALED_OVERHEAD) SyncV2Codec.fail("object_too_large")
+            size > SyncV2NoteSegments.LIMIT + SyncV2NoteSegments.SEALED_OVERHEAD) SyncV2Codec.fail("object_too_large")
     }
-    private fun refsEncoding(raw: ByteArray) { SyncV2Wire.parse(raw, SyncV2NoteSegments.LIMIT, true) }
+    private fun refsEncoding(raw: ByteArray) { SyncV2Wire.parse(raw, Int.MAX_VALUE, true) }
     private fun refsSize(raw: ByteArray) { refsEncoding(raw); if (raw.size > SyncV2NoteSegments.LIMIT) SyncV2Codec.fail("object_too_large") }
 
     /** All obtained raw encodings before any size failure: traversal order never changes the first error. */
     private fun sizes(bytes: ByteArray, objects: Map<String, ByteArray>, tables: Map<String, Mapping>) {
         for (t in tables.values) refsEncoding(t.raw)
-        val pairs = (listOf(bytes) + objects.values).map { it to stateHeader(it) }
+        val pairs=mutableListOf(bytes.size to stateHeader(bytes))
+        for(b in objects.values)pairs.add(b.size to stateHeader(b))
         for (t in tables.values) if (t.raw.size > SyncV2NoteSegments.LIMIT) SyncV2Codec.fail("object_too_large")
-        for ((b, h) in pairs) stateBounds(b, h)
+        for ((size, h) in pairs) stateBounds(size, h)
     }
     private fun hashes(oid: String, bytes: ByteArray, objects: Map<String, ByteArray>, tables: Map<String, Mapping>) {
         if ("state:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(bytes))}" != oid) SyncV2Codec.fail("hash_mismatch")
         for ((id, b) in objects) if ("state:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(b))}" != id) SyncV2Codec.fail("hash_mismatch")
         for ((_, t) in tables) if (Regex("state-refs:sha256:[0-9a-f]{64}").matches(SyncV2Wire.string(t.info, "refsOid")) &&
-            "state-refs:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(t.raw))}" != SyncV2Wire.string(t.info, "refsOid")) SyncV2Codec.fail("hash_mismatch")
+            ("state-refs:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(t.raw))}" != SyncV2Wire.string(t.info, "refsOid") ||
+                (t.info.opt("totalBytes") is Int || t.info.opt("totalBytes") is Long) && (t.info.get("totalBytes") as Number).toLong()!=t.raw.size.toLong())) SyncV2Codec.fail("hash_mismatch")
     }
 
     /** Verifies one signed refs mapping against its parent and returns the published segment list. */
@@ -53,13 +58,13 @@ internal object SyncV2NoteClosure {
         val field = if (type == "state") "segmentOids" else "blobOids"
         SyncV2Codec.exact(body, setOf("scope", "${type}Oid", field))
         val ids = body.optJSONArray(field) ?: SyncV2Codec.fail("invalid_schema")
+        val refsOid = SyncV2Wire.oid(SyncV2Wire.string(t.info, "refsOid"), "$type-refs")
+        if (refsOid != "$type-refs:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(t.raw))}" ||
+            SyncV2Wire.uint(t.info, "totalBytes", 262144) != t.raw.size.toLong()) SyncV2Codec.fail("hash_mismatch")
         SyncV2Codec.scope(body.getJSONObject("scope")); SyncV2Codec.scope(t.info.getJSONObject("scope"))
         if (SyncV2Codec.canonical(t.info.getJSONObject("scope")) != SyncV2Codec.canonical(ctx.scope) ||
             SyncV2Codec.canonical(body.getJSONObject("scope")) != SyncV2Codec.canonical(ctx.scope)) SyncV2Codec.fail("scope_mismatch")
         if (SyncV2Wire.string(body, "${type}Oid") != oid || t.info.get("parentOid") != oid) SyncV2Codec.fail("invalid_schema")
-        val refsOid = SyncV2Wire.oid(SyncV2Wire.string(t.info, "refsOid"), "$type-refs")
-        if (refsOid != "$type-refs:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(t.raw))}" ||
-            SyncV2Wire.uint(t.info, "totalBytes", 262144) != t.raw.size.toLong()) SyncV2Codec.fail("hash_mismatch")
         val list = SyncV2Wire.strings(ids, SyncV2NoteSegments.MAX, false)
         if (list.distinct().size != list.size) SyncV2Codec.fail("invalid_schema")
         list.forEach { SyncV2Wire.oid(it, "state") }
@@ -75,7 +80,7 @@ internal object SyncV2NoteClosure {
         if (len !in 1..4096 || 24L + len > bytes.size) SyncV2Codec.fail("invalid_encoding")
         val h = SyncV2Wire.parse(bytes.copyOfRange(8, 8 + len), 4096, true)
         val version = SyncV2Wire.uint(h, "keyVersion", 4294967295)
-        val plain = SyncV2Envelope.open(ctx.scope, ctx.opaque, ctx.contentKey(version), oid, bytes, version)
+        val plain = SyncV2Envelope.open(ctx.scope, ctx.opaque, ctx.contentKey(version), oid, bytes, version,lengthError="invalid_schema")
         return Opened(h, SyncV2Wire.parse(plain, 262144, true), plain)
     }
 
@@ -87,11 +92,17 @@ internal object SyncV2NoteClosure {
      */
     fun authenticate(ctx: Context, state: JSONObject, oid: String, bytes: ByteArray,
         objectFor: (String) -> ByteArray?, table: (String) -> Mapping?, supported: Set<String>,
-        maxBytes: Long = SyncV2NoteSegments.maxNoteBytes): Closed {
+        maxBytes: Long = SyncV2NoteSegments.maxNoteBytes, objectsStore:(()->MutableMap<String,ByteArray>)?=null): Closed = SyncV2Wire.schema {
+        authenticateChecked(ctx,state,oid,bytes,objectFor,table,supported,maxBytes,objectsStore)
+    }
+    private fun authenticateChecked(ctx: Context, state: JSONObject, oid: String, bytes: ByteArray,
+        objectFor: (String) -> ByteArray?, table: (String) -> Mapping?, supported: Set<String>,
+        maxBytes:Long,objectsStore:(()->MutableMap<String,ByteArray>)?):Closed {
         if (!SyncV2NoteSegments.structure(state, supported)) SyncV2Codec.fail("invalid_schema")
         val ids = SyncV2Wire.strings(state.getJSONArray("noteSegments"), SyncV2NoteSegments.MAX, false)
         val all = listOf(oid) + ids
-        val objects = linkedMapOf<String, ByteArray>(); val tables = linkedMapOf<String, Mapping>()
+        val objects = objectsStore?.invoke()?:linkedMapOf<String, ByteArray>(); val tables = linkedMapOf<String, Mapping>()
+        try {
         for (id in all) {
             val t = try { table(id) } catch (e: IllegalStateException) {
                 if (e.message in setOf("object_missing", "not_found", "closure_incomplete")) null else throw e
@@ -109,8 +120,14 @@ internal object SyncV2NoteClosure {
         var resident = bytes.size.toLong()
         for (t in tables.values) resident += t.raw.size
         for (b in objects.values) resident += b.size
-        if (resident > maxBytes) SyncV2Codec.fail("storage_pressure")
         hashes(oid, bytes, objects, tables)
+        // This is a physical allocation cap, independent of the publish/read meter. Scan
+        // all available encodings, bounds, missing items and hashes first (25.5 steps 1-6).
+        val overhead=SyncV2NoteSegments.SEALED_OVERHEAD.toLong()*ids.size
+        val hardCap=if(maxBytes>(Long.MAX_VALUE-overhead)/3)Long.MAX_VALUE else 3*maxBytes+overhead
+        var plainBytes=0L
+        for(b in listOf(bytes).asSequence()+objects.values.asSequence())plainBytes+=(stateHeader(b)?.opt("plainBytes") as? Number)?.toLong()?:0
+        if(resident>hardCap||plainBytes>hardCap)SyncV2Codec.fail("storage_pressure")
         val parent = open(ctx, oid, bytes)
         if (SyncV2Codec.canonical(parent.value) != SyncV2Codec.canonical(state)) SyncV2Codec.fail("invalid_schema")
         if (SyncV2Wire.string(parent.header, "type") != "state") SyncV2Codec.fail("invalid_schema")
@@ -118,10 +135,17 @@ internal object SyncV2NoteClosure {
         val published = verifyRefs(ctx, tables.getValue(oid), oid, "state")
         if (SyncV2Codec.canonical(published) != SyncV2Codec.canonical(state.getJSONArray("noteSegments"))) SyncV2Codec.fail("invalid_schema")
         for (id in ids) if (verifyRefs(ctx, tables.getValue(id), id, "state").length() != 0) SyncV2Codec.fail("invalid_schema")
-        val ordinary = SyncV2NoteSegments.reassemble(state, values.map { it.value }, maxBytes)
+        val ordinary = SyncV2NoteSegments.reassemble(state, values.map { it.value }, Long.MAX_VALUE / 4)
+        // M1b: publish and read use the same escaped text meter. Sealed bytes are only
+        // a separate physical hard cap, after the complete 25.5 authentication order.
+        if (SyncV2NoteSegments.measure(ordinary.getString("entityKey"), ordinary.getJSONObject("payload"),
+                ordinary.getJSONArray("requiredFeatures")).streamBytes > maxBytes ||
+            resident > hardCap)
+            SyncV2Codec.fail("storage_pressure")
         val streamBytes = values.sumOf { it.value.getJSONObject("payload").getString("text").let { text -> SyncV2Codec.utf8(text).size.toLong() } }
         val segments = ids.mapIndexed { i, id -> Segment(id, objects.getValue(id), values[i].plain, values[i].value, tables.getValue(id)) }
         return Closed(ordinary, streamBytes, segments)
+        }finally{(objects as? AutoCloseable)?.close()}
     }
 
     /** Authenticated reuse cache for the previous segments of one binding (spec 25.7). */

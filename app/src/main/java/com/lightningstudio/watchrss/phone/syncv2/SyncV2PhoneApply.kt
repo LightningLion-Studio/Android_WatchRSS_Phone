@@ -7,7 +7,7 @@ import org.json.JSONObject
 /** Room business rows and the projection state commit on the same SQLite connection.
  * Immutable original files are never deleted here. Unknown/new bodies remain placeholders. */
 internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
-    private fun scalar(table:String,key:String,id:String,columns:String="*"):JSONObject? = db.query("SELECT $columns FROM `$table` WHERE `$key`=?",arrayOf(id)).use{c->
+    private fun scalar(table:String,key:String,id:String,columns:String="*"):JSONObject? = db.controlQuery("SELECT $columns FROM `$table` WHERE `$key`=?",arrayOf(id)).use{c->
         if(!c.moveToFirst())null else JSONObject().also{v->for(i in 0 until c.columnCount)v.put(c.getColumnName(i),when {
             c.isNull(i)->JSONObject.NULL
             c.getType(i)==android.database.Cursor.FIELD_TYPE_INTEGER->c.getLong(i)
@@ -15,13 +15,13 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
             else->c.getString(i)
         })}
     }
-    private fun upsert(table:String,keys:List<String>,values:JSONObject) {
-        val columns=db.query("PRAGMA table_info(`$table`)").use{c->buildList{while(c.moveToNext())add(Triple(c.getString(1),c.getString(2),c.getInt(3)!=0))}}
+    internal fun upsert(table:String,keys:List<String>,values:JSONObject) {
+        val columns=db.controlQuery("PRAGMA table_info(`$table`)").use{c->buildList{while(c.moveToNext())add(Triple(c.getString(1),c.getString(2),c.getInt(3)!=0))}}
         val supplied=values.keys().asSequence().toSet()
         // A complete new Room row uses the existing storage types. Unknown wire fields never
         // become columns; projection sidecars retain their authenticated representation.
         fun argument(v:Any?):Any?=when(v){JSONObject.NULL->null;is Boolean->if(v)1L else 0L;else->v}
-        val existing=db.query("SELECT 1 FROM `$table` WHERE ${keys.joinToString(" AND "){"`$it`=?"}}",keys.map{argument(values.get(it))}.toTypedArray()).use{it.moveToFirst()}
+        val existing=db.controlQuery("SELECT 1 FROM `$table` WHERE ${keys.joinToString(" AND "){"`$it`=?"}}",keys.map{argument(values.get(it))}.toTypedArray()).use{it.moveToFirst()}
         if(existing) {
             val updates=columns.map{it.first}.filter{it in supplied && it !in keys}
             if(updates.isNotEmpty())db.execSQL("UPDATE `$table` SET ${updates.joinToString(","){"`$it`=?"}} WHERE ${keys.joinToString(" AND "){"`$it`=?"}} AND (${updates.joinToString(" OR "){"`$it` IS NOT ?"}})",(updates+keys+updates).map{argument(values.get(it))}.toTypedArray())
@@ -40,11 +40,11 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
      * replacement uses the exact selected snapshot instead. Wire provenance stays separate. */
     fun effective(before:List<JSONObject>,target:List<JSONObject>,replaceConflicts:Boolean):List<JSONObject> {
         if(replaceConflicts)return target
-        val known=before.associateBy{it.getJSONObject("meta").getString("entityKey")}
+        val known=before.indexRows()
         val present=target.map{it.getJSONObject("meta").getString("entityKey")}.toSet()
         for((entity,record)in known)if(entity !in present && record.getJSONObject("meta").getString("kind")=="note" &&
             record.getJSONObject("value").getJSONObject("noteConflicts").getJSONArray("records").length()!=0)SyncV2Codec.fail("closure_incomplete")
-        return target.map {incoming->
+        return target.mapRows {incoming->
             val m=incoming.getJSONObject("meta");val old=known[m.getString("entityKey")]
             // F1/R3: an isolated wire row has no value and never joins, validates or reads a body.
             if(m.getString("kind")!="note" || old==null || incoming.has(SyncV2NoteWiring.ISOLATED_KEY))incoming else {
@@ -87,14 +87,17 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
             if(d.kind=="note")db.execSQL("DELETE FROM note_conflicts WHERE noteId=?",arrayOf(id))
             if(d.kind=="book")db.execSQL("DELETE FROM imported_book_chapters WHERE bookId=?",arrayOf(id))
         }
-        val originals=before.associateBy{it.getJSONObject("meta").getString("entityKey")}
-        val notes=target.filter{it.getJSONObject("meta").getString("kind")=="note"}
+        val originals=before.indexRows()
+        val notes=target.indices.filter{target[it].getJSONObject("meta").getString("kind")=="note" && target[it].has("value")}.mapRows{target[it]}
         for(record in target) {
             val meta=record.getJSONObject("meta");val kind=meta.getString("kind")
             // F1/R3: an isolated row applies no business body: the local Room row survives untouched.
             if(!record.has("value")||record.has(SyncV2NoteWiring.ISOLATED_KEY))continue
             val v=JSONObject(record.getJSONObject("value").toString())
-            if(SyncV2LocalJson.canonical(originals[meta.getString("entityKey")]?.optJSONObject("value"))==SyncV2LocalJson.canonical(v))continue
+            // A quarantined source may retain a local body after its edit was saved as a
+            // fork. Reopening it must restore the authenticated note even if its candidate
+            // equals the incoming value. upsert's IS NOT guard keeps unchanged Room rows quiet.
+            if(kind!="note"&&SyncV2LocalJson.canonical(originals[meta.getString("entityKey")]?.optJSONObject("value"))==SyncV2LocalJson.canonical(v))continue
             when(kind) {
                 "article"->{
                     val old=scalar("phone_articles","articleId",v.getString("articleId"),"contentHash")
@@ -120,7 +123,7 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
                     // A confirmed cloud choice may replace the current conflict channel. The
                     // discarded local channel is part of the encrypted minimal recovery value.
                     val a=conflicts.getJSONArray("records");val ids=(0 until a.length()).map{a.getJSONObject(it).getString("conflictId")}.toSet()
-                    val oldIds=db.query("SELECT conflictId FROM note_conflicts WHERE noteId=?",arrayOf(v.getString("noteId"))).use{c->buildList{while(c.moveToNext())add(c.getString(0))}}
+                    val oldIds=db.controlQuery("SELECT conflictId FROM note_conflicts WHERE noteId=?",arrayOf(v.getString("noteId"))).use{c->buildList{while(c.moveToNext())add(c.getString(0))}}
                     for(id in oldIds)if(id !in ids)db.execSQL("DELETE FROM note_conflicts WHERE noteId=? AND conflictId=?",arrayOf(v.getString("noteId"),id))
                     for(i in 0 until a.length())upsert("note_conflicts",listOf("conflictId"),a.getJSONObject(i))
                 }
@@ -136,7 +139,7 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
                 }
             }
         }
-        val rss=if((before+target).any{it.getJSONObject("meta").getString("kind")=="rss-state"})SyncV2RssApply(db,before+target)else null
+        val rss=if((before.asSequence()+target.asSequence()).any{it.getJSONObject("meta").getString("kind")=="rss-state"})SyncV2RssApply(db,before.plusRows(target))else null
         rss?.apply(target,before)
         return rss
     }

@@ -16,7 +16,7 @@ internal class SyncV2AccountCatalog(private val db:SupportSQLiteDatabase,private
     fun finish(body:JSONObject){archiveHeaders(body);for(kind in kinds)body.put("p5Selector/$kind",roots[kind]?:JSONObject.NULL)}
     fun reset(){writeTrees.clear();for(kind in kinds)if(kind!="headers")roots[kind]=null}
     private fun root(kind:String)=if(db.inTransaction())roots[kind]else state().optString("p5Selector/$kind").takeIf{it.isNotEmpty() && it!="null"}
-    private fun entry(entity:String):JSONObject?=db.query("SELECT auth FROM syncv2_p5_catalog WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{c->
+    private fun entry(entity:String):JSONObject?=db.controlQuery("SELECT auth FROM syncv2_p5_catalog WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{c->
         if(!c.moveToFirst())null else {if(c.isNull(0))SyncV2Codec.fail("closure_incomplete");open("catalog-entry",c.getBlob(0)).also{if(it.getString("entityKey")!=entity)SyncV2Codec.fail("identity_conflict")}}
     }
     private fun persist(value:JSONObject) {
@@ -62,21 +62,28 @@ internal class SyncV2AccountCatalog(private val db:SupportSQLiteDatabase,private
     fun kindOf(entity:String)=entry(entity)?.getString("kind")
     fun typedIds(kind:String):Set<String> {check(kind in setOf("rss-state","source"));return listOf("candidate","cloud").flatMap{side->SyncV2SelectorTree(db,scope,"$side/$kind").read(root("$side/$kind"),65).keys}.toSet()}
     fun differences()=SyncV2SelectorTree(db,scope,"differences").read(root("differences"),65).keys
-    fun channels(side:String):JSONObject {
-        check(side in setOf("candidate","cloud"));val out=JSONObject()
-        val entries=SyncV2SelectorTree(db,scope,"$side-notes").read(root("$side-notes"))
-        for((entity,hash)in entries) {
-            val bytes=db.query("SELECT body FROM syncv2_p5_channels WHERE scope=? AND side=? AND entity_key=?",arrayOf(scope,side,entity)).use{if(!it.moveToFirst())SyncV2Codec.fail("closure_incomplete");it.getBlob(0)}
+    fun channelRows(side:String):Map<String,JSONObject> {
+        check(side in setOf("candidate","cloud"))
+        val channelHashes=SyncV2SelectorTree(db,scope,"$side-notes").read(root("$side-notes"))
+        fun read(entity:String):JSONObject? {
+            val hash=channelHashes[entity]?:return null
+            val bytes=db.controlQuery("SELECT body FROM syncv2_p5_channels WHERE scope=? AND side=? AND entity_key=?",arrayOf(scope,side,entity)).use{if(!it.moveToFirst())SyncV2Codec.fail("closure_incomplete");it.getBlob(0)}
             if(SyncV2Codec.hex(SyncV2Codec.sha(bytes))!=hash)SyncV2Codec.fail("hash_mismatch")
             val value=open("channel",bytes);if(value.getString("entityKey")!=entity)SyncV2Codec.fail("identity_conflict")
             if(value.isNull("noteConflicts"))SyncV2Codec.fail("unsupported_feature")
-            out.put(entity,JSONObject().put("identity",value.getString("identity")).put("noteConflicts",value.getJSONObject("noteConflicts")))
-        };return out
+            return JSONObject().put("identity",value.getString("identity")).put("noteConflicts",value.getJSONObject("noteConflicts"))
+        }
+        return object:AbstractMap<String,JSONObject>() {
+            override val keys get()=channelHashes.keys
+            override fun get(key:String)=read(key)
+            override val entries get()=keys.map{key->object:Map.Entry<String,JSONObject>{override val key=key;override val value get()=read(key)?:SyncV2Codec.fail("closure_incomplete")}}.toSet()
+        }
     }
+    fun channels(side:String)=JSONObject().also{out->for((entity,value)in channelRows(side))out.put(entity,value)}
     fun header(oid:String):JSONObject? {
         val hash=if(db.inTransaction())tree("headers").find(root("headers"),oid.substringAfter(":sha256:"))else SyncV2SelectorTree(db,scope,"headers").find(root("headers"),oid.substringAfter(":sha256:"))
         if(hash==null)return null
-        val bytes=db.query("SELECT body FROM syncv2_p5_header_archive WHERE scope=? AND oid=?",arrayOf(scope,oid)).use{if(!it.moveToFirst())SyncV2Codec.fail("closure_incomplete");it.getBlob(0)}
+        val bytes=db.controlQuery("SELECT body FROM syncv2_p5_header_archive WHERE scope=? AND oid=?",arrayOf(scope,oid)).use{if(!it.moveToFirst())SyncV2Codec.fail("closure_incomplete");it.getBlob(0)}
         if(SyncV2Codec.hex(SyncV2Codec.sha(bytes))!=hash)SyncV2Codec.fail("hash_mismatch")
         return open("header-archive",bytes).also{if(it.getString("oid")!=oid || SyncV2Codec.oid("commit",it.getJSONObject("header").getJSONObject("body"))!=oid)SyncV2Codec.fail("identity_conflict")}
     }
@@ -108,7 +115,7 @@ internal class SyncV2AccountCatalog(private val db:SupportSQLiteDatabase,private
         put("cloud",record);val value=entry(entity)?:SyncV2Codec.fail("closure_incomplete")
         persist(value.put("rowHash",SyncV2Codec.hash(record)).put("refs",refsOid?:JSONObject.NULL))
     }
-    fun refs(parent:String)=db.query("SELECT body FROM syncv2_p5_ref_index WHERE scope=? AND parent_oid=?",arrayOf(scope,parent)).use{c->if(!c.moveToFirst())null else {
+    fun refs(parent:String)=db.controlQuery("SELECT body FROM syncv2_p5_ref_index WHERE scope=? AND parent_oid=?",arrayOf(scope,parent)).use{c->if(!c.moveToFirst())null else {
         if(c.isNull(0))SyncV2Codec.fail("closure_incomplete");val value=open("refs-map",c.getBlob(0));if(value.getString("parent")!=parent)SyncV2Codec.fail("identity_conflict");value.getString("oid")
     }}
     fun putRefs(parent:String,oid:String){check(db.inTransaction());db.execSQL("INSERT OR REPLACE INTO syncv2_p5_ref_index VALUES(?,?,?,?)",arrayOf(scope,parent,oid,seal("refs-map",JSONObject().put("parent",parent).put("oid",oid))))}

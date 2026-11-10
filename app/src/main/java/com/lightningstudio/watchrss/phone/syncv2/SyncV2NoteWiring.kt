@@ -31,7 +31,7 @@ internal object SyncV2NoteWiring {
 
     fun binding(db: SupportSQLiteDatabase, scope: String, entity: String): JSONObject? {
         SyncV2Codec.unhex(entity, 32)
-        return db.query("SELECT note_revision,deleted,invalidated FROM syncv2_note_bindings WHERE scope=? AND entity_key=?",
+        return db.controlQuery("SELECT note_revision,deleted,invalidated FROM syncv2_note_bindings WHERE scope=? AND entity_key=?",
             arrayOf(scope, entity)).use { c -> if (!c.moveToFirst()) null
             else JSONObject().put("noteRevision", if (c.isNull(0)) JSONObject.NULL else c.getString(0)).put("deleted", c.getInt(1) != 0).put("invalidated", c.getInt(2) != 0) }
     }
@@ -71,11 +71,11 @@ internal object SyncV2NoteWiring {
 
     /** True when the entity still has unpublished local edits (outbox journal, ruling M1). */
     fun outboxOwned(db: SupportSQLiteDatabase, scope: String, entity: String): Boolean =
-        db.query("SELECT 1 FROM syncv2_candidates c JOIN syncv2_outbox o ON o.scope=c.scope AND o.logical_id=c.logical_id WHERE c.scope=? AND c.entity_key=? LIMIT 1",
+        db.controlQuery("SELECT 1 FROM syncv2_candidates c JOIN syncv2_outbox o ON o.scope=c.scope AND o.logical_id=c.logical_id WHERE c.scope=? AND c.entity_key=? LIMIT 1",
             arrayOf(scope, entity)).use { it.moveToFirst() }
 
     private fun storedBytes(db: SupportSQLiteDatabase, scope: String, oid: String): ByteArray? =
-        db.query("SELECT body FROM syncv2_cloud_objects WHERE scope=? AND oid=?", arrayOf(scope, oid)).use { c ->
+        db.controlQuery("SELECT body FROM syncv2_cloud_objects WHERE scope=? AND oid=?", arrayOf(scope, oid)).use { c ->
             if (!c.moveToFirst()) null else c.getBlob(0).also {
                 if (oid.substringAfter(":sha256:") != SyncV2Codec.hex(SyncV2Codec.sha(it))) SyncV2Codec.fail("hash_mismatch")
             }
@@ -89,7 +89,8 @@ internal object SyncV2NoteWiring {
      */
     class Sealed(val parentOid: String, val parentBytes: ByteArray, val parentRefs: JSONObject,
         val childRefs: List<JSONObject>, val segmentOids: List<String>, val objects: Map<String, ByteArray>,
-        val uploaded: Int, val reused: Int, val noteRevision: String, val upperBound: Long, val streamBytes: Long)
+        val uploaded: Int, val reused: Int, val noteRevision: String, val upperBound: Long, val streamBytes: Long,
+        internal val reservation:SyncV2NoteBudget.Reservation):AutoCloseable {override fun close()=reservation.close()}
 
     fun seal(identity: SyncV2Identity, signer: SyncV2Signing, contentKey: ByteArray, keyVersion: Long,
         db: SupportSQLiteDatabase, scope: String, entityKey: String, ordinaryState: JSONObject,
@@ -150,10 +151,13 @@ internal object SyncV2NoteWiring {
         }
         // Persist the binding with the publish staging decision (25.3). A local delete records the
         // lifetime boundary {deleted, invalidated} so a rebuild can never reuse sealed segments (R2).
+        val reservation=SyncV2NoteBudget.reserve(db,scope,entityKey,m.shortPlainBytes,encoded.closureStoredBytesUpperBound)
+        try {
         val removing = payload.optBoolean("deleted", false)
         putBinding(db, scope, entityKey, revision, removing, removing && priorExisted(db, scope, entityKey))
         return Sealed(parentOid, parentBytes.bytes, parentRefs, childRefs, ids, objects,
-            uploaded, reused, revision, encoded.closureStoredBytesUpperBound, encoded.streamBytes)
+            uploaded, reused, revision, encoded.closureStoredBytesUpperBound, encoded.streamBytes,reservation)
+        }catch(e:Throwable){reservation.close();throw e}
     }
 
     private class ReusableIndex(val cache: Map<String, Triple<String, ByteArray, ByteArray>>) {

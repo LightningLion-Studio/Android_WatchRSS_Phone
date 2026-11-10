@@ -140,6 +140,7 @@ internal object SyncV2NoteSegments {
         empty.keys().forEach { shortRoot.put(it, "") }
         val shortPlainBytes = add(canonicalSize(root(entityKey, shortRoot, ordinaryFeatures)), extra)
         val streamBytes = add(SyncV2Codec.utf8(SyncV2Codec.canonical(empty)).size.toLong(), extra)
+        if(streamBytes>maxStreamBytes)SyncV2Codec.fail("storage_pressure")
         return Measure(fields, metadata, ordinaryFeatures, shortPlainBytes, streamBytes)
     }
 
@@ -283,7 +284,7 @@ internal object SyncV2NoteSegments {
             val text = SyncV2Wire.string(q, "text")
             val bytes = SyncV2Codec.utf8(text)
             if (text.isEmpty()) SyncV2Codec.fail("invalid_schema")
-            if (bytes.size > TEXT) SyncV2Codec.fail("object_too_large")
+            if (bytes.size > TEXT) SyncV2Codec.fail("invalid_schema")
             if (SyncV2Codec.utf8(SyncV2Codec.canonical(v)).size > LIMIT) SyncV2Codec.fail("object_too_large")
             total = add(total, bytes.size.toLong())
             if (total > maxBytes) SyncV2Codec.fail("storage_pressure")
@@ -291,7 +292,7 @@ internal object SyncV2NoteSegments {
         }
         if (SyncV2Codec.hex(digest.digest()) != SyncV2Wire.string(p, "plaintextSha256")) SyncV2Codec.fail("hash_mismatch")
         val joined = texts.joinToString("")
-        val decoded = try { SyncV2Wire.parse(SyncV2Codec.utf8(joined), (maxBytes + 4096).toInt(), true) }
+        val decoded = try { SyncV2Wire.parse(SyncV2Codec.utf8(joined), minOf(Int.MAX_VALUE.toLong(), maxBytes + 4096).toInt(), true) }
         catch (e: IllegalStateException) { if (e.message == "object_too_large") SyncV2Codec.fail("invalid_encoding") else throw e }
         if (decoded.keys().asSequence().any { it !in names || decoded.get(it) !is String }) SyncV2Codec.fail("invalid_schema")
         val metadata = p.getJSONObject("metadata")

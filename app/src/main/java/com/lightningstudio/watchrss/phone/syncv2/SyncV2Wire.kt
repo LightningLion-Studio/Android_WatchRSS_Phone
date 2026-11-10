@@ -28,7 +28,6 @@ internal object SyncV2Wire {
         if (values.any { !Regex("[a-z0-9][a-z0-9.-]{0,63}").matches(it) }) SyncV2Codec.fail("invalid_schema")
     }
     fun parse(bytes: ByteArray, limit: Int = 1048576, canonical: Boolean = false): JSONObject = SyncV2LocalProfile.time("json.parse",bytes.size.toLong()) {
-        if (bytes.size > limit) SyncV2Codec.fail("object_too_large")
         val text = try { Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString() }
         catch (_: Exception) { SyncV2Codec.fail("invalid_encoding") }
@@ -36,6 +35,7 @@ internal object SyncV2Wire {
         val value = parser.value(0) as? JSONObject ?: SyncV2Codec.fail("invalid_encoding")
         parser.space()
         if (parser.at != text.length || (canonical && SyncV2Codec.canonical(value) != text)) SyncV2Codec.fail("invalid_encoding")
+        if (bytes.size > limit) SyncV2Codec.fail("object_too_large")
         value
     }
     private class Parser(val text: String) {

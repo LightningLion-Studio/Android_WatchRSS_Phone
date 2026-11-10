@@ -8,19 +8,21 @@ internal class SyncV2AccountSparseMetadata(private val projection:SyncV2Projecti
     private val db get()=projection.accountDatabase
     private val scope get()=projection.scope
     fun objects(rows:List<JSONObject>,supplied:Map<String,ByteArray>):Map<String,ByteArray> {
-        val out=supplied.toMutableMap()
+        val available=objectOverlay(projection.cloudObjects(),supplied);val needed=supplied.keys.toMutableSet()
         for(record in rows) {
             val row=record.getJSONObject("row")
-            for(field in listOf("metaOid","stateOid")){val oid=row.getString(field);if(oid !in out)out[oid]=projection.accountObject(oid)}
-            val refs=projection.accountCatalog.refs(row.getString("stateOid"))?:SyncV2Codec.fail("closure_incomplete")
-            if(refs !in out)out[refs]=projection.accountObject(refs)
-        };return out
+            for(field in listOf("metaOid","stateOid"))needed.add(row.getString(field))
+            val refs=projection.accountCatalog.refs(row.getString("stateOid"))
+            if(refs==null&&!record.has(SyncV2NoteWiring.ISOLATED_KEY))SyncV2Codec.fail("closure_incomplete")
+            if(refs!=null&&refs in available.keys)needed.add(refs)
+        }
+        return available.selectObjects{it in needed}
     }
     fun replace(st:SyncV2Projection.State,account:JSONObject,root:String,ids:Set<String>,rows:List<JSONObject>,
         objects:Map<String,ByteArray>,retiredTrees:Set<String>,serverRevision:String) {
         check(db.inTransaction());SyncV2Codec.d64(serverRevision)
-        val catalog=projection.accountCatalog;val byId=rows.associateBy{it.getJSONObject("meta").getString("entityKey")}
-        val cache=mutableMapOf<String,ByteArray>();fun read(oid:String)=objects[oid]?:cache.getOrPut(oid){projection.accountObject(oid)}
+        val catalog=projection.accountCatalog;val byId=rows.indexRows()
+        fun read(oid:String)=objects[oid]?:projection.accountObject(oid)
         for((oid,bytes)in objects)if(oid.startsWith("state-refs:")) {
             val refs=SyncV2Wire.parse(bytes,262144,true);if(SyncV2Codec.oid("state-refs",refs)!=oid)SyncV2Codec.fail("hash_mismatch")
             catalog.putRefs(refs.getJSONObject("body").getString("stateOid"),oid)
@@ -49,11 +51,22 @@ internal class SyncV2AccountSparseMetadata(private val projection:SyncV2Projecti
             if(next==null) {
                 db.execSQL("DELETE FROM syncv2_cloud_rows WHERE scope=? AND entity_key=?",arrayOf(scope,id));catalog.remove("cloud",id)
             }else {
-                val normalized=JSONObject().put("meta",next.getJSONObject("meta")).put("state",next.getJSONObject("state")).put("row",next.getJSONObject("row"))
+                val normalized=JSONObject(next.toString()).apply{for(key in listOf("value","wire","p5Base","localValue"))remove(key)}
                 if(catalog.cloudRowHash(id)!=SyncV2Codec.hash(normalized))db.execSQL("INSERT OR REPLACE INTO syncv2_cloud_rows VALUES(?,?,?)",arrayOf(scope,id,projection.accountCacheRow(normalized)))
-                catalog.setCloudRow(normalized,catalog.refs(next.getJSONObject("row").getString("stateOid")))
+                if(normalized.has(SyncV2NoteWiring.ISOLATED_KEY))catalog.remove("cloud",id)
+                else catalog.setCloudRow(normalized,catalog.refs(next.getJSONObject("row").getString("stateOid")))
             }
         }
+        val isolation=JSONObject((st.body.optJSONObject("noteIsolation")?:JSONObject()).toString())
+        for(id in ids) {
+            isolation.remove(id)
+            val row=byId[id]
+            if(row?.has(SyncV2NoteWiring.ISOLATED_KEY)!=true)st.body.optJSONObject("noteForkSources")?.remove(id)
+            if(row?.has(SyncV2NoteWiring.ISOLATED_KEY)==true)isolation.put(id,JSONObject().put("reason",row.getString(SyncV2NoteWiring.ISOLATED_KEY))
+                .put("stateOid",row.getJSONObject("row").getString("stateOid")).put("noteRevision",row.opt(SyncV2NoteWiring.REVISION_KEY)?:JSONObject.NULL))
+        }
+        st.body.put("noteIsolation",isolation)
+        SyncV2NoteWiring.observeBindings(db,scope,rows)
         // The legacy cloud-row envelope purpose stays the same; projection owns it.
         for((oid,bytes)in objects)if(oid.substringBefore(':') in setOf("meta","state","tree","state-refs"))
             db.execSQL("INSERT OR IGNORE INTO syncv2_cloud_objects VALUES(?,?,?)",arrayOf(scope,oid,bytes))

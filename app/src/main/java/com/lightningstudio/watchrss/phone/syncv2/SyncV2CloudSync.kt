@@ -66,9 +66,10 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             if(next!=at || page.get("complete")!=(at==pin))SyncV2Codec.fail("ref_continuity_unavailable")
         }
         val closure=SyncV2ControlClosure(identity,authors,contentKey,client.noteSegmentsRead())
-        val verified=closure.verify(headers.first(),{oid->client.raw(oid,id)},{ parent ->
+        val verified=projection.verifyCloud(closure,headers.first(),{oid->client.raw(oid,id)},{ parent ->
             client.reference(parent,id).let { JSONObject(it.toString()).apply { remove("version") } }
         })
+        verified.use {
         fresh(window)
         projection.installCloudIndex(observation,headers,verified,authors::header,window.getString("serverRevision")) { oid ->
             // Permanent signed headers remain available after historical content has expired.
@@ -78,6 +79,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             val envelope=JSONObject().put("body",first.getJSONObject("body")).put("signature",first.getString("signature"))
             if(first.getString("commitOid")!=oid || SyncV2Codec.oid("commit-header",envelope)!=first.getString("headerOid"))SyncV2Codec.fail("hash_mismatch")
             fresh(window);envelope
+        }
         }
         return if(projection.status()=="awaiting-user")"awaiting-user" else "metadata-ready"
     }
@@ -125,10 +127,12 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         if(!account.isNull("commitOid") && (accepted==null || accepted.getString("oid")!=account.getString("commitOid") || accepted.getString("generation")!=account.getString("rollbackGeneration")))throw SyncV2CloudError("ref_conflict",true)
         if(!account.isNull("commitOid") && st.body.optJSONObject("metadataAccount")?.optString("oid")!=account.getString("commitOid"))SyncV2Codec.fail("closure_incomplete")
         val localIndex=projection.prepareWireIndex(signer,contentKey,keyVersion)
+        try {
         // Without an authenticated operation base, a differing local row cannot overwrite a cloud row.
         // Missing local rows are retained from cloud, never interpreted as deletions.
         val mergedRows=SyncV2Index.read(identity.scope,localIndex.tree.root,localIndex.objects::getValue).associateBy{it.getString("entityKey")}.toMutableMap()
-        val mergedObjects=projection.cloudObjects().toMutableMap().apply{putAll(localIndex.objects)}
+        val mergedObjects=projection.objectSpool().apply{putAll(projection.cloudObjects());putAll(localIndex.objects)}
+        try {
         val newRefs=localIndex.refs.toMutableList()
         for(cloud in projection.cloudRows()) {
             val meta=cloud.getJSONObject("meta");val entity=meta.getString("entityKey")
@@ -180,7 +184,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
                 }
             }
         }
-        val index=SyncV2Projection.WireIndex(tree,mergedObjects.filterKeys{it in reachable},newRefs.filter{it.getJSONObject("body").getString("stateOid") in reachable})
+        val index=SyncV2Projection.WireIndex(tree,mergedObjects.selectObjects{it in reachable},newRefs.filter{it.getJSONObject("body").getString("stateOid") in reachable})
         val refs=window.getJSONArray("refs");var own:String?=null;var revision="0"
         for(i in 0 until refs.length()) {val ref=refs.getJSONObject(i);if(ref.getString("deviceId")==signer.deviceId) {own=ref.getString("commitOid");revision=ref.getString("refRevision")}}
         val ownSequence=if(own==null)"0" else {
@@ -194,7 +198,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             .put("indexComplete",true).put("accountParent",account.get("commitOid")).put("rollbackGeneration",account.getString("rollbackGeneration"))
             .put("operation",JSONObject().put("kind","normal").put("rollbackTarget",JSONObject.NULL).put("resolvesGeneration",JSONObject.NULL))
         val signed=signer.commit(body);val oid=SyncV2Codec.oid("commit",body)
-        val objects=index.objects.toMutableMap();objects[oid]=SyncV2Codec.utf8(SyncV2Codec.canonical(signed))
+        val objects=mergedObjects;objects.retain(reachable);objects[oid]=SyncV2Codec.utf8(SyncV2Codec.canonical(signed))
         // Each reservation is bounded. Control upload never requests a content slot.
         val currentOids=projection.cloudObjects().keys
         val toUpload=objects.entries.filter{it.key !in currentOids && it.key.substringBefore(':') in setOf("meta","state","tree","commit")}.sortedBy{it.key}
@@ -228,6 +232,8 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             .put("device",SyncV2CloudClient.refUpdate(signer,identity.scope,"refs/devices/${signer.deviceId}/index",own,revision,oid,id,now())).put("relayGrant",JSONObject.NULL)
         projection.persistPublish(request,publishState.version)
         val response=publishAttempt(request);projection.confirmPublish(request,response);return response
+        } finally {mergedObjects.close()}
+        } finally {localIndex.close()}
     }
     private fun randomId()=SyncV2Codec.hex(SyncV2Codec.random(16))
 }

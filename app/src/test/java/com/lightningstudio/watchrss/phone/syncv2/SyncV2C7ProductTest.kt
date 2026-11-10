@@ -290,4 +290,62 @@ class SyncV2C7ProductTest {
         assertFalse(note.getJSONObject("state").getJSONObject("payload").has("segmentedNote"))
         assertNull(text(db,"SELECT note_revision FROM syncv2_note_bindings WHERE scope='${p.scope}' AND entity_key='${identity.entity("note","note")}'"))
     }
+    @Test fun oneAndThreeNearTwoMiBNotesKeepProductPullAndPublicationPeaksBounded() {
+        fun heap():Long {System.gc();Thread.sleep(25);return Runtime.getRuntime().totalMemory()-Runtime.getRuntime().freeMemory()}
+        data class Peaks(val publish:Long,val pull:Long,val sampledPublish:Long,val sampledPull:Long)
+        fun measure(count:Int):Peaks {
+            sequence=0;lastCommit=null
+            val db=room(root().resolve("memory.db"));val sql=db.openHelper.writableDatabase
+            val markdown="a".repeat(1_048_500)
+            seedNote(db,markdown)
+            for(i in 1 until count)sql.execSQL("INSERT INTO notes SELECT ?,folderId,title,markdown,plainText,contentHash,baseContentHash,baseMarkdown,pinned,createdAt,updatedAt,modifiedBy,deleted,deletedAt FROM notes WHERE noteId='note'",arrayOf("note$i"))
+            var publishPeak=0L;var pullPeak=0L
+            val phase=java.util.concurrent.atomic.AtomicReference("")
+            val p=SyncV2Projection(sql,identity,localKey,true,{point->
+                if(point=="note-publish-staged")publishPeak=maxOf(publishPeak,heap())
+                if(point=="note-pull-staged")pullPeak=maxOf(pullPeak,heap())
+            },true).also{it.install();it.noteSegmentsServerAnnounced=true;while(!it.scanPage("notes").complete){}}
+            val running=java.util.concurrent.atomic.AtomicBoolean(true)
+            val samplePublish=java.util.concurrent.atomic.AtomicLong();val samplePull=java.util.concurrent.atomic.AtomicLong()
+            val thread=Thread({while(running.get()){
+                val used=Runtime.getRuntime().totalMemory()-Runtime.getRuntime().freeMemory()
+                when(phase.get()){"publish"->samplePublish.accumulateAndGet(used,::maxOf);"pull"->samplePull.accumulateAndGet(used,::maxOf)}
+                Thread.sleep(2)
+            }},"c7-product-heap").apply{isDaemon=true;start()}
+            try {
+                heap();phase.set("publish")
+                val index=p.prepareWireIndex(signer(),contentKey,1)
+                phase.set("");assertTrue(index.objects is SyncV2Spool)
+                val refs=index.refs.associateBy{it.getJSONObject("body").getString("stateOid")}
+                val signed=signer().commit(JSONObject(SyncV2Fixtures.envelope().getJSONObject("body").toString()).put("treeRoot",index.tree.root))
+                val authors=SyncV2Authors(identity){true};authors.accept(identity.signingBinding(signer(),100,"0"),"0")
+                heap();phase.set("pull")
+                p.verifyCloud(SyncV2ControlClosure(identity,authors,{contentKey},true),signed,index.objects::getValue,{parent->
+                    val ref=refs.getValue(parent);JSONObject().put("scope",identity.scope).put("parentOid",parent)
+                        .put("refsOid",SyncV2Codec.oid("state-refs",ref)).put("authorDeviceId",signer().deviceId).put("keyId",signer().keyId)
+                        .put("totalBytes",SyncV2Codec.utf8(SyncV2Codec.canonical(ref)).size)
+                }).use{verified->
+                    assertTrue(verified.objects is SyncV2Spool)
+                    p.installCloudIndex(JSONObject().put("oid",verified.commitOid).put("revision","1").put("generation","0"),listOf(signed),verified,authors::header)
+                }
+                phase.set("")
+                assertEquals(count,p.cloudRows().size)
+                for(row in p.cloudRows())assertEquals(markdown,row.getJSONObject("state").getJSONObject("payload").getString("markdown"))
+                (index.objects as SyncV2Spool).close()
+            }finally{running.set(false);thread.join(1000)}
+            return Peaks(publishPeak,pullPeak,samplePublish.get(),samplePull.get())
+        }
+        // Warm all codec/Room paths before comparing one entity with three entities.
+        measure(1)
+        val one=measure(1);val three=measure(3)
+        println("PHONE_C7_MEMORY one=$one three=$three noteEscapedBytes=2097048 samplingMillis=2")
+        assertTrue("publish live peak: $one -> $three",three.publish<=one.publish*1.5+2*1024*1024)
+        assertTrue("pull live peak: $one -> $three",three.pull<=one.pull*1.5+2*1024*1024)
+        assertTrue("publish sampled peak: $one -> $three",three.sampledPublish<=one.sampledPublish*1.5+2*1024*1024)
+        assertTrue("pull sampled peak: $one -> $three",three.sampledPull<=one.sampledPull*1.5+2*1024*1024)
+        SyncV2Fixtures.evidence("c7-review-product-memory.json",JSONObject().put("noteEscapedBytes",2097048)
+            .put("onePublishLive",one.publish).put("threePublishLive",three.publish).put("onePullLive",one.pull).put("threePullLive",three.pull)
+            .put("onePublishSampled",one.sampledPublish).put("threePublishSampled",three.sampledPublish).put("onePullSampled",one.sampledPull).put("threePullSampled",three.sampledPull))
+    }
+
 }

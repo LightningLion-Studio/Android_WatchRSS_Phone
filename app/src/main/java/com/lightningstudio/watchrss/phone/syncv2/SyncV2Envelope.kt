@@ -36,7 +36,7 @@ internal object SyncV2Envelope {
     fun open(identity: SyncV2Identity, key: ByteArray, oid: String, bytes: ByteArray, expectedVersion: Long? = null, stage:((String,Long)->Unit)?=null): ByteArray =
         open(identity.scope, { t, p -> identity.opaque(t, p) }, key, oid, bytes, expectedVersion,stage)
     internal fun open(scope: JSONObject, opaque: (String, ByteArray) -> String, key: ByteArray, oid: String,
-        bytes: ByteArray, expectedVersion: Long? = null,stage:((String,Long)->Unit)?=null): ByteArray {
+        bytes: ByteArray, expectedVersion: Long? = null,stage:((String,Long)->Unit)?=null, lengthError:String="invalid_encoding"): ByteArray {
         val authAt=System.nanoTime()
         if(key.size!=32)SyncV2Codec.fail("authentication_required")
         if (bytes.size !in 24..266264 || !bytes.copyOfRange(0, 4).contentEquals("WRS2".toByteArray())) SyncV2Codec.fail("invalid_encoding")
@@ -44,18 +44,18 @@ internal object SyncV2Envelope {
         if (length !in 1..4096 || bytes.size < 8 + length + 16) SyncV2Codec.fail("invalid_encoding")
         val aad = bytes.copyOfRange(8, 8 + length)
         val h = SyncV2Wire.parse(aad, 4096, true); validate(h)
-        if (SyncV2Codec.scope(h.getJSONObject("scope")) != SyncV2Codec.scope(scope)) SyncV2Codec.fail("scope_mismatch")
         val type = h.getString("type")
         SyncV2Wire.oid(oid, type)
         if (oid != "$type:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(bytes))}") SyncV2Codec.fail("hash_mismatch")
+        if (SyncV2Codec.scope(h.getJSONObject("scope")) != SyncV2Codec.scope(scope)) SyncV2Codec.fail("scope_mismatch")
         if (bytes.size != 8 + length + h.getInt("encodedBytes") + 16 || expectedVersion != null && h.getLong("keyVersion") != expectedVersion) SyncV2Codec.fail("invalid_schema")
         val derived = SyncV2Codec.hkdf(key, SyncV2Codec.decode64(h.getString("salt"), 32), SyncV2Codec.lp(SyncV2Codec.utf8("wrss.sync.v2/aead"), SyncV2Codec.sha(aad)))
         val encoded = try { SyncV2Codec.decrypt(derived, SyncV2Codec.decode64(h.getString("nonce"), 12), aad, bytes.copyOfRange(8 + length, bytes.size)) } finally { derived.fill(0) }
         stage?.invoke("authentication",System.nanoTime()-authAt)
         val decompressAt=System.nanoTime()
-        val plain = if (h.getString("encoding") == "identity") encoded else gunzip(encoded, h.getInt("plainBytes"))
+        val plain = if (h.getString("encoding") == "identity") encoded else gunzip(encoded, h.getInt("plainBytes"),lengthError)
         if(h.getString("encoding")=="gzip")stage?.invoke("decompression",System.nanoTime()-decompressAt)
-        if (plain.size != h.getInt("plainBytes")) SyncV2Codec.fail("invalid_encoding")
+        if (plain.size != h.getInt("plainBytes")) SyncV2Codec.fail(lengthError)
         if (opaque(type, plain) != h.getString("opaqueContentId")) SyncV2Codec.fail("fingerprint_mismatch")
         if (type != "blob") SyncV2Wire.parse(plain, 262144, true)
         return plain
@@ -73,7 +73,7 @@ internal object SyncV2Envelope {
         }
         SyncV2Codec.decode64(SyncV2Wire.string(h, "salt"), 32); SyncV2Codec.decode64(SyncV2Wire.string(h, "nonce"), 12)
     }
-    private fun gunzip(bytes: ByteArray, size: Int): ByteArray {
+    private fun gunzip(bytes: ByteArray, size: Int, lengthError:String="invalid_encoding"): ByteArray {
         fun bad(): Nothing = SyncV2Codec.fail("invalid_encoding")
         if (bytes.size < 18 || bytes[0] != 31.toByte() || bytes[1] != 139.toByte() || bytes[2] != 8.toByte()) bad()
         val flags = bytes[3].toInt() and 255; if (flags and 224 != 0) bad()
@@ -93,14 +93,15 @@ internal object SyncV2Envelope {
             while (!inflater.finished()) {
                 val n = try { inflater.inflate(block) } catch (_: Exception) { bad() }
                 if (n == 0 && !inflater.finished()) bad()
-                if (out.size() + n > size) bad()
+                if (out.size() + n > size) SyncV2Codec.fail(lengthError)
                 out.write(block, 0, n)
             }
             val trailer = bytes.size - inflater.remaining
             if (trailer + 8 != bytes.size) bad() // one member; no concatenation or trailing bytes
             fun little(at: Int): Long = (0..3).fold(0L) { x, i -> x or ((bytes[at + i].toLong() and 255) shl (8 * i)) }
             val plain = out.toByteArray()
-            if (plain.size != size || little(trailer + 4) != size.toLong() || little(trailer) != CRC32().also { it.update(plain) }.value) bad()
+            if (plain.size != size) SyncV2Codec.fail(lengthError)
+            if (little(trailer + 4) != size.toLong() || little(trailer) != CRC32().also { it.update(plain) }.value) bad()
             return plain
         } finally { inflater.end() }
     }

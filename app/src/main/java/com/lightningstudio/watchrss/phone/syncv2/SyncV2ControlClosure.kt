@@ -9,23 +9,29 @@ import org.json.JSONObject
  * F2/R4: with a pull-side stager every segmented entity is processed on its own. Its segment
  * ciphertext and its reassembled body leave [verify] immediately through [StagedRow], so one
  * round only ever retains OIDs, hashes and binding metadata across entities. Without a stager
- * (rollback, vectors) the round keeps the pre-C7 whole-snapshot behaviour.
+ * (fixed vectors) the round keeps the pre-C7 whole-snapshot behaviour.
  */
 internal class SyncV2ControlClosure(private val identity: SyncV2Identity, private val authors: SyncV2Authors,
     private val contentKey: (Long)->ByteArray, private val noteSegmentsRead: Boolean = false) {
-    class Verified private constructor(val commitOid:String, internal val rows:List<JSONObject>, internal val objects:Map<String,ByteArray>) {
+    class Verified private constructor(val commitOid:String, internal val rows:List<JSONObject>, internal val objects:Map<String,ByteArray>, private val cleanup:()->Unit = {}) : AutoCloseable {
+        override fun close() = cleanup()
         companion object {
-            internal fun create(oid:String,rows:List<JSONObject>,objects:Map<String,ByteArray>)=Verified(oid,rows,objects)
+            internal fun create(oid:String,rows:List<JSONObject>,objects:Map<String,ByteArray>,cleanup:()->Unit = {})=Verified(oid,rows,objects,cleanup)
         }
     }
     /** One authenticated entity handed to the pull-side stager: sealed cloud-row body plus its
      * hash-verified raw objects. Cross-entity state never keeps these bytes (F2/R4). */
     class StagedRow internal constructor(internal val entityKey:String, internal val body:JSONObject, internal val objects:Map<String,ByteArray>)
+    private fun <T> available(read:()->T):T? = try{read()}catch(e:Exception) {
+        val code=if(e is SyncV2CloudError)e.code else e.message
+        if(code in setOf("object_missing","not_found","closure_incomplete"))null
+        else if(code=="object_too_large")SyncV2Codec.fail("object_too_large")else throw e
+    }
     private fun emptyState(entity:String)=JSONObject().put("version",2).put("entityKey",entity)
         .put("requiredFeatures",JSONArray()).put("payload",JSONObject()).put("noteSegments",JSONArray())
     fun verify(envelope:JSONObject,get:(String)->ByteArray,reference:(String)->JSONObject):Verified=verifyStaged(envelope,get,reference,null)
     /** F2/R4 pull entry: each segmented entity is handed to [stage] and dropped from the round. */
-    fun verifyStaged(envelope:JSONObject,get:(String)->ByteArray,reference:(String)->JSONObject,stage:((StagedRow)->Unit)?):Verified {
+    fun verifyStaged(envelope:JSONObject,get:(String)->ByteArray,reference:(String)->JSONObject,stage:((StagedRow)->Unit)?,objectsStore:(()->MutableMap<String,ByteArray>)?=null):Verified {
         val commit=authors.header(envelope);val objects=linkedMapOf<String,ByteArray>()
         fun fetch(oid:String):ByteArray = objects[oid] ?: get(oid).copyOf().also { objects[oid]=it }
         val rows=SyncV2Index.read(identity.scope,commit.getString("treeRoot"),::fetch)
@@ -33,16 +39,19 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
         for(row in rows) {
             val entity=row.getString("entityKey")
             // F2/R4: segmented bytes live only inside this entity's iteration.
-            val rowBytes=linkedMapOf<String,ByteArray>()
+            val rowStorage=lazy{if(stage!=null)objectsStore?.invoke()?:linkedMapOf<String,ByteArray>()else linkedMapOf<String,ByteArray>()}
+            val rowBytes by rowStorage
+            try {
             fun fetchRow(oid:String):ByteArray = rowBytes[oid] ?: get(oid).copyOf().also{rowBytes[oid]=it}
-            fun openWith(read:(String)->ByteArray,oid:String):JSONObject {
+            fun openWith(read:(String)->ByteArray,oid:String,lengthError:String="invalid_encoding"):JSONObject {
                 val bytes=read(oid)
                 if(bytes.size<9)SyncV2Codec.fail("invalid_encoding")
                 val len=java.nio.ByteBuffer.wrap(bytes,4,4).int
                 if(len !in 1..4096 || len+24>bytes.size)SyncV2Codec.fail("invalid_encoding")
                 val h=SyncV2Wire.parse(bytes.copyOfRange(8,8+len),4096,true)
+                if(SyncV2Wire.uint(h,"plainBytes")>SyncV2NoteSegments.LIMIT || bytes.size>SyncV2NoteSegments.LIMIT+SyncV2NoteSegments.SEALED_OVERHEAD)SyncV2Codec.fail("object_too_large")
                 val version=SyncV2Wire.uint(h,"keyVersion",4294967295)
-                val value=SyncV2Wire.parse(SyncV2Envelope.open(identity,contentKey(version),oid,bytes,version),262144,true)
+                val value=SyncV2Wire.parse(SyncV2Envelope.open(identity.scope,{type,plain->identity.opaque(type,plain)},contentKey(version),oid,bytes,version,lengthError=lengthError),262144,true)
                 if(value.get("version")!=2 || value.get("entityKey")!=entity)SyncV2Codec.fail("invalid_schema")
                 return value
             }
@@ -92,7 +101,7 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
             val isolated=runCatching{
                 if(rowFeatures.isNotEmpty()&&!noteSegmentsRead)throw IllegalStateException("unsupported_feature")
                 // The parent wire is opened from bytes that stay inside this iteration only.
-                val read=openWith(if(stage!=null)::fetchRow else ::fetch,row.getString("stateOid"))
+                val read=openWith(if(stage!=null)::fetchRow else ::fetch,row.getString("stateOid"),"invalid_schema")
                 wire=read
                 SyncV2Codec.exact(read,setOf("version","entityKey","requiredFeatures","payload","noteSegments"))
                 segmented = read.optJSONObject("payload")?.has("segmentedNote")==true ||
@@ -107,14 +116,14 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
                     val stateOid=row.getString("stateOid")
                     val rowRead=if(stage!=null)::fetchRow else ::fetch
                     val closed=SyncV2NoteClosure.authenticate(ctx,read,stateOid,rowRead(stateOid),
-                        {id->runCatching{rowRead(id)}.getOrNull()},
+                        {id->available{rowRead(id)}},
                         {parent->
-                            val info=runCatching{reference(parent)}.getOrNull()?:return@authenticate null
+                            val info=available{reference(parent)}?:return@authenticate null
                             val refsOid=info.optString("refsOid")
-                            if(!Regex("state-refs:sha256:[0-9a-f]{64}").matches(refsOid))return@authenticate null
-                            val raw=runCatching{rowRead(refsOid)}.getOrNull()?:return@authenticate null
-                            SyncV2NoteClosure.Mapping(info,raw)
-                        },setOf(SyncV2NoteConflicts.feature,SyncV2NoteSegments.feature))
+                            SyncV2Wire.oid(refsOid,"state-refs")
+                            available{rowRead(refsOid)}?:return@authenticate null
+                            SyncV2NoteClosure.Mapping(info){rowRead(refsOid)}
+                        },setOf(SyncV2NoteConflicts.feature,SyncV2NoteSegments.feature),objectsStore=objectsStore)
                     ordinary=closed.ordinary
                     wrapper.put(SyncV2NoteWiring.SEGMENTS_KEY,JSONArray(closed.segments.map{it.oid}))
                         .put(SyncV2NoteWiring.REFS_MAPS_KEY,JSONObject().also{maps->for(seg in closed.segments)maps.put(seg.oid,seg.mapping.info)})
@@ -143,24 +152,24 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
                     .put(SyncV2NoteWiring.REVISION_KEY,failed?.optJSONObject("payload")?.opt("noteRevision")?:JSONObject.NULL)
                 if(stage!=null) {
                     wrapper.put(SyncV2NoteWiring.PULL_STAGED_KEY,true)
-                    stage(StagedRow(entity,JSONObject(wrapper.toString()).put("state",failed?:emptyState(entity)),rowBytes.toMap()))
+                    stage(StagedRow(entity,JSONObject(wrapper.toString()).put("state",failed?:emptyState(entity)),rowBytes))
                     rowBytes.clear()
                 }
                 decoded.add(wrapper);continue
             }
             if(isolated!=null)SyncV2Codec.fail("invalid_schema")
-            if(stage!=null&&!segmented)for((oid,bytes)in rowBytes)objects[oid]=bytes // ordinary notes keep the round map
-            businessRow(wrapper,ordinary?:wire!!,wire!!,kind,logicalId,row,if(stage!=null&&segmented)::fetchRow else ::fetch)
-            if(stage!=null&&segmented) {
+            businessRow(wrapper,ordinary?:wire!!,wire!!,kind,logicalId,row,if(stage!=null)::fetchRow else ::fetch)
+            if(stage!=null) {
                 // F2/R4: the reassembled body and the segment ciphertexts are handed off per
                 // entity; the round keeps only the verbatim parent wire plus metadata.
-                val body=JSONObject(wrapper.toString()).put("state",ordinary!!)
+                val body=JSONObject(wrapper.toString()).put("state",ordinary?:wire!!)
                 wrapper.put(SyncV2NoteWiring.PULL_STAGED_KEY,true)
-                stage(StagedRow(entity,body,rowBytes.toMap()));rowBytes.clear()
+                stage(StagedRow(entity,body,rowBytes));rowBytes.clear()
             }
             wrapper.put("state",ordinary?:wire!!)
-            if(stage!=null&&segmented)wrapper.put("state",wire) // the round carries the parent wire verbatim only
+            if(stage!=null)wrapper.put("state",if(segmented)wire else emptyState(entity)) // the round carries the parent wire verbatim only
             decoded.add(wrapper)
+            }finally{if(rowStorage.isInitialized())(rowBytes as? AutoCloseable)?.close()}
         }
         return Verified.create(SyncV2Codec.oid("commit",commit),decoded,objects)
     }

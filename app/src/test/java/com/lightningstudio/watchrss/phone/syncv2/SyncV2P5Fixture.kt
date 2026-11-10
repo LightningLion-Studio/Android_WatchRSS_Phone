@@ -30,6 +30,7 @@ internal class SyncV2P5Fixture:AutoCloseable {
     var target:String;val initial:String
     /** C7 hook: rewrites one entity's state wire before it is sealed (e.g. declares a feature to isolate it). */
     var stateHook:((String,JSONObject)->Unit)?=null
+    var noteSegmentsAnnounced=false
     init {
         val targetRow=note("old title","base\nline\n")
         target=commit(listOf(targetRow),null,"0","normal",null)
@@ -40,7 +41,7 @@ internal class SyncV2P5Fixture:AutoCloseable {
             val route=request.requestUrl!!.encodedPath.substringAfter("/functions/v1/sync/v2/");requests.add(route)
             fun body()=SyncV2Wire.parse(request.body.readByteArray())
             when {
-                route=="capabilities"->f.response(f.dto().put("minVersion",2).put("maxVersion",2).put("maxPartBytes",65536).put("historyDays",7).put("features",JSONArray())
+                route=="capabilities"->f.response(f.dto().put("minVersion",2).put("maxVersion",2).put("maxPartBytes",65536).put("historyDays",7).put("features",if(noteSegmentsAnnounced)JSONArray().put(SyncV2NoteSegments.feature)else JSONArray())
                     .put("receiptKeyId",f.bootstrap.get("receiptKeyId")).put("receiptSigningPublicKey",f.bootstrap.get("receiptSigningPublicKey"))
                     .put("flags",JSONObject().put("read",true).put("indexWrite",true).put("contentWrite",true).put("historyRestore",flags)))
                 route=="negotiate" || route=="account"->f.response(window())

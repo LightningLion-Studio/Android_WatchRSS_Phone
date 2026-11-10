@@ -121,6 +121,7 @@ fun CloudAccountPanel(
 
     val member = syncState.member
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        SyncV2Section(service)
         Text("云空间", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         val keyWarning by service.keyWarning.collectAsState()
         val needsReapproval by service.needsReapproval.collectAsState()

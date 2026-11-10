@@ -265,4 +265,18 @@ class SyncV2C7RereviewRegressionTest {
             assertEquals("the markdown still references the original attachment so the fork must reserve its closure",expected,actual)
         }
     }
+    @Test fun authenticatedRefsMismatchMustPrecedePressure() {
+        for(size in listOf(300000,7*1024*1024)) {
+            val input=Input("a".repeat(size))
+            val observed=try {
+                input.read(refsHook={
+                    val parent=input.mappings.keys.single{it !in input.ids}
+                    input.refs(parent,input.ids.reversed())
+                }).rows.single().optString(SyncV2NoteWiring.ISOLATED_KEY)
+            }catch(e:IllegalStateException){e.message}
+            println("RR2_EXTRA_REFS size=$size observed=$observed")
+            assertEquals("invalid_schema",observed)
+        }
+    }
+
 }

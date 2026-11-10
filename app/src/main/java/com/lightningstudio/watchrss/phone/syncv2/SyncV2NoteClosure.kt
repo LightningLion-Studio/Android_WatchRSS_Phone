@@ -132,7 +132,9 @@ internal object SyncV2NoteClosure {
             val parent=open(ctx,oid,bytes)
             if(SyncV2Codec.canonical(parent.value)!=SyncV2Codec.canonical(state) || SyncV2Wire.string(parent.header,"type")!="state")SyncV2Codec.fail("invalid_schema")
             for(id in ids)open(ctx,id,objects.getValue(id))
-            for(id in all)verifyRefs(ctx,tables.getValue(id),id,"state")
+            val published=verifyRefs(ctx,tables.getValue(oid),oid,"state")
+            if(SyncV2Codec.canonical(published)!=SyncV2Codec.canonical(state.getJSONArray("noteSegments")))SyncV2Codec.fail("invalid_schema")
+            for(id in ids)if(verifyRefs(ctx,tables.getValue(id),id,"state").length()!=0)SyncV2Codec.fail("invalid_schema")
             SyncV2Codec.fail("storage_pressure")
         }
         val parent = open(ctx, oid, bytes)

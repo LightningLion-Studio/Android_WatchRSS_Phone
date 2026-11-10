@@ -37,6 +37,7 @@ class SyncV2P6ProductTest {
         val announcement=JSONObject().put("algorithm","ES256").put("receiptKeyId","cd".repeat(16)).put("receiptSigningPublicKey",SyncV2Codec.b64(SubjectPublicKeyInfo(
             AlgorithmIdentifier(ASN1ObjectIdentifier("1.2.840.10045.2.1"),ASN1ObjectIdentifier("1.2.840.10045.3.1.7")),SyncV2Codec.unhex(receipt.publicHex,65)).encoded))
         var descriptor:JSONObject?=null;var capsule:JSONObject?=null
+        var descriptorUnavailable=false;var failAfterConflict=false;var dropInit=false;val initBytes=mutableListOf<String>()
         val objects=linkedMapOf<String,ByteArray>();val prefixes=linkedMapOf<String,ByteArray>();val totals=linkedMapOf<String,Int>()
         val bindings=linkedMapOf<String,JSONObject>();val refs=linkedMapOf<String,JSONObject>();val devices=linkedMapOf<String,JSONObject>();val results=linkedMapOf<String,JSONObject>()
         var account=JSONObject().put("commitOid",JSONObject.NULL).put("revision","0").put("rollbackGeneration","0")
@@ -46,7 +47,7 @@ class SyncV2P6ProductTest {
         fun scope()=descriptor!!.getJSONObject("body").getJSONObject("scope")
         fun dto(s:JSONObject)=JSONObject().put("version",2).put("scope",s)
         fun response(v:JSONObject)=MockResponse().setHeader("Content-Type","application/json").setBody(SyncV2Codec.canonical(v))
-        fun error(code:String)=response(JSONObject().put("error",JSONObject().put("code",code).put("retryable",false).put("retryAfterMillis",JSONObject.NULL).put("details",JSONObject()))).setResponseCode(if(code=="object_missing")404 else 409)
+        fun error(code:String)=response(JSONObject().put("error",JSONObject().put("code",code).put("retryable",code=="ref_conflict").put("retryAfterMillis",JSONObject.NULL).put("details",if(code=="ref_conflict")JSONObject().put("currentOid",account.get("commitOid")).put("currentRevision",account.get("revision"))else JSONObject()))).setResponseCode(if(code=="object_missing")404 else if(code=="temporarily_unavailable")503 else 409)
         fun window(s:JSONObject)=dto(s).put("windowId","aa".repeat(16)).put("issuedAtMillis",now).put("expiresAtMillis",now+300000)
             .put("historyFloorMillis",0).put("historyFloorRevision","0").put("serverRevision",account.get("revision")).put("refs",JSONArray(devices.values.sortedBy{it.getString("deviceId")})).put("account",JSONObject(account.toString()))
         fun receipt(s:JSONObject,oid:String,total:Int,offset:Int)=receipt.signed("wrss.sync.v2/object-receipt-sign",JSONObject().put("version",2).put("scope",s).put("oid",oid).put("totalBytes",total).put("durableOffset",offset)
@@ -63,12 +64,13 @@ class SyncV2P6ProductTest {
                     when {
                         route=="capabilities"->return response(dto(s).put("minVersion",2).put("maxVersion",2).put("maxPartBytes",65536).put("historyDays",7).put("features",JSONArray())
                             .put("receiptKeyId",announcement.get("receiptKeyId")).put("receiptSigningPublicKey",announcement.get("receiptSigningPublicKey")).put("flags",JSONObject().put("read",true).put("indexWrite",true).put("contentWrite",true)))
-                        route=="repo/descriptor"->{val d=descriptor?:return error("object_missing");return response(dto(scope()).put("descriptor",d).put("descriptorOid",SyncV2Codec.oid("repo-descriptor",d)).put("recoveryOid",SyncV2Codec.oid("id-key-recovery",capsule)))}
+                        route=="repo/descriptor"->{if(descriptorUnavailable)return error("temporarily_unavailable");val d=descriptor?:return error("object_missing");return response(dto(scope()).put("descriptor",d).put("descriptorOid",SyncV2Codec.oid("repo-descriptor",d)).put("recoveryOid",SyncV2Codec.oid("id-key-recovery",capsule)))}
                         route.startsWith("repo/id-key-recovery/")->return response(capsule!!)
                         route=="repo/init"->{
-                            inits++;val b=body();concurrentWinner?.let{descriptor=it.descriptor;capsule=it.recoveryCapsule;concurrentWinner=null}
-                            if(descriptor!=null && SyncV2Codec.canonical(descriptor)!=SyncV2Codec.canonical(b.getJSONObject("descriptor")))return error("ref_conflict")
+                            inits++;val b=body();initBytes.add(SyncV2Codec.canonical(b));concurrentWinner?.let{descriptor=it.descriptor;capsule=it.recoveryCapsule;concurrentWinner=null}
+                            if(descriptor!=null && SyncV2Codec.canonical(descriptor)!=SyncV2Codec.canonical(b.getJSONObject("descriptor")))run{if(failAfterConflict)descriptorUnavailable=true;return error("ref_conflict")}
                             descriptor=b.getJSONObject("descriptor");capsule=b.getJSONObject("recoveryCapsule")
+                            if(dropInit){dropInit=false;return MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)}
                             return response(dto(s).put("descriptorOid",SyncV2Codec.oid("repo-descriptor",descriptor)))
                         }
                         route=="checkpoint"->{val w=window(s).apply{remove("version")}.put("checkpointId","33".repeat(16));return response(receipt.signed("wrss.sync.v2/checkpoint-sign",w).put("version",2).put("scope",s))}
@@ -357,4 +359,151 @@ class SyncV2P6ProductTest {
         }}
     }
 
+    @Test fun reviewSecureSigningCorruptionMustNotBlockReception()=damagedSigningReception("{broken")
+    @Test fun reviewMissingSigningRecordMustNotBlockReception()=damagedSigningReception(null)
+    @Test fun malformedSigningFieldsMustNotBlockReception()=damagedSigningReception("{}")
+    private fun damagedSigningReception(damage:String?) {
+        Server().use {server->Host(server,"a").use {a->
+            a.note();a.sync()
+            Host(server,"b").use {b->
+                b.sync();b.room.openHelper.writableDatabase.execSQL("UPDATE notes SET markdown='remote latest',plainText='remote latest',updatedAt=updatedAt+1 WHERE noteId='note'");b.sync()
+                a.product.release()
+                val repo=server.scope().getString("repoId");val name="local/signing/$repo"
+                val counter=a.context.noBackupFilesDir.walkTopDown().single{it.name.endsWith(".sequence")}
+                val counterBytes=counter.readBytes()
+                a.manager.syncV2Write(user,name,damage)
+                val acks=server.acks;val publishes=server.publishes;val registrations=server.bindings.size
+                val failure=runCatching{a.sync()}.exceptionOrNull()
+                assertEquals("secure signing damage stopped authenticated reception","remote latest",a.text())
+                assertEquals("signing_state_unavailable",failure?.message)
+                val port=a.product.uiPort.value!!
+                assertEquals("signing_state_unavailable",port.state.value.errorCode);assertNull(port.state.value.ownDeviceId)
+                assertEquals("blocked",port.state.value.phase)
+                assertTrue("damaged signing record must remain untouched",damage==a.manager.syncV2Read(user,name));assertArrayEquals(counterBytes,counter.readBytes())
+                assertEquals(acks,server.acks);assertEquals(registrations,server.bindings.size)
+                // A later receive round still follows the remote account without replacing the signer.
+                b.room.openHelper.writableDatabase.execSQL("UPDATE notes SET markdown='remote again',plainText='remote again',updatedAt=updatedAt+1 WHERE noteId='note'");b.sync()
+                val laterAcks=server.acks
+                assertEquals("signing_state_unavailable",runCatching{a.sync()}.exceptionOrNull()?.message)
+                assertEquals("remote again",a.text());assertEquals(laterAcks,server.acks)
+                a.room.openHelper.writableDatabase.execSQL("UPDATE notes SET markdown='local retained',plainText='local retained',updatedAt=updatedAt+1 WHERE noteId='note'")
+                assertEquals("signing_state_unavailable",runCatching{a.sync()}.exceptionOrNull()?.message)
+                assertEquals("local retained",a.text());assertEquals(publishes+1,server.publishes)
+                assertTrue("damaged signing record must remain untouched",damage==a.manager.syncV2Read(user,name));assertArrayEquals(counterBytes,counter.readBytes())
+            }
+        }}
+    }
+    @Test fun reviewRepoConflictReadFailureMustNotReplayLosingInit() {
+        Server().use {server->Host(server,"a").use {h->
+            server.concurrentWinner=SyncV2RepoBootstrap.prepareStored("12".repeat(16),"winner","e","g",1,{server.wrap},{null}){}
+            h.note();server.failAfterConflict=true
+            assertNotNull(runCatching{h.sync()}.exceptionOrNull())
+            assertEquals(1,server.inits)
+            val pending=h.manager.syncV2Read(user,"secret/pending")
+            h.product.release()
+            assertNotNull(runCatching{h.sync()}.exceptionOrNull())
+            assertEquals("19.5 forbids blind losing repo-init replay after descriptor failure",1,server.inits)
+            assertTrue("pending bytes changed after a failed winner read",pending==h.manager.syncV2Read(user,"secret/pending"));assertEquals("local",h.text())
+            assertEquals(0,server.publishes)
+            server.descriptorUnavailable=false;server.failAfterConflict=false
+            h.sync();assertEquals(1,server.inits);assertEquals(1,server.publishes)
+            assertEquals("local",server.values().single().getString("markdown"))
+            assertNull(h.manager.syncV2Read(user,"secret/pending"))
+        }}
+    }
+    @Test fun reviewLostInitResponseReplaysExactFullBytesAcrossRelease() {
+        Server().use {server->Host(server,"a").use {h->
+            h.note();server.dropInit=true
+            assertNotNull(runCatching{h.sync()}.exceptionOrNull());assertEquals(1,server.inits)
+            h.product.release();h.sync()
+            assertEquals(2,server.inits);assertEquals(server.initBytes[0],server.initBytes[1]);assertEquals(1,server.publishes)
+        }}
+    }
+    @Test fun reviewHtmlFileMarkerPublishesActualV1BodyBytes()=htmlBodyPublication(true)
+    @Test fun inlineHtmlPublishesActualV1BodyBytes()=htmlBodyPublication(false)
+    private fun htmlBodyPublication(fileBody:Boolean) {
+        Server().use {server->Host(server,"a").use {h->
+            val records=javaClass.classLoader!!.getResourceAsStream("syncv2-business-schema.json")!!.bufferedReader().use{JSONObject(it.readText())}.getJSONArray("records")
+            val article=(0 until records.length()).map{records.getJSONObject(it)}.single{it.getString("kind")=="article"}.getJSONObject("value")
+            val html="<p>actual v1 HTML 正文 é😀</p>"
+            val content=com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore(h.context)
+            val marker=content.storeText(article.getString("articleId")+"-html",html)
+            assertEquals(html,content.loadText(marker))
+            SyncV2PhoneApply(h.room.openHelper.writableDatabase).upsert("phone_articles",listOf("articleId"),article.put("contentText","").put("contentHtml",if(fileBody)marker else html))
+            h.sync()
+            val head=SyncV2Wire.parse(server.objects.getValue(server.account.getString("commitOid")),262144,true)
+            val row=SyncV2Index.read(server.scope(),head.getJSONObject("body").getString("treeRoot"),server.objects::getValue).single()
+            val identity=SyncV2Identity.recover(server.capsule!!,server.descriptor!!,server.wrap,"12".repeat(16),server.scope(),SyncV2Codec.oid("repo-descriptor",server.descriptor))
+            try {
+                val oid=row.getString("recipeOid")
+                val recipe=SyncV2Wire.parse(SyncV2Envelope.open(identity,server.wrap,oid,server.objects.getValue(oid)),262144,true)
+                val blob=recipe.getJSONArray("blocks").getJSONObject(0).getString("oid")
+                val actual=SyncV2Envelope.open(identity,server.wrap,blob,server.objects.getValue(blob)).toString(Charsets.UTF_8)
+                assertEquals("HTML marker must resolve through the same v1 content store",html,actual)
+            }finally{identity.close()}
+        }}
+    }
+    @Test fun reviewR0ReallyPagesAndPublishesEveryBusinessRow() {
+        Server().use {server->Host(server,"a").use {h->
+            val apply=SyncV2PhoneApply(h.room.openHelper.writableDatabase)
+            SyncV2P5Fixture().use {f->repeat(130){n->apply.upsert("notes",listOf("noteId"),f.note(markdown="body-$n").put("noteId","note-%03d".format(n)))}}
+            h.sync();assertEquals(1,server.publishes)
+            assertEquals((0 until 130).map{"body-$it"}.toSet(),server.values().map{it.getString("markdown")}.toSet())
+            h.room.openHelper.writableDatabase.query("SELECT complete,page_key FROM syncv2_scan WHERE domain='notes'").use{assertTrue(it.moveToFirst());assertEquals(1,it.getInt(0))}
+        }}
+    }
+
+    @Test fun reviewClosedUiGatesRejectRecoveryWithoutWritesOrRequests() {
+        Server().use {server->Host(server,"a").use {h->
+            h.note();h.sync()
+            val port=h.product.uiPort.value!!
+            val runtime=SyncV2PhoneProduct::class.java.getDeclaredField("runtime").also{it.isAccessible=true}.get(h.product) as SyncV2PhoneProduct.Runtime
+            val revision=runtime.projection.state().revision
+            val requests=server.http.requestCount
+            assertEquals("feature_disabled",runCatching{runBlocking{port.restoreRecovery("aa".repeat(16))}}.exceptionOrNull()?.message)
+            assertEquals("feature_disabled",runCatching{runBlocking{port.history()}}.exceptionOrNull()?.message)
+            assertEquals(revision,runtime.projection.state().revision)
+            assertEquals(requests,server.http.requestCount);assertEquals("local",h.text())
+        }}
+    }
+
+    @Test fun reviewArticleCursorMustRestartWhenEarlierSourceChanges()=articleCursorSourceChange(false)
+    @Test fun articleCursorMustRestartAcrossProductReopen()=articleCursorSourceChange(true)
+    private fun articleCursorSourceChange(reopen:Boolean) {
+        Server().use {server->Host(server,"a").use {h->
+            val records=javaClass.classLoader!!.getResourceAsStream("syncv2-business-schema.json")!!.bufferedReader().use{JSONObject(it.readText())}.getJSONArray("records")
+            val sample=(0 until records.length()).map{records.getJSONObject(it)}.single{it.getString("kind")=="article"}.getJSONObject("value")
+            val apply=SyncV2PhoneApply(h.room.openHelper.writableDatabase)
+            repeat(17){n->val value=JSONObject(sample.toString()).put("articleId","article-$n").put("url","https://synthetic.invalid/$n").put("contentText","initial body $n");apply.upsert("phone_articles",listOf("articleId"),value)}
+            assertEquals("budget_paused",runCatching{h.sync()}.exceptionOrNull()?.message)
+            assertEquals(0,server.publishes)
+            val runtime=SyncV2PhoneProduct::class.java.getDeclaredField("runtime").also{it.isAccessible=true}.get(h.product) as SyncV2PhoneProduct.Runtime
+            val first=h.room.openHelper.writableDatabase.query("SELECT entity_key,logical_id FROM syncv2_candidates WHERE kind='article' ORDER BY entity_key LIMIT 1").use{it.moveToFirst();it.getString(0) to it.getString(1)}
+            assertFalse(runtime.projection.wireContentRow(first.first)!!.isNull("recipeOid"))
+            h.room.openHelper.writableDatabase.execSQL("UPDATE phone_articles SET contentText='edited earlier body',contentHash=?,updatedAt=updatedAt+1 WHERE articleId=?",arrayOf(SyncV2Codec.hex(SyncV2Codec.sha("edited earlier body".toByteArray())),first.second))
+            if(reopen)h.product.release()
+            // Restarting the prefix can take another bounded page. No snapshot may omit its body.
+            repeat(3) {
+                val failure=runCatching{h.sync()}.exceptionOrNull()
+                if(failure!=null)assertEquals("budget_paused",failure.message)
+            }
+            assertEquals(1,server.publishes)
+            val head=SyncV2Wire.parse(server.objects.getValue(server.account.getString("commitOid")),262144,true)
+            val row=SyncV2Index.read(server.scope(),head.getJSONObject("body").getString("treeRoot"),server.objects::getValue).single{it.getString("entityKey")==first.first}
+            assertEquals("edited earlier body",h.room.openHelper.writableDatabase.query("SELECT contentText FROM phone_articles WHERE articleId=?",arrayOf(first.second)).use{it.moveToFirst();it.getString(0)})
+            val live=SyncV2PhoneProduct::class.java.getDeclaredField("runtime").also{it.isAccessible=true}.get(h.product) as SyncV2PhoneProduct.Runtime
+            val state=live.projection.state()
+            assertEquals(state.revision,state.body.getString("acknowledgedLocalRevision"))
+            assertFalse("earlier cached body was acknowledged without a recipe after article cursor resume",row.isNull("recipeOid"))
+            val all=SyncV2Index.read(server.scope(),head.getJSONObject("body").getString("treeRoot"),server.objects::getValue)
+            assertEquals(17,all.size);assertTrue(all.all{!it.isNull("recipeOid")})
+            val identity=SyncV2Identity.recover(server.capsule!!,server.descriptor!!,server.wrap,"12".repeat(16),server.scope(),SyncV2Codec.oid("repo-descriptor",server.descriptor))
+            try {
+                val oid=row.getString("recipeOid")
+                val recipe=SyncV2Wire.parse(SyncV2Envelope.open(identity,server.wrap,oid,server.objects.getValue(oid)),262144,true)
+                val blob=recipe.getJSONArray("blocks").getJSONObject(0).getString("oid")
+                assertArrayEquals("edited earlier body".toByteArray(),SyncV2Envelope.open(identity,server.wrap,blob,server.objects.getValue(blob)))
+            }finally{identity.close()}
+        }}
+    }
 }

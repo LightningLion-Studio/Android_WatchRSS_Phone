@@ -8,13 +8,15 @@ import java.io.File
 /** Opt-in P5 product actions. UI supplies the ORIGINAL Preview handle, never a live boolean.
  * All network/file/crypto work is outside the existing projection's SQLite writer. */
 internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private val identity:SyncV2Identity,
-    private val projection:SyncV2Projection,private val signer:SyncV2Signing,private val contentKey:(Long)->ByteArray,
+    private val projection:SyncV2Projection,signer:SyncV2Signing?,private val contentKey:(Long)->ByteArray,
     private val approved:(String)->Boolean,private val files:File,private val enabled:Boolean=BuildConfig.SYNC_OBJECTS_V2_HISTORY_RESTORE,
     private val trustedNow:()->Long?={null},recoveryQuotaBytes:Long=32L*1024*1024,
     recoveryReads:SyncV2RecoveryStorage.SourceReads?=null,private val fault:(String)->Unit={},
     private val noteSegmentsRead:Boolean=BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,
     private val networkNow:()->Long=System::currentTimeMillis,
     private val currentKeyVersion:()->Long={1}):AutoCloseable {
+    private val signing=signer
+    private val signer:SyncV2Signing get()=signing?:SyncV2Codec.fail("signing_state_unavailable")
     private val db get()=projection.accountDatabase
     private val scope get()=projection.scope
     private val recovery=SyncV2RecoveryStorage(projection,identity,files,recoveryQuotaBytes,recoveryReads)
@@ -127,7 +129,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         fileGuard(fileToken){ projection.accountWriter(st.version){current->
             val rss=business.apply(before,target);fault("business-applied")
             projection.accountApplied(current,a,target,id(),before,rss)
-            current.body.put("pendingAppliedAck",JSONObject().put("requestId",id()).put("commitOid",a.getString("oid")).put("deviceId",signer.deviceId).put("refRevision",a.getString("revision")).put("rollbackGeneration",a.getString("generation")))
+            if(signing!=null)current.body.put("pendingAppliedAck",JSONObject().put("requestId",id()).put("commitOid",a.getString("oid")).put("deviceId",signer.deviceId).put("refRevision",a.getString("revision")).put("rollbackGeneration",a.getString("generation")))
         }
         }
         runCatching{flushAppliedAck()};return true
@@ -978,7 +980,10 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         return result.put("localCommitted",true).put("tailPreserved",true).put("appliedAckPending",!projection.state().body.isNull("pendingAppliedAck"))
     }
     fun flushAppliedAck():JSONObject? {
-        gate();val st=projection.state();val pending=st.body.optJSONObject("pendingAppliedAck")?:return null
+        gate()
+        val signing=signing?:return null
+        val st=projection.state();val pending=st.body.optJSONObject("pendingAppliedAck")?:return null
+        if(pending.getString("deviceId")!=signing.deviceId)SyncV2Codec.fail("signing_state_unavailable")
         SyncV2Codec.next(st.version)
         client.capabilities();val response=client.applied(pending)
         projection.accountWriter(st.version){current->if(!same(current.body.optJSONObject("pendingAppliedAck"),pending))SyncV2Codec.fail("choice_stale");current.body.remove("pendingAppliedAck")}

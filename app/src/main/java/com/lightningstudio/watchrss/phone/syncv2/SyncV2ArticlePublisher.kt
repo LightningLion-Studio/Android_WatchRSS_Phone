@@ -11,14 +11,17 @@ internal class SyncV2ArticlePublisher(private val projection:SyncV2Projection,pr
     fun runPage(budgetMillis:Long=280000):Boolean {
         val started=monotonic();val version=keys.newestVersion
         val exporter=SyncV2ContentExport(identity,keys.read(version),version,store)
-        val cursor=store.load("p6/article-cursor")?.optString("after","")?:""
+        val revision=projection.state().revision
+        val saved=store.load("p6/article-cursor")
+        // A local edit anywhere invalidates the processed prefix, including across restart.
+        val cursor=if(saved?.optString("sourceRevision")==revision)saved.optString("after","")else ""
+        fun sourceCurrent(){check();if(projection.state().revision!=revision)SyncV2Codec.fail("source_changed")}
         val page=projection.accountDatabase.controlQuery("SELECT entity_key,logical_id FROM syncv2_candidates WHERE scope=? AND kind='article' AND entity_key>? ORDER BY entity_key LIMIT 17",arrayOf(projection.scope,cursor)).use{c->buildList{while(c.moveToNext())add(c.getString(0) to c.getString(1))}}
         var remaining=32L*1024*1024
         for((entity,id)in page.take(16)) {
-            check();if(monotonic()-started>=budgetMillis || remaining<=0)return false
+            sourceCurrent();if(monotonic()-started>=budgetMillis || remaining<=0)return false
             var row=projection.wireContentRow(entity)?:SyncV2Codec.fail("projection_incomplete")
             if(!row.getBoolean("deleted")) {
-                val revision=projection.state().revision
                 val source=SyncV2ArticleBody.source(projection.accountDatabase,files,id) {
                     check();if(monotonic()-started>=budgetMillis)SyncV2Codec.fail("budget_paused")
                     if(projection.state().revision!=revision)SyncV2Codec.fail("body_revision_changed")
@@ -49,9 +52,11 @@ internal class SyncV2ArticlePublisher(private val projection:SyncV2Projection,pr
                     }
                 }
             }
-            store.save("p6/article-cursor",JSONObject().put("after",entity))
+            sourceCurrent()
+            store.save("p6/article-cursor",JSONObject().put("sourceRevision",revision).put("after",entity))
         }
-        if(page.size<=16){store.save("p6/article-cursor",JSONObject().put("after",""));return true}
+        sourceCurrent()
+        if(page.size<=16){store.save("p6/article-cursor",JSONObject().put("sourceRevision",revision).put("after",""));return true}
         return false
     }
 }

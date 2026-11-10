@@ -95,4 +95,20 @@ class SyncV2P6ArticleTest {
         }
     }
 
+    @Test fun htmlInlineFileAndMissingFileUseTheSelectedV1Field() {
+        SyncV2P5Fixture().use {f->
+            val html="<p>actual HTML é😀</p>";val value=article();val id=value.getString("articleId")
+            val content=FileArticleContentStore(File(f.root,"imported_text"))
+            val marker=content.storeText(id+"-html",html)
+            for(body in listOf(html,marker)) {
+                SyncV2PhoneApply(f.sql).upsert("phone_articles",listOf("articleId"),value.put("contentText","").put("contentHtml",body))
+                val source=SyncV2ArticleBody.source(f.sql,f.root,id){}!!
+                assertArrayEquals(html.toByteArray(),source.read(0,source.size.toInt()))
+            }
+            File(f.root,"imported_text").listFiles()!!.forEach{it.delete()}
+            assertNull(SyncV2ArticleBody.source(f.sql,f.root,id){})
+            assertEquals(marker,f.sql.query("SELECT contentHtml FROM phone_articles").use{it.moveToFirst();it.getString(0)})
+        }
+    }
+
 }

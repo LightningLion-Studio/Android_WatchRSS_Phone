@@ -34,11 +34,13 @@ internal object SyncV2ArticleBody {
     fun source(db:SupportSQLiteDatabase,files:File,articleId:String,check:()->Unit):Source? {
         check()
         // Only fetch a bounded prefix. A long DB body must never fill one CursorWindow.
-        val fields=db.controlQuery("SELECT substr(contentText,1,256),length(CAST(contentText AS BLOB)),length(CAST(contentHtml AS BLOB)) FROM phone_articles WHERE articleId=?",arrayOf(articleId)).use {
+        val fields=db.controlQuery("SELECT substr(contentText,1,256),length(CAST(contentText AS BLOB)),substr(contentHtml,1,256),length(CAST(contentHtml AS BLOB)) FROM phone_articles WHERE articleId=?",arrayOf(articleId)).use {
             if(!it.moveToFirst())return null
-            Triple(it.getString(0),it.getLong(1),if(it.isNull(2))0L else it.getLong(2))
+            val textBytes=it.getLong(1)
+            if(textBytes>0)Triple("contentText",it.getString(0),textBytes)
+            else Triple("contentHtml",if(it.isNull(2))""else it.getString(2),it.getLong(3))
         }
-        val marker=articleContentMarkerFileName(fields.first)
+        val marker=articleContentMarkerFileName(fields.second)
         if(marker!=null) {
             val directory=File(files,"imported_text").canonicalFile;val file=File(directory,marker).canonicalFile
             if(file.parentFile!=directory || !file.isFile)return null
@@ -47,8 +49,9 @@ internal object SyncV2ArticleBody {
                 check();if(file.length()!=size || file.lastModified()!=modified)SyncV2Codec.fail("body_revision_changed")
             }
         }
-        val field=if(fields.second>0)"contentText"else if(fields.third>0)"contentHtml"else return null
-        val size=if(field=="contentText")fields.second else fields.third
+        val field=fields.first
+        val size=fields.third
+        if(size==0L)return null
         return Source({offset,n->db.controlQuery("SELECT substr(CAST($field AS BLOB),?,?) FROM phone_articles WHERE articleId=?",arrayOf<Any>(offset+1,n,articleId)).use {
             if(!it.moveToFirst() || it.isNull(0))SyncV2Codec.fail("body_revision_changed");it.getBlob(0)
         }},size,check)

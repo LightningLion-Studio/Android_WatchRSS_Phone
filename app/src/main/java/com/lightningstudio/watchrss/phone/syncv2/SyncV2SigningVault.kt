@@ -11,8 +11,13 @@ import java.nio.file.StandardOpenOption
 internal class SyncV2SigningVault(private val store:SyncV2AccountStore,private val repo:String,
     private val counter:File,private val lifetime:SyncV2Lifetime):AutoCloseable {
     private val name="local/signing/$repo"
-    val signer:SyncV2Signing
-    init {
+    private val available:SyncV2Signing?=try { openSigner() } catch(_:Exception) {
+        // A damaged credential disables signing, never independent authenticated reception.
+        lifetime.check();null
+    }
+    val signer:SyncV2Signing get()=available?:SyncV2Codec.fail("signing_state_unavailable")
+    fun signerOrNull():SyncV2Signing?=available
+    private fun openSigner():SyncV2Signing {
         val saved=store.read(name)
         val record=if(saved!=null)saved else {
             if(counter.exists() || File(counter.path+".next").exists())SyncV2Codec.fail("signing_state_unavailable")
@@ -24,8 +29,9 @@ internal class SyncV2SigningVault(private val store:SyncV2AccountStore,private v
                     }
             } finally {raw.fill(0)}
         }
+        SyncV2Codec.d64(record.getString("sequence"))
         val raw=SyncV2Codec.unhex(record.getString("privateHex"),32)
-        signer=try{SyncV2Signing.fromPrivate(raw,record.getString("deviceId"),record.getString("keyId"))}finally{raw.fill(0)}
+        return try{SyncV2Signing.fromPrivate(raw,record.getString("deviceId"),record.getString("keyId"))}finally{raw.fill(0)}
     }
     private fun writeCounter(record:JSONObject) {
         counter.parentFile?.let{if(!it.isDirectory && !it.mkdirs())SyncV2Codec.fail("storage_pressure")}
@@ -48,5 +54,5 @@ internal class SyncV2SigningVault(private val store:SyncV2AccountStore,private v
         store.write(name,record)
         next
     }
-    override fun close()=signer.close()
+    override fun close(){available?.close()}
 }

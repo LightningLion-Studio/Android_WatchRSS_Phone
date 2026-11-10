@@ -95,10 +95,12 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             var capsule:JSONObject?=null
             var discovery=client(JSONObject().put("repoId","00".repeat(16)).put("libraryEpoch","1").put("contentGeneration","1"),"00".repeat(16))
             var descriptor:JSONObject?=null
-            if(pending==null) {
+            val initRejected=pending?.optBoolean("initRejected")==true
+            if(pending==null || initRejected) {
                 discovery.capabilities()
                 descriptor=try{discovery.descriptor().takeUnless{it.isNull("descriptor")}}catch(e:SyncV2CloudError){if(e.code!="object_missing")throw e;null}
             }
+            if(initRejected && descriptor==null)SyncV2Codec.fail("object_missing")
             if(descriptor==null) {
                 if(pending==null && store.read("pin")!=null)SyncV2Codec.fail("identity_conflict")
                 val candidate=life.guard {SyncV2RepoBootstrap.prepareStored(account.accountId,account.legacyDeviceId,account.epoch,account.generation,ring.newestVersion,ring::read,store::pending,store::pending)}
@@ -108,7 +110,12 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                     discovery.repoInit(candidate.descriptor,candidate.recoveryCapsule)
                     capsule=candidate.recoveryCapsule
                     JSONObject().put("descriptor",candidate.descriptor).put("descriptorOid",SyncV2Codec.oid("repo-descriptor",candidate.descriptor)).put("recoveryOid",SyncV2Codec.oid("id-key-recovery",candidate.recoveryCapsule))
-                } catch(e:SyncV2CloudError) {if(e.code!="ref_conflict")throw e;discovery.descriptor()}
+                } catch(e:SyncV2CloudError) {
+                    if(e.code!="ref_conflict")throw e
+                    // Persist the CAS rejection before GET. An unknown outcome still replays exact bytes.
+                    life.guard {store.pending((store.pending()?:SyncV2Codec.fail("identity_conflict")).put("initRejected",true))}
+                    discovery.descriptor()
+                }
             }
             life.check()
             val descriptorBody=descriptor!!.getJSONObject("descriptor").getJSONObject("body")
@@ -121,13 +128,15 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             val local=life.guard {store.localKey(identity.repoId).also{raw->life.own(AutoCloseable{raw.fill(0)})}}
             val path=SyncV2Codec.hash(JSONObject().put("backend",account.backendBaseUrl).put("account",account.accountId).put("repo",identity.repoId))
             val vault=life.guard {life.own(SyncV2SigningVault(store,identity.repoId,File(context.noBackupFilesDir,"syncv2/$path.sequence"),life))}
-            val control=client(identity.scope,vault.signer.deviceId)
-            val contentClient=client(identity.scope,vault.signer.deviceId)
+            val signer=vault.signerOrNull()
+            val deviceId=signer?.deviceId?:"00".repeat(16)
+            val control=client(identity.scope,deviceId)
+            val contentClient=client(identity.scope,deviceId)
             val projection=life.guard {life.own(SyncV2Projection(database().openHelper.writableDatabase,identity,local,true,
                 noteSegments=BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,lifetime=life,sequenceAllocator=vault::reserve).also{it.install()})}
             val content=life.guard {life.own(SyncV2ContentStore(File(context.filesDir,"syncv2/$path"),identity.scopeJson,local.copyOf()))}
             val cloud=SyncV2CloudSync(control,identity,projection,approved,ring::read,{time.now()?:System.currentTimeMillis()})
-            val actions=life.guard {life.own(SyncV2AccountActions(control,identity,projection,vault.signer,ring::read,approved,context.filesDir,true,time::now,
+            val actions=life.guard {life.own(SyncV2AccountActions(control,identity,projection,signer,ring::read,approved,context.filesDir,true,time::now,
                 noteSegmentsRead=BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,currentKeyVersion={ring.newestVersion}))}
             val worker=SyncV2ContentWorker(contentClient,identity,content,signals,enabled=contentEnabled,clock=clock,now={time.now()?:System.currentTimeMillis()},approvedDevice={device->
                 val bindings=projection.state().body.optJSONArray("signingBindings")
@@ -136,7 +145,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                     b.getJSONObject("body").getString("deviceId")==device && approved(b.getJSONObject("deviceMapping").getJSONObject("body").getString("legacyDeviceId"))
                 }
             })
-            val articles=SyncV2ArticlePublisher(projection,identity,ring,vault.signer,contentClient,content,worker,context.filesDir,life::check,clock)
+            val articles=signer?.let{SyncV2ArticlePublisher(projection,identity,ring,it,contentClient,content,worker,context.filesDir,life::check,clock)}
             val result=Runtime(account.copy(bearer="",apiKey="",deviceAuthorization=null),life,ring,identity,vault,projection,cloud,actions,control,articles,time,contentEnabled,serviceAnnouncement)
             life.guard {
                 val port=SyncV2PhoneUiPort(this,result)
@@ -156,13 +165,14 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
     }
     internal class Runtime(val account:Account,val life:SyncV2Lifetime,val keys:SyncV2ContentKeys,val identity:SyncV2Identity,
         val vault:SyncV2SigningVault,val projection:SyncV2Projection,val cloud:SyncV2CloudSync,val actions:SyncV2AccountActions,
-        val client:SyncV2CloudClient,val articles:SyncV2ArticlePublisher,val time:SyncV2TrustedTime,val contentEnabled:Boolean,val serviceAnnouncement:String) {
+        val client:SyncV2CloudClient,val articles:SyncV2ArticlePublisher?,val time:SyncV2TrustedTime,val contentEnabled:Boolean,val serviceAnnouncement:String) {
         var lastSyncedAt:Long?=null
         fun signingDeviceId():String? {
-            life.check();val bindings=projection.state().body.optJSONArray("signingBindings")?:return null
-            return vault.signer.deviceId.takeIf {id->(0 until bindings.length()).any {index->
+            life.check();val signer=vault.signerOrNull()?:return null
+            val bindings=projection.state().body.optJSONArray("signingBindings")?:return null
+            return signer.deviceId.takeIf {id->(0 until bindings.length()).any {index->
                 val b=bindings.getJSONObject(index).getJSONObject("body")
-                b.optString("deviceId")==id && b.optString("publicKey")==SyncV2Codec.b64(SyncV2Codec.unhex(vault.signer.publicHex,65))
+                b.optString("deviceId")==id && b.optString("publicKey")==SyncV2Codec.b64(SyncV2Codec.unhex(signer.publicHex,65))
             }}
         }
         fun round() {
@@ -170,6 +180,10 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             val started=android.os.SystemClock.elapsedRealtime()
             fun remaining():Long=(290000L-(android.os.SystemClock.elapsedRealtime()-started)).also{if(it<=0)SyncV2Codec.fail("budget_paused")}
             client.withinBudget(remaining()) {
+            if(vault.signerOrNull()==null) {
+                actions.refresh(budgetMillis=remaining())
+                SyncV2Codec.fail("signing_state_unavailable")
+            }
             // Reconcile the original signed attempt before any new-account or new-source guard.
             cloud.resumePublish()
             cloud.readCurrent()
@@ -189,7 +203,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 }
                 actions.prepareSigning()
                 projection.prepareWireIndex(vault.signer,keys.read(keys.newestVersion),keys.newestVersion).close()
-                if(contentEnabled && client.contentWriteAllowed() && !articles.runPage(remaining()))SyncV2Codec.fail("budget_paused")
+                if(contentEnabled && client.contentWriteAllowed() && !articles!!.runPage(remaining()))SyncV2Codec.fail("budget_paused")
                 cloud.publishIndex(vault.signer,keys.read(keys.newestVersion),keys.newestVersion,publicationRevision)
                 actions.refresh(budgetMillis=remaining())
             } else actions.flushAppliedAck()

@@ -13,11 +13,14 @@ import org.json.JSONObject
 import java.math.BigInteger
 
 /** Fixed independent P256 key. Never uses the existing ECDH key or content key. */
-internal class SyncV2Signing private constructor(private val scalar: BigInteger, val deviceId: String, val keyId: String) {
-    val publicHex: String = SyncV2Codec.hex(curve.g.multiply(scalar).normalize().getEncoded(false))
+internal class SyncV2Signing private constructor(private val material: ByteArray, val deviceId: String, val keyId: String):AutoCloseable {
+    @Volatile private var closed=false
+    val publicHex: String = SyncV2Codec.hex(curve.g.multiply(BigInteger(1,material)).normalize().getEncoded(false))
+    override fun close(){closed=true;material.fill(0)}
     fun sign(message: ByteArray): String {
+        if(closed)SyncV2Codec.fail("authentication_required")
         val signer = ECDSASigner(HMacDSAKCalculator(SHA256Digest()))
-        signer.init(true, ECPrivateKeyParameters(scalar, domain))
+        signer.init(true, ECPrivateKeyParameters(BigInteger(1,material), domain))
         val (r, original) = signer.generateSignature(SyncV2Codec.sha(message))
         val s = if (original > curve.n.shiftRight(1)) curve.n - original else original
         return SyncV2Codec.b64(fixed(r) + fixed(s))
@@ -37,7 +40,14 @@ internal class SyncV2Signing private constructor(private val scalar: BigInteger,
             SyncV2Codec.unhex(deviceId, 16); SyncV2Codec.unhex(keyId, 16)
             val n = BigInteger(1, bytes)
             if (bytes.size != 32 || n < BigInteger.ONE || n >= curve.n) SyncV2Codec.fail("invalid_schema")
-            return SyncV2Signing(n, deviceId, keyId)
+            return SyncV2Signing(bytes.copyOf(), deviceId, keyId)
+        }
+        internal fun randomPrivate():ByteArray {
+            while(true) {
+                val raw=SyncV2Codec.random(32);val n=BigInteger(1,raw)
+                if(n>=BigInteger.ONE && n<curve.n)return raw
+                raw.fill(0)
+            }
         }
         /** Installed atomically before returning; a missing/unreadable existing record is never replaced. */
         @Synchronized fun loadOrCreate(context: Context, accountId: String, repoId: String): SyncV2Signing {

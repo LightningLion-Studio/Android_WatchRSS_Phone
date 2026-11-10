@@ -16,24 +16,40 @@ internal object SyncV2RepoBootstrap {
         if(approvedWrappingRoot.size!=32 || wrappingKeyVersion !in 1..4294967295L || listOf(legacyDeviceId,legacyEpoch,legacyGeneration).any{it.isEmpty()})SyncV2Codec.fail("authentication_required")
         val master=MasterKey.Builder(context,"watchrss-syncv2-pending-repo").setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
         val prefs=EncryptedSharedPreferences.create(context,"watchrss-syncv2-pending-repo",master,EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM)
-        // Old epochs are part of the pending identity fence, never silently translated into new D64s.
+        return prepareStored(accountId,legacyDeviceId,legacyEpoch,legacyGeneration,wrappingKeyVersion,
+            { approvedWrappingRoot },{prefs.getString(accountId,null)?.let{SyncV2Wire.parse(SyncV2Codec.utf8(it))}}) {
+            if(!prefs.edit().putString(accountId,SyncV2Codec.canonical(it)).commit())SyncV2Codec.fail("storage_pressure")
+        }
+    }
+    /** The secure port commits complete candidate bytes before the first repo-init request. */
+    internal fun prepareStored(accountId:String,legacyDeviceId:String,legacyEpoch:String,legacyGeneration:String,
+        version:Long,key:(Long)->ByteArray,load:()->JSONObject?,save:(JSONObject)->Unit):Candidate {
+        SyncV2Codec.unhex(accountId,16)
+        if(version !in 1..4294967295L || listOf(legacyDeviceId,legacyEpoch,legacyGeneration).any{it.isEmpty()})SyncV2Codec.fail("authentication_required")
         val fence=SyncV2Codec.hash(JSONObject().put("accountId",accountId).put("legacyDeviceId",legacyDeviceId).put("libraryEpoch",legacyEpoch).put("contentGeneration",legacyGeneration))
-        fun save(value:JSONObject){if(!prefs.edit().putString(accountId,SyncV2Codec.canonical(value)).commit())SyncV2Codec.fail("storage_pressure")}
-        val stored=prefs.getString(accountId,null)
-        val pending=if(stored==null)JSONObject().put("fence",fence).put("repoId",SyncV2Codec.hex(SyncV2Codec.random(16)))
-            .put("creationId",SyncV2Codec.hex(SyncV2Codec.random(16))).put("idKeyHex",SyncV2Codec.hex(SyncV2Codec.random(32))).also(::save)
-            else SyncV2Wire.parse(SyncV2Codec.utf8(stored))
+        val pending=load()?:run {
+            val raw=SyncV2Signing.randomPrivate()
+            try {
+                JSONObject().put("fence",fence).put("repoId",SyncV2Codec.hex(SyncV2Codec.random(16)))
+                    .put("creationId",SyncV2Codec.hex(SyncV2Codec.random(16))).put("idKeyHex",SyncV2Codec.hex(SyncV2Codec.random(32)))
+                    .put("creatorPrivateHex",SyncV2Codec.hex(raw)).put("creatorDeviceId",SyncV2Codec.hex(SyncV2Codec.random(16)))
+                    .put("creatorKeyId",SyncV2Codec.hex(SyncV2Codec.random(16))).also(save)
+            } finally {raw.fill(0)}
+        }
         if(pending.getString("fence")!=fence)SyncV2Codec.fail("scope_mismatch")
-        val signer=SyncV2Signing.loadOrCreate(context,accountId,pending.getString("repoId"))
         if(pending.has("descriptor")) {
             val result=Candidate(pending.getJSONObject("descriptor"),pending.getJSONObject("recoveryCapsule"))
-            SyncV2Identity.recover(result.recoveryCapsule,result.descriptor,approvedWrappingRoot,accountId,result.scope,SyncV2Codec.oid("repo-descriptor",result.descriptor))
+            SyncV2Identity.recover(result.recoveryCapsule,result.descriptor,key(result.descriptor.getJSONObject("body").getLong("wrappingKeyVersion")),accountId,result.scope,SyncV2Codec.oid("repo-descriptor",result.descriptor))
             return result
         }
-        val key=SyncV2Codec.unhex(pending.getString("idKeyHex"),32)
+        val raw=SyncV2Codec.unhex(pending.getString("creatorPrivateHex"),32)
+        val signer=try{SyncV2Signing.fromPrivate(raw,pending.getString("creatorDeviceId"),pending.getString("creatorKeyId"))}finally{raw.fill(0)}
+        val idKey=SyncV2Codec.unhex(pending.getString("idKeyHex"),32)
         val scope=JSONObject().put("repoId",pending.getString("repoId")).put("libraryEpoch","1").put("contentGeneration","1")
-        val result=try {build(accountId,scope,pending.getString("creationId"),key,approvedWrappingRoot,wrappingKeyVersion,signer,SyncV2Codec.random(32),SyncV2Codec.random(12))}finally{key.fill(0)}
-        pending.put("descriptor",result.descriptor).put("recoveryCapsule",result.recoveryCapsule);save(pending)
+        val result=try{build(accountId,scope,pending.getString("creationId"),idKey,key(version),version,signer,SyncV2Codec.random(32),SyncV2Codec.random(12))}
+            finally{idKey.fill(0);signer.close()}
+        pending.put("descriptor",result.descriptor).put("recoveryCapsule",result.recoveryCapsule)
+        save(pending)
         return result
     }
     internal fun build(accountId:String,scope:JSONObject,creationId:String,idKey:ByteArray,wrap:ByteArray,version:Long,
@@ -53,14 +69,15 @@ internal object SyncV2RepoBootstrap {
         return Candidate(descriptor,JSONObject().put("header",header).put("ciphertext",SyncV2Codec.b64(cipher)))
     }
     /** Conflict is not an empty repo. Caller must recover the winner before any identity-map scan. */
-    fun publish(client:SyncV2CloudClient,candidate:Candidate,wrap:ByteArray,accountId:String):SyncV2Identity {
+    fun publish(client:SyncV2CloudClient,candidate:Candidate,wrap:ByteArray,accountId:String):SyncV2Identity = publish(client,candidate,{wrap},accountId)
+    fun publish(client:SyncV2CloudClient,candidate:Candidate,key:(Long)->ByteArray,accountId:String):SyncV2Identity {
         client.capabilities()
         try{client.repoInit(candidate.descriptor,candidate.recoveryCapsule)}catch(e:SyncV2CloudError) {
             if(e.code!="ref_conflict")throw e
             val winner=client.descriptor();val descriptor=winner.getJSONObject("descriptor");val pin=winner.getString("descriptorOid")
             val recovery=SyncV2Wire.parse(client.recovery(winner.getString("recoveryOid")),8192,true)
-            return SyncV2Identity.recover(recovery,descriptor,wrap,accountId,descriptor.getJSONObject("body").getJSONObject("scope"),pin)
+            return SyncV2Identity.recover(recovery,descriptor,key(SyncV2Wire.uint(descriptor.getJSONObject("body"),"wrappingKeyVersion",4294967295)),accountId,descriptor.getJSONObject("body").getJSONObject("scope"),pin)
         }
-        return SyncV2Identity.recover(candidate.recoveryCapsule,candidate.descriptor,wrap,accountId,candidate.scope,SyncV2Codec.oid("repo-descriptor",candidate.descriptor))
+        return SyncV2Identity.recover(candidate.recoveryCapsule,candidate.descriptor,key(candidate.descriptor.getJSONObject("body").getLong("wrappingKeyVersion")),accountId,candidate.scope,SyncV2Codec.oid("repo-descriptor",candidate.descriptor))
     }
 }

@@ -28,7 +28,8 @@ internal class SyncV2CloudClient(
     private val enabled: Boolean = BuildConfig.SYNC_OBJECTS_V2_CLOUD_INDEX,
     private val http: OkHttpClient = OkHttpClient.Builder().retryOnConnectionFailure(false)
         .followRedirects(false).followSslRedirects(false).callTimeout(30, TimeUnit.SECONDS).build(),
-    authenticatedBackend: HttpUrl? = null
+    authenticatedBackend: HttpUrl? = null,
+    private val trustedTime:SyncV2TrustedTime?=null
 ):AutoCloseable {
     @Volatile private var closed=false
     private val calls=java.util.concurrent.ConcurrentHashMap.newKeySet<okhttp3.Call>()
@@ -241,7 +242,10 @@ internal class SyncV2CloudClient(
         SyncV2Codec.d64(after);require(waitMillis in 0..25000)
         return get("events",mapOf("after" to after,"waitMillis" to waitMillis.toString())).also(::window)
     }
-    fun checkpoint(now:Long=System.currentTimeMillis())=get("checkpoint").also{serviceTrust.checkpoint(it,scope,now)}
+    fun checkpoint(now:Long=System.currentTimeMillis())=get("checkpoint").also {
+        val body=serviceTrust.checkpoint(it,scope,if(trustedTime==null)now else null)
+        trustedTime?.acceptVerifiedCheckpoint(SyncV2Wire.uint(body,"issuedAtMillis"))
+    }
     fun account()=get("account").also(::window)
     fun ancestry(head:String,stop:String?)=get("account/ancestry",mapOf("head" to head,"limit" to "64")+if(stop==null)emptyMap()else mapOf("stop" to stop))
     fun history(page:String?=null)=get("history",if(page==null)emptyMap()else mapOf("pageToken" to page)).also { response ->

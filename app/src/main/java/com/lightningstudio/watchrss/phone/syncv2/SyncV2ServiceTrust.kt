@@ -48,7 +48,7 @@ internal class SyncV2ServiceTrust private constructor(val accountId:String,val k
         return status
     }
     /** C5 authenticates the complete fixed window; it does not replace author or content verification. */
-    fun checkpoint(value:JSONObject,scope:JSONObject,now:Long):JSONObject = SyncV2Wire.schema {
+    fun checkpoint(value:JSONObject,scope:JSONObject,now:Long?):JSONObject = SyncV2Wire.schema {
         SyncV2Codec.exact(value,setOf("version","scope","body","signature"))
         if(value.get("version")!=2 || SyncV2Codec.scope(value.getJSONObject("scope"))!=SyncV2Codec.scope(scope))SyncV2Codec.fail("scope_mismatch")
         val body=verify("wrss.sync.v2/checkpoint-sign",JSONObject().put("body",value.getJSONObject("body")).put("signature",value.get("signature")))
@@ -59,7 +59,7 @@ internal class SyncV2ServiceTrust private constructor(val accountId:String,val k
         if(SyncV2Codec.d64(SyncV2Wire.string(body,"historyFloorRevision"))>revision)SyncV2Codec.fail("invalid_schema")
         SyncV2Wire.uint(body,"historyFloorMillis")
         val issued=SyncV2Wire.uint(body,"issuedAtMillis");val expires=SyncV2Wire.uint(body,"expiresAtMillis")
-        if(expires<=issued || expires-issued>300000 || expires<=now || issued>now+30000)SyncV2Codec.fail("replay_detected")
+        if(expires<=issued || expires-issued>300000 || now!=null && (expires<=now || issued>now+30000))SyncV2Codec.fail("replay_detected")
         val refs=body.getJSONArray("refs");if(refs.length()>64)SyncV2Codec.fail("invalid_schema")
         var previous=""
         for(i in 0 until refs.length()) {

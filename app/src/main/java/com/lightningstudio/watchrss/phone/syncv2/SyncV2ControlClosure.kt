@@ -95,7 +95,6 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
                 val read=openWith(if(stage!=null)::fetchRow else ::fetch,row.getString("stateOid"))
                 wire=read
                 SyncV2Codec.exact(read,setOf("version","entityKey","requiredFeatures","payload","noteSegments"))
-                if(SyncV2Wire.features(read.getJSONArray("requiredFeatures")).isNotEmpty()&&!noteSegmentsRead)throw IllegalStateException("unsupported_feature")
                 segmented = read.optJSONObject("payload")?.has("segmentedNote")==true ||
                     SyncV2NoteSegments.feature in SyncV2Wire.features(read.getJSONArray("requiredFeatures")) ||
                     read.getJSONArray("noteSegments").length()!=0

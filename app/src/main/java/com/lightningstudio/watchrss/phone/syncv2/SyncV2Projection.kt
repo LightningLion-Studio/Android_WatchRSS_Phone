@@ -14,21 +14,31 @@ internal class SyncV2Projection(
     private val db: SupportSQLiteDatabase, private val identity: SyncV2Identity,
     localKey: ByteArray, private val enabled: Boolean = BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION,
     private val fault: (String) -> Unit = {},
-    private val noteSegments: Boolean = BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS
-) {
+    private val noteSegments: Boolean = BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,
+    private val lifetime:SyncV2Lifetime?=null
+):AutoCloseable {
+    @Volatile private var closed=false
+    override fun close() {
+        closed=true;key.fill(0)
+        // Delete the credential copy, retaining encrypted edits and public identity mappings.
+        runCatching{db.execSQL("UPDATE syncv2_state SET identity=X'' WHERE scope=?",arrayOf(scope))}
+        runCatching{db.execSQL("UPDATE syncv2_control SET enabled=0 WHERE active_scope=?",arrayOf(scope))}
+    }
     /** Server announcement captured by the cloud layer; the write gate is the AND of both (25.8). */
     internal var noteSegmentsServerAnnounced = false
     private val key=localKey.copyOf()
     val scope=identity.scopeJson
     init { require(key.size==32) }
-    private fun gate() { if(!enabled) SyncV2Codec.fail("feature_disabled") }
+    private fun gate() { if(closed)SyncV2Codec.fail("authentication_required");if(!enabled) SyncV2Codec.fail("feature_disabled") }
     private fun ensureActive() {
         gate()
         val on=db.controlQuery("SELECT enabled FROM syncv2_control WHERE id=1 AND active_scope=?",arrayOf(scope)).use { it.moveToFirst() && it.getInt(0)==1 }
         if(!on) SyncV2Codec.fail("feature_disabled")
     }
     private fun requireWorkerContext(){if(db.inTransaction())SyncV2Codec.fail("projection_in_business_transaction")}
-    fun install() {
+    private fun <T> guarded(work:()->T):T = if(lifetime==null)work()else lifetime.guard(work)
+    fun install()=guarded { installLocal() }
+    private fun installLocal() {
         requireWorkerContext();gate(); SyncV2Schema.install(db)
         db.beginTransaction()
         try {
@@ -37,10 +47,14 @@ internal class SyncV2Projection(
             }
             if(prior!=null) {
                 if(prior.first!=identity.descriptorOid || prior.second!=identity.accountId) SyncV2Codec.fail("identity_conflict")
+                if(prior.third.isEmpty()) {
+                    db.execSQL("UPDATE syncv2_state SET identity=? WHERE scope=?",arrayOf(identity.encryptedRecord(key),scope))
+                } else {
                 val record=JSONObject(SyncV2Codec.openLocal(key,scope,"identity",prior.third))
                 if(record.getString("descriptorOid")!=identity.descriptorOid) SyncV2Codec.fail("identity_conflict")
                 // Also compare the installed K_id, not just the server-provided descriptor name.
                 if(SyncV2Codec.entity(SyncV2Codec.unhex(record.getString("idKeyHex"),32),identity.repoId,"article","identity-check")!=identity.entity("article","identity-check")) SyncV2Codec.fail("identity_conflict")
+                }
             } else {
                 val body=JSONObject().put("rollbackGeneration","0").put("account",JSONObject.NULL)
                     .put("pendingChoice",JSONObject.NULL).put("editBase",JSONObject.NULL).put("received",JSONObject())
@@ -56,13 +70,14 @@ internal class SyncV2Projection(
         } finally { db.endTransaction() }
     }
     fun pause() { ensureActive(); db.execSQL("UPDATE syncv2_control SET enabled=0 WHERE id=1") }
-    private fun seal(purpose: String, value: Any?) = SyncV2Codec.sealLocal(key,scope,purpose,value)
-    private fun open(purpose: String, bytes: ByteArray)=JSONObject(SyncV2Codec.openLocal(key,scope,purpose,bytes))
+    private fun seal(purpose: String, value: Any?):ByteArray {gate();return SyncV2Codec.sealLocal(key,scope,purpose,value)}
+    private fun open(purpose: String, bytes: ByteArray):JSONObject {gate();return JSONObject(SyncV2Codec.openLocal(key,scope,purpose,bytes))}
     data class State(val version: String,val revision: String,val body: JSONObject)
     private fun readState():State = db.controlQuery("SELECT state_version,local_revision,body FROM syncv2_state WHERE scope=?",arrayOf(scope)).use { c ->
         check(c.moveToFirst());State(c.getString(0),c.getString(1),open("state",c.getBlob(2)))
     }
-    fun state(): State {
+    fun state():State=guarded { stateLocal() }
+    private fun stateLocal(): State {
         requireWorkerContext();ensureActive()
         val stamp=SyncV2BusinessWitness.read(db)
         val old=readState()
@@ -95,7 +110,8 @@ internal class SyncV2Projection(
         db.execSQL("UPDATE syncv2_state SET state_version=?,local_revision=?,body=? WHERE scope=? AND state_version=?",arrayOf(following,revision,seal("state",st.body),scope,st.version))
         if(db.controlQuery("SELECT changes()").use{it.moveToFirst();it.getInt(0)}!=1)SyncV2Codec.fail("choice_stale")
     }
-    private fun <T> writer(expected: String?=null, body: (State)->T): T {
+    private fun <T> writer(expected:String?=null,body:(State)->T):T=guarded {writerLocal(expected,body)}
+    private fun <T> writerLocal(expected: String?, body: (State)->T): T {
         state() // Consume only the small business witness, outside the projection transaction.
         db.beginTransaction() // Android uses an immediate/exclusive SQLite writer, never a read-deferred txn.
         var started=false;var failure:Throwable?=null

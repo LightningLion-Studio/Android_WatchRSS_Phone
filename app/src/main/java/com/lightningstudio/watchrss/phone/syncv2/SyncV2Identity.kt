@@ -13,12 +13,16 @@ internal class SyncV2Identity private constructor(
     val accountId: String, val scopeJson: String, val descriptorOid: String,
     private val identityKey: ByteArray,
     private val creator: String, private val creatorPublicKey: String
-) {
+):AutoCloseable {
+    @Volatile private var closed=false
+    override fun close(){closed=true;identityKey.fill(0)}
+    private fun active(){if(closed)SyncV2Codec.fail("authentication_required")}
     val scope get() = JSONObject(scopeJson)
     val repoId get() = scope.getString("repoId")
-    fun entity(kind: String, id: String) = SyncV2Codec.entity(identityKey, repoId, kind, id)
-    fun opaque(type: String, bytes: ByteArray) = SyncV2Codec.opaque(identityKey, scope, type, bytes)
+    fun entity(kind: String, id: String):String {active();return SyncV2Codec.entity(identityKey, repoId, kind, id)}
+    fun opaque(type: String, bytes: ByteArray):String {active();return SyncV2Codec.opaque(identityKey, scope, type, bytes)}
     internal fun opaqueDigest(type:String,digest:ByteArray):String {
+        active()
         if(digest.size!=32)SyncV2Codec.fail("invalid_schema")
         return SyncV2Codec.hex(SyncV2Codec.hmac(identityKey,SyncV2Codec.lp(SyncV2Codec.utf8("wrss.sync.v2/content"),SyncV2Codec.utf8(scopeJson),SyncV2Codec.utf8(type),digest)))
     }
@@ -39,6 +43,7 @@ internal class SyncV2Identity private constructor(
     }
 
     fun signingBinding(signer: SyncV2Signing, authorizedAt: Long, revocationRevision: String): JSONObject {
+        active()
         val b = JSONObject().put("version", 2).put("scope", scope).put("deviceId", signer.deviceId)
             .put("keyId", signer.keyId).put("publicKey", SyncV2Codec.b64(SyncV2Codec.unhex(signer.publicHex, 65)))
             .put("authorizedAtMillis", authorizedAt).put("revocationRevision", revocationRevision)
@@ -134,12 +139,17 @@ internal class SyncV2Identity private constructor(
             if (SyncV2Codec.utf8(SyncV2Codec.canonical(v)).size > 8192) SyncV2Codec.fail("invalid_schema")
             val h = v.getJSONObject("header"); val aad = SyncV2Codec.utf8(SyncV2Codec.canonical(h))
             val key = SyncV2Codec.hkdf(wrapKey, SyncV2Codec.decode64(h.getString("salt"), 32), SyncV2Codec.lp(SyncV2Codec.utf8(h.getString("domain")), SyncV2Codec.sha(aad)))
-            val p = JSONObject(SyncV2Codec.decrypt(key, SyncV2Codec.decode64(h.getString("nonce"), 12), aad, SyncV2Codec.decode64(v.getString("ciphertext"))).toString(Charsets.UTF_8))
-            SyncV2Codec.exact(p, setOf("idKeyHex")); return SyncV2Codec.unhex(p.getString("idKeyHex"), 32)
+            val plain=try{SyncV2Codec.decrypt(key, SyncV2Codec.decode64(h.getString("nonce"), 12), aad, SyncV2Codec.decode64(v.getString("ciphertext")))}finally{key.fill(0)}
+            try {
+                val p=SyncV2Wire.parse(plain,8192,true)
+                SyncV2Codec.exact(p, setOf("idKeyHex")); return SyncV2Codec.unhex(p.getString("idKeyHex"), 32)
+            } finally {plain.fill(0)}
         }
         private fun installed(key: ByteArray, b: JSONObject, account: String, scope: JSONObject, pin: String): SyncV2Identity {
-            if (commitment(key) != b.getString("idKeyCommitment")) SyncV2Codec.fail("fingerprint_mismatch")
-            return SyncV2Identity(account, SyncV2Codec.scope(scope), pin, key.copyOf(), b.getString("creatorDeviceId"), b.getString("creatorPublicKey"))
+            try {
+                if (commitment(key) != b.getString("idKeyCommitment")) SyncV2Codec.fail("fingerprint_mismatch")
+                return SyncV2Identity(account, SyncV2Codec.scope(scope), pin, key.copyOf(), b.getString("creatorDeviceId"), b.getString("creatorPublicKey"))
+            } finally {key.fill(0)}
         }
     }
 }

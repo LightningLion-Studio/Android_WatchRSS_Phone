@@ -39,7 +39,7 @@ internal object SyncV2RepoBootstrap {
         if(pending.getString("fence")!=fence)SyncV2Codec.fail("scope_mismatch")
         if(pending.has("descriptor")) {
             val result=Candidate(pending.getJSONObject("descriptor"),pending.getJSONObject("recoveryCapsule"))
-            SyncV2Identity.recover(result.recoveryCapsule,result.descriptor,key(result.descriptor.getJSONObject("body").getLong("wrappingKeyVersion")),accountId,result.scope,SyncV2Codec.oid("repo-descriptor",result.descriptor))
+            SyncV2Identity.recover(result.recoveryCapsule,result.descriptor,key(result.descriptor.getJSONObject("body").getLong("wrappingKeyVersion")),accountId,result.scope,SyncV2Codec.oid("repo-descriptor",result.descriptor)).close()
             return result
         }
         val raw=SyncV2Codec.unhex(pending.getString("creatorPrivateHex"),32)

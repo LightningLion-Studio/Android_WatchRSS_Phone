@@ -156,13 +156,34 @@ class CloudKeyManager(
         changed()
     }
 
-    @Synchronized
+    private val accountRelease = java.util.concurrent.CopyOnWriteArrayList<Pair<String, () -> Unit>>()
+    internal fun onAccountRelease(userId:String,release:()->Unit):AutoCloseable {
+        val entry=userId to release;accountRelease.add(entry)
+        return AutoCloseable {accountRelease.remove(entry)}
+    }
+    internal fun syncV2Read(userId:String,name:String):String? = synchronized(this) {
+        preferences.getString(syncV2Name(userId,name),null)
+    }
+    internal fun syncV2Write(userId:String,name:String,value:String?) = synchronized(this) {
+        check(preferences.edit().putString(syncV2Name(userId,name),value).commit()) { "storage_pressure" }
+    }
+    private fun syncV2Name(userId:String,name:String) =
+        "syncv2_${CloudSnapshotCodec.sha256("$backendScope:$userId".toByteArray()).take(24)}_$name"
+
     fun clearAccountKeys(userId: String) {
+        // Release in-flight holders before taking the storage lock. Their guarded writes take
+        // lifetime -> storage locks in that order; reversing it here could deadlock logout.
+        accountRelease.filter{it.first==userId}.forEach{it.second()}
+        synchronized(this) { clearAccountKeysLocked(userId) }
+    }
+    private fun clearAccountKeysLocked(userId: String) {
         if (loadedPreferences == null) return
         migrateLegacy(userId)
         val names = preferences.all.keys.filter {
             it == currentVersionName(userId) || it == legacyAccountKeyName(userId) || it.startsWith(accountKeyPrefix(userId))
-        } + legacyEntries(userId).keys
+        } + legacyEntries(userId).keys + preferences.all.keys.filter {
+            it.startsWith(syncV2Name(userId,"secret/"))
+        }
         if (names.isEmpty()) return
         val editor = preferences.edit()
         names.forEach(editor::remove)

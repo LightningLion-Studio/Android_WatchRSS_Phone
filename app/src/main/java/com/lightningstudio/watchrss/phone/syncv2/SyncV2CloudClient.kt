@@ -29,7 +29,10 @@ internal class SyncV2CloudClient(
     private val http: OkHttpClient = OkHttpClient.Builder().retryOnConnectionFailure(false)
         .followRedirects(false).followSslRedirects(false).callTimeout(30, TimeUnit.SECONDS).build(),
     authenticatedBackend: HttpUrl? = null
-) {
+):AutoCloseable {
+    @Volatile private var closed=false
+    private val calls=java.util.concurrent.ConcurrentHashMap.newKeySet<okhttp3.Call>()
+    override fun close(){closed=true;calls.forEach{it.cancel()}}
     data class Session(val userId: String, val legacyDeviceId: String, val legacyEpoch: String,
         val legacyGeneration: String, val scopeJson: String, val deviceId: String, val bearer: String, val apiKey: String, val deviceAuthorization: String? = null) {
         val accountId: String get() {
@@ -57,6 +60,7 @@ internal class SyncV2CloudClient(
         if (http.interceptors.isNotEmpty() || http.networkInterceptors.isNotEmpty() || http.followRedirects || http.followSslRedirects) SyncV2Codec.fail("invalid_schema")
     }
     private fun active(): Session {
+        if(closed)SyncV2Codec.fail("authentication_required")
         if (!enabled) SyncV2Codec.fail("feature_disabled")
         serviceTrust.requireActive()
         val s = session(); if(s.accountId!=serviceTrust.accountId)SyncV2Codec.fail("authentication_required"); if (s.fence() != owner) SyncV2Codec.fail("scope_mismatch"); return s
@@ -85,6 +89,9 @@ internal class SyncV2CloudClient(
             if(remaining<=0)SyncV2Codec.fail("budget_paused")
             call.timeout().timeout(minOf(TimeUnit.SECONDS.toNanos(30),remaining),TimeUnit.NANOSECONDS)
         }
+        calls.add(call)
+        try {
+        active()
         call.execute().use { response ->
             val limit = if(raw && response.isSuccessful) 266264 else 1048576
             val data = response.body?.byteStream()?.use { input ->
@@ -108,6 +115,7 @@ internal class SyncV2CloudClient(
             }
             return data to response.headers.toMultimap().mapValues { it.value.singleOrNull() ?: "" }
         }
+        } finally {calls.remove(call)}
     }
     private fun get(path: String, query: Map<String,String> = emptyMap()): JSONObject = check(SyncV2Wire.parse(bytes("GET",path,query=query).first))
     private fun post(path: String, value: JSONObject): JSONObject {
@@ -271,7 +279,13 @@ internal class SyncV2CloudClient(
         if(value.opt("version")!=2)throw SyncV2CloudError("upgrade_required")
         return value
     }
-    fun recovery(oid:String):ByteArray {SyncV2Wire.oid(oid,"id-key-recovery");return bytes("GET","repo/id-key-recovery/$oid").first}
+    fun recovery(oid:String):ByteArray {
+        SyncV2Wire.oid(oid,"id-key-recovery")
+        val raw=bytes("GET","repo/id-key-recovery/$oid").first
+        val capsule=SyncV2Wire.parse(raw,8192,true)
+        if(SyncV2Codec.oid("id-key-recovery",capsule)!=oid)SyncV2Codec.fail("hash_mismatch")
+        return raw
+    }
     companion object {
         fun window(v:JSONObject) {
             SyncV2Codec.unhex(SyncV2Wire.string(v,"windowId"),16);SyncV2Wire.uint(v,"expiresAtMillis")

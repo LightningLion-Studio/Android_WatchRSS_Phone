@@ -731,7 +731,20 @@ internal class SyncV2Projection(
         val isolated=JSONObject();for(r in descriptors)if(r.has(SyncV2NoteWiring.ISOLATED_KEY))
             isolated.put(r.getJSONObject("meta").getString("entityKey"),JSONObject().put("reason",r.getString(SyncV2NoteWiring.ISOLATED_KEY))
                 .put("stateOid",r.getJSONObject("row").getString("stateOid")).put("noteRevision",r.opt(SyncV2NoteWiring.REVISION_KEY)?:JSONObject.NULL))
+        val priorIsolation=st.body.optJSONObject("noteIsolation")?:JSONObject()
         st.body.put("noteIsolation",isolated)
+        // R2: capture edits that were already projected before the remote row became
+        // unopenable. Ordinary reconciliation sees an unchanged candidate and would
+        // otherwise skip it, allowing a later account choice to acknowledge it away.
+        val notes=SyncV2Schema.domains.single{it.table=="notes"}
+        for(entity in isolated.keys())if(!priorIsolation.has(entity)&&SyncV2NoteWiring.outboxOwned(db,scope,entity)) {
+            val id=db.controlQuery("SELECT logical_id FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{c->if(c.moveToFirst())c.getString(0)else SyncV2Codec.fail("closure_incomplete")}
+            val local=db.controlQuery("SELECT noteId AS projection_key,${columns(notes)} FROM notes WHERE noteId=?",arrayOf(id)).use{c->
+                if(!c.moveToFirst())SyncV2Codec.fail("closure_incomplete")
+                readRecord(notes,c)
+            }
+            project(notes,id,local,st.revision,st.body.optJSONObject("account"),true,st.body,st.body,forceFork=true)
+        }
         st.body.optJSONObject("noteForkSources")?.let{sources->for(entity in sources.keys().asSequence().toList())if(!isolated.has(entity))sources.remove(entity)}
         st.body.put("metadataTreeRoot",root)
         st.body.put("metadataAccount",account).put("metadataStatus","metadata-ready").put("metadataSchema",SyncV2HeadPins.schema)
@@ -1192,7 +1205,7 @@ internal class SyncV2Projection(
         }
         return out
     }
-    private fun project(d: SyncV2Schema.Domain,id: String,value: JSONObject,revision: String,eventAccount: JSONObject?=null,enqueue:Boolean=false,sourceState:JSONObject?=null,ownerBody:JSONObject?=null,forkEdits:Boolean=true) {
+    private fun project(d: SyncV2Schema.Domain,id: String,value: JSONObject,revision: String,eventAccount: JSONObject?=null,enqueue:Boolean=false,sourceState:JSONObject?=null,ownerBody:JSONObject?=null,forkEdits:Boolean=true,forceFork:Boolean=false) {
         var id2=id; var value2=value
         val owner=ownerBody?:readState().body
         if(d.kind=="note"&&forkEdits) owner.optJSONObject("noteIsolation")?.let{iso->
@@ -1203,7 +1216,7 @@ internal class SyncV2Projection(
                 // An unchanged local cache is not an edit. Reconciliation must not create
                 // a phantom fork merely because the remote row became isolated.
                 val prior=db.controlQuery("SELECT meta,state FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,source)).use{c->if(c.moveToFirst())open("meta",c.getBlob(0)) to open("candidate-state",c.getBlob(1))else null}
-                if(prior!=null) {
+                if(prior!=null&&!forceFork) {
                     val incoming=SyncV2Business.split(d.kind,id,source,value,null)
                     if(SyncV2Codec.canonical(prior.first.getJSONObject("payload"))==SyncV2Codec.canonical(incoming.meta.getJSONObject("payload"))&&
                         SyncV2Codec.canonical(prior.second)==SyncV2Codec.canonical(incoming.state))return

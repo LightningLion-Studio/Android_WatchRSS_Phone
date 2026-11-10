@@ -121,13 +121,20 @@ internal object SyncV2NoteClosure {
         for (t in tables.values) resident += t.raw.size
         for (b in objects.values) resident += b.size
         hashes(oid, bytes, objects, tables)
-        // This is a physical allocation cap, independent of the publish/read meter. Scan
-        // all available encodings, bounds, missing items and hashes first (25.5 steps 1-6).
+        // This is a physical allocation cap, independent of the publish/read meter.
+        // Authenticate step 7 one object at a time before allowing this cap to isolate
+        // the entity. No list of decoded bodies is allocated for an over-cap closure.
         val overhead=SyncV2NoteSegments.SEALED_OVERHEAD.toLong()*ids.size
         val hardCap=if(maxBytes>(Long.MAX_VALUE-overhead)/3)Long.MAX_VALUE else 3*maxBytes+overhead
         var plainBytes=0L
         for(b in listOf(bytes).asSequence()+objects.values.asSequence())plainBytes+=(stateHeader(b)?.opt("plainBytes") as? Number)?.toLong()?:0
-        if(resident>hardCap||plainBytes>hardCap)SyncV2Codec.fail("storage_pressure")
+        if(resident>hardCap||plainBytes>hardCap) {
+            val parent=open(ctx,oid,bytes)
+            if(SyncV2Codec.canonical(parent.value)!=SyncV2Codec.canonical(state) || SyncV2Wire.string(parent.header,"type")!="state")SyncV2Codec.fail("invalid_schema")
+            for(id in ids)open(ctx,id,objects.getValue(id))
+            for(id in all)verifyRefs(ctx,tables.getValue(id),id,"state")
+            SyncV2Codec.fail("storage_pressure")
+        }
         val parent = open(ctx, oid, bytes)
         if (SyncV2Codec.canonical(parent.value) != SyncV2Codec.canonical(state)) SyncV2Codec.fail("invalid_schema")
         if (SyncV2Wire.string(parent.header, "type") != "state") SyncV2Codec.fail("invalid_schema")

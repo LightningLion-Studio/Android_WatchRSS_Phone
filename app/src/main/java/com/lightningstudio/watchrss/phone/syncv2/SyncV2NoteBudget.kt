@@ -1,6 +1,8 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 
@@ -24,9 +26,28 @@ internal object SyncV2NoteBudget {
             return Reservation(file)
         }catch(e:java.io.IOException){file.delete();SyncV2Codec.fail("storage_pressure")}
     }
-    fun reserve(db:SupportSQLiteDatabase,scope:String,entity:String,ordinaryBytes:Long,closureUpperBound:Long):Reservation {
+    fun reserve(db:SupportSQLiteDatabase,scope:String,entity:String,ordinaryBytes:Long,closureUpperBound:Long,payload:JSONObject):Reservation {
         val id=db.query("SELECT logical_id FROM syncv2_identity_map WHERE entity_key=? LIMIT 1",arrayOf(entity)).use{if(it.moveToFirst())it.getString(0)else null}
-        val attachments=if(id==null)0 else db.query("SELECT COALESCE(SUM(byteCount),0) FROM note_assets WHERE noteId=?",arrayOf(id)).use{it.moveToFirst();it.getLong(0)}
+        // A fork keeps the original storageKey; attachment ownership is not the
+        // reference graph. Charge every referenced key once, including ancestry
+        // and conflict texts, without claiming any authenticated OID reuse discount.
+        val keys=linkedSetOf<String>()
+        fun collect(text:String){keys.addAll(NoteAssetSyncPayload.referencedStorageKeys(text))}
+        for(field in SyncV2NoteSegments.names)if(payload.has(field))collect(payload.getString(field))
+        payload.optJSONObject("noteConflicts")?.optJSONArray("records")?.let{records->
+            for(i in 0 until records.length())for(field in listOf("baseMarkdown","localMarkdown","remoteMarkdown"))collect(records.getJSONObject(i).getString(field))
+        }
+        // Keep the existing conservative charge for owned attachment rows as well.
+        if(id!=null)db.query("SELECT storageKey FROM note_assets WHERE noteId=?",arrayOf(id)).use{c->while(c.moveToNext())keys.add(c.getString(0))}
+        var attachments=0L
+        for(storageKey in keys) {
+            val size=db.query("SELECT MAX(byteCount) FROM note_assets WHERE storageKey=?",arrayOf(storageKey)).use{c->
+                if(!c.moveToFirst()||c.isNull(0))SyncV2Codec.fail("closure_incomplete")
+                c.getLong(0)
+            }
+            if(size<0||attachments>9007199254740991L-size)SyncV2Codec.fail("storage_pressure")
+            attachments+=size
+        }
         val old=db.query("SELECT length(meta)+length(state) FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())it.getLong(0)else 0}
         val bytes=required(maxOf(old,ordinaryBytes),closureUpperBound,attachments)
         return reserve(syncV2SpoolDirectory(db),bytes)

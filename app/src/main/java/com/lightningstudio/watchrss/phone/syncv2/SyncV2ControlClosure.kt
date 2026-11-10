@@ -154,6 +154,7 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
                     wrapper.put(SyncV2NoteWiring.PULL_STAGED_KEY,true)
                     stage(StagedRow(entity,JSONObject(wrapper.toString()).put("state",failed?:emptyState(entity)),rowBytes))
                     rowBytes.clear()
+                    wrapper.put("state",emptyState(entity))
                 }
                 decoded.add(wrapper);continue
             }
@@ -161,13 +162,14 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
             businessRow(wrapper,ordinary?:wire!!,wire!!,kind,logicalId,row,if(stage!=null)::fetchRow else ::fetch)
             if(stage!=null) {
                 // F2/R4: the reassembled body and the segment ciphertexts are handed off per
-                // entity; the round keeps only the verbatim parent wire plus metadata.
+                // entity; the round keeps only descriptors. Parent metadata can itself
+                // contain three conflict bodies and must stay in the encrypted spool.
                 val body=JSONObject(wrapper.toString()).put("state",ordinary?:wire!!)
                 wrapper.put(SyncV2NoteWiring.PULL_STAGED_KEY,true)
                 stage(StagedRow(entity,body,rowBytes));rowBytes.clear()
             }
             wrapper.put("state",ordinary?:wire!!)
-            if(stage!=null)wrapper.put("state",if(segmented)wire else emptyState(entity)) // the round carries the parent wire verbatim only
+            if(stage!=null)wrapper.put("state",emptyState(entity))
             decoded.add(wrapper)
             }finally{if(rowStorage.isInitialized())(rowBytes as? AutoCloseable)?.close()}
         }

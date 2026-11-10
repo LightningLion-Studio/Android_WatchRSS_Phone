@@ -151,7 +151,7 @@ internal object SyncV2NoteWiring {
         }
         // Persist the binding with the publish staging decision (25.3). A local delete records the
         // lifetime boundary {deleted, invalidated} so a rebuild can never reuse sealed segments (R2).
-        val reservation=SyncV2NoteBudget.reserve(db,scope,entityKey,m.shortPlainBytes,encoded.closureStoredBytesUpperBound)
+        val reservation=SyncV2NoteBudget.reserve(db,scope,entityKey,m.shortPlainBytes,encoded.closureStoredBytesUpperBound,payload)
         try {
         val removing = payload.optBoolean("deleted", false)
         putBinding(db, scope, entityKey, revision, removing, removing && priorExisted(db, scope, entityKey))

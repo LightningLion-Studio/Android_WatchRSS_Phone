@@ -23,7 +23,7 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
     class StagedRow internal constructor(internal val entityKey:String, internal val body:JSONObject, internal val objects:Map<String,ByteArray>)
     private fun emptyState(entity:String)=JSONObject().put("version",2).put("entityKey",entity)
         .put("requiredFeatures",JSONArray()).put("payload",JSONObject()).put("noteSegments",JSONArray())
-    fun verify(envelope:JSONObject,get:(String)->ByteArray,reference:(String)->JSONObject,stage:((StagedRow)->Unit)?=null):Verified {
+    fun verify(envelope:JSONObject,get:(String)->ByteArray,stage:((StagedRow)->Unit)?=null,reference:(String)->JSONObject):Verified {
         val commit=authors.header(envelope);val objects=linkedMapOf<String,ByteArray>()
         fun fetch(oid:String):ByteArray = objects[oid] ?: get(oid).copyOf().also { objects[oid]=it }
         val rows=SyncV2Index.read(identity.scope,commit.getString("treeRoot"),::fetch)
@@ -40,7 +40,7 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
                 if(len !in 1..4096 || len+24>bytes.size)SyncV2Codec.fail("invalid_encoding")
                 val h=SyncV2Wire.parse(bytes.copyOfRange(8,8+len),4096,true)
                 val version=SyncV2Wire.uint(h,"keyVersion",4294967295)
-                val value=SyncV2NoteClosure.strictParse(SyncV2Envelope.open(identity,contentKey(version),oid,bytes,version),262144)
+                val value=SyncV2Wire.parse(SyncV2Envelope.open(identity,contentKey(version),oid,bytes,version),262144,true)
                 if(value.get("version")!=2 || value.get("entityKey")!=entity)SyncV2Codec.fail("invalid_schema")
                 return value
             }
@@ -54,7 +54,7 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
                 val refsOid=SyncV2Wire.oid(SyncV2Wire.string(mapping,"refsOid"),"state-refs")
                 val raw=read(refsOid)
                 if(raw.size.toLong()!=SyncV2Wire.uint(mapping,"totalBytes",262144) || refsOid!="state-refs:sha256:${SyncV2Codec.hex(SyncV2Codec.sha(raw))}")SyncV2Codec.fail("hash_mismatch")
-                val signed=SyncV2NoteClosure.strictParse(raw,262144);SyncV2Codec.exact(signed,setOf("body","signature"))
+                val signed=SyncV2Wire.parse(raw,262144,true);SyncV2Codec.exact(signed,setOf("body","signature"))
                 val body=signed.getJSONObject("body");SyncV2Codec.exact(body,setOf("scope","stateOid","segmentOids"))
                 if(SyncV2Codec.scope(body.getJSONObject("scope"))!=identity.scopeJson || body.get("stateOid")!=row.get("stateOid") || SyncV2Codec.canonical(body.getJSONArray("segmentOids"))!=SyncV2Codec.canonical(wire.getJSONArray("noteSegments")))SyncV2Codec.fail("invalid_schema")
                 val pub=authors.publicKey(SyncV2Wire.string(mapping,"authorDeviceId"),SyncV2Wire.string(mapping,"keyId"),true)
@@ -137,7 +137,7 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
                     val bytes=if(stage!=null)fetchRow(refsOid) else fetch(refsOid)
                     if(stage!=null&&refsOid.substringAfter(":sha256:")==SyncV2Codec.hex(SyncV2Codec.sha(bytes)))rowBytes[refsOid]=bytes}
                 wrapper.put("state",failed?:emptyState(entity)).put(SyncV2NoteWiring.ISOLATED_KEY,e.message?:"storage_pressure")
-                    .put(SyncV2NoteWiring.SEGMENTS_KEY,JSONArray(failed?.optJSONArray("noteSegments")?.let{SyncV2Wire.strings(it,SyncV2NoteSegments.MAX,false)}?:emptyList()))
+                    .put(SyncV2NoteWiring.SEGMENTS_KEY,JSONArray(failed?.optJSONArray("noteSegments")?.let{SyncV2Wire.strings(it,SyncV2NoteSegments.MAX,false)}?:emptyList<String>()))
                     .put(SyncV2NoteWiring.REFS_MAPS_KEY,JSONObject())
                     .put(SyncV2NoteWiring.REVISION_KEY,failed?.optJSONObject("payload")?.opt("noteRevision")?:JSONObject.NULL)
                 if(stage!=null) {

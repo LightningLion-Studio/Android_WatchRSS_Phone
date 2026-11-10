@@ -23,7 +23,9 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
     class StagedRow internal constructor(internal val entityKey:String, internal val body:JSONObject, internal val objects:Map<String,ByteArray>)
     private fun emptyState(entity:String)=JSONObject().put("version",2).put("entityKey",entity)
         .put("requiredFeatures",JSONArray()).put("payload",JSONObject()).put("noteSegments",JSONArray())
-    fun verify(envelope:JSONObject,get:(String)->ByteArray,stage:((StagedRow)->Unit)?=null,reference:(String)->JSONObject):Verified {
+    fun verify(envelope:JSONObject,get:(String)->ByteArray,reference:(String)->JSONObject):Verified=verifyStaged(envelope,get,reference,null)
+    /** F2/R4 pull entry: each segmented entity is handed to [stage] and dropped from the round. */
+    fun verifyStaged(envelope:JSONObject,get:(String)->ByteArray,reference:(String)->JSONObject,stage:((StagedRow)->Unit)?):Verified {
         val commit=authors.header(envelope);val objects=linkedMapOf<String,ByteArray>()
         fun fetch(oid:String):ByteArray = objects[oid] ?: get(oid).copyOf().also { objects[oid]=it }
         val rows=SyncV2Index.read(identity.scope,commit.getString("treeRoot"),::fetch)

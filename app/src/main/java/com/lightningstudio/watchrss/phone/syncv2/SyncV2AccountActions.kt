@@ -461,7 +461,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         val fileToken=fileCapture();val context=context(capture)
         val requestId=id();val prepared=client.prepareHistory(JSONObject().put("requestId",requestId).put("targetCommitOid",targetOid).put("expectedAccountRevision",capture.accountRevision).put("expectedRollbackGeneration",capture.generation))
         if(prepared.getLong("expiresAtMillis")<=now())SyncV2Codec.fail("snapshot_expired")
-        val envelope=header(targetOid);val verified=SyncV2ControlClosure(identity,context.authors,contentKey,noteSegmentsReadGate()).verify(envelope,{client.raw(it,context.window.getString("windowId"))}){p->client.reference(p,context.window.getString("windowId")).let{copy(it).apply{remove("version")}}}
+        val envelope=header(targetOid);val verified=SyncV2ControlClosure(identity,context.authors,contentKey,noteSegmentsReadGate()).verify(envelope,{client.raw(it,context.window.getString("windowId"))},{p->client.reference(p,context.window.getString("windowId")).let{copy(it).apply{remove("version")}}})
         if(verified.commitOid!=targetOid || envelope.getJSONObject("body").getString("treeRoot")!=prepared.getString("treeRoot"))SyncV2Codec.fail("hash_mismatch")
         val target=verified.rows.map{if(it.has(SyncV2NoteWiring.ISOLATED_KEY))copy(it)
             else copy(it).put("value",SyncV2Business.join(it.getJSONObject("meta").getString("kind"),it.getJSONObject("meta"),it.getJSONObject("state")))}

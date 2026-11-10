@@ -27,7 +27,9 @@ internal class SyncV2P5Fixture:AutoCloseable {
     var selectedLocalRevision:String?=null;var choiceCalls=0;var publishCalls=0;var ackCalls=0;var historyCalls=0;var flags=true;var drop=false;var ackFailure=false
     var onConfirm:(()->Unit)?=null;var afterCloudConfirmation:((JSONObject)->Unit)?=null;var historyExpired=false;var snapshotExpired=false
     private val totals=mutableMapOf<String,Int>()
-    val target:String;val initial:String
+    var target:String;val initial:String
+    /** C7 hook: rewrites one entity's state wire before it is sealed (e.g. declares a feature to isolate it). */
+    var stateHook:((String,JSONObject)->Unit)?=null
     init {
         val targetRow=note("old title","base\nline\n")
         target=commit(listOf(targetRow),null,"0","normal",null)
@@ -103,7 +105,7 @@ internal class SyncV2P5Fixture:AutoCloseable {
         .put("contentHash","hash").put("baseContentHash","hash").put("baseMarkdown","base\nline\n").put("pinned",false).put("createdAt",0).put("updatedAt",0).put("modifiedBy","synthetic").put("deleted",false).put("deletedAt",0).put("noteConflicts",JSONObject().put("version",1).put("records",JSONArray()))
     fun commit(values:List<JSONObject>,parent:String?,generation:String,kind:String,target:String?):String {
         val rows=values.map{v->val kind=when{v.has("noteId")->"note";v.has("folderId")->"folder";v.has("articleId")->"article";v.has("assetId")->"asset";v.has("chapterIndex")->"book-reading";v.has("bookId")->"book";v.has("articleIdHash")->"rss-state";else->"source"};val id=SyncV2Business.logicalId(kind,v);val entity=identity.entity(kind,id)
-            val p=SyncV2Business.split(kind,id,entity,v,null);val meta=SyncV2Envelope.seal(identity,key,1,"meta",SyncV2Codec.utf8(SyncV2Codec.canonical(p.meta)));val state=SyncV2Envelope.seal(identity,key,1,"state",SyncV2Codec.utf8(SyncV2Codec.canonical(p.state)))
+            val p=SyncV2Business.split(kind,id,entity,v,null);stateHook?.invoke(id,p.state);val meta=SyncV2Envelope.seal(identity,key,1,"meta",SyncV2Codec.utf8(SyncV2Codec.canonical(p.meta)));val state=SyncV2Envelope.seal(identity,key,1,"state",SyncV2Codec.utf8(SyncV2Codec.canonical(p.state)))
             f.objects[meta.oid]=meta.bytes;f.objects[state.oid]=state.bytes
             val reference=SyncV2Index.refs(identity,f.signer,state.oid);val refOid=SyncV2Codec.oid("state-refs",reference);f.objects[refOid]=SyncV2Codec.utf8(SyncV2Codec.canonical(reference));refs[state.oid]=mapping(state.oid,refOid,f.objects.getValue(refOid).size)
             JSONObject().put("entityKey",entity).put("metaOid",meta.oid).put("stateOid",state.oid).put("addedAtMillis",0).put("rowSequence","1").put("deleted",v.optBoolean("deleted",false)).put("bodyRevision",JSONObject.NULL).put("recipeOid",JSONObject.NULL).put("promiseId",JSONObject.NULL).put("opaqueContentId",JSONObject.NULL).put("contentBytes",JSONObject.NULL).put("requiredFeatures",JSONArray())}

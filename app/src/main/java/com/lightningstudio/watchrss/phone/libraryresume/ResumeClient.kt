@@ -222,9 +222,11 @@ class ResumeClient(
         // the DB lane so the source can persist the receiver-granted epoch first.
         sourceBegins[frame.optString("jobId")]?.await()
         return store.exclusive {
-        val r = ResumeWire.envelope(ResumeJson.parse(ResumeJson.utf8(frame.toString())))
+        val r = ResumeWire.envelope(ResumeJson.parse(ResumeJson.utf8(frame.toString()))).also { ResumeWire.retainSize(it, ResumeWire.frameBytes(frame)) }
         authorize()
         if (r.s("type") != "request" || r.s("phase") != "cancel" || bindings.none { it.s("jobId") == r.s("jobId") && it.s("direction") == "phoneToWatch" }) fail()
+        val binding = bindings.first { it.s("jobId") == r.s("jobId") }
+        if (ResumeWire.frameBytes(r) > binding.o("selection").o("limits").n("maxFrameBytes")) fail("LIMIT_EXCEEDED")
         if (r.o("payload").s("reason") == "SOURCE_CHANGED") fail()
         val job = r.s("jobId"); val source = store.get(account, "sourceJob", job) ?: fail("NOT_FOUND")
         if (source.s("connection") != connectionId || source.n("epoch") != r.n("epoch")) fail("STALE_EPOCH")

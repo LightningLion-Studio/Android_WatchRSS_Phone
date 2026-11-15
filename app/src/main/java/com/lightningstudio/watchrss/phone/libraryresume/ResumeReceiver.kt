@@ -97,6 +97,8 @@ class ResumeReceiver(
         if (r.s("phase") == "begin") return@exclusive begin(r, now)
         val j = job(r.s("jobId")); fence(j, r)
         if (ResumeWire.frameBytes(r) > lim(j).n("maxFrameBytes")) fail("LIMIT_EXCEEDED")
+        // Phase-specific limits apply before request/page receipt adoption too.
+        if (r.s("phase") == "manifestPage" && ResumeWire.frameBytes(r) > lim(j).n("maxManifestPageBytes")) fail("LIMIT_EXCEEDED")
         if (j.s("state") == "CANCELLED" && r.s("phase") !in listOf("missing", "cancel")) fail("JOB_CANCELLED")
         if (j.s("state") == "PLANNING" && r.s("phase") in listOf("putChunk", "apply")) fail("MANIFEST_INCOMPLETE")
         // Wire payload validation always precedes deduplication. put additionally checks bytes.
@@ -149,6 +151,7 @@ class ResumeReceiver(
             bind(j, r); touch(j, now)
         }
         begun.add(id)
+        cleanupApplied(j)
         return ResumeResults.answer(r, obj("disposition" to if (old == null) "CREATED" else "RESUMED", "selectionDigest" to p.s("selectionDigest"), "state" to j.s("state"), "expiresAtMillis" to j.n("expiresAtMillis"), "nextManifestPage" to j.n("nextManifestPage"), "completion" to j.get("completion")), epoch)
     }
     private suspend fun manifest(j: JSONObject, r: JSONObject): JSONObject {
@@ -185,8 +188,19 @@ class ResumeReceiver(
         if (r.s("jobId") != j.s("jobId") || r.s("planDigest") != j.s("planDigest") || r.s("receiverDeviceId") != auth.phoneDeviceId || r.s("objectId") != row.o("descriptor").s("objectId")) fail("RECEIPT_CONFLICT")
         return r
     }
+    /** The durable receipt plus immutable descriptor is the cleanup retry record.
+     * Only our disposable chunk/compose paths are removed. Failure leaves that record
+     * intact, never rolls back APPLIED, and is retried on observation or admission. */
+    private suspend fun cleanupApplied(j: JSONObject) {
+        for (row in objects(j.s("jobId"))) if (receipt(j, row) != null) {
+            files.release(scope, j.s("jobId"), row.o("descriptor"))
+        }
+    }
     private suspend fun status(j: JSONObject, row: JSONObject): Pair<String, List<Int>> {
-        if (receipt(j, row) != null) return "APPLIED" to emptyList()
+        if (receipt(j, row) != null) {
+            files.release(scope, j.s("jobId"), row.o("descriptor"))
+            return "APPLIED" to emptyList()
+        }
         val d = row.o("descriptor"); val missing = files.missing(scope, j.s("jobId"), d)
         // Adopt durable orphan files after a crash; discard stale block availability.
         d.a("chunkHashes").strings().indices.forEach { i ->
@@ -198,6 +212,7 @@ class ResumeReceiver(
         return (if (staged) "STAGED" else if (missing.size < d.a("chunkHashes").length()) "PARTIAL" else "PENDING") to missing
     }
     private suspend fun missing(j: JSONObject, p: JSONObject): JSONObject {
+        cleanupApplied(j)
         val base = obj("state" to j.s("state"), "nextManifestPage" to j.n("nextManifestPage"), "expiresAtMillis" to j.n("expiresAtMillis"), "completion" to j.get("completion"))
         val items = JSONArray(); var next: JSONObject? = null
         if (p.n("limit") == 0L || j.s("state") == "CANCELLED") return base.put("items", items).put("next", JSONObject.NULL).put("done", true)
@@ -230,6 +245,7 @@ class ResumeReceiver(
     private suspend fun admit(j: JSONObject, d: JSONObject) {
         var active = 0L; var ceiling = lim(j).n("maxInFlightObjects")
         for ((id, other) in store.list(scope, "job")) {
+            cleanupApplied(other)
             if (terminal(other)) continue
             ceiling = minOf(ceiling, lim(other).n("maxInFlightObjects"))
             for (row in objects(id)) {
@@ -254,7 +270,10 @@ class ResumeReceiver(
     private suspend fun put(j: JSONObject, r: JSONObject): JSONObject {
         if (j.s("state") == "PLANNING") fail("MANIFEST_INCOMPLETE")
         val p = r.o("payload"); val (row, bytes) = validateChunk(j, p); val d = row.o("descriptor"); val rc = receipt(j, row)
-        if (rc != null) return obj("objectId" to d.s("objectId"), "chunkIndex" to p.n("chunkIndex"), "chunkState" to null, "objectState" to "APPLIED", "receipt" to rc)
+        if (rc != null) {
+            files.release(scope, j.s("jobId"), d)
+            return obj("objectId" to d.s("objectId"), "chunkIndex" to p.n("chunkIndex"), "chunkState" to null, "objectState" to "APPLIED", "receipt" to rc)
+        }
         if (terminal(j)) fail("JOB_CANCELLED")
         runnable(j, d); admit(j, d)
         files.stage(scope, j.s("jobId"), d, p.n("chunkIndex").toInt(), bytes, stagingLimit(j)); fault("afterChunkDurable")
@@ -267,7 +286,10 @@ class ResumeReceiver(
     private suspend fun apply(j: JSONObject, r: JSONObject): JSONObject {
         if (j.s("state") == "PLANNING") fail("MANIFEST_INCOMPLETE")
         val row = objectRow(j.s("jobId"), r.o("payload").s("objectId")); val d = row.o("descriptor")
-        receipt(j, row)?.let { return obj("state" to "APPLIED", "receipt" to it) }
+        receipt(j, row)?.let {
+            files.release(scope, j.s("jobId"), d)
+            return obj("state" to "APPLIED", "receipt" to it)
+        }
         if (terminal(j)) fail("JOB_CANCELLED")
         runnable(j, d); admit(j, d)
         val metadata = ResumeMetadata.validate(d)

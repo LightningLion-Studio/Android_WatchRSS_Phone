@@ -9,7 +9,9 @@ import java.nio.file.StandardOpenOption
 
 /** Private cache only. The engine's writer lane covers validation, publish and receipt.
  * Never release business-referenced files here: adapters publish their own immutable files. */
-class ResumeFiles(private val root: File) {
+class ResumeFiles internal constructor(private val root: File, private val deleteCache: (File) -> Boolean) {
+    constructor(root: File) : this(root, { it.delete() })
+    // The internal delete port lets host tests retain a retryable cache deletion failure.
     init { root.mkdirs(); if (!root.isDirectory) fail("LOCAL_IO") }
     private fun local(vararg parts: String) = File(root, ResumeDigests.d("wrss.library-resume.v1/local-file", parts.toList()))
     internal fun chunk(scope: String, job: String, oid: String, index: Int) = local("chunk", scope, job, oid, index.toString())
@@ -43,9 +45,15 @@ class ResumeFiles(private val root: File) {
         if (ResumeDigests.hash(bytes) != d.s("sha256")) fail("HASH_MISMATCH")
         durable(target, bytes, budget); return target
     }
-    internal fun release(scope: String, job: String, d: JSONObject) {
-        d.a("chunkHashes").strings().indices.forEach { chunk(scope, job, d.s("objectId"), it).delete() }
-        composed(scope, job, d.s("objectId")).delete()
+    internal fun release(scope: String, job: String, d: JSONObject): Boolean {
+        val paths = d.a("chunkHashes").strings().indices.map { chunk(scope, job, d.s("objectId"), it) } + composed(scope, job, d.s("objectId"))
+        var released = true
+        for (path in paths) {
+            try { if (path.exists() && !deleteCache(path)) released = false }
+            catch (_: java.io.IOException) { released = false }
+            catch (_: SecurityException) { released = false }
+        }
+        return released
     }
 }
 

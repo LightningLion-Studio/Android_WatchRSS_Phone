@@ -22,6 +22,11 @@ The wire is frozen by `library-resume-v1.md` (RESUMEC-SPEC2); there are eight ph
   it routes watchToPhone work to the receiver and remote cancellation of phoneToWatch work
   to the source journal. Supply `session::cancelJob` as the client's `onSourceCancelled`
   callback so a cancelled source stops waiting immediately. There are no old ACKs inside this session.
+  Observe `session.awaitTermination()` independently of source requests. It returns the first
+  typed local/remote STOP cause and fails pending exchanges with the same cause, even if the
+  error reply write or the later stream close fails. Revoke the receiver on that notification
+  before controller cleanup. STOP never authorizes another search. QUERY/WAIT/BEGIN/REPLAN
+  retain their existing recovery rules. After a STOP reply no queued handler can execute.
 - `ResumeAuthorization` is LOCAL consent, account and stable peer authorization. Construct it
   from the currently verified session, never from a network begin. The controller calls the
   receiver's serialized `revoke(cancelJobs=true)` before account cleanup or consent cancellation.
@@ -39,6 +44,9 @@ The wire is frozen by `library-resume-v1.md` (RESUMEC-SPEC2); there are eight ph
   filenames never use remote paths. It fsyncs file data before atomic rename and fsyncs the
   directory before admitting chunk receipts. Cache adoption rehashes actual bytes. A half frame
   cannot stage. A corrupt local chunk becomes missing; a bad incoming hash is a protocol error.
+  APPLIED receipts and descriptors also serve as cleanup retry records: begin, missing, receipt
+  replay and object admission release only private chunk/compose cache. A failed deletion
+  preserves the receipt, retries later and never removes a separately published business file.
 - `ResumeBusinessPort.apply` is a SUSPENDING transaction adapter, not a notification. Use only
   the supplied Room business DB and existing MERGE/clock/provenance logic. The receiver invokes
   it INSIDE the same transaction that commits APPLIED. A thrown error rolls both back. Publish
@@ -90,6 +98,7 @@ The wire is frozen by `library-resume-v1.md` (RESUMEC-SPEC2); there are eight ph
 Use the task's `flock ... capmem 16G ./gradlew ... --no-daemon -Dorg.gradle.workers.max=2` wrapper.
 `ResumeVectorsTest`, `ResumeDurabilityTest`, and `ResumeSessionTest` are hermetic host tests.
 For explicit Kotlin↔PodJS host interop, set `WATCHRSS_RESUME_WATCH` to the watch application
-checkout at `83d4f8fef24091aa5546cb18eaac91eb73678bb9` and include `ResumeWatchInteropTest`.
+checkout (use `PodJS_WatchRSS.wt-resume-c`) at `83d4f8fef24091aa5546cb18eaac91eb73678bb9` and include `ResumeWatchInteropTest`.
 It uses that application's real coordinator, SQLite and article repository with its test native
-facade. It uses Bun for TypeScript execution. It does not contact a service or device.
+facade. The binary variant also runs the real phone ResumeSession with length-prefixed frames;
+the original JSON-line variant remains as a direct protocol regression. Bun executes TypeScript. It does not contact a service or device.

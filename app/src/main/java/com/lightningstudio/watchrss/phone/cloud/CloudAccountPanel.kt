@@ -69,6 +69,8 @@ fun CloudAccountPanel(
     val registrationConflict by service.deviceRegistrationConflict.collectAsState()
     var showReregisterConfirmation by remember(userId) { mutableStateOf(false) }
     var activationInFlight by remember(userId) { mutableStateOf(false) }
+    var recordSyncEnabled by remember(userId) { mutableStateOf<Boolean?>(null) }
+    var recordConsentEpoch by remember(userId) { mutableStateOf<String?>(null) }
 
     fun refresh() {
         runAction {
@@ -90,6 +92,38 @@ fun CloudAccountPanel(
     }
 
     LaunchedEffect(userId) { refresh() }
+    val localCloudKey = service.hasLocalAccountKey()
+    LaunchedEffect(userId, bootstrap?.libraryEpoch, localCloudKey) {
+        recordSyncEnabled = null
+        if (bootstrap != null && localCloudKey) {
+            try { recordSyncEnabled = service.cloudRecordSyncEnabled(userId) }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) { onError(error.message ?: "云端状态同步读取失败") }
+        }
+    }
+
+    recordConsentEpoch?.let { epoch ->
+        AlertDialog(
+            onDismissRequest = { recordConsentEpoch = null },
+            title = { Text("启用云端状态同步？") },
+            text = { Text("同步订阅、收藏、稍后读、阅读进度、笔记和书籍状态。数据在本机加密；已有备份会保留。") },
+            confirmButton = { TextButton(enabled = !busy, onClick = {
+                recordConsentEpoch = null
+                runAction {
+                    onBusyChange(true)
+                    try {
+                        if (service.enableCloudRecordSync(true, userId, epoch)) {
+                            recordSyncEnabled = true
+                            onMessage("云端状态同步已启用，请点立即同步")
+                        }
+                    } catch (error: CancellationException) { throw error }
+                    catch (error: Exception) { onError(error.message ?: "云端状态同步启用失败") }
+                    finally { onBusyChange(false) }
+                }
+            }) { Text("同意并启用") } },
+            dismissButton = { TextButton(enabled = !busy, onClick = { recordConsentEpoch = null }) { Text("取消") } }
+        )
+    }
 
     if (showReregisterConfirmation && registrationConflict) {
         AlertDialog(
@@ -332,6 +366,16 @@ fun CloudAccountPanel(
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.SemiBold
                 )
+                when (recordSyncEnabled) {
+                    false -> {
+                        Text("云端状态同步尚未启用。启用后可与手表同步个人状态。")
+                        OutlinedButton(enabled = !busy, onClick = {
+                            recordConsentEpoch = bootstrap?.libraryEpoch
+                        }) { Text("启用云端状态同步") }
+                    }
+                    true -> Text("✓ 云端状态同步已启用", color = MaterialTheme.colorScheme.primary)
+                    null -> Text("正在读取云端状态同步…")
+                }
                 Text("快照保留", fontWeight = FontWeight.Medium)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf(7 to "7天", 30 to "30天", 90 to "90天", 0 to "永久").forEach { (days, label) ->

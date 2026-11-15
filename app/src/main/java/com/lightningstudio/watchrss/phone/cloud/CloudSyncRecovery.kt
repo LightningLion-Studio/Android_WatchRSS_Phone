@@ -8,6 +8,7 @@ import java.io.IOException
 /** A valid record may precede its body snapshot; this is not a failed sync or an invalid owner. */
 internal class MissingCloudBodyException : IOException("正文尚未同步完成，请稍后重试；后台将继续恢复")
 internal class CloudRecordsUnavailableException : IOException("记录通道暂不可用，请稍后重试")
+internal class CloudRecordConsentRequiredException : IllegalStateException("请先在云同步设置中启用云端状态同步")
 
 internal fun recoverableCloudRestoreFailure(error: Exception): Boolean =
     error !is CancellationException && error !is CloudTrustException &&

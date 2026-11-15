@@ -32,6 +32,20 @@ class PhoneCloudRecordSyncTest {
     private fun sync(client: PhoneCloudClient, state: State, values: List<JSONObject> = emptyList(), apply: suspend (String, JSONObject) -> Unit = { _, _ -> }, owner: (PhoneAccountSession) -> Unit = {}) =
         PhoneCloudRecordSync(client, state, { consume -> values.forEach { consume("article", it) } }, { _, kind, value -> apply(kind, value) }, { 1 }, { _, _ -> key.copyOf() }, owner)
 
+    @Test fun unconsentedAccountRequiresExplicitOptInAndPreservesCursor() = runBlocking {
+        val state = State().also { it.cursor = "7"; it.rows["retained"] = "7" to "hash" }
+        var posts = 0
+        val client = client { request ->
+            if (request.method != "GET") posts++
+            200 to page(format = 0)
+        }
+        val failure = runCatching { sync(client, state).sync(session, true, "epoch", requireAvailable = true) }.exceptionOrNull()
+        assertEquals("请先在云同步设置中启用云端状态同步", failure?.message)
+        assertEquals("7", state.cursor)
+        assertEquals("7" to "hash", state.rows["retained"])
+        assertEquals(0, posts)
+    }
+
     @Test fun commitProbeNeverTraversesHashesAppliesOrAdvancesTheCursor()=runBlocking {
         val state=State();var work=0
         fun probeClient(response:JSONObject)=client { 200 to response }

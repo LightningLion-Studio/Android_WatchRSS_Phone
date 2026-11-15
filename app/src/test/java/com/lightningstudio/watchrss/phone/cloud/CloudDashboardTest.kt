@@ -4,6 +4,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CloudDashboardTest {
+    @Test fun recordsConsentOffersSetupInsteadOfNetworkRetry() {
+        val value = cloudDashboardPresentation(true, true, false, CloudSyncPhase.ERROR, member,
+            recordsConsentRequired = true)
+        assertEquals("云端状态同步未启用", value.status)
+        assertEquals("启用云端状态同步", value.actionLabel)
+        assertFalse(value.detail.orEmpty().contains("网络"))
+    }
     private val member = CloudMemberState("member", true, true, true, 1000, 300, 200, 30, null, null)
     @Test fun `only stale session errors trigger possession refresh, revoked device never reclaims`() {
         assertTrue(isRefreshableCloudDeviceSessionError("device_session_revoked"))

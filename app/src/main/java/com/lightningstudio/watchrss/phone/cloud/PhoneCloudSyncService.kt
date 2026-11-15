@@ -839,6 +839,36 @@ class PhoneCloudSyncService(
             result
         }
 
+    suspend fun cloudRecordSyncEnabled(expectedUserId: String): Boolean = approvalMutex.withLock {
+        val session = requireSession()
+        check(session.userId == expectedUserId) { "账号已切换，请重新操作" }
+        val bootstrap = client.bootstrap(session)
+        checkCloudEpoch(session, bootstrap.libraryEpoch)
+        val page = client.recordPage(session, "0") ?: throw CloudRecordsUnavailableException()
+        checkCloudEpoch(session, bootstrap.libraryEpoch)
+        when (page.opt("formatVersion")) {
+            0 -> false
+            1 -> true
+            else -> error("云端状态同步协议不受支持，请升级手机端")
+        }
+    }
+
+    suspend fun enableCloudRecordSync(confirmed: Boolean, expectedUserId: String, expectedEpoch: String): Boolean {
+        if (!confirmed) return false
+        return approvalMutex.withLock {
+            val session = requireSession()
+            check(session.userId == expectedUserId) { "账号已切换，请重新操作" }
+            val bootstrap = client.bootstrap(session)
+            checkCloudEpoch(session, expectedEpoch)
+            check(bootstrap.libraryEpoch == expectedEpoch) { "云端资料库已变化，请重新确认" }
+            check(hasLocalAccountKey()) { "请先授权此手机解密云备份" }
+            verifyLocalKeys(session, bootstrap)
+            client.consentRecords(session, true, expectedEpoch)
+            checkCloudEpoch(session, expectedEpoch)
+            true
+        }
+    }
+
     suspend fun prepareFirstDevice(): RecoveryKeySetup = approvalMutex.withLock {
         val session = requireSession(); val bootstrap = client.bootstrap(session)
         requireCloudFirstActivationAllowed(bootstrap)
@@ -1495,6 +1525,9 @@ class PhoneCloudSyncService(
                     update(CloudSyncPhase.ERROR, if (error is CloudHttpException && error.status == 413) {
                         "云空间不足，同步尚未完成。请释放云空间后重试，本机内容已保留。"
                     } else error.message ?: "云同步失败")
+                    if (error is CloudRecordConsentRequiredException) {
+                        _state.update { it.copy(errorCode = "cloud_records_consent_required") }
+                    }
                 }
                 throw error
             }

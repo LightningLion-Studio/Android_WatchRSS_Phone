@@ -90,6 +90,18 @@ class PhoneCloudClient(
     internal suspend fun postRecords(session: PhoneAccountSession, items: JSONArray, expectedEpoch: String? = knownEpoch(session)): JSONObject =
         post(session, "/functions/v1/cloud/records", JSONObject().put("formatVersion", 1).put("items", items), expectedEpoch).use { it.jsonBody() }
 
+    /** Account-wide opt-in. This must only follow a user's explicit confirmation. */
+    internal suspend fun consentRecords(session: PhoneAccountSession, confirmed: Boolean, expectedEpoch: String): Boolean {
+        if (!confirmed) return false
+        post(session, "/functions/v1/cloud/records/consent", JSONObject().put("formatVersion", 1), expectedEpoch).use {
+            val value = it.jsonBody()
+            require(value.opt("formatVersion") == 1 && value.getString("headRevision").matches(Regex("[0-9]+")) &&
+                value.getLong("recordBytes") >= 0) { "云端状态同步响应无效，请升级或稍后重试" }
+        }
+        // Consent is not a read receipt. Do not advance the records cursor here.
+        return true
+    }
+
     suspend fun membership(session: PhoneAccountSession): CloudMemberState =
         get(session, "/functions/v1/account/entitlement").use { response ->
             response.jsonBody().memberState()

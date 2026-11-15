@@ -6,7 +6,7 @@ import org.json.JSONObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** Bounded pull and CAS diff. Android never grants the mini program's consent. */
+/** Bounded pull and CAS diff. Background sync never grants account records consent. */
 internal enum class CloudRecordProbe { EMPTY, CHANGED, FULL }
 
 internal class PhoneCloudRecordSync(
@@ -30,7 +30,7 @@ internal class PhoneCloudRecordSync(
         try {
         stageRestrictedEdits(session)
         replay(session)
-        if (!pullAlreadyCompleted && !pull(session)) { if (requireAvailable) throw CloudRecordsUnavailableException(); return@withContext }
+        if (!pullAlreadyCompleted && !pull(session, requireAvailable)) { if (requireAvailable) throw CloudRecordsUnavailableException(); return@withContext }
         checkBoundOwner(session); afterPull(session)
         if (!allowUpload) return@withContext
         for (attempt in 0..2) {
@@ -38,7 +38,7 @@ internal class PhoneCloudRecordSync(
             catch (error: CloudHttpException) {
                 if (error.status != 409 || !error.detail.contains("cloud_record_conflict") || attempt == 2) throw error
                 // Whole-batch conflict: merge winners, then regenerate candidates.
-                if (!pull(session)) { if (requireAvailable) throw CloudRecordsUnavailableException(); return@withContext }
+                if (!pull(session, requireAvailable)) { if (requireAvailable) throw CloudRecordsUnavailableException(); return@withContext }
                 checkBoundOwner(session); afterPull(session)
             }
         }
@@ -79,16 +79,16 @@ internal class PhoneCloudRecordSync(
         checkOwner(session)
         if (expectedEpoch != null && client.knownEpoch(session) != expectedEpoch) throw CloudTrustException()
     }
-    private suspend fun pull(session: PhoneAccountSession): Boolean = try {
-        pullPages(session)
+    private suspend fun pull(session: PhoneAccountSession, requireConsent: Boolean): Boolean = try {
+        pullPages(session, requireConsent)
     } catch (error: CloudHttpException) {
         if (error.status != 400 || runCatching { JSONObject(error.detail).optString("error") }.getOrDefault("") != "cloud_record_cursor_invalid") throw error
         checkBoundOwner(session)
         store.resetCursor(client.scopeId(session))
         // Exactly one recovery attempt; only the records cache is reset.
-        pullPages(session)
+        pullPages(session, requireConsent)
     }
-    private suspend fun pullPages(session: PhoneAccountSession): Boolean {
+    private suspend fun pullPages(session: PhoneAccountSession, requireConsent: Boolean): Boolean {
         var cursor = store.cursor(client.scopeId(session))
         var pageCount = 0
         var refreshedKeys = false
@@ -98,6 +98,10 @@ internal class PhoneCloudRecordSync(
             val page = client.recordPage(session, cursor) ?: return false
             checkBoundOwner(session)
             if (page.getInt("formatVersion") == 0) {
+                // No consent is not a transport failure or permission to discard a cursor.
+                // Only the explicit, account/epoch-bound UI action may enable this channel.
+                if (requireConsent) throw CloudRecordConsentRequiredException()
+                // Preserve the optional legacy probe's cache-reset behavior.
                 checkBoundOwner(session); store.resetCursor(client.scopeId(session))
                 return false
             }

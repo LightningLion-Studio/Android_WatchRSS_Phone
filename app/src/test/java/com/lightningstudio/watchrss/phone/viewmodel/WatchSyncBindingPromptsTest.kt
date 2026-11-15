@@ -11,6 +11,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class WatchSyncBindingPromptsTest {
+    @Test fun expiredLoginPersistsLoginPromptWithoutPairingNavigation() {
+        val prompts = WatchSyncBindingPrompts()
+        assertTrue(prompts.handle(com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired()))
+        assertEquals(WatchSyncBindingEvent.RequirePhoneLogin, prompts.prompt.value)
+        prompts.openWatchPairing()
+        assertEquals(WatchSyncBindingEvent.RequirePhoneLogin, prompts.prompt.value)
+        prompts.dismiss()
+        assertNull(prompts.prompt.value)
+    }
+
     @Test fun requireBindingPersistsUntilHandledAndOnlyUserActionRequestsNavigation() = runBlocking {
         val prompts = WatchSyncBindingPrompts()
         val events = mutableListOf<WatchSyncBindingEvent>()

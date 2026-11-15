@@ -16,6 +16,7 @@ import org.json.JSONObject
 import java.security.KeyFactory
 import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired
 
 class AppAccessCoordinator(
     private val context: Context,
@@ -54,6 +55,20 @@ class AppAccessCoordinator(
     suspend fun reconcile() {
         operationMutex.withLock { reconcileLocked() }
         authorizationNotifier.afterReconcile(isAuthorized)
+    }
+
+    /** Uses the existing lease/possession refresh; account tokens have no refresh API here. */
+    internal suspend fun buildWatchAccountSyncRequest(watch: String, install: String?, name: String?): JSONObject {
+        if (!accountRepository.hasUsableSession) throw PhoneLoginRequired()
+        val owner = accountRepository.session.value!!.userId
+        reconcile()
+        check(accountRepository.session.value?.userId == owner) { "手机账号已变化，请重新同步" }
+        if (!accountRepository.hasUsableSession || deviceAccessToken.isNullOrBlank()) throw PhoneLoginRequired()
+        return withWatchAccountDeviceRefresh(
+            deviceToken = { deviceAccessToken },
+            refresh = { rejected -> refreshRejectedDeviceSession(rejected, owner) },
+            build = { accountRepository.buildAccountSyncRequest(watch, install, name) }
+        )
     }
 
     /** Refresh a rotated session using the existing device possession proof, never reclaim a revoked device. */

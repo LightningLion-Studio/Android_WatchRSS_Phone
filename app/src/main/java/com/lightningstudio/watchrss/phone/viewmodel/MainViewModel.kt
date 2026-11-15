@@ -88,6 +88,11 @@ data class MainSyncProgressUi(
 )
 
 internal fun syncFailureMessage(throwable: Throwable, phase: String?): String {
+    if (throwable is com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired) return throwable.message!!
+    if (throwable is com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneAccountSyncFailed) return throwable.message!!
+    if (throwable is com.lightningstudio.watchrss.phone.connection.bluetooth.WatchAccountSyncRequired) {
+        return "手表账号同步后仍拒绝资料同步：${throwable.message}"
+    }
     val detail = generateSequence(throwable) { it.cause }
         .mapNotNull { cause -> cause.message?.trim()?.takeIf(String::isNotEmpty) }
         .firstOrNull()
@@ -891,6 +896,10 @@ class MainViewModel(
     ) {
         viewModelScope.launch {
             if (sessionState.value.isBusy) return@launch
+            runCatching { bluetoothSyncManager.requirePhoneLogin() }.exceptionOrNull()?.let {
+                handleWatchSyncBindingFailure(it)
+                return@launch
+            }
             bluetoothSyncManager.foregroundSyncStarted()
             try {
             val startMessage = when (mode) {
@@ -1296,7 +1305,9 @@ class MainViewModel(
             _toastEvent.tryEmit(error)
             showSupportAlert(
                 title = "资料库同步失败",
-                message = "同步过程中断，请确认手表保持亮屏并重试。",
+                message = if (throwable is com.lightningstudio.watchrss.phone.connection.bluetooth.WatchAccountSyncRequired ||
+                    throwable is com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneAccountSyncFailed) error
+                    else "同步过程中断，请确认手表保持亮屏并重试。",
                 errorDetails = error
             )
         }

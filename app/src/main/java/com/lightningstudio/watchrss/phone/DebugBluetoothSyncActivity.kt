@@ -54,10 +54,12 @@ class DebugBluetoothSyncActivity : ComponentActivity() {
         lifecycleScope.launch {
             runCatching {
                 if (action == BluetoothSyncProtocol.ACTION_SYNC_LIBRARY) {
-                    val result = (application as PhoneCompanionApplication)
-                        .container
-                        .bluetoothSyncManager
-                        .syncLibrary()
+                    val manager = (application as PhoneCompanionApplication).container.bluetoothSyncManager
+                    manager.requirePhoneLogin()
+                    val targets = manager.probeLibrarySyncTargets()
+                    val target = targets.devices.singleOrNull { deviceAddress == null || it.address == deviceAddress }
+                        ?: run { targets.sessionLease?.close(); error("请指定一块可同步手表") }
+                    val result = manager.syncAll(target, reusableSession = targets.sessionLease)
                     return@runCatching buildString {
                         appendLine("Bluetooth library sync debug complete")
                         appendLine("device=${result.deviceName}")

@@ -384,8 +384,7 @@ class PhoneCompanionContainer(context: Context) {
             deviceId = deviceIdentity.deviceId,
             debugLog = bluetoothDebugLog,
             buildAccountSyncRequest = { watchDeviceId, watchInstallId, watchDisplayName ->
-                appAccessCoordinator.reconcile()
-                accountRepository.buildAccountSyncRequest(
+                appAccessCoordinator.buildWatchAccountSyncRequest(
                     watchDeviceId,
                     watchInstallId,
                     watchDisplayName

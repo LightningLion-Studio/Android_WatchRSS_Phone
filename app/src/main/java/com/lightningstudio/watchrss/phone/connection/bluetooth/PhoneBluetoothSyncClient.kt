@@ -72,6 +72,7 @@ private class LibrarySyncRejectedException(response: JSONObject) :
     IllegalArgumentException(watchBluetoothFailureMessage(response))
 
 private fun requireLibraryFrameAccepted(response: JSONObject) {
+    requireAccountAccepted(response)
     if (!response.optBoolean("success", true) || response.optBoolean("fatalSession", false)) {
         throw LibrarySyncRejectedException(response)
     }
@@ -2872,6 +2873,7 @@ class PhoneBluetoothSyncClient(
                     fields = mapOf("label" to label, "elapsedMs" to elapsedSince(startedAt),"wireBytes" to wireBytes) +
                         payloadFields(label, payload)
                 )
+                requireAccountAccepted(payload)
             }
         } catch (throwable: Throwable) {
             debugLog.appendEvent(

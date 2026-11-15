@@ -6,6 +6,23 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class SyncFailureMessageTest {
+    @Test fun loginFailureDoesNotUseConnectionStageOrRetryItsHttpCause() {
+        val failure = com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired(IOException("expired"))
+        assertEquals("登录已失效，请重新登录", syncFailureMessage(failure, "建立连接中"))
+        org.junit.Assert.assertFalse(com.lightningstudio.watchrss.phone.connection.bluetooth.isRetryableBluetoothDisconnect(failure))
+    }
+
+    @Test fun repeatedAccountRejectionKeepsItsReasonWithoutConnectionStage() {
+        val failure = com.lightningstudio.watchrss.phone.connection.bluetooth.WatchAccountSyncRequired(
+            org.json.JSONObject().put("message", "请重新连接并同步账号后再同步资料"))
+        assertEquals("手表账号同步后仍拒绝资料同步：请重新连接并同步账号后再同步资料", syncFailureMessage(failure, "建立连接中"))
+    }
+
+    @Test fun accountHttpFailureDoesNotRetryBluetoothOrUseConnectionStage() {
+        val failure = com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneAccountSyncFailed(IOException("HTTP 503"))
+        assertEquals("账号同步失败：HTTP 503", syncFailureMessage(failure, "建立连接中"))
+        org.junit.Assert.assertFalse(com.lightningstudio.watchrss.phone.connection.bluetooth.isRetryableBluetoothDisconnect(failure))
+    }
     @Test
     fun includesStageExceptionAndTransportMessage() {
         assertEquals(

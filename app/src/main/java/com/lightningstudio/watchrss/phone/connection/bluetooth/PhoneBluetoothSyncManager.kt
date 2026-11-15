@@ -142,6 +142,10 @@ class PhoneBluetoothSyncManager(
     private val watchBackgroundTranscoder =
         WatchBackgroundTranscoder(context.applicationContext, readerPresetRepository)
 
+    internal fun requirePhoneLogin() {
+        if (!canSyncAccount()) throw PhoneLoginRequired()
+    }
+
     fun foregroundSyncStarted() {
         debugLog.appendEvent("sync.ui.click",fields=mapOf("elapsedNanos" to SystemClock.elapsedRealtimeNanos()))
         onSyncActiveChanged(true)
@@ -341,11 +345,15 @@ class PhoneBluetoothSyncManager(
         val result = runCatching {
             bindingSnapshot(sessionId,effectiveDevice.address,syncSession,binding)
             if(!reuseGrant)prepareAccountDomain(watchDeviceId,null)
-            val request = buildAccountSyncRequest(
-                watchDeviceId,
-                null,
-                effectiveDevice.name.ifBlank { "手表" }
-            )
+            val request = try {
+                buildAccountSyncRequest(watchDeviceId, null, effectiveDevice.name.ifBlank { "手表" })
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (failure: PhoneLoginRequired) {
+                throw failure
+            } catch (failure: Throwable) {
+                throw PhoneAccountSyncFailed(failure)
+            }
             val exchange = exchange(
                 request = request,
                 deviceAddress = effectiveDevice.address,
@@ -403,6 +411,7 @@ class PhoneBluetoothSyncManager(
         var syncSession = reusableSession
         var effectiveDevice = device
         var opened = reusableSession != null
+        lateinit var accountGate: AccountSyncGate
         var sharedBinding: BleSyncBindingSnapshot? = null
         var libraryDeclarations: JSONObject? = null
         var fastPath:DomainFastPath?=null
@@ -440,6 +449,7 @@ class PhoneBluetoothSyncManager(
             // All recovery for this operation uses the visible, bounded manager budget.
             syncSession?.recoveryGate?.tryAcquire()
             effectiveDevice = syncSession?.device ?: device
+            accountGate.invalidate()
             sharedBinding = null
             libraryDeclarations = null
             fastPath=null;rootWindow=null;fastPeer=null;fastScope=null;completedDomains.clear()
@@ -457,16 +467,26 @@ class PhoneBluetoothSyncManager(
             onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.RECONNECTING, 0, reconnectAttempt = attempt))
         }
         var accountSync: AccountSyncResult? = null
-        var accountSyncWarning: String? = null
         var tokenUsageSyncWarning: String? = null
         var readerSyncWarning: String? = null
         suspend fun warningOrThrow(failure: Throwable, fallback: String): String {
-            if (failure is CancellationException || failure is WatchSyncBlocked || isRetryableBluetoothDisconnect(failure)) throw failure
+            if (failure is CancellationException || failure is WatchSyncBlocked || failure is PhoneLoginRequired || isRetryableBluetoothDisconnect(failure)) throw failure
             // Explicit peer rejection is a terminal error, not a successful sync with a warning.
             if (failure is IllegalArgumentException) throw failure
             return failure.message ?: fallback
         }
+        accountGate = AccountSyncGate(syncAccount = {
+            requirePhoneLogin()
+            reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_ACCOUNT, 0)
+            accountSync = syncAccount(effectiveDevice, syncSession, false, binding()).accountSync
+            completedDomains.add("account")
+        }, reconnect = ::connect)
+        suspend fun <T> accountRecovery(block: suspend () -> T): T = recovery.run {
+            accountGate.run(block)
+        }
         val completed = try {
+            // Check login before opening a transport or sending any library request.
+            requirePhoneLogin()
             recovery.run {
                 if (!opened) connect()
                 syncSession = syncSession?.let { client.promoteLateIpSession(it, "$sessionId-ip-upgrade") }
@@ -474,7 +494,7 @@ class PhoneBluetoothSyncManager(
                 syncSession?.recoveryGate?.tryAcquire()
                 binding()
             }
-            recovery.run {
+            accountRecovery {
             val active=binding()
             if(repository.bleDomains!=null && DomainFastPath.enabled(active.capabilities,syncSession?.isPersistent==true,forceFull,mode)) {
                 val peer=active.response.getString("deviceId")
@@ -493,14 +513,7 @@ class PhoneBluetoothSyncManager(
                 }
             }
             }
-            if (!skipped("account") && mode == LibrarySyncMode.MERGE && canSyncAccount()) {
-                prepareAccountDomain(binding().response.getString("deviceId"),fastPath?.accountGrantWitness(fastPath?.remoteAccountRoot))
-                reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_ACCOUNT, 0)
-                runCatching { recovery.run { syncAccount(effectiveDevice, syncSession, false, binding(),reuseGrant=fastPath!=null) } }
-                    .onSuccess { accountSync = it.accountSync; completedDomains.add("account") }
-                    .onFailure { accountSyncWarning = warningOrThrow(it, "账号授权同步失败") }
-            }
-            recovery.run {
+            accountRecovery {
                 val active = binding()
                 if (active.capabilities.books && repository.books != null && (!skipped("books") || !skipped("bookReading"))) {
                     reportProgress(onProgress,PhoneBluetoothSyncStage.SYNCING_BOOKS,0)
@@ -537,7 +550,7 @@ class PhoneBluetoothSyncManager(
                 }
             }
             // A retry starts a NEW cursor handshake. Never replay an old manifest/body closure.
-            val libraryResult = if(skipped("library")) PhoneBluetoothSyncResult(effectiveDevice.name,effectiveDevice.address,libraryStats=LibrarySyncStats(0,0,0)) else recovery.run {
+            val libraryResult = if(skipped("library")) PhoneBluetoothSyncResult(effectiveDevice.name,effectiveDevice.address,libraryStats=LibrarySyncStats(0,0,0)) else accountRecovery {
                 syncLibrary(deviceAddress = effectiveDevice.address, syncSession = syncSession,
                     forceFull = forceFull || mode != LibrarySyncMode.MERGE, mode = mode,
                     onProgress = onProgress, binding = binding(), syncAuxiliary = false,
@@ -549,7 +562,7 @@ class PhoneBluetoothSyncManager(
             }
             var noteStats: NoteSyncStats? = null
             if (mode == LibrarySyncMode.MERGE) {
-                runCatching { recovery.run {
+                runCatching { accountRecovery {
                     val active = binding()
                     if (!skipped("reader") && (libraryDeclarations ?: active.response).optInt("version") >= 11 && (libraryDeclarations ?: active.response).optBoolean("supportsReaderPresets", true)) {
                         val confirmed=syncReaderPresets(effectiveDevice.address, sessionId, syncSession, active,onLocalApplied={if(it>0)locallyApplied=true}) { done, total ->
@@ -561,15 +574,15 @@ class PhoneBluetoothSyncManager(
                     debugLog.appendEvent("sync.reader.failed",sessionId,fields=mapOf("errorClass" to it.javaClass.simpleName,"readerError" to it.message.orEmpty().replace(Regex("[0-9a-fA-F]{24,}"),"<id>").take(180)),throwable=it)
                     readerSyncWarning = warningOrThrow(it, "阅读器资源同步失败")
                 }
-                noteStats = if(skipped("notes")) NoteSyncStats(0,0,0,0) else recovery.run {
+                noteStats = if(skipped("notes")) NoteSyncStats(0,0,0,0) else accountRecovery {
                     reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_NOTES, 0)
                     syncNotes(effectiveDevice.address, sessionId, syncSession, libraryDeclarations?.let { binding().capabilities.withDeclarations(it) } ?: binding().capabilities,
                         onLocalApplied = { if (it > 0) locallyApplied = true }, legacyVersion=binding().response.optInt("version")).also{completedDomains.add("notes")}
                 }
-                runCatching { recovery.run { if(!skipped("usage")){syncLlmTokenUsage(effectiveDevice, syncSession, binding());completedDomains.add("usage")} } }
+                runCatching { accountRecovery { if(!skipped("usage")){syncLlmTokenUsage(effectiveDevice, syncSession, binding());completedDomains.add("usage")} } }
                     .onFailure { tokenUsageSyncWarning = warningOrThrow(it, "词元用量同步失败") }
             }
-            recovery.run { fastPath?.let { window->
+            accountRecovery { fastPath?.let { window->
                 val roots=localRoots(requireNotNull(fastPeer))
                 val request=window.commitRequest(roots,completedDomains)
                 withTimeout(READER_EXCHANGE_TIMEOUT_MS) {withContext(Dispatchers.IO) {
@@ -578,7 +591,7 @@ class PhoneBluetoothSyncManager(
                 }}
             }
             }
-            recovery.run {
+            accountRecovery {
                 binding()
                 withTimeout(QUICK_EXCHANGE_TIMEOUT_MS) {
                     if(fastPath!=null) {
@@ -593,11 +606,11 @@ class PhoneBluetoothSyncManager(
                     } else syncSession?.complete("$sessionId-complete")
                 }
             }
-            libraryResult.copy(accountSync = accountSync, accountSyncWarning = accountSyncWarning,
+            libraryResult.copy(accountSync = accountSync,
                 tokenUsageSyncWarning = tokenUsageSyncWarning, readerSyncWarning = readerSyncWarning, noteStats = noteStats, bookSyncIssues=bookSyncIssues)
         } catch (failure: Throwable) {
             // A broken transport is already closed; do not wait for a doomed abort round trip.
-            if (!isRetryableBluetoothDisconnect(failure)) runCatching { withTimeout(QUICK_EXCHANGE_TIMEOUT_MS) { syncSession?.abort("$sessionId-abort") } }
+            if (failure !is PhoneLoginRequired && !isRetryableBluetoothDisconnect(failure)) runCatching { withTimeout(QUICK_EXCHANGE_TIMEOUT_MS) { syncSession?.abort("$sessionId-abort") } }
             throw failure
         } finally {
             syncSession?.close()
@@ -1805,6 +1818,7 @@ class PhoneBluetoothSyncManager(
     }
 
     private fun requireSuccess(response: JSONObject) {
+        requireAccountAccepted(response)
         require(response.optBoolean("success") && !response.optBoolean("fatalSession", false)) {
             watchBluetoothFailureMessage(response)
         }

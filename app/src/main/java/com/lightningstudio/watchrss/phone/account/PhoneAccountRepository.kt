@@ -16,7 +16,7 @@ class PhoneAccountRepository(
     val session: StateFlow<PhoneAccountSession?> = sessionStore.session
 
     val hasUsableSession: Boolean
-        get() = session.value?.isExpired == false
+        get() = session.value?.let { !it.isExpired && it.userId.isNotBlank() && it.accessToken.isNotBlank() } == true
 
     val installId: String
         get() = installationIdentity.installId
@@ -313,7 +313,7 @@ class PhoneAccountRepository(
         watchInstallId: String? = null,
         watchDisplayName: String? = null
     ): JSONObject {
-        val session = session.value ?: error("请先在手机端登录腕上RSS账号")
+        val session = requireSession()
         validBluetoothGrant(watchDeviceId)?.let{return it}
         val token = accountClient.issueWatchDeviceToken(
             session = session,

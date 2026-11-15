@@ -44,6 +44,7 @@ fun String.asBuildConfigString(): String =
         .replace("\n", "\\n")}\""
 
 android {
+    testOptions { unitTests.isIncludeAndroidResources = true }
     namespace = "com.lightningstudio.watchrss.phone"
     compileSdk = 36
     buildToolsVersion = "36.1.0"

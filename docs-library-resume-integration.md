@@ -23,10 +23,17 @@ The wire is frozen by `library-resume-v1.md` (RESUMEC-SPEC2); there are eight ph
   to the source journal. Supply `session::cancelJob` as the client's `onSourceCancelled`
   callback so a cancelled source stops waiting immediately. There are no old ACKs inside this session.
   Observe `session.awaitTermination()` independently of source requests. It returns the first
-  typed local/remote STOP cause and fails pending exchanges with the same cause, even if the
-  error reply write or the later stream close fails. Revoke the receiver on that notification
-  before controller cleanup. STOP never authorizes another search. QUERY/WAIT/BEGIN/REPLAN
-  retain their existing recovery rules. After a STOP reply no queued handler can execute.
+  typed local/remote STOP cause as soon as it is reserved, and immediately fails pending
+  exchanges with that same cause. Revoke the receiver on that notification before controller
+  cleanup; do not wait for an error reply or stream close. STOP never authorizes another search.
+  Error replies are best effort with a separate 1000-ms deadline; blocked writes, flushes,
+  closes or waiting for the writer lock cannot defer logical termination. Physical cleanup
+  has its own once-only state, cancels stream work and closes input/output independently.
+  Registration, response adoption, STOP reservation and success return share a lock. Even a
+  success already delivered to a waiter must fail if a typed STOP was reserved before return.
+  An already delivered COMPLETE followed by ordinary EOF keeps its normal successful result.
+  QUERY/WAIT/BEGIN/REPLAN retain their existing recovery rules. After STOP reservation no
+  queued handler can execute. Owners must still call close() during lifecycle cleanup.
 - `ResumeAuthorization` is LOCAL consent, account and stable peer authorization. Construct it
   from the currently verified session, never from a network begin. The controller calls the
   receiver's serialized `revoke(cancelJobs=true)` before account cleanup or consent cancellation.

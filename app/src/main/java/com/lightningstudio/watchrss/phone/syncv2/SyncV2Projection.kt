@@ -254,7 +254,7 @@ internal class SyncV2Projection(
         return db.controlQuery("SELECT body FROM syncv2_wire_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())open("wire-candidate",it.getBlob(0)).getJSONObject("row")else null}
     }
     /** The article adapter supplies the deterministic revision after reading the actual v1 body. */
-    fun bindArticleRevision(captured:JSONObject,revision:String):JSONObject {
+    fun bindArticleRevision(captured:JSONObject,revision:String,independent:Boolean=false):JSONObject {
         SyncV2Codec.unhex(revision,16)
         return writer {
             val entity=captured.getString("entityKey")
@@ -265,9 +265,27 @@ internal class SyncV2Projection(
             if(row.opt("bodyRevision")!=revision) {
                 row.put("bodyRevision",revision).put("promiseId",SyncV2Codec.hex(SyncV2Codec.random(16))).put("recipeOid",JSONObject.NULL)
                     .put("opaqueContentId",JSONObject.NULL).put("contentBytes",JSONObject.NULL).put("rowSequence",SyncV2Codec.next(row.getString("rowSequence")))
-                db.execSQL("UPDATE syncv2_wire_candidates SET body=? WHERE scope=? AND entity_key=?",arrayOf(seal("wire-candidate",value),scope,entity))
             }
+            if(independent)value.put("bodyChannelRevision",revision)
+            db.execSQL("UPDATE syncv2_wire_candidates SET body=? WHERE scope=? AND entity_key=?",arrayOf(seal("wire-candidate",value),scope,entity))
             JSONObject(row.toString())
+        }
+    }
+    internal fun independentBodyRevision(entity:String):String? {
+        ensureActive()
+        return db.controlQuery("SELECT body FROM syncv2_wire_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{c->if(c.moveToFirst())open("wire-candidate",c.getBlob(0)).optString("bodyChannelRevision").takeIf{it.isNotEmpty()}else null}
+    }
+    /** Retire only derived pre-body-channel private-UUID aliases. Cloud rows and originals survive. */
+    internal fun migrateBodyAssetCandidates() {
+        while(true) {
+        val aliases=db.controlQuery("SELECT c.entity_key FROM syncv2_candidates c WHERE c.scope=? AND c.kind='asset' AND EXISTS(SELECT 1 FROM note_assets a WHERE a.assetId=c.logical_id AND a.storageKey<>c.logical_id) AND NOT EXISTS(SELECT 1 FROM note_assets a WHERE a.storageKey=c.logical_id) ORDER BY c.entity_key LIMIT 256",arrayOf(scope)).use{c->buildList{while(c.moveToNext())add(c.getString(0))}}
+        if(aliases.isEmpty())return
+        writer { _ -> for(entity in aliases) {
+            db.execSQL("DELETE FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity))
+            db.execSQL("DELETE FROM syncv2_wire_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity))
+            SyncV2CandidateTree(db,scope).remove(entity);accountCatalog.remove("candidate",entity)
+        }}
+        if(aliases.size<256)return
         }
     }
     fun requestConcurrentChoice()=writer {st->st.body.put("tailChoicePending",true);refreshPending(st.body)}
@@ -467,7 +485,7 @@ internal class SyncV2Projection(
             }}
             val signed=value.getJSONObject("refs");if(value.opt("postRefs")!=false)refs.add(signed)
             objects[SyncV2Codec.oid("state-refs",signed)]=SyncV2Codec.utf8(SyncV2Codec.canonical(signed))
-            if(value.opt("postRefs")!=false && SyncV2Codec.canonical(value)!=SyncV2Codec.canonical(prior))prepared[entity]=seal("wire-candidate",value)
+            if((value.opt("postRefs")!=false || c[1] in setOf("asset","book")) && SyncV2Codec.canonical(value)!=SyncV2Codec.canonical(prior))prepared[entity]=seal("wire-candidate",value)
             if(c[1]=="note")fault("note-publish-staged")
         }
         val tree=SyncV2Index.build(identity.scope,rows);objects.putAll(tree.objects)
@@ -1105,7 +1123,7 @@ internal class SyncV2Projection(
     private fun reconciliationSemantics()=SyncV2Codec.hash(JSONArray(SyncV2Schema.domains.map{binding(it,"p1-local-v1")}))
     private fun binding(domain: SyncV2Schema.Domain, capability: String): String = SyncV2Codec.hash(JSONObject()
         .put("schema",SyncV2Schema.semanticBinding(db,listOf(domain.table)+when(domain.table){"notes"->listOf("note_conflicts");"phone_articles"->listOf("article_register_provenance");"imported_books"->listOf("imported_book_chapters");else->emptyList()}))
-        .put("scope",identity.scope).put("descriptor",identity.descriptorOid).put("account",identity.accountId).put("capability",capability)
+        .put("bodyAssetMapping",2).put("scope",identity.scope).put("descriptor",identity.descriptorOid).put("account",identity.accountId).put("capability",capability)
         .put("businessEpoch",readState().body.optString("businessEpoch","0")))
     private fun completedScan(domainName:String,capability:String,stamp:String):Boolean {
         val domain=SyncV2Schema.domains.single{it.table==domainName};val bind=binding(domain,capability)
@@ -1202,7 +1220,7 @@ internal class SyncV2Projection(
         "imported_books", "imported_book_reading" -> "stateJson"
         "notes" -> SyncV2Business.noteFields.sorted().joinToString(","){"`$it`"}
         "note_folders" -> SyncV2Business.folderFields.sorted().joinToString(","){"`$it`"}
-        "note_assets" -> "assetId,mimeType,displayName,createdAt,deleted,deletedAt"
+        "note_assets" -> "storageKey,mimeType,displayName,createdAt,deleted,deletedAt"
         else -> SyncV2Codec.fail("unsupported_feature")
     }
     private fun readRecord(d:SyncV2Schema.Domain,c:Cursor):JSONObject {
@@ -1229,7 +1247,7 @@ internal class SyncV2Projection(
         }
         if(d.table=="note_assets") {
             // Preserve identity; source paths, byte hashes and note linkage stay in encrypted provenance.
-            return JSONObject().put("assetId",out.get("assetId")).put("mime",out.get("mimeType")).put("originalFilename",out.get("displayName"))
+            return JSONObject().put("assetId",out.get("storageKey")).put("mime",out.get("mimeType")).put("originalFilename",out.get("displayName"))
                 .put("updatedAt",out.get("createdAt")).put("sourceDeviceId","").put("deleted",out.get("deleted")).put("deletedAt",out.get("deletedAt"))
         }
         if(d.table=="notes") {
@@ -1360,7 +1378,7 @@ internal class SyncV2Projection(
         val statements=when(d.table) {
             "notes"->listOf("conflicts" to "SELECT * FROM note_conflicts WHERE noteId=? ORDER BY conflictId LIMIT 1025")
             "phone_articles"->listOf("register" to "SELECT * FROM article_register_provenance WHERE articleId=?")
-            "note_assets"->listOf("asset" to "SELECT * FROM note_assets WHERE assetId=?")
+            "note_assets"->listOf("asset" to "SELECT * FROM note_assets WHERE storageKey=?")
             "imported_books"->listOf("chapters" to "SELECT * FROM imported_book_chapters WHERE bookId=? ORDER BY chapterIndex LIMIT 257")
             else->emptyList()
         }

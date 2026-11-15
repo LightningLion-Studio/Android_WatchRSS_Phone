@@ -63,7 +63,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                 if(f.length()!=c.getLong(1))SyncV2Codec.fail("closure_incomplete")
                 listOf("book" to fileSource(f,c.getString(0),maxBytes))
             }
-            "asset"->db.query("SELECT storageKey,sha256 FROM note_assets WHERE assetId=?",arrayOf(id)).use{c->
+            "asset"->db.query("SELECT storageKey,sha256 FROM note_assets WHERE storageKey=?",arrayOf(id)).use{c->
                 if(!c.moveToFirst())SyncV2Codec.fail("closure_incomplete")
                 val name=c.getString(0);if(!com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.isSafeStorageKey(name))SyncV2Codec.fail("closure_incomplete")
                 listOf("asset/$name" to fileSource(File(files,"notes/assets/$name"),c.getString(1),maxBytes))
@@ -87,7 +87,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
         return when(m.getString("kind")) {
             "article"->db.query("SELECT length(CAST(contentText AS BLOB))+COALESCE(length(CAST(contentHtml AS BLOB)),0) FROM phone_articles WHERE articleId=?",arrayOf(id)).use{it.moveToFirst() && it.getLong(0)>0}
             "book"->File(files,"imported_books/$id.jsonl").isFile
-            "asset"->db.query("SELECT storageKey FROM note_assets WHERE assetId=?",arrayOf(id)).use{c->c.moveToFirst() && com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.isSafeStorageKey(c.getString(0)) && File(files,"notes/assets/${c.getString(0)}").isFile}
+            "asset"->db.query("SELECT storageKey FROM note_assets WHERE storageKey=?",arrayOf(id)).use{c->c.moveToFirst() && com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.isSafeStorageKey(c.getString(0)) && File(files,"notes/assets/${c.getString(0)}").isFile}
             else->false
         }
     }

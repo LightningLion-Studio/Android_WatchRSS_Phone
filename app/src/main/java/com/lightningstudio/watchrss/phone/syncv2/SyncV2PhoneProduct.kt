@@ -171,7 +171,9 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 }
             })
             val articles=signer?.let{SyncV2ArticlePublisher(projection,identity,ring,it,contentClient,content,worker,context.filesDir,life::check,clock)}
-            val result=Runtime(account.copy(bearer="",apiKey="",deviceAuthorization=null),life,ring,identity,vault,projection,cloud,actions,control,articles,time,contentEnabled,serviceAnnouncement)
+            val bodies=signer?.let{SyncV2BodyChannel(projection,identity,ring,it,control,SyncV2BodyRepository(projection.accountDatabase,context.filesDir),
+                File(context.filesDir,"syncv2/$path/bodies"),life,approved,signals)}
+            val result=Runtime(account.copy(bearer="",apiKey="",deviceAuthorization=null),life,ring,identity,vault,projection,cloud,actions,control,articles,bodies,time,contentEnabled,serviceAnnouncement)
             life.guard {
                 val port=SyncV2PhoneUiPort(this,result)
                 life.own(AutoCloseable{port.disabled()})
@@ -190,8 +192,9 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
     }
     internal class Runtime(val account:Account,val life:SyncV2Lifetime,val keys:SyncV2ContentKeys,val identity:SyncV2Identity,
         val vault:SyncV2SigningVault,val projection:SyncV2Projection,val cloud:SyncV2CloudSync,val actions:SyncV2AccountActions,
-        val client:SyncV2CloudClient,val articles:SyncV2ArticlePublisher?,val time:SyncV2TrustedTime,val contentEnabled:Boolean,val serviceAnnouncement:String) {
+        val client:SyncV2CloudClient,val articles:SyncV2ArticlePublisher?,val bodies:SyncV2BodyChannel?,val time:SyncV2TrustedTime,val contentEnabled:Boolean,val serviceAnnouncement:String) {
         var lastSyncedAt:Long?=null
+        var bodyResult=SyncV2BodyChannel.Result(0,emptyList())
         fun signingDeviceId():String? {
             life.check();val signer=vault.signerOrNull()?:return null
             val bindings=projection.state().body.optJSONArray("signingBindings")?:return null
@@ -200,7 +203,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 b.optString("deviceId")==id && b.optString("publicKey")==SyncV2Codec.b64(SyncV2Codec.unhex(signer.publicHex,65))
             }}
         }
-        fun round() {
+        fun round(manual:Boolean=false) {
             life.check()
             val started=android.os.SystemClock.elapsedRealtime()
             fun remaining():Long=(290000L-(android.os.SystemClock.elapsedRealtime()-started)).also{if(it<=0)SyncV2Codec.fail("budget_paused")}
@@ -214,24 +217,31 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             cloud.readCurrent()
             if(signingDeviceId()==null)actions.prepareSigning()
             actions.refresh(budgetMillis=remaining())
+            val referenceErrors=if(contentEnabled)life.guard{bodies?.refreshReferences()?:emptyList()}else emptyList()
             val progress=projection.runWindow(budgetMillis=remaining())
             if(progress.paused)SyncV2Codec.fail("budget_paused")
             var st=projection.state()
             if(!st.body.isNull("pendingAccountAction")){actions.resume();st=projection.state()}
             if(!st.body.isNull("pendingChoice"))return@withinBudget
-            val dirty=st.revision!=st.body.optString("acknowledgedLocalRevision","0") || st.body.isNull("activeGeneration")
+            val localDirty=st.revision!=st.body.optString("acknowledgedLocalRevision","0") || st.body.isNull("activeGeneration")
+            val dirty=localDirty || (contentEnabled && bodies?.needsPublication()==true)
             if(dirty) {
                 val publicationRevision=st.revision
                 val accountHead=st.body.optJSONObject("account")
-                if(accountHead!=null && (st.body.optBoolean("unknownEditBase") || st.body.optJSONObject("editBase")?.optString("accountOid")!=accountHead.getString("oid"))) {
+                if(localDirty && accountHead!=null && (st.body.optBoolean("unknownEditBase") || st.body.optJSONObject("editBase")?.optString("accountOid")!=accountHead.getString("oid"))) {
                     projection.requestConcurrentChoice();return@withinBudget
                 }
                 actions.prepareSigning()
                 projection.prepareWireIndex(vault.signer,keys.read(keys.newestVersion),keys.newestVersion).close()
+                if(contentEnabled)bodies?.bindPrepared()
                 if(contentEnabled && client.contentWriteAllowed() && !articles!!.runPage(remaining()))SyncV2Codec.fail("budget_paused")
                 cloud.publishIndex(vault.signer,keys.read(keys.newestVersion),keys.newestVersion,publicationRevision)
                 actions.refresh(budgetMillis=remaining())
             } else actions.flushAppliedAck()
+            if(contentEnabled) {
+                val result=bodies?.sync(manual)?:SyncV2BodyChannel.Result(0,emptyList())
+                bodyResult=SyncV2BodyChannel.Result(result.pending+referenceErrors.size,(referenceErrors+result.errors).distinct())
+            }
             st=projection.state()
             if(!st.body.isNull("appliedAccount") && st.body.isNull("pendingAppliedAck"))lastSyncedAt=time.now()
             }

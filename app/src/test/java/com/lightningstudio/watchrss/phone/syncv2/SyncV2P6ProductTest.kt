@@ -43,6 +43,7 @@ class SyncV2P6ProductTest {
         val boundAliases=linkedMapOf<String,String>();val registrationBodies=mutableListOf<JSONObject>()
         var negotiateStepMillis=0L;var timeOffsetMillis=0L;var expiredNegotiate=false;var checkpoints=0
         var account=JSONObject().put("commitOid",JSONObject.NULL).put("revision","0").put("rollbackGeneration","0")
+        var closedBodyChannel=false;var bodyRequests=0
         var publishes=0;var acks=0;var inits=0;var queries=0;var dropPublish=false;var failQuery=false
         var block:String?=null;val entered=CountDownLatch(1);val unblock=CountDownLatch(1)
         var concurrentWinner:SyncV2RepoBootstrap.Candidate?=null
@@ -59,6 +60,11 @@ class SyncV2P6ProductTest {
                 try {
                     assertEquals("Bearer synthetic-account",r.getHeader("Authorization"));assertEquals("synthetic-api",r.getHeader("apikey"))
                     assertEquals("Bearer synthetic-device",r.getHeader("x-watchrss-device-authorization"))
+                    if(closedBodyChannel && r.requestUrl!!.encodedPath.startsWith("/functions/v1/cloud/bodies/v1/")) {
+                        bodyRequests++
+                        if(r.method!="GET")return error("body_channel_write_disabled").setResponseCode(503)
+                        return response(JSONObject().put("version",1).put("purpose",SyncV2BodyCodec.PURPOSE).put("scope",scope()).put("carriers",JSONArray()).put("nextAfter",JSONObject.NULL))
+                    }
                     val route=r.requestUrl!!.encodedPath.removePrefix(SyncV2Origin.path)
                     if(route==block){block=null;entered.countDown();assertTrue(unblock.await(10,TimeUnit.SECONDS))}
                     val s=JSONObject().put("repoId",r.requestUrl!!.queryParameter("repoId")).put("libraryEpoch",r.requestUrl!!.queryParameter("libraryEpoch")).put("contentGeneration",r.requestUrl!!.queryParameter("contentGeneration"))
@@ -136,7 +142,7 @@ class SyncV2P6ProductTest {
         }
         override fun close(){unblock.countDown();http.shutdown();receipt.close()}
     }
-    private inner class Host(val server:Server,val id:String,localSwitch:Boolean=true):AutoCloseable {
+    private inner class Host(val server:Server,val id:String,localSwitch:Boolean=true,bodyChannel:Boolean=true):AutoCloseable {
         val root=File((RuntimeEnvironment.getApplication() as Context).cacheDir,"p6-host-${System.nanoTime()}").also{it.mkdirs()}
         val context=object:ContextWrapper(RuntimeEnvironment.getApplication()) {
             override fun getApplicationContext():Context=this
@@ -148,11 +154,49 @@ class SyncV2P6ProductTest {
         val manager=CloudKeyManager(null,preferencesOverride=prefs).also{it.bindBackend(server.http.url("/").toString());it.saveAccountKey(user,1,server.wrap,true)}
         var account:SyncV2PhoneProduct.Account?=SyncV2PhoneProduct.Account(user,server.http.url("/").toString(),id,"old-epoch","old-generation","synthetic-account","synthetic-api","Bearer synthetic-device")
         var enabled=localSwitch
-        val product=SyncV2PhoneProduct(context,{room},manager,{account},{_,values->assertTrue(java.security.MessageDigest.isEqual(server.wrap,values.getValue(1)))},{true},{enabled},signals={SyncV2TransportSignals(wifi=true,internet=true)})
+        val product=SyncV2PhoneProduct(context,{room},manager,{account},{_,values->assertTrue(java.security.MessageDigest.isEqual(server.wrap,values.getValue(1)))},{true},{enabled},signals={SyncV2TransportSignals(wifi=true,internet=true)},contentEnabled=bodyChannel)
         fun note(text:String="local"){val v=SyncV2P5Fixture().use{it.note(markdown=text)};SyncV2PhoneApply(room.openHelper.writableDatabase).upsert("notes",listOf("noteId"),v)}
         fun text()=room.openHelper.writableDatabase.query("SELECT markdown FROM notes WHERE noteId='note'").use{if(it.moveToFirst())it.getString(0)else null}
         fun sync()=runBlocking{product.sync(server.announcement)}
         override fun close(){product.release();room.close();root.deleteRecursively()}
+    }
+    @Test fun independentBodyClosedGateKeepsOriginalAndContinuesProductMetadata() {
+        Server().use {server->Host(server,"a").use {h->
+            fun syncFully(){repeat(4){try{h.sync();return}catch(e:IllegalStateException){if(e.message!="budget_paused")throw e}};fail("bounded scan did not resume")}
+            server.closedBodyChannel=true;h.note("![a](assets/product.png)")
+            val raw="product original".toByteArray();val file=File(h.context.filesDir,"notes/assets/product.png");file.parentFile!!.mkdirs();file.writeBytes(raw)
+            // Reference discovery registers the literal storageKey, even without an old private asset row.
+            syncFully();assertEquals(1,server.publishes);assertTrue(server.bodyRequests>0)
+            val runtime=SyncV2PhoneProduct::class.java.getDeclaredField("runtime").also{it.isAccessible=true}.get(h.product) as SyncV2PhoneProduct.Runtime
+            assertEquals(listOf("body_channel_write_disabled"),runtime.bodyResult.errors)
+            assertArrayEquals(raw,file.readBytes())
+            assertTrue(server.values().any{it.optString("assetId")=="product.png"})
+            assertEquals("body_channel_write_disabled",h.product.uiPort.value!!.state.value.errorCode)
+            val entity=runtime.identity.entity("asset","product.png");val row=runtime.projection.cloudRows(setOf(entity)).single().getJSONObject("row")
+            assertEquals(SyncV2BodyCodec.revision("asset",entity,SyncV2BodyCodec.hash(raw)),row.getString("bodyRevision"));assertTrue(row.isNull("recipeOid"))
+            h.note("later metadata");syncFully();assertEquals(2,server.publishes);assertEquals("later metadata",h.text());assertArrayEquals(raw,file.readBytes())
+        }}
+    }
+    @Test fun originalOnReceivingPhoneReplacesRandomPlaceholderWithoutMetadataEdits() {
+        Server().use{server->
+            server.closedBodyChannel=true;val raw="old original".toByteArray()
+            fun full(h:Host){repeat(4){try{h.sync();return}catch(e:IllegalStateException){if(e.message!="budget_paused")throw e}};fail("scan did not finish")}
+            Host(server,"old",bodyChannel=false).use{h->
+                h.note("![a](assets/old.png)")
+                SyncV2PhoneApply(h.room.openHelper.writableDatabase).upsert("note_assets",listOf("assetId"),JSONObject().put("assetId","private-old").put("storageKey","old.png").put("mimeType","image/png").put("displayName","old.png").put("createdAt",1).put("deleted",false).put("deletedAt",0))
+                full(h);assertEquals(1,server.publishes);assertEquals(0,server.bodyRequests)
+            }
+            Host(server,"receiver").use{h->
+                val file=File(h.context.filesDir,"notes/assets/old.png");file.parentFile!!.mkdirs();file.writeBytes(raw)
+                full(h)
+                val runtime=SyncV2PhoneProduct::class.java.getDeclaredField("runtime").also{it.isAccessible=true}.get(h.product) as SyncV2PhoneProduct.Runtime
+                assertEquals(2,server.publishes);assertTrue(runtime.projection.state().body.isNull("pendingChoice"))
+                val entity=runtime.identity.entity("asset","old.png");val row=runtime.projection.cloudRows(setOf(entity)).single().getJSONObject("row")
+                assertEquals(SyncV2BodyCodec.revision("asset",entity,SyncV2BodyCodec.hash(raw)),row.getString("bodyRevision"));assertTrue(row.isNull("recipeOid"))
+                assertEquals(listOf("body_channel_write_disabled"),runtime.bodyResult.errors);assertArrayEquals(raw,file.readBytes())
+                assertEquals(1,h.room.openHelper.writableDatabase.query("SELECT createdAt FROM note_assets WHERE storageKey='old.png'").use{it.moveToFirst();it.getInt(0)})
+            }
+        }
     }
     @Test fun disabledAndUnannouncedEntryHasZeroRequestsNoRuntimeAndNoDatabaseOpen()=runBlocking {
         Server().use {server->Host(server,"a",false).use{h->

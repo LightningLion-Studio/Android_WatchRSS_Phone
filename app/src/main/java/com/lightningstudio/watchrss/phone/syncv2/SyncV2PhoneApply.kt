@@ -128,10 +128,11 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
                     for(i in 0 until a.length())upsert("note_conflicts",listOf("conflictId"),a.getJSONObject(i))
                 }
                 "asset"->{
-                    val id=v.getString("assetId");val old=scalar("note_assets","assetId",id)
-                    val linked=notes.firstOrNull{r->com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.referencedStorageKeys(r.getJSONObject("value").getString("markdown")).any{it.substringBeforeLast('.')==id}}
-                    val storage=linked?.let{r->com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.referencedStorageKeys(r.getJSONObject("value").getString("markdown")).first{it.substringBeforeLast('.')==id}}?:"syncv2-${meta.getString("entityKey") }"
-                    val row=JSONObject().put("assetId",id).put("mimeType",v.get("mime")).put("displayName",v.get("originalFilename"))
+                    val storage=v.getString("assetId");SyncV2BodyCodec.name("asset",storage)
+                    val old=scalar("note_assets","storageKey",storage)
+                    val linked=notes.firstOrNull{r->SyncV2BodyRepository.noteReferences(r.getJSONObject("value")).contains(storage)}
+                    val row=JSONObject().put("assetId",old?.getString("assetId")?:java.util.UUID.randomUUID().toString())
+                        .put("mimeType",v.get("mime")).put("displayName",v.get("originalFilename"))
                         .put("createdAt",v.get("updatedAt")).put("deleted",v.get("deleted")).put("deletedAt",v.get("deletedAt"))
                     if(old==null)row.put("noteId",linked?.getJSONObject("value")?.getString("noteId")?:"").put("storageKey",storage)
                         .put("sha256","syncv2:${meta.getString("entityKey")}").put("byteCount",0).put("isOriginal",false)

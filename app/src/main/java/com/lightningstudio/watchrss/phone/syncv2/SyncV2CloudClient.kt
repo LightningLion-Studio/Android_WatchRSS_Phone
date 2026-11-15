@@ -17,6 +17,7 @@ internal class SyncV2CloudError(val code: String, val retryable: Boolean = false
         "cloud_account_busy", "library_busy" -> "同步忙，请稍后重试"
         "service_key_changed" -> "云同步服务密钥变化，请更新应用"
         "budget_paused" -> "同步暂停，稍后继续"
+        "body_channel_write_disabled" -> "云端正文写入未开放，本机正文保留"
         else -> "同步暂未完成：$code"
     }
 }
@@ -68,16 +69,16 @@ internal class SyncV2CloudClient(
     }
     val deviceId:String get()=active().deviceId
     val scope: JSONObject get() = JSONObject(active().scopeJson)
-    private fun url(path: String, query: Map<String,String> = emptyMap()): HttpUrl {
+    private fun url(path: String, query: Map<String,String> = emptyMap(), bodyChannel:Boolean=false, includeScope:Boolean=true): HttpUrl {
         if (!Regex("[a-zA-Z0-9/_.:-]+").matches(path) || path.contains("..")) SyncV2Codec.fail("invalid_schema")
-        val builder = base.newBuilder().encodedPath(base.encodedPath + path)
-        val s = JSONObject(owner[4]); for (k in listOf("repoId", "libraryEpoch", "contentGeneration")) builder.addQueryParameter(k,s.getString(k))
+        val builder = base.newBuilder().encodedPath((if(bodyChannel)"/functions/v1/cloud/bodies/v1/"else base.encodedPath) + path)
+        val s = JSONObject(owner[4]); if(includeScope)for (k in listOf("repoId", "libraryEpoch", "contentGeneration")) builder.addQueryParameter(k,s.getString(k))
         query.forEach { (k,v) -> builder.addQueryParameter(k,v) }; return builder.build()
     }
-    private fun bytes(method: String, path: String, body: ByteArray? = null, headers: Map<String,String> = emptyMap(), query: Map<String,String> = emptyMap(), raw: Boolean = false): Pair<ByteArray,Map<String,String>> {
+    private fun bytes(method: String, path: String, body: ByteArray? = null, headers: Map<String,String> = emptyMap(), query: Map<String,String> = emptyMap(), raw: Boolean = false, bodyChannel:Boolean=false): Pair<ByteArray,Map<String,String>> {
         val s = active()
         if(path!="capabilities" && !capabilitiesChecked)SyncV2Codec.fail("authentication_required")
-        val builder = Request.Builder().url(url(path,query)).header("Authorization", "Bearer ${s.bearer}")
+        val builder = Request.Builder().url(url(path,query,bodyChannel,!bodyChannel || method=="GET")).header("Authorization", "Bearer ${s.bearer}")
             .header("apikey",s.apiKey).header("x-watchrss-cloud-device-id",s.legacyDeviceId)
             .header("x-watchrss-library-epoch",s.legacyEpoch).header("x-watchrss-content-generation",s.legacyGeneration)
             .header("Accept",if(raw)"application/octet-stream" else "application/json")
@@ -108,9 +109,9 @@ internal class SyncV2CloudClient(
                 val code=SyncV2Wire.string(error,"code")
                 if(!Regex("[a-z][a-z0-9_]{0,63}").matches(code) || error.get("retryable") !is Boolean)SyncV2Codec.fail("invalid_schema")
                 val delay=if(error.isNull("retryAfterMillis"))null else SyncV2Wire.uint(error,"retryAfterMillis",60000)
-                throw SyncV2CloudError(code,error.getBoolean("retryable"),delay,JSONObject(error.getJSONObject("details").toString()))
+                throw SyncV2CloudError(code,error.getBoolean("retryable"),delay?:if(bodyChannel && response.code in setOf(429,507))60000L else null,JSONObject(error.getJSONObject("details").toString()))
             }
-            if(raw) {
+            if(raw && !bodyChannel) {
                 if(response.code != if(headers.containsKey("Range"))206 else 200)SyncV2Codec.fail("invalid_range")
                 if(response.header("ETag")?.removeSurrounding("\"") != path.removePrefix("objects/"))SyncV2Codec.fail("hash_mismatch")
                 if(response.header("Content-Length")?.toLongOrNull()!=data.size.toLong())SyncV2Codec.fail("invalid_encoding")
@@ -119,6 +120,9 @@ internal class SyncV2CloudClient(
         }
         } finally {calls.remove(call)}
     }
+    /** Same authenticated origin, ownership fence, cancellation and deadline; separate byte namespace. */
+    internal fun bodyBytes(method:String,path:String,body:ByteArray?=null,headers:Map<String,String> = emptyMap(),query:Map<String,String> = emptyMap(),raw:Boolean=false)=
+        bytes(method,path,body,headers,query,raw,bodyChannel=true)
     private fun get(path: String, query: Map<String,String> = emptyMap()): JSONObject = check(SyncV2Wire.parse(bytes("GET",path,query=query).first))
     private fun post(path: String, value: JSONObject): JSONObject {
         val request=JSONObject(value.toString())

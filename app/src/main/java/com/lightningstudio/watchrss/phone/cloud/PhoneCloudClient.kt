@@ -21,7 +21,8 @@ class PhoneCloudClient(
     private val deviceAccessToken: () -> String? = { null },
     private val http: OkHttpClient = defaultHttpClient(),
     private val refreshDeviceSession: suspend (String, String) -> Boolean = { _, _ -> false },
-    private val downloadBackoff: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) }
+    private val downloadBackoff: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
+    private val deviceSessionRequest: (suspend (String, suspend (String?) -> okhttp3.Response) -> okhttp3.Response)? = null
 ) {
     internal var allowR48Writes:()->Boolean = { CloudFormatR48.writeV1 }
     val backendBaseUrl: String get() = environment.backendBaseUrl.trimEnd('/')
@@ -539,14 +540,15 @@ class PhoneCloudClient(
         val requiresR48=initial.tag(CloudR48WriteRequired::class.java)?.value==true
         val admission=admissionPath && allowR48Writes() && CloudFormatWritePolicy(true,false).canWrite(formatCapabilities(session))
         if(requiresR48 && !admission)throw CloudHttpException(503,"{\"error\":\"r48_write_feature_disabled\"}")
-        fun buildRequest() = builder
+        fun buildRequest(token: String?) = initial.newBuilder()
             .apply {if(admission)header("x-watchrss-r48-write-v1","1") else removeHeader("x-watchrss-r48-write-v1")}
             .tag(CloudContentRequestGeneration::class.java, CloudContentRequestGeneration(expectedGeneration))
             .also { checkSession(session) }
             .withWatchRssAppVersionHeader()
             .header("authorization", "Bearer ${session.accessToken}")
             .apply {
-                deviceAccessToken()?.takeIf { it.isNotBlank() }?.let {
+                removeHeader("x-watchrss-device-authorization")
+                token?.takeIf { it.isNotBlank() }?.let {
                     header("x-watchrss-device-authorization", "Bearer $it")
                 }
             }
@@ -568,7 +570,7 @@ class PhoneCloudClient(
             .header("apikey", environment.supabaseAnonKey)
             .header("accept", "application/json")
             .build()
-        val firstRequest = buildRequest()
+        val firstRequest = buildRequest(null)
         val migrationDeadline=kotlinx.coroutines.currentCoroutineContext()[CloudMigrationDeadline]
         // Reserve/complete may verify hundreds of stored immutable blocks.
         val requestHttp = http.newBuilder().followRedirects(false).followSslRedirects(false).apply {
@@ -589,21 +591,37 @@ class PhoneCloudClient(
         fun timedCall(request:Request)=requestHttp.newCall(request).also { call ->
             migrationDeadline?.let { call.timeout().timeout(it.budget.remainingMillis(),TimeUnit.MILLISECONDS) }
         }
-        var response = timedCall(firstRequest).execute()
-        val rejected = firstRequest.header("x-watchrss-device-authorization")?.removePrefix("Bearer ")
+        suspend fun attempt(rejectedToken: String? = null): okhttp3.Response {
+            val send: suspend (String?) -> okhttp3.Response = { token ->
+                if (rejectedToken != null && (token.isNullOrBlank() || token == rejectedToken)) {
+                    throw CloudDeviceSessionRefreshException()
+                }
+                timedCall(buildRequest(token)).execute()
+            }
+            return deviceSessionRequest?.invoke(session.userId, send) ?: send(deviceAccessToken())
+        }
+        var response = attempt()
+        val rejected = response.request.header("x-watchrss-device-authorization")?.removePrefix("Bearer ")
         if (response.code == 403 && rejected != null && isRefreshableCloudDeviceSessionError(
                 runCatching { JSONObject(response.peekBody(4096).string()).optString("error") }.getOrDefault("")
             )) {
             response.close()
             if (refreshDeviceSession(rejected, session.userId)) {
-                response = timedCall(buildRequest()).execute()
+                response = attempt(rejected)
             } else {
-                throw CloudDeviceAuthorizationException()
+                // A stale app session says nothing about the cloud epoch or root key.
+                throw CloudDeviceSessionRefreshException()
             }
         }
         if (response.code == 403) {
             val code = runCatching { JSONObject(response.peekBody(4096).string()).optString("error") }.getOrDefault("")
-            if (code in setOf("device_session_revoked", "device_session_expired", "device_session_invalid", "device_revoked", "device_mismatch")) {
+            if (code in setOf("device_session_revoked", "device_session_expired", "device_session_invalid")) {
+                response.close()
+                // A second rotation may invalidate the token used by the bounded retry.
+                // Do not turn either an unsuccessful refresh or a stale retry into key loss.
+                throw CloudDeviceSessionRefreshException()
+            }
+            if (code in setOf("device_revoked", "device_mismatch")) {
                 response.close()
                 throw CloudDeviceAuthorizationException()
             }
@@ -710,6 +728,8 @@ class PhoneCloudClient(
 
 internal fun isRefreshableCloudDeviceSessionError(code: String): Boolean =
     code == "device_session_revoked" || code == "device_session_expired"
+
+internal class CloudDeviceSessionRefreshException : IOException("设备登录状态暂时无法更新，请重试；仍失败时请在账号页重新验证。本机云密钥已保留")
 
 internal class CloudDeviceAuthorizationException : IOException("设备身份需要重新验证，请前往账号页面完成验证")
 

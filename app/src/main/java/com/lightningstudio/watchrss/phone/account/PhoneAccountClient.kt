@@ -468,7 +468,8 @@ class PhoneAccountClient(
             val text = response.body?.string().orEmpty()
             val error = PhoneAccountHttpException(
                 statusCode = response.code,
-                responseBody = text
+                responseBody = text,
+                retryAfterMillis = deviceSessionRetryAfterMillis(response.header("Retry-After"))
             )
             response.close()
             throw error

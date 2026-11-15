@@ -248,7 +248,8 @@ class PhoneCompanionContainer(context: Context) {
     private val publicRssClient by lazy { com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient(
         environment = accountEnvironment,
         deviceAccessToken = { appAccessCoordinator.deviceAccessToken },
-        refreshDeviceSession = { token, owner -> appAccessCoordinator.refreshRejectedDeviceSession(token, owner) }) }
+        refreshDeviceSession = { token, owner -> appAccessCoordinator.refreshRejectedDeviceSession(token, owner) },
+        deviceSessionRequest = { owner, request -> appAccessCoordinator.withDeviceSession(owner, request) }) }
 
     private val rssChannelImporter by lazy {
         com.lightningstudio.watchrss.phone.data.importer.RssChannelImporter(publicImport = { url ->
@@ -317,7 +318,8 @@ class PhoneCompanionContainer(context: Context) {
             client = PhoneCloudClient(
                 accountEnvironment,
                 deviceAccessToken = { appAccessCoordinator.deviceAccessToken },
-                refreshDeviceSession = { token, owner -> appAccessCoordinator.refreshRejectedDeviceSession(token, owner) }
+                refreshDeviceSession = { token, owner -> appAccessCoordinator.refreshRejectedDeviceSession(token, owner) },
+                deviceSessionRequest = { owner, request -> appAccessCoordinator.withDeviceSession(owner, request) }
             ),
             keyManager = com.lightningstudio.watchrss.phone.cloud.CloudKeyManager(
                 appContext,

@@ -11,8 +11,21 @@ internal enum class AccountLoginAction {
 
 internal class PhoneAccountHttpException(
     val statusCode: Int,
-    val responseBody: String
+    val responseBody: String,
+    val retryAfterMillis: Long? = null
 ) : IOException(watchAccountConflictMessage(parseErrorResponse(responseBody).code) ?: "账号请求失败（HTTP $statusCode）")
+
+internal fun deviceSessionRetryAfterMillis(value: String?, nowMillis: Long = System.currentTimeMillis()): Long? {
+    val text = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    text.toLongOrNull()?.let { seconds ->
+        return seconds.takeIf { it >= 0 }?.coerceAtMost(86_400)?.times(1_000)
+    }
+    return runCatching {
+        val at = java.time.ZonedDateTime.parse(text, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
+            .toInstant().toEpochMilli()
+        (at - nowMillis).coerceIn(0, 86_400_000)
+    }.getOrNull()
+}
 
 internal fun accountLoginErrorMessage(
     action: AccountLoginAction,

@@ -26,6 +26,14 @@ class AppAccessCoordinator(
     private val onAuthorized: () -> Unit = {}
 ) {
     private val operationMutex = Mutex()
+    private val sessionRefresh = DeviceSessionRefreshCoordinator(
+        load = store::load,
+        save = store::save,
+        owner = { accountRepository.session.value?.userId },
+        refresh = accountRepository::refreshAppAccess,
+        elapsedMillis = android.os.SystemClock::elapsedRealtime,
+        wallMillis = { store.trustedNowMillis() ?: System.currentTimeMillis() }
+    )
     private val authorizationNotifier = AuthorizationReadyNotifier(onAuthorized)
     private val environment = AccountEnvironment.active(context)
     private val _state = MutableStateFlow<AppAccessState>(AppAccessState.Loading)
@@ -33,6 +41,10 @@ class AppAccessCoordinator(
 
     val isAuthorized: Boolean get() = _state.value is AppAccessState.Authorized
     val deviceAccessToken: String? get() = store.load()?.deviceAccessToken
+
+    /** Wait for a rotation, then retain that session until the HTTP response headers arrive. */
+    suspend fun <T> withDeviceSession(expectedUserId: String, request: suspend (String?) -> T): T =
+        sessionRefresh.withSession(expectedUserId, request)
 
     init {
         scope.launch(Dispatchers.IO) {
@@ -62,12 +74,14 @@ class AppAccessCoordinator(
         if (store.load()?.deviceAccessToken != rejectedToken) {
             return@withLock !store.load()?.deviceAccessToken.isNullOrBlank()
         }
-        reconcileLocked()
+        sessionRefresh.checkBackoff(expectedUserId)
+        reconcileLocked(rejectedToken)
+        sessionRefresh.checkBackoff(expectedUserId)
         accountRepository.session.value?.userId == expectedUserId &&
             store.load()?.deviceAccessToken?.let { it.isNotBlank() && it != rejectedToken } == true
     }
 
-    private suspend fun reconcileLocked() {
+    private suspend fun reconcileLocked(rejectedToken: String? = null) {
         val cached = store.load()
         val trustedNow = store.trustedNowMillis()
         val cachedValid = cached != null && trustedNow != null && LeaseVerifier.verify(
@@ -104,9 +118,10 @@ class AppAccessCoordinator(
         }
 
         try {
-            val refreshed = accountRepository.refreshAppAccess(cached!!).also(store::save)
+            val refreshed = sessionRefresh.refresh(sessionUserId, rejectedToken)
             _state.value = AppAccessState.Authorized(refreshed.access, offline = false)
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             handleValidLeaseRefreshFailure(cached!!, error)
         }
     }
@@ -217,7 +232,9 @@ class AppAccessCoordinator(
                     store.clearPendingOrder()
                     val cached = store.load()
                     if (cached != null) {
-                        val refreshed = accountRepository.refreshAppAccess(cached).also(store::save)
+                        val refreshed = sessionRefresh.refresh(
+                            accountRepository.session.value?.userId.orEmpty(), cached.deviceAccessToken
+                        )
                         _state.value = AppAccessState.Authorized(refreshed.access, offline = false)
                     } else {
                         claimLocked()

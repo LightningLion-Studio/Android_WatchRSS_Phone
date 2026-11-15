@@ -256,6 +256,63 @@ class CloudContentRebuildIntegrationTest {
     }
     private suspend fun fixture(stage:String?=null,always:Boolean=false)=Fixture(failStage=stage,alwaysFail=always).also{fixtures+=it;it.initialize()}
     @After fun close(){fixtures.forEach{it.close()};java.security.Security.removeProvider("cloud-r45-fixture")}
+    private suspend fun assertDeviceSessionFailureKeepsCloudScope(code:String, refreshed:Boolean) {
+        val f=fixture();f.recordStore.close()
+        var requests=0;var refreshes=0
+        val headers=mutableListOf<String?>()
+        val client=PhoneCloudClient(f.env,deviceAccessToken={if(refreshed&&refreshes>0)"fresh-test-device-token"else"stale-test-device-token"},
+            http=OkHttpClient.Builder().addInterceptor { chain ->
+                requests++;headers+=chain.request().header("x-watchrss-device-authorization")
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(403).message("fixture")
+                    .body(JSONObject().put("error",code).toString().toResponseBody("application/json".toMediaType())).build()
+            }.build(),refreshDeviceSession={_,_->refreshes++;refreshed})
+        f.service=PhoneCloudSyncService(f.context,f.account,f.backup,f.repository,notes(f),"phone",client,
+            keyManager=f.keys,settings=f.state,cache=f.cache)
+        val owner=client.scopeId(session)
+        assertTrue(f.keys.hasAccountKey(session.userId));assertEquals(epoch,f.state.libraryEpoch)
+        assertEquals("900",f.recordStore.cursor(owner))
+        val error=runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()
+        assertTrue(error is CloudDeviceSessionRefreshException)
+        val canRefresh=isRefreshableCloudDeviceSessionError(code)
+        assertEquals(if(canRefresh&&refreshed)2 else 1,requests);assertEquals(if(canRefresh)1 else 0,refreshes)
+        if(canRefresh&&refreshed)assertEquals(listOf("Bearer stale-test-device-token","Bearer fresh-test-device-token"),headers)
+        assertTrue("failed device-session refresh is not proof of a cloud epoch reset",f.keys.hasAccountKey(session.userId))
+        assertArrayEquals(key,f.keys.getAccountKey(session.userId))
+        assertEquals(epoch,f.state.libraryEpoch);assertEquals(900,f.state.appliedSequence("old-phone",true))
+        assertEquals("900",f.recordStore.cursor(owner));assertEquals(0,f.completed)
+        assertEquals(CloudSyncPhase.NEEDS_RECOVERY,f.service.state.value.phase)
+        val presentation=cloudDashboardPresentation(true,true,false,f.service.state.value.phase,CloudMemberState("free",true,true,true,1000,0,0,30,null,null))
+        assertEquals("验证设备身份",presentation.actionLabel);assertFalse(presentation.status.contains("未授权"))
+    }
+    @Test fun staleDeviceSessionRefreshFailureMustKeepAccountKeyAndCloudState()=runBlocking {
+        assertDeviceSessionFailureKeepsCloudScope("device_session_revoked",false)
+    }
+    @Test fun secondDeviceSessionRotationAfterRefreshMustKeepKeyAndNeverLoop()=runBlocking {
+        assertDeviceSessionFailureKeepsCloudScope("device_session_revoked",true)
+        assertDeviceSessionFailureKeepsCloudScope("device_session_expired",true)
+    }
+    @Test fun invalidDeviceSessionMustPreserveKeysWithoutReclaimingOrPublishing()=runBlocking {
+        assertDeviceSessionFailureKeepsCloudScope("device_session_invalid",false)
+    }
+    @Test fun explicitDeviceRevocationOrMismatchStillInvalidatesCloudAuthorization()=runBlocking {
+        for(code in listOf("device_revoked","device_mismatch")) {
+            val f=fixture();f.recordStore.close();var refreshes=0
+            val client=PhoneCloudClient(f.env,deviceAccessToken={"revoked-test-token"},http=OkHttpClient.Builder().addInterceptor{chain->
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(403).message("fixture")
+                    .body(JSONObject().put("error",code).toString().toResponseBody("application/json".toMediaType())).build()
+            }.build(),refreshDeviceSession={_,_->refreshes++;true})
+            f.service=PhoneCloudSyncService(f.context,f.account,f.backup,f.repository,notes(f),"phone",client,keyManager=f.keys,settings=f.state,cache=f.cache)
+            assertTrue(runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()is CloudDeviceAuthorizationException)
+            assertEquals(0,refreshes);assertFalse(f.keys.hasAccountKey(session.userId));assertNull(f.state.libraryEpoch)
+            assertEquals("0",f.recordStore.cursor(client.scopeId(session)));assertEquals(0,f.completed)
+        }
+    }
+    @Test fun ordinaryNetworkFailureBeforeBootstrapKeepsExistingCloudScope()=runBlocking {
+        val f=fixture();f.failBootstrap=true
+        assertTrue(runCatching{f.service.syncNow(manual=true)}.exceptionOrNull()is java.io.IOException)
+        assertArrayEquals(key,f.keys.getAccountKey(session.userId));assertEquals(epoch,f.state.libraryEpoch)
+        assertEquals(900,f.state.appliedSequence("old-phone",true));assertEquals("900",f.recordStore.cursor(f.client.scopeId(session)))
+    }
     @Test fun reviewAssetOnlyRemoteHydrationMustPublishNewLocalBytes()=runBlocking {
         val f=fixture(); val repo=notes(f)
         val imageFile=java.io.File(f.context.filesDir,"notes/assets/review-hydrate.png")

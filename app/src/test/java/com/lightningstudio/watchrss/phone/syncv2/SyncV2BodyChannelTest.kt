@@ -38,12 +38,12 @@ class SyncV2BodyChannelTest {
             val items=JSONArray();val bindings=mutableListOf<SyncV2BodyCodec.Binding>()
             for((kind,id,raw)in samples){val b=binding(kind,id,raw);bindings.add(b);val p=SyncV2BodyCodec.prepare(f.identity.scope,anchor,b,key,1,f.f.signer,raw)
                 assertArrayEquals(raw,SyncV2BodyCodec.open(p.descriptor,f.identity.scope,b,f.f.signer.publicHex,{key}){h,_->p.objects.getValue(h)})
-                items.put(JSONObject().put("binding",json(b)).put("descriptor",p.descriptor).put("objects",JSONObject(p.objects.mapValues{Base64.getEncoder().encodeToString(it.value)})).put("raw",Base64.getEncoder().encodeToString(raw)).put("value",if(kind=="book")book else JSONObject()).apply{if(raw.size>262144)put("expectedPodjsError","hash_unit_too_large")})}
+                items.put(JSONObject().put("binding",json(b)).put("descriptor",p.descriptor).put("objects",JSONObject(p.objects.mapValues{Base64.getEncoder().encodeToString(it.value)})).put("raw",Base64.getEncoder().encodeToString(raw)).put("value",if(kind=="book")book else JSONObject()))}
             val input=File(f.root,"input.json");val output=File(f.root,"output.json");input.writeText(JSONObject().put("scope",f.identity.scope).put("publicHex",f.f.signer.publicHex).put("items",items).toString())
             org.junit.Assume.assumeTrue("real PodJS source is required",File(System.getenv("WATCHRSS_PODJS_BODY_SOURCE")?:"/home/wilf/data/OPPO_Develop/PodJS_WatchRSS.wt-notes","src/sync-v2/body-channel-codec.ts").isFile)
             val script=File("src/test/body/podjs-body-oracle.ts").absoluteFile.takeIf{it.isFile}?:File("app/src/test/body/podjs-body-oracle.ts").absoluteFile
             val process=ProcessBuilder("bun",script.path,input.path,output.path).redirectErrorStream(true).start();val log=process.inputStream.bufferedReader().readText();assertEquals(log,0,process.waitFor())
-            val result=JSONObject(output.readText());val pub=result.getString("publicHex");assertEquals("hash_unit_too_large",result.getJSONArray("items").getJSONObject(1).getString("phoneToPodjsError"))
+            val result=JSONObject(output.readText());val pub=result.getString("publicHex");assertTrue(result.getJSONArray("items").getJSONObject(1).isNull("phoneToPodjsError"))
             for((i,sample)in samples.withIndex())for(p in listOf(result.getJSONArray("items").getJSONObject(i),result.getJSONArray("items").getJSONObject(i).getJSONObject("legacy"))) {
                 val decoded=SyncV2BodyCodec.open(p.getJSONObject("descriptor"),f.identity.scope,bindings[i],pub,{key}){h,_->bytes(p).getValue(h)}
                 assertArrayEquals(sample.third,decoded)

@@ -103,7 +103,6 @@ internal class SyncV2CloudClient(
             } ?: SyncV2Codec.fail("invalid_encoding")
             active() // An auth refresh may keep ownership; account/old epoch changes invalidate this round.
             if (!response.isSuccessful) {
-                if(path=="capabilities" && response.code in setOf(404,426))throw SyncV2CloudError("upgrade_required")
                 val error = SyncV2Wire.parse(data).getJSONObject("error")
                 SyncV2Codec.exact(error,setOf("code","retryable","retryAfterMillis","details"))
                 val code=SyncV2Wire.string(error,"code")

@@ -7,6 +7,8 @@ import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
 import org.bouncycastle.asn1.ASN1ObjectIdentifier
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier
@@ -154,7 +156,8 @@ class SyncV2P6ProductTest {
         val manager=CloudKeyManager(null,preferencesOverride=prefs).also{it.bindBackend(server.http.url("/").toString());it.saveAccountKey(user,1,server.wrap,true)}
         var account:SyncV2PhoneProduct.Account?=SyncV2PhoneProduct.Account(user,server.http.url("/").toString(),id,"old-epoch","old-generation","synthetic-account","synthetic-api","Bearer synthetic-device")
         var enabled=localSwitch
-        val product=SyncV2PhoneProduct(context,{room},manager,{account},{_,values->assertTrue(java.security.MessageDigest.isEqual(server.wrap,values.getValue(1)))},{true},{enabled},signals={SyncV2TransportSignals(wifi=true,internet=true)},contentEnabled=bodyChannel)
+        var wifi=true
+        val product=SyncV2PhoneProduct(context,{room},manager,{account},{_,values->assertTrue(java.security.MessageDigest.isEqual(server.wrap,values.getValue(1)))},{true},{enabled},signals={SyncV2TransportSignals(wifi=wifi,internet=true)},contentEnabled=bodyChannel)
         fun note(text:String="local"){val v=SyncV2P5Fixture().use{it.note(markdown=text)};SyncV2PhoneApply(room.openHelper.writableDatabase).upsert("notes",listOf("noteId"),v)}
         fun text()=room.openHelper.writableDatabase.query("SELECT markdown FROM notes WHERE noteId='note'").use{if(it.moveToFirst())it.getString(0)else null}
         fun sync()=runBlocking{product.sync(server.announcement)}
@@ -617,4 +620,78 @@ class SyncV2P6ProductTest {
             }finally{identity.close()}
         }}
     }
+    private inner class ServiceEntry(val h:Host):AutoCloseable {
+        private val c=h.context
+        private val epoch="11111111-1111-4111-8111-111111111111"
+        private val generation="22222222-2222-4222-8222-222222222222"
+        private val scope=kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob()+kotlinx.coroutines.Dispatchers.Default)
+        val settings=com.lightningstudio.watchrss.phone.cloud.PhoneCloudStateStore(com.lightningstudio.watchrss.phone.testing.MemoryPreferences())
+        var announced=true;var failAuthentication=false;var unsupported=false;var legacyCalls=0;var bootstraps=0
+        private val env=com.lightningstudio.watchrss.phone.account.AccountEnvironment(backendBaseUrl=h.server.http.url("/").toString(),supabaseAnonKey="synthetic-api")
+        private val session=com.lightningstudio.watchrss.phone.account.PhoneAccountSession(user,"***","synthetic-account","synthetic-refresh",Long.MAX_VALUE)
+        private val store=com.lightningstudio.watchrss.phone.account.EncryptedAccountSessionStore(c).also {store->
+            store.javaClass.getDeclaredField("prefsRef").apply{isAccessible=true}.set(store,com.lightningstudio.watchrss.phone.testing.MemoryPreferences())
+        }
+        private val account=com.lightningstudio.watchrss.phone.account.PhoneAccountRepository(env,store,com.lightningstudio.watchrss.phone.account.PhoneInstallationIdentity(c),
+            com.lightningstudio.watchrss.phone.account.PhoneAccountClient(env,com.lightningstudio.watchrss.phone.account.LicenseDeviceIdentity(c)),h.id)
+        private val repo=com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository(h.room.phoneSavedItemDao(),h.room.phoneArticleDao(),h.room.phoneRssSourceDao(),h.id,
+            syncChangeLogDao=h.room.syncChangeLogDao(),syncPeerStateDao=h.room.syncPeerStateDao(),appMetaDao=h.room.appMetaDao())
+        private val reader=com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository(c,h.room,h.room.readerPresetDao(),h.id,scope)
+        private val client=com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient(env,http=okhttp3.OkHttpClient.Builder().addInterceptor{chain->
+            val request=chain.request();val bootstrap=request.url.encodedPath.endsWith("/bootstrap")
+            val status=if(bootstrap){bootstraps++;if(failAuthentication)401 else if(unsupported)426 else 200}else{legacyCalls++;426}
+            val body=if(status==200)JSONObject().put("libraryEpoch",epoch).put("contentGeneration",generation).put("contentEmpty",false)
+                .put("member",JSONObject().put("active",true).put("writable",true).put("readable",true).put("quotaBytes",1000000).put("usedBytes",0).put("reservedBytes",0))
+                .put("keyVersionFloor",0).put("keyCommitments",JSONArray().put(JSONObject().put("keyVersion",1).put("commitment",com.lightningstudio.watchrss.phone.cloud.CloudProtocolV2.commitment(h.server.wrap,user,epoch,1))))
+                .put("keyEnvelopes",JSONArray()).put("devices",JSONArray()).also{if(announced)it.put("syncV2",h.server.announcement)}
+                else JSONObject().put("error",if(unsupported)"client_upgrade_required"else if(failAuthentication)"invalid_token"else JSONObject().put("code","upgrade_required"))
+            okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1).code(status).message("synthetic")
+                .body(body.toString().toResponseBody("application/json".toMediaType())).build()
+        }.build())
+        val service:com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncService
+        init {
+            runBlocking{store.save(session)}
+            h.account=h.account!!.copy(epoch=epoch,generation=generation)
+            val manager=c.getSystemService(android.net.ConnectivityManager::class.java);val shadow=org.robolectric.Shadows.shadowOf(manager)
+            shadow.setActiveNetworkInfo(org.robolectric.shadows.ShadowNetworkInfo.newInstance(android.net.NetworkInfo.DetailedState.CONNECTED,android.net.ConnectivityManager.TYPE_MOBILE,0,true,true))
+            val caps=android.net.NetworkCapabilities();org.robolectric.Shadows.shadowOf(caps).addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET);shadow.setNetworkCapabilities(manager.activeNetwork,caps)
+            service=com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncService(c,account,com.lightningstudio.watchrss.phone.data.backup.WatchRssBackupService(c,h.room,repo,reader,h.id),repo,
+                com.lightningstudio.watchrss.phone.data.note.NoteRepository(h.room.noteDao(),h.id),h.id,client,keyManager=h.manager,settings=settings,syncV2Database={h.room})
+            // Replace only the local build gate with the existing real enabled product fixture.
+            service.javaClass.getDeclaredField("syncV2Product\$delegate").apply{isAccessible=true}.set(service,lazy{h.product})
+        }
+        fun sync(manual:Boolean)=runBlocking{service.syncNow(manual)}
+        override fun close(){scope.coroutineContext[kotlinx.coroutines.Job]?.cancel();service.javaClass.getDeclaredField("recordStore").apply{isAccessible=true}.get(service).let{(it as com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordStore).close()}}
+    }
+    @Test fun formalEntrySelectsAuthenticatedV2BeforeLegacyAndForwardsManualBodyConsent() {
+        Server().use{server->Host(server,"entry").use{h->ServiceEntry(h).use{entry->
+            server.closedBodyChannel=true;h.wifi=false;h.note("![a](assets/entry.png)")
+            val file=File(h.context.filesDir,"notes/assets/entry.png");file.parentFile!!.mkdirs();file.writeText("retained entry original")
+            entry.settings.formatUpgradeRequiredVersion=com.lightningstudio.watchrss.phone.BuildConfig.VERSION_CODE
+            fun complete(manual:Boolean){repeat(4){val error=runCatching{entry.sync(manual)}.exceptionOrNull();if(error==null)return;assertEquals("budget_paused",error.message)};fail("entry scan did not resume")}
+            complete(false);assertEquals(1,server.publishes);assertEquals(0,entry.legacyCalls);assertEquals(0,server.bodyRequests)
+            assertEquals(0,entry.settings.formatUpgradeRequiredVersion);assertFalse(entry.service.formatStatus.value.upgradeRequired)
+            complete(true);assertTrue(server.bodyRequests>0);assertEquals(0,entry.legacyCalls);assertEquals("retained entry original",file.readText())
+            assertEquals("body_channel_write_disabled",h.product.uiPort.value!!.state.value.errorCode)
+        }}}
+    }
+    @Test fun formalEntryClosedProductOrMissingAnnouncementNeverProbesV2OrRequestsAnUpgrade() {
+        for(announced in listOf(false,true))Server().use{server->Host(server,"closed",localSwitch=!announced).use{h->ServiceEntry(h).use{entry->
+            entry.announced=announced
+            repeat(2){assertTrue(runCatching{entry.sync(false)}.isFailure)}
+            assertEquals(0,server.http.requestCount);assertEquals(2,entry.bootstraps);assertEquals(2,entry.legacyCalls)
+            assertEquals(0,entry.settings.formatUpgradeRequiredVersion);assertFalse(entry.service.formatStatus.value.upgradeRequired)
+            assertFalse(entry.service.state.value.message.contains("请升级"))
+        }}}
+    }
+    @Test fun formalEntryRequiresAuthenticatedBootstrapAndOnlyServerUnsupportedBuildShowsUpgrade() {
+        for(unsupported in listOf(false,true))Server().use{server->Host(server,"auth").use{h->ServiceEntry(h).use{entry->
+            entry.unsupported=unsupported;entry.failAuthentication=!unsupported
+            assertTrue(runCatching{entry.sync(true)}.isFailure)
+            assertEquals(0,server.http.requestCount);assertEquals(0,entry.legacyCalls)
+            assertEquals(unsupported,entry.service.formatStatus.value.upgradeRequired)
+            assertEquals(if(unsupported)com.lightningstudio.watchrss.phone.BuildConfig.VERSION_CODE else 0,entry.settings.formatUpgradeRequiredVersion)
+        }}}
+    }
+
 }

@@ -139,7 +139,17 @@ internal object SyncV2BodyCodec {
         val legacy=codec.decryptManifest(key,b.getString("sourceSnapshotId"),manifest)
         if(legacy.keyVersion.toLong()!=b.getLong("keyVersion"))SyncV2Codec.fail("key_unavailable")
         val selected=legacy.objects.singleOrNull{it.name==if(binding.kind=="asset")"notes-assets.zip"else name(binding.kind,binding.logicalId)}?:SyncV2Codec.fail("source_identity_missing")
-        val raw=decodeObject(selected.toJson(),b,key,if(binding.kind=="asset")32*1024*1024 else limit(binding.kind),read)
+        // Validate legacy compatibility and key wrapping before discarding locator/business metadata.
+        legacy.requireReadable()
+        if(selected.access in setOf(com.lightningstudio.watchrss.phone.cloud.CloudFormatAccess.OPAQUE,com.lightningstudio.watchrss.phone.cloud.CloudFormatAccess.ISOLATED) || selected.entryRef!=null)SyncV2Codec.fail("unsupported_feature")
+        val objectKey=codec.unwrapReaderKey(key,selected)
+        val raw=try {
+            val old=selected.toJson();val body=JSONObject()
+            for(field in listOf("name","encoding","originalBytes","encodedBytes","contentSha256"))if(old.has(field))body.put(field,old.get(field))
+            body.put("chunks",JSONArray(selected.chunks.map{chunk->val c=chunk.toJson();JSONObject().also{out->
+                for(field in com.lightningstudio.watchrss.phone.cloud.CloudChunkDescriptor.fields)out.put(field,c.get(field))}}))
+            decodeObject(body,b,objectKey,if(binding.kind=="asset")32*1024*1024 else limit(binding.kind),read)
+        }finally{if(objectKey!==key)objectKey.fill(0)}
         val body=if(binding.kind=="book")raw else java.util.zip.ZipInputStream(raw.inputStream()).use{zip->var result:ByteArray?=null;val seen=hashSetOf<String>();var total=0L
             while(true){val entry=zip.nextEntry?:break;if(!seen.add(entry.name)||seen.size>10000)SyncV2Codec.fail("invalid_schema");val keep=entry.name==name(binding.kind,binding.logicalId);val out=ByteArrayOutputStream();val buf=ByteArray(8192)
                 while(true){val n=zip.read(buf);if(n<0)break;total+=n;if(total>32*1024*1024 || keep&&out.size()+n>limit(binding.kind))SyncV2Codec.fail("object_too_large");if(keep)out.write(buf,0,n)}

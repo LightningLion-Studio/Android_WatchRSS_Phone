@@ -18,8 +18,8 @@ for(const item of request.items){
  try {
   const decoded=await openCarrier({descriptor:item.descriptor,scope:request.scope,binding:item.binding,crypto:snapshotCrypto,signer,publicKey:Buffer.from(request.publicHex,'hex').toString('base64url'),key:async()=>key.slice(),read:async(h:string)=>objects.get(h)!});
   if(Buffer.from(decoded.get(bodyObjectName(item.binding.kind,item.binding.logicalId))!).toString('base64')!==item.raw)throw Error('phone-to-podjs mismatch');
- }catch(error){phoneToPodjsError=(error as Error).message;if(phoneToPodjsError!==item.expectedPodjsError)throw error;}
- if(phoneToPodjsError!==(item.expectedPodjsError??null))throw Error('unexpected oracle result');
+ }catch(error){phoneToPodjsError=(error as Error).message;throw error;}
+ if(phoneToPodjsError!==null)throw Error('unexpected oracle result');
  const raw=new Uint8Array(Buffer.from(item.raw,'base64'));
  if(item.binding.kind==='book')await validateBookPackage(splitBookLines((async function*(){yield Buffer.from(raw).toString('utf8')})()),async(b:Uint8Array)=>createHash('sha256').update(b).digest('hex'),item.value);
  const pack=(p:any)=>({descriptor:p.descriptor,objects:Object.fromEntries([...p.objects].map(([h,b]:any)=>[h,Buffer.from(b).toString('base64')]))});

@@ -445,17 +445,18 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             }
             val cached=projection.accountWireRowFor(r)
             val bodySources=listOfNotNull(remote,known,cached?.let{copy(r).put("row",it)}).filter{it.has("row") && bodyIdentity(it)==bodyIdentity(r)}
-            val source=if(kind in setOf("book","asset") && SyncV2BodyIdentity.same(m,remote))remote else
+            val deleted=r.getJSONObject("value").optBoolean("deleted",false)
+            val source=if(deleted)remote else if(kind in setOf("book","asset") && SyncV2BodyIdentity.same(m,remote))remote else
                 bodySources.maxWithOrNull(compareBy<JSONObject>{!it.getJSONObject("row").isNull("recipeOid")}.thenBy{SyncV2Codec.d64(it.getJSONObject("row").getString("rowSequence"))})
             val priorRows=listOfNotNull(known?.optJSONObject("row"),remote?.optJSONObject("row"),cached)
             val inherited=priorRows.maxByOrNull{SyncV2Codec.d64(it.getString("rowSequence"))}
             val addedAt=known?.optJSONObject("row")?.optLong("addedAtMillis")?:remote?.optJSONObject("row")?.optLong("addedAtMillis")?:0
-            val needsBody=kind in setOf("article","book","asset")
+            val needsBody=!deleted && kind in setOf("article","book","asset")
             val row=JSONObject().put("entityKey",entity).put("metaOid",metaOid).put("stateOid",stateOid).put("addedAtMillis",addedAt)
                 .put("rowSequence",inherited?.getString("rowSequence")?:"0").put("deleted",r.getJSONObject("value").optBoolean("deleted",false))
                 .put("bodyRevision",if(needsBody)SyncV2Codec.hex(SyncV2Codec.random(16))else JSONObject.NULL)
                 .put("promiseId",if(needsBody)id()else JSONObject.NULL).put("recipeOid",JSONObject.NULL).put("opaqueContentId",JSONObject.NULL).put("contentBytes",JSONObject.NULL).put("requiredFeatures",JSONArray())
-            if(source!=null)for(f in listOf("bodyRevision","promiseId","recipeOid","opaqueContentId","contentBytes"))row.put(f,source.getJSONObject("row").get(f))
+            if(source!=null)SyncV2BodyIdentity.carry(row,source.getJSONObject("row"))
             val unchanged=remote?.getJSONObject("row")?.let{old->same(JSONObject(row.toString()).apply{remove("rowSequence")},JSONObject(old.toString()).apply{remove("rowSequence")})}==true
             row.put("rowSequence",if(unchanged)remote!!.getJSONObject("row").getString("rowSequence")else SyncV2Codec.next(inherited?.getString("rowSequence")?:"0"))
             rows.add(row);r.put("row",row).remove("wire")
@@ -536,7 +537,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             for(r in local) {
                 val prior=byEntity[r.getJSONObject("meta").getString("entityKey")]
                 val preservesIndependent=prior!=null && r.getJSONObject("meta").getString("kind") in setOf("book","asset") && bodyIdentity(prior)==bodyIdentity(r)
-                if(!preservesIndependent && (prior==null || !same(prior.getJSONObject("meta"),r.getJSONObject("meta")) || !same(prior.getJSONObject("state"),r.getJSONObject("state"))) && !recovery.contentReady(r))SyncV2Codec.fail("closure_incomplete")
+                if(!r.getJSONObject("state").getJSONObject("payload").optBoolean("deleted",false) && !preservesIndependent && (prior==null || !same(prior.getJSONObject("meta"),r.getJSONObject("meta")) || !same(prior.getJSONObject("state"),r.getJSONObject("state"))) && !recovery.contentReady(r))SyncV2Codec.fail("closure_incomplete")
             }
         }
         val requestId=id();val action=JSONObject().put("id",requestId).put("kind",choice).put("capture",c.json()).put("serverTime",now()).put("fileCapture",plan.files).put("legacySelected",JSONArray(plan.legacySelected))

@@ -91,7 +91,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             else->false
         }
     }
-    fun contentReady(record:JSONObject):Boolean=try {sources(record);true}catch(_:Exception){false}
+    fun contentReady(record:JSONObject):Boolean=record.getJSONObject("state").getJSONObject("payload").optBoolean("deleted",false) || try {sources(record);true}catch(_:Exception){false}
     fun prepare(local:List<JSONObject>,cloud:List<JSONObject>,base:JSONObject,captured:Set<String>,revision:String,accountOid:String,now:Long):Bundle {
         val localValues=JSONObject();val cloudValues=JSONObject();val refs=JSONObject();val records=local.associateBy{it.getJSONObject("meta").getString("entityKey")}
         for((id,r)in records)localValues.put(id,JSONObject().put("meta",r.getJSONObject("meta")).put("state",r.getJSONObject("state")))

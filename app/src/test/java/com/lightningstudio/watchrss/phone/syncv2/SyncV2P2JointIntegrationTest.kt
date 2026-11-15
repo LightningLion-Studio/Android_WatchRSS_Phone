@@ -244,7 +244,7 @@ class SyncV2P2JointIntegrationTest {
             val upgrade=error as CloudHttpException
             val detail=SyncV2Wire.parse(upgrade.detail.toByteArray())
             requireThat(detail.getJSONObject("error").getString("code")=="upgrade_required","legacy_upgrade_code_missing")
-            requireThat(upgrade.message=="请升级到最新版本以继续同步","legacy_upgrade_message_missing")
+            requireThat(upgrade.message=="旧同步通道已关闭，请等待可用的 Sync v2 服务","legacy_channel_closed_message_missing")
             result.put("upgradeMessage",upgrade.message).put("returnedNull",false)
             File(root,"joint-legacy-read-product.json").writeText(results.toString(2)+"\n")
         }

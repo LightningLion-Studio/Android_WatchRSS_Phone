@@ -1125,10 +1125,6 @@ class PhoneCloudSyncService(
         if(!manual && bluetoothFence.active)return@withContext PhoneCloudSyncResult(0,0,0,false,0)
         val activeSession=accountRepository.session.value
         if(activeSession!=null)bindScope(activeSession)
-        if(!manual && settings.formatUpgradeRequiredVersion>=com.lightningstudio.watchrss.phone.BuildConfig.VERSION_CODE) {
-            _state.update{it.copy(phase=CloudSyncPhase.ERROR,message="请升级到最新版本以继续同步",errorCode="cloud_format_upgrade_required")}
-            return@withContext PhoneCloudSyncResult(0,0,0,false,0)
-        }
         traceSync("sync-request")
         syncMutex.run(manual, { PhoneCloudSyncResult(0, 0, 0, false, 0) }) {
             val automaticJob=if(manual)null else kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]
@@ -1151,11 +1147,18 @@ class PhoneCloudSyncService(
                     val admission=settings.admitCycle()
                     if (paused.value || !networkGate.isConnected()) syncOnePass(manual, retryingTransfer, admission=admission)
                     else {
+                        update(CloudSyncPhase.CHECKING,"正在检查云端")
                         val bootstrap=validatedBootstrap(session)
-                        client.inContentGeneration(session) { syncOnePass(manual, retryingTransfer, bootstrap, admission) }
+                        // Authenticated bootstrap selects the channel before any legacy business request.
+                        val v2=if(syncV2Database!=null)syncV2Product.sync(bootstrap.syncV2,manual)else null
+                        if(v2?.enabled==true) {
+                            settings.formatUpgradeRequiredVersion=0
+                            _formatStatus.value=_formatStatus.value.copy(upgradeRequired=false)
+                            update(CloudSyncPhase.COMPLETE,"云同步完成",bootstrap.member,completedAt=System.currentTimeMillis())
+                            PhoneCloudSyncResult(0,0,0,false,0)
+                        } else client.inContentGeneration(session) { syncOnePass(manual, retryingTransfer, bootstrap, admission) }
                     }
                 })
-                if(syncV2Database!=null)syncV2Product.sync(trustedBootstrap?.syncV2)
                 legacyResult
             } catch (error: Exception) {
                 if (error is CancellationException) {
@@ -1173,10 +1176,8 @@ class PhoneCloudSyncService(
                 } else if (_state.value.phase !in setOf(CloudSyncPhase.NEEDS_RECOVERY,CloudSyncPhase.ERROR)) {
                     update(CloudSyncPhase.ERROR, if(error.message=="device_alias_recovery_required")SyncV2View.errorText("device_alias_recovery_required")else error.message ?: "云同步失败")
                 }
-                if(error is CloudFormatUpgradeRequired || error is CloudHttpException && error.status==426) {
-                    // Only the authenticated account floor halts same-build background passes.
-                    // A locally read-only object must not freeze reads or unrelated records.
-                    if(error is CloudHttpException)settings.formatUpgradeRequiredVersion=com.lightningstudio.watchrss.phone.BuildConfig.VERSION_CODE
+                if(serverRequiresCloudClientUpgrade(error)) {
+                    settings.formatUpgradeRequiredVersion=com.lightningstudio.watchrss.phone.BuildConfig.VERSION_CODE
                     _formatStatus.value=_formatStatus.value.copy(upgradeRequired=true)
                     _state.update{it.copy(phase=CloudSyncPhase.ERROR,message="请升级到最新版本以继续同步",errorCode="cloud_format_upgrade_required")}
                 }
@@ -1478,7 +1479,7 @@ class PhoneCloudSyncService(
                 update(CloudSyncPhase.IDLE, "等待继续同步")
                 throw error
             } catch (error: Throwable) {
-                if(error is CloudFormatUpgradeRequired || error is CloudHttpException && error.status==426)_formatStatus.value=_formatStatus.value.copy(upgradeRequired=true)
+                if(serverRequiresCloudClientUpgrade(error))_formatStatus.value=_formatStatus.value.copy(upgradeRequired=true)
                 traceSync("failure:${error.javaClass.simpleName}:status=${(error as? CloudHttpException)?.status ?: (error as? CloudObjectUploadException)?.status}:${error.stackTrace.firstOrNull { it.className.startsWith("com.lightningstudio.watchrss.phone") }}")
                 if (com.lightningstudio.watchrss.phone.BuildConfig.DEBUG) android.util.Log.w("WatchRssCloud", "sync failed phase=${_state.value.phase} type=${error.javaClass.simpleName} at=${error.stackTrace.firstOrNull { it.className.startsWith("com.lightningstudio.watchrss.phone") }}" + if (error is CloudHttpException) " status=${error.status}" else "")
                 if (error is CloudHttpException && discardedCloudTransfer(error)) throw error

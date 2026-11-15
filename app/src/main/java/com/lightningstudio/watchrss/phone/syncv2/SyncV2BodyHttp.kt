@@ -46,9 +46,9 @@ internal class SyncV2BodyHttp(private val client:SyncV2CloudClient,private val c
     }
     fun download(id:String,hash:String,size:Int,directory:File):ByteArray {
         SyncV2Codec.unhex(id,16);SyncV2Codec.unhex(hash,32);if(size !in 1..16777216)SyncV2Codec.fail("invalid_schema")
-        directory.mkdirs();val target=File(directory,hash)
-        if(target.isFile && target.length()==size.toLong())target.readBytes().let{if(SyncV2BodyCodec.hash(it)==hash)return it}
-        val partial=File(directory,"$hash.part");if(partial.length()>size)atomic(partial,byteArrayOf())
+        directory.mkdirs();val target=File(directory,hash);val partial=File(directory,"$hash.part")
+        if(target.isFile && target.length()==size.toLong())target.readBytes().let{if(SyncV2BodyCodec.hash(it)==hash){removeCompletedPart(partial);return it}}
+        if(partial.length()>size)atomic(partial,byteArrayOf())
         var at=partial.length().toInt()
         while(at<size) {check();val (bytes,headers)=client.bodyBytes("GET","carriers/$id/objects/$hash",query=mapOf("offset" to at.toString()),raw=true)
             fun header(k:String)=headers.entries.firstOrNull{it.key.equals(k,true)}?.value
@@ -56,7 +56,13 @@ internal class SyncV2BodyHttp(private val client:SyncV2CloudClient,private val c
             FileOutputStream(partial,true).use{it.write(bytes);it.fd.sync()};at+=bytes.size
         }
         val raw=partial.readBytes();if(raw.size!=size || SyncV2BodyCodec.hash(raw)!=hash){atomic(partial,byteArrayOf());SyncV2Codec.fail("hash_mismatch")}
-        atomic(target,raw);return raw
+        atomic(target,raw);removeCompletedPart(partial);return raw
+    }
+    private fun removeCompletedPart(partial:File) {
+        if(partial.exists()) {
+            check(partial.delete()){"body_cache_cleanup_failed"}
+            java.nio.channels.FileChannel.open(partial.parentFile!!.toPath(),java.nio.file.StandardOpenOption.READ).use{it.force(true)}
+        }
     }
     companion object {
         fun atomic(file:File,raw:ByteArray) {

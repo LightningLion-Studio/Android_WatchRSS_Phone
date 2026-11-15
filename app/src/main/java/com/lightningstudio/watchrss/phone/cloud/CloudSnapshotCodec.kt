@@ -251,7 +251,7 @@ class CloudSnapshotCodec(
         }) } finally { if(root !== accountKey) root.fill(0) }
     }
 
-    private fun unwrapReaderKey(accountKey: ByteArray, descriptor: CloudObjectDescriptor): ByteArray {
+    internal fun unwrapReaderKey(accountKey: ByteArray, descriptor: CloudObjectDescriptor): ByteArray {
         val objectEnvelope=descriptor.objectKeyEnvelope
         require(objectEnvelope==null||descriptor.readerKeyEnvelope==null)
         val envelope = objectEnvelope ?: descriptor.readerKeyEnvelope ?: return accountKey

@@ -419,7 +419,7 @@ internal class SyncV2Projection(
             val bodyBinding=if(c[1] in setOf("book","asset"))SyncV2BodyIdentity.witness(meta)else SyncV2Codec.hash(JSONObject().put("kind",c[1]).put("logicalId",c[2])
                 .put("bodyHash",meta.getJSONObject("payload").opt("contentHash")?:meta.getJSONObject("payload").opt("fingerprint")?:JSONObject.NULL)
                 .put("assetVersion",JSONObject.NULL).put("deleted",state.getJSONObject("payload").optBoolean("deleted",false)))
-            val value=if(prior!=null && prior.getString("sourceHash")==hash && prior.getLong("keyVersion")==keyVersion)prior else if(remote!=null && SyncV2Codec.canonical(remote.getJSONObject("meta"))==SyncV2Codec.canonical(meta) && SyncV2Codec.canonical(remote.getJSONObject("state"))==SyncV2Codec.canonical(state)) {
+            var value=if(prior!=null && prior.getString("sourceHash")==hash && prior.getLong("keyVersion")==keyVersion)prior else if(remote!=null && SyncV2Codec.canonical(remote.getJSONObject("meta"))==SyncV2Codec.canonical(meta) && SyncV2Codec.canonical(remote.getJSONObject("state"))==SyncV2Codec.canonical(state)) {
                 val row=remote.getJSONObject("row")
                 JSONObject().put("sourceHash",hash).put("bodyBinding",bodyBinding).put("keyVersion",keyVersion).put("row",row)
                     .put("meta",SyncV2Codec.b64(currentObjects[row.getString("metaOid")]?:SyncV2Codec.fail("closure_incomplete")))
@@ -474,6 +474,12 @@ internal class SyncV2Projection(
                 JSONObject().put("sourceHash",hash).put("bodyBinding",bodyBinding).put("keyVersion",keyVersion).put("row",row)
                     .put("meta",SyncV2Codec.b64(sealedMeta.bytes)).put("state",SyncV2Codec.b64(sealedState.bytes))
                     .put("refs",SyncV2Index.refs(identity,signer,sealedState.oid))
+            }
+            // A tombstone retains the current authenticated body's references. It never
+            // invents a promise, including when reusing a pre-fix sealed local candidate.
+            if(value.getJSONObject("row").getBoolean("deleted")) {
+                value=JSONObject(value.toString())
+                SyncV2BodyIdentity.carry(value.getJSONObject("row"),remote?.getJSONObject("row"))
             }
             val row=value.getJSONObject("row");rows.add(row)
             objects[row.getString("metaOid")]=SyncV2Codec.decode64(value.getString("meta"));objects[row.getString("stateOid")]=SyncV2Codec.decode64(value.getString("state"))

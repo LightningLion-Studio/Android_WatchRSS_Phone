@@ -12,5 +12,5 @@ internal object SyncV2BodyIdentity {
             )
     }
     fun same(meta:JSONObject,other:JSONObject?):Boolean=other!=null&&witness(meta)==witness(other.getJSONObject("meta"))
-    fun carry(row:JSONObject,source:JSONObject){for(field in fields)row.put(field,source.get(field))}
+    fun carry(row:JSONObject,source:JSONObject?){for(field in fields)row.put(field,source?.get(field)?:JSONObject.NULL)}
 }

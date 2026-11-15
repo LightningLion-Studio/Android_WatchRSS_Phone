@@ -50,7 +50,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             live.projection.receiveLegacy(SyncV2Projection.LegacyInput(peer,version,cursor,JSONObject().put("legacy-frame",payload.toString())),null,false)
         }}.onFailure{_uiPort.value?.failed(it)}
     }
-    suspend fun sync(syncV2:JSONObject?):Result=withContext(Dispatchers.IO) {
+    suspend fun sync(syncV2:JSONObject?,manual:Boolean=false):Result=withContext(Dispatchers.IO) {
         if(!enabled() || syncV2==null) {
             announcement=null
             _uiPort.value?.disabled()
@@ -69,7 +69,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             val live=runtime?:open(account,syncV2)
             live.life.check()
             live.life.guard {live.keys.refreshAuthenticated(keys,account.userId){verifyKeys(account,it)}}
-            try {live.round();_uiPort.value?.refresh();Result(true)}catch(e:Throwable) {
+            try {live.round(manual);_uiPort.value?.refresh();Result(true)}catch(e:Throwable) {
                 _uiPort.value?.failed(e)
                 throw e
             }

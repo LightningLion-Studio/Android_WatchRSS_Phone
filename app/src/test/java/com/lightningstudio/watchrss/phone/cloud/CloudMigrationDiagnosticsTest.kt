@@ -23,7 +23,12 @@ class CloudMigrationDiagnosticsTest {
     @Test fun formatFloor426IsStableUpgradeStateAndNeverRetryable() {
         val failure=CloudMigrationDiagnostics.classify(CloudHttpException(426,"{\"error\":\"cloud_format_upgrade_required\"}"))
         assertEquals("cloud_format_upgrade_required",failure.name.lowercase());assertFalse(failure.retryable)
-        assertEquals("请升级到最新版本以继续同步",CloudHttpException(426,"untrusted response").message)
+        assertFalse(serverRequiresCloudClientUpgrade(CloudHttpException(426,"untrusted response")))
+        assertEquals("旧同步通道已关闭，请等待可用的 Sync v2 服务",CloudHttpException(426,"untrusted response").message)
+        assertFalse(serverRequiresCloudClientUpgrade(CloudHttpException(426,"{\"error\":\"client_upgrade_required\"}")))
+        assertTrue(serverRequiresCloudClientUpgrade(CloudHttpException(426,"{\"error\":\"client_upgrade_required\"}",serverResponse=true)))
+        assertTrue(serverRequiresCloudClientUpgrade(CloudHttpException(426,"{\"error\":{\"code\":\"client_upgrade_required\"}}",serverResponse=true)))
+        assertFalse(serverRequiresCloudClientUpgrade(CloudHttpException(426,"{\"error\":{\"code\":\"upgrade_required\"}}",serverResponse=true)))
     }
     @Test fun diagnosticsFailureCannotBreakPublicationOrChangeItsException()=runBlocking {
         val diagnostics=CloudMigrationDiagnostics(CloudMigrationObserver {error("synthetic logger full")})

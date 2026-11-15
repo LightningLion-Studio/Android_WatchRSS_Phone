@@ -169,4 +169,21 @@ class SyncV2BodyTransportTest {
             }
         }
     }
+ @Test fun allFiveMiBEncryptedBytesUploadAndDownloadThroughActualHttp() {
+  SyncV2P5Fixture().use{f->
+   // Reuse the original synthetic server dispatcher, without replacing product code.
+   val backend=Backend(f)
+   val client=f.f.client();client.capabilities();val http=SyncV2BodyHttp(client){}
+   val raw=ByteArray(5*1024*1024){(it%251).toByte()};val entity=f.identity.entity("asset","five-mib.bin")
+   val revision=SyncV2BodyCodec.revision("asset",entity,SyncV2BodyCodec.hash(raw));val binding=SyncV2BodyCodec.Binding("asset","five-mib.bin",entity,revision)
+   val anchor=JSONObject().put("commitOid","commit:sha256:"+"ab".repeat(32)).put("revision","1").put("rollbackGeneration","0")
+   val p=SyncV2BodyCodec.prepare(f.identity.scope,anchor,binding,f.key,1,f.f.signer,raw);val upload=File(f.root,"upload");for((h,b)in p.objects)SyncV2BodyHttp.atomic(File(upload,h),b)
+   http.upload(p.descriptor,upload)
+   val receive=File(f.root,"receive");val decoded=SyncV2BodyCodec.open(p.descriptor,f.identity.scope,binding,f.f.signer.publicHex,{f.key}){h,n->http.download(p.descriptor.getJSONObject("body").getString("carrierId"),h,n,receive)}
+   assertArrayEquals(raw,decoded)
+   assertTrue(backend.puts.size>80);assertTrue(backend.reads.size>80)
+   assertFalse(receive.listFiles()!!.any{it.name.endsWith(".part")})
+  }
+ }
+
 }

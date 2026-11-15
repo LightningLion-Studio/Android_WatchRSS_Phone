@@ -31,18 +31,17 @@ class EncryptedAccountSessionStore(
     suspend fun beginSameAccountReauthentication() = withContext(Dispatchers.IO) {
         withPrefs { prefs ->
             val current = _session.value ?: return@withPrefs
-            // Retain identity/custody while all existing expired-session checks pause requests.
-            val paused = current.copy(expiresAtMillis = 1L)
-            check(prefs.edit().putString("reauthentication_owner", current.userId)
-                .putString(KEY_SESSION, encodeSession(paused)).commit())
+            // Pause is separate from the server's expiry; logout still revokes a server-valid token.
+            check(prefs.edit().putString("reauthentication_owner", current.userId).commit())
             _reauthenticationOwner.value = current.userId
-            _session.value = paused
+            _session.value = current.copy(authenticationPaused = true)
         }
     }
 
     suspend fun finishReauthentication() = withContext(Dispatchers.IO) {
         withPrefs { check(it.edit().remove("reauthentication_owner").commit()) }
         _reauthenticationOwner.value = null
+        _session.value = _session.value?.copy(authenticationPaused = false)
     }
 
     suspend fun load(): PhoneAccountSession? = withContext(Dispatchers.IO) {
@@ -50,6 +49,8 @@ class EncryptedAccountSessionStore(
             _reauthenticationOwner.value = prefs.getString("reauthentication_owner", null)
             prefs.getString(KEY_SESSION, null)
                 ?.let(::decodeSession)
+        }.let { loaded ->
+            loaded?.copy(authenticationPaused = _reauthenticationOwner.value != null)
         }.also { _session.value = it }
     }
 
@@ -57,7 +58,7 @@ class EncryptedAccountSessionStore(
         withPrefs { prefs ->
             prefs.edit().putString(KEY_SESSION, encodeSession(session)).apply()
         }
-        _session.value = session
+        _session.value = session.copy(authenticationPaused = _reauthenticationOwner.value != null)
     }
 
     suspend fun clear() = withContext(Dispatchers.IO) {

@@ -325,7 +325,7 @@ class PhoneBluetoothSyncManager(
         }
     }
 
-    suspend fun sendRemoteInput(url: String): PhoneBluetoothSyncResult {
+    suspend fun sendRemoteInput(url: String, deviceAddress: String? = null): PhoneBluetoothSyncResult {
         val sessionId = BluetoothDebugLog.newSessionId("remoteInput")
         debugLog.appendEvent(
             event = "sync.remoteInput.start",
@@ -334,7 +334,7 @@ class PhoneBluetoothSyncManager(
         )
         return runCatching {
             requirePhoneLogin()
-            val targetAddress: String? = null
+            val targetAddress: String? = deviceAddress
             val exchange = exchange(
                 JSONObject().apply {
                     put("version", 1)
@@ -691,7 +691,7 @@ class PhoneBluetoothSyncManager(
         } finally {onSyncActiveChanged(false)}
     }
 
-    suspend fun syncSavedItems(type: PhoneSavedItemType): PhoneBluetoothSyncResult {
+    suspend fun syncSavedItems(type: PhoneSavedItemType, deviceAddress: String? = null): PhoneBluetoothSyncResult {
         val sessionId = BluetoothDebugLog.newSessionId("savedItems")
         debugLog.appendEvent(
             event = "sync.savedItems.start",
@@ -700,7 +700,7 @@ class PhoneBluetoothSyncManager(
         )
         return runCatching {
             requirePhoneLogin()
-            val targetAddress: String? = null
+            val targetAddress: String? = deviceAddress
             val exchange = exchange(
                 JSONObject().apply {
                     put("version", 1)

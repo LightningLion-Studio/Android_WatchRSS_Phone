@@ -4,6 +4,7 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.ui.layout.onGloballyPositioned
 
+import com.lightningstudio.watchrss.phone.account.requireReady
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -162,8 +163,12 @@ class AccountActivity : ComponentActivity() {
                     onLoginComplete = {
                         if (finishAfterLogin) {
                             lifecycleScope.launch {
-                                container.appAccessCoordinator.reconcile()
-                                finish()
+                                val result = completePhoneAccountAuthentication(container.appAccessCoordinator)
+                                if (result == com.lightningstudio.watchrss.phone.account.WatchAccountRefreshResult.Ready) finish()
+                                else {
+                                    val failure = runCatching { result.requireReady() }.exceptionOrNull()
+                                    android.widget.Toast.makeText(this@AccountActivity, failure?.message ?: "设备授权尚未完成", android.widget.Toast.LENGTH_LONG).show()
+                                }
                             }
                         }
                     },
@@ -266,16 +271,18 @@ internal fun AccountScreen(
     initialSection: AccountSection = AccountSection.ROOT,
     /** Opened from watch pairing for the cloud key: go straight back once the key exists, and Back returns there too. */
     returnWhenCloudReady: Boolean = false,
-    forceReauthentication: Boolean = false
+    forceReauthentication: Boolean = false,
+    accessCoordinatorOverride: com.lightningstudio.watchrss.phone.account.AppAccessCoordinator? = null
 ) {
     val session by accountRepository.session.collectAsState()
+    var authenticationCompleted by remember { mutableStateOf(false) }
     val reauthenticationOwner by accountRepository.reauthenticationOwner.collectAsState()
     LaunchedEffect(forceReauthentication) {
         if (forceReauthentication) accountRepository.beginSameAccountReauthentication()
     }
     val context = LocalContext.current
     val tipManager = LocalTipManager.current
-    val accessCoordinator = (context.applicationContext as PhoneCompanionApplication).container.appAccessCoordinator
+    val accessCoordinator = accessCoordinatorOverride ?: (context.applicationContext as PhoneCompanionApplication).container.appAccessCoordinator
     val appAccessState by accessCoordinator.state.collectAsState()
     val cloudSyncState by cloudSyncService.state.collectAsState()
     val coroutineScope = rememberCoroutineScope()
@@ -506,7 +513,7 @@ internal fun AccountScreen(
     }
 
     val accountControls: @Composable ColumnScope.(() -> Unit) -> Unit = { onCloudSyncClick ->
-        if (session == null || reauthenticationOwner != null || forceReauthentication) {
+        if (shouldShowAccountLogin(session, reauthenticationOwner, forceReauthentication && !authenticationCompleted)) {
             Text(
                 "登录",
                 style = MaterialTheme.typography.titleLarge,
@@ -537,6 +544,7 @@ internal fun AccountScreen(
             fun applyLoginProgress(progress: LoginProgress) {
                 loginProgress = progress
                 progress.session?.let { signedIn ->
+                    authenticationCompleted = true
                     message = "登录成功"
                     usageTelemetry.recordAccountSignedIn(signedIn.userId)
                     tipManager?.recordEvent(TipEvents.ACCOUNT_SIGNED_IN)
@@ -2320,3 +2328,11 @@ internal fun trialRemainingText(expiresAtMillis: Long?, nowMillis: Long): String
 }
 
 private const val MAX_PASSKEY_DISPLAY_NAME_CHARS = 64
+
+internal fun shouldShowAccountLogin(
+    session: com.lightningstudio.watchrss.phone.account.PhoneAccountSession?,
+    reauthenticationOwner: String?, forceReauthentication: Boolean
+): Boolean = session == null || reauthenticationOwner != null || forceReauthentication
+
+/** The real login-completion callback always runs device authorization reconciliation. */
+internal suspend fun completePhoneAccountAuthentication(coordinator: com.lightningstudio.watchrss.phone.account.AppAccessCoordinator) = coordinator.reconcile()

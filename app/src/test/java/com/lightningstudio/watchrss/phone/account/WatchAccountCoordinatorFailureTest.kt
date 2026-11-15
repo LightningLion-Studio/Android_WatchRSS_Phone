@@ -40,6 +40,9 @@ class WatchAccountCoordinatorFailureTest {
     private lateinit var repo:PhoneAccountRepository
     private lateinit var coordinator:AppAccessCoordinator
     @Before fun setup()=runBlocking<Unit>{
+        java.security.Security.addProvider(object:java.security.Provider("acctgate-r2-keystore",1.0,"synthetic identity") {
+            init { put("KeyStore.AndroidKeyStore",com.lightningstudio.watchrss.phone.cloud.CloudContentRebuildIntegrationTest.FixtureKeyStore::class.java.name) }
+        })
         server.start()
         val environment=AccountEnvironment(backendBaseUrl=server.url("/").toString().trimEnd('/'),supabaseAnonKey="synthetic",appAccessPublicKey=publicPem)
         repo=PhoneAccountRepository(environment,sessionStore,PhoneInstallationIdentity(context),PhoneAccountClient(environment,identity),"phone")
@@ -49,7 +52,7 @@ class WatchAccountCoordinatorFailureTest {
         // An expired lease takes the real status reconciliation branch; failed status must retain its type.
         appStore.save(AppAuthorization("old",1,"expired-lease",1,"release",AppAccessSummary(deviceStatus="authorized")))
     }
-    @After fun close(){scope.cancel();server.shutdown()}
+    @After fun close(){scope.cancel();server.shutdown();java.security.Security.removeProvider("acctgate-r2-keystore")}
     private fun custodyUnchanged() {
         assertEquals("owner",repo.session.value?.userId);assertEquals("synthetic-account",repo.session.value?.accessToken)
         assertArrayEquals(root,keys.getAccountKey("owner",1));assertEquals("synthetic-K_id",keys.syncV2Read("owner","secret/K_id"))
@@ -84,6 +87,77 @@ class WatchAccountCoordinatorFailureTest {
         val result=coordinator.refreshWatchDeviceSession("old","owner")
         assertTrue(result.toString(),result is WatchAccountRefreshResult.TemporaryFailure)
         assertEquals(2,server.requestCount);custodyUnchanged()
+    }
+
+    private suspend fun claimFailure(status:Int, fallbackStatus:Int=200):Throwable? {
+        sessionStore.save(repo.session.value!!.copy(activationProof="synthetic-proof"))
+        server.enqueue(MockResponse().setBody("""{"accessMode":"paid","deviceStatus":"authorized"}"""))
+        server.enqueue(MockResponse().setResponseCode(status).setBody("""{"error":"synthetic","retryAfterMillis":2000}"""))
+        server.enqueue(MockResponse().setResponseCode(fallbackStatus).setBody("""{"accessMode":"paid","deviceStatus":"authorized"}"""))
+        val failure=runCatching{coordinator.buildWatchAccountSyncRequest("watch",null,"watch")}.exceptionOrNull()
+        assertEquals(3,server.requestCount);custodyUnchanged();return failure
+    }
+    @Test fun claim401RetainsAccountFailure()=runBlocking<Unit>{assertTrue(claimFailure(401) is com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired)}
+    @Test fun claim403RetainsDeviceVerification()=runBlocking<Unit>{assertTrue(claimFailure(403) is PhoneDeviceVerificationRequired)}
+    @Test fun claim429RetainsTemporaryFailureAndDelay()=runBlocking<Unit>{
+        val failure=claimFailure(429);assertTrue(failure is PhoneAccountTemporarilyUnavailable)
+        assertEquals(2000L,(failure as PhoneAccountTemporarilyUnavailable).retryAfterMillis)
+    }
+    @Test fun claim503RetainsTemporaryFailure()=runBlocking<Unit>{assertTrue(claimFailure(503) is PhoneAccountTemporarilyUnavailable)}
+    @Test fun pendingOrderErrorsKeepTheirTypes()=runBlocking<Unit>{
+        for(code in listOf(401,403,429,503)) {
+            appStore.savePendingOrder(AppPaymentOrder(orderId="order",merchantOrderId="merchant",amountFen=600,status="pending",paymentUrl=null),"owner")
+            server.enqueue(MockResponse().setResponseCode(code).setBody("""{"retryAfterMillis":1000}"""))
+            val result=coordinator.reconcile()
+            when(code){401->assertTrue(result is WatchAccountRefreshResult.AccountUnrecoverable)
+                403->assertTrue(result is WatchAccountRefreshResult.DeviceVerificationRequired)
+                else->assertTrue(result is WatchAccountRefreshResult.TemporaryFailure)}
+            custodyUnchanged()
+        }
+        assertEquals(4,server.requestCount)
+    }
+    @Test fun paidOrderClaimFailureAlsoKeepsTemporaryType()=runBlocking<Unit>{
+        sessionStore.save(repo.session.value!!.copy(activationProof="synthetic-proof"));appStore.clear()
+        appStore.savePendingOrder(AppPaymentOrder(orderId="order",merchantOrderId="merchant",amountFen=600,status="pending",paymentUrl=null),"owner")
+        server.enqueue(MockResponse().setBody("""{"orderId":"order","merchantOrderId":"merchant","amountFen":600,"status":"paid"}"""))
+        server.enqueue(MockResponse().setResponseCode(503).setBody("{}"))
+        server.enqueue(MockResponse().setBody("""{"accessMode":"paid","deviceStatus":"authorized"}"""))
+        assertTrue(coordinator.reconcile() is WatchAccountRefreshResult.TemporaryFailure);assertEquals(3,server.requestCount);custodyUnchanged()
+    }
+    @Test fun cancelledOrderStatusIsNotConvertedToDeviceFailure()=runBlocking<Unit>{
+        appStore.savePendingOrder(AppPaymentOrder(orderId="order",merchantOrderId="merchant",amountFen=600,status="pending",paymentUrl=null),"owner")
+        server.enqueue(MockResponse().setBody("""{"orderId":"order","merchantOrderId":"merchant","amountFen":600,"status":"cancelled"}"""))
+        server.enqueue(MockResponse().setResponseCode(429).setBody("""{"retryAfterMillis":1000}"""))
+        assertTrue(coordinator.reconcile() is WatchAccountRefreshResult.TemporaryFailure);assertEquals(2,server.requestCount);custodyUnchanged()
+    }
+
+    @Test fun pendingOrderCancellationEscapesWithoutFallbackRequests()=runBlocking<Unit>{
+        appStore.savePendingOrder(AppPaymentOrder(orderId="order",merchantOrderId="merchant",amountFen=600,status="pending",paymentUrl=null),"owner")
+        server.enqueue(MockResponse().setBody("""{"orderId":"order","merchantOrderId":"merchant","amountFen":600,"status":"pending"}""").setBodyDelay(150,java.util.concurrent.TimeUnit.MILLISECONDS))
+        var returned=false
+        val job=scope.async{coordinator.reconcile();returned=true}
+        assertNotNull(server.takeRequest(2,java.util.concurrent.TimeUnit.SECONDS));job.cancel()
+        withTimeout(3000){job.join()};assertFalse(returned);assertEquals(1,server.requestCount);custodyUnchanged()
+    }
+    @Test fun claimCancellationEscapesBeforeAnyStatusFallback()=runBlocking<Unit>{
+        sessionStore.save(repo.session.value!!.copy(activationProof="synthetic-proof"))
+        server.enqueue(MockResponse().setBody("""{"accessMode":"paid","deviceStatus":"authorized"}"""))
+        server.enqueue(MockResponse().setResponseCode(503).setBody("{}").setBodyDelay(150,java.util.concurrent.TimeUnit.MILLISECONDS))
+        var returned=false
+        val job=scope.async{coordinator.reconcile();returned=true}
+        assertNotNull(server.takeRequest(2,java.util.concurrent.TimeUnit.SECONDS));assertNotNull(server.takeRequest(2,java.util.concurrent.TimeUnit.SECONDS))
+        job.cancel();withTimeout(3000){job.join()};assertFalse(returned);assertEquals(2,server.requestCount);custodyUnchanged()
+    }
+
+    @Test fun claimFallbackFailuresAreAlsoTyped()=runBlocking<Unit>{
+        val failure=claimFailure(403,503)
+        assertTrue(failure.toString(),failure is PhoneAccountTemporarilyUnavailable)
+    }
+    @Test fun claimFallback401IsDefinitiveAccountFailure()=runBlocking<Unit>{
+        assertTrue(claimFailure(503,401) is com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired)
+    }
+    @Test fun claim401IsNotOverwrittenByFallback503()=runBlocking<Unit>{
+        assertTrue(claimFailure(401,503) is com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired)
     }
 
 }

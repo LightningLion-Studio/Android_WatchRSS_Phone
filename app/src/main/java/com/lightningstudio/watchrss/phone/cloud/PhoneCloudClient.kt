@@ -530,7 +530,7 @@ class PhoneCloudClient(
     ): okhttp3.Response = withContext(Dispatchers.IO) {
         checkSession(session)
         require(environment.backendBaseUrl.isNotBlank()) { "云服务地址未配置" }
-        require(!session.isExpired) { "登录已过期，请重新登录" }
+        require(session.isUsableForAuthentication) { "登录已过期，请重新登录" }
         // Capture once, including an authentication refresh. Never retag stale work with a new generation.
         val fence = kotlinx.coroutines.currentCoroutineContext()[CloudContentGenerationFence]
         val expectedGeneration = if (fence?.scope == scopeId(session)) fence.generation else knownContentGeneration(session)

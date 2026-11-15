@@ -20,7 +20,7 @@ class PhoneAccountRepository(
     suspend fun beginSameAccountReauthentication() = sessionStore.beginSameAccountReauthentication()
 
     val hasUsableSession: Boolean
-        get() = reauthenticationOwner.value == null && session.value?.let { !it.isExpired && it.userId.isNotBlank() && it.accessToken.isNotBlank() } == true
+        get() = reauthenticationOwner.value == null && session.value?.let { it.isUsableForAuthentication && it.userId.isNotBlank() && it.accessToken.isNotBlank() } == true
 
     val installId: String
         get() = installationIdentity.installId
@@ -143,26 +143,22 @@ class PhoneAccountRepository(
         accountClient.startActionSecurityVerification(requireSession(), action)
 
     suspend fun startPasskeyRegistration(): PasskeyOptions {
-        val session = session.value ?: error("请先使用手机号验证码登录")
-        require(!session.isExpired) { "登录已过期，请重新登录" }
+        val session = requireSession()
         return accountClient.startPasskeyRegistration(session)
     }
 
     suspend fun listRegisteredPasskeys(): List<RegisteredPasskey> {
-        val session = session.value ?: error("请先使用手机号验证码登录")
-        require(!session.isExpired) { "登录已过期，请重新登录" }
+        val session = requireSession()
         return accountClient.listRegisteredPasskeys(session)
     }
 
     suspend fun renameRegisteredPasskey(credentialId: String, displayName: String) {
-        val session = session.value ?: error("请先使用手机号验证码登录")
-        require(!session.isExpired) { "登录已过期，请重新登录" }
+        val session = requireSession()
         accountClient.renameRegisteredPasskey(session, credentialId, displayName)
     }
 
     suspend fun deleteRegisteredPasskey(credentialId: String) {
-        val session = session.value ?: error("请先使用手机号验证码登录")
-        require(!session.isExpired) { "登录已过期，请重新登录" }
+        val session = requireSession()
         accountClient.deleteRegisteredPasskey(session, credentialId)
     }
 
@@ -170,7 +166,7 @@ class PhoneAccountRepository(
         challengeId: String,
         credentialJson: String
     ) {
-        val session = session.value ?: error("请先使用手机号验证码登录")
+        val session = requireSession()
         accountClient.finishPasskeyRegistration(session, challengeId, credentialJson)
     }
 
@@ -200,7 +196,8 @@ class PhoneAccountRepository(
 
     suspend fun logout() {
         val current = session.value
-        current?.let { runCatching { onReleaseCloudAuthorization(it) } }
+        // Explicit logout is revocation, not a new authenticated product operation.
+        current?.let { runCatching { onReleaseCloudAuthorization(it.copy(authenticationPaused = false)) } }
         if (current != null && !current.isExpired) {
             val queued = runCatching { sessionStore.queueRevocation(current) }.isSuccess
             val revoked = runCatching { accountClient.logout(current) }.isSuccess
@@ -271,6 +268,7 @@ class PhoneAccountRepository(
 
     private fun requireSession(): PhoneAccountSession {
         val current = session.value ?: error("请先登录")
+        check(!current.authenticationPaused) { "请先完成账号重新认证" }
         require(!current.isExpired) { "登录已过期，请重新登录" }
         return current
     }

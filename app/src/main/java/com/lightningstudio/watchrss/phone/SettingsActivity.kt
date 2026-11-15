@@ -327,9 +327,7 @@ internal fun ReaderSettingsHost(
     if (accountSyncFailure is com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired) {
         PhoneSyncLoginDialog(onDismiss = { accountSyncFailure = null }, onLogin = { openPhoneSyncReauthentication(context) { accountSyncFailure = null } })
     } else if (accountSyncFailure is com.lightningstudio.watchrss.phone.account.PhoneDeviceVerificationRequired) {
-        PhoneDeviceVerificationDialog(onDismiss = { accountSyncFailure = null }, onAccount = {
-            accountSyncFailure = null; context.startActivity(AccountActivity.createIntent(context))
-        })
+        PhoneDeviceVerificationPrompt(onDismiss = { accountSyncFailure = null })
     }
     val backgroundImportPreferences = remember {
         context.getSharedPreferences(BACKGROUND_IMPORT_PREFERENCES, Context.MODE_PRIVATE)

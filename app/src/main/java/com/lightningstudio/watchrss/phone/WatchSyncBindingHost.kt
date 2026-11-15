@@ -22,10 +22,7 @@ internal fun WatchSyncBindingHost(viewModel: MainViewModel) {
         }
     }
     when (prompt) {
-        WatchSyncBindingEvent.RequirePhoneDeviceVerification -> PhoneDeviceVerificationDialog(
-            onDismiss = viewModel::dismissWatchSyncBindingPrompt,
-            onAccount = { viewModel.dismissWatchSyncBindingPrompt(); context.startActivity(AccountActivity.createIntent(context)) }
-        )
+        WatchSyncBindingEvent.RequirePhoneDeviceVerification -> PhoneDeviceVerificationPrompt(viewModel::dismissWatchSyncBindingPrompt)
         WatchSyncBindingEvent.RequirePhoneLogin -> PhoneSyncLoginDialog(
             onDismiss = viewModel::dismissWatchSyncBindingPrompt,
             onLogin = {
@@ -72,4 +69,11 @@ internal fun PhoneDeviceVerificationDialog(onDismiss: () -> Unit, onAccount: () 
         text = { Text("手机设备身份需要验证，请前往账号页面完成验证") },
         confirmButton = { TextButton(onClick = onAccount) { Text("前往账号") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+}
+
+/** Both hosts use exactly the same recovery navigation, including an already-valid account. */
+@Composable
+internal fun PhoneDeviceVerificationPrompt(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    PhoneDeviceVerificationDialog(onDismiss, onAccount = { openPhoneSyncReauthentication(context, onDismiss) })
 }

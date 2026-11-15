@@ -26,7 +26,7 @@ internal class PairingRelayHttp(
 ):PairingHttp {
     override suspend fun call(method:String,path:String,body:String?,capability:String?,timeoutMillis:Long):JSONObject = withContext(Dispatchers.IO) {
         require(path.matches(Regex("/functions/v1/watch-pairing/sessions/[A-Za-z0-9_-]{22}/(?:claim|request|close|response\\?seq=(?:[0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5]))")))
-        val owner=session();require(!owner.isExpired) { "请先重新登录账号" }
+        val owner=session();require(owner.isUsableForAuthentication) { "请先重新登录账号" }
         fun build():Request {
             val current=session();check(current.userId==owner.userId) { "账号已切换，请重新配对" }
             return Request.Builder().url(environment.backendBaseUrl.trimEnd('/')+path).withWatchRssAppVersionHeader()

@@ -81,6 +81,7 @@ class AccountSyncGateSessionTest {
                 }
                 "syncReader"->if(rejectReader)answer(action,phase).put("success",false).put("message","请重新连接并同步账号后再同步资料")
                     else JSONObject(q.toString()).put("success",true).put("deviceId","watch").put("missingResources",org.json.JSONArray())
+                "remoteInput"->answer(action)
                 "clearLibrary"->if(failClear)throw IOException("clear transport disconnected") else answer(action)
                 "pullSavedItems"->answer(action).put("items",org.json.JSONArray())
                 "previewReader"->JSONObject(q.toString()).put("success",true)
@@ -245,5 +246,23 @@ class AccountSyncGateSessionTest {
             assertEquals(0,reconnects);assertEquals(1,frames.count{it.optString("action")=="clearLibrary"})
         }
     }
+
+    @Test fun debugNonLibraryDataActionsUseThePublicManagerGateOnBothRoutes()=runBlocking<Unit>{runBoth {
+        for(action in listOf("remoteInput","pullSavedItems","clearLibrary")) {
+            val before=accountCount
+            com.lightningstudio.watchrss.phone.runDebugBluetoothSyncAction(manager,action,com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType.FAVORITE,
+                "https://example.invalid/feed",device.address){error("data action bypassed the manager")}
+            assertEquals(before+1,accountCount)
+        }
+    }}
+    @Test fun debugDataActionsStopWithoutLoginAndUnknownRawActionsAreRejected()=runBlocking<Unit>{login=false;runBoth {
+        for(action in listOf("remoteInput","pullSavedItems","clearLibrary","syncLibrary","previewReader","syncNotes")) {
+            val failure=runCatching{com.lightningstudio.watchrss.phone.runDebugBluetoothSyncAction(manager,action,com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType.FAVORITE,
+                "https://example.invalid/feed",device.address){error("raw data dispatch must be forbidden")}}.exceptionOrNull()
+            assertNotNull(failure)
+        }
+        assertEquals(0,accountCount)
+        assertFalse(frames.any{it.optString("action") in setOf("remoteInput","pullSavedItems","clearLibrary","syncNotes","previewReader")})
+    }}
 
 }

@@ -319,7 +319,7 @@ class PhoneAccountClient(
         displayName: String? = null
     ): WatchDeviceToken = withContext(Dispatchers.IO) {
         requireConfigured()
-        require(!session.isExpired) { "登录已过期，请重新登录" }
+        require(session.isUsableForAuthentication) { "登录已过期，请重新登录" }
         val body = JSONObject().apply {
             put("phoneDeviceId", phoneDeviceId)
             put("watchDeviceId", watchDeviceId)

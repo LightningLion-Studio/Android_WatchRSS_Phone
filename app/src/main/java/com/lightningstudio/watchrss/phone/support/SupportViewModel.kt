@@ -99,7 +99,7 @@ class SupportViewModel internal constructor(
     init {
         viewModelScope.launch {
             sessions.collect { session ->
-                val user = session?.takeUnless { it.isExpired }?.userId
+                val user = session?.takeUnless { !it.isUsableForAuthentication }?.userId
                 if (mutable.value.user != user || mutable.value.loading && user == null) {
                     operation?.cancel(); uploadOperation?.cancel(); client.cancel()
                     mutable.value = SupportState(user = user, loading = user != null)

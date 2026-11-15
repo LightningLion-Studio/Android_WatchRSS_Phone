@@ -103,7 +103,7 @@ class WatchAccountCoordinatorFailureTest {
         assertEquals(9,server.requestCount)
     }
     @Test fun pendingPaymentFailureRetainsTemporaryClassification()=runBlocking<Unit>{
-        appStore.savePendingOrder(AppPaymentOrder("order","merchant",600,"pending",null),"owner")
+        appStore.savePendingOrder(AppPaymentOrder(orderId="order",merchantOrderId="merchant",amountFen=600,status="pending",paymentUrl=null),"owner")
         server.enqueue(MockResponse().setResponseCode(503).setBody("{}"))
         val error=runCatching{coordinator.buildWatchAccountSyncRequest("watch",null,null)}.exceptionOrNull()
         assertTrue(error.toString(),error is PhoneAccountTemporarilyUnavailable)

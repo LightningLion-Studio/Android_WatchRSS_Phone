@@ -1102,6 +1102,8 @@ class PhoneBluetoothSyncManager(
         try {
             streamPreparedReaderPresetPreview(deviceAddress, sessionId, initialPreset, updates, onConnected, onApplied, onStage)
         } catch (failure: Exception) {
+            // A definitive account refusal must not open a third cleanup connection.
+            if (isTerminalAccountSyncFailure(failure)) throw failure
             // Preparation can be cancelled before a streaming socket exists. Clear the
             // watch's transfer state as well instead of leaving it until its idle timeout.
             withContext(kotlinx.coroutines.NonCancellable) {

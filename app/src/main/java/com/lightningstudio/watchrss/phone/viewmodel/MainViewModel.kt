@@ -1,5 +1,9 @@
 package com.lightningstudio.watchrss.phone.viewmodel
 
+import com.lightningstudio.watchrss.phone.PhoneSyncAccountPrompt
+import com.lightningstudio.watchrss.phone.phoneSyncAccountPrompt
+import com.lightningstudio.watchrss.phone.connection.bluetooth.isTerminalAccountSyncFailure
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncProgress
@@ -46,6 +50,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class MainUiState(
+    val accountPrompt: PhoneSyncAccountPrompt? = null,
     val urlInput: String = "",
     val isBusy: Boolean = false,
     val message: String? = null,
@@ -81,6 +86,7 @@ data class MainSyncProgressUi(
 )
 
 internal fun syncFailureMessage(throwable: Throwable, phase: String?): String {
+    if (isTerminalAccountSyncFailure(throwable)) return throwable.message ?: "账号同步失败"
     val detail = generateSequence(throwable) { it.cause }
         .mapNotNull { cause -> cause.message?.trim()?.takeIf(String::isNotEmpty) }
         .firstOrNull()
@@ -875,6 +881,9 @@ class MainViewModel(
     ) {
         viewModelScope.launch {
             if (sessionState.value.isBusy) return@launch
+            runCatching { bluetoothSyncManager.requirePhoneLogin() }.onFailure {
+                handleAccountSyncFailure(it)
+                return@launch
             val startMessage = when (mode) {
                 LibrarySyncMode.PHONE_TO_WATCH_REPLACE -> "正在准备让手机覆盖手表"
                 LibrarySyncMode.WATCH_TO_PHONE_REPLACE -> "正在准备让手表覆盖手机"
@@ -1217,6 +1226,7 @@ class MainViewModel(
             usageTelemetry.recordSyncResult(true, "library")
             tipManager.recordEvent(TipEvents.SYNC_COMPLETED)
         }.onFailure { throwable ->
+            if (handleAccountSyncFailure(throwable)) return@onFailure
             val error = syncFailureMessage(
                 throwable = throwable,
                 phase = verificationProgressTarget?.phase
@@ -1298,6 +1308,7 @@ class MainViewModel(
             usageTelemetry.recordSyncResult(true, "account")
             _toastEvent.tryEmit(message)
         }.onFailure { throwable ->
+            if (handleAccountSyncFailure(throwable)) return@onFailure
             clearSmoothedSyncProgress()
             sessionState.value = sessionState.value.copy(
                 syncStatusMessage = null,
@@ -1472,6 +1483,7 @@ class MainViewModel(
         )
         runCatching { block() }
             .onFailure { throwable ->
+                if (handleAccountSyncFailure(throwable)) return@onFailure
                 val error = throwable.message ?: "操作失败"
                 sessionState.value = sessionState.value.copy(
                     error = error,
@@ -1479,6 +1491,21 @@ class MainViewModel(
                 )
         }
         sessionState.value = sessionState.value.copy(isBusy = false, syncProgress = null)
+    }
+
+    fun dismissAccountSyncPrompt() {
+        sessionState.value = sessionState.value.copy(accountPrompt = null)
+    }
+
+    private fun handleAccountSyncFailure(failure: Throwable): Boolean {
+        if (!isTerminalAccountSyncFailure(failure)) return false
+        clearSmoothedSyncProgress()
+        val prompt = phoneSyncAccountPrompt(failure)
+        sessionState.value = sessionState.value.copy(isBusy = false, accountPrompt = prompt,
+            syncStatusMessage = null, syncStatusError = if (prompt == null) failure.message else null,
+            error = null, conflictPrompt = null, bluetoothDevicePrompt = null)
+        if (prompt == null) _toastEvent.tryEmit(failure.message ?: "账号同步失败")
+        return true
     }
 
     private fun updateLibrarySyncProgress(progress: PhoneBluetoothSyncProgress) {

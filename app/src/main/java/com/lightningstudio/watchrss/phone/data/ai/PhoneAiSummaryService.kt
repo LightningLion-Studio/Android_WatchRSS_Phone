@@ -90,6 +90,7 @@ class PhoneAiSummaryService(
 
     suspend fun summarize(article: PhoneArticleEntity, promptPreset: Int = 1): PhoneAiSummaryResult =
         withContext(Dispatchers.IO) {
+            check(accountRepository.hasUsableSession) { "请重新登录腕上RSS账号" }
             val session = accountRepository.session.value ?: error("请先登录腕上RSS账号")
             val deviceToken = deviceAccessToken().orEmpty()
             require(deviceToken.isNotBlank()) { "请先完成 6 元授权" }

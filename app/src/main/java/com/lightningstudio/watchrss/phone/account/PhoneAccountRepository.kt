@@ -11,10 +11,15 @@ class PhoneAccountRepository(
     private val accountClient: PhoneAccountClient,
     private val phoneDeviceId: String
 ) {
+    internal var onClearCloudState: (PhoneAccountSession) -> Unit = {}
     val session: StateFlow<PhoneAccountSession?> = sessionStore.session
 
+    val reauthenticationOwner: StateFlow<String?> = sessionStore.reauthenticationOwner
+
+    suspend fun beginSameAccountReauthentication() = sessionStore.beginSameAccountReauthentication()
+
     val hasUsableSession: Boolean
-        get() = session.value?.isExpired == false
+        get() = reauthenticationOwner.value == null && session.value?.let { !it.isExpired && it.userId.isNotBlank() && it.accessToken.isNotBlank() } == true
 
     val installId: String
         get() = installationIdentity.installId
@@ -104,25 +109,25 @@ class PhoneAccountRepository(
         accountClient.startActionSecurityVerification(requireSession(), action)
 
     suspend fun startPasskeyRegistration(): PasskeyOptions {
-        val session = session.value ?: error("请先使用手机号验证码登录")
+        val session = requireSession()
         require(!session.isExpired) { "登录已过期，请重新登录" }
         return accountClient.startPasskeyRegistration(session)
     }
 
     suspend fun listRegisteredPasskeys(): List<RegisteredPasskey> {
-        val session = session.value ?: error("请先使用手机号验证码登录")
+        val session = requireSession()
         require(!session.isExpired) { "登录已过期，请重新登录" }
         return accountClient.listRegisteredPasskeys(session)
     }
 
     suspend fun renameRegisteredPasskey(credentialId: String, displayName: String) {
-        val session = session.value ?: error("请先使用手机号验证码登录")
+        val session = requireSession()
         require(!session.isExpired) { "登录已过期，请重新登录" }
         accountClient.renameRegisteredPasskey(session, credentialId, displayName)
     }
 
     suspend fun deleteRegisteredPasskey(credentialId: String) {
-        val session = session.value ?: error("请先使用手机号验证码登录")
+        val session = requireSession()
         require(!session.isExpired) { "登录已过期，请重新登录" }
         accountClient.deleteRegisteredPasskey(session, credentialId)
     }
@@ -131,7 +136,7 @@ class PhoneAccountRepository(
         challengeId: String,
         credentialJson: String
     ) {
-        val session = session.value ?: error("请先使用手机号验证码登录")
+        val session = requireSession()
         accountClient.finishPasskeyRegistration(session, challengeId, credentialJson)
     }
 
@@ -150,8 +155,12 @@ class PhoneAccountRepository(
         }
     }
 
-    private suspend fun saveCompletedLogin(progress: LoginProgress) {
-        progress.session?.let { sessionStore.save(it) }
+    internal suspend fun saveCompletedLogin(progress: LoginProgress) {
+        progress.session?.let {
+            session.value?.takeIf { previous -> previous.userId != it.userId }?.let(onClearCloudState)
+            sessionStore.save(it)
+            sessionStore.finishReauthentication()
+        }
     }
 
     suspend fun logout() {
@@ -168,7 +177,7 @@ class PhoneAccountRepository(
                 sessionStore.schedulePendingRevocation()
             }
         }
-        sessionStore.clear()
+        try { current?.let(onClearCloudState) } finally { sessionStore.clear() }
     }
 
     suspend fun consumeActivationProof(expectedProof: String) {
@@ -225,7 +234,7 @@ class PhoneAccountRepository(
 
     private fun requireSession(): PhoneAccountSession {
         val current = session.value ?: error("请先登录")
-        require(!current.isExpired) { "登录已过期，请重新登录" }
+        require(hasUsableSession) { "登录已过期，请重新登录" }
         return current
     }
 
@@ -234,7 +243,7 @@ class PhoneAccountRepository(
         watchInstallId: String? = null,
         watchDisplayName: String? = null
     ): JSONObject {
-        val session = session.value ?: error("请先在手机端登录腕上RSS账号")
+        val session = requireSession()
         val token = accountClient.issueWatchDeviceToken(
             session = session,
             phoneDeviceId = phoneDeviceId,
@@ -242,6 +251,7 @@ class PhoneAccountRepository(
             watchInstallId = watchInstallId,
             displayName = watchDisplayName
         )
+        check(this.session.value?.userId == session.userId && hasUsableSession) { "手机账号已变化，请重新同步" }
         return JSONObject().apply {
             put("version", 1)
             put("action", "syncAccount")

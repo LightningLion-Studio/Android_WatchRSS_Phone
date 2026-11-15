@@ -16,6 +16,7 @@ import org.json.JSONObject
 import java.security.KeyFactory
 import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired
 
 class AppAccessCoordinator(
     private val context: Context,
@@ -23,11 +24,13 @@ class AppAccessCoordinator(
     private val identity: LicenseDeviceIdentity,
     private val scope: CoroutineScope,
     private val store: AppAccessStore = AppAccessStore(context, AccountEnvironment.active(context).storageSuffix),
+    environmentOverride: AccountEnvironment? = null,
     private val onAuthorized: () -> Unit = {}
 ) {
     private val operationMutex = Mutex()
+    private var lastReconcileFailure: Throwable? = null
     private val authorizationNotifier = AuthorizationReadyNotifier(onAuthorized)
-    private val environment = AccountEnvironment.active(context)
+    private val environment = environmentOverride ?: AccountEnvironment.active(context)
     private val _state = MutableStateFlow<AppAccessState>(AppAccessState.Loading)
     val state: StateFlow<AppAccessState> = _state.asStateFlow()
 
@@ -56,7 +59,67 @@ class AppAccessCoordinator(
         authorizationNotifier.afterReconcile(isAuthorized)
     }
 
+    /** Uses the existing lease/possession refresh; account tokens have no refresh API here. */
+    internal suspend fun buildWatchAccountSyncRequest(watch: String, install: String?, name: String?): JSONObject {
+        if (!accountRepository.hasUsableSession) throw PhoneLoginRequired()
+        val owner = accountRepository.session.value!!.userId
+        val readiness = operationMutex.withLock {
+            try { reconcileLocked() } catch (failure: Throwable) { return@withLock accountSyncFailureResult(failure) }
+            if (accountRepository.session.value?.userId != owner) return@withLock WatchAccountRefreshResult.DeviceVerificationRequired()
+            if (!accountRepository.hasUsableSession) return@withLock WatchAccountRefreshResult.AccountUnrecoverable()
+            lastReconcileFailure?.let { return@withLock accountSyncFailureResult(it) }
+            if (deviceAccessToken.isNullOrBlank()) WatchAccountRefreshResult.DeviceVerificationRequired() else WatchAccountRefreshResult.Ready
+        }
+        readiness.requireReady()
+        authorizationNotifier.afterReconcile(isAuthorized)
+        return withWatchAccountDeviceRefresh(
+            deviceToken = { deviceAccessToken },
+            refresh = { rejected -> refreshWatchDeviceSession(rejected, owner) },
+            build = { accountRepository.buildAccountSyncRequest(watch, install, name) }
+        )
+    }
+
+    internal suspend fun refreshWatchDeviceSession(rejectedToken: String, expectedUserId: String): WatchAccountRefreshResult = operationMutex.withLock {
+        if (accountRepository.session.value?.userId != expectedUserId) return@withLock WatchAccountRefreshResult.DeviceVerificationRequired()
+        if (!accountRepository.hasUsableSession) return@withLock WatchAccountRefreshResult.AccountUnrecoverable()
+        val current = store.load()?.deviceAccessToken
+        if (!current.isNullOrBlank() && current != rejectedToken) return@withLock WatchAccountRefreshResult.Ready
+        try { reconcileLocked() } catch (failure: Throwable) { return@withLock accountSyncFailureResult(failure) }
+        lastReconcileFailure?.let { return@withLock accountSyncFailureResult(it) }
+        if (accountRepository.session.value?.userId != expectedUserId) return@withLock WatchAccountRefreshResult.DeviceVerificationRequired()
+        if (store.load()?.deviceAccessToken?.let { it.isNotBlank() && it != rejectedToken } == true) WatchAccountRefreshResult.Ready
+        else WatchAccountRefreshResult.DeviceVerificationRequired()
+    }
+
+    /** Legacy cloud callers keep their Boolean API until the coordinated 115 merge. */
+    suspend fun refreshRejectedDeviceSession(rejectedToken: String, expectedUserId: String): Boolean =
+        refreshWatchDeviceSession(rejectedToken, expectedUserId) == WatchAccountRefreshResult.Ready
+
+    /** A new account token alone does not complete same-account device reauthentication. */
+    internal suspend fun completeSameAccountLogin(): WatchAccountRefreshResult {
+        val result = operationMutex.withLock {
+            val owner = accountRepository.session.value?.userId
+            val readiness = try {
+                reconcileLocked()
+                when {
+                    lastReconcileFailure != null -> accountSyncFailureResult(requireNotNull(lastReconcileFailure))
+                    !accountRepository.hasUsableSession -> WatchAccountRefreshResult.AccountUnrecoverable()
+                    accountRepository.session.value?.userId != owner -> WatchAccountRefreshResult.DeviceVerificationRequired()
+                    isAuthorized && !deviceAccessToken.isNullOrBlank() -> WatchAccountRefreshResult.Ready
+                    else -> WatchAccountRefreshResult.DeviceVerificationRequired()
+                }
+            } catch (failure: Throwable) { accountSyncFailureResult(failure) }
+            if (readiness is WatchAccountRefreshResult.AccountUnrecoverable) {
+                accountRepository.beginSameAccountReauthentication()
+            }
+            readiness
+        }
+        authorizationNotifier.afterReconcile(result == WatchAccountRefreshResult.Ready && isAuthorized)
+        return result
+    }
+
     private suspend fun reconcileLocked() {
+        lastReconcileFailure = null
         val cached = store.load()
         val trustedNow = store.trustedNowMillis()
         val cachedValid = cached != null && trustedNow != null && LeaseVerifier.verify(
@@ -104,11 +167,16 @@ class AppAccessCoordinator(
         cached: AppAuthorization,
         error: Throwable
     ) {
+        if (error is kotlinx.coroutines.CancellationException) throw error
+        lastReconcileFailure = error
         if (error.findAccountHttpException()?.statusCode != 403) {
             _state.value = AppAccessState.Authorized(cached.access, offline = true)
             return
         }
-        val serverSummary = runCatching { accountRepository.appAccessStatus() }.getOrNull()
+        val serverSummary = runCatching { accountRepository.appAccessStatus() }.onFailure {
+            if (it is kotlinx.coroutines.CancellationException) throw it
+            lastReconcileFailure = it
+        }.getOrNull()
         val decision = validLeaseRefreshDecision(cached.access, serverSummary)
         if (decision.clearCache) store.clear()
         _state.value = decision.state
@@ -152,6 +220,8 @@ class AppAccessCoordinator(
             accountRepository.consumeActivationProof(activationProof)
             _state.value = AppAccessState.Authorized(authorization.access, false)
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            lastReconcileFailure = error
             val cached = store.load()?.takeIf {
                 val trustedNow = store.trustedNowMillis() ?: return@takeIf false
                 LeaseVerifier.verify(
@@ -165,7 +235,12 @@ class AppAccessCoordinator(
                 _state.value = AppAccessState.Authorized(cached.access, offline = true)
                 return
             }
-            val status = runCatching { accountRepository.appAccessStatus() }.getOrDefault(AppAccessSummary())
+            val status = try { accountRepository.appAccessStatus() } catch (statusFailure: Throwable) {
+                if (statusFailure is kotlinx.coroutines.CancellationException) throw statusFailure
+                // Keep the primary claim failure, unless the status query proves account authentication failed.
+                if (statusFailure.findAccountHttpException()?.statusCode == 401) lastReconcileFailure = statusFailure
+                AppAccessSummary()
+            }
             _state.value = when ((error as? PhoneAccountHttpException)?.statusCode) {
                 402 -> AppAccessState.PurchaseRequired(status)
                 409 -> AppAccessState.ReauthenticationRequired(status)
@@ -223,8 +298,13 @@ class AppAccessCoordinator(
                     loadServerStatusLocked()
                 }
             }
+        }.onFailure {
+            if (it is kotlinx.coroutines.CancellationException) throw it
+            lastReconcileFailure = it
         }
     }
+
+
 
     suspend fun logout(): Boolean = operationMutex.withLock {
         val current = store.load()
@@ -252,16 +332,9 @@ class AppAccessCoordinator(
             result
         }
 
-    /**
-     * A revoked device must produce a new SMS/Passkey activation proof before claiming again.
-     * Keep local content and the revoked authorization record intact; only forget the account
-     * session so AccountActivity presents the real login flow.
-     */
+    /** Pause authenticated operations while retaining the owner and its cloud custody. */
     suspend fun beginReauthentication() = operationMutex.withLock {
-        store.clearPendingOrder()
-        store.clearOrderIdempotencyKey()
-        accountRepository.logout()
-        _state.value = AppAccessState.LoggedOut
+        accountRepository.beginSameAccountReauthentication()
     }
 
     private suspend fun loadServerStatusLocked() {
@@ -276,7 +349,11 @@ class AppAccessCoordinator(
                 "unclaimed" -> AppAccessState.ReauthenticationRequired(summary)
                 else -> AppAccessState.PurchaseRequired(summary)
             }
-        }.onFailure { _state.value = AppAccessState.ValidationError(it.message ?: "授权状态获取失败") }
+        }.onFailure {
+            if (it is kotlinx.coroutines.CancellationException) throw it
+            lastReconcileFailure = it
+            _state.value = AppAccessState.ValidationError(it.message ?: "授权状态获取失败")
+        }
     }
 }
 

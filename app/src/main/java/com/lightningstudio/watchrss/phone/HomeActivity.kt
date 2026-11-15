@@ -184,6 +184,7 @@ class HomeActivity : ComponentActivity() {
             WatchRssPhoneTheme {
                 ProvideReaderPreset(container.readerPresetRepository) {
                     val state by viewModel.uiState.collectAsState()
+                    PhoneSyncAccountHost(state.accountPrompt, viewModel::dismissAccountSyncPrompt)
                     val updateState by appUpdateDownloader.state.collectAsState()
                     val currentStorageUsedBytes by storageUsedBytes
                     val tipSuppression = remember { TipSuppressionState() }

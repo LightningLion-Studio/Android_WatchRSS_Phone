@@ -66,6 +66,16 @@ class DebugBluetoothSyncActivity : ComponentActivity() {
                         }
                     }
                 }
+                if (action == BluetoothSyncProtocol.ACTION_PULL_SAVED_ITEMS) {
+                    val result = (application as PhoneCompanionApplication).container.bluetoothSyncManager.syncSavedItems(PhoneSavedItemType.valueOf(typeName))
+                    return@runCatching "Bluetooth saved-items sync complete: ${result.importedCount}"
+                }
+                if (action == BluetoothSyncProtocol.ACTION_REMOTE_INPUT) {
+                    val result = (application as PhoneCompanionApplication).container.bluetoothSyncManager.sendRemoteInput(
+                        intent.getStringExtra(EXTRA_URL) ?: "https://example.com/feed.xml")
+                    return@runCatching "Bluetooth remote input complete: ${result.deviceName}"
+                }
+                require(action == BluetoothSyncProtocol.ACTION_PING) { "资料动作必须使用账号同步入口" }
                 val request = buildRequest(action, typeName)
                 val container = (application as PhoneCompanionApplication).container
                 val exchange = withContext(Dispatchers.IO) {

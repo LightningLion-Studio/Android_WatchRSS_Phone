@@ -777,7 +777,8 @@ class PhoneBluetoothSyncClient(
         deviceAddress: String,
         sessionId: String,
         nextRequest: suspend () -> JSONObject,
-        onResponse: (deviceName: String, response: JSONObject) -> Unit
+        onResponse: (deviceName: String, response: JSONObject) -> Unit,
+        authorizeConnection: suspend (suspend (JSONObject) -> JSONObject) -> Unit = {}
     ): BluetoothSyncExchange = connectionMutex.withLock {
         requireBluetoothConnectPermission()
         val adapter = context.getSystemService(BluetoothManager::class.java)
@@ -799,6 +800,14 @@ class PhoneBluetoothSyncClient(
         try {
             socket = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
             connectLogged(socket, sessionId, device)
+            val connected = socket
+            authorizeConnection { request ->
+                writeFrameLogged(connected, sessionId, "previewAccountRequest", request)
+                readFrameLogged(connected, sessionId, "previewAccountResponse").also {
+                    require(it.optBoolean("success")) { it.optString("message").ifBlank { "账号同步失败" } }
+                    writeResponseAck(connected, sessionId, success = true, applied = true)
+                }
+            }
             var request = initialRequest
             writeFrameLogged(socket, sessionId, "previewFrame", request)
             var response = readFrameLogged(socket, sessionId, "previewResponse")
@@ -903,6 +912,7 @@ class PhoneBluetoothSyncClient(
             BluetoothSyncProtocol.readFrame(socket.inputStream) { bytes ->
                 transferredBytes += bytes
             }.also { payload ->
+                requireAccountAccepted(payload)
                 stats.recordReceive(
                     bytes = transferredBytes,
                     elapsedMs = elapsedSince(startedAt)
@@ -2715,6 +2725,7 @@ class PhoneBluetoothSyncClient(
                 byteTracker?.add(bytes)
                 onBytesTransferred?.invoke(bytes)
             }.also { payload ->
+                requireAccountAccepted(payload)
                 debugLog.appendEvent(
                     event = "bt.frame.read.success",
                     sessionId = sessionId,

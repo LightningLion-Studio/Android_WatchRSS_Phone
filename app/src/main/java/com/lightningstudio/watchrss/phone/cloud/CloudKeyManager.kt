@@ -14,10 +14,12 @@ import java.security.spec.ECGenParameterSpec
 
 class CloudKeyManager(
     context: Context,
-    private val storageSuffix: String = ""
+    private val storageSuffix: String = "",
+    private val preferencesOverride: android.content.SharedPreferences? = null
 ) {
     private val appContext = context.applicationContext
     private val preferences by lazy {
+        preferencesOverride ?: run {
         val masterKey = MasterKey.Builder(appContext)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
@@ -28,6 +30,7 @@ class CloudKeyManager(
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
+        }
     }
 
     fun hasAccountKey(userId: String): Boolean =

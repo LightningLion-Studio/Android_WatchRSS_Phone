@@ -846,8 +846,16 @@ class PhoneCloudSyncService(
         }
     }
 
-    private fun requireSession(): PhoneAccountSession =
-        accountRepository.session.value ?: error("请先登录腕上RSS账号")
+    internal fun discardSessionCloudState(session: PhoneAccountSession) {
+        keyManager.clearAccountKeys(session.userId)
+        settings.clearLibraryState()
+        cache.clear(session.userId)
+    }
+
+    private fun requireSession(): PhoneAccountSession {
+        check(accountRepository.hasUsableSession) { "登录已过期，请重新登录" }
+        return accountRepository.session.value ?: error("请先登录腕上RSS账号")
+    }
 
     private fun snapshotContentHash(
         objects: List<CloudLogicalObject>,

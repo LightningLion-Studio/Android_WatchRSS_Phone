@@ -140,7 +140,9 @@ class PhoneCompanionContainer(context: Context) {
                 }
             ),
             phoneDeviceId = deviceIdentity.deviceId
-        )
+        ).also { account ->
+            account.onClearCloudState = { session -> cloudSyncService.discardSessionCloudState(session) }
+        }
     }
 
     val appAccessCoordinator: AppAccessCoordinator by lazy {
@@ -330,14 +332,14 @@ class PhoneCompanionContainer(context: Context) {
             deviceId = deviceIdentity.deviceId,
             debugLog = bluetoothDebugLog,
             buildAccountSyncRequest = { watchDeviceId, watchInstallId, watchDisplayName ->
-                appAccessCoordinator.reconcile()
-                accountRepository.buildAccountSyncRequest(
+                appAccessCoordinator.buildWatchAccountSyncRequest(
                     watchDeviceId,
                     watchInstallId,
                     watchDisplayName
                 )
             },
             canSyncAccount = { accountRepository.hasUsableSession },
+            currentPhoneUserId = { accountRepository.session.value?.userId },
             onLibrarySyncCompleted = {
                 if (accountRepository.hasUsableSession) {
                     runCatching { cloudSyncService.syncNow() }

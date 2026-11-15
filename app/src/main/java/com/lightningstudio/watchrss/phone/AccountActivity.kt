@@ -96,6 +96,7 @@ import com.lightningstudio.watchrss.phone.account.AccountLoginAction
 import com.lightningstudio.watchrss.phone.account.AccountDeletionResult
 import com.lightningstudio.watchrss.phone.account.AccountSecurityStatus
 import com.lightningstudio.watchrss.phone.account.AppAccessState
+import com.lightningstudio.watchrss.phone.account.WatchAccountRefreshResult
 import com.lightningstudio.watchrss.phone.account.AppPaymentOrder
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.account.PhonePasskeyCoordinator
@@ -154,6 +155,8 @@ class AccountActivity : ComponentActivity() {
                     rssSources = rssSources,
                     usageTelemetry = container.usageTelemetry,
                     onBack = ::finish,
+                    forceReauthentication = intent.getBooleanExtra(EXTRA_REAUTHENTICATE, false),
+                    onReauthenticationComplete = { if (finishAfterLogin) finish() },
                     onLoginComplete = {
                         if (finishAfterLogin) {
                             lifecycleScope.launch {
@@ -193,11 +196,13 @@ class AccountActivity : ComponentActivity() {
 
     companion object {
         private const val EXTRA_SECTION = "account_section"
+        internal const val EXTRA_REAUTHENTICATE = "same_account_reauthentication"
         private const val EXTRA_FINISH_AFTER_LOGIN =
             "com.lightningstudio.watchrss.phone.extra.FINISH_AFTER_LOGIN"
 
-        fun createIntent(context: Context, finishAfterLogin: Boolean = false, section: AccountSection = AccountSection.ROOT): Intent =
+        fun createIntent(context: Context, finishAfterLogin: Boolean = false, section: AccountSection = AccountSection.ROOT, reauthenticate: Boolean = false): Intent =
             Intent(context, AccountActivity::class.java).apply {
+                putExtra(EXTRA_REAUTHENTICATE, reauthenticate)
                 putExtra(EXTRA_FINISH_AFTER_LOGIN, finishAfterLogin)
                 putExtra(EXTRA_SECTION, section.name)
             }
@@ -243,9 +248,22 @@ internal fun AccountScreen(
     createPasskey: suspend () -> Unit,
     runAction: (suspend () -> Unit) -> Unit,
     leadingPane: (@Composable () -> Unit)? = null,
-    initialSection: AccountSection = AccountSection.ROOT
+    initialSection: AccountSection = AccountSection.ROOT,
+    forceReauthentication: Boolean = false,
+    onReauthenticationComplete: () -> Unit = onLoginComplete
 ) {
     val session by accountRepository.session.collectAsState()
+    val reauthenticationOwner by accountRepository.reauthenticationOwner.collectAsState()
+    var reauthenticationRequested by remember { mutableStateOf(forceReauthentication || reauthenticationOwner != null) }
+    var reauthenticationCompleted by remember { mutableStateOf(false) }
+    var deviceAuthorizationPending by remember { mutableStateOf(false) }
+    var authorizationFailure by remember { mutableStateOf<WatchAccountRefreshResult?>(null) }
+    LaunchedEffect(reauthenticationOwner) {
+        if (reauthenticationOwner != null) { reauthenticationRequested = true; reauthenticationCompleted = false }
+    }
+    LaunchedEffect(forceReauthentication) {
+        if (forceReauthentication) accountRepository.beginSameAccountReauthentication()
+    }
     val context = LocalContext.current
     val tipManager = LocalTipManager.current
     val accessCoordinator = (context.applicationContext as PhoneCompanionApplication).container.appAccessCoordinator
@@ -467,8 +485,43 @@ internal fun AccountScreen(
         securityVerificationInput = ""
     }
 
+    suspend fun completeReauthentication() {
+        deviceAuthorizationPending = true
+        try {
+            val result = accessCoordinator.completeSameAccountLogin()
+            reauthenticationCompleted = result == WatchAccountRefreshResult.Ready
+            authorizationFailure = result.takeUnless { it == WatchAccountRefreshResult.Ready }
+            when (result) {
+                WatchAccountRefreshResult.Ready -> {
+                    message = "登录成功"
+                    error = null
+                    accountRepository.session.value?.let { usageTelemetry.recordAccountSignedIn(it.userId) }
+                    tipManager?.recordEvent(TipEvents.ACCOUNT_SIGNED_IN)
+                    onReauthenticationComplete()
+                }
+                is WatchAccountRefreshResult.AccountUnrecoverable -> {
+                    authorizationFailure = null
+                    loginProgress = null
+                    otp = ""
+                    password = ""
+                    passwordTotp = ""
+                    otpResendAvailableAt = 0L
+                    message = null
+                    error = "登录已失效，请重新登录"
+                }
+                else -> { message = null; error = null }
+            }
+        } finally { deviceAuthorizationPending = false }
+    }
+
     val accountControls: @Composable ColumnScope.(() -> Unit) -> Unit = { onCloudSyncClick ->
-        if (session == null) {
+        if (authorizationFailure != null) {
+            Text("设备授权尚未完成", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+            Text(if (authorizationFailure is WatchAccountRefreshResult.DeviceVerificationRequired)
+                "手机设备身份需要验证，请重试设备授权" else "账号服务暂时不可用，请稍后重试")
+            Button(onClick = { if (!deviceAuthorizationPending) coroutineScope.launch { completeReauthentication() } },
+                enabled = !deviceAuthorizationPending) { Text("重试设备授权") }
+        } else if (session == null || reauthenticationOwner != null || (reauthenticationRequested && !reauthenticationCompleted)) {
             Text(
                 "登录",
                 style = MaterialTheme.typography.titleLarge,
@@ -489,7 +542,7 @@ internal fun AccountScreen(
                     },
                     label = { Text("手机号") },
                     singleLine = true,
-                    enabled = !busy,
+                    enabled = !busy && !deviceAuthorizationPending,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -499,10 +552,16 @@ internal fun AccountScreen(
             fun applyLoginProgress(progress: LoginProgress) {
                 loginProgress = progress
                 progress.session?.let { signedIn ->
-                    message = "登录成功"
-                    usageTelemetry.recordAccountSignedIn(signedIn.userId)
-                    tipManager?.recordEvent(TipEvents.ACCOUNT_SIGNED_IN)
-                    onLoginComplete()
+                    if (reauthenticationRequested) {
+                        deviceAuthorizationPending = true
+                        message = "正在验证设备授权"
+                        coroutineScope.launch { completeReauthentication() }
+                    } else {
+                        message = "登录成功"
+                        usageTelemetry.recordAccountSignedIn(signedIn.userId)
+                        tipManager?.recordEvent(TipEvents.ACCOUNT_SIGNED_IN)
+                        onLoginComplete()
+                    }
                 } ?: run {
                     message = "已完成一种验证方式，请再选择另一种不同方式。"
                 }
@@ -511,7 +570,7 @@ internal fun AccountScreen(
                 Box(modifier = modifier) {
                     OutlinedButton(
                         onClick = { loginMethodMenuExpanded = true },
-                        enabled = !busy,
+                        enabled = !busy && !deviceAuthorizationPending,
                         modifier = Modifier
                             .fillMaxWidth()
                             .tipAnchor(TipIds.PASSKEY_LOGIN)
@@ -561,7 +620,7 @@ internal fun AccountScreen(
                         onValueChange = { password = it },
                         label = { Text("密码") },
                         singleLine = true,
-                        enabled = !busy,
+                        enabled = !busy && !deviceAuthorizationPending,
                         visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                         trailingIcon = {
@@ -590,7 +649,7 @@ internal fun AccountScreen(
                                     busy = false
                                 }
                             },
-                            enabled = !busy && password.length >= 10 && (phone.isNotBlank() || loginProgress != null),
+                            enabled = !busy && !deviceAuthorizationPending && password.length >= 10 && (phone.isNotBlank() || loginProgress != null),
                             modifier = Modifier.weight(1f)
                         ) { Text("继续") }
                     }
@@ -601,7 +660,7 @@ internal fun AccountScreen(
                         onValueChange = { otp = it.filter(Char::isDigit).take(6) },
                         label = { Text("验证码") },
                         singleLine = true,
-                        enabled = !busy,
+                        enabled = !busy && !deviceAuthorizationPending,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         trailingIcon = {
                             TextButton(
@@ -623,7 +682,7 @@ internal fun AccountScreen(
                                         busy = false
                                     }
                                 },
-                                enabled = !busy && (phone.isNotBlank() || loginProgress != null) && otpResendSecondsRemaining == 0L
+                                enabled = !busy && !deviceAuthorizationPending && (phone.isNotBlank() || loginProgress != null) && otpResendSecondsRemaining == 0L
                             ) { Text(if (otpResendSecondsRemaining > 0) "${otpResendSecondsRemaining}s 后重发" else "发送验证码") }
                         },
                         modifier = Modifier
@@ -651,7 +710,7 @@ internal fun AccountScreen(
                                     busy = false
                                 }
                             },
-                            enabled = !busy && otp.length == 6 && (phone.isNotBlank() || loginProgress != null),
+                            enabled = !busy && !deviceAuthorizationPending && otp.length == 6 && (phone.isNotBlank() || loginProgress != null),
                             modifier = Modifier.weight(1f)
                         ) { Text("继续") }
                     }
@@ -662,7 +721,7 @@ internal fun AccountScreen(
                         onValueChange = { passwordTotp = it.filter(Char::isDigit).take(6) },
                         label = { Text("验证器动态码") },
                         singleLine = true,
-                        enabled = !busy,
+                        enabled = !busy && !deviceAuthorizationPending,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -686,7 +745,7 @@ internal fun AccountScreen(
                                     busy = false
                                 }
                             },
-                            enabled = !busy && passwordTotp.length == 6 &&
+                            enabled = !busy && !deviceAuthorizationPending && passwordTotp.length == 6 &&
                                 (phone.isNotBlank() || loginProgress != null),
                             modifier = Modifier.weight(1f)
                         ) { Text("继续") }
@@ -712,7 +771,7 @@ internal fun AccountScreen(
                                     busy = false
                                 }
                             },
-                            enabled = !busy && (phone.isNotBlank() || loginProgress != null),
+                            enabled = !busy && !deviceAuthorizationPending && (phone.isNotBlank() || loginProgress != null),
                             modifier = Modifier.weight(1f)
                         ) { Text("继续") }
                     }

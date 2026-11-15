@@ -158,7 +158,7 @@ class OnboardingViewModel(
 
     /** AccountActivity 返回后调用：登录成功则直接跳到授权说明，否则留在登录引导。 */
     fun onLoginReturned() {
-        val hasUsableSession = accountRepository.session.value?.isExpired == false
+        val hasUsableSession = accountRepository.hasUsableSession
         val target = if (hasUsableSession) OnboardingCatalogIndices.LOGIN_GUIDE_INDEX + 3 else OnboardingCatalogIndices.LOGIN_GUIDE_INDEX
         mutateDraft { it.copy(stepIndex = target, updatedAtMillis = System.currentTimeMillis()) }
         _state.update {

@@ -19,7 +19,7 @@ class PhoneAccountRepository(
     suspend fun beginSameAccountReauthentication() = sessionStore.beginSameAccountReauthentication()
 
     val hasUsableSession: Boolean
-        get() = reauthenticationOwner.value == null && session.value?.let { !it.isExpired && it.userId.isNotBlank() && it.accessToken.isNotBlank() } == true
+        get() = reauthenticationOwner.value == null && session.value?.let { it.isUsableForAuthentication && it.userId.isNotBlank() && it.accessToken.isNotBlank() } == true
 
     val installId: String
         get() = installationIdentity.installId
@@ -234,6 +234,7 @@ class PhoneAccountRepository(
 
     private fun requireSession(): PhoneAccountSession {
         val current = session.value ?: error("请先登录")
+        check(!current.authenticationPaused) { "请先完成账号重新认证" }
         require(hasUsableSession) { "登录已过期，请重新登录" }
         return current
     }

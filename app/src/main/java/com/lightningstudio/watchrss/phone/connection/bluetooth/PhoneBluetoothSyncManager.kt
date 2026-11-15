@@ -267,7 +267,7 @@ class PhoneBluetoothSyncManager(
         }
     }
 
-    suspend fun sendRemoteInput(url: String): PhoneBluetoothSyncResult {
+    suspend fun sendRemoteInput(url: String, deviceAddress: String? = null): PhoneBluetoothSyncResult {
         val sessionId = BluetoothDebugLog.newSessionId("remoteInput")
         debugLog.appendEvent(
             event = "sync.remoteInput.start",
@@ -282,7 +282,8 @@ class PhoneBluetoothSyncManager(
                     put("nonce", System.currentTimeMillis().toString())
                     put("url", url)
                 },
-                sessionId = sessionId
+                sessionId = sessionId,
+                deviceAddress = deviceAddress
             )
             requireSuccess(exchange.response)
             debugLog.appendEvent(
@@ -387,9 +388,10 @@ class PhoneBluetoothSyncManager(
             emptyMap()
         }
     ): PhoneBluetoothSyncResult {
+        return try {
         requirePhoneLogin()
         reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_ACCOUNT, 0)
-        return try { withAccountDataSession(device.address, reusableSession) { session ->
+        withAccountDataSession(device.address, reusableSession) { session ->
             reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_ACCOUNT, 100)
             val libraryResult = syncLibrary(deviceAddress = session.device.address, syncSession = session, forceFull = forceFull || mode != LibrarySyncMode.MERGE, mode = mode, onProgress = onProgress, resolveDeleteConflicts = resolveDeleteConflicts)
             var tokenWarning: String? = null
@@ -402,7 +404,7 @@ class PhoneBluetoothSyncManager(
         } } finally { reusableSession?.close() }
     }
 
-    suspend fun syncSavedItems(type: PhoneSavedItemType): PhoneBluetoothSyncResult {
+    suspend fun syncSavedItems(type: PhoneSavedItemType, deviceAddress: String? = null): PhoneBluetoothSyncResult {
         val sessionId = BluetoothDebugLog.newSessionId("savedItems")
         debugLog.appendEvent(
             event = "sync.savedItems.start",
@@ -417,7 +419,8 @@ class PhoneBluetoothSyncManager(
                     put("nonce", System.currentTimeMillis().toString())
                     put("type", type.name)
                 },
-                sessionId = sessionId
+                sessionId = sessionId,
+                deviceAddress = deviceAddress
             )
             requireSuccess(exchange.response)
             val items = exchange.response.optJSONArray("items") ?: JSONArray()
@@ -1453,7 +1456,7 @@ class PhoneBluetoothSyncManager(
         deviceAddress: String? = null,
         syncSession: PhoneSyncSession? = null
     ): BluetoothSyncExchange {
-        val dataAction = request.optString("action") in setOf("remoteInput", "pullSavedItems", "syncReader", "previewReader", "syncNotes", "syncNoteAsset", "syncLlmTokenUsage")
+        val dataAction = request.optString("action") in setOf("remoteInput", "pullSavedItems", "syncReader", "previewReader", "syncNotes", "syncNoteAsset", "syncLlmTokenUsage", "clearLibrary")
         if (dataAction) return withAccountDataSession(deviceAddress, syncSession) { active ->
             exchangeAuthorized(request, timeoutMs, sessionId, active.device.address, active)
         }

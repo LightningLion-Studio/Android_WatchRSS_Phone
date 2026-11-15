@@ -335,7 +335,7 @@ class PhoneCloudClient(
         builder: Request.Builder
     ): okhttp3.Response = withContext(Dispatchers.IO) {
         require(environment.backendBaseUrl.isNotBlank()) { "云服务地址未配置" }
-        require(!session.isExpired) { "登录已过期，请重新登录" }
+        require(session.isUsableForAuthentication) { "登录已过期，请重新登录" }
         val request = builder
             .withWatchRssAppVersionHeader()
             .header("authorization", "Bearer ${session.accessToken}")

@@ -25,10 +25,10 @@ class SupportClient(private val environment: AccountEnvironment, private val ses
     private val http = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(135, TimeUnit.SECONDS).callTimeout(140, TimeUnit.SECONDS).build()
     fun cancel() = http.dispatcher.cancelAll()
-    fun identity(): String? = sessions.value?.takeUnless { it.isExpired }?.userId
+    fun identity(): String? = sessions.value?.takeIf { it.isUsableForAuthentication }?.userId
 
     private fun request(user: String, path: String, body: JSONObject?): Request {
-        val session = sessions.value?.takeIf { it.userId == user && !it.isExpired }
+        val session = sessions.value?.takeIf { it.userId == user && it.isUsableForAuthentication }
             ?: throw SupportFailure("support_login_required")
         return Request.Builder().url(environment.backendBaseUrl + "/functions/v1/support" + path)
             .header("apikey", environment.supabaseAnonKey)

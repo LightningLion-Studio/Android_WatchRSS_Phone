@@ -21,7 +21,11 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class Hotfix133LoginUiDeviceTest {
     @get:Rule val compose=createEmptyComposeRule()
-    @Test fun deviceVerificationReauthenticatesSameOwnerWithoutLosingRoot()=runBlocking<Unit> {
+    @Test fun deviceVerificationReauthenticatesSameOwnerWithoutLosingRoot()=runDeviceFlow(503,true)
+    @Test fun deviceVerificationAndReadySurviveActivityRecreation()=runDeviceFlow(403,false)
+    @Test fun rateLimitAndReadySurviveActivityRecreation()=runDeviceFlow(429,false)
+
+    private fun runDeviceFlow(retryStatus:Int,finishAfterLogin:Boolean)=runBlocking<Unit> {
         val context=InstrumentationRegistry.getInstrumentation().targetContext
         val app=context.applicationContext as PhoneCompanionApplication
         val account=app.container.accountRepository
@@ -68,7 +72,7 @@ class Hotfix133LoginUiDeviceTest {
         val previous=field.get(account)
         field.set(account,PhoneAccountClient(AccountEnvironment(backendBaseUrl=server.url("/").toString().trimEnd('/'),supabaseAnonKey="synthetic"),LicenseDeviceIdentity(context)))
         try {
-            val scenario=ActivityScenario.launch<AccountActivity>(AccountActivity.createIntent(context,finishAfterLogin=true,reauthenticate=true))
+            val scenario=ActivityScenario.launch<AccountActivity>(AccountActivity.createIntent(context,finishAfterLogin=finishAfterLogin,reauthenticate=true))
             scenario.use {
                 compose.waitUntil(10000){account.reauthenticationOwner.value==owner}
                 assertFalse(account.hasUsableSession)
@@ -84,7 +88,15 @@ class Hotfix133LoginUiDeviceTest {
                 assertFalse(account.hasUsableSession)
                 assertArrayEquals(root,keys.getAccountKey(owner))
                 compose.onNodeWithText("手机号").assertExists()
-                authorizationStatus.set(503);verified.set(false)
+                repeat(2) {
+                    scenario.recreate()
+                    compose.onNodeWithText("手机号").assertExists()
+                    compose.onNodeWithText("登录已失效，请重新登录").assertExists()
+                    assertEquals(owner,account.reauthenticationOwner.value)
+                    assertArrayEquals(root,keys.getAccountKey(owner))
+                }
+                compose.onNodeWithText("手机号").performScrollTo().performTextInput("13800000133")
+                authorizationStatus.set(retryStatus);verified.set(false)
                 compose.onNodeWithText("发送验证码").performScrollTo().performClick()
                 compose.waitUntil(10000){compose.onAllNodesWithText("验证码已发送").fetchSemanticsNodes().isNotEmpty()}
                 compose.onNodeWithText("验证码").performScrollTo().performTextInput("123456")
@@ -92,9 +104,25 @@ class Hotfix133LoginUiDeviceTest {
                 compose.waitUntil(10000){verified.get() && compose.onAllNodesWithText("重试设备授权").fetchSemanticsNodes().isNotEmpty()}
                 assertArrayEquals(root,keys.getAccountKey(owner))
                 assertEquals(2,verificationCount.get())
+                repeat(2) {
+                    scenario.recreate()
+                    compose.onNodeWithText("重试设备授权").assertExists()
+                    compose.onNodeWithText("手机号").assertDoesNotExist()
+                    assertTrue(account.hasUsableSession);assertNull(account.reauthenticationOwner.value)
+                    assertEquals(2,verificationCount.get());assertEquals(0,claimed.get())
+                    assertArrayEquals(root,keys.getAccountKey(owner))
+                }
                 authorizationStatus.set(200)
                 compose.onNodeWithText("重试设备授权").performClick()
-                compose.waitUntil(10000){claimed.get()>0 && scenario.state==androidx.lifecycle.Lifecycle.State.DESTROYED}
+                compose.waitUntil(10000){claimed.get()>0 && (if(finishAfterLogin) scenario.state==androidx.lifecycle.Lifecycle.State.DESTROYED else compose.onAllNodesWithText("重试设备授权").fetchSemanticsNodes().isEmpty())}
+                if(!finishAfterLogin) repeat(2) {
+                    scenario.recreate()
+                    compose.onNodeWithText("手机号").assertDoesNotExist()
+                    compose.onNodeWithText("重试设备授权").assertDoesNotExist()
+                    assertTrue(account.hasUsableSession);assertNull(account.reauthenticationOwner.value)
+                    assertEquals(1,claimed.get());assertEquals(2,verificationCount.get())
+                    assertArrayEquals(root,keys.getAccountKey(owner))
+                }
                 assertEquals("Device retry must not repeat MFA",2,verificationCount.get())
                 assertTrue(account.hasUsableSession)
                 assertEquals(owner,account.session.value?.userId)

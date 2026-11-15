@@ -16,8 +16,6 @@ import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
 
 class DebugBluetoothSyncActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -53,49 +51,12 @@ class DebugBluetoothSyncActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             runCatching {
-                if (action == BluetoothSyncProtocol.ACTION_SYNC_LIBRARY) {
-                    val result = (application as PhoneCompanionApplication)
-                        .container
-                        .bluetoothSyncManager
-                        .syncLibrary()
-                    return@runCatching buildString {
-                        appendLine("Bluetooth library sync debug complete")
-                        appendLine("device=${result.deviceName}")
-                        result.libraryStats?.let { stats ->
-                            appendLine("sent=${stats.sent} received=${stats.received} merged=${stats.merged}")
-                        }
-                    }
-                }
-                if (action == BluetoothSyncProtocol.ACTION_PULL_SAVED_ITEMS) {
-                    val result = (application as PhoneCompanionApplication).container.bluetoothSyncManager.syncSavedItems(PhoneSavedItemType.valueOf(typeName))
-                    return@runCatching "Bluetooth saved-items sync complete: ${result.importedCount}"
-                }
-                if (action == BluetoothSyncProtocol.ACTION_REMOTE_INPUT) {
-                    val result = (application as PhoneCompanionApplication).container.bluetoothSyncManager.sendRemoteInput(
-                        intent.getStringExtra(EXTRA_URL) ?: "https://example.com/feed.xml")
-                    return@runCatching "Bluetooth remote input complete: ${result.deviceName}"
-                }
-                require(action == BluetoothSyncProtocol.ACTION_PING) { "资料动作必须使用账号同步入口" }
-                val request = buildRequest(action, typeName)
                 val container = (application as PhoneCompanionApplication).container
-                val exchange = withContext(Dispatchers.IO) {
-                    PhoneBluetoothSyncClient(
-                        context = applicationContext,
-                        debugLog = container.bluetoothDebugLog
-                    ).exchange(
-                        request = request,
-                        deviceAddress = deviceAddress,
-                        deviceNameHint = deviceNameHint
-                    )
-                }
-                val importedCount = importSavedItemsIfNeeded(action, typeName, exchange.response)
-                buildString {
-                    appendLine("Bluetooth sync debug complete")
-                    appendLine("device=${exchange.deviceName} ${exchange.deviceAddress}")
-                    appendLine("request=${exchange.request}")
-                    appendLine("response=${exchange.response}")
-                    if (importedCount != null) {
-                        appendLine("importedCount=$importedCount")
+                runDebugBluetoothSyncAction(container.bluetoothSyncManager, action, PhoneSavedItemType.valueOf(typeName),
+                    intent.getStringExtra(EXTRA_URL) ?: "https://example.com/feed.xml", deviceAddress) { request ->
+                    withContext(Dispatchers.IO) {
+                        PhoneBluetoothSyncClient(applicationContext, container.bluetoothDebugLog).exchange(
+                            request = request, deviceAddress = deviceAddress, deviceNameHint = deviceNameHint)
                     }
                 }
             }.onSuccess { message ->
@@ -107,44 +68,6 @@ class DebugBluetoothSyncActivity : ComponentActivity() {
                 statusView.text = message
             }
         }
-    }
-
-    private fun buildRequest(action: String, typeName: String): JSONObject {
-        return JSONObject().apply {
-            put("version", 1)
-            put("action", action)
-            put("nonce", System.currentTimeMillis().toString())
-            when (action) {
-                BluetoothSyncProtocol.ACTION_REMOTE_INPUT -> {
-                    put(
-                        "url",
-                        intent.getStringExtra(EXTRA_URL)
-                            ?: "https://example.com/feed.xml"
-                    )
-                }
-
-                BluetoothSyncProtocol.ACTION_PULL_SAVED_ITEMS -> {
-                    put("type", typeName)
-                }
-            }
-        }
-    }
-
-    private suspend fun importSavedItemsIfNeeded(
-        action: String,
-        typeName: String,
-        response: JSONObject
-    ): Int? {
-        if (action != BluetoothSyncProtocol.ACTION_PULL_SAVED_ITEMS) return null
-        require(response.optBoolean("success")) {
-            response.optString("message").ifBlank { "手表返回同步失败" }
-        }
-        val type = PhoneSavedItemType.valueOf(typeName)
-        val items = response.optJSONArray("items") ?: JSONArray()
-        return (application as PhoneCompanionApplication)
-            .container
-            .repository
-            .replaceSavedItems(type, items)
     }
 
     private fun missingBluetoothPermission(): String? {

@@ -64,4 +64,39 @@ class SameAccountReauthenticationTest {
         } finally {server.shutdown()}
     }
 
+    @Test fun pausedColdSessionPreservesExpiryAndBlocksAllAuthenticationRequests()=runBlocking<Unit>{
+        seed();repo.beginSameAccountReauthentication()
+        val reopened=EncryptedAccountSessionStore(context).also { ReflectionHelpers.setField(it,"prefsRef",prefs) }
+        val paused=reopened.load()!!
+        assertEquals(Long.MAX_VALUE,paused.expiresAtMillis);assertFalse(paused.isExpired)
+        assertTrue(paused.authenticationPaused);assertFalse(paused.isUsableForAuthentication)
+        val server=okhttp3.mockwebserver.MockWebServer();server.start()
+        try {
+            val env=environment.copy(backendBaseUrl=server.url("/").toString().trimEnd('/'))
+            assertTrue(runCatching{repo.appAccessStatus()}.isFailure)
+            assertTrue(runCatching{com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient(env).bootstrap(paused)}.isFailure)
+            val client=PhoneAccountClient(env,LicenseDeviceIdentity(context))
+            assertEquals("登录已过期，请重新登录",runCatching{client.issueWatchDeviceToken(paused,"phone","watch")}.exceptionOrNull()?.message)
+            assertEquals(0,server.requestCount);assertArrayEquals(root,keys.getAccountKey("owner",1))
+        } finally {server.shutdown()}
+    }
+    @Test fun pausedLogoutQueuesOriginalServerValidTokenWhenServerUnavailable()=runBlocking<Unit>{
+        seed();repo.beginSameAccountReauthentication()
+        val server=okhttp3.mockwebserver.MockWebServer();server.start()
+        try {
+            try { androidx.work.WorkManager.getInstance(context) } catch (_:IllegalStateException) {
+                val held=java.util.concurrent.Executor { }
+                androidx.work.WorkManager.initialize(context,androidx.work.Configuration.Builder().setExecutor(held).setTaskExecutor(held).build())
+            }
+            server.enqueue(okhttp3.mockwebserver.MockResponse().setResponseCode(503).setBody("{}"))
+            val env=environment.copy(backendBaseUrl=server.url("/").toString().trimEnd('/'))
+            val offline=PhoneAccountRepository(env,store,PhoneInstallationIdentity(context),PhoneAccountClient(env,LicenseDeviceIdentity(context)),"phone")
+            offline.onClearCloudState=repo.onClearCloudState;offline.logout()
+            val pending=store.pendingRevocation()!!
+            assertEquals(Long.MAX_VALUE,pending.expiresAtMillis);assertFalse(pending.isExpired)
+            assertEquals("synthetic-old",pending.accessToken);assertNull(offline.session.value)
+            assertFalse(keys.hasAccountKey("owner"));assertEquals(1,server.requestCount)
+        } finally {server.shutdown()}
+    }
+
 }

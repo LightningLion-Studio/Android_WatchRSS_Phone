@@ -120,7 +120,7 @@ class Hotfix133RadioDeviceTest {
             java.io.File(context.getExternalFilesDir(null),"hotfix133-radio.json").writeText(receipt.toString())
         } finally {
             runCatching { app.javaClass.getDeclaredMethod("stopWatchBaseStation").apply { isAccessible=true }.invoke(app) }
-            scope.cancel();db.close();server.shutdown();store.clear();accessStore.clear()
+            scope.coroutineContext[kotlinx.coroutines.Job]!!.cancelAndJoin();db.close();server.shutdown();store.clear();accessStore.clear()
         }
     }
 }

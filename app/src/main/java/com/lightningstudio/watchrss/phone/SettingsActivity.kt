@@ -512,7 +512,7 @@ internal fun ReaderSettingsHost(
                 val previewAddress = device.readerPreviewAddress
                 watchPreviewDeviceAddress = previewAddress
                 watchPreviewUpdates = updates
-                val job = scope.launch preview@{
+                val job = scope.launch(com.lightningstudio.watchrss.phone.connection.bluetooth.AccountRepairBudget()) preview@{
                     var connectionFailures = 0
                     while (!watchPreviewStopRequested.get() && watchPreviewUpdates === updates) {
                         val attemptSessionId = UUID.randomUUID().toString()

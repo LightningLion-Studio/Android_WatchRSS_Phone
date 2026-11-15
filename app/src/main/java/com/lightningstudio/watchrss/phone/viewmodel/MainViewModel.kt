@@ -884,6 +884,7 @@ class MainViewModel(
             runCatching { bluetoothSyncManager.requirePhoneLogin() }.onFailure {
                 handleAccountSyncFailure(it)
                 return@launch
+            }
             val startMessage = when (mode) {
                 LibrarySyncMode.PHONE_TO_WATCH_REPLACE -> "正在准备让手机覆盖手表"
                 LibrarySyncMode.WATCH_TO_PHONE_REPLACE -> "正在准备让手表覆盖手机"

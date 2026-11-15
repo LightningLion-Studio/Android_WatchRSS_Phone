@@ -38,6 +38,7 @@ class Hotfix133AccountDeviceTest {
     private var failClear=false
     private var unbound=false
     private var failFirstCursor=false
+    private var rejectLibraryPhase:String?=null
     private var rejectCount=0
     private var cursorCount=0
     private var accountCount=0
@@ -53,7 +54,7 @@ class Hotfix133AccountDeviceTest {
                 JSONObject().put("action","syncAccount")
             }
         })
-    @After fun close(){scope.cancel();db.close()}
+    @After fun close()=runBlocking {scope.coroutineContext[Job]!!.cancelAndJoin();db.close()}
     private fun answer(action:String,phase:String="")=JSONObject().put("success",true).put("action",action).put("phase",phase).put("version",14).put("deviceId","watch")
     private fun session(pending:Boolean=false):PhoneSyncSession {
         val incoming=ArrayDeque<Byte>()
@@ -65,7 +66,7 @@ class Hotfix133AccountDeviceTest {
             val q=BluetoothSyncProtocol.readFrame(ByteArrayInputStream(toByteArray()));reset();frames+=q
             val action=q.optString("action");val phase=q.optString("phase")
             if(action=="ack")return
-            val a=when(action){
+            val a=if(action=="syncLibrary" && phase==rejectLibraryPhase) answer(action,phase).put("success",false).put("message","请重新连接并同步账号后再同步资料") else when(action){
                 "syncAccount"->{accountCount++;answer(action).put("boundUserId","owner")}
                 "syncLibrary"->when(phase){
                     "probe"->answer(action,phase).put("supportsPersistentSession",true).put("persistentSessionAccepted",true).apply { if(unbound)put("account",JSONObject().put("bound",false)) }
@@ -136,7 +137,9 @@ class Hotfix133AccountDeviceTest {
         assertEquals(1,refreshes);assertEquals(0,accountCount);assertEquals(0,cursorCount);assertEquals(0,reconnects)
     }}
     @Test fun expiredOrMissingLoginStopsBeforeAnyRequestOnBothRoutes()=runBlocking<Unit>{login=false;runBoth {
-        assertTrue(runCatching{manager.syncAll(device,reusableSession=session())}.exceptionOrNull() is PhoneLoginRequired)
+        val borrowed=session()
+        assertTrue(runCatching{manager.syncAll(device,reusableSession=borrowed)}.exceptionOrNull() is PhoneLoginRequired)
+        assertNull(borrowed.transport)
         assertTrue(frames.isEmpty())
         assertEquals(0,accountCount);assertEquals(0,cursorCount)
     }}
@@ -256,5 +259,44 @@ class Hotfix133AccountDeviceTest {
         assertEquals(listOf("syncLibrary","syncAccount","syncLibrary"),actions)
         assertEquals(1,accountCount);assertEquals(1,cursorCount)
     }}
+
+    @Test fun debugNonLibraryActionsUseTheSameGateOnBothRoutes()=runBlocking<Unit>{runBoth {
+        for(action in listOf("remoteInput","pullSavedItems")) {
+            frames.clear();val before=accountCount
+            com.lightningstudio.watchrss.phone.runDebugBluetoothSyncAction(manager,action,com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType.FAVORITE,
+                "https://example.invalid/feed",device.address){error("data must not use raw diagnostic")}
+            assertEquals(before+1,accountCount)
+            assertTrue(frames.indexOfFirst{it.optString("action")=="syncAccount"}<frames.indexOfFirst{it.optString("action")==action})
+        }
+    }}
+    @Test fun invalidLoginAndUnknownDebugActionsCannotReachRawTransport()=runBlocking<Unit>{login=false;runBoth {
+        var rawCalls=0
+        for(action in listOf("remoteInput","pullSavedItems","syncLibrary","syncNotes")) {
+            assertNotNull(runCatching { com.lightningstudio.watchrss.phone.runDebugBluetoothSyncAction(manager,action,
+                com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType.FAVORITE,"https://example.invalid/feed",device.address){rawCalls++;error("must not reach raw transport")} }.exceptionOrNull())
+        }
+        assertEquals(0,rawCalls)
+        assertTrue(frames.isEmpty())
+    }}
+
+
+    @Test fun disconnectedLibraryNeverTransparentlyReplaysOnANewConnection()=runBlocking<Unit>{runBoth {
+        failFirstCursor=true
+        val failure=runCatching{manager.syncAll(device,reusableSession=session())}.exceptionOrNull()
+        assertTrue(failure.toString(),failure is IOException)
+        assertEquals(0,reconnects);assertEquals(1,accountCount)
+        assertEquals(1,frames.count{it.optString("action")=="syncLibrary" && it.optString("phase")=="cursor"})
+    }}
+    @Test fun manifestAndArticleRefusalsStopBeforeAppliedAckOnBothRoutes()=runBlocking<Unit>{
+        for(phase in listOf("manifest","articles")) {rejectLibraryPhase=phase;runBoth {
+            val failure=runCatching{manager.syncAll(device,reusableSession=session())}.exceptionOrNull()
+            assertTrue(failure.toString(),failure is WatchAccountSyncRequired)
+            assertEquals(2,accountCount);assertEquals(1,reconnects)
+            // Only the two successful account responses may receive an applied ACK.
+            assertEquals(2,frames.count{it.optString("action")=="ack" && it.optBoolean("success") && it.optBoolean("applied")})
+            assertEquals(2,frames.count{it.optString("action")=="syncLibrary" && it.optString("phase")==phase})
+            if(phase=="manifest") assertFalse(frames.any{it.optString("action")=="syncLibrary" && it.optString("phase")=="articles"})
+        }}
+    }
 
 }

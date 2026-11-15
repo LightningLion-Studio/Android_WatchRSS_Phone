@@ -301,4 +301,43 @@ class AccountSyncGateSessionTest {
         }}
     }
 
+    // RVHOTFIX131-01: retain the two independent ReviewHotfix131ExtraDataProbeTest counterexamples.
+    private suspend fun clearThroughProductionViewModel(expected:com.lightningstudio.watchrss.phone.PhoneSyncAccountPrompt) {
+        val env=com.lightningstudio.watchrss.phone.account.AccountEnvironment(backendBaseUrl="http://127.0.0.1:1",supabaseAnonKey="synthetic")
+        val account=com.lightningstudio.watchrss.phone.account.PhoneAccountRepository(env,
+            com.lightningstudio.watchrss.phone.account.EncryptedAccountSessionStore(context),
+            com.lightningstudio.watchrss.phone.account.PhoneInstallationIdentity(context),
+            com.lightningstudio.watchrss.phone.account.PhoneAccountClient(env,com.lightningstudio.watchrss.phone.account.LicenseDeviceIdentity(context)),"phone")
+        val telemetry=com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry(context,env,
+            com.lightningstudio.watchrss.phone.account.PhoneInstallationIdentity(context),"phone",account,scope)
+        val reader=ReaderPresetRepository(context,db,db.readerPresetDao(),"phone",scope)
+        val vm=com.lightningstudio.watchrss.phone.viewmodel.MainViewModel(repo,manager,PhoneLlmTokenUsageRepository(db.llmTokenUsageDao()),telemetry,
+            com.lightningstudio.watchrss.phone.data.backup.WatchRssBackupService(context,db,repo,reader,"phone"),
+            com.lightningstudio.watchrss.phone.tips.TipManager(emptyList(),com.lightningstudio.watchrss.phone.tips.TipStateStore(context),com.lightningstudio.watchrss.phone.tips.TipEventStore(context)))
+        val lifecycle=androidx.lifecycle.ViewModelStore().apply{put("review",vm)}
+        val state=org.robolectric.util.ReflectionHelpers.getField<kotlinx.coroutines.flow.MutableStateFlow<com.lightningstudio.watchrss.phone.viewmodel.MainUiState>>(vm,"sessionState")
+        try {
+            vm.clearWatchLibraryByBluetooth()
+            val deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            do {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                if(System.nanoTime()>deadline)error("clear ViewModel state timeout")
+                Thread.sleep(5)
+            }while(state.value.isBusy || (state.value.message==null && state.value.accountPrompt==null))
+            assertFalse(frames.any{it.optString("action")=="clearLibrary"})
+            println("route=$transport busy="+state.value.isBusy+" prompt="+state.value.accountPrompt+" status="+state.value.syncStatusMessage+" error="+state.value.syncStatusError)
+            assertEquals("clear-library account failure must expose the production reauthentication prompt",expected,state.value.accountPrompt)
+            assertNull("failed clear must not retain an in-progress status",state.value.syncStatusMessage)
+            assertNull("failed clear must not retain an in-progress message",state.value.message)
+        }finally{lifecycle.clear()}
+    }
+    @Test fun reviewClearDeviceVerificationUsesTheProductionAccountPrompt()=runBlocking<Unit>{
+        issueFailure=com.lightningstudio.watchrss.phone.account.PhoneDeviceVerificationRequired()
+        runBoth{clearThroughProductionViewModel(com.lightningstudio.watchrss.phone.PhoneSyncAccountPrompt.DEVICE)}
+    }
+    @Test fun reviewClearMissingLoginUsesTheProductionLoginPrompt()=runBlocking<Unit>{
+        login=false
+        runBoth{clearThroughProductionViewModel(com.lightningstudio.watchrss.phone.PhoneSyncAccountPrompt.LOGIN)}
+    }
+
 }

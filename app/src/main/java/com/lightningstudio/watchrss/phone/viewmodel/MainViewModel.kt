@@ -999,12 +999,16 @@ class MainViewModel(
     fun clearWatchLibraryByBluetooth() {
         viewModelScope.launch {
             if (sessionState.value.isBusy) return@launch
+            runCatching { bluetoothSyncManager.requirePhoneLogin() }.onFailure {
+                handleAccountSyncFailure(it)
+                return@launch
+            }
             sessionState.value = sessionState.value.copy(isBusy = true, message = "正在查找手表…")
             val targets = runCatching {
                 bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress)
             }.getOrElse { throwable ->
-                sessionState.value = sessionState.value.copy(isBusy = false, message = null)
-                _toastEvent.tryEmit(throwable.message ?: "查找手表失败")
+                sessionState.value = sessionState.value.copy(isBusy = false, message = null, syncStatusMessage = null)
+                if (!handleAccountSyncFailure(throwable)) _toastEvent.tryEmit(throwable.message ?: "查找手表失败")
                 return@launch
             }
             when (targets.devices.size) {
@@ -1267,7 +1271,10 @@ class MainViewModel(
                 sessionState.value = sessionState.value.copy(message = message, syncStatusMessage = message)
                 _toastEvent.tryEmit(message)
             }
-            .onFailure { throwable -> _toastEvent.tryEmit(throwable.message ?: "清空手表资料库失败") }
+            .onFailure { throwable ->
+                sessionState.value = sessionState.value.copy(message = null, syncStatusMessage = null)
+                if (!handleAccountSyncFailure(throwable)) _toastEvent.tryEmit(throwable.message ?: "清空手表资料库失败")
+            }
         sessionState.value = sessionState.value.copy(isBusy = false)
     }
 

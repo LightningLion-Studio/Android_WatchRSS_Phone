@@ -31,6 +31,7 @@ import org.robolectric.util.ReflectionHelpers
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class PhoneDeviceReauthenticationFlowTest {
     @get:Rule val compose=createComposeRule()
+    private val restoration=androidx.compose.ui.test.junit4.StateRestorationTester(compose)
     private val context=RuntimeEnvironment.getApplication()
     private val scope=CoroutineScope(SupervisorJob()+Dispatchers.Default)
     private val server=MockWebServer()
@@ -96,7 +97,7 @@ class PhoneDeviceReauthenticationFlowTest {
     private fun openDeviceLogin() {
         var showAccount by mutableStateOf(false)
         var force=false
-        compose.setContent {
+        restoration.setContent {
             WatchRssPhoneTheme {
                 if (!showAccount) PhoneDeviceVerificationPrompt({})
                 else AccountScreen(repo,cloud,emptyList(),telemetry,{},
@@ -188,6 +189,74 @@ class PhoneDeviceReauthenticationFlowTest {
         assertEquals(0,completed);assertCustodyPreserved()
         claimStatus=200
         signIn();assertReady()
+    }
+    /** Regression from the independent r4 StateRestorationTester probe. */
+    @Test fun reviewTemporaryFailureKeepsValidAccountAndRetryAfterSavedStateRestore() = restoreAuthorizationRetry(503)
+    @Test fun deviceVerificationRetrySurvivesSavedStateRestore() = restoreAuthorizationRetry(403)
+    @Test fun rateLimitRetrySurvivesSavedStateRestore() = restoreAuthorizationRetry(429)
+    private fun restoreAuthorizationRetry(status:Int) {
+        claimStatus=status;openDeviceLogin();signIn()
+        compose.waitUntil(15000){compose.onAllNodesWithText("重试设备授权").fetchSemanticsNodes().isNotEmpty()}
+        assertTrue(repo.hasUsableSession);assertCustodyPreserved()
+        val beforeRequests=requests.count{it.endsWith("/phone-authorizations/claim")}
+        repeat(2) {
+            restoration.emulateSavedInstanceStateRestore()
+            compose.waitForIdle()
+            assertTrue("screen recreation must not pause the account again after a temporary device failure",repo.hasUsableSession)
+            assertNull(repo.reauthenticationOwner.value)
+            compose.onNodeWithText("手机号").assertDoesNotExist()
+            compose.onNodeWithText("重试设备授权").performScrollTo().assertIsEnabled()
+            compose.onNodeWithText(if(status==403) "手机设备身份需要验证，请重试设备授权" else "账号服务暂时不可用，请稍后重试").assertExists()
+            assertEquals(beforeRequests,requests.count{it.endsWith("/phone-authorizations/claim")})
+            assertEquals(0,completed);assertCustodyPreserved()
+        }
+        captureEvidence("fix4-claim$status-restored-host.png")
+        claimStatus=200
+        compose.onNodeWithText("重试设备授权").performClick();assertReady()
+        assertEquals(1,loginCount)
+        assertEquals(beforeRequests+1,requests.count{it.endsWith("/phone-authorizations/claim")})
+    }
+    @Test fun completedAuthenticationSurvivesSavedStateRestoreWithoutConsumingForceAgain() {
+        openDeviceLogin();signIn();assertReady()
+        val beforeRequests=requests.count{it.endsWith("/phone-authorizations/claim")}
+        repeat(2) {
+            restoration.emulateSavedInstanceStateRestore()
+            compose.waitForIdle()
+            assertReady()
+            assertEquals(beforeRequests,requests.count{it.endsWith("/phone-authorizations/claim")})
+        }
+        assertEquals(1,loginCount)
+    }
+    @Test fun accountReauthenticationFormAndReasonSurviveSavedStateRestore() {
+        claimStatus=401;openDeviceLogin();signIn()
+        compose.waitUntil(15000){repo.reauthenticationOwner.value=="owner" && requests.any{it.endsWith("/phone-authorizations/claim")}}
+        restoration.emulateSavedInstanceStateRestore()
+        compose.waitForIdle()
+        compose.onNodeWithText("手机号").assertExists()
+        compose.onNodeWithText("登录已失效，请重新登录").assertExists()
+        assertEquals("owner",repo.reauthenticationOwner.value)
+        assertEquals(0,completed);assertCustodyPreserved()
+        // Fields and factor state intentionally reset; start a fresh authentication transaction.
+        claimStatus=200
+        compose.onNodeWithText("手机号").performTextInput("13800138000")
+        compose.onNodeWithContentDescription("切换登录方式").performClick()
+        compose.onNodeWithText("通行密钥",useUnmergedTree=true).performClick()
+        signIn();assertReady()
+        assertEquals(2,requests.count{it.endsWith("/account/login/start")})
+    }
+    @Test fun restoredAuthorizationRetryIsNotAppliedToAnotherAccount() {
+        claimStatus=503;openDeviceLogin();signIn()
+        compose.waitUntil(15000){compose.onAllNodesWithText("重试设备授权").fetchSemanticsNodes().isNotEmpty()}
+        val beforeRequests=requests.count{it.endsWith("/phone-authorizations/claim")}
+        // Simulate a session replaced outside this screen; repository switch cleanup has its own tests.
+        runBlocking {store.save(PhoneAccountSession("other-owner","other-phone","other-account","",Long.MAX_VALUE))}
+        restoration.emulateSavedInstanceStateRestore()
+        compose.waitForIdle()
+        compose.onNodeWithText("重试设备授权").assertDoesNotExist()
+        compose.onNodeWithText("手机号").assertDoesNotExist()
+        assertTrue(repo.hasUsableSession);assertNull(repo.reauthenticationOwner.value)
+        assertEquals(beforeRequests,requests.count{it.endsWith("/phone-authorizations/claim")})
+        assertEquals(0,completed)
     }
     private fun captureEvidence(name:String) {
         System.getenv("WRSS_ACCTGATE_EVIDENCE")?.let { path ->

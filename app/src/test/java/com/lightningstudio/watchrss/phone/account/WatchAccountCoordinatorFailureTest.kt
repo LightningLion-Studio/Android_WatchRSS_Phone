@@ -160,4 +160,27 @@ class WatchAccountCoordinatorFailureTest {
         assertTrue(claimFailure(401,503) is com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired)
     }
 
+    @Test fun integratedCloudAndWatchRefreshShareRateLimitBackoffWithoutLosingTypedDelay()=runBlocking<Unit>{
+        val now=System.currentTimeMillis()
+        appStore.save(AppAuthorization("old",now+300000,validLease(),now+3600000,"release",AppAccessSummary(deviceStatus="authorized"),now))
+        server.enqueue(MockResponse().setResponseCode(429).setHeader("Retry-After","120").setBody("{}"))
+        assertTrue(coordinator.refreshWatchDeviceSession("old","owner") is WatchAccountRefreshResult.TemporaryFailure)
+        val watch=coordinator.refreshWatchDeviceSession("old","owner") as WatchAccountRefreshResult.TemporaryFailure
+        assertTrue(watch.retryAfterMillis!! in 119000L..120000L)
+        val cloud=runCatching{coordinator.refreshRejectedDeviceSession("old","owner")}.exceptionOrNull() as PhoneAccountTemporarilyUnavailable
+        assertTrue(cloud.retryAfterMillis!! in 119000L..120000L)
+        assertEquals(1,server.requestCount);custodyUnchanged()
+    }
+    @Test fun integratedWatchRefreshWaitsForAnInFlightCloudSessionLease()=runBlocking<Unit>{
+        val now=System.currentTimeMillis()
+        appStore.save(AppAuthorization("old",now+300000,validLease(),now+3600000,"release",AppAccessSummary(deviceStatus="authorized"),now))
+        val entered=CompletableDeferred<Unit>();val release=CompletableDeferred<Unit>()
+        val reader=scope.async{coordinator.withDeviceSession("owner"){token->assertEquals("old",token);entered.complete(Unit);release.await()}}
+        entered.await();server.enqueue(MockResponse().setResponseCode(503).setBody("{}"))
+        val refresh=scope.async{coordinator.refreshWatchDeviceSession("old","owner")}
+        delay(80);assertEquals(0,server.requestCount)
+        release.complete(Unit);withTimeout(3000){reader.await();assertTrue(refresh.await() is WatchAccountRefreshResult.TemporaryFailure)}
+        assertEquals(1,server.requestCount);custodyUnchanged()
+    }
+
 }

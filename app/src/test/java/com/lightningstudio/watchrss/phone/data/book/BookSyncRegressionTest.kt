@@ -289,6 +289,7 @@ class BookSyncRegressionTest {
                 .put("supportsReaderPresets",false).put("supportsNoteManifestV2",false).put("supportsNoteAssetInventory",false).put("supportsBookSyncV1",modern)
             val frames=buildList {
                 add(ok("syncLibrary").put("supportsBookSyncV1",modern))
+                add(ok("syncAccount").put("boundUserId","owner"))
                 if(modern){add(reply("manifest").put("books",JSONArray().put(copy(state).put("contentAvailable",true))).put("missingBookIds",JSONArray()));add(readingReply())}
                 add(ok("syncLibrary","cursor"));add(manifest);add(ok("syncLibrary","complete").put("articles",JSONArray()))
                 add(ok("syncNotes").put("notes",JSONArray()));add(ok("syncLlmTokenUsage").put("records",JSONArray()));add(BluetoothSyncProtocol.buildSessionControlResponse(14,"complete"))
@@ -298,9 +299,12 @@ class BookSyncRegressionTest {
             val device=PhoneBluetoothWatchDevice("watch","11:22:33:44:55:66",1,"watch",supportsPersistentSession=true)
             val session=PhoneSyncSession(PhoneBluetoothSyncClient(context,log),device,"phone",PhoneSyncSession.Transport(ByteArrayInputStream(input.toByteArray()),output,"test",false,{}),true,false,false)
             val manager=PhoneBluetoothSyncManager(context,f.repo,com.lightningstudio.watchrss.phone.data.note.NoteRepository(f.db.noteDao(),"phone"),f.reader,
-                PhoneLlmTokenUsageRepository(f.db.llmTokenUsageDao()),"phone",log)
+                PhoneLlmTokenUsageRepository(f.db.llmTokenUsageDao()),"phone",log,
+                canSyncAccount={true},currentPhoneUserId={"owner"},buildAccountSyncRequest={_,_,_->JSONObject().put("action","syncAccount")})
             manager.syncAll(device,reusableSession=session)
             val wire=ByteArrayInputStream(output.toByteArray());val sent=buildList{while(wire.available()>0)add(BluetoothSyncProtocol.readFrame(wire))}
+            assertEquals(1,sent.count{it.optString("action")=="syncAccount"})
+            assertTrue(sent.indexOfFirst{it.optString("action")=="syncAccount"}<sent.indexOfFirst{it.optString("action")=="syncLibrary"&&it.optString("phase")=="manifest"})
             val library=sent.single{it.optString("action")=="syncLibrary"&&it.optString("phase")=="manifest"}
             assertEquals(if(modern)0 else 3,library.getJSONArray("articleManifest").length())
             assertEquals(if(modern)1 else 0,sent.count{it.optString("action")=="syncBooks"&&it.optString("phase")=="manifest"})

@@ -88,7 +88,7 @@ class AppAccessCoordinator(
         return withWatchAccountDeviceRefresh(
             deviceToken = { deviceAccessToken },
             refresh = { rejected -> refreshWatchDeviceSession(rejected, owner) },
-            build = { accountRepository.buildAccountSyncRequest(watch, install, name) }
+            build = { withDeviceSession(owner) { accountRepository.buildAccountSyncRequest(watch, install, name) } }
         )
     }
 

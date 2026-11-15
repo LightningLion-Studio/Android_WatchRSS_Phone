@@ -4,6 +4,7 @@ import android.content.Context
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -15,13 +16,24 @@ import org.robolectric.util.ReflectionHelpers
 @RunWith(RobolectricTestRunner::class)
 @Config(application=android.app.Application::class,manifest=Config.NONE,sdk=[35])
 class SameAccountReauthenticationTest {
+    private var previousManagers=emptyMap<java.lang.reflect.Field,Any?>()
+    private var isolatedManager:androidx.work.impl.WorkManagerImpl?=null
     @Before fun isolateRevocationWork() {
-        try { androidx.work.WorkManager.getInstance(RuntimeEnvironment.getApplication()) }
-        catch (_:IllegalStateException) {
-            androidx.work.WorkManager.initialize(RuntimeEnvironment.getApplication(), androidx.work.Configuration.Builder()
-                .setExecutor { /* Background execution is outside this persistence test. */ }
-                .setTaskExecutor { /* Keep the queued token under this test's custody. */ }.build())
+        val fields=listOf("sDefaultInstance","sDelegatedInstance").map{name->androidx.work.impl.WorkManagerImpl::class.java.getDeclaredField(name).apply{isAccessible=true}}
+        previousManagers=fields.associateWith{it.get(null)}
+        fields.forEach{it.set(null,null)}
+        androidx.work.WorkManager.initialize(RuntimeEnvironment.getApplication(), androidx.work.Configuration.Builder()
+            .setExecutor { /* Background execution is outside this persistence test. */ }
+            .setTaskExecutor { /* Keep the queued token under this test's custody. */ }.build())
+        isolatedManager=androidx.work.impl.WorkManagerImpl.getInstance(RuntimeEnvironment.getApplication())
+    }
+    @After fun restoreRevocationWork() {
+        isolatedManager?.let{manager->
+            val background=ReflectionHelpers.getField<kotlinx.coroutines.CoroutineScope>(manager,"mWorkManagerScope")
+            background.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+            manager.workDatabase.close()
         }
+        previousManagers.forEach{(field,value)->field.set(null,value)}
     }
 
     private val context=RuntimeEnvironment.getApplication()

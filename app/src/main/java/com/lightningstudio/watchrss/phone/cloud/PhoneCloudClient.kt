@@ -155,7 +155,7 @@ class PhoneCloudClient(
                     put("credentialEnvelopes", false)
                 })
             }, expectedEpoch
-        ).close()
+        ).closeOnIo()
     }
 
     /** R28: supplement a server-confirmed watch; omit displayName/capabilities, never create its identity. */
@@ -164,7 +164,7 @@ class PhoneCloudClient(
         require(watch.revokedAt == null && !watch.watchSelfRegisteredAt.isNullOrBlank()) { "手表尚未自行登记" }
         post(session, "/functions/v1/cloud/devices/register", JSONObject().put("deviceId", watch.deviceId)
             .put("platform", watch.platform).put("publicKeySpki", watch.publicKeySpki.base64Bytes().base64())
-            .put("keyVersion", watch.keyVersion).put("attestation", attestation).put("attestationKeyVersion", attestationKeyVersion), expectedEpoch).close()
+            .put("keyVersion", watch.keyVersion).put("attestation", attestation).put("attestationKeyVersion", attestationKeyVersion), expectedEpoch).closeOnIo()
     }
 
     suspend fun storeRecoveryEnvelope(
@@ -274,7 +274,7 @@ class PhoneCloudClient(
         require(target.signedUrl == url) { "云上传地址不匹配" }
         val attempt = CloudUploadAttempt(id, onUploadTransportEvent)
         try {
-            request(session, Request.Builder().url(url).tag(CloudR48WriteRequired::class.java,CloudR48WriteRequired(target.requiresR48Write)).put(bytes.toRequestBody("application/octet-stream".toMediaType())), expectedEpoch, attempt).close()
+            request(session, Request.Builder().url(url).tag(CloudR48WriteRequired::class.java,CloudR48WriteRequired(target.requiresR48Write)).put(bytes.toRequestBody("application/octet-stream".toMediaType())), expectedEpoch, attempt).closeOnIo()
         } catch (error: IOException) {
             // Keep the existing service retry budget. Only its next PUT changes transport;
             // control requests, immutable bytes and both content fences remain unchanged.
@@ -304,7 +304,7 @@ class PhoneCloudClient(
                     )
                 )
             }, expectedEpoch,requiresR48Write=migrationContext!=null || snapshot.manifest.requiresR48Write()
-        ).close()
+        ).closeOnIo()
     }
 
     suspend fun snapshotHeads(session: PhoneAccountSession): List<CloudSnapshotHead> =
@@ -370,7 +370,7 @@ class PhoneCloudClient(
                 put("deviceId", deviceId)
                 put("result", result)
             }, expectedEpoch
-        ).close()
+        ).closeOnIo()
     }
 
     suspend fun revokeDevice(session: PhoneAccountSession, deviceId: String, expectedEpoch: String? = knownEpoch(session)) {
@@ -378,7 +378,7 @@ class PhoneCloudClient(
             session,
             "/functions/v1/cloud/devices/$deviceId/revoke",
             JSONObject(), expectedEpoch
-        ).close()
+        ).closeOnIo()
     }
 
     suspend fun resolveRssSource(session: PhoneAccountSession, sourceUrl: String): String =
@@ -432,7 +432,7 @@ class PhoneCloudClient(
             Request.Builder()
                 .url(environment.backendBaseUrl + "/functions/v1/cloud/snapshots/$snapshotId")
                 .delete(), expectedEpoch
-        ).close()
+        ).closeOnIo()
     }
 
     suspend fun resetLibrary(session: PhoneAccountSession, expectedEpoch: String? = knownEpoch(session)): CloudLibraryResetResult =
@@ -498,7 +498,7 @@ class PhoneCloudClient(
                 put("ephemeralPublicKeySpki", envelope.ephemeralPublicKeySpki ?: JSONObject.NULL)
                 put("createdByDeviceId", createdByDeviceId)
             }, expectedEpoch
-        ).close()
+        ).closeOnIo()
     }
 
     private suspend fun post(
@@ -642,9 +642,16 @@ class PhoneCloudClient(
         throw CloudHttpException(code, detail.ifBlank { message })
     }
 
-    private fun okhttp3.Response.jsonBody(): JSONObject {
+    // request() returns after headers; a delayed/chunked body can still read the socket.
+    // Pairing and account screens call this client from Main, so consume on IO as well.
+    private suspend fun okhttp3.Response.jsonBody(): JSONObject = withContext(Dispatchers.IO) {
         val text = body?.string().orEmpty()
-        return if (text.isBlank()) JSONObject() else JSONObject(text)
+        if (text.isBlank()) JSONObject() else JSONObject(text)
+    }
+
+    // Closing an unread success body can discard socket bytes to reuse the connection.
+    private suspend fun okhttp3.Response.closeOnIo() = withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
+        close()
     }
 
     private fun JSONObject.memberState() = CloudMemberState(

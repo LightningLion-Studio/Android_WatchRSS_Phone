@@ -18,6 +18,7 @@ import com.lightningstudio.watchrss.phone.data.note.NoteFolderEntity
 
 @Database(
     entities = [
+        com.lightningstudio.watchrss.phone.libraryresume.ResumeRecord::class,
         PhoneSavedItemEntity::class,
         PhoneArticleEntity::class,
         PhoneRssSourceEntity::class,
@@ -49,10 +50,11 @@ import com.lightningstudio.watchrss.phone.data.note.NoteFolderEntity
         com.lightningstudio.watchrss.phone.data.book.BookReadingPeerEntity::class,
         com.lightningstudio.watchrss.phone.data.book.BookCaptureMetaEntity::class
     ],
-    version = 19,
+    version = 20,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
+    abstract fun resumeDao():com.lightningstudio.watchrss.phone.libraryresume.ResumeDao
     abstract fun articleProvenanceDao():ArticleProvenanceDao
     abstract fun bookReadingDao():com.lightningstudio.watchrss.phone.data.book.BookReadingDao
     abstract fun bookDao():com.lightningstudio.watchrss.phone.data.book.BookDao
@@ -67,6 +69,11 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
     abstract fun llmTokenUsageDao(): PhoneLlmTokenUsageDao
 
     companion object {
+        val MIGRATION_19_20=object:Migration(19,20) {
+            override fun migrate(database:SupportSQLiteDatabase) {
+                database.execSQL("CREATE TABLE IF NOT EXISTS library_resume_records (scope TEXT NOT NULL, namespace TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(scope,namespace,id))")
+            }
+        }
         /** A pre-update trigger captures the old source once, before any legacy writer can replace it. */
         fun installArticleProvenanceWitnesses(db:SupportSQLiteDatabase) {
             val existing=db.query("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN ('article_provenance_freeze_insert','article_provenance_freeze_update')").use{it.moveToFirst();it.getInt(0)}

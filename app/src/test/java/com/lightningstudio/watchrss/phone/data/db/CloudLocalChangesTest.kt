@@ -26,7 +26,7 @@ class CloudLocalChangesTest {
     private fun open(name:String?=null,callback:Boolean=true)=
         (if(name==null)Room.inMemoryDatabaseBuilder(context,PhoneCompanionDatabase::class.java)
         else Room.databaseBuilder(context,PhoneCompanionDatabase::class.java,name))
-            .addMigrations(PhoneCompanionDatabase.MIGRATION_18_19)
+            .addMigrations(PhoneCompanionDatabase.MIGRATION_18_19,PhoneCompanionDatabase.MIGRATION_19_20)
             .apply{if(callback)addCallback(PhoneCompanionDatabase.ARTICLE_PROVENANCE_CALLBACK)}
             .allowMainThreadQueries().build().also{dbs+=it}
     private fun name()="fix5-cloud-counter-${System.nanoTime()}".also{names+=it}
@@ -107,7 +107,7 @@ class CloudLocalChangesTest {
         migrated.appMetaDao().set(AppMetaEntity("after-migration","changed"))
         migrated.syncChangeLogDao().deleteAll()
         assertTrue(after.sequence()>cp.localMaxSeq)
-        assertEquals(19,migrated.openHelper.readableDatabase.version)
+        assertEquals(20,migrated.openHelper.readableDatabase.version)
     }
 
     @Test fun cloudFlowObservesChangeEvenWhenSameTransactionDeletesBluetoothHistory()=runBlocking<Unit> {

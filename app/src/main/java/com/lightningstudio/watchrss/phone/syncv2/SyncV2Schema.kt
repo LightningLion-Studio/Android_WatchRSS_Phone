@@ -9,7 +9,7 @@ internal object SyncV2Schema {
     val domains = listOf(
         Domain("phone_articles", "article", "articleId"), Domain("phone_rss_sources", "source", "url"),
         Domain("imported_books", "book", "bookId"), Domain("imported_book_reading", "book-reading", "bookId || ':' || chapterIndex"),
-        Domain("notes", "note", "noteId"), Domain("note_folders", "folder", "folderId"), Domain("note_assets", "asset", "assetId")
+        Domain("notes", "note", "noteId"), Domain("note_folders", "folder", "folderId"), Domain("note_assets", "asset", "storageKey")
     )
     /** Remove the old P1 business triggers even when the projection gate is closed. */
     fun beforeBusinessOpen(db:SupportSQLiteDatabase) {

@@ -22,7 +22,7 @@ internal class SyncV2PhoneUiPort(private val product:SyncV2PhoneProduct,private 
     }
     internal fun refresh() {
         runtime.life.check();val gates=gates();val own=runtime.signingDeviceId()
-        if(!gates.historyRestore && !gates.choiceApply && !gates.noteSegments){_state.value=SyncV2UiState(ownDeviceId=own);return}
+        if(!gates.historyRestore && !gates.choiceApply && !gates.noteSegments){_state.value=SyncV2UiState(enabled=runtime.bodyResult.errors.isNotEmpty(),phase=if(runtime.bodyResult.errors.isEmpty())"idle"else"error",ownDeviceId=own,errorCode=runtime.bodyResult.errors.firstOrNull());return}
         val projection=runtime.projection;val body=projection.state().body
         val pending=runtime.actions.pendingChoice()
         val choice=pending?.let {
@@ -42,7 +42,7 @@ internal class SyncV2PhoneUiPort(private val product:SyncV2PhoneProduct,private 
             SyncV2UiState.RecoveryCopy(c.getString("copyId"),h.getLong("createdAtMillis"),h.getLong("expiresAtMillis"))
         }}
         val publication=body.optJSONObject("pendingAccountAction")?.let{SyncV2UiState.Publication("pending",it.optLong("createdAtMillis",0))}
-        _state.value=SyncV2UiState(true,if(choice!=null)"awaiting_choice"else"idle",runtime.lastSyncedAt,null,own,choice,notes,copies,
+        _state.value=SyncV2UiState(true,if(choice!=null)"awaiting_choice"else if(runtime.bodyResult.errors.isNotEmpty())"error"else"idle",runtime.lastSyncedAt,runtime.bodyResult.errors.firstOrNull(),own,choice,notes,copies,
             runtime.actions.keepDiscardedLocalChanges7Days(),gates,publication)
     }
     data class ChoiceItem(val title:String,val kind:String)
@@ -50,12 +50,12 @@ internal class SyncV2PhoneUiPort(private val product:SyncV2PhoneProduct,private 
         val localMore:Int,val cloudMore:Int,val canMerge:Boolean,val reason:String?)
     private fun items(value:JSONObject)=value.getJSONArray("items").let{a->(0 until a.length()).map{a.getJSONObject(it).let{item->ChoiceItem(item.getString("title"),item.getString("kind"))}}}
     suspend fun bodyStatus(kind:String,logicalId:String):JSONObject=product.action(this) {
-        SyncV2ArticleBody.placeholder(kind)?:if(kind=="note")it.actions.noteStatus(logicalId) else {
+        (if(kind in setOf("book","asset"))it.bodies?.status(kind,logicalId)?:SyncV2ArticleBody.placeholder(kind)else null)?:if(kind=="note")it.actions.noteStatus(logicalId) else {
             val row=it.projection.cloudRows(setOf(it.identity.entity(kind,logicalId))).firstOrNull()?.optJSONObject("row")
             JSONObject().put("placeholder",row==null || row.isNull("recipeOid")).put("reason",if(row==null || row.isNull("recipeOid"))"body_not_synced"else JSONObject.NULL).put("keepLocalBody",true)
         }
     }
-    suspend fun syncNow()=product.action(this){gate("any");_state.value=_state.value.copy(phase="syncing");it.round()}
+    suspend fun syncNow()=product.action(this){if(it.bodies==null || !it.contentEnabled)gate("any");_state.value=_state.value.copy(phase="syncing");it.round(manual=true)}
     suspend fun openChoice():ChoicePreview=product.action(this) {
         gate("choice");val p=it.actions.preview();val s=it.actions.previewSummary(p)
         ChoicePreview(p,items(s.getJSONObject("local")),items(s.getJSONObject("cloud")),s.getJSONObject("local").getInt("more"),s.getJSONObject("cloud").getInt("more"),p.canMerge,p.reason)

@@ -48,7 +48,7 @@ class NoteImportExportService(private val context: Context, private val reposito
             .forEach { entry ->
                 val key = MarkdownNoteArchive.safePath(entry.path.removePrefix("notes/assets/")).substringAfterLast('/')
                 val target = File(context.filesDir, "notes/assets/$key").also { it.parentFile?.mkdirs() }
-                if (!target.exists()) com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.writeBytes(target,entry.bytes)
+                if (!target.exists()) com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.writeBytes(target,entry.bytes,expectedSha=null)
             }
     }
 
@@ -92,7 +92,7 @@ class NoteImportExportService(private val context: Context, private val reposito
                 val source = entriesByPath[archiveAssetPath] ?: return@forEach
                 val safeKey = relativeAssetPath.substringAfterLast('/')
                 val target = File(context.filesDir, "notes/assets/$safeKey").also { it.parentFile?.mkdirs() }
-                if (!target.exists()) com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.writeBytes(target,source.bytes)
+                if (!target.exists()) com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.writeBytes(target,source.bytes,expectedSha=null)
                 repository.registerAsset(NoteAssetEntity(
                     assetId = UUID.randomUUID().toString(), noteId = note.noteId,
                     sha256 = sha256(target.readBytes()),

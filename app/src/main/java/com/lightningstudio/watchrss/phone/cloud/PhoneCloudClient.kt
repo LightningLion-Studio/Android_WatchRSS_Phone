@@ -651,7 +651,7 @@ class PhoneCloudClient(
     private fun okhttp3.Response.throwHttp(): Nothing {
         val detail = body?.string().orEmpty()
         close()
-        throw CloudHttpException(code, detail.ifBlank { message })
+        throw CloudHttpException(code, detail.ifBlank { message },serverResponse=true)
     }
 
     // request() returns after headers; a delayed/chunked body can still read the socket.
@@ -752,7 +752,16 @@ internal class CloudDeviceSessionRefreshException : IOException("设备登录状
 
 internal class CloudDeviceAuthorizationException : IOException("设备身份需要重新验证，请前往账号页面完成验证")
 
-internal class CloudHttpException(val status: Int, val detail: String) : IOException(if (status == 426) "请升级到最新版本以继续同步" else if (status == 409 && runCatching { JSONObject(detail).optString("error") }.getOrDefault("") == "device_key_conflict") "本机设备身份冲突，请重新登记本机" else "HTTP $status: $detail")
+internal fun serverRequiresCloudClientUpgrade(error:Throwable):Boolean =
+    error is com.lightningstudio.watchrss.phone.syncv2.SyncV2CloudError && error.code=="upgrade_required" ||
+        error is CloudHttpException && error.status==426 && error.serverResponse && declaresCloudClientUpgrade(error.detail)
+
+private fun declaresCloudClientUpgrade(detail:String):Boolean = runCatching {
+    val error=JSONObject(detail).get("error")
+    (if(error is JSONObject)error.optString("code")else error)=="client_upgrade_required"
+}.getOrDefault(false)
+
+internal class CloudHttpException(val status: Int, val detail: String, val serverResponse:Boolean=false) : IOException(if (status == 426 && serverResponse && declaresCloudClientUpgrade(detail)) "请升级到最新版本以继续同步" else if(status==426) "旧同步通道已关闭，请等待可用的 Sync v2 服务" else if (status == 409 && runCatching { JSONObject(detail).optString("error") }.getOrDefault("") == "device_key_conflict") "本机设备身份冲突，请重新登记本机" else "HTTP $status: $detail")
 
 /** A malicious/misconfigured candidate response cannot allocate beyond the advertised local run budget. */
 internal fun readMigrationBody(input:java.io.InputStream,maximumBytes:Long):ByteArray {

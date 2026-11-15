@@ -44,6 +44,7 @@ internal object SyncV2View {
         "quota_exceeded" -> "云空间已满。"
         "note_unopenable" -> "这条笔记太大，本机无法打开。"
         "feature_disabled" -> "云端暂不支持此操作。"
+        "body_channel_write_disabled" -> "云端正文写入未开放。本机正文已保留，资料信息仍可同步。"
         "trusted_time_unavailable" -> "暂时无法确认云端时间，请联网后重试。"
         "signing_state_unavailable" -> "本机签名状态不可用，暂时只能接收云端修改。"
         "device_alias_recovery_required" -> "本机设备身份冲突。请保留应用数据并联系支持核对设备登记。"

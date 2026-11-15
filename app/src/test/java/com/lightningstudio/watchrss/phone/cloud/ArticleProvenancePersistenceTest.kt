@@ -114,7 +114,7 @@ class ArticleProvenancePersistenceTest {
         for(action in listOf<suspend()->Unit>({repository.markArticleRead("synthetic-article",false)},
             {repository.toggleSaved(db.phoneArticleDao().getById("synthetic-article")!!,PhoneSavedItemType.FAVORITE);Unit},
             {repository.deleteArticle("synthetic-article")})) {
-            try{action();fail("must remain read only")}catch(e:CloudFormatUpgradeRequired){assertEquals("请升级到最新版本以继续同步",e.message)}
+            try{action();fail("must remain read only")}catch(e:CloudFormatUpgradeRequired){assertEquals("该资料格式暂不受支持，本机资料已保留",e.message)}
         }
         assertEquals(before,store.record("synthetic-article")!!.canonicalUtf8());assertEquals(1,store.pendingCount())
         assertThrows(CloudFormatUpgradeRequired::class.java){runBlocking{repository.getArticlesForSync()}}

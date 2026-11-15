@@ -180,7 +180,14 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             val ready=mergedRows[entity]
             val fulfillsPromise=ready!=null && !row.isNull("promiseId") && ready.isNull("promiseId") && !ready.isNull("recipeOid") &&
                 listOf("bodyRevision","metaOid","stateOid").all{ready.get(it)==row.get(it)} && SyncV2Codec.d64(ready.getString("rowSequence"))>SyncV2Codec.d64(row.getString("rowSequence"))
-            mergedRows[entity]=if(fulfillsPromise || preservesConflictFacts || localEdit)ready?:SyncV2Codec.fail("closure_incomplete")else row
+            // A locally verified P6 original may replace a random placeholder without editing business state.
+            // This witness is device-local encrypted cache data; it never enters the wire.
+            val bindsIndependent=ready!=null && meta.getString("kind") in setOf("asset","book") && candidate!=null &&
+                SyncV2Codec.canonical(candidate.first)==SyncV2Codec.canonical(meta) && SyncV2Codec.canonical(candidate.second)==SyncV2Codec.canonical(remoteState) &&
+                !row.getBoolean("deleted") && row.isNull("recipeOid") && ready.isNull("recipeOid") && !ready.isNull("promiseId") &&
+                ready.getString("bodyRevision")==projection.independentBodyRevision(entity) && ready.get("bodyRevision")!=row.get("bodyRevision") &&
+                listOf("metaOid","stateOid").all{ready.get(it)==row.get(it)} && SyncV2Codec.d64(ready.getString("rowSequence"))>SyncV2Codec.d64(row.getString("rowSequence"))
+            mergedRows[entity]=if(bindsIndependent || fulfillsPromise || preservesConflictFacts || localEdit)ready?:SyncV2Codec.fail("closure_incomplete")else row
         }
         val tree=SyncV2Index.build(identity.scope,mergedRows.values.toList());mergedObjects.putAll(tree.objects)
         val reachable=mutableSetOf<String>();reachable.addAll(tree.objects.keys)

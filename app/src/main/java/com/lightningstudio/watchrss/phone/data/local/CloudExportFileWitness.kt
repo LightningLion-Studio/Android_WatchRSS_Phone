@@ -148,13 +148,8 @@ internal object CloudExportFileWitness {
         }
         return null
     }
-    fun writeBytes(target:File, bytes:ByteArray) = changing(target) {
-        target.parentFile?.mkdirs()
-        val temporary=File.createTempFile(".install-", ".part",target.parentFile)
-        try {
-            FileOutputStream(temporary).use{it.write(bytes);it.fd.sync()}
-            Files.move(temporary.toPath(),target.toPath(),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING)
-        } finally {temporary.delete()}
+    fun writeBytes(target:File, bytes:ByteArray, expectedSha:String?=ConditionalBodyFile.digest(target)) = changing(target) {
+        ConditionalBodyFile.install(target,bytes,expectedSha)
     }
     fun <T> changing(target:File, block:()->T):T {
         val (root,notes)=scope(target) ?: return block()

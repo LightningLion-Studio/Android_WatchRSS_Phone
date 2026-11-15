@@ -110,11 +110,11 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             check(db.bookReadingDao().registration()?.registrationRevision==registrationRevision){"书籍在登记期间发生变化，请重试"}
             val existing=dao.get(id)
             if(existing==null) {
-                directory.mkdirs();com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)){Files.move(temporary.toPath(),file(id).toPath(),StandardCopyOption.REPLACE_EXISTING)}
+                directory.mkdirs();com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)){com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.install(file(id),temporary)}
                 db.withTransaction {dao.put(BookEntity(id,BookSync.canonical(state),sha(file(id)),file(id).length()));dao.putChapters(metadata.mapIndexed {i,row->BookChapterEntity(id,i+1,row.articleId)})}
             } else {
                 // Same immutable sequence imported under a new filename: one identity, merge deletion state.
-                if(!available(existing)){directory.mkdirs();com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)){Files.move(temporary.toPath(),file(id).toPath(),StandardCopyOption.REPLACE_EXISTING)};dao.put(existing.copy(packageSha256=sha(file(id)),packageBytes=file(id).length()))}
+                if(!available(existing)){directory.mkdirs();com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)){com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.install(file(id),temporary)};dao.put(existing.copy(packageSha256=sha(file(id)),packageBytes=file(id).length()))}
                 merge(state)
                 val mappings=dao.chapters(id)
                 if(mappings.isEmpty())dao.putChapters(metadata.mapIndexed{i,row->BookChapterEntity(id,i+1,row.articleId)})
@@ -387,7 +387,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         val h=requireNotNull(header);val state=existing?.let{JSONObject(it.stateJson)}?:JSONObject().put("bookId",id).put("fingerprint",fingerprint).put("title",h.getString("title")).put("chapterCount",hashes.size).put("sourceUrl",h.getString("sourceUrl")).put("kind",h.getString("kind")).put("deletedChapters",JSONArray()).put("deletionClock",0).put("deleted",false).put("deletedAt",0).put("updatedAt",0).put("sourceDeviceId",deviceId)
         require(ImportedContentIds.isImportedContentUrl(h.getString("sourceUrl")))
         val tmp=temporary("received-");input.copyTo(tmp,true)
-        val packageHash=sha(tmp);val bytes=tmp.length();directory.mkdirs();com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)){Files.move(tmp.toPath(),file(id).toPath(),StandardCopyOption.REPLACE_EXISTING)}
+        val packageHash=sha(tmp);val bytes=tmp.length();directory.mkdirs();try{com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)){com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.install(file(id),tmp)}}finally{tmp.delete()}
         var changed=0
         db.withTransaction {
             checkOwner()
@@ -427,6 +427,6 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         db.syncChangeLogDao().insert(SyncChangeLogEntity(kind="article",entityId=row.articleId,changedAt=maxOf(row.updatedAt,row.deletedAt,row.readingPositionChangedAt),
             originDeviceId=row.sourceDeviceId,reason="bookState",createdAt=System.currentTimeMillis()))
     }
-    suspend fun clear(){db.withTransaction {dao.clear();readingJournal.clear()};directory.deleteRecursively();migrationWarnings.clear()}
+    suspend fun clear(){db.withTransaction {dao.clear();readingJournal.clear()};directory.listFiles()?.filter{it.isFile}?.forEach{file->val expected=com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.digest(file);com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.delete(file,expected)};directory.delete();migrationWarnings.clear()}
     private fun sha(file:File):String {val digest=MessageDigest.getInstance("SHA-256");file.inputStream().buffered().use{input->val b=ByteArray(65536);while(true){val n=input.read(b);if(n<0)break;digest.update(b,0,n)}};return digest.digest().joinToString(""){"%02x".format(it)}}
 }

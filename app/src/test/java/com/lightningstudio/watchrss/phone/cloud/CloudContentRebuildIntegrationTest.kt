@@ -777,21 +777,23 @@ class CloudContentRebuildIntegrationTest {
         assertTrue(androidx.work.WorkManager.getInstance(f.context).getWorkInfosForUniqueWork("watchrss-cloud-follow-up").get(5,java.util.concurrent.TimeUnit.SECONDS).any{!it.state.isFinished})
         val second=f.service.syncNow(manual=true);assertFalse(second.snapshotUploaded);assertEquals(1,f.plans.size);assertEquals(CloudSyncPhase.COMPLETE,f.service.state.value.phase)
     }
-    @Test fun formatFloorHaltsAutomaticRetriesAndPreservesPendingRecordsKeysAndArchive()=runBlocking {
+    @Test fun legacyFormatFloorPreservesPendingRecordsKeysAndArchiveWithoutHaltingBootstrap()=runBlocking {
         val f=fixture();f.formatFloor=true
         val pending=f.cache.loadPendingManifest(f.client.scopeId(session))!!
         val result=runCatching{f.service.syncNow(manual=true)}
         assertTrue(result.exceptionOrNull() is CloudHttpException)
-        assertEquals("cloud_format_upgrade_required",f.service.state.value.errorCode)
-        assertEquals("请升级到最新版本以继续同步",f.service.state.value.message)
-        assertTrue(f.service.formatStatus.value.upgradeRequired)
+        assertNull(f.service.state.value.errorCode)
+        assertEquals("旧同步通道已关闭，请等待可用的 Sync v2 服务",f.service.state.value.message)
+        assertFalse(f.service.formatStatus.value.upgradeRequired)
+        assertEquals(0,f.state.formatUpgradeRequiredVersion)
         assertTrue(f.db.phoneRssSourceDao().getAllForSync().isNotEmpty())
         assertTrue(f.keys.hasAccountKey(session.userId));assertEquals(session.userId,f.account.session.value!!.userId)
         // The fixture includes an obsolete-generation cache, legitimately cleared by R45. Create a
-        // current-generation pending archive and verify 426's halt never clears it or sends IO.
+        // current-generation pending archive. The next authenticated bootstrap is still allowed.
         f.cache.storePendingManifest(f.client.scopeId(session),pending.first,pending.second,emptyList())
         val requests=f.httpRequests
-        f.service.syncNow();assertEquals(requests,f.httpRequests)
+        assertTrue(runCatching{f.service.syncNow()}.exceptionOrNull() is CloudHttpException);assertTrue(f.httpRequests>requests)
+        assertEquals(0,f.state.formatUpgradeRequiredVersion)
         assertArrayEquals(pending.second,f.cache.loadPendingManifest(f.client.scopeId(session))!!.second)
     }
     @Test fun localReadOnlyArticleDoesNotHaltLaterBackgroundReadsAndNeverPublishesADowngrade()=runBlocking {
@@ -802,7 +804,7 @@ class CloudContentRebuildIntegrationTest {
         val first=runCatching{f.service.syncNow(manual=true)}
         assertTrue(first.exceptionOrNull() is CloudFormatUpgradeRequired)
         assertEquals(0,f.completed);assertEquals(0,f.state.formatUpgradeRequiredVersion)
-        assertEquals("请升级到最新版本以继续同步",f.service.state.value.message)
+        assertEquals("该资料格式暂不受支持，本机资料已保留",f.service.state.value.message)
         val requests=f.httpRequests
         val second=runCatching{f.service.syncNow()}
         assertTrue(second.exceptionOrNull() is CloudFormatUpgradeRequired);assertTrue(f.httpRequests>requests)

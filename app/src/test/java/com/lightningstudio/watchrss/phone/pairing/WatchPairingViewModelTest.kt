@@ -26,7 +26,7 @@ class WatchPairingViewModelTest {
         var replacementGate:CompletableDeferred<Unit>?=null;var ignoreReplacementCancellation=false
         var replaceCalls=0;var replacementFailure:Exception?=null;var replacementReceipt:JSONObject?=null
         var issueFailure:Exception?=null;var statusGate:CompletableDeferred<Unit>?=null
-        var statusFailure:Exception?=null
+        var statusFailure:Exception?=null;var statusReceipt:JSONObject?=null
         var issueCalls=0;var cloudCalls=0;var opens=0;var closes=0;var invalidated=false
         var claimGate:CompletableDeferred<Unit>?=null
         var prepareGate:CompletableDeferred<Unit>?=null
@@ -55,7 +55,7 @@ class WatchPairingViewModelTest {
                         if(ignorePrepareCancellation)withContext(NonCancellable){prepareGate?.await()}else prepareGate?.await()
                         prepareReceipt?:uxPrepare(data,watchConfirmed,conflict,replaceCap)
                     }
-                    "pairingStatus"->{statusGate?.await();statusFailure?.let {throw it};uxStatus(message.getString("decision"),watchConfirmed,watchRejected,conflict)}
+                    "pairingStatus"->{statusGate?.await();statusFailure?.let {throw it};statusReceipt?:uxStatus(message.getString("decision"),watchConfirmed,watchRejected,conflict)}
                     "replaceAccount"->{replaceCalls++;if(ignoreReplacementCancellation)withContext(NonCancellable){replacementGate?.await()}else replacementGate?.await();replacementFailure?.let {throw it};conflict=false;replacementReceipt?:JSONObject().put("success",true).put("action","replaceAccount").put("released",true).put("cleared",true).put("userId",data.user).put("deviceId",data.device).put("installId",data.install).put("publicKeySpki",data.spki)}
                     "configure"->{configureGate?.await();configureFailure?.let {throw it};configureReceipt?:JSONObject().put("success",true).put("bound",true).put("userId",data.user).put("deviceId",data.device)}
                     "key"->{if(keyReceiptFailure)throw IOException("key response lost");JSONObject().put("success",true).put("cloudReady",true).put("keyVersion",1).put("deviceId",data.device)}
@@ -82,6 +82,58 @@ class WatchPairingViewModelTest {
     }
     private fun TestScope.vm(p:Ports)=WatchPairingViewModel(p,backgroundScope,{d.now},{testScheduler.currentTime})
     private fun TestScope.scan(vm:WatchPairingViewModel) {vm.onPageEntered();vm.startScan(true);runCurrent();assertTrue(vm.state.value is WatchPairingState.Scanning);vm.onQrDecoded(d.raw);runCurrent();assertTrue(vm.state.value is WatchPairingState.Confirming)}
+    @Test fun renegotiationRejectionEndsSessionWithoutRetryOrCredentialIssuance()=runTest {
+        val p=Ports();p.watchConfirmed=false
+        val vm=vm(p);scan(vm)
+        p.statusFailure=PairingException("pairing_renegotiation_rejected","配对验证未通过，已取消；请重新扫码")
+        vm.confirmSas(true);runCurrent()
+        val failed=vm.state.value as WatchPairingState.Failed
+        assertFalse(failed.canRetry);assertTrue(p.invalidated);assertEquals(1,p.closes)
+        assertEquals(0,p.issueCalls);assertEquals(0,p.cloudCalls)
+        vm.retry();runCurrent();assertEquals(1,p.opens);assertFalse(p.calls.contains("configure"));vm.cancel()
+    }
+    @Test fun composeFifteenFramesKeepBothConfirmationsBeforeIssuance()=runTest {
+        val p=Ports();p.watchConfirmed=false
+        p.prepareReceipt=uxPrepare(d,false,false,false).put("messageSequenceMax",15)
+        val vm=vm(p);scan(vm);assertEquals(0,p.issueCalls)
+        vm.confirmSas(true);runCurrent();assertEquals(0,p.issueCalls);assertEquals(0,p.cloudCalls)
+        p.watchConfirmed=true;advanceTimeBy(8_000);runCurrent()
+        assertEquals(WatchPairingState.Done(true,true),vm.state.value)
+        assertEquals(1,p.issueCalls);assertEquals(1,p.cloudCalls)
+        assertFalse(p.calls.contains("replaceAccount"));assertTrue(p.messages.size<=16);vm.cancel()
+    }
+    @Test fun composeFifteenFramesReserveThreeFramesAfterLongWatchWait()=runTest {
+        val p=Ports();p.watchConfirmed=false
+        p.prepareReceipt=uxPrepare(d,false,false,false).put("messageSequenceMax",15)
+        val vm=vm(p);scan(vm);vm.confirmSas(true);runCurrent()
+        advanceTimeBy(80_000);runCurrent();assertEquals(0,p.issueCalls)
+        p.watchConfirmed=true;advanceTimeBy(8_000);runCurrent()
+        assertEquals(WatchPairingState.Done(true,true),vm.state.value)
+        assertTrue(p.calls.count{it=="pairingStatus"}<=12)
+        assertTrue(p.messages.size<=16);assertEquals(listOf("configure","key","finish"),p.messages.takeLast(3).map{it.getString("action")});vm.cancel()
+    }
+    @Test fun composePhoneConfirmationBeforePrepareDoesNotSpendAnExtraStatusFrame()=runTest {
+        val p=Ports();p.watchConfirmed=false;p.prepareGate=CompletableDeferred()
+        p.prepareReceipt=uxPrepare(d,false,false,false).put("messageSequenceMax",15)
+        val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent();vm.confirmSas(true);runCurrent()
+        p.prepareGate!!.complete(Unit);runCurrent();assertEquals(1,p.calls.count{it=="pairingStatus"})
+        advanceTimeBy(80_000);runCurrent();assertEquals(11,p.calls.count{it=="pairingStatus"})
+        p.watchConfirmed=true;advanceTimeBy(8_000);runCurrent()
+        assertEquals(WatchPairingState.Done(true,true),vm.state.value);assertEquals(16,p.messages.size);vm.cancel()
+    }
+    @Test fun advertised255CannotFallBackOnAChangedStatusBudget()=runTest {
+        val p=Ports();p.statusReceipt=uxStatus("pending",false).put("messageSequenceMax",15)
+        val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent();vm.confirmSas(true);runCurrent()
+        assertTrue(vm.state.value is WatchPairingState.Failed);assertEquals(0,p.issueCalls);assertEquals(0,p.cloudCalls)
+        assertEquals(1,p.calls.count{it=="prepare"});assertFalse(p.calls.contains("configure"));vm.cancel()
+    }
+    @Test fun composeBudgetTimeoutClosesSessionWithoutIssuingOrOfferingUnsafeRetry()=runTest {
+        val p=Ports();p.watchConfirmed=false;p.prepareReceipt=uxPrepare(d,false,false,false).put("messageSequenceMax",15)
+        val vm=vm(p);scan(vm);vm.confirmSas(true);runCurrent();advanceTimeBy(90_000);runCurrent()
+        val failed=vm.state.value as WatchPairingState.Failed
+        assertFalse(failed.canRetry);assertTrue(failed.message.contains("重新扫描"));assertTrue(p.invalidated)
+        assertEquals(0,p.issueCalls);assertEquals(0,p.cloudCalls);assertTrue(p.calls.count{it=="pairingStatus"}<=12);vm.cancel()
+    }
     @Test fun phoneMayConfirmBeforeClaimAndPrepareButBothMustArriveBeforeIssuance()=runTest {
         val p=Ports();p.claimGate=CompletableDeferred();p.prepareGate=CompletableDeferred();p.configureGate=CompletableDeferred()
         val vm=vm(p);vm.startScan(true);runCurrent();vm.onQrDecoded(d.raw);runCurrent()

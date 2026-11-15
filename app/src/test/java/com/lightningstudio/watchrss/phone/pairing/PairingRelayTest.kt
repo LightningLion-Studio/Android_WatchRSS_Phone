@@ -9,6 +9,26 @@ import java.io.IOException
 class PairingRelayTest {
     private val d=PairingTestData
     private data class Call(val method:String,val path:String,val body:String?,val cap:String?)
+    @Test fun identicalSecondNegotiationAbortsBeforeAnotherRequest()=runBlocking {
+        val qr=d.qr();var requests=0;var closes=0
+        val prepared=JSONObject().put("success",true).put("pairingUxVersion",1).put("messageSequenceMax",255)
+            .put("capabilities",JSONObject().put("pairingConfirmV1",true).put("pairingReplaceAccountV1",false))
+        val relay=WatchPairingRelay(qr,object:PairingHttp {
+            override suspend fun call(method:String,path:String,body:String?,capability:String?,timeoutMillis:Long):JSONObject=when {
+                path.endsWith("/claim")->JSONObject().put("claimed",true)
+                path.endsWith("/close")->{closes++;JSONObject().put("closed",true)}
+                path.endsWith("/request")->{requests++;JSONObject()}
+                else->JSONObject().put("wire",PairingWireCodec.seal(qr,"watch",0,prepared,255))
+            }
+        },{},{true},{d.now},sleep={})
+        relay.connect();val receipt=relay.request(JSONObject().put("action","prepare"));relay.negotiateUx(receipt)
+        assertThrows(IllegalStateException::class.java){relay.negotiateUx(JSONObject(receipt.toString()))}
+        assertFalse("second negotiation must abort the owned QR session",qr.active)
+        assertTrue(qr.secret.all{it==0.toByte()})
+        assertThrows(PairingInvalidated::class.java){runBlocking{relay.request(JSONObject().put("action","pairingStatus"))}}
+        assertEquals(1,requests);relay.close();assertEquals(1,closes)
+        Unit
+    }
     @Test fun claimAndRequestRetriesReuseSameCapabilitySequenceNonceAndCiphertext() = runBlocking {
         val calls=mutableListOf<Call>();var claims=0;var requests=0;var polls=0;val qr=d.qr()
         val http=object:PairingHttp {override suspend fun call(method:String,path:String,body:String?,capability:String?,timeoutMillis:Long):JSONObject {

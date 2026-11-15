@@ -14,9 +14,15 @@ internal object PairingUxCodec {
     const val SEQUENCE_MAX=255
     private val conflicts=setOf("account_switch_requires_logout","device_owned_by_another_account","installation_owned_by_another_account")
     fun ownershipConflict(error:Throwable):Boolean = error.findAccountHttpException()?.statusCode==409 && error.accountHttpErrorCode() in conflicts
-    fun requireSupport(receipt:JSONObject) {
-        if(receipt.opt("pairingUxVersion")!=1 || receipt.optJSONObject("capabilities")?.opt("pairingConfirmV1")!=true || receipt.opt("messageSequenceMax")!=SEQUENCE_MAX)
+    /** The frozen Compose peer authenticates confirmation receipts within its 0..15 budget.
+     * No absent/false confirmation capability, replacement capability or unknown limit opts in. */
+    fun requireSupport(receipt:JSONObject):Int {
+        val maximum=receipt.opt("messageSequenceMax")
+        val capabilities=receipt.optJSONObject("capabilities")
+        if(receipt.opt("pairingUxVersion")!=1 || capabilities?.opt("pairingConfirmV1")!=true ||
+            maximum !in setOf(15,SEQUENCE_MAX) || maximum==15 && capabilities.opt("pairingReplaceAccountV1")!=false)
             throw PairingException("pairing_upgrade_required","请更新手机和手表后重新扫码；当前版本不支持安全的双端确认")
+        return maximum as Int
     }
     fun prepare(receipt:JSONObject,qr:WatchPairingQr,userId:String):PairingConsentReceipt {
         requireSupport(receipt)
@@ -25,7 +31,7 @@ internal object PairingUxCodec {
         com.lightningstudio.watchrss.phone.cloud.CloudKeyEnvelopeCodec.decodeP256PublicKey(receipt.getString("publicKeySpki"))
         return status(receipt,qr,userId).also { require(it.phone=="pending") { "手表核对状态无效，请重新扫码" } }
     }
-    fun canReplace(receipt:JSONObject)=receipt.getJSONObject("capabilities").opt("pairingReplaceAccountV1")==true
+    fun canReplace(receipt:JSONObject)=requireSupport(receipt)==SEQUENCE_MAX && receipt.getJSONObject("capabilities").opt("pairingReplaceAccountV1")==true
     fun identity(receipt:JSONObject,qr:WatchPairingQr,userId:String) {
         for((key,expected) in mapOf("userId" to userId,"deviceId" to qr.deviceId,"installId" to qr.installId,"sas" to PairingWireCodec.sas(qr,userId))) {
             require(!receipt.has(key) || receipt.opt(key)==expected) { "手表身份或配对码不一致，请重新扫码" }

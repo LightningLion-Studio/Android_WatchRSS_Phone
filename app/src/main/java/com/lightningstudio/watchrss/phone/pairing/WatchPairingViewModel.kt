@@ -67,6 +67,8 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
     val confirmation:StateFlow<PairingConfirmation> = mutableConfirmation.asStateFlow()
     private val consentWake=Channel<Unit>(Channel.CONFLATED)
     private var consent:PairingConsentReceipt?=null
+    private var confirmationSequenceMax=PairingUxCodec.SEQUENCE_MAX
+    private var confirmationStatusCount=0
     private var pendingStatus:JSONObject?=null
     private var accountConflict=false
     private var replacing=false
@@ -109,7 +111,7 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
             catch(error:Exception) {
                 if(generation.get()==ticket) {
                     val revoked=error.accountHttpErrorCode()=="device_revoked"
-                    val ended=revoked || (error is PairingException && error.code in setOf("watch_rejected","pairing_expired","pairing_upgrade_required")) ||
+                    val ended=revoked || (error is PairingException && error.code in setOf("watch_rejected","pairing_expired","pairing_upgrade_required","pairing_confirmation_expired","pairing_renegotiation_rejected")) ||
                         (error is PairingPeerException && (!replacing || error.peerCode in setOf("pairing_rejected","watch_rejected","device_revoked","pairing_identity_changed","pairing_confirmation_expired","pairing_upgrade_required"))) ||
                         (error is PairingHttpException && error.status in setOf(404,410))
                     if(ended)this@WatchPairingViewModel.cancel()
@@ -200,6 +202,7 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
                     check(ticket)
                     val status=PairingUxCodec.prepare(receipt,descriptor,requireNotNull(owner).userId)
                     link.negotiateUx(receipt)
+                    confirmationSequenceMax=PairingUxCodec.requireSupport(receipt)
                     consent=status;accountConflict=status.accountConflict;prepared=receipt
                 }
                 check(ticket)
@@ -223,24 +226,36 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
                     if(sasConfirmed && previous?.bothConfirmed==true)break
                     val sas=PairingWireCodec.sas(descriptor,pinned.userId)
                     mutable.value=if(sasConfirmed)WatchPairingState.WaitingWatchConfirmAfterPhone(sas)else WatchPairingState.Confirming(sas)
+                    val composeBudget=confirmationSequenceMax==15
+                    // Compose's authenticated prepare/status receipts preserve BOTH decisions.
+                    // Wait locally for the phone, then allow at most 12 status frames; the last
+                    // three slots remain exclusively for configure, key and finish (seq 13..15).
+                    if(composeBudget && !sasConfirmed) {consentWake.receive();continue}
+                    while(composeBudget && consentWake.tryReceive().isSuccess) { /* This phone decision is already in the next frame. */ }
+                    if(composeBudget && confirmationStatusCount>=COMPOSE_STATUS_LIMIT)
+                        throw PairingException("pairing_confirmation_expired","等待手表核对超时，请重新扫描配对码")
                     val request=pendingStatus?:JSONObject().put("action","pairingStatus").put("userId",pinned.userId)
                         .put("decision",if(sasConfirmed)"confirmed" else "pending").also {pendingStatus=it}
                     val reply=link.request(request);check(ticket)
+                    require(!reply.has("messageSequenceMax") || reply.opt("messageSequenceMax")==confirmationSequenceMax) { "手表确认协议已变化，请重新扫码" }
+                    require(!reply.has("capabilities") || PairingUxCodec.requireSupport(reply)==confirmationSequenceMax) { "手表确认协议已变化，请重新扫码" }
                     require(reply.opt("action")=="pairingStatus") { "手表核对响应无效，请重新扫码" }
                     val next=PairingUxCodec.status(reply,descriptor,pinned.userId)
                     require(next.phone!="confirmed" || (sasConfirmed && request.getString("decision")=="confirmed")) { "手表核对响应无效，请重新扫码" }
                     require(previous?.watch!="confirmed" || next.watch!="pending") { "手表确认已失效，请重新扫码" }
                     require(previous?.phone!="confirmed" || next.phone!="pending") { "手机确认已失效，请重新扫码" }
                     require(!reply.has("publicKeySpki") || reply.opt("publicKeySpki")==requireNotNull(prepared).getString("publicKeySpki")) { "手表身份已变化，请重新扫码核对" }
+                    confirmationStatusCount++
                     pendingStatus=null;consent=next;accountConflict=accountConflict || next.accountConflict
                     mutableConfirmation.value=PairingConfirmation(sasConfirmed,next.watch=="confirmed")
                     if(next.rejected || (sasConfirmed && next.bothConfirmed))continue
                     // A click wakes polling immediately; an in-flight request still finishes in sequence.
-                    withTimeoutOrNull(CONSENT_POLL_MS) {consentWake.receive()}
+                    withTimeoutOrNull(if(composeBudget)COMPOSE_CONSENT_POLL_MS else CONSENT_POLL_MS) {consentWake.receive()}
                 }
             }
         } catch(error:TimeoutCancellationException) {
             check(ticket)
+            if(confirmationSequenceMax==15)throw PairingException("pairing_confirmation_expired","等待手表核对超时，请重新扫描配对码")
             throw PairingException("pairing_timeout","等待双端核对超时，请重试；若配对码过期请重新扫描")
         }
         check(ticket)
@@ -354,6 +369,7 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
     private fun resetPairing() {
         generation.incrementAndGet();work?.cancel();work=null;release();owner=null
         bound=false;cloudReady=false;finished=false;sasConfirmed=false
+        confirmationSequenceMax=PairingUxCodec.SEQUENCE_MAX;confirmationStatusCount=0
         consent=null;pendingStatus=null;accountConflict=false;replacing=false;replacementApproved=false
         mutableConfirmation.value=PairingConfirmation()
         while(consentWake.tryReceive().isSuccess) { /* Drop an abandoned session's click. */ }
@@ -379,6 +395,8 @@ class WatchPairingViewModel internal constructor(private val ports:WatchPairingP
         const val WATCH_BOUND_TIMEOUT_MS=120_000L
         const val CONSENT_TIMEOUT_MS=90_000L
         const val CONSENT_POLL_MS=1_000L
+        const val COMPOSE_CONSENT_POLL_MS=8_000L
+        const val COMPOSE_STATUS_LIMIT=12
     }
 }
 

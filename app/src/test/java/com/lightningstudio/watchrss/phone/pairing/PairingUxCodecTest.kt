@@ -61,11 +61,13 @@ class PairingUxCodecTest {
         },{},{true},{fixture.getLong("now")},sleep={})
         relay.connect();assertThrows(IllegalStateException::class.java){relay.negotiateUx(prepare)}
         relay.request(JSONObject().put("action","prepare"))
-        assertThrows(PairingException::class.java){relay.negotiateUx(JSONObject(prepare.toString()).put("messageSequenceMax",15))}
+        assertThrows(PairingException::class.java){relay.negotiateUx(JSONObject(prepare.toString()).put("messageSequenceMax",16))}
         relay.negotiateUx(prepare)
         repeat(20) {relay.request(JSONObject().put("action","pairingStatus"))}
         assertEquals(20,seq)
         assertThrows(IllegalStateException::class.java){relay.negotiateUx(prepare)}
+        assertFalse(qr.active)
+        assertThrows(PairingInvalidated::class.java){runBlocking{relay.request(JSONObject().put("action","pairingStatus"))}}
         Unit
     }
     @Test fun phoneProductionPrepareCodecAcceptsExactWatchSharedResponseAndRejectsIdentityOrSpkiMutation() {

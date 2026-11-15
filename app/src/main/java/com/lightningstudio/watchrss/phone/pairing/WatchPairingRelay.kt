@@ -37,6 +37,7 @@ internal class WatchPairingRelay(
     private var claimAttempted=false; private var claimed=false
     private var sequence=0
     private var maxSequence=15
+    private var negotiated=false
     private var pendingPlain: String? = null
     private var pendingBody: String? = null
     private fun check() { if(closed) throw PairingInvalidated(); if(now() >= qr.expiresAt) throw PairingException("pairing_expired","配对码已过期，请重新扫描"); checkOwner() }
@@ -83,8 +84,13 @@ internal class WatchPairingRelay(
         throw PairingException("pairing_timeout","等待手表确认超时，请重试；若配对码过期请重新扫描")
     }
     override fun negotiateUx(receipt:JSONObject) {
-        check();check(sequence==1 && pendingBody==null)
-        PairingUxCodec.requireSupport(receipt);maxSequence=PairingUxCodec.SEQUENCE_MAX
+        check()
+        if(negotiated) {
+            invalidate();pendingPlain=null;pendingBody=null
+            throw PairingException("pairing_renegotiation_rejected","配对验证未通过，已取消；请重新扫码")
+        }
+        check(sequence==1 && pendingBody==null)
+        maxSequence=PairingUxCodec.requireSupport(receipt);negotiated=true
     }
     override fun invalidate() { closed=true;qr.destroy() }
     override suspend fun close() {

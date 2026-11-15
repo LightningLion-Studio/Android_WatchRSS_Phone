@@ -36,8 +36,19 @@ internal class BluetoothArticleIdentityProjection(
     }
     fun outgoing(article:PhoneArticleEntity):PhoneArticleEntity {
         val id=wire(article.articleId)
-        if(id==article.articleId)return article
-        val projected=article.copy(articleId=id)
+        // Both v14 receivers normalize metadata before validating the frozen manifest
+        // (Compose 1.3.3-5 LibrarySyncPayload.parseArticles / ArticleReceiveCheckpoint).
+        // Project the same values into BOTH manifest and body frames. Keep the stored
+        // article, body bytes and content identity unchanged, including book chapters
+        // sent as articles when supportsBookSyncV1 is absent.
+        val url=article.url.trim()
+        val projected=article.copy(articleId=id, url=url,
+            sourceDeviceId=article.sourceDeviceId.ifBlank { "" },
+            title=article.title.trim().ifBlank { url }, siteName=article.siteName.trim(),
+            excerpt=article.excerpt.trim(), imageUrl=article.imageUrl?.trim()?.ifBlank { null },
+            rssSourceUrl=article.rssSourceUrl?.trim()?.ifBlank { null },
+            rssSourceTitle=article.rssSourceTitle?.trim()?.ifBlank { null })
+        if(projected==article)return article
         return projected.copy(syncMetadataHash=ArticleSyncBody.metadataHashFor(projected))
     }
     fun incoming(article:PhoneArticleEntity):PhoneArticleEntity {
@@ -54,7 +65,7 @@ internal class BluetoothArticleIdentityProjection(
 
     fun manifest(entry:ArticleSyncManifestEntry):ArticleSyncManifestEntry {
         val id=wire(entry.articleId);val row=byId[local(entry.articleId)]
-        return entry.copy(articleId=id,metadataHash=if(id!=entry.articleId && row!=null)ArticleSyncBody.metadataHashFor(outgoing(row))else entry.metadataHash,
+        return entry.copy(articleId=id,metadataHash=if(row!=null)ArticleSyncBody.metadataHashFor(outgoing(row))else entry.metadataHash,
             legacyArticleIds=legacyIds(row,id))
     }
     fun localManifest(entry:ArticleSyncManifestEntry)=entry.copy(articleId=local(entry.articleId))

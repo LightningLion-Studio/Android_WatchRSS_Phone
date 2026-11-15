@@ -39,7 +39,7 @@ class LibraryFatalResponseTest {
     private val device=PhoneBluetoothWatchDevice("watch","11:22:33:44:55:66",1,"watch",supportsPersistentSession=true)
     private var cloudCalls=0
     private val manager=PhoneBluetoothSyncManager(context,repo,NoteRepository(db.noteDao(),"phone"),ReaderPresetRepository(context,db,db.readerPresetDao(),"phone",scope),
-        PhoneLlmTokenUsageRepository(db.llmTokenUsageDao()),"phone",log,onLibrarySyncCompleted={cloudCalls++},currentPhoneUserId={"owner"})
+        PhoneLlmTokenUsageRepository(db.llmTokenUsageDao()),"phone",log,canSyncAccount={true},buildAccountSyncRequest={_,_,_->JSONObject().put("action","syncAccount")},onLibrarySyncCompleted={cloudCalls++},currentPhoneUserId={"owner"})
     private fun ok(phase:String)=JSONObject().put("success",true).put("action","syncLibrary").put("phase",phase).put("version",14).put("deviceId","watch")
     private fun manifest()=LibrarySyncPayload.buildManifestResponse("watch",emptyList()).put("supportsReaderPresets",false)
         .put("supportsNoteManifestV2",false).put("supportsNoteAssetInventory",false)
@@ -63,7 +63,7 @@ class LibraryFatalResponseTest {
         val peerBefore=db.syncPeerStateDao().get("watch")
         val beforeMeta=db.appMetaDao().getAll().filter{it.key.startsWith("ble_echo_v2:")}
         val sent=ByteArrayOutputStream();var closed=false
-        val failure=runCatching{manager.syncAll(device,reusableSession=session(listOf(binding(),ok("cursor"),fatal()),sent,{closed=true}))}.exceptionOrNull()
+        val failure=runCatching{manager.syncAll(device,reusableSession=session(listOf(binding(),JSONObject().put("success",true).put("action","syncAccount"),ok("cursor"),fatal()),sent,{closed=true}))}.exceptionOrNull()
         assertTrue("fatal must reach manager caller: $failure",failure is IllegalArgumentException)
         assertTrue(closed);assertEquals(peerBefore,db.syncPeerStateDao().get("watch"));assertEquals(beforeMeta,db.appMetaDao().getAll().filter{it.key.startsWith("ble_echo_v2:")})
         assertEquals(0,cloudCalls);assertTrue(watchDb.phoneArticleDao().getAllForSync().isEmpty())
@@ -80,6 +80,7 @@ class LibraryFatalResponseTest {
             val q=BluetoothSyncProtocol.readFrame(toByteArray().inputStream());reset();requestFrames+=q
             val response=when(q.optString("action")) {
                 "ack"->return
+                "syncAccount"->JSONObject().put("success",true).put("action","syncAccount")
                 "syncLibrary"->when(q.optString("phase")) {
                     "probe"->binding()
                     "cursor"->LibrarySyncPayload.buildCursorResponse("watch",LibrarySyncCursor(0,0,0)).put("supportsRssCanonicalIds",false)
@@ -127,7 +128,7 @@ class LibraryFatalResponseTest {
             val error=JSONObject(body.toString()).put("success",success).put("fatalSession",true)
             val response=if(tail)listOf(JSONObject(body.toString()).put("batchIndex",0).put("batchCount",2),error.put("batchIndex",1).put("batchCount",2))else listOf(error)
             val out=ByteArrayOutputStream()
-            val failure=runCatching{manager.syncAll(device,reusableSession=session(listOf(binding(),ok("cursor"),incomingManifest)+response,out))}.exceptionOrNull()
+            val failure=runCatching{manager.syncAll(device,reusableSession=session(listOf(binding(),JSONObject().put("success",true).put("action","syncAccount"),ok("cursor"),incomingManifest)+response,out))}.exceptionOrNull()
             assertTrue("$tail/$success: $failure",failure is IllegalArgumentException)
             assertTrue(failure.toString(),failure!!.message.orEmpty().contains("可直接点“同步”重试"))
             assertTrue(db.phoneArticleDao().getAllForSync().isEmpty());assertEquals(peer,db.syncPeerStateDao().get("watch"));assertEquals(0,cloudCalls)

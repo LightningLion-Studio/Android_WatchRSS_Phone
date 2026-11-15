@@ -77,7 +77,7 @@ class PhoneOobeActivity : ComponentActivity() {
                         )
                     )
                 }
-                val hasUsableSession = session?.isExpired == false
+                val hasUsableSession = session?.isUsableForAuthentication == true
                 val stage = phoneOobeStage(page, hasConsent, hasUsableSession)
 
                 BackHandler {

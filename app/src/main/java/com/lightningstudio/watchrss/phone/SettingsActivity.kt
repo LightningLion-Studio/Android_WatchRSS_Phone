@@ -323,6 +323,12 @@ internal fun ReaderSettingsHost(
         repository.setSystemDark(isSystemDark)
     }
     val scope = rememberCoroutineScope()
+    var accountSyncFailure by remember { mutableStateOf<Throwable?>(null) }
+    if (accountSyncFailure is com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired) {
+        PhoneSyncLoginDialog(onDismiss = { accountSyncFailure = null }, onLogin = { openPhoneSyncReauthentication(context) { accountSyncFailure = null } })
+    } else if (accountSyncFailure is com.lightningstudio.watchrss.phone.account.PhoneDeviceVerificationRequired) {
+        PhoneDeviceVerificationPrompt(onDismiss = { accountSyncFailure = null })
+    }
     val backgroundImportPreferences = remember {
         context.getSharedPreferences(BACKGROUND_IMPORT_PREFERENCES, Context.MODE_PRIVATE)
     }
@@ -443,6 +449,7 @@ internal fun ReaderSettingsHost(
         scope.launch {
             message = "正在探测手表…"
             message = runCatching {
+                container.bluetoothSyncManager.requirePhoneLogin()
                 val targets = container.bluetoothSyncManager.probeLibrarySyncTargets()
                 val devices = targets.devices
                 require(devices.isNotEmpty()) { "未找到可同步的手表" }
@@ -461,7 +468,7 @@ internal fun ReaderSettingsHost(
                     lease?.close()
                 }
                 "预设、整个字体库和引用背景已同步"
-            }.getOrElse { it.message ?: "同步失败" }
+            }.getOrElse { accountSyncFailure = it; it.message ?: "同步失败" }
         }
     }
 
@@ -494,6 +501,7 @@ internal fun ReaderSettingsHost(
         watchPreviewStopRequested.set(false)
         watchPreviewStartJob = scope.launch {
             runCatching {
+                container.bluetoothSyncManager.requirePhoneLogin()
                 val targets = container.bluetoothSyncManager.probeLibrarySyncTargets()
                 val devices = targets.devices
                 require(devices.isNotEmpty()) { "未找到可预览的手表" }
@@ -538,7 +546,8 @@ internal fun ReaderSettingsHost(
                         }.onFailure {
                             if (it is kotlinx.coroutines.CancellationException) throw it
                             if (watchPreviewUpdates !== updates) return@preview
-                            if (it is WatchBackgroundPreparationException) {
+                            if (it is WatchBackgroundPreparationException || com.lightningstudio.watchrss.phone.connection.bluetooth.isTerminalAccountSyncFailure(it)) {
+                                accountSyncFailure = it
                                 if (!firstConnection.isCompleted) firstConnection.completeExceptionally(it)
                                 watchPreviewStatus = it.message ?: "背景预处理失败"
                                 watchPreviewEnabled = false
@@ -570,6 +579,7 @@ internal fun ReaderSettingsHost(
                 watchPreviewStatus = "正在“${deviceName.ifBlank { device.name }}”上预览"
             }.onFailure {
                 if (it is kotlinx.coroutines.CancellationException) throw it
+                accountSyncFailure = it
                 // Do not cancel this start job while reporting its own failure.
                 watchPreviewStartJob = null
                 stopWatchPreview(showStatus = false)

@@ -44,6 +44,7 @@ fun String.asBuildConfigString(): String =
         .replace("\n", "\\n")}\""
 
 android {
+    testOptions { unitTests.isIncludeAndroidResources = true }
     namespace = "com.lightningstudio.watchrss.phone"
     compileSdk = 36
     buildToolsVersion = "36.1.0"
@@ -216,6 +217,7 @@ dependencies {
     // Backdrop source copied locally — see app/src/main/java/com/kyant/backdrop
 
     testImplementation(libs.junit)
+    testImplementation(libs.androidx.compose.ui.test.junit4)
     testImplementation(libs.json)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.robolectric)

@@ -11,7 +11,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchSyncBindingEvent
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModel
 
-/** Shows why a sync stopped before touching the watch; binding is the only way forward from an unbound watch. */
+/** Shows the required login or binding action before library data can be sent. */
 @Composable
 internal fun WatchSyncBindingHost(viewModel: MainViewModel) {
     val context = LocalContext.current
@@ -22,6 +22,13 @@ internal fun WatchSyncBindingHost(viewModel: MainViewModel) {
         }
     }
     when (prompt) {
+        WatchSyncBindingEvent.RequirePhoneDeviceVerification -> PhoneDeviceVerificationPrompt(viewModel::dismissWatchSyncBindingPrompt)
+        WatchSyncBindingEvent.RequirePhoneLogin -> PhoneSyncLoginDialog(
+            onDismiss = viewModel::dismissWatchSyncBindingPrompt,
+            onLogin = {
+                openPhoneSyncReauthentication(context, viewModel::dismissWatchSyncBindingPrompt)
+            }
+        )
         WatchSyncBindingEvent.RequireWatchBinding -> AlertDialog(
             onDismissRequest = viewModel::dismissWatchSyncBindingPrompt,
             title = { Text("先绑定手表") },
@@ -37,4 +44,36 @@ internal fun WatchSyncBindingHost(viewModel: MainViewModel) {
         )
         else -> Unit
     }
+}
+
+@Composable
+internal fun PhoneSyncLoginDialog(onDismiss: () -> Unit, onLogin: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重新登录") },
+        text = { Text("登录已失效，请重新登录") },
+        confirmButton = { TextButton(onClick = onLogin) { Text("去登录") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+/** Navigation is non-destructive; AccountActivity pauses authentication through the repository. */
+internal fun openPhoneSyncReauthentication(context: android.content.Context, dismiss: () -> Unit) {
+    dismiss()
+    context.startActivity(AccountActivity.createIntent(context, finishAfterLogin = true, reauthenticate = true))
+}
+
+@Composable
+internal fun PhoneDeviceVerificationDialog(onDismiss: () -> Unit, onAccount: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("验证设备身份") },
+        text = { Text("手机设备身份需要验证，请前往账号页面完成验证") },
+        confirmButton = { TextButton(onClick = onAccount) { Text("前往账号") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+}
+
+/** Both hosts use exactly the same recovery navigation, including an already-valid account. */
+@Composable
+internal fun PhoneDeviceVerificationPrompt(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    PhoneDeviceVerificationDialog(onDismiss, onAccount = { openPhoneSyncReauthentication(context, onDismiss) })
 }

@@ -61,7 +61,7 @@ class DomainFastPathSessionTest {
                 if(stopAtCursor && action=="syncLibrary" && phase=="cursor")throw IllegalArgumentException("original cursor reached")
                 val answer=when(action) {
                     "syncLibrary"->response(action,phase).put("supportsPersistentSession",true).put("persistentSessionAccepted",true).put("account",JSONObject().put("bound",true).put("userIdHash",BleDomainStore.hash("owner"))).advertiseBleSyncV2().apply {if(legacyOnly){remove("supportsDomainFastPathV2");put("supportsDomainFastPathV1",true)}}
-                    "syncAccount"->{check(accountApplyFixture);accountWitness="installed-grant";response(action,phase).put("accountStateRoot","c".repeat(64))}
+                    "syncAccount"->{if(accountApplyFixture)accountWitness="installed-grant";response(action,phase).apply{if(accountApplyFixture)put("accountStateRoot","c".repeat(64))}}
                     "syncDomains"->response(action,phase).put("windowId","window").put("roots",JSONObject(remote)).put("projectionVersions",JSONObject().apply { store.projectionVersions().forEach{(d,p)->put(d,p.json())} }).apply {
                         if(phase=="summary")put("skipDomains",JSONArray(request.getJSONObject("known").keys().asSequence().toList()))
                         else {
@@ -86,9 +86,9 @@ class DomainFastPathSessionTest {
     @Test fun unchangedSevenDomainsOnlyExchangeSummaryCommitAndStrictComplete()=runBlocking<Unit> {
         seed();val result=manager.syncAll(device,reusableSession=session())
         assertEquals(0,cloudCalls);assertEquals(0,result.libraryStats?.sent)
-        assertEquals(listOf("syncLibrary:probe","syncDomains:summary","syncDomains:commit","syncSession:complete"),frames.filter{it.optString("action")!="ack"}.map{it.getString("action")+":"+it.getString("phase")})
+        assertEquals(listOf("syncLibrary:probe","syncAccount:apply","syncDomains:summary","syncDomains:commit","syncSession:complete"),frames.filter{it.optString("action")!="ack"}.map{it.getString("action")+":"+it.getString("phase")})
         assertEquals(7,store.receipts("scope","watch").size)
-        assertEquals(4,frames.count{it.optString("action")=="ack"})
+        assertEquals(5,frames.count{it.optString("action")=="ack"})
     }
     @Test fun lostCompleteAppliedAckDoesNotPublishStagedReceipts()=runBlocking<Unit> {
         seed();discardOldReceipts=true;failCompleteAck=true;manager.reconnectDelay={};manager.reconnectSession={_,_->throw IllegalArgumentException("offline fixture")}
@@ -129,7 +129,7 @@ class DomainFastPathSessionTest {
 
     @Test fun periodicFullAndPeerProtocolCannotBeSkippedByFreshSevenDomainReceipts()=runBlocking<Unit> {
         for(state in listOf(SyncPeerStateEntity("watch",lastProtocolVersion=12,lastFullSyncAt=System.currentTimeMillis()),SyncPeerStateEntity("watch",lastProtocolVersion=14,lastFullSyncAt=System.currentTimeMillis()-BleDomainStore.RECEIPT_MAX_AGE_MS))) {
-            frames.clear();db.syncPeerStateDao().upsert(state);seed();stopAtCursor=true;allowAccount=false
+            frames.clear();db.syncPeerStateDao().upsert(state);seed();stopAtCursor=true;allowAccount=true
             assertTrue(runCatching{manager.syncAll(device,reusableSession=session())}.isFailure)
             val summary=frames.single {it.optString("action")=="syncDomains"&&it.optString("phase")=="summary"}
             assertFalse(summary.getJSONObject("roots").has("library"));assertFalse(summary.getJSONObject("known").has("library"))
@@ -138,7 +138,7 @@ class DomainFastPathSessionTest {
     }
     @Test fun expiredReceiptsAndV1OnlyPeersReachOriginalCursorRatherThanSkip()=runBlocking<Unit> {
         seed();db.openHelper.writableDatabase.execSQL("UPDATE ble_fast_receipts SET verifiedAt=?",arrayOf(System.currentTimeMillis()-BleDomainStore.RECEIPT_MAX_AGE_MS))
-        stopAtCursor=true;allowAccount=false
+        stopAtCursor=true;allowAccount=true
         assertTrue(runCatching{manager.syncAll(device,reusableSession=session())}.isFailure)
         assertEquals(0,frames.single{it.optString("action")=="syncDomains"&&it.optString("phase")=="summary"}.getJSONObject("known").length())
         assertTrue(frames.any{it.optString("action")=="syncLibrary"&&it.optString("phase")=="cursor"})

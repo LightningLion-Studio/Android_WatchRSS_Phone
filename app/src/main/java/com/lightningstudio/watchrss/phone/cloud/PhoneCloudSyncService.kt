@@ -144,7 +144,7 @@ class PhoneCloudSyncService(
                 val session=accountRepository.session.value
                 val bootstrap=trustedBootstrap
                 val generation= session?.let{client.knownContentGeneration(it)}
-                if(session==null || session.isExpired || bootstrap==null || generation==null)null
+                if(session==null || !session.isUsableForAuthentication || bootstrap==null || generation==null)null
                 else client.syncV2Account(session,bootstrap.libraryEpoch,generation)
             },
             verifyKeys={account,keys->val bootstrap=trustedBootstrap?:error("authentication_required")
@@ -2210,7 +2210,10 @@ class PhoneCloudSyncService(
     }
 
     private fun requireSession(): PhoneAccountSession =
-        (accountRepository.session.value ?: error("请先登录腕上RSS账号")).also { bindScope(it); settings.claimLegacyOwner(it.userId) }
+        (accountRepository.session.value ?: error("请先登录腕上RSS账号")).also {
+            check(it.isUsableForAuthentication) { "请先完成账号重新认证" }
+            bindScope(it); settings.claimLegacyOwner(it.userId)
+        }
 
     private fun update(
         phase: CloudSyncPhase,

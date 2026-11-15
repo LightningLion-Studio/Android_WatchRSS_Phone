@@ -2,6 +2,7 @@ package com.lightningstudio.watchrss.phone.viewmodel
 
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchSyncBindingEvent
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchSyncBlocked
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -14,9 +15,14 @@ internal class WatchSyncBindingPrompts {
     private val emitted = MutableSharedFlow<WatchSyncBindingEvent>(extraBufferCapacity = 1)
     val events = emitted.asSharedFlow()
     fun handle(failure: Throwable): Boolean {
-        if (failure !is WatchSyncBlocked) return false
-        pending.value = failure.event
-        emitted.tryEmit(failure.event)
+        val event = when (failure) {
+            is com.lightningstudio.watchrss.phone.account.PhoneDeviceVerificationRequired -> WatchSyncBindingEvent.RequirePhoneDeviceVerification
+            is PhoneLoginRequired -> WatchSyncBindingEvent.RequirePhoneLogin
+            is WatchSyncBlocked -> failure.event
+            else -> return false
+        }
+        pending.value = event
+        emitted.tryEmit(event)
         return true
     }
     fun dismiss() { pending.value = null }

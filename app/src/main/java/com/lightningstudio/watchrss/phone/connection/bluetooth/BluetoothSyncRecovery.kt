@@ -39,7 +39,7 @@ internal class BluetoothSyncRecovery(
 internal fun isRetryableBluetoothDisconnect(failure: Throwable): Boolean {
     if (failure is CancellationException && failure !is TimeoutCancellationException) return false
     // Protocol rejection/validation is deliberately not matched by its human-readable message.
-    if (failure is IllegalArgumentException || failure is WatchSyncBlocked) return false
+    if (failure is IllegalArgumentException || isTerminalAccountSyncFailure(failure)) return false
     var current: Throwable? = failure
     val seen = mutableSetOf<Throwable>()
     while (current != null && seen.add(current)) {

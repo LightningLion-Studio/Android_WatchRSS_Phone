@@ -16,6 +16,7 @@ import org.json.JSONObject
 import java.security.KeyFactory
 import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired
 
 class AppAccessCoordinator(
     private val context: Context,
@@ -23,6 +24,7 @@ class AppAccessCoordinator(
     private val identity: LicenseDeviceIdentity,
     private val scope: CoroutineScope,
     private val store: AppAccessStore = AppAccessStore(context, AccountEnvironment.active(context).storageSuffix),
+    environmentOverride: AccountEnvironment? = null,
     private val onAuthorized: () -> Unit = {}
 ) {
     private val operationMutex = Mutex()
@@ -35,7 +37,7 @@ class AppAccessCoordinator(
         wallMillis = { store.trustedNowMillis() ?: System.currentTimeMillis() }
     )
     private val authorizationNotifier = AuthorizationReadyNotifier(onAuthorized)
-    private val environment = AccountEnvironment.active(context)
+    private val environment = environmentOverride ?: AccountEnvironment.active(context)
     private val _state = MutableStateFlow<AppAccessState>(AppAccessState.Loading)
     val state: StateFlow<AppAccessState> = _state.asStateFlow()
 
@@ -63,87 +65,103 @@ class AppAccessCoordinator(
 
     fun initialize() { scope.launch(Dispatchers.IO) { reconcile() } }
 
-    suspend fun reconcile() {
-        operationMutex.withLock { reconcileLocked() }
+    internal suspend fun reconcile(): WatchAccountRefreshResult {
+        val result = operationMutex.withLock { reconcileLocked() }
         authorizationNotifier.afterReconcile(isAuthorized)
+        return result
     }
 
-    /** Refresh a rotated session using the existing device possession proof, never reclaim a revoked device. */
-    suspend fun refreshRejectedDeviceSession(rejectedToken: String, expectedUserId: String): Boolean = operationMutex.withLock {
-        if (accountRepository.session.value?.userId != expectedUserId) return@withLock false
-        if (store.load()?.deviceAccessToken != rejectedToken) {
-            return@withLock !store.load()?.deviceAccessToken.isNullOrBlank()
+    /** Uses the existing lease/possession refresh; account tokens have no refresh API here. */
+    internal suspend fun buildWatchAccountSyncRequest(watch: String, install: String?, name: String?): JSONObject {
+        if (!accountRepository.hasUsableSession) throw PhoneLoginRequired()
+        val owner = accountRepository.session.value!!.userId
+        val readiness = operationMutex.withLock {
+            val result = reconcileLocked()
+            if (result != WatchAccountRefreshResult.Ready) return@withLock result
+            if (accountRepository.session.value?.userId != owner) WatchAccountRefreshResult.DeviceVerificationRequired()
+            else if (!accountRepository.hasUsableSession) WatchAccountRefreshResult.AccountUnrecoverable()
+            else if (deviceAccessToken.isNullOrBlank()) WatchAccountRefreshResult.DeviceVerificationRequired()
+            else result
         }
-        sessionRefresh.checkBackoff(expectedUserId)
-        reconcileLocked(rejectedToken)
-        sessionRefresh.checkBackoff(expectedUserId)
-        accountRepository.session.value?.userId == expectedUserId &&
-            store.load()?.deviceAccessToken?.let { it.isNotBlank() && it != rejectedToken } == true
+        readiness.requireReady()
+        authorizationNotifier.afterReconcile(isAuthorized)
+        return withWatchAccountDeviceRefresh(
+            deviceToken = { deviceAccessToken },
+            refresh = { rejected -> refreshWatchDeviceSession(rejected, owner) },
+            build = { accountRepository.buildAccountSyncRequest(watch, install, name) }
+        )
     }
 
-    private suspend fun reconcileLocked(rejectedToken: String? = null) {
+    internal suspend fun refreshWatchDeviceSession(rejectedToken: String, expectedUserId: String): WatchAccountRefreshResult = try { operationMutex.withLock {
+        if (accountRepository.session.value?.userId != expectedUserId) return@withLock WatchAccountRefreshResult.DeviceVerificationRequired()
+        if (!accountRepository.hasUsableSession) return@withLock WatchAccountRefreshResult.AccountUnrecoverable()
+        val current = store.load()?.deviceAccessToken
+        if (!current.isNullOrBlank() && current != rejectedToken) return@withLock WatchAccountRefreshResult.Ready
+        sessionRefresh.checkBackoff(expectedUserId)
+        val result = reconcileLocked(rejectedToken)
+        if (result != WatchAccountRefreshResult.Ready) return@withLock result
+        sessionRefresh.checkBackoff(expectedUserId)
+        if (accountRepository.session.value?.userId != expectedUserId) return@withLock WatchAccountRefreshResult.DeviceVerificationRequired()
+        if (store.load()?.deviceAccessToken?.let { it.isNotBlank() && it != rejectedToken } == true) WatchAccountRefreshResult.Ready
+        else WatchAccountRefreshResult.DeviceVerificationRequired()
+    }} catch (error: Throwable) { accountSyncFailureResult(error) }
+
+    /** Cloud and watch callers share rotations/backoff; the watch keeps classified failures. */
+    suspend fun refreshRejectedDeviceSession(rejectedToken: String, expectedUserId: String): Boolean =
+        refreshWatchDeviceSession(rejectedToken, expectedUserId).let { result -> result.requireReady(); true }
+
+    private suspend fun reconcileLocked(rejectedToken: String? = null): WatchAccountRefreshResult = try {
         val cached = store.load()
         val trustedNow = store.trustedNowMillis()
         val cachedValid = cached != null && trustedNow != null && LeaseVerifier.verify(
-            compact = cached.lease,
-            expectedDeviceId = identity.deviceId,
-            publicKeyPem = environment.appAccessPublicKey,
-            nowSeconds = trustedNow / 1000
+            compact = cached.lease, expectedDeviceId = identity.deviceId,
+            publicKeyPem = environment.appAccessPublicKey, nowSeconds = trustedNow / 1000
         )
         if (cachedValid) store.recordTrustedTime(trustedNow!!)
         if (cached != null && !cachedValid) store.clear()
         val hasUsableSession = accountRepository.hasUsableSession
-        initialAppAccessState(
-            cachedSummary = cached?.access,
-            cachedLeaseValid = cachedValid,
-            hasUsableSession = hasUsableSession
-        )?.let { _state.value = it }
-
-        if (!hasUsableSession) {
-            return
-        }
-
-        val sessionUserId = accountRepository.session.value?.userId.orEmpty()
-        store.loadPendingOrder(sessionUserId)?.let { order ->
-            if (order.status == "pending") {
-                _state.value = AppAccessState.PaymentPending(order)
-                refreshPaymentLocked(order.orderId)
-                return
+        initialAppAccessState(cached?.access, cachedValid, hasUsableSession)?.let { _state.value = it }
+        if (!hasUsableSession) WatchAccountRefreshResult.AccountUnrecoverable()
+        else {
+            val order = store.loadPendingOrder(accountRepository.session.value!!.userId)
+            when {
+                order?.status == "pending" -> {
+                    _state.value = AppAccessState.PaymentPending(order)
+                    refreshPaymentLocked(order.orderId)
+                }
+                !cachedValid -> loadServerStatusLocked()
+                else -> refreshLeaseLocked(requireNotNull(cached), rejectedToken)
             }
         }
+    } catch (error: Throwable) { accountSyncFailureResult(error) }
 
-        if (!cachedValid) {
-            loadServerStatusLocked()
-            return
-        }
+    private suspend fun refreshLeaseLocked(cached: AppAuthorization, rejectedToken: String? = null): WatchAccountRefreshResult = try {
+        val refreshed = sessionRefresh.refresh(accountRepository.session.value?.userId.orEmpty(), rejectedToken)
+        _state.value = AppAccessState.Authorized(refreshed.access, offline = false)
+        WatchAccountRefreshResult.Ready
+    } catch (error: Throwable) { handleValidLeaseRefreshFailure(cached, error) }
 
-        try {
-            val refreshed = sessionRefresh.refresh(sessionUserId, rejectedToken)
-            _state.value = AppAccessState.Authorized(refreshed.access, offline = false)
-        } catch (error: Throwable) {
-            if (error is kotlinx.coroutines.CancellationException) throw error
-            handleValidLeaseRefreshFailure(cached!!, error)
-        }
-    }
-
-    private suspend fun handleValidLeaseRefreshFailure(
-        cached: AppAuthorization,
-        error: Throwable
-    ) {
+    private suspend fun handleValidLeaseRefreshFailure(cached: AppAuthorization, error: Throwable): WatchAccountRefreshResult {
+        val failure = accountSyncFailureResult(error) // Cancellation always escapes before fallback I/O.
         if (error.findAccountHttpException()?.statusCode != 403) {
             _state.value = AppAccessState.Authorized(cached.access, offline = true)
-            return
+            return failure
         }
-        val serverSummary = runCatching { accountRepository.appAccessStatus() }.getOrNull()
-        val decision = validLeaseRefreshDecision(cached.access, serverSummary)
+        val summary = try { accountRepository.appAccessStatus() } catch (statusError: Throwable) {
+            _state.value = AppAccessState.Authorized(cached.access, offline = true)
+            return accountSyncFailureResult(statusError)
+        }
+        val decision = validLeaseRefreshDecision(cached.access, summary)
         if (decision.clearCache) store.clear()
         _state.value = decision.state
+        return failure
     }
 
-    suspend fun claim() {
+    internal suspend fun claim(): WatchAccountRefreshResult {
         val wasAuthorized = isAuthorized
-        operationMutex.withLock { claimLocked() }
+        val result = operationMutex.withLock { claimLocked() }
         notifyIfNewlyAuthorized(wasAuthorized)
+        return result
     }
 
     suspend fun startTrial() {
@@ -157,6 +175,7 @@ class AppAccessCoordinator(
                 accountRepository.consumeActivationProof(activationProof)
                 _state.value = AppAccessState.Authorized(authorization.access, false)
             } catch (error: Throwable) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
                 val summary = runCatching { accountRepository.appAccessStatus() }
                     .getOrDefault(AppAccessSummary())
                 _state.value = when (error.findAccountHttpException()?.statusCode) {
@@ -169,34 +188,46 @@ class AppAccessCoordinator(
         notifyIfNewlyAuthorized(wasAuthorized)
     }
 
-    private suspend fun claimLocked() {
+    private suspend fun claimLocked(): WatchAccountRefreshResult {
         val activationProof = accountRepository.session.value?.activationProof.orEmpty()
-        try {
+        if (activationProof.isBlank()) {
+            _state.value = AppAccessState.ReauthenticationRequired(store.load()?.access ?: AppAccessSummary())
+            return WatchAccountRefreshResult.DeviceVerificationRequired()
+        }
+        return try {
             val authorization = accountRepository.claimAppAccess(store.claimIdempotencyKey())
             store.save(authorization)
             store.clearClaimIdempotencyKey()
             accountRepository.consumeActivationProof(activationProof)
             _state.value = AppAccessState.Authorized(authorization.access, false)
+            WatchAccountRefreshResult.Ready
         } catch (error: Throwable) {
+            val failure = accountSyncFailureResult(error)
             val cached = store.load()?.takeIf {
-                val trustedNow = store.trustedNowMillis() ?: return@takeIf false
-                LeaseVerifier.verify(
-                    compact = it.lease,
-                    expectedDeviceId = identity.deviceId,
-                    publicKeyPem = environment.appAccessPublicKey,
-                    nowSeconds = trustedNow / 1000
-                )
+                val now = store.trustedNowMillis() ?: return@takeIf false
+                LeaseVerifier.verify(it.lease, identity.deviceId, environment.appAccessPublicKey, now / 1000)
             }
-            if (cached != null) {
-                _state.value = AppAccessState.Authorized(cached.access, offline = true)
-                return
+            if (cached != null) _state.value = AppAccessState.Authorized(cached.access, offline = true)
+            else {
+                val status = try { accountRepository.appAccessStatus() } catch (statusError: Throwable) {
+                    val statusFailure = accountSyncFailureResult(statusError)
+                    _state.value = AppAccessState.ValidationError(statusError.message ?: "授权状态获取失败")
+                    // Authentication is definitive; temporary failures must not become device rejection.
+                    return when {
+                        failure is WatchAccountRefreshResult.AccountUnrecoverable -> failure
+                        statusFailure is WatchAccountRefreshResult.AccountUnrecoverable -> statusFailure
+                        failure is WatchAccountRefreshResult.TemporaryFailure -> failure
+                        statusFailure is WatchAccountRefreshResult.TemporaryFailure -> statusFailure
+                        else -> failure
+                    }
+                }
+                _state.value = when (error.findAccountHttpException()?.statusCode) {
+                    402 -> AppAccessState.PurchaseRequired(status)
+                    409 -> AppAccessState.ReauthenticationRequired(status)
+                    else -> AppAccessState.ValidationError(error.message ?: "设备授权失败")
+                }
             }
-            val status = runCatching { accountRepository.appAccessStatus() }.getOrDefault(AppAccessSummary())
-            _state.value = when ((error as? PhoneAccountHttpException)?.statusCode) {
-                402 -> AppAccessState.PurchaseRequired(status)
-                409 -> AppAccessState.ReauthenticationRequired(status)
-                else -> AppAccessState.ValidationError(error.message ?: "设备授权失败")
-            }
+            return failure
         }
     }
 
@@ -210,13 +241,14 @@ class AppAccessCoordinator(
         return order
     }
 
-    suspend fun refreshPayment(orderId: String) {
+    internal suspend fun refreshPayment(orderId: String): WatchAccountRefreshResult {
         val wasAuthorized = isAuthorized
-        operationMutex.withLock { refreshPaymentLocked(orderId) }
+        val result = operationMutex.withLock { refreshPaymentLocked(orderId) }
         notifyIfNewlyAuthorized(wasAuthorized)
+        return result
     }
 
-    suspend fun cancelPendingPayment() = operationMutex.withLock {
+    internal suspend fun cancelPendingPayment() = operationMutex.withLock {
         store.clearPendingOrder()
         loadServerStatusLocked()
     }
@@ -225,34 +257,22 @@ class AppAccessCoordinator(
         authorizationNotifier.afterPotentialTransition(wasAuthorized, isAuthorized)
     }
 
-    private suspend fun refreshPaymentLocked(orderId: String) {
-        runCatching { accountRepository.paymentOrder(orderId) }.onSuccess { order ->
-            when (order.status) {
-                "paid" -> {
-                    store.clearPendingOrder()
-                    val cached = store.load()
-                    if (cached != null) {
-                        val refreshed = sessionRefresh.refresh(
-                            accountRepository.session.value?.userId.orEmpty(), cached.deviceAccessToken
-                        )
-                        _state.value = AppAccessState.Authorized(refreshed.access, offline = false)
-                    } else {
-                        claimLocked()
-                    }
-                }
-                "pending" -> {
-                    accountRepository.session.value?.userId?.let { userId ->
-                        store.savePendingOrder(order, userId)
-                    }
-                    _state.value = AppAccessState.PaymentPending(order)
-                }
-                else -> {
-                    store.clearPendingOrder()
-                    loadServerStatusLocked()
-                }
+    private suspend fun refreshPaymentLocked(orderId: String): WatchAccountRefreshResult = try {
+        val order = accountRepository.paymentOrder(orderId)
+        when (order.status) {
+            "paid" -> {
+                store.clearPendingOrder()
+                val cached = store.load()
+                if (cached != null) refreshLeaseLocked(cached, cached.deviceAccessToken) else claimLocked()
             }
+            "pending" -> {
+                accountRepository.session.value?.userId?.let { store.savePendingOrder(order, it) }
+                _state.value = AppAccessState.PaymentPending(order)
+                WatchAccountRefreshResult.DeviceVerificationRequired()
+            }
+            else -> { store.clearPendingOrder(); loadServerStatusLocked() }
         }
-    }
+    } catch (error: Throwable) { accountSyncFailureResult(error) }
 
     suspend fun logout(): Boolean = operationMutex.withLock {
         val current = store.load()
@@ -280,32 +300,28 @@ class AppAccessCoordinator(
             result
         }
 
-    /**
-     * A revoked device must produce a new SMS/Passkey activation proof before claiming again.
-     * Keep local content and the revoked authorization record intact; only forget the account
-     * session so AccountActivity presents the real login flow.
-     */
+    /** Pause authenticated operations while retaining the owner and its cloud custody. */
     suspend fun beginReauthentication() = operationMutex.withLock {
-        store.clearPendingOrder()
-        store.clearOrderIdempotencyKey()
-        accountRepository.logout()
-        _state.value = AppAccessState.LoggedOut
+        accountRepository.beginSameAccountReauthentication()
     }
 
-    private suspend fun loadServerStatusLocked() {
-        runCatching { accountRepository.appAccessStatus() }.onSuccess { summary ->
-            if (summary.accessMode != "none" && accountRepository.session.value?.activationProof?.isNotBlank() == true) {
-                claimLocked()
-                return@onSuccess
-            }
+    private suspend fun loadServerStatusLocked(): WatchAccountRefreshResult = try {
+        val summary = accountRepository.appAccessStatus()
+        if (summary.accessMode != "none" && accountRepository.session.value?.activationProof?.isNotBlank() == true) claimLocked()
+        else {
             _state.value = when (summary.deviceStatus) {
-                "authorized" -> AppAccessState.ReauthenticationRequired(summary)
+                "authorized", "unclaimed" -> AppAccessState.ReauthenticationRequired(summary)
                 "revoked" -> AppAccessState.Revoked(summary)
-                "unclaimed" -> AppAccessState.ReauthenticationRequired(summary)
                 else -> AppAccessState.PurchaseRequired(summary)
             }
-        }.onFailure { _state.value = AppAccessState.ValidationError(it.message ?: "授权状态获取失败") }
+            WatchAccountRefreshResult.DeviceVerificationRequired()
+        }
+    } catch (error: Throwable) {
+        val failure = accountSyncFailureResult(error)
+        _state.value = AppAccessState.ValidationError(error.message ?: "授权状态获取失败")
+        failure
     }
+
 }
 
 /**

@@ -29,7 +29,7 @@ class PhonePushRegistrationUploader(
     /** Returns true only when the backend accepted the registration. Never throws. */
     fun upload(regId: String): Boolean {
         val session = accountRepository.session.value ?: return false
-        if (session.isExpired) return false
+        if (!session.isUsableForAuthentication) return false
         val deviceToken = deviceAccessTokenProvider()?.takeIf { it.isNotBlank() } ?: return false
         val payload = JSONObject().apply {
             put("registrationId", regId)

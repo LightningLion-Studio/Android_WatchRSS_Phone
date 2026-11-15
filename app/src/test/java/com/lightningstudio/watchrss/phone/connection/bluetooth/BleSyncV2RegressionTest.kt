@@ -72,13 +72,13 @@ class BleSyncV2RegressionTest {
         val asset=NoteAssetHashCache().inventory(file,"pic.png")!!
         val inventory=ok("syncNotes","manifest").put("noteManifest",NoteSyncPayload.summaries(listOf(note))).put("assetManifest",JSONArray().put(asset.json()))
         val optimizedSession=session(inventory,noteResponse("delta"))
-        val optimized=manager.syncNotes(device.address,"test",optimizedSession,BleSyncCapabilities(noteManifest=true,noteAssets=true))
+        val optimized=withContext(AccountDataSession(optimizedSession)){manager.syncNotes(device.address,"test",optimizedSession,BleSyncCapabilities(noteManifest=true,noteAssets=true))}
         assertEquals(0,optimized.sent);assertEquals(0,optimized.appliedOnPhone)
         val optimizedPayloads=payloads();assertEquals(listOf("manifest","delta"),optimizedPayloads.map{it.getString("phase")})
         assertFalse(optimizedPayloads[0].has("notes"));assertEquals(0,optimizedPayloads[1].getJSONArray("notes").length())
         optimizedSession.close()
         val legacySession=session(noteResponse(null,listOf(note)),ok("syncNoteAsset").put("alreadyPresent",true))
-        manager.syncNotes(device.address,"legacy",legacySession,BleSyncCapabilities())
+        withContext(AccountDataSession(legacySession)){manager.syncNotes(device.address,"legacy",legacySession,BleSyncCapabilities())}
         val old=payloads();assertFalse(old[0].has("phase"));assertEquals(1,old[0].getJSONArray("notes").length())
         assertEquals(1,old.count{it.optString("action")=="syncNoteAsset"})
         val before=old.sumOf(BluetoothSyncProtocol::wireSize);val after=optimizedPayloads.sumOf(BluetoothSyncProtocol::wireSize)
@@ -91,7 +91,7 @@ class BleSyncV2RegressionTest {
         File(context.filesDir,"notes/assets/pic.png").apply{requireNotNull(parentFile).mkdirs();writeBytes(ByteArray(12){1})}
         for(remote in listOf(JSONArray(),JSONArray().put(NoteAssetInventoryEntry("pic.png","0".repeat(64),12).json()))) {
             val s=session(ok("syncNotes","manifest").put("noteManifest",NoteSyncPayload.summaries(listOf(n))).put("assetManifest",remote),noteResponse("delta"),ok("syncNoteAsset"))
-            manager.syncNotes(device.address,"asset",s,BleSyncCapabilities(noteManifest=true,noteAssets=true))
+            withContext(AccountDataSession(s)){manager.syncNotes(device.address,"asset",s,BleSyncCapabilities(noteManifest=true,noteAssets=true))}
             assertEquals(1,payloads().count{it.getString("action")=="syncNoteAsset"});s.close()
         }
     }
@@ -103,14 +103,14 @@ class BleSyncV2RegressionTest {
         notes.applyRemote(n.copy(folderId=""),"phone");assertEquals("",notes.note("n")!!.folderId)
         notes.applyRemote(n,"phone");assertEquals("",notes.note("n")!!.folderId)
         val s=session(ok("syncNotes","manifest").put("noteManifest",NoteSyncPayload.summaries(listOf(n))),noteResponse("delta",listOf(n.copy(title="new",updatedAt=200,modifiedBy="watch"))))
-        assertEquals(1,manager.syncNotes(device.address,"note",s,BleSyncCapabilities(noteManifest=true)).appliedOnPhone)
+        assertEquals(1,withContext(AccountDataSession(s)){manager.syncNotes(device.address,"note",s,BleSyncCapabilities(noteManifest=true))}.appliedOnPhone)
         assertEquals("new",notes.note("n")!!.title);s.close()
     }
     @Test fun malformedOrDuplicateNoteManifestFailsInsteadOfClaimingPeerHasBody()=runBlocking<Unit> {
         val n=notes.save(noteId="n",title="n",markdown="text")
         val bad=NoteSyncPayload.summaries(listOf(n)).apply{put(getJSONObject(0))}
         val s=session(ok("syncNotes","manifest").put("noteManifest",bad))
-        assertTrue(runCatching{manager.syncNotes(device.address,"bad",s,BleSyncCapabilities(noteManifest=true))}.isFailure)
+        assertTrue(runCatching{withContext(AccountDataSession(s)){manager.syncNotes(device.address,"bad",s,BleSyncCapabilities(noteManifest=true))}}.isFailure)
         assertEquals(1,payloads().size);s.close()
     }
     @Test fun hashingIsCachedAcrossInstancesAndInvalidatesOnMtimeSizeOrPathChange() {
@@ -146,10 +146,10 @@ class BleSyncV2RegressionTest {
     @Test fun tokenManagerUsesCursorPagesAndLegacyFallbackDoesNotSendCursor()=runBlocking<Unit> {
         val binding=ok("syncLibrary").put("supportsTokenUsageCursor",true)
         val s=session(usage("epoch",1,listOf(1),more=true),usage("epoch",2,listOf(2)))
-        manager.syncLlmTokenUsage(device,s,BleSyncBindingSnapshot(device.address,"owner",s,binding))
+        withContext(AccountDataSession(s)){manager.syncLlmTokenUsage(device,s,BleSyncBindingSnapshot(device.address,"owner",s,binding))}
         assertEquals(listOf(0L,1L),payloads().map{it.getLong("afterId")});assertFalse(payloads()[0].has("usageEpoch"));assertEquals("epoch",payloads()[1].getString("usageEpoch"));s.close()
         val old=session(ok("syncLlmTokenUsage").put("records",JSONArray().put(JSONObject().put("totalTokens",9))))
-        manager.syncLlmTokenUsage(device,old,BleSyncBindingSnapshot(device.address,"owner",old,ok("syncLibrary")))
+        withContext(AccountDataSession(old)){manager.syncLlmTokenUsage(device,old,BleSyncBindingSnapshot(device.address,"owner",old,ok("syncLibrary")))}
         assertFalse(payloads().single().has("afterId"));assertEquals(3,tokens.observeRecent().first().size);old.close()
     }
     @Test fun canonicalAndLegacyArticleIdsRoundTripWithoutChangingBodyOrDuplicatingTrueGuids() {
@@ -329,14 +329,14 @@ class BleSyncV2RegressionTest {
             assertTrue(runCatching{tokens.applyIncremental("peer",page)}.isFailure)
         assertNull(tokens.cursor("peer"))
         val s=session(ok("otherAction").put("records",JSONArray()))
-        assertTrue(runCatching { manager.syncLlmTokenUsage(device,s,BleSyncBindingSnapshot(device.address,"owner",s,ok("syncLibrary"))) }.isFailure)
+        assertTrue(runCatching { withContext(AccountDataSession(s)){manager.syncLlmTokenUsage(device,s,BleSyncBindingSnapshot(device.address,"owner",s,ok("syncLibrary")))} }.isFailure)
         assertEquals(7,tokens.observeRecent().first().single().totalTokens);s.close()
     }
 
     @Test fun bindingSnapshotCannotBeReusedForAnotherPhysicalSessionOrOwner()=runBlocking<Unit> {
         val original=session();val another=session()
         for(snapshot in listOf(BleSyncBindingSnapshot(device.address,"different-owner",another,ok("syncLibrary")),BleSyncBindingSnapshot(device.address,"owner",original,ok("syncLibrary")))) {
-            assertTrue(runCatching {manager.syncLlmTokenUsage(device,another,snapshot)}.isFailure)
+            assertTrue(runCatching {withContext(AccountDataSession(another)){manager.syncLlmTokenUsage(device,another,snapshot)}}.isFailure)
             assertTrue(payloads().isEmpty())
         }
         original.close();another.close()
@@ -386,7 +386,7 @@ class BleSyncV2RegressionTest {
             }
         }
         val s=PhoneSyncSession(PhoneBluetoothSyncClient(context,log),device,"phone",PhoneSyncSession.Transport(ByteArrayInputStream(input.toByteArray()),output,"test",false,{}),true,false,false)
-        val failure=runCatching {manager.syncLibrary(device.address,s,binding=BleSyncBindingSnapshot(device.address,"owner",s,ok("syncLibrary")))}.exceptionOrNull()
+        val failure=runCatching {withContext(AccountDataSession(s)){manager.syncLibrary(device.address,s,binding=BleSyncBindingSnapshot(device.address,"owner",s,ok("syncLibrary")))}}.exceptionOrNull()
         assertNotNull(failure);assertTrue(failure.toString(),failure!!.message.orEmpty().contains("lost library ACK"))
         assertNull(db.syncPeerStateDao().get("watch"))
         assertTrue(db.appMetaDao().getAll().none {it.key.startsWith("ble_echo_v2:") || it.key.startsWith("ble_identity_mode:")})
@@ -399,7 +399,7 @@ class BleSyncV2RegressionTest {
         db.phoneRssSourceDao().upsert(source);assertEquals(0,repo.mergeAuthoritativeRssSources(listOf(source)))
         repeat(2) {round->
             val manifest=LibrarySyncPayload.buildManifestRequestFromEntries("watch",emptyList(),emptyList()).put("success",true)
-            val s=session(ok("syncLibrary"),ok("syncLibrary","cursor").put("supportsAuthoritativeLibraryReplace",true),manifest,
+            val s=session(ok("syncLibrary"),ok("syncAccount"),ok("syncLibrary","cursor").put("supportsAuthoritativeLibraryReplace",true),manifest,
                 ok("syncLibrary","complete").put("articles",JSONArray()),BluetoothSyncProtocol.buildSessionControlResponse(14,"complete"))
             val result=manager.syncAll(device,mode=LibrarySyncMode.WATCH_TO_PHONE_REPLACE,reusableSession=s)
             assertEquals(if(round==0)1 else 0,result.libraryStats!!.merged)
@@ -491,7 +491,7 @@ class BleSyncV2RegressionTest {
     private fun emptyComplete() = ok("syncLibrary", "complete").put("articles", JSONArray())
     private fun finishResponse() = BluetoothSyncProtocol.buildSessionControlResponse(14, "complete")
 
-    @Test fun disconnectMidBodyReconnectsWithFreshCursorAndKeepsCompletedAccountStage() = runBlocking<Unit> {
+    @Test fun disconnectMidBodyReconnectsWithFreshCursorAndReconfirmsAccount() = runBlocking<Unit> {
         repo.markLibrarySyncSuccess("watch", 0, 0, 14, true, canonicalIds = false)
         repo.mergeArticlesFromSync(listOf(row("local")))
         val seq = db.syncChangeLogDao().maxSeq()
@@ -500,14 +500,14 @@ class BleSyncV2RegressionTest {
         manager.reconnectDelay = { waits += it }
         manager.reconnectSession = { _, _ ->
             opens++
-            session(bindingResponse(), LibrarySyncPayload.buildCursorResponse("watch", LibrarySyncCursor(0, seq, 0)).put("supportsRssCanonicalIds", false),
+            session(bindingResponse(), ok("syncAccount"), LibrarySyncPayload.buildCursorResponse("watch", LibrarySyncCursor(0, seq, 0)).put("supportsRssCanonicalIds", false),
                 LibrarySyncPayload.buildManifestRequest("watch", repo.getArticlesForSync(), emptyList()).put("success", true).put("supportsReaderPresets", false).put("supportsNoteManifestV2", false).put("supportsNoteAssetInventory", false),
                 emptyComplete(), noteResponse(null), ok("syncLlmTokenUsage").put("records", JSONArray()), finishResponse())
         }
         manager.syncAll(device, reusableSession = first, onProgress = { if (it.reconnectAttempt > 0) attempts += it.reconnectAttempt })
         assertEquals(listOf(2000L), waits); assertEquals(listOf(1), attempts); assertEquals(1, opens)
         assertEquals(1, payloads(0).count { it.optString("action") == "syncAccount" })
-        assertEquals(0, payloads(1).count { it.optString("action") == "syncAccount" })
+        assertEquals(1, payloads(1).count { it.optString("action") == "syncAccount" })
         val manifest = payloads(1).single { it.optString("phase") == "manifest" && it.optString("action") == "syncLibrary" }
         assertEquals(0, manifest.getJSONArray("articleManifest").length())
         assertEquals(seq, db.syncPeerStateDao().get("watch")!!.lastLocalSeqAckedByPeer)
@@ -527,7 +527,7 @@ class BleSyncV2RegressionTest {
         manager.reconnectDelay={waits+=it}
         manager.reconnectSession={_,_->
             assertTrue(ip.isClosed);opens++
-            session(bindingResponse(),ok("syncLibrary","cursor"),emptyManifest(),emptyComplete(),
+            session(bindingResponse(),ok("syncAccount"),ok("syncLibrary","cursor"),emptyManifest(),emptyComplete(),
                 noteResponse(null),ok("syncLlmTokenUsage").put("records",JSONArray()),finishResponse())
         }
         try {
@@ -560,7 +560,7 @@ class BleSyncV2RegressionTest {
         manager.reconnectSession = { _, _ ->
             afterFirstApply = db.syncChangeLogDao().maxSeq()
             assertNotNull(db.phoneArticleDao().getById(remote.articleId)); assertNull(db.syncPeerStateDao().get("watch"))
-            session(bindingResponse(), ok("syncLibrary", "cursor"), manifest, complete, noteResponse(null),
+            session(bindingResponse(), ok("syncAccount"), ok("syncLibrary", "cursor"), manifest, complete, noteResponse(null),
                 ok("syncLlmTokenUsage").put("records", JSONArray()), finishResponse())
         }
         val result = manager.syncAll(device, reusableSession = first)
@@ -572,7 +572,7 @@ class BleSyncV2RegressionTest {
     @Test fun failureAfterCommittedLibraryResumesNotesWithoutRepeatingLibrary() = runBlocking<Unit> {
         val first = session(bindingResponse(), ok("syncAccount"), ok("syncLibrary", "cursor"), emptyManifest(), emptyComplete())
         manager.reconnectDelay = {}
-        manager.reconnectSession = { _, _ -> session(bindingResponse(), noteResponse(null), ok("syncLlmTokenUsage").put("records", JSONArray()), finishResponse()) }
+        manager.reconnectSession = { _, _ -> session(bindingResponse(), ok("syncAccount"), noteResponse(null), ok("syncLlmTokenUsage").put("records", JSONArray()), finishResponse()) }
         manager.syncAll(device, reusableSession = first)
         assertEquals(listOf("probe"), payloads().filter { it.optString("action") == "syncLibrary" }.map { it.getString("phase") })
         assertEquals(0, cloudCalls)
@@ -621,7 +621,7 @@ class BleSyncV2RegressionTest {
     @Test fun reconnectDropsOldPhysicalSessionCapabilitiesAndUsesNewProbe()=runBlocking<Unit> {
         val first=session(bindingResponse(),ok("syncAccount"),ok("syncLibrary","cursor"),emptyManifest(),emptyComplete())
         manager.reconnectDelay={}
-        manager.reconnectSession={_,_->session(bindingResponse().put("supportsNoteManifestV2",true),
+        manager.reconnectSession={_,_->session(bindingResponse().put("supportsNoteManifestV2",true),ok("syncAccount"),
             ok("syncNotes","manifest").put("noteManifest",JSONArray()),noteResponse("delta"),ok("syncLlmTokenUsage").put("records",JSONArray()),finishResponse())}
         manager.syncAll(device,reusableSession=first)
         assertEquals(listOf("manifest","delta"),payloads().filter{it.optString("action")=="syncNotes"}.map{it.getString("phase")})
@@ -639,7 +639,7 @@ class BleSyncV2RegressionTest {
         val pull=ok("syncReader","pullResource").put("kind","font").put("fileName",fa.fileName).put("totalBytes",a.size).put("chunkIndex",0).put("chunkCount",1).put("chunkSha256",fa.sha256).put("data",java.util.Base64.getEncoder().encodeToString(a))
         val push=ok("syncReader","pushResource").put("received",true).put("chunkSha256",fb.sha256).put("applied",true)
         val s=session(reply(true),pull,push,reply(false));var applied=0
-        assertTrue(manager.syncReaderPresets(device.address,"reader-recovery",s,BleSyncBindingSnapshot(device.address,"owner",s,ok("syncLibrary").advertiseBleSyncV2()),onLocalApplied={applied+=it}))
+        assertTrue(withContext(AccountDataSession(s)){manager.syncReaderPresets(device.address,"reader-recovery",s,BleSyncBindingSnapshot(device.address,"owner",s,ok("syncLibrary").advertiseBleSyncV2()),onLocalApplied={applied+=it})})
         assertEquals(listOf("manifest","pullResource","pushResource","manifest"),payloads().map{it.getString("phase")});assertArrayEquals(a,reader.resourceStore.fontFile(fa.fileName)!!.readBytes());assertEquals(1,applied);s.close()
     }
     @Test fun missingOriginalOnBothPeersIsPreservedWithActionableWarning()=runBlocking<Unit> {
@@ -648,7 +648,7 @@ class BleSyncV2RegressionTest {
         db.readerPresetDao().upsertFont(font)
         val reply=ReaderPresetSyncPayload.buildManifest(reader.exportSnapshot(),"watch").put("success",true).put("missingResources",JSONArray().put(JSONObject().put("kind","font").put("fileName",font.fileName).put("sha256",sha).put("byteCount",4)))
         val s=session(reply)
-        val failure=runCatching{manager.syncReaderPresets(device.address,"reader-missing",s,BleSyncBindingSnapshot(device.address,"owner",s,ok("syncLibrary")))}.exceptionOrNull()
+        val failure=runCatching{withContext(AccountDataSession(s)){manager.syncReaderPresets(device.address,"reader-missing",s,BleSyncBindingSnapshot(device.address,"owner",s,ok("syncLibrary")))}}.exceptionOrNull()
         assertTrue(failure?.message.orEmpty().contains("两端均缺少字体"));assertTrue(failure?.message.orEmpty().contains("aaaaaaaa"));assertTrue(failure?.message.orEmpty().contains("重新导入"));assertEquals(1,payloads().size);assertFalse(db.readerPresetDao().fontById(sha)!!.deleted);s.close()
     }
 

@@ -15,8 +15,12 @@ class PhoneAccountRepository(
     internal var onClearCloudState: (PhoneAccountSession) -> Unit = {}
     val session: StateFlow<PhoneAccountSession?> = sessionStore.session
 
+    val reauthenticationOwner: StateFlow<String?> = sessionStore.reauthenticationOwner
+
+    suspend fun beginSameAccountReauthentication() = sessionStore.beginSameAccountReauthentication()
+
     val hasUsableSession: Boolean
-        get() = session.value?.isExpired == false
+        get() = reauthenticationOwner.value == null && session.value?.let { it.isUsableForAuthentication && it.userId.isNotBlank() && it.accessToken.isNotBlank() } == true
 
     val installId: String
         get() = installationIdentity.installId
@@ -139,26 +143,22 @@ class PhoneAccountRepository(
         accountClient.startActionSecurityVerification(requireSession(), action)
 
     suspend fun startPasskeyRegistration(): PasskeyOptions {
-        val session = session.value ?: error("请先使用手机号验证码登录")
-        require(!session.isExpired) { "登录已过期，请重新登录" }
+        val session = requireSession()
         return accountClient.startPasskeyRegistration(session)
     }
 
     suspend fun listRegisteredPasskeys(): List<RegisteredPasskey> {
-        val session = session.value ?: error("请先使用手机号验证码登录")
-        require(!session.isExpired) { "登录已过期，请重新登录" }
+        val session = requireSession()
         return accountClient.listRegisteredPasskeys(session)
     }
 
     suspend fun renameRegisteredPasskey(credentialId: String, displayName: String) {
-        val session = session.value ?: error("请先使用手机号验证码登录")
-        require(!session.isExpired) { "登录已过期，请重新登录" }
+        val session = requireSession()
         accountClient.renameRegisteredPasskey(session, credentialId, displayName)
     }
 
     suspend fun deleteRegisteredPasskey(credentialId: String) {
-        val session = session.value ?: error("请先使用手机号验证码登录")
-        require(!session.isExpired) { "登录已过期，请重新登录" }
+        val session = requireSession()
         accountClient.deleteRegisteredPasskey(session, credentialId)
     }
 
@@ -166,7 +166,7 @@ class PhoneAccountRepository(
         challengeId: String,
         credentialJson: String
     ) {
-        val session = session.value ?: error("请先使用手机号验证码登录")
+        val session = requireSession()
         accountClient.finishPasskeyRegistration(session, challengeId, credentialJson)
     }
 
@@ -185,17 +185,19 @@ class PhoneAccountRepository(
         }
     }
 
-    private suspend fun saveCompletedLogin(progress: LoginProgress) {
+    internal suspend fun saveCompletedLogin(progress: LoginProgress) {
         progress.session?.let { next ->
             session.value?.takeIf { it.userId != next.userId }?.let(onClearCloudState)
             sessionStore.clearBluetoothGrants()
             sessionStore.save(next)
+            sessionStore.finishReauthentication()
         }
     }
 
     suspend fun logout() {
         val current = session.value
-        current?.let { runCatching { onReleaseCloudAuthorization(it) } }
+        // Explicit logout is revocation, not a new authenticated product operation.
+        current?.let { runCatching { onReleaseCloudAuthorization(it.copy(authenticationPaused = false)) } }
         if (current != null && !current.isExpired) {
             val queued = runCatching { sessionStore.queueRevocation(current) }.isSuccess
             val revoked = runCatching { accountClient.logout(current) }.isSuccess
@@ -266,6 +268,7 @@ class PhoneAccountRepository(
 
     private fun requireSession(): PhoneAccountSession {
         val current = session.value ?: error("请先登录")
+        check(!current.authenticationPaused) { "请先完成账号重新认证" }
         require(!current.isExpired) { "登录已过期，请重新登录" }
         return current
     }
@@ -313,7 +316,7 @@ class PhoneAccountRepository(
         watchInstallId: String? = null,
         watchDisplayName: String? = null
     ): JSONObject {
-        val session = session.value ?: error("请先在手机端登录腕上RSS账号")
+        val session = requireSession()
         validBluetoothGrant(watchDeviceId)?.let{return it}
         val token = accountClient.issueWatchDeviceToken(
             session = session,

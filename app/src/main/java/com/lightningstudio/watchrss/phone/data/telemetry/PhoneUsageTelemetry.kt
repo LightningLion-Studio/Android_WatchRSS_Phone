@@ -138,7 +138,7 @@ class PhoneUsageTelemetry(
 
     private fun uploadPending() {
         val session = accountRepository.session.value ?: return
-        if (session.isExpired) return
+        if (!session.isUsableForAuthentication) return
         for (snapshot in store.snapshots()) {
             val payload = JSONObject().apply {
                 put("day", snapshot.day)

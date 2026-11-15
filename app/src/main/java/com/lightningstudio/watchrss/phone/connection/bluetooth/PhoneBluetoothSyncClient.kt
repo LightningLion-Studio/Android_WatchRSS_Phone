@@ -72,6 +72,7 @@ private class LibrarySyncRejectedException(response: JSONObject) :
     IllegalArgumentException(watchBluetoothFailureMessage(response))
 
 private fun requireLibraryFrameAccepted(response: JSONObject) {
+    requireAccountAccepted(response)
     if (!response.optBoolean("success", true) || response.optBoolean("fatalSession", false)) {
         throw LibrarySyncRejectedException(response)
     }
@@ -920,7 +921,8 @@ class PhoneBluetoothSyncClient(
         deviceAddress: String,
         sessionId: String,
         nextRequest: suspend () -> JSONObject,
-        onResponse: (deviceName: String, response: JSONObject) -> Unit
+        onResponse: (deviceName: String, response: JSONObject) -> Unit,
+        authorizeConnection: suspend (suspend (JSONObject) -> JSONObject) -> Unit = {}
     ): BluetoothSyncExchange = connectionMutex.withLock {
         requireBluetoothConnectPermission()
         val adapter = context.getSystemService(BluetoothManager::class.java)
@@ -943,6 +945,14 @@ class PhoneBluetoothSyncClient(
             socket = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
             currentCoroutineContext().ensureActive()
             connectLogged(socket, sessionId, device)
+            val connected = socket
+            authorizeConnection { accountRequest ->
+                writeFrameLogged(connected, sessionId, "previewAccountRequest", accountRequest)
+                readFrameLogged(connected, sessionId, "previewAccountResponse").also {
+                    require(it.optBoolean("success")) { watchBluetoothFailureMessage(it) }
+                    writeResponseAck(connected, sessionId, success = true, applied = true)
+                }
+            }
             var request = initialRequest
             writeFrameLogged(socket, sessionId, "previewFrame", request)
             var response = readFrameLogged(socket, sessionId, "previewResponse")
@@ -1047,6 +1057,7 @@ class PhoneBluetoothSyncClient(
             BluetoothSyncProtocol.readFrame(socket.inputStream) { bytes ->
                 transferredBytes += bytes
             }.also { payload ->
+                requireAccountAccepted(payload)
                 stats.recordReceive(
                     bytes = transferredBytes,
                     elapsedMs = elapsedSince(startedAt)
@@ -2872,6 +2883,7 @@ class PhoneBluetoothSyncClient(
                     fields = mapOf("label" to label, "elapsedMs" to elapsedSince(startedAt),"wireBytes" to wireBytes) +
                         payloadFields(label, payload)
                 )
+                requireAccountAccepted(payload)
             }
         } catch (throwable: Throwable) {
             debugLog.appendEvent(

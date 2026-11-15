@@ -4,6 +4,7 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.ui.layout.onGloballyPositioned
 
+import com.lightningstudio.watchrss.phone.account.WatchAccountRefreshResult
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -158,13 +159,9 @@ class AccountActivity : ComponentActivity() {
                     usageTelemetry = container.usageTelemetry,
                     onBack = ::finish,
                     returnWhenCloudReady = returnWhenCloudReady,
+                    forceReauthentication = intent.getBooleanExtra(EXTRA_REAUTHENTICATE, false),
                     onLoginComplete = {
-                        if (finishAfterLogin) {
-                            lifecycleScope.launch {
-                                container.appAccessCoordinator.reconcile()
-                                finish()
-                            }
-                        }
+                        if (finishAfterLogin) finish()
                     },
                     loginWithPasskey = passkeyCoordinator::login,
                     createPasskey = passkeyCoordinator::createPasskey,
@@ -196,14 +193,16 @@ class AccountActivity : ComponentActivity() {
     }
 
     companion object {
+        internal const val EXTRA_REAUTHENTICATE = "same_account_reauthentication"
         private const val EXTRA_SECTION = "account_section"
         private const val EXTRA_RETURN_WHEN_CLOUD_READY = "return_when_cloud_ready"
         private const val EXTRA_FINISH_AFTER_LOGIN =
             "com.lightningstudio.watchrss.phone.extra.FINISH_AFTER_LOGIN"
 
         fun createIntent(context: Context, finishAfterLogin: Boolean = false, section: AccountSection = AccountSection.ROOT,
-            returnWhenCloudReady: Boolean = false): Intent =
+            returnWhenCloudReady: Boolean = false, reauthenticate: Boolean = false): Intent =
             Intent(context, AccountActivity::class.java).apply {
+                putExtra(EXTRA_REAUTHENTICATE, reauthenticate)
                 putExtra(EXTRA_FINISH_AFTER_LOGIN, finishAfterLogin)
                 putExtra(EXTRA_SECTION, section.name)
                 putExtra(EXTRA_RETURN_WHEN_CLOUD_READY, returnWhenCloudReady)
@@ -262,12 +261,26 @@ internal fun AccountScreen(
     leadingPane: (@Composable () -> Unit)? = null,
     initialSection: AccountSection = AccountSection.ROOT,
     /** Opened from watch pairing for the cloud key: go straight back once the key exists, and Back returns there too. */
-    returnWhenCloudReady: Boolean = false
+    returnWhenCloudReady: Boolean = false,
+    forceReauthentication: Boolean = false,
+    accessCoordinatorOverride: com.lightningstudio.watchrss.phone.account.AppAccessCoordinator? = null
 ) {
     val session by accountRepository.session.collectAsState()
+    var authenticationCompleted by rememberSaveable { mutableStateOf(false) }
+    // Save only safe categories and their owner, never an exception or its response body.
+    var authorizationFailure by rememberSaveable { mutableStateOf<AccountAuthorizationFailure?>(null) }
+    var authorizationOwner by rememberSaveable { mutableStateOf<String?>(null) }
+    var forceReauthenticationConsumed by rememberSaveable { mutableStateOf(false) }
+    val reauthenticationOwner by accountRepository.reauthenticationOwner.collectAsState()
+    LaunchedEffect(forceReauthentication) {
+        if (forceReauthentication && !forceReauthenticationConsumed) {
+            forceReauthenticationConsumed = true
+            accountRepository.beginSameAccountReauthentication()
+        }
+    }
     val context = LocalContext.current
     val tipManager = LocalTipManager.current
-    val accessCoordinator = (context.applicationContext as PhoneCompanionApplication).container.appAccessCoordinator
+    val accessCoordinator = accessCoordinatorOverride ?: (context.applicationContext as PhoneCompanionApplication).container.appAccessCoordinator
     val appAccessState by accessCoordinator.state.collectAsState()
     val cloudSyncState by cloudSyncService.state.collectAsState()
     val coroutineScope = rememberCoroutineScope()
@@ -497,8 +510,73 @@ internal fun AccountScreen(
         securityVerificationInput = ""
     }
 
+    suspend fun completeAuthentication() {
+        val owner = accountRepository.session.value?.userId ?: return
+        val result = completePhoneAccountAuthentication(accessCoordinator)
+        if (accountRepository.session.value?.userId != owner) return
+        authorizationOwner = owner
+        authenticationCompleted = result == WatchAccountRefreshResult.Ready
+        authorizationFailure = when (result) {
+            WatchAccountRefreshResult.Ready -> null
+            is WatchAccountRefreshResult.AccountUnrecoverable -> AccountAuthorizationFailure.ACCOUNT_UNRECOVERABLE
+            is WatchAccountRefreshResult.DeviceVerificationRequired -> AccountAuthorizationFailure.DEVICE_VERIFICATION_REQUIRED
+            is WatchAccountRefreshResult.TemporaryFailure -> AccountAuthorizationFailure.TEMPORARY_FAILURE
+        }
+        when (result) {
+            WatchAccountRefreshResult.Ready -> {
+                message = "登录成功"
+                error = null
+                onLoginComplete()
+            }
+            is WatchAccountRefreshResult.AccountUnrecoverable -> {
+                // The newly signed-in account was rejected: pause it without releasing cloud custody.
+                accountRepository.beginSameAccountReauthentication()
+                loginProgress = null
+                password = ""
+                otp = ""
+                passwordTotp = ""
+                otpResendAvailableAt = 0L
+                message = null
+                error = "登录已失效，请重新登录"
+            }
+            else -> {
+                message = null
+                error = null // The authorization panel shows the typed reason beside its retry action.
+            }
+        }
+    }
+
+    val authorizationMatchesAccount = authorizationOwner != null && authorizationOwner == session?.userId
+    val pendingAuthorizationFailure = authorizationFailure.takeIf {
+        authorizationMatchesAccount && it != AccountAuthorizationFailure.ACCOUNT_UNRECOVERABLE
+    }
+    val accountError = if (authorizationMatchesAccount &&
+        authorizationFailure == AccountAuthorizationFailure.ACCOUNT_UNRECOVERABLE
+    ) "登录已失效，请重新登录" else error
+    val forceLoginPending = forceReauthentication && !authenticationCompleted &&
+        (authorizationOwner == null || authorizationMatchesAccount)
     val accountControls: @Composable ColumnScope.(() -> Unit) -> Unit = { onCloudSyncClick ->
-        if (session == null) {
+        if (pendingAuthorizationFailure != null) {
+            Text("设备授权尚未完成", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+            Text(
+                when (pendingAuthorizationFailure) {
+                    AccountAuthorizationFailure.DEVICE_VERIFICATION_REQUIRED -> "手机设备身份需要验证，请重试设备授权"
+                    else -> "账号服务暂时不可用，请稍后重试"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Button(
+                onClick = {
+                    runAction {
+                        if (accountRepository.session.value?.userId != authorizationOwner) return@runAction
+                        busy = true
+                        try { completeAuthentication() } finally { busy = false }
+                    }
+                },
+                enabled = !busy
+            ) { Text(if (busy) "正在重试…" else "重试设备授权") }
+        } else if (shouldShowAccountLogin(session, reauthenticationOwner, forceLoginPending)) {
             Text(
                 "登录",
                 style = MaterialTheme.typography.titleLarge,
@@ -526,13 +604,12 @@ internal fun AccountScreen(
                         .semantics { contentType = ContentType.PhoneNumber }
                 )
             }
-            fun applyLoginProgress(progress: LoginProgress) {
+            suspend fun applyLoginProgress(progress: LoginProgress) {
                 loginProgress = progress
                 progress.session?.let { signedIn ->
-                    message = "登录成功"
                     usageTelemetry.recordAccountSignedIn(signedIn.userId)
                     tipManager?.recordEvent(TipEvents.ACCOUNT_SIGNED_IN)
-                    onLoginComplete()
+                    completeAuthentication()
                 } ?: run {
                     // Two-step sign-in: move straight to the next factor instead of
                     // leaving the user on the one that just succeeded.
@@ -622,10 +699,11 @@ internal fun AccountScreen(
                                 runAction {
                                     busy = true
                                     error = null
+                                    authorizationFailure = null
                                     runCatching {
                                         val progress = loginProgress ?: accountRepository.startLogin(phone)
                                         accountRepository.loginWithPasswordFactor(progress.transactionId, password)
-                                    }.onSuccess(::applyLoginProgress)
+                                    }.onSuccess { applyLoginProgress(it) }
                                         .onFailure { error = it.message ?: "密码验证失败" }
                                     busy = false
                                 }
@@ -649,6 +727,7 @@ internal fun AccountScreen(
                                     runAction {
                                         busy = true
                                         error = null
+                                        authorizationFailure = null
                                         runCatching {
                                             val progress = loginProgress ?: accountRepository.startLogin(phone)
                                             loginProgress = progress
@@ -683,10 +762,11 @@ internal fun AccountScreen(
                                 runAction {
                                     busy = true
                                     error = null
+                                    authorizationFailure = null
                                     runCatching {
                                         val progress = loginProgress ?: accountRepository.startLogin(phone)
                                         accountRepository.verifyPhoneOtpFactor(progress.transactionId, otp)
-                                    }.onSuccess(::applyLoginProgress)
+                                    }.onSuccess { applyLoginProgress(it) }
                                         .onFailure { error = accountLoginErrorMessage(AccountLoginAction.VERIFY_OTP, it) }
                                     busy = false
                                 }
@@ -714,6 +794,7 @@ internal fun AccountScreen(
                                 runAction {
                                     busy = true
                                     error = null
+                                    authorizationFailure = null
                                     runCatching {
                                         val progress = loginProgress ?: accountRepository.startLogin(phone)
                                         accountRepository.verifyTotpFactor(
@@ -721,7 +802,7 @@ internal fun AccountScreen(
                                             passwordTotp
                                         )
                                     }
-                                        .onSuccess(::applyLoginProgress)
+                                        .onSuccess { applyLoginProgress(it) }
                                         .onFailure { error = it.message ?: "动态验证码无效" }
                                     busy = false
                                 }
@@ -741,10 +822,11 @@ internal fun AccountScreen(
                                 runAction {
                                     busy = true
                                     error = null
+                                    authorizationFailure = null
                                     runCatching {
                                         val progress = loginProgress ?: accountRepository.startLogin(phone)
                                         loginWithPasskey(phone, progress.transactionId)
-                                    }.onSuccess(::applyLoginProgress)
+                                    }.onSuccess { applyLoginProgress(it) }
                                         .onFailure {
                                             Log.w(ACCOUNT_LOG_TAG, "Passkey login failed", it)
                                             error = accountLoginErrorMessage(AccountLoginAction.PASSKEY_LOGIN, it)
@@ -1931,7 +2013,7 @@ internal fun AccountScreen(
                 }
                 accountControls(::openCloudSync)
                 if (page == AccountPage.ROOT) {
-                    AccountFeedback(message = message, error = error)
+                    AccountFeedback(message = message, error = accountError)
                 }
             }
         }
@@ -1972,7 +2054,7 @@ internal fun AccountScreen(
                         )
                     }
                     if (page == AccountPage.CLOUD_SYNC) {
-                        AccountFeedback(message = message, error = error)
+                        AccountFeedback(message = message, error = accountError)
                     }
                 }
             }
@@ -2311,4 +2393,16 @@ internal fun trialRemainingText(expiresAtMillis: Long?, nowMillis: Long): String
     }
 }
 
+private enum class AccountAuthorizationFailure {
+    ACCOUNT_UNRECOVERABLE, DEVICE_VERIFICATION_REQUIRED, TEMPORARY_FAILURE
+}
+
 private const val MAX_PASSKEY_DISPLAY_NAME_CHARS = 64
+
+internal fun shouldShowAccountLogin(
+    session: com.lightningstudio.watchrss.phone.account.PhoneAccountSession?,
+    reauthenticationOwner: String?, forceReauthentication: Boolean
+): Boolean = session == null || reauthenticationOwner != null || forceReauthentication
+
+/** The real login-completion callback always runs device authorization reconciliation. */
+internal suspend fun completePhoneAccountAuthentication(coordinator: com.lightningstudio.watchrss.phone.account.AppAccessCoordinator) = coordinator.reconcile()

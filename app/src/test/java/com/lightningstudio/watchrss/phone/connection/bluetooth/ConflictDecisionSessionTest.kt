@@ -59,9 +59,9 @@ class ConflictDecisionSessionTest {
         val device=PhoneBluetoothWatchDevice("watch","11:22:33:44:55:66",1,"watch",supportsPersistentSession=true)
         return PhoneSyncSession(PhoneBluetoothSyncClient(context,log),device,"phone",PhoneSyncSession.Transport(input,output,"test",false,{}),true,false,false)
     }
-    private suspend fun runSync()=session().use { s->manager.syncLibrary(syncSession=s,syncAuxiliary=false,booksPrepared=true,
+    private suspend fun runSync()=session().use { s->withContext(AccountDataSession(s)) { manager.syncLibrary(syncSession=s,syncAuxiliary=false,booksPrepared=true,
         binding=BleSyncBindingSnapshot(s.device.address,null,s,JSONObject().put("supportsRssCanonicalIds",false)),
-        resolveDeleteConflicts={ conflicts->prompts++;conflicts.associate{it.articleId to PhoneSyncConflictResolution.KEEP_WATCH}}) }
+        resolveDeleteConflicts={ conflicts->prompts++;conflicts.associate{it.articleId to PhoneSyncConflictResolution.KEEP_WATCH}}) } }
     private suspend fun seed(){db.phoneArticleDao().upsert(watch.copy(sourceDeviceId="phone",updatedAt=100,favoriteSaved=false,favoriteChangedAt=100,deleted=true,deletedAt=100))}
     @Test fun selectingWatchBodyPersistsThenReturnsNewDecisionAndWaitsForAppliedAck()=runBlocking<Unit>{
         seed();runSync()

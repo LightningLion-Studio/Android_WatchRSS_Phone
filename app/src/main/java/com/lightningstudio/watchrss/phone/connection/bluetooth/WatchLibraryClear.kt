@@ -101,6 +101,12 @@ internal class WatchLibraryClearOperation(
             lease = null
             publish(state.copy(phase = WatchLibraryClearPhase.COMPLETE, clearPercent = 100))
         } catch (failure: Throwable) {
+            if (isTerminalAccountSyncFailure(failure)) {
+                publish(state.copy(phase = WatchLibraryClearPhase.FAILED, clearPercent = null,
+                    errorCode = "clear_account_required", retryable = failure is com.lightningstudio.watchrss.phone.account.PhoneAccountTemporarilyUnavailable,
+                    remoteMayHaveChanged = false))
+                throw failure
+            }
             val classified = watchLibraryClearFailure(failure, state.phase)
             val mayHaveChanged = state.phase == WatchLibraryClearPhase.CLEARING &&
                 classified.errorCode !in setOf("clear_library_busy", "clear_library_database")

@@ -77,6 +77,7 @@ class BookSessionIsolationTest {
                         "reading"->reply(action,phase).put("states",JSONArray()).put("hasMore",false).put("nextAfter",0)
                         else->error("unexpected book phase")
                     }
+                    "syncAccount"->reply(action,phase)
                     "syncNotes"->NoteSyncPayload.manifest("watch",emptyList()).put("success",true)
                     "syncSession"->reply(action,phase)
                     else->error("unexpected action $action/$phase")
@@ -87,7 +88,7 @@ class BookSessionIsolationTest {
         val input=object:InputStream(){override fun read()=if(incoming.isEmpty())-1 else incoming.removeFirst().toInt() and 255}
         val session=PhoneSyncSession(PhoneBluetoothSyncClient(context,log),device,"phone",PhoneSyncSession.Transport(input,output,"test",false,{}),true,false,false)
         val manager=PhoneBluetoothSyncManager(context,repo,NoteRepository(db.noteDao(),"phone"),ReaderPresetRepository(context,db,db.readerPresetDao(),"phone",scope),PhoneLlmTokenUsageRepository(db.llmTokenUsageDao()),"phone",log,
-            currentPhoneUserId={"owner"},domainScope={"scope"},accountDomainWitness={"account"})
+            canSyncAccount={true},buildAccountSyncRequest={_,_,_->JSONObject().put("action","syncAccount")},currentPhoneUserId={"owner"},domainScope={"scope"},accountDomainWitness={"account"})
         manager.reconnectDelay={};manager.reconnectSession={_,_->error("must not reconnect for invalid items")}
         return manager.syncAll(device,reusableSession=session)
     }

@@ -22,11 +22,13 @@ import org.junit.Assert.*
 import org.junit.runner.RunWith
 import org.robolectric.*
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
 import org.robolectric.util.ReflectionHelpers
 
 /** Actual production dialog and AccountScreen; only platform Passkey and secure storage are replaced. */
 @RunWith(RobolectricTestRunner::class)
 @Config(application=android.app.Application::class,sdk=[35],qualifiers="w412dp-h915dp-xhdpi")
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
 class PhoneDeviceReauthenticationFlowTest {
     @get:Rule val compose=createComposeRule()
     private val context=RuntimeEnvironment.getApplication()
@@ -43,7 +45,9 @@ class PhoneDeviceReauthenticationFlowTest {
     private lateinit var coordinator:AppAccessCoordinator
     private lateinit var cloud:PhoneCloudSyncService
     private lateinit var telemetry:PhoneUsageTelemetry
-    @Volatile private var result:WatchAccountRefreshResult?=null
+    @Volatile private var completed=0
+    @Volatile private var claimStatus=200
+    private var loginCount=0
     private var releases=0
     private var clears=0
     private lateinit var beforeState:Map<String,*>
@@ -53,6 +57,9 @@ class PhoneDeviceReauthenticationFlowTest {
         })
         server.dispatcher=object:Dispatcher(){override fun dispatch(request:RecordedRequest):MockResponse {
             val path=request.path.orEmpty().substringBefore('?');requests+=path
+            if(path.endsWith("/phone-authorizations/claim") && claimStatus!=200) {
+                return MockResponse().setResponseCode(claimStatus).setBody("""{"error":"unauthorized"}""")
+            }
             val body=when {
                 path.endsWith("/account/login/start")->"""{"transactionId":"login","requiredFactorCount":1,"completedFactors":[],"complete":false}"""
                 path.endsWith("/account/app-access")->"""{"accessMode":"paid","deviceStatus":"authorized"}"""
@@ -86,15 +93,16 @@ class PhoneDeviceReauthenticationFlowTest {
         telemetry=PhoneUsageTelemetry(context,environment,install,"phone",repo,scope)
     }
     @After fun close(){scope.cancel();db.close();server.shutdown();java.security.Security.removeProvider("device-flow-keystore")}
-    @Test fun validAccountDeviceVerificationOpensRealLoginFormAndReconcilesWithoutLosingKeys() {
+    private fun openDeviceLogin() {
         var showAccount by mutableStateOf(false)
         var force=false
         compose.setContent {
             WatchRssPhoneTheme {
                 if (!showAccount) PhoneDeviceVerificationPrompt({})
                 else AccountScreen(repo,cloud,emptyList(),telemetry,{},
-                    onLoginComplete={scope.launch{result=completePhoneAccountAuthentication(coordinator)}},
+                    onLoginComplete={completed++},
                     loginWithPasskey={_,_->
+                        loginCount++
                         LoginProgress("login",1,listOf("passkey"),true,PhoneAccountSession("owner","phone","new-account","",Long.MAX_VALUE,"activation-proof"))
                             .also {repo.saveCompletedLogin(it)}
                     },createPasskey={},runAction={action->scope.launch{action()}},
@@ -107,17 +115,91 @@ class PhoneDeviceReauthenticationFlowTest {
         assertTrue(intent.getBooleanExtra(AccountActivity.EXTRA_REAUTHENTICATE,false));force=true
         runBlocking {repo.beginSameAccountReauthentication()}
         compose.runOnIdle{showAccount=true}
-        compose.onNodeWithText("手机号").assertExists().performTextInput("13800138000")
-        compose.onNodeWithContentDescription("切换登录方式").performClick()
-        compose.onNodeWithText("通行密钥",useUnmergedTree=true).performClick()
-        compose.onNodeWithText("继续").performScrollTo().performClick()
-        compose.waitUntil(15000){result==WatchAccountRefreshResult.Ready}
-        compose.onNodeWithText("手机号").assertDoesNotExist()
-        assertTrue(repo.hasUsableSession);assertNull(repo.reauthenticationOwner.value)
-        assertEquals("new-device",coordinator.deviceAccessToken)
-        assertTrue(requests.any{it.endsWith("/phone-authorizations/claim")})
-        assertArrayEquals(root,keys.getAccountKey("owner",1));assertEquals("synthetic-secret",keys.syncV2Read("owner","secret/K_id"))
+    }
+    private fun signIn() {
+        compose.onNodeWithText("手机号").assertExists()
+        if (loginCount == 0) {
+            compose.onNodeWithText("手机号").performTextInput("13800138000")
+            compose.onNodeWithContentDescription("切换登录方式").performClick()
+            compose.onNodeWithText("通行密钥",useUnmergedTree=true).performClick()
+        }
+        compose.onNodeWithText("继续").performScrollTo().assertIsEnabled().performClick()
+    }
+    private fun assertCustodyPreserved() {
+        assertArrayEquals(root,keys.getAccountKey("owner",1))
+        assertEquals("synthetic-secret",keys.syncV2Read("owner","secret/K_id"))
         assertEquals("epoch-A",cloud.settings.libraryEpoch);assertEquals(17L,cloud.settings.lastSnapshotPublishedAt)
         assertEquals(beforeState,cloudState.all);assertEquals(0,releases);assertEquals(0,clears)
+    }
+    private fun assertReady() {
+        compose.waitUntil(15000){completed==1}
+        compose.onNodeWithText("手机号").assertDoesNotExist()
+        compose.onNodeWithText("重试设备授权").assertDoesNotExist()
+        assertTrue(repo.hasUsableSession);assertNull(repo.reauthenticationOwner.value)
+        assertEquals("new-device",coordinator.deviceAccessToken)
+        assertCustodyPreserved()
+    }
+    @Test fun validAccountDeviceVerificationOpensRealLoginFormAndReconcilesWithoutLosingKeys() {
+        openDeviceLogin();signIn();assertReady()
+        assertTrue(requests.any{it.endsWith("/phone-authorizations/claim")})
+    }
+    /** Regression from the independent r3 host-page counterexample, now part of the repository. */
+    @Test fun reviewAccount401AfterLoginKeepsReauthenticationFormAvailable() {
+        claimStatus=401
+        openDeviceLogin();signIn()
+        compose.waitUntil(15000){repo.reauthenticationOwner.value=="owner" && requests.any{it.endsWith("/phone-authorizations/claim")}}
+        compose.onNodeWithText("手机号").assertExists()
+        compose.onNodeWithText("登录已失效，请重新登录").performScrollTo().assertIsDisplayed()
+        assertEquals(0,completed)
+        assertFalse(repo.hasUsableSession);assertEquals(Long.MAX_VALUE,repo.session.value?.expiresAtMillis)
+        assertCustodyPreserved();captureEvidence("fix3-claim401-reauthentication-host.png")
+        claimStatus=200
+        signIn();assertReady()
+        assertEquals(2,loginCount)
+        assertEquals(2,requests.count{it.endsWith("/account/login/start")})
+        assertEquals(2,requests.count{it.endsWith("/phone-authorizations/claim")})
+    }
+    @Test fun deviceVerificationFailureOffersAuthorizationRetryWithoutAnotherLogin() = retryAuthorization(403)
+    @Test fun temporaryFailureOffersAuthorizationRetryWithoutAnotherLogin() = retryAuthorization(503)
+    @Test fun rateLimitOffersAuthorizationRetryWithoutAnotherLogin() = retryAuthorization(429)
+    private fun retryAuthorization(status:Int) {
+        claimStatus=status
+        openDeviceLogin();signIn()
+        val reason=if(status==403) "手机设备身份需要验证，请重试设备授权" else "账号服务暂时不可用，请稍后重试"
+        compose.waitUntil(15000){compose.onAllNodesWithText("重试设备授权").fetchSemanticsNodes().isNotEmpty()}
+        compose.onNodeWithText(reason).assertExists()
+        compose.onNodeWithText("重试设备授权").performScrollTo().assertIsEnabled()
+        assertEquals(0,completed);assertTrue(repo.hasUsableSession);assertNull(repo.reauthenticationOwner.value)
+        assertCustodyPreserved();captureEvidence("fix3-claim$status-retry-host.png")
+        claimStatus=200
+        compose.onNodeWithText("重试设备授权").performClick();assertReady()
+        assertEquals(1,loginCount)
+        assertEquals(2,requests.count{it.endsWith("/phone-authorizations/claim")})
+    }
+    @Test fun authorizationRetry401ReturnsToLoginWithoutLogout() {
+        claimStatus=503
+        openDeviceLogin();signIn()
+        compose.waitUntil(15000){compose.onAllNodesWithText("重试设备授权").fetchSemanticsNodes().isNotEmpty()}
+        claimStatus=401
+        compose.onNodeWithText("重试设备授权").performScrollTo().performClick()
+        compose.waitUntil(15000){repo.reauthenticationOwner.value=="owner"}
+        compose.onNodeWithText("手机号").assertExists()
+        compose.onNodeWithText("登录已失效，请重新登录").assertExists()
+        assertEquals(0,completed);assertCustodyPreserved()
+        claimStatus=200
+        signIn();assertReady()
+    }
+    private fun captureEvidence(name:String) {
+        System.getenv("WRSS_ACCTGATE_EVIDENCE")?.let { path ->
+            compose.runOnIdle {
+                val global=ReflectionHelpers.callStaticMethod<Any>(Class.forName("android.view.WindowManagerGlobal"),"getInstance")
+                val view=ReflectionHelpers.getField<List<android.view.View>>(global,"mViews").last()
+                assertTrue(view.width>0 && view.height>0)
+                val bitmap=android.graphics.Bitmap.createBitmap(view.width,view.height,android.graphics.Bitmap.Config.ARGB_8888)
+                view.draw(android.graphics.Canvas(bitmap))
+                java.io.File(path,name).outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) }
+                bitmap.recycle()
+            }
+        }
     }
 }

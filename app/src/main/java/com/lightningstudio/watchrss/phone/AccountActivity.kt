@@ -4,7 +4,7 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.ui.layout.onGloballyPositioned
 
-import com.lightningstudio.watchrss.phone.account.requireReady
+import com.lightningstudio.watchrss.phone.account.WatchAccountRefreshResult
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -161,16 +161,7 @@ class AccountActivity : ComponentActivity() {
                     returnWhenCloudReady = returnWhenCloudReady,
                     forceReauthentication = intent.getBooleanExtra(EXTRA_REAUTHENTICATE, false),
                     onLoginComplete = {
-                        if (finishAfterLogin) {
-                            lifecycleScope.launch {
-                                val result = completePhoneAccountAuthentication(container.appAccessCoordinator)
-                                if (result == com.lightningstudio.watchrss.phone.account.WatchAccountRefreshResult.Ready) finish()
-                                else {
-                                    val failure = runCatching { result.requireReady() }.exceptionOrNull()
-                                    android.widget.Toast.makeText(this@AccountActivity, failure?.message ?: "设备授权尚未完成", android.widget.Toast.LENGTH_LONG).show()
-                                }
-                            }
-                        }
+                        if (finishAfterLogin) finish()
                     },
                     loginWithPasskey = passkeyCoordinator::login,
                     createPasskey = passkeyCoordinator::createPasskey,
@@ -276,6 +267,7 @@ internal fun AccountScreen(
 ) {
     val session by accountRepository.session.collectAsState()
     var authenticationCompleted by remember { mutableStateOf(false) }
+    var authorizationFailure by remember { mutableStateOf<WatchAccountRefreshResult?>(null) }
     val reauthenticationOwner by accountRepository.reauthenticationOwner.collectAsState()
     LaunchedEffect(forceReauthentication) {
         if (forceReauthentication) accountRepository.beginSameAccountReauthentication()
@@ -512,8 +504,56 @@ internal fun AccountScreen(
         securityVerificationInput = ""
     }
 
+    suspend fun completeAuthentication() {
+        val result = completePhoneAccountAuthentication(accessCoordinator)
+        authenticationCompleted = result == WatchAccountRefreshResult.Ready
+        authorizationFailure = result.takeUnless { it == WatchAccountRefreshResult.Ready }
+        when (result) {
+            WatchAccountRefreshResult.Ready -> {
+                message = "登录成功"
+                error = null
+                onLoginComplete()
+            }
+            is WatchAccountRefreshResult.AccountUnrecoverable -> {
+                // The newly signed-in account was rejected: pause it without releasing cloud custody.
+                accountRepository.beginSameAccountReauthentication()
+                authorizationFailure = null
+                loginProgress = null
+                password = ""
+                otp = ""
+                passwordTotp = ""
+                otpResendAvailableAt = 0L
+                message = null
+                error = "登录已失效，请重新登录"
+            }
+            else -> {
+                message = null
+                error = null // The authorization panel shows the typed reason beside its retry action.
+            }
+        }
+    }
+
     val accountControls: @Composable ColumnScope.(() -> Unit) -> Unit = { onCloudSyncClick ->
-        if (shouldShowAccountLogin(session, reauthenticationOwner, forceReauthentication && !authenticationCompleted)) {
+        if (authorizationFailure != null) {
+            Text("设备授权尚未完成", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+            Text(
+                when (authorizationFailure) {
+                    is WatchAccountRefreshResult.DeviceVerificationRequired -> "手机设备身份需要验证，请重试设备授权"
+                    else -> "账号服务暂时不可用，请稍后重试"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Button(
+                onClick = {
+                    runAction {
+                        busy = true
+                        try { completeAuthentication() } finally { busy = false }
+                    }
+                },
+                enabled = !busy
+            ) { Text(if (busy) "正在重试…" else "重试设备授权") }
+        } else if (shouldShowAccountLogin(session, reauthenticationOwner, forceReauthentication && !authenticationCompleted)) {
             Text(
                 "登录",
                 style = MaterialTheme.typography.titleLarge,
@@ -541,14 +581,12 @@ internal fun AccountScreen(
                         .semantics { contentType = ContentType.PhoneNumber }
                 )
             }
-            fun applyLoginProgress(progress: LoginProgress) {
+            suspend fun applyLoginProgress(progress: LoginProgress) {
                 loginProgress = progress
                 progress.session?.let { signedIn ->
-                    authenticationCompleted = true
-                    message = "登录成功"
                     usageTelemetry.recordAccountSignedIn(signedIn.userId)
                     tipManager?.recordEvent(TipEvents.ACCOUNT_SIGNED_IN)
-                    onLoginComplete()
+                    completeAuthentication()
                 } ?: run {
                     // Two-step sign-in: move straight to the next factor instead of
                     // leaving the user on the one that just succeeded.
@@ -641,7 +679,7 @@ internal fun AccountScreen(
                                     runCatching {
                                         val progress = loginProgress ?: accountRepository.startLogin(phone)
                                         accountRepository.loginWithPasswordFactor(progress.transactionId, password)
-                                    }.onSuccess(::applyLoginProgress)
+                                    }.onSuccess { applyLoginProgress(it) }
                                         .onFailure { error = it.message ?: "密码验证失败" }
                                     busy = false
                                 }
@@ -702,7 +740,7 @@ internal fun AccountScreen(
                                     runCatching {
                                         val progress = loginProgress ?: accountRepository.startLogin(phone)
                                         accountRepository.verifyPhoneOtpFactor(progress.transactionId, otp)
-                                    }.onSuccess(::applyLoginProgress)
+                                    }.onSuccess { applyLoginProgress(it) }
                                         .onFailure { error = accountLoginErrorMessage(AccountLoginAction.VERIFY_OTP, it) }
                                     busy = false
                                 }
@@ -737,7 +775,7 @@ internal fun AccountScreen(
                                             passwordTotp
                                         )
                                     }
-                                        .onSuccess(::applyLoginProgress)
+                                        .onSuccess { applyLoginProgress(it) }
                                         .onFailure { error = it.message ?: "动态验证码无效" }
                                     busy = false
                                 }
@@ -760,7 +798,7 @@ internal fun AccountScreen(
                                     runCatching {
                                         val progress = loginProgress ?: accountRepository.startLogin(phone)
                                         loginWithPasskey(phone, progress.transactionId)
-                                    }.onSuccess(::applyLoginProgress)
+                                    }.onSuccess { applyLoginProgress(it) }
                                         .onFailure {
                                             Log.w(ACCOUNT_LOG_TAG, "Passkey login failed", it)
                                             error = accountLoginErrorMessage(AccountLoginAction.PASSKEY_LOGIN, it)

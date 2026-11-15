@@ -61,6 +61,25 @@ data class LibrarySyncCursor(
 )
 
 object LibrarySyncPayload {
+    const val ARTICLE_CHECKPOINT_FEATURE = "supportsLibraryArticleCheckpoints"
+    fun wantsArticleCheckpoint(frames: List<JSONObject>, index: Int): Boolean {
+        val current = frames[index].optJSONArray("articles")
+        val next = frames.getOrNull(index + 1)?.optJSONArray("articles")
+        return current == null || current.length() == 0 || next == null || next.length() == 0 ||
+            current.getJSONObject(current.length() - 1).optString("articleId") != next.getJSONObject(0).optString("articleId")
+    }
+    fun articleBatchAck(direction: String, index: Int, articles: Int): JSONObject = JSONObject().apply {
+        put("version", 14); put("action", "ack"); put("phase", "libraryBatch")
+        put("direction", direction); put("batchIndex", index); put("success", true); put("applied", true)
+        put("confirmedArticles", articles)
+    }
+    fun requireArticleBatchAck(frame: JSONObject, direction: String, index: Int, articles: Int) {
+        require(frame.optString("action") == "ack" && frame.optString("phase") == "libraryBatch" &&
+            frame.optString("direction") == direction && frame.optInt("batchIndex", -1) == index &&
+            frame.optBoolean("success") && frame.optBoolean("applied") && frame.optInt("confirmedArticles", -1) == articles) {
+            "资料批次确认不匹配"
+        }
+    }
     const val PROTOCOL_VERSION = 14
     const val MIN_SUPPORTED_WATCH_PROTOCOL_VERSION = 13
     const val LEGACY_PROTOCOL_VERSION = 4

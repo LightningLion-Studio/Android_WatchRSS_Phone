@@ -14,6 +14,10 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncSession
 import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSessionRegistry
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncDeleteConflict
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryTransferRecovery
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryReconnectLimit
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryDisconnectLimit
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryProgressHold
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibrarySyncMode
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
 import com.lightningstudio.watchrss.phone.data.backup.BackupPreview
@@ -86,6 +90,7 @@ data class MainSyncProgressUi(
 )
 
 internal fun syncFailureMessage(throwable: Throwable, phase: String?): String {
+    if (throwable is LibraryReconnectLimit || throwable is LibraryDisconnectLimit) return throwable.message.orEmpty()
     if (isTerminalAccountSyncFailure(throwable)) return throwable.message ?: "账号同步失败"
     val detail = generateSequence(throwable) { it.cause }
         .mapNotNull { cause -> cause.message?.trim()?.takeIf(String::isNotEmpty) }
@@ -186,6 +191,9 @@ class MainViewModel(
 
     private val sessionState = MutableStateFlow(MainUiState())
     private var conflictResolutionDeferred: CompletableDeferred<PhoneSyncConflictResolution>? = null
+    private var librarySyncJob: Job? = null
+    private var libraryRecoveryPolicy: LibraryTransferRecovery? = null
+    private val libraryProgressHold = LibraryProgressHold()
     private var smoothedSyncProgressJob: Job? = null
     private var smoothedSyncProgressTarget: MainSyncProgressUi? = null
     private var verificationTransitionJob: Job? = null
@@ -881,6 +889,9 @@ class MainViewModel(
     ) {
         viewModelScope.launch {
             if (sessionState.value.isBusy) return@launch
+            librarySyncJob = kotlinx.coroutines.currentCoroutineContext()[Job]
+            libraryRecoveryPolicy = LibraryTransferRecovery { android.os.SystemClock.elapsedRealtime() }
+            libraryProgressHold.reset()
             runCatching { bluetoothSyncManager.requirePhoneLogin() }.onFailure {
                 handleAccountSyncFailure(it)
                 return@launch
@@ -901,8 +912,12 @@ class MainViewModel(
                 conflictPrompt = null
             )
             val probeTargets = runCatching {
-                bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress)
+                bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress, libraryRecoveryPolicy) {
+                    updateLibrarySyncProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.RECONNECTING, 0))
+                }
             }.getOrElse { throwable ->
+                if (throwable is kotlinx.coroutines.CancellationException) { clearCancelledLibrarySync(kotlinx.coroutines.currentCoroutineContext()[Job]); return@launch }
+                if (handleAccountSyncFailure(throwable)) return@launch
                 clearSmoothedSyncProgress()
                 sessionState.value = sessionState.value.copy(
                     isBusy = false,
@@ -1158,6 +1173,7 @@ class MainViewModel(
         forceFull: Boolean = false,
         mode: LibrarySyncMode = LibrarySyncMode.MERGE
     ) {
+        librarySyncJob = kotlinx.coroutines.currentCoroutineContext()[Job]
         beginSmoothedSyncProgress(MainSyncProgressUi(phase = "建立连接中", percent = 0))
         sessionState.value = sessionState.value.copy(
             isBusy = true,
@@ -1178,6 +1194,7 @@ class MainViewModel(
                     supportsPersistentSession = device.supportsPersistentSession
                 ),
                 reusableSession = reusableSession,
+                recoveryPolicy = libraryRecoveryPolicy,
                 forceFull = forceFull,
                 mode = mode,
                 onProgress = ::updateLibrarySyncProgress,
@@ -1231,6 +1248,7 @@ class MainViewModel(
             usageTelemetry.recordSyncResult(true, "library")
             tipManager.recordEvent(TipEvents.SYNC_COMPLETED)
         }.onFailure { throwable ->
+            if (throwable is kotlinx.coroutines.CancellationException) { clearCancelledLibrarySync(kotlinx.coroutines.currentCoroutineContext()[Job]); return }
             if (handleAccountSyncFailure(throwable)) return@onFailure
             val error = syncFailureMessage(
                 throwable = throwable,
@@ -1501,6 +1519,23 @@ class MainViewModel(
         sessionState.value = sessionState.value.copy(isBusy = false, syncProgress = null)
     }
 
+    fun cancelLibrarySync() {
+        val running = librarySyncJob ?: return
+        if (!running.isActive) return
+        running.cancel()
+        clearCancelledLibrarySync(running)
+    }
+
+    private fun clearCancelledLibrarySync(expected: Job? = librarySyncJob) {
+        if (expected !== librarySyncJob) return
+        conflictResolutionDeferred?.cancel()
+        conflictResolutionDeferred = null
+        clearSmoothedSyncProgress()
+        sessionState.value = sessionState.value.copy(isBusy = false, message = null,
+            syncStatusMessage = null, syncStatusError = null, error = null, conflictPrompt = null,
+            bluetoothDevicePrompt = null)
+    }
+
     fun dismissAccountSyncPrompt() {
         sessionState.value = sessionState.value.copy(accountPrompt = null)
     }
@@ -1517,7 +1552,9 @@ class MainViewModel(
     }
 
     private fun updateLibrarySyncProgress(progress: PhoneBluetoothSyncProgress) {
-        val percent = progress.percent.coerceIn(0, 100)
+        val reconnecting = progress.stage == PhoneBluetoothSyncStage.RECONNECTING
+        val percent = libraryProgressHold.percent(reconnecting, progress.percent,
+            sessionState.value.syncProgress?.percent).coerceIn(0, 100)
         val uiProgress = MainSyncProgressUi(
             phase = progress.stage.displayName,
             percent = percent,
@@ -1525,7 +1562,17 @@ class MainViewModel(
             bytesTransferred = progress.bytesTransferred,
             bytesPerSecond = progress.bytesPerSecond
         )
-        if (progress.stage == PhoneBluetoothSyncStage.VERIFYING) {
+        if (reconnecting) {
+            verificationTransitionJob?.cancel()
+            verificationTransitionJob = null
+            verificationProgressTarget = null
+            smoothedSyncProgressJob?.cancel()
+            smoothedSyncProgressJob = null
+            smoothedSyncProgressTarget = uiProgress
+            sessionState.value = sessionState.value.copy(message = uiProgress.phase,
+                syncStatusMessage = uiProgress.phase, syncProgress = uiProgress,
+                syncStatusError = null, error = null)
+        } else if (progress.stage == PhoneBluetoothSyncStage.VERIFYING) {
             transitionToVerification(uiProgress)
         } else {
             verificationTransitionJob?.cancel()

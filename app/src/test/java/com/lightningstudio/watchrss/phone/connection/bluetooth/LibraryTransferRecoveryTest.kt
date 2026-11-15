@@ -1,0 +1,137 @@
+package com.lightningstudio.watchrss.phone.connection.bluetooth
+
+import kotlinx.coroutines.*
+import org.junit.Assert.*
+import org.junit.Test
+import java.io.*
+import java.net.ProtocolException
+import java.net.SocketTimeoutException
+
+class LibraryTransferRecoveryTest {
+    @Test fun ownerFailureBeforeIoCannotBeReclassifiedByConcurrentIpClose() {
+        val owner=IllegalStateException("account changed");var writes=0
+        val output=object:OutputStream(){override fun write(value:Int){writes++}}
+        val guard=LibraryIoGuard(1,{true},{},remotelyClosed={true},beforeIo={throw owner})
+        assertSame(owner,runCatching{guard.output(output).write(1)}.exceptionOrNull())
+        assertEquals(0,writes)
+    }
+    @Test fun retryLimitsShowTheirChineseReasonWithoutImplementationClassNames() {
+        for (failure in listOf(LibraryReconnectLimit(), LibraryDisconnectLimit())) {
+            assertEquals(failure.message, com.lightningstudio.watchrss.phone.viewmodel.syncFailureMessage(failure, "信息传输中"))
+        }
+    }
+    @Test fun thirdSearchFailureStopsAndSuccessResetsOnlySearchCounter() {
+        var now = 0L
+        val p = LibraryTransferRecovery { now }
+        p.searchFailed(); p.searchFailed(); p.ready()
+        assertEquals(0, p.consecutiveFailures)
+        p.observe(1); p.disconnected(1)
+        now = 5000; p.observe(2); p.disconnected(2); p.ready()
+        now = 10000; p.observe(3)
+        assertThrows(LibraryDisconnectLimit::class.java) { p.disconnected(3) }
+        p.searchFailed(); p.searchFailed()
+        assertThrows(LibraryReconnectLimit::class.java) { p.searchFailed() }
+    }
+    @Test fun tenSecondBoundaryIsInclusiveAndOldOrDuplicateCallbacksDoNotCount() {
+        var now = 0L; val p = LibraryTransferRecovery { now }
+        p.observe(1); p.disconnected(1); p.disconnected(1)
+        p.observe(2); p.disconnected(1); now = 5000; p.disconnected(2)
+        p.observe(3); now = 10001; p.disconnected(3)
+        p.ready(); p.observe(4); now = 10002
+        assertThrows(LibraryDisconnectLimit::class.java) { p.disconnected(4) }
+    }
+    @Test fun onlyNetworkGuardCreatesRetryableFailures() {
+        for (error in listOf(IOException("reset by peer"), EOFException(), SocketTimeoutException())) {
+            val input = object : InputStream() { override fun read(): Int = throw error }
+            val failure = runCatching { LibraryIoGuard(42, { true }, {}).input(input).read() }.exceptionOrNull()
+            assertTrue(failure is LibraryTransportFailure)
+            assertSame(error, failure!!.cause)
+        }
+        val protocol = ProtocolException("bad frame")
+        assertSame(protocol, runCatching { LibraryIoGuard(42, { true }, {}).input(object : InputStream() {
+            override fun read(): Int = throw protocol
+        }).read() }.exceptionOrNull())
+        val local = IOException("disk full")
+        assertFalse(local is LibraryTransportFailure)
+        assertTrue(runCatching { LibraryIoGuard(1, { true }, {}).input(ByteArrayInputStream(byteArrayOf())).read() }.exceptionOrNull() is LibraryTransportFailure)
+    }
+    @Test fun deadlineClosesBlockedIoAndRetainsTimeoutCause() {
+        val closed = java.util.concurrent.CountDownLatch(1)
+        val source = object : InputStream() { override fun read(): Int {
+            check(closed.await(2, java.util.concurrent.TimeUnit.SECONDS)); throw IOException("closed")
+        } }
+        val failure = runCatching { LibraryIoGuard(1, { true }, { closed.countDown() }, 10).input(source).read() }.exceptionOrNull()
+        assertTrue(failure is LibraryTransportFailure)
+        assertTrue(failure!!.cause is SocketTimeoutException)
+    }
+    @Test fun controllerConfirmsReplacementBeforeReplayingCurrentUnit() = runBlocking {
+        var active = true; var generation = 1L; var confirms = 0; var searches = 0
+        val order = mutableListOf<String>(); val policy = LibraryTransferRecovery { 0 }
+        policy.observe(1)
+        val context = LibraryRecoveryContext(policy, LibrarySyncMode.MERGE, { active },
+            { searches++; generation++; policy.observe(generation); active = true; order += "connect" },
+            { confirms++; order += "account" }, {}, { _, _ -> }, { order += "progress" })
+        var calls = 0
+        withContext(context) { context.unit("body") {
+            calls++; order += "data"
+            if (calls == 1) { active = false; throw LibraryTransportFailure(1, EOFException()) }
+        } }
+        assertEquals(listOf("data", "progress", "connect", "account", "data"), order)
+        assertEquals(1, searches); assertEquals(1, confirms)
+    }
+    @Test fun searchFailureStopsAfterThreeAndProtocolOrAccountErrorsNeverSearch() = runBlocking {
+        var searches = 0; val p = LibraryTransferRecovery { 0 }
+        val c = LibraryRecoveryContext(p, LibrarySyncMode.MERGE, { false },
+            { searches++; throw LibrarySearchFailure() }, {}, {}, { _, _ -> }, {})
+        assertTrue(runCatching { c.unit("start") {} }.exceptionOrNull() is LibraryReconnectLimit)
+        assertEquals(3, searches)
+        for (error in listOf(PhoneLoginRequired(), ProtocolException("invalid"), IOException("local file"))) {
+            val context = LibraryRecoveryContext(LibraryTransferRecovery { 0 }, LibrarySyncMode.MERGE, { true },
+                { fail("must not reconnect") }, {}, {}, { _, _ -> }, {})
+            assertSame(error, runCatching { context.unit("data") { throw error } }.exceptionOrNull())
+        }
+    }
+    @Test fun cancellationNeverReconnectsEvenWhenSocketReportsEof() = runBlocking {
+        var searches = 0
+        val c = LibraryRecoveryContext(LibraryTransferRecovery { 0 }, LibrarySyncMode.MERGE, { true },
+            { searches++ }, {}, {}, { _, _ -> }, {})
+        val job = launch { c.unit("data") { currentCoroutineContext().cancel(); throw LibraryTransportFailure(1, EOFException()) } }
+        job.join(); assertTrue(job.isCancelled); assertEquals(0, searches)
+    }
+    @Test fun halfFramesAreTransportFailuresButMalformedFramesAreNot() {
+        val encoded=ByteArrayOutputStream().also { out ->
+            val data=DataOutputStream(out);data.writeInt(12);data.write(byteArrayOf(123,34))
+        }.toByteArray()
+        assertTrue(runCatching { BluetoothSyncProtocol.readFrame(LibraryIoGuard(7,{true},{}).input(ByteArrayInputStream(encoded))) }.exceptionOrNull() is LibraryTransportFailure)
+        val bad=ByteArrayOutputStream().also { DataOutputStream(it).writeInt(-1) }.toByteArray()
+        assertTrue(runCatching { BluetoothSyncProtocol.readFrame(LibraryIoGuard(7,{true},{}).input(ByteArrayInputStream(bad))) }.exceptionOrNull() is IllegalArgumentException)
+        assertTrue(isLibraryProbeFatal(ProtocolException()))
+        assertFalse(isLibraryProbeFatal(IOException("connect failed")))
+    }
+    @Test fun oldConnectionFailureCannotCloseOrResearchNewConnection()=runBlocking {
+        val p=LibraryTransferRecovery{0};p.observe(2)
+        var calls=0
+        val c=LibraryRecoveryContext(p,LibrarySyncMode.MERGE,{true},{fail("old generation researched")},{},{},{_,_->},{})
+        c.unit("data"){calls++;if(calls==1)throw LibraryTransportFailure(1,EOFException())}
+        assertEquals(2,calls)
+    }
+    @Test fun cancellationDuringSearchOrConfirmationStopsFurtherAttempts()=runBlocking {
+        for(confirming in listOf(false,true)) {
+            val entered=CompletableDeferred<Unit>();var searches=0
+            val c=LibraryRecoveryContext(LibraryTransferRecovery{0},LibrarySyncMode.MERGE,{false},
+                {searches++;if(!confirming){entered.complete(Unit);awaitCancellation()}},
+                {entered.complete(Unit);awaitCancellation()},{},{_,_->},{})
+            val job=launch{c.unit("data"){}}
+            entered.await();job.cancelAndJoin();assertEquals(1,searches)
+        }
+    }
+    @Test fun reconnectProgressRetainsVisiblePercentAndExactStageLabel() {
+        val hold = LibraryProgressHold()
+        assertEquals(37, hold.percent(true, 90, 37))
+        assertEquals(37, hold.percent(false, 0, 37))
+        assertEquals(68, hold.percent(false, 68, 37))
+        assertEquals(68, hold.percent(true, 1, 68))
+        assertEquals("正在重新连接手表…", PhoneBluetoothSyncStage.RECONNECTING.displayName)
+        hold.reset(); assertEquals(0, hold.percent(false, 0, 68))
+    }
+}

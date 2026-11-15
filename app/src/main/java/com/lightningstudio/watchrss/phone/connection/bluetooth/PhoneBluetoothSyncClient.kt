@@ -156,7 +156,8 @@ data class PhoneBluetoothWatchProbeResult(
     val device: PhoneBluetoothWatchDevice,
     val reachable: Boolean,
     val message: String? = null,
-    val capabilities: PhoneWatchCapabilities? = null
+    val capabilities: PhoneWatchCapabilities? = null,
+    val failure: Throwable? = null
 )
 
 internal data class PhoneBluetoothWatchProbeBatch(
@@ -212,21 +213,34 @@ internal class PhoneSyncSession internal constructor(
         internal set
 
     internal class Transport(
-        val inputStream: InputStream,
-        val outputStream: OutputStream,
+        inputStream: InputStream,
+        outputStream: OutputStream,
         val owner: String,
         val closeOnLegacyFallback: Boolean,
+        private val remotelyClosed: () -> Boolean = { false },
         private val closeTransport: () -> Unit
     ) : Closeable {
-        private var closed = false
+        companion object { private val sequence = java.util.concurrent.atomic.AtomicLong() }
+        val generation = sequence.incrementAndGet()
+        @Volatile var recoveryEnabled = false
+        @Volatile var validateLibraryOperation: () -> Unit = {}
+        private val io = LibraryIoGuard(generation, { recoveryEnabled }, { close() }, remotelyClosed = remotelyClosed,
+            beforeIo = { validateLibraryOperation() })
+        val inputStream: InputStream = io.input(inputStream)
+        val outputStream: OutputStream = io.output(outputStream)
+        @Volatile private var closed = false
 
         val isClosed: Boolean
-            get() = closed
+            get() = closed || remotelyClosed()
 
         override fun close() {
             if (closed) return
             closed = true
-            closeTransport()
+            if (recoveryEnabled && owner.startsWith("ip:") && android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+                // Cancellation originates on Main. Closing the WebSocket can write a close
+                // frame, so dispatch the captured old transport independently of that job.
+                Dispatchers.IO.dispatch(kotlin.coroutines.EmptyCoroutineContext, Runnable { runCatching(closeTransport) })
+            } else closeTransport()
         }
     }
 
@@ -290,6 +304,7 @@ internal class PhoneSyncSession internal constructor(
         legacyFallback = replacement.legacyFallback
         ipUpgradeExpected = replacement.ipUpgradeExpected
         device = replacement.device
+        closed = false
     }
 
     override fun close() {
@@ -314,7 +329,8 @@ class PhoneBluetoothSyncClient(
         deviceId: String,
         sessionId: String = BluetoothDebugLog.newSessionId("bt-library-probe"),
         perDeviceTimeoutMs: Long = DEFAULT_DEVICE_PROBE_TIMEOUT_MS,
-        onProbe: (completed: Int, total: Int, result: PhoneBluetoothWatchProbeResult) -> Unit = { _, _, _ -> }
+        onProbe: (completed: Int, total: Int, result: PhoneBluetoothWatchProbeResult) -> Unit = { _, _, _ -> },
+        requiredBluetoothAddress: String? = null
     ): PhoneBluetoothWatchProbeBatch {
         val startedAt = SystemClock.elapsedRealtime()
         debugLog.appendEvent(
@@ -351,7 +367,7 @@ class PhoneBluetoothSyncClient(
         val allCandidates = probeCandidateWatchDevices(
             devices = bondedDevices,
             activeWatchAddresses = activeWatchAddresses
-        )
+        ).filter { requiredBluetoothAddress == null || it.address.equals(requiredBluetoothAddress, ignoreCase = true) }
         val activeCandidates = allCandidates.filter { device ->
             device.address.uppercase() in activeWatchAddresses
         }
@@ -1569,6 +1585,7 @@ class PhoneBluetoothSyncClient(
         applyResponse: suspend (BluetoothLibrarySyncExchange) -> Unit
     ): BluetoothLibrarySyncExchange {
         val transport = session.transport ?: error("持久同步连接已关闭")
+        val recovery = currentCoroutineContext()[LibraryRecoveryContext]
         val startedAt = SystemClock.elapsedRealtime()
         val tracker = ByteTransferTracker().apply { start() }
         var lastProgressStage: PhoneBluetoothSyncStage? = null
@@ -1589,6 +1606,7 @@ class PhoneBluetoothSyncClient(
         }
         report(PhoneBluetoothSyncStage.CONNECTING, 5, force = true)
         val wireCursorRequest = session.requestForExchange(cursorRequest)
+        if (recovery?.mode == LibrarySyncMode.MERGE) wireCursorRequest.put(LibrarySyncPayload.ARTICLE_CHECKPOINT_FEATURE, true)
         writeFrameLogged(
             transport.outputStream,
             sessionId,
@@ -1614,7 +1632,9 @@ class PhoneBluetoothSyncClient(
         }
         val peerDeviceId = cursorResponse.optString("deviceId").trim()
             .ifBlank { session.device.remoteDeviceId.ifBlank { session.device.address } }
+        recovery?.checkpoints = recovery?.mode == LibrarySyncMode.MERGE && cursorResponse.optBoolean(LibrarySyncPayload.ARTICLE_CHECKPOINT_FEATURE)
         val request = buildManifestRequest(peerDeviceId, cursorResponse)
+        if (recovery?.checkpoints == true) request.put(LibrarySyncPayload.ARTICLE_CHECKPOINT_FEATURE, true)
         val manifestRequests = if (LibrarySyncPayload.supportsManifestBatches(cursorResponse)) {
             LibrarySyncPayload.buildManifestFrames(request)
         } else {
@@ -1650,7 +1670,12 @@ class PhoneBluetoothSyncClient(
         var requestWireBytesSent = 0L
         val requestTotalWireBytes = articleRequestStats.totalWireBytes.coerceAtLeast(1L)
         report(PhoneBluetoothSyncStage.TRANSFERRING, 30)
+        val sentArticleIds = mutableSetOf<String>()
         articleRequests.forEachIndexed { index, articleRequest ->
+            val checkpoint = recovery?.checkpoints == true && LibrarySyncPayload.wantsArticleCheckpoint(articleRequests, index)
+            if (recovery?.checkpoints == true) articleRequest.put("libraryCheckpoint", checkpoint)
+            var frameWireBytes = 0L
+            try {
             writeFrameLogged(
                 outputStream = transport.outputStream,
                 sessionId = sessionId,
@@ -1658,6 +1683,7 @@ class PhoneBluetoothSyncClient(
                 payload = articleRequest,
                 byteTracker = tracker,
                 onBytesTransferred = { bytes ->
+                    frameWireBytes += bytes
                     requestWireBytesSent += bytes
                     report(
                         PhoneBluetoothSyncStage.TRANSFERRING,
@@ -1665,6 +1691,18 @@ class PhoneBluetoothSyncClient(
                     )
                 }
             )
+            } catch (failure: LibraryTransportFailure) {
+                recovery?.bodies?.partialWire(frameWireBytes)
+                throw failure
+            }
+            recovery?.bodies?.frame("send", articleRequest)
+            articleRequest.optJSONArray("articles")?.let { entries ->
+                for (n in 0 until entries.length()) sentArticleIds += entries.getJSONObject(n).getString("articleId")
+            }
+            if (checkpoint) {
+                LibrarySyncPayload.requireArticleBatchAck(readFrameLogged(transport.inputStream, sessionId, "libraryBatchAck"),
+                    "phoneToWatch", index, sentArticleIds.size)
+            }
         }
         report(PhoneBluetoothSyncStage.TRANSFERRING, 58)
         val responseRead = readLibraryResponse(
@@ -1802,7 +1840,8 @@ class PhoneBluetoothSyncClient(
                 PhoneBluetoothWatchProbeResult(
                     device = device.toWatchDevice(),
                     reachable = false,
-                    message = probeFailureMessage(throwable)
+                    message = probeFailureMessage(throwable),
+                    failure = throwable
                 )
             }
         )
@@ -1895,6 +1934,7 @@ class PhoneBluetoothSyncClient(
             if (result.isSuccess) return result.getOrThrow()
             val throwable = result.exceptionOrNull() ?: error("蓝牙探测失败但没有异常")
             if (throwable is CancellationException) currentCoroutineContext().ensureActive()
+            if (isLibraryProbeFatal(throwable)) throw throwable
             val elapsedMs = elapsedSince(attemptStartedAt)
             val recovery = sdpProbeFailureRecovery(
                 elapsedMs = elapsedMs,
@@ -1922,14 +1962,17 @@ class PhoneBluetoothSyncClient(
     }
 
     @SuppressLint("MissingPermission")
-    private fun probeDirectPersistentOnce(
+    private suspend fun probeDirectPersistentOnce(
         device: BluetoothDevice,
         deviceId: String,
         sessionId: String
     ): ProbeIdentity? {
+        currentCoroutineContext().ensureActive()
         var socket: BluetoothSocket? = null
+        val cancellation = installSocketCancellationLogger(sessionId, "recovery-probe") { socket }
         return try {
             socket = device.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
+            currentCoroutineContext().ensureActive()
             connectLogged(socket, sessionId, device)
             val request = BluetoothSyncProtocol.withPersistentSessionRequest(
                 LibrarySyncPayload.buildProbeRequest(deviceId)
@@ -1979,6 +2022,7 @@ class PhoneBluetoothSyncClient(
                 )
             }
         } finally {
+            cancellation?.dispose()
             socket?.let { closeSocketLogged(it, sessionId, "probe") }
         }
     }
@@ -2017,6 +2061,7 @@ class PhoneBluetoothSyncClient(
             if (throwable is CancellationException) {
                 currentCoroutineContext().ensureActive()
             }
+            if (isLibraryProbeFatal(throwable)) throw throwable
             val elapsedMs = elapsedSince(attemptStartedAt)
             val recovery = sdpProbeFailureRecovery(
                 elapsedMs = elapsedMs,
@@ -2121,6 +2166,7 @@ class PhoneBluetoothSyncClient(
                 outputStream = ipSession.outputStream,
                 owner = "ip:${ipSession.routeKind.wireName}",
                 closeOnLegacyFallback = false,
+                remotelyClosed = { ipSession.isClosed },
                 closeTransport = { ipSession.close() }
             ),
             persistentAccepted = false,
@@ -2136,12 +2182,28 @@ class PhoneBluetoothSyncClient(
         }
     }
 
-    private fun readLibraryResponse(
+    private suspend fun readLibraryResponse(
         inputStream: InputStream,
         sessionId: String,
         onProgress: (PhoneBluetoothSyncProgress) -> Unit,
         byteTracker: ByteTransferTracker
     ): LibraryResponseRead {
+        val recovery = currentCoroutineContext()[LibraryRecoveryContext]
+        val receivedIds = mutableSetOf<String>()
+        suspend fun appliedFrame(frame: JSONObject, index: Int) {
+            if (recovery == null) return
+            recovery.receiveFrame(frame)
+            recovery.bodies.frame("receive", frame)
+            frame.optJSONArray("articles")?.let { entries ->
+                for (n in 0 until entries.length()) receivedIds += entries.getJSONObject(n).getString("articleId")
+            }
+            if (recovery.checkpoints && frame.optBoolean("libraryCheckpoint")) {
+                require(receivedIds.all { recovery.receiver?.isApplied(it) == true }) { "资料批次正文尚未完整应用" }
+                val transport = currentCoroutineContext()[AccountDataSession]?.session?.transport ?: error("同步连接已关闭")
+                writeFrameLogged(transport.outputStream, sessionId, "libraryBatchAck",
+                    LibrarySyncPayload.articleBatchAck("watchToPhone", index, receivedIds.size))
+            }
+        }
         var lastPercent = -1
         fun report(percent: Int) {
             val clampedPercent = percent.coerceIn(0, 100)
@@ -2159,7 +2221,7 @@ class PhoneBluetoothSyncClient(
 
         report(60)
         var responseWireBytesRead = 0L
-        val first = readFrameLogged(
+        val first = try { readFrameLogged(
             inputStream = inputStream,
             sessionId = sessionId,
             label = "libraryResponse",
@@ -2167,7 +2229,7 @@ class PhoneBluetoothSyncClient(
             onBytesTransferred = { bytes ->
                 responseWireBytesRead += bytes
             }
-        )
+        ) } catch (failure: LibraryTransportFailure) { recovery?.bodies?.partialWire(responseWireBytesRead); throw failure }
         if (!first.optBoolean("success", true)) {
             return LibraryResponseRead(
                 response = first,
@@ -2181,6 +2243,7 @@ class PhoneBluetoothSyncClient(
             expectedIndex = 0,
             expectedBatchCount = null
         )
+        appliedFrame(first, 0)
         val accumulator = CombinedLibraryResponse(first)
         var stats = frameStats(first)
         var completed = 1
@@ -2194,7 +2257,8 @@ class PhoneBluetoothSyncClient(
         }
         while (completed < batchCount) {
             val index = completed
-            val frame = readFrameLogged(
+            val before = responseWireBytesRead
+            val frame = try { readFrameLogged(
                 inputStream = inputStream,
                 sessionId = sessionId,
                 label = batchLabel("libraryResponse", index, batchCount),
@@ -2205,7 +2269,7 @@ class PhoneBluetoothSyncClient(
                         report(percentBetweenBytes(60, 100, responseWireBytesRead, responseTotalWireBytes))
                     }
                 }
-            )
+            ) } catch (failure: LibraryTransportFailure) { recovery?.bodies?.partialWire(responseWireBytesRead - before); throw failure }
             validateBatchFrame(
                 frame = frame,
                 label = "libraryResponse",
@@ -2213,6 +2277,7 @@ class PhoneBluetoothSyncClient(
                 expectedIndex = index,
                 expectedBatchCount = batchCount
             )
+            appliedFrame(frame, index)
             accumulator.append(frame)
             stats = stats + frameStats(frame)
             completed += 1
@@ -2847,12 +2912,13 @@ class PhoneBluetoothSyncClient(
         session: PhoneSyncSession,
         sessionId: String,
         action: String
-    ) = currentCoroutineContext()[Job]?.invokeOnCompletion(
+    ): kotlinx.coroutines.DisposableHandle? {
+        val transport = session.transport ?: return null
+        return currentCoroutineContext()[Job]?.invokeOnCompletion(
         onCancelling = true,
         invokeImmediately = false
     ) { cause ->
         if (cause !is CancellationException) return@invokeOnCompletion
-        val transport = session.transport ?: return@invokeOnCompletion
         runCatching { transport.close() }
         if (session.transport === transport) session.transport = null
         debugLog.appendEvent(
@@ -2864,6 +2930,8 @@ class PhoneBluetoothSyncClient(
                 "message" to cause.message.orEmpty()
             )
         )
+    }
+
     }
 
     @OptIn(InternalCoroutinesApi::class)

@@ -37,7 +37,7 @@ class SyncV2P6ProductTest {
         val announcement=JSONObject().put("algorithm","ES256").put("receiptKeyId","cd".repeat(16)).put("receiptSigningPublicKey",SyncV2Codec.b64(SubjectPublicKeyInfo(
             AlgorithmIdentifier(ASN1ObjectIdentifier("1.2.840.10045.2.1"),ASN1ObjectIdentifier("1.2.840.10045.3.1.7")),SyncV2Codec.unhex(receipt.publicHex,65)).encoded))
         var descriptor:JSONObject?=null;var capsule:JSONObject?=null
-        var descriptorUnavailable=false;var failAfterConflict=false;var dropInit=false;val initBytes=mutableListOf<String>()
+        var readGate=true;var descriptorUnavailable=false;var failAfterConflict=false;var dropInit=false;val initBytes=mutableListOf<String>()
         val objects=linkedMapOf<String,ByteArray>();val prefixes=linkedMapOf<String,ByteArray>();val totals=linkedMapOf<String,Int>()
         val bindings=linkedMapOf<String,JSONObject>();val refs=linkedMapOf<String,JSONObject>();val devices=linkedMapOf<String,JSONObject>();val results=linkedMapOf<String,JSONObject>()
         val boundAliases=linkedMapOf<String,String>();val registrationBodies=mutableListOf<JSONObject>()
@@ -62,10 +62,11 @@ class SyncV2P6ProductTest {
                     val route=r.requestUrl!!.encodedPath.removePrefix(SyncV2Origin.path)
                     if(route==block){block=null;entered.countDown();assertTrue(unblock.await(10,TimeUnit.SECONDS))}
                     val s=JSONObject().put("repoId",r.requestUrl!!.queryParameter("repoId")).put("libraryEpoch",r.requestUrl!!.queryParameter("libraryEpoch")).put("contentGeneration",r.requestUrl!!.queryParameter("contentGeneration"))
+                    if(!readGate && route!="capabilities")return error("feature_disabled")
                     fun body()=SyncV2Wire.parse(r.body.readByteArray())
                     when {
                         route=="capabilities"->return response(dto(s).put("minVersion",2).put("maxVersion",2).put("maxPartBytes",65536).put("historyDays",7).put("features",JSONArray())
-                            .put("receiptKeyId",announcement.get("receiptKeyId")).put("receiptSigningPublicKey",announcement.get("receiptSigningPublicKey")).put("flags",JSONObject().put("read",true).put("indexWrite",true).put("contentWrite",true)))
+                            .put("receiptKeyId",announcement.get("receiptKeyId")).put("receiptSigningPublicKey",announcement.get("receiptSigningPublicKey")).put("flags",JSONObject().put("read",readGate).put("indexWrite",readGate).put("contentWrite",readGate)))
                         route=="repo/descriptor"->{if(descriptorUnavailable)return error("temporarily_unavailable");val d=descriptor?:return error("object_missing");return response(dto(scope()).put("descriptor",d).put("descriptorOid",SyncV2Codec.oid("repo-descriptor",d)).put("recoveryOid",SyncV2Codec.oid("id-key-recovery",capsule)))}
                         route.startsWith("repo/id-key-recovery/")->return response(capsule!!)
                         route=="repo/init"->{
@@ -153,6 +154,19 @@ class SyncV2P6ProductTest {
         fun text()=room.openHelper.writableDatabase.query("SELECT markdown FROM notes WHERE noteId='note'").use{if(it.moveToFirst())it.getString(0)else null}
         fun sync()=runBlocking{product.sync(server.announcement)}
         override fun close(){product.release();room.close();root.deleteRecursively()}
+    }
+    @Test fun announcedButClosedServerGateDoesNotFailTheLegacyCloudPass() {
+        Server().use {server->Host(server,"a").use{h->
+            server.readGate=false;h.note()
+            val result=h.sync()
+            assertFalse(result.enabled);assertEquals("feature_disabled",result.reason)
+            assertEquals(0,server.inits);assertEquals(0,server.publishes);assertEquals(0,server.acks)
+            assertEquals("local",h.text());assertNull(h.product.uiPort.value)
+            server.readGate=true;assertTrue(h.sync().enabled);assertEquals(1,server.publishes)
+            server.readGate=false
+            assertFalse(h.sync().enabled);assertEquals(1,server.publishes)
+            assertEquals("local",h.text());assertFalse(h.product.uiPort.value!!.state.value.enabled)
+        }}
     }
     @Test fun disabledAndUnannouncedEntryHasZeroRequestsNoRuntimeAndNoDatabaseOpen()=runBlocking {
         Server().use {server->Host(server,"a",false).use{h->

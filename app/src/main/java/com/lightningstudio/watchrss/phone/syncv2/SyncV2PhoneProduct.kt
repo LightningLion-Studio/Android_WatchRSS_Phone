@@ -57,7 +57,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             return@withContext Result(false,if(!enabled())"feature_disabled"else"not_announced")
         }
         announcement=JSONObject(syncV2.toString())
-        mutex.withLock {
+        try { mutex.withLock {
             val account=current()?:SyncV2Codec.fail("authentication_required")
             val old=runtime
             if(old!=null && old.account.owner()!=account.owner()) {
@@ -73,6 +73,12 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 _uiPort.value?.failed(e)
                 throw e
             }
+        }} catch(error:SyncV2CloudError) {
+            // A server gate closing only disables this optional protocol. The caller's
+            // completed v1 body/records pass remains valid; all other failures propagate.
+            if(error.code!="feature_disabled")throw error
+            _uiPort.value?.disabled()
+            Result(false,"feature_disabled")
         }
     }
     private fun open(account:Account,syncV2:JSONObject):Runtime {

@@ -6,7 +6,7 @@ import org.json.JSONObject
 import java.io.File
 
 /** Original bytes are the offline queue. Downloaded SHA values never change business clocks. */
-internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private val files:File) {
+internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private val files:File,private val beforeInstall:(File)->Unit={}) {
     fun file(kind:String,id:String):File {
         SyncV2BodyCodec.name(kind,id)
         return File(files,if(kind=="asset")"notes/assets/$id"else"imported_books/$id.jsonl")
@@ -68,17 +68,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         check(db.inTransaction());val target=file(kind,id);val hash=SyncV2BodyCodec.hash(raw)
         val bookState=if(kind=="book")db.controlQuery("SELECT stateJson FROM imported_books WHERE bookId=?",arrayOf(id)).use{c->if(!c.moveToFirst())SyncV2Codec.fail("body_revision_changed");JSONObject(c.getString(0))}else null
         if(bookState!=null)validate("book",id,bookState,raw)
-        if(target.isFile && (target.length()!=raw.size.toLong() || SyncV2BodyCodec.hash(target.readBytes())!=hash))SyncV2Codec.fail("body_revision_changed")
-        if(!target.isFile) {
-            target.parentFile!!.mkdirs();val staged=File.createTempFile(".body-install-",".part",target.parentFile)
-            try {
-                java.io.FileOutputStream(staged).use{it.write(raw);it.fd.sync()}
-                // link(2) is an atomic no-clobber publication, unlike rename with replacement.
-                try{java.nio.file.Files.createLink(target.toPath(),staged.toPath())}
-                catch(_:java.nio.file.FileAlreadyExistsException){if(!target.isFile || target.length()!=raw.size.toLong() || SyncV2BodyCodec.hash(target.readBytes())!=hash)SyncV2Codec.fail("body_revision_changed")}
-                java.nio.channels.FileChannel.open(target.parentFile!!.toPath(),java.nio.file.StandardOpenOption.READ).use{it.force(true)}
-            }finally{staged.delete()}
-        }
+        com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.install(target,raw){beforeInstall(target)}
         if(kind=="asset")db.execSQL("UPDATE note_assets SET sha256=?,byteCount=? WHERE storageKey=? AND (sha256 IS NOT ? OR byteCount IS NOT ?)",arrayOf<Any>(hash,raw.size,id,hash,raw.size))
         else {
             materializeBook(id,raw,bookState!!)
@@ -113,8 +103,8 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
                         // Hydration is a cache write: an immutable private marker must not bump the edit witness.
                         val marker=content.markerFor("syncv2-body-${SyncV2BodyCodec.hash(textBytes)}")
                         val target=File(files,"imported_text/${com.lightningstudio.watchrss.phone.data.local.articleContentMarkerFileName(marker)!!}")
-                        if(target.exists()) {if(target.length()!=textBytes.size.toLong() || SyncV2BodyCodec.hash(target.readBytes())!=SyncV2BodyCodec.hash(textBytes))SyncV2Codec.fail("body_revision_changed")}
-                        else SyncV2BodyHttp.atomic(target,textBytes)
+                        com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.install(target,textBytes)
+
                         marker
                     }else text
                     val missingHtml=old==null || db.controlQuery("SELECT contentHtml IS NULL OR length(contentHtml)=0 FROM phone_articles WHERE articleId=?",arrayOf(article)).use{it.moveToFirst() && it.getInt(0)!=0}

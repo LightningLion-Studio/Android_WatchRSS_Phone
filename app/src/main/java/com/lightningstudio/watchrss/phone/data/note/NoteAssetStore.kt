@@ -22,7 +22,8 @@ class NoteAssetStore(private val context: Context) {
     fun discardImportedAsset(storageKey: String) {
         require(storageKey == File(storageKey).name) { "图片文件名无效" }
         val target=File(context.filesDir, "notes/assets/$storageKey")
-        if(target.exists())com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target){target.delete()}
+        val expected=com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.digest(target)
+        if(expected!=null)com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target){com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.delete(target,expected)}
     }
 
     suspend fun importImage(noteId: String, uri: Uri, keepOriginal: Boolean): StoredNoteAsset {
@@ -46,12 +47,13 @@ class NoteAssetStore(private val context: Context) {
             requireNotNull(BitmapFactory.decodeStream(input)) { "图片格式不受支持" }
         }
         val scaled = scaleTo680Pixels(bitmap)
-        com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target) {
-            FileOutputStream(target).use { output ->
-                check(scaled.compress(Bitmap.CompressFormat.JPEG, 85, output)) { "图片压缩失败" }
-                output.fd.sync()
+        val staged=File.createTempFile(".image-",".part",directory)
+        try {
+            FileOutputStream(staged).use {output->check(scaled.compress(Bitmap.CompressFormat.JPEG,85,output)){"图片压缩失败"};output.fd.sync()}
+            com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target) {
+                com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.install(target,staged,expectedSha=null)
             }
-        }
+        }finally{staged.delete()}
         if (scaled !== bitmap) bitmap.recycle()
         val sourceName = uri.lastPathSegment?.substringAfterLast('/')?.take(120).orEmpty().ifBlank { "图片" }
         val entity = NoteAssetEntity(
@@ -93,10 +95,13 @@ class NoteAssetStore(private val context: Context) {
             else -> "original"
         }
         val target = File(directory, "$assetId.$extension")
-        context.contentResolver.openInputStream(uri).use { input ->
-            requireNotNull(input) { "无法读取原图" }
-            com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target) { FileOutputStream(target).use{out->input.copyTo(out);out.fd.sync()} }
-        }
+        val staged=File.createTempFile(".original-",".part",directory)
+        try {
+            context.contentResolver.openInputStream(uri).use {input->requireNotNull(input){"无法读取原图"};FileOutputStream(staged).use{out->input.copyTo(out);out.fd.sync()}}
+            com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(target) {
+                com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.install(target,staged,expectedSha=null)
+            }
+        }finally{staged.delete()}
         val displayName = uri.lastPathSegment?.substringAfterLast('/')?.take(120).orEmpty().ifBlank { "图片" }
         return NoteAssetEntity(
             assetId = assetId, noteId = noteId, sha256 = target.inputStream().use(::sha256),

@@ -416,10 +416,9 @@ internal class SyncV2Projection(
             // Revalidate persisted candidates before reusing a pre-upgrade sealed cache.
             SyncV2Business.join(c[1] as String,meta,state)
             val prior=db.controlQuery("SELECT body FROM syncv2_wire_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())open("wire-candidate",it.getBlob(0))else null}
-            val bodyBinding=SyncV2Codec.hash(JSONObject().put("kind",c[1]).put("logicalId",c[2])
+            val bodyBinding=if(c[1] in setOf("book","asset"))SyncV2BodyIdentity.witness(meta)else SyncV2Codec.hash(JSONObject().put("kind",c[1]).put("logicalId",c[2])
                 .put("bodyHash",meta.getJSONObject("payload").opt("contentHash")?:meta.getJSONObject("payload").opt("fingerprint")?:JSONObject.NULL)
-                .put("assetVersion",if(c[1]=="asset")state.getJSONObject("payload").opt("updatedAt")?:JSONObject.NULL else JSONObject.NULL)
-                .put("deleted",state.getJSONObject("payload").optBoolean("deleted",false)))
+                .put("assetVersion",JSONObject.NULL).put("deleted",state.getJSONObject("payload").optBoolean("deleted",false)))
             val value=if(prior!=null && prior.getString("sourceHash")==hash && prior.getLong("keyVersion")==keyVersion)prior else if(remote!=null && SyncV2Codec.canonical(remote.getJSONObject("meta"))==SyncV2Codec.canonical(meta) && SyncV2Codec.canonical(remote.getJSONObject("state"))==SyncV2Codec.canonical(state)) {
                 val row=remote.getJSONObject("row")
                 JSONObject().put("sourceHash",hash).put("bodyBinding",bodyBinding).put("keyVersion",keyVersion).put("row",row)
@@ -466,10 +465,12 @@ internal class SyncV2Projection(
                     .put("bodyRevision",if(body)SyncV2Codec.hex(SyncV2Codec.random(16))else JSONObject.NULL)
                     .put("promiseId",if(body)SyncV2Codec.hex(SyncV2Codec.random(16))else JSONObject.NULL).put("recipeOid",JSONObject.NULL)
                     .put("opaqueContentId",JSONObject.NULL).put("contentBytes",JSONObject.NULL).put("requiredFeatures",JSONArray())
-                if(prior?.optString("bodyBinding")==bodyBinding && prior.getLong("keyVersion")==keyVersion) {
-                    val old=prior.getJSONObject("row")
-                    for(field in listOf("bodyRevision","promiseId","recipeOid","opaqueContentId","contentBytes"))row.put(field,old.get(field))
+                val bodySource=when {
+                    c[1] in setOf("book","asset") && SyncV2BodyIdentity.same(meta,remote)->remote!!.getJSONObject("row")
+                    prior?.optString("bodyBinding")==bodyBinding->prior.getJSONObject("row")
+                    else->null
                 }
+                if(bodySource!=null)SyncV2BodyIdentity.carry(row,bodySource)
                 JSONObject().put("sourceHash",hash).put("bodyBinding",bodyBinding).put("keyVersion",keyVersion).put("row",row)
                     .put("meta",SyncV2Codec.b64(sealedMeta.bytes)).put("state",SyncV2Codec.b64(sealedState.bytes))
                     .put("refs",SyncV2Index.refs(identity,signer,sealedState.oid))

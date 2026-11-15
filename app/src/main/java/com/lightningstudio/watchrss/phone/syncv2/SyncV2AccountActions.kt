@@ -366,11 +366,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         val pair=SyncV2Business.split(kind,logicalId,entity,value,null)
         return JSONObject().put("meta",pair.meta).put("state",pair.state).put("value",SyncV2Business.join(kind,pair.meta,pair.state))
     }
-    private fun bodyIdentity(r:JSONObject):String {
-        val m=r.getJSONObject("meta");val v=r.optJSONObject("value")?:JSONObject()
-        return SyncV2Codec.hash(JSONObject().put("kind",m.getString("kind")).put("id",m.getString("logicalId"))
-            .put("body",when(m.getString("kind")){"article"->v.opt("contentHash");"book"->v.opt("fingerprint");"asset"->v.opt("updatedAt");else->JSONObject.NULL}))
-    }
+    private fun bodyIdentity(r:JSONObject):String=SyncV2BodyIdentity.witness(r.getJSONObject("meta"))
     private fun endangeredBodies(before:List<JSONObject>,target:List<JSONObject>):Set<String> {
         val targets=target.indexRows()
         return before.asSequence().filter { r ->
@@ -449,7 +445,8 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             }
             val cached=projection.accountWireRowFor(r)
             val bodySources=listOfNotNull(remote,known,cached?.let{copy(r).put("row",it)}).filter{it.has("row") && bodyIdentity(it)==bodyIdentity(r)}
-            val source=bodySources.maxWithOrNull(compareBy<JSONObject>{!it.getJSONObject("row").isNull("recipeOid")}.thenBy{SyncV2Codec.d64(it.getJSONObject("row").getString("rowSequence"))})
+            val source=if(kind in setOf("book","asset") && SyncV2BodyIdentity.same(m,remote))remote else
+                bodySources.maxWithOrNull(compareBy<JSONObject>{!it.getJSONObject("row").isNull("recipeOid")}.thenBy{SyncV2Codec.d64(it.getJSONObject("row").getString("rowSequence"))})
             val priorRows=listOfNotNull(known?.optJSONObject("row"),remote?.optJSONObject("row"),cached)
             val inherited=priorRows.maxByOrNull{SyncV2Codec.d64(it.getString("rowSequence"))}
             val addedAt=known?.optJSONObject("row")?.optLong("addedAtMillis")?:remote?.optJSONObject("row")?.optLong("addedAtMillis")?:0
@@ -538,7 +535,8 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             val byEntity=remote.indexRows()
             for(r in local) {
                 val prior=byEntity[r.getJSONObject("meta").getString("entityKey")]
-                if((prior==null || !same(prior.getJSONObject("meta"),r.getJSONObject("meta")) || !same(prior.getJSONObject("state"),r.getJSONObject("state"))) && !recovery.contentReady(r))SyncV2Codec.fail("closure_incomplete")
+                val preservesIndependent=prior!=null && r.getJSONObject("meta").getString("kind") in setOf("book","asset") && bodyIdentity(prior)==bodyIdentity(r)
+                if(!preservesIndependent && (prior==null || !same(prior.getJSONObject("meta"),r.getJSONObject("meta")) || !same(prior.getJSONObject("state"),r.getJSONObject("state"))) && !recovery.contentReady(r))SyncV2Codec.fail("closure_incomplete")
             }
         }
         val requestId=id();val action=JSONObject().put("id",requestId).put("kind",choice).put("capture",c.json()).put("serverTime",now()).put("fileCapture",plan.files).put("legacySelected",JSONArray(plan.legacySelected))

@@ -55,21 +55,7 @@ class FileArticleContentStore internal constructor(
                 output.fd.sync()
             }
             check(temporary.length() == encoded.size.toLong()) { "正文临时文件校验失败" }
-            CloudExportFileWitness.changing(target) { try {
-                Files.move(
-                    temporary.toPath(),
-                    target.toPath(),
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING
-                )
-            } catch (_: AtomicMoveNotSupportedException) {
-                Files.move(
-                    temporary.toPath(),
-                    target.toPath(),
-                    StandardCopyOption.REPLACE_EXISTING
-                )
-            }
-            }
+            CloudExportFileWitness.changing(target) { ConditionalBodyFile.install(target,temporary) }
             check(target.matchesContent(encoded.size.toLong(), contentHash)) { "正文文件校验失败" }
         } finally {
             runCatching { temporary.delete() }
@@ -125,7 +111,8 @@ class FileArticleContentStore internal constructor(
             val managedFile = isArticleContentFileName(file.name) ||
                 (file.name.startsWith(".write-") && file.name.endsWith(".part"))
             if (file.isFile && managedFile && file.name !in retainedFileNames) {
-                CloudExportFileWitness.changing(file) { runCatching { file.delete() } }
+                val expected=ConditionalBodyFile.digest(file)
+                CloudExportFileWitness.changing(file) { runCatching { ConditionalBodyFile.delete(file,expected) } }
             }
         }
     }

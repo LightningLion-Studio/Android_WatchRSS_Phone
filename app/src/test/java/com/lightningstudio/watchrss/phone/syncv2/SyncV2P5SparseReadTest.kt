@@ -27,7 +27,11 @@ class SyncV2P5SparseReadTest {
         val p=SyncV2Business.split("asset","asset",w.identity.entity("asset","asset"),asset,null)
         w.sql.execSQL("INSERT INTO note_assets VALUES('asset','note',?,'asset.bin','application/octet-stream',?,'asset.bin',0,0,0,0)",arrayOf<Any>(SyncV2Codec.hex(SyncV2Codec.sha(bytes)),bytes.size))
         File(w.root,"notes/assets/asset.bin").also{it.parentFile!!.mkdirs();it.writeBytes(bytes)}
-        assertTrue(storage.contentReady(JSONObject().put("meta",p.meta).put("state",p.state).put("value",asset)));assertEquals(bytes.size.toLong(),reads.fileBytes)
+        assertFalse(storage.contentReady(JSONObject().put("meta",p.meta).put("state",p.state).put("value",asset)))
+        assertEquals(0L,reads.fileBytes)
+        val literal=JSONObject(asset.toString()).put("assetId","asset.bin")
+        val body=SyncV2Business.split("asset","asset.bin",w.identity.entity("asset","asset.bin"),literal,null)
+        assertTrue(storage.contentReady(JSONObject().put("meta",body.meta).put("state",body.state).put("value",literal)));assertEquals(bytes.size.toLong(),reads.fileBytes)
     }
     private class Reads {
         val calls=linkedMapOf<String,Long>();val rows=linkedMapOf<String,Long>();val blobBytes=linkedMapOf<String,Long>();val stringBytes=linkedMapOf<String,Long>()

@@ -27,10 +27,10 @@ internal fun requireAccountAccepted(response: JSONObject) {
 /** One account repair per operation. A new transport always needs its own confirmation. */
 internal class AccountSyncGate(
     private val syncAccount: suspend () -> Unit,
-    private val reconnect: suspend () -> Unit
+    private val reconnect: suspend () -> Unit,
+    private val budget: AccountRepairBudget = AccountRepairBudget()
 ) {
     private var confirmed = false
-    private var repaired = false
 
     fun invalidate() { confirmed = false }
 
@@ -46,8 +46,8 @@ internal class AccountSyncGate(
         return try {
             block()
         } catch (failure: WatchAccountSyncRequired) {
-            if (repaired) throw failure
-            repaired = true
+            if (budget.repaired) throw failure
+            budget.repaired = true
             invalidate()
             // Compose closes the rejected connection. Do not replay on that socket.
             reconnect()
@@ -56,3 +56,8 @@ internal class AccountSyncGate(
         }
     }
 }
+
+internal fun isTerminalAccountSyncFailure(error: Throwable): Boolean =
+    error is PhoneLoginRequired || error is PhoneAccountSyncFailed || error is WatchAccountSyncRequired ||
+        error is com.lightningstudio.watchrss.phone.account.PhoneDeviceVerificationRequired ||
+        error is com.lightningstudio.watchrss.phone.account.PhoneAccountTemporarilyUnavailable || error is WatchSyncBlocked

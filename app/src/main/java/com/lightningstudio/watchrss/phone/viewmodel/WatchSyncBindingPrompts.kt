@@ -16,6 +16,7 @@ internal class WatchSyncBindingPrompts {
     val events = emitted.asSharedFlow()
     fun handle(failure: Throwable): Boolean {
         val event = when (failure) {
+            is com.lightningstudio.watchrss.phone.account.PhoneDeviceVerificationRequired -> WatchSyncBindingEvent.RequirePhoneDeviceVerification
             is PhoneLoginRequired -> WatchSyncBindingEvent.RequirePhoneLogin
             is WatchSyncBlocked -> failure.event
             else -> return false

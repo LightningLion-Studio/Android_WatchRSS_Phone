@@ -217,6 +217,7 @@ dependencies {
     // Backdrop source copied locally — see app/src/main/java/com/kyant/backdrop
 
     testImplementation(libs.junit)
+    testImplementation(libs.androidx.compose.ui.test.junit4)
     testImplementation(libs.json)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.robolectric)

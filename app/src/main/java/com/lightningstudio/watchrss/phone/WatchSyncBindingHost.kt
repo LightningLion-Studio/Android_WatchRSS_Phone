@@ -6,19 +6,15 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchSyncBindingEvent
 import com.lightningstudio.watchrss.phone.viewmodel.MainViewModel
-import kotlinx.coroutines.launch
-import android.widget.Toast
 
 /** Shows the required login or binding action before library data can be sent. */
 @Composable
 internal fun WatchSyncBindingHost(viewModel: MainViewModel) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val prompt by viewModel.watchSyncBindingPrompt.collectAsStateWithLifecycle()
     LaunchedEffect(viewModel) {
         viewModel.watchSyncBindingEvents.collect { event ->
@@ -26,20 +22,14 @@ internal fun WatchSyncBindingHost(viewModel: MainViewModel) {
         }
     }
     when (prompt) {
+        WatchSyncBindingEvent.RequirePhoneDeviceVerification -> PhoneDeviceVerificationDialog(
+            onDismiss = viewModel::dismissWatchSyncBindingPrompt,
+            onAccount = { viewModel.dismissWatchSyncBindingPrompt(); context.startActivity(AccountActivity.createIntent(context)) }
+        )
         WatchSyncBindingEvent.RequirePhoneLogin -> PhoneSyncLoginDialog(
             onDismiss = viewModel::dismissWatchSyncBindingPrompt,
             onLogin = {
-                scope.launch {
-                    runCatching {
-                        (context.applicationContext as PhoneCompanionApplication).container
-                            .appAccessCoordinator.beginReauthentication()
-                    }.onSuccess {
-                        viewModel.dismissWatchSyncBindingPrompt()
-                        context.startActivity(AccountActivity.createIntent(context, finishAfterLogin = true))
-                    }.onFailure {
-                        Toast.makeText(context, it.message ?: "无法打开登录，请重试", Toast.LENGTH_LONG).show()
-                    }
-                }
+                openPhoneSyncReauthentication(context, viewModel::dismissWatchSyncBindingPrompt)
             }
         )
         WatchSyncBindingEvent.RequireWatchBinding -> AlertDialog(
@@ -68,4 +58,18 @@ internal fun PhoneSyncLoginDialog(onDismiss: () -> Unit, onLogin: () -> Unit) {
         confirmButton = { TextButton(onClick = onLogin) { Text("去登录") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
+}
+
+/** Navigation is non-destructive; AccountActivity pauses authentication through the repository. */
+internal fun openPhoneSyncReauthentication(context: android.content.Context, dismiss: () -> Unit) {
+    dismiss()
+    context.startActivity(AccountActivity.createIntent(context, finishAfterLogin = true, reauthenticate = true))
+}
+
+@Composable
+internal fun PhoneDeviceVerificationDialog(onDismiss: () -> Unit, onAccount: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("验证设备身份") },
+        text = { Text("手机设备身份需要验证，请前往账号页面完成验证") },
+        confirmButton = { TextButton(onClick = onAccount) { Text("前往账号") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }

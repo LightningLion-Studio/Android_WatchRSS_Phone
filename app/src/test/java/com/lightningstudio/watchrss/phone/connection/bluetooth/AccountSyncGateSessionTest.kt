@@ -35,6 +35,11 @@ class AccountSyncGateSessionTest {
     private var deviceRefreshSucceeds=true
     private var refreshes=0
     private var login=true
+    private var rejectReader=false
+    private var closeOnRejection=false
+    private var failClear=false
+    private var unbound=false
+    private var failFirstCursor=false
     private var rejectCount=0
     private var cursorCount=0
     private var accountCount=0
@@ -45,7 +50,7 @@ class AccountSyncGateSessionTest {
     private val manager=PhoneBluetoothSyncManager(context,repo,NoteRepository(db.noteDao(),"phone"),ReaderPresetRepository(context,db,db.readerPresetDao(),"phone",scope),PhoneLlmTokenUsageRepository(db.llmTokenUsageDao()),"phone",log,
         canSyncAccount={login},currentPhoneUserId={"owner"},buildAccountSyncRequest={_,_,_->
             issueFailure?.let { throw it }
-            withWatchAccountDeviceRefresh({"old-device-token"},{refreshes++;deviceRefreshSucceeds}) {
+            withWatchAccountDeviceRefresh({"old-device-token"},{refreshes++;if(deviceRefreshSucceeds) com.lightningstudio.watchrss.phone.account.WatchAccountRefreshResult.Ready else com.lightningstudio.watchrss.phone.account.WatchAccountRefreshResult.DeviceVerificationRequired()}) {
                 if(requiresDeviceRefresh && refreshes==0)throw PhoneAccountHttpException(403,"""{"error":"device_session_expired"}""")
                 JSONObject().put("action","syncAccount")
             }
@@ -55,23 +60,30 @@ class AccountSyncGateSessionTest {
     private fun session():PhoneSyncSession {
         val incoming=ArrayDeque<Byte>()
         var ip:PhoneIpSyncSession?=null
+        var rejectedConnection=false
         val output=object:ByteArrayOutputStream(){override fun flush(){
             if(size()==0)return
+            if(rejectedConnection)throw EOFException("Compose closed rejected connection")
             val q=BluetoothSyncProtocol.readFrame(ByteArrayInputStream(toByteArray()));reset();frames+=q
             val action=q.optString("action");val phase=q.optString("phase")
             if(action=="ack")return
             val a=when(action){
                 "syncAccount"->{accountCount++;answer(action).put("boundUserId","owner")}
                 "syncLibrary"->when(phase){
-                    "probe"->answer(action,phase).put("supportsPersistentSession",true).put("persistentSessionAccepted",true)
-                    "cursor"->{cursorCount++;if(cursorCount<=rejectCount)answer(action,phase).put("success",false)
+                    "probe"->answer(action,phase).put("supportsPersistentSession",true).put("persistentSessionAccepted",true).apply { if(unbound)put("account",JSONObject().put("bound",false)) }
+                    "cursor"->{if(failFirstCursor){failFirstCursor=false;throw IOException("synthetic disconnect")};cursorCount++;if(cursorCount<=rejectCount)answer(action,phase).put("success",false)
                         .put("message","请重新连接并同步账号后再同步资料").apply {rejectionCode?.let {put("errorCode",it)}}
                         else LibrarySyncPayload.buildCursorResponse("watch",LibrarySyncCursor(0,0,0)).put("supportsAuthoritativeLibraryReplace",true)}
-                    "manifest"->LibrarySyncPayload.buildManifestResponse("watch",emptyList()).put("supportsReaderPresets",false)
+                    "manifest"->LibrarySyncPayload.buildManifestResponse("watch",emptyList()).put("supportsReaderPresets",rejectReader)
                         .put("supportsNoteManifestV2",false).put("supportsNoteAssetInventory",false)
                     "articles"->LibrarySyncPayload.buildChunkedResponseFrames("watch",emptyList(),emptyList(),useBatches=false).single()
                     else->error("unexpected library phase $phase")
                 }
+                "syncReader"->if(rejectReader)answer(action,phase).put("success",false).put("message","请重新连接并同步账号后再同步资料")
+                    else JSONObject(q.toString()).put("success",true).put("deviceId","watch").put("missingResources",org.json.JSONArray())
+                "clearLibrary"->if(failClear)throw IOException("clear transport disconnected") else answer(action)
+                "pullSavedItems"->answer(action).put("items",org.json.JSONArray())
+                "previewReader"->JSONObject(q.toString()).put("success",true)
                 "syncNotes"->NoteSyncPayload.manifest("watch",emptyList()).put("success",true)
                 "syncLlmTokenUsage"->answer(action).put("records",org.json.JSONArray())
                 "syncSession"->answer(action,phase)
@@ -80,6 +92,7 @@ class AccountSyncGateSessionTest {
             val encoded=ByteArrayOutputStream().also{BluetoothSyncProtocol.writeFrame(it,a)}.toByteArray()
             val activeIp=ip
             if(activeIp!=null)activeIp.acceptBinary(encoded) else encoded.forEach{incoming.addLast(it)}
+            if(closeOnRejection && !a.optBoolean("success",true))rejectedConnection=true
         }}
         val input=object:InputStream(){override fun read()=if(incoming.isEmpty())-1 else incoming.removeFirst().toInt() and 255}
         val streams=if(transport.startsWith("ip:")) {
@@ -103,6 +116,7 @@ class AccountSyncGateSessionTest {
     private suspend fun runBoth(block:suspend ()->Unit) {
         for(route in listOf("rfcomm","ip:test")) {
             transport=route;frames.clear();accountCount=0;cursorCount=0;reconnects=0;refreshes=0
+            manager.probeDevices={_,_,_->PhoneBluetoothWatchProbeBatch(listOf(PhoneBluetoothWatchProbeResult(device,true)),session())}
             manager.reconnectDelay={error("account rejection must use its separate bounded repair")}
             manager.reconnectSession={_,_->reconnects++;session()}
             block()
@@ -118,9 +132,9 @@ class AccountSyncGateSessionTest {
         manager.syncAll(device,reusableSession=session())
         assertEquals(1,refreshes);assertEquals(1,accountCount);assertEquals(1,cursorCount)
     }}
-    @Test fun failedDeviceRefreshShowsLoginAndNeverSendsAccountOrDataOnBothRoutes()=runBlocking<Unit>{requiresDeviceRefresh=true;deviceRefreshSucceeds=false;runBoth {
+    @Test fun failedDeviceRefreshRequiresDeviceVerificationWithoutSendingDataOnBothRoutes()=runBlocking<Unit>{requiresDeviceRefresh=true;deviceRefreshSucceeds=false;runBoth {
         val failure=runCatching{manager.syncAll(device,reusableSession=session())}.exceptionOrNull()
-        assertTrue(failure is PhoneLoginRequired)
+        assertTrue(failure is com.lightningstudio.watchrss.phone.account.PhoneDeviceVerificationRequired)
         assertEquals(1,refreshes);assertEquals(0,accountCount);assertEquals(0,cursorCount);assertEquals(0,reconnects)
     }}
     @Test fun expiredOrMissingLoginStopsBeforeAnyRequestOnBothRoutes()=runBlocking<Unit>{login=false;runBoth {
@@ -134,7 +148,7 @@ class AccountSyncGateSessionTest {
     }}
     @Test fun accountIssuanceNetworkFailureDoesNotSendDataOrReconnectBluetooth()=runBlocking<Unit>{issueFailure=IOException("credential service unavailable");runBoth {
         val failure=runCatching{manager.syncAll(device,reusableSession=session())}.exceptionOrNull()
-        assertTrue(failure is PhoneAccountSyncFailed)
+        assertTrue(failure.toString(),failure is com.lightningstudio.watchrss.phone.account.PhoneAccountTemporarilyUnavailable)
         assertEquals(0,cursorCount);assertEquals(0,accountCount);assertEquals(0,reconnects)
     }}
     @Test fun composeMessageRejectionReconnectsAndResyncsExactlyOnceOnBothRoutes()=runBlocking<Unit>{rejectCount=1;runBoth {
@@ -158,4 +172,78 @@ class AccountSyncGateSessionTest {
         assertTrue(runCatching{requireAccountAccepted(JSONObject().put("success",false).put("errorCode","device_owned_by_another_account"))}.isSuccess)
         assertTrue(runCatching{requireAccountAccepted(JSONObject().put("success",false).put("message","other"))}.isSuccess)
     }
+    @Test fun independentReaderStopsBeforeDataWithoutLoginOnBothRoutes()=runBlocking<Unit>{login=false;runBoth {
+        assertTrue(runCatching{manager.syncReaderPresets(device.address,syncSession=session())}.exceptionOrNull() is PhoneLoginRequired)
+        assertFalse(frames.any{it.optString("action")=="syncReader"})
+    }}
+    @Test fun boundOrUnknownClearStopsBeforeDataWithoutLoginOnBothRoutes()=runBlocking<Unit>{login=false;runBoth {
+        assertTrue(runCatching{manager.clearWatchLibrary(device.address,session())}.exceptionOrNull() is PhoneLoginRequired)
+        assertFalse(frames.any{it.optString("action")=="clearLibrary"})
+    }}
+    @Test fun explicitlyUnboundClearKeepsExistingPolicyWithoutLoginOnBothRoutes()=runBlocking<Unit>{login=false;unbound=true;runBoth {
+        manager.clearWatchLibrary(device.address,session())
+        assertEquals(0,accountCount);assertEquals(1,frames.count{it.optString("action")=="clearLibrary"})
+    }}
+    @Test fun independentReaderConfirmsEveryNewConnectionOnBothRoutes()=runBlocking<Unit>{runBoth {
+        repeat(2){manager.syncReaderPresets(device.address,syncSession=session())}
+        assertEquals(2,accountCount);assertEquals(2,frames.count{it.optString("action")=="syncReader"})
+        assertTrue(frames.indexOfFirst{it.optString("action")=="syncAccount"}<frames.indexOfFirst{it.optString("action")=="syncReader"})
+    }}
+    @Test fun readerRefusalInGlobalSyncHasExactlyOneRepairAndRetryOnBothRoutes()=runBlocking<Unit>{rejectReader=true;runBoth {
+        val failure=runCatching{manager.syncAll(device,reusableSession=session())}.exceptionOrNull()
+        assertTrue(failure.toString(),failure is WatchAccountSyncRequired)
+        assertEquals(2,accountCount);assertEquals(1,reconnects)
+        assertEquals(2,frames.count{it.optString("action")=="syncReader"})
+    }}
+    @Test fun independentReaderPreservesComposeRefusalAfterPeerClosesOnBothRoutes()=runBlocking<Unit>{rejectReader=true;closeOnRejection=true;runBoth {
+        val failure=runCatching{manager.syncReaderPresets(device.address,syncSession=session())}.exceptionOrNull()
+        assertTrue(failure.toString(),failure is WatchAccountSyncRequired)
+        assertEquals(2,accountCount);assertEquals(1,reconnects);assertEquals(2,frames.count{it.optString("action")=="syncReader"})
+    }}
+    @Test fun savedItemsUsesSameAccountConnectionGateOnBothRoutes()=runBlocking<Unit>{runBoth {
+        manager.syncSavedItems(com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType.FAVORITE)
+        assertEquals(1,accountCount)
+        assertTrue(frames.indexOfFirst{it.optString("action")=="syncAccount"}<frames.indexOfFirst{it.optString("action")=="pullSavedItems"})
+    }}
+    @Test fun previewUpdateRequiresAccountOnItsActualConnectionOnBothRoutes()=runBlocking<Unit>{runBoth {
+        val preset=com.lightningstudio.watchrss.phone.data.reader.ReaderPreset.darkDefault()
+        manager.updateReaderPresetPreview(device.address,"preview",1,preset)
+        assertEquals(1,accountCount)
+        assertTrue(frames.indexOfFirst{it.optString("action")=="syncAccount"}<frames.indexOfFirst{it.optString("action")=="previewReader"})
+    }}
+    @Test fun forceFullAndPhoneReplaceRequireAccountOnBothRoutes()=runBlocking<Unit>{runBoth {
+        for(mode in listOf(LibrarySyncMode.MERGE,LibrarySyncMode.PHONE_TO_WATCH_REPLACE)) {
+            val before=accountCount
+            manager.syncAll(device,forceFull=true,mode=mode,reusableSession=session())
+            assertEquals(before+1,accountCount)
+        }
+    }}
+    @Test fun readerTransportRecoveryReconfirmsAccountOnBothRoutes()=runBlocking<Unit>{runBoth {
+        failFirstCursor=true;manager.reconnectDelay={}
+        manager.syncAll(device,reusableSession=session())
+        assertEquals(2,accountCount);assertEquals(1,reconnects)
+    }}
+
+    @Test fun temporaryAccountFailureStopsBothRoutesWithoutLoginOrData()=runBlocking<Unit>{
+        issueFailure=com.lightningstudio.watchrss.phone.account.PhoneAccountTemporarilyUnavailable(IOException("backoff"),2000)
+        runBoth {
+            val failure=runCatching{manager.syncAll(device,reusableSession=session())}.exceptionOrNull()
+            assertTrue(failure.toString(),failure is com.lightningstudio.watchrss.phone.account.PhoneAccountTemporarilyUnavailable)
+            assertFalse(failure is PhoneLoginRequired);assertEquals(0,accountCount);assertEquals(0,cursorCount);assertEquals(0,reconnects)
+        }
+    }
+    @Test fun directLibraryEntryUsesTheCommonGateOnBothRoutes()=runBlocking<Unit>{runBoth {
+        manager.syncLibrary(device.address,session(),syncAuxiliary=false,booksPrepared=true)
+        assertEquals(1,accountCount);assertEquals(1,cursorCount)
+    }}
+
+    @Test fun clearTransportFailureKeepsManualRetryPolicyOnBothRoutes()=runBlocking<Unit>{
+        failClear=true;unbound=true;login=false
+        runBoth {
+            val failure=runCatching{manager.clearWatchLibrary(device.address,session())}.exceptionOrNull()
+            assertTrue(failure.toString(),failure is WatchLibraryClearException)
+            assertEquals(0,reconnects);assertEquals(1,frames.count{it.optString("action")=="clearLibrary"})
+        }
+    }
+
 }

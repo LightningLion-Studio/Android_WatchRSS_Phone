@@ -88,6 +88,8 @@ data class MainSyncProgressUi(
 )
 
 internal fun syncFailureMessage(throwable: Throwable, phase: String?): String {
+    if (throwable is com.lightningstudio.watchrss.phone.account.PhoneDeviceVerificationRequired ||
+        throwable is com.lightningstudio.watchrss.phone.account.PhoneAccountTemporarilyUnavailable) return throwable.message!!
     if (throwable is com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired) return throwable.message!!
     if (throwable is com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneAccountSyncFailed) return throwable.message!!
     if (throwable is com.lightningstudio.watchrss.phone.connection.bluetooth.WatchAccountSyncRequired) {
@@ -1054,10 +1056,12 @@ class MainViewModel(
                 _toastEvent.tryEmit(sessionState.value.message ?: "手表资料库已清空")
             } catch (failure: Throwable) {
                 if (failure is CancellationException) throw failure
+                if (handleWatchSyncBindingFailure(failure)) return@launch
                 val state = sessionState.value.watchLibraryClear
                 val code = (failure as? WatchLibraryClearException)?.errorCode ?: state?.errorCode
                 val hint = if (state?.remoteMayHaveChanged == true) "手表可能已清理一部分，再次清空会接着完成" else null
-                val text = listOfNotNull(watchLibraryClearFailureText(code), hint).joinToString("；")
+                val text = if (com.lightningstudio.watchrss.phone.connection.bluetooth.isTerminalAccountSyncFailure(failure)) failure.message.orEmpty()
+                    else listOfNotNull(watchLibraryClearFailureText(code), hint).joinToString("；")
                 sessionState.value = sessionState.value.copy(message = text, syncStatusMessage = text)
                 _toastEvent.tryEmit(text)
             } finally {
@@ -1306,7 +1310,8 @@ class MainViewModel(
             showSupportAlert(
                 title = "资料库同步失败",
                 message = if (throwable is com.lightningstudio.watchrss.phone.connection.bluetooth.WatchAccountSyncRequired ||
-                    throwable is com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneAccountSyncFailed) error
+                    throwable is com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneAccountSyncFailed ||
+                    throwable is com.lightningstudio.watchrss.phone.account.PhoneAccountTemporarilyUnavailable) error
                     else "同步过程中断，请确认手表保持亮屏并重试。",
                 errorDetails = error
             )

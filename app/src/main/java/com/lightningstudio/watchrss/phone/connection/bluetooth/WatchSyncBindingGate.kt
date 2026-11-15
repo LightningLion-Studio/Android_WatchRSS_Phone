@@ -4,6 +4,7 @@ import org.json.JSONObject
 import java.security.MessageDigest
 
 sealed interface WatchSyncBindingEvent {
+    data object RequirePhoneDeviceVerification : WatchSyncBindingEvent
     data object RequirePhoneLogin : WatchSyncBindingEvent
     data object RequireWatchBinding : WatchSyncBindingEvent
     data object WatchAccountMismatch : WatchSyncBindingEvent
@@ -12,6 +13,7 @@ sealed interface WatchSyncBindingEvent {
 
 class WatchSyncBlocked(val event: WatchSyncBindingEvent) : IllegalStateException(
     when (event) {
+        WatchSyncBindingEvent.RequirePhoneDeviceVerification -> "手机设备身份需要验证，请前往账号页面完成验证"
         WatchSyncBindingEvent.RequirePhoneLogin -> "登录已失效，请重新登录"
         WatchSyncBindingEvent.RequireWatchBinding -> "请先扫码绑定手表，再进行同步"
         WatchSyncBindingEvent.WatchAccountMismatch -> "这块手表已登录其他账号，请先在手表上退出"

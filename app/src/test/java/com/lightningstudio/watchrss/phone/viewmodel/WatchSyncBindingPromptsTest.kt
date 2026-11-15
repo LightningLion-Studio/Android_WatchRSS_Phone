@@ -11,6 +11,17 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class WatchSyncBindingPromptsTest {
+    @Test fun deviceVerificationIsSeparateFromAccountLogin() {
+        val prompts=WatchSyncBindingPrompts()
+        assertTrue(prompts.handle(com.lightningstudio.watchrss.phone.account.PhoneDeviceVerificationRequired()))
+        assertEquals(WatchSyncBindingEvent.RequirePhoneDeviceVerification,prompts.prompt.value)
+    }
+    @Test fun transientFailureNeverBecomesLoginPrompt() {
+        val prompts=WatchSyncBindingPrompts()
+        assertFalse(prompts.handle(com.lightningstudio.watchrss.phone.account.PhoneAccountTemporarilyUnavailable(java.io.IOException("offline"))))
+        assertNull(prompts.prompt.value)
+    }
+
     @Test fun expiredLoginPersistsLoginPromptWithoutPairingNavigation() {
         val prompts = WatchSyncBindingPrompts()
         assertTrue(prompts.handle(com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired()))

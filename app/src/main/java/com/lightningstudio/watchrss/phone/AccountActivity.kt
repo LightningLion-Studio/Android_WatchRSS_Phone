@@ -158,6 +158,7 @@ class AccountActivity : ComponentActivity() {
                     usageTelemetry = container.usageTelemetry,
                     onBack = ::finish,
                     returnWhenCloudReady = returnWhenCloudReady,
+                    forceReauthentication = intent.getBooleanExtra(EXTRA_REAUTHENTICATE, false),
                     onLoginComplete = {
                         if (finishAfterLogin) {
                             lifecycleScope.launch {
@@ -196,14 +197,16 @@ class AccountActivity : ComponentActivity() {
     }
 
     companion object {
+        internal const val EXTRA_REAUTHENTICATE = "same_account_reauthentication"
         private const val EXTRA_SECTION = "account_section"
         private const val EXTRA_RETURN_WHEN_CLOUD_READY = "return_when_cloud_ready"
         private const val EXTRA_FINISH_AFTER_LOGIN =
             "com.lightningstudio.watchrss.phone.extra.FINISH_AFTER_LOGIN"
 
         fun createIntent(context: Context, finishAfterLogin: Boolean = false, section: AccountSection = AccountSection.ROOT,
-            returnWhenCloudReady: Boolean = false): Intent =
+            returnWhenCloudReady: Boolean = false, reauthenticate: Boolean = false): Intent =
             Intent(context, AccountActivity::class.java).apply {
+                putExtra(EXTRA_REAUTHENTICATE, reauthenticate)
                 putExtra(EXTRA_FINISH_AFTER_LOGIN, finishAfterLogin)
                 putExtra(EXTRA_SECTION, section.name)
                 putExtra(EXTRA_RETURN_WHEN_CLOUD_READY, returnWhenCloudReady)
@@ -262,9 +265,14 @@ internal fun AccountScreen(
     leadingPane: (@Composable () -> Unit)? = null,
     initialSection: AccountSection = AccountSection.ROOT,
     /** Opened from watch pairing for the cloud key: go straight back once the key exists, and Back returns there too. */
-    returnWhenCloudReady: Boolean = false
+    returnWhenCloudReady: Boolean = false,
+    forceReauthentication: Boolean = false
 ) {
     val session by accountRepository.session.collectAsState()
+    val reauthenticationOwner by accountRepository.reauthenticationOwner.collectAsState()
+    LaunchedEffect(forceReauthentication) {
+        if (forceReauthentication) accountRepository.beginSameAccountReauthentication()
+    }
     val context = LocalContext.current
     val tipManager = LocalTipManager.current
     val accessCoordinator = (context.applicationContext as PhoneCompanionApplication).container.appAccessCoordinator
@@ -498,7 +506,7 @@ internal fun AccountScreen(
     }
 
     val accountControls: @Composable ColumnScope.(() -> Unit) -> Unit = { onCloudSyncClick ->
-        if (session == null) {
+        if (session == null || reauthenticationOwner != null || forceReauthentication) {
             Text(
                 "登录",
                 style = MaterialTheme.typography.titleLarge,

@@ -15,8 +15,12 @@ class PhoneAccountRepository(
     internal var onClearCloudState: (PhoneAccountSession) -> Unit = {}
     val session: StateFlow<PhoneAccountSession?> = sessionStore.session
 
+    val reauthenticationOwner: StateFlow<String?> = sessionStore.reauthenticationOwner
+
+    suspend fun beginSameAccountReauthentication() = sessionStore.beginSameAccountReauthentication()
+
     val hasUsableSession: Boolean
-        get() = session.value?.let { !it.isExpired && it.userId.isNotBlank() && it.accessToken.isNotBlank() } == true
+        get() = reauthenticationOwner.value == null && session.value?.let { !it.isExpired && it.userId.isNotBlank() && it.accessToken.isNotBlank() } == true
 
     val installId: String
         get() = installationIdentity.installId
@@ -185,11 +189,12 @@ class PhoneAccountRepository(
         }
     }
 
-    private suspend fun saveCompletedLogin(progress: LoginProgress) {
+    internal suspend fun saveCompletedLogin(progress: LoginProgress) {
         progress.session?.let { next ->
             session.value?.takeIf { it.userId != next.userId }?.let(onClearCloudState)
             sessionStore.clearBluetoothGrants()
             sessionStore.save(next)
+            sessionStore.finishReauthentication()
         }
     }
 

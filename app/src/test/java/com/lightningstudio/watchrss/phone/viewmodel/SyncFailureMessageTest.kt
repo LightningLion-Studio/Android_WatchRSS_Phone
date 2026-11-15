@@ -6,6 +6,16 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class SyncFailureMessageTest {
+    @Test fun transientFailureAsksForLaterRetryWithoutConnectionOrLoginMisclassification() {
+        val failure=com.lightningstudio.watchrss.phone.account.PhoneAccountTemporarilyUnavailable(IOException("offline"))
+        assertEquals("账号服务暂时不可用，请稍后重试",syncFailureMessage(failure,"建立连接中"))
+        org.junit.Assert.assertFalse(com.lightningstudio.watchrss.phone.connection.bluetooth.isRetryableBluetoothDisconnect(failure))
+    }
+    @Test fun deviceIdentityFailureDoesNotAskForAccountLogin() {
+        val failure=com.lightningstudio.watchrss.phone.account.PhoneDeviceVerificationRequired()
+        assertEquals("手机设备身份需要验证，请前往账号页面完成验证",syncFailureMessage(failure,"建立连接中"))
+    }
+
     @Test fun loginFailureDoesNotUseConnectionStageOrRetryItsHttpCause() {
         val failure = com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired(IOException("expired"))
         assertEquals("登录已失效，请重新登录", syncFailureMessage(failure, "建立连接中"))

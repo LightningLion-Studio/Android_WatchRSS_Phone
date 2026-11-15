@@ -25,9 +25,29 @@ class EncryptedAccountSessionStore(
     private var prefsRef: SharedPreferences? = null
     private val _session = MutableStateFlow<PhoneAccountSession?>(null)
     val session: StateFlow<PhoneAccountSession?> = _session
+    private val _reauthenticationOwner = MutableStateFlow<String?>(null)
+    val reauthenticationOwner: StateFlow<String?> = _reauthenticationOwner
+
+    suspend fun beginSameAccountReauthentication() = withContext(Dispatchers.IO) {
+        withPrefs { prefs ->
+            val current = _session.value ?: return@withPrefs
+            // Retain identity/custody while all existing expired-session checks pause requests.
+            val paused = current.copy(expiresAtMillis = 1L)
+            check(prefs.edit().putString("reauthentication_owner", current.userId)
+                .putString(KEY_SESSION, encodeSession(paused)).commit())
+            _reauthenticationOwner.value = current.userId
+            _session.value = paused
+        }
+    }
+
+    suspend fun finishReauthentication() = withContext(Dispatchers.IO) {
+        withPrefs { check(it.edit().remove("reauthentication_owner").commit()) }
+        _reauthenticationOwner.value = null
+    }
 
     suspend fun load(): PhoneAccountSession? = withContext(Dispatchers.IO) {
         withPrefs { prefs ->
+            _reauthenticationOwner.value = prefs.getString("reauthentication_owner", null)
             prefs.getString(KEY_SESSION, null)
                 ?.let(::decodeSession)
         }.also { _session.value = it }
@@ -42,9 +62,10 @@ class EncryptedAccountSessionStore(
 
     suspend fun clear() = withContext(Dispatchers.IO) {
         withPrefs { prefs ->
-            prefs.edit().apply {remove(KEY_SESSION);prefs.all.keys.filter{it.startsWith("ble_grant:")}.forEach{remove(it)}}.apply()
+            prefs.edit().apply {remove(KEY_SESSION);remove("reauthentication_owner");prefs.all.keys.filter{it.startsWith("ble_grant:")}.forEach{remove(it)}}.apply()
         }
         _session.value = null
+        _reauthenticationOwner.value = null
     }
 
     internal suspend fun bluetoothGrant(key:String):JSONObject?=withContext(Dispatchers.IO) {

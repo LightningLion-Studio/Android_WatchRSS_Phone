@@ -6,8 +6,8 @@ import androidx.security.crypto.MasterKey
 import android.os.SystemClock
 import org.json.JSONObject
 
-class AppAccessStore(context: Context, suffix: String = "") {
-    private val prefs = EncryptedSharedPreferences.create(
+class AppAccessStore(context: Context, suffix: String = "", preferencesOverride: android.content.SharedPreferences? = null) {
+    private val prefs = preferencesOverride ?: EncryptedSharedPreferences.create(
         context,
         "watchrss_app_access$suffix",
         MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),

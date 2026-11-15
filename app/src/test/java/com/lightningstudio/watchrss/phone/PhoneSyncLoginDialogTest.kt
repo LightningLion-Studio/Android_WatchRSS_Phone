@@ -22,10 +22,13 @@ import java.io.File
 @Config(application=android.app.Application::class,manifest=Config.NONE,sdk=[35],qualifiers="w412dp-h915dp-xhdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class PhoneSyncLoginDialogTest {
-    @Test fun rendersProductionLoginPrompt() {
+    @Test fun rendersProductionLoginPrompt() = capture("login-required-host.png") { PhoneSyncLoginDialog({}, {}) }
+    @Test fun rendersDeviceVerificationPrompt() = capture("device-verification-host.png") { PhoneDeviceVerificationDialog({}, {}) }
+
+    private fun capture(fileName: String, content: @androidx.compose.runtime.Composable () -> Unit) {
         val controller=Robolectric.buildActivity(ComponentActivity::class.java).setup().visible()
         try {
-            controller.get().setContent { WatchRssPhoneTheme { PhoneSyncLoginDialog({}, {}) } }
+            controller.get().setContent { WatchRssPhoneTheme { content() } }
             ShadowLooper.idleMainLooper(500L)
             val global=ReflectionHelpers.callStaticMethod<Any>(Class.forName("android.view.WindowManagerGlobal"),"getInstance")
             val views=ReflectionHelpers.getField<List<View>>(global,"mViews")
@@ -34,7 +37,7 @@ class PhoneSyncLoginDialogTest {
             val bitmap=Bitmap.createBitmap(dialog.width,dialog.height,Bitmap.Config.ARGB_8888)
             dialog.draw(Canvas(bitmap))
             System.getenv("WRSS_ACCTGATE_EVIDENCE")?.let { path ->
-                File(path,"login-required-host.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG,100,it) }
+                File(path,fileName).outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG,100,it) }
             }
             assertTrue(bitmap.width>100)
         } finally { controller.pause().stop().destroy() }

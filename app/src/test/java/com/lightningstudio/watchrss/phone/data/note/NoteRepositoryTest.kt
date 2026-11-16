@@ -83,6 +83,7 @@ class NoteRepositoryTest {
     private class FakeNoteDao : NoteDao {
         val notes = linkedMapOf<String, NoteEntity>()
         val assets = linkedMapOf<String, NoteAssetEntity>()
+        override suspend fun conflictsFor(noteId: String) = emptyList<NoteConflictEntity>()
         override suspend fun hasAny() = notes.isNotEmpty()
         private val noteFlow = MutableStateFlow<List<NoteEntity>>(emptyList())
 

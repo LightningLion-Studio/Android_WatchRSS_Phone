@@ -33,7 +33,7 @@ class NoteRepository(
             "笔记不能为空"
         }
         val previous = if (noteId == null) null else dao.note(noteId)
-        val instant = now()
+        val instant = nextTime(previous)
         val canonical = markdown.replace("\r\n", "\n").replace('\r', '\n')
         val hash = MarkdownNoteCodec.sha256(canonical)
         val saved = NoteEntity(
@@ -43,8 +43,8 @@ class NoteRepository(
             markdown = canonical,
             plainText = MarkdownNoteCodec.toPlainText(canonical),
             contentHash = hash,
-            baseContentHash = previous?.baseContentHash ?: hash,
-            baseMarkdown = previous?.baseMarkdown ?: canonical,
+            baseContentHash = if (previous?.deleted == true) previous.contentHash else previous?.baseContentHash ?: hash,
+            baseMarkdown = if (previous?.deleted == true) previous.markdown else previous?.baseMarkdown ?: canonical,
             pinned = pinned,
             createdAt = previous?.createdAt ?: instant,
             updatedAt = instant,
@@ -52,7 +52,7 @@ class NoteRepository(
             deleted = false,
             deletedAt = 0L
         )
-        dao.upsertNotes(listOf(saved))
+        check(dao.commitNote(saved.noteId, previous, saved)) { "notes_stale" }
         return saved
     }
 
@@ -63,10 +63,7 @@ class NoteRepository(
         updateMetadata(noteId) { it.copy(pinned = pinned) }
 
     suspend fun delete(noteId: String): NoteEntity {
-        val instant = now()
-        return updateMetadata(noteId, instant) {
-            it.copy(deleted = true, deletedAt = instant)
-        }
+        return updateMetadata(noteId) { it.copy(deleted = true) }
     }
 
     private suspend fun updateMetadata(
@@ -75,11 +72,11 @@ class NoteRepository(
         transform: (NoteEntity) -> NoteEntity
     ): NoteEntity {
         val local = dao.note(noteId) ?: error("笔记不存在")
-        val updated = transform(local).copy(
-            updatedAt = instant,
-            modifiedBy = deviceId
-        )
-        dao.upsertNotes(listOf(updated))
+        val version = nextTime(local, instant)
+        val changed = transform(local)
+        val updated = changed.copy(updatedAt = version, modifiedBy = deviceId,
+            deletedAt = if (changed.deleted) version else changed.deletedAt)
+        check(dao.commitNote(noteId, local, updated)) { "notes_stale" }
         return updated
     }
 
@@ -94,39 +91,81 @@ class NoteRepository(
         )
     }
 
+    private fun nextTime(local: NoteEntity?, clock: Long = now(), peer: NoteEntity? = null): Long {
+        val previous = maxOf(local?.updatedAt ?: 0L, local?.deletedAt ?: 0L, peer?.updatedAt ?: 0L, peer?.deletedAt ?: 0L)
+        check(previous < Long.MAX_VALUE) { "counter_exhausted" }
+        return maxOf(clock, previous + 1)
+    }
+
     suspend fun resolveConflict(conflict: NoteConflictEntity, markdown: String): NoteEntity {
         val local = dao.note(conflict.noteId) ?: error("冲突笔记不存在")
-        val resolved = save(local.noteId, local.title, markdown, local.folderId, local.pinned)
-        dao.resolveConflict(conflict.conflictId, now())
+        val known = dao.conflictsFor(local.noteId).find { it.conflictId == conflict.conflictId }
+        check(known == conflict && known.resolvedAt == 0L) { "notes_stale" }
+        require(local.title.isNotBlank() || MarkdownNoteCodec.toPlainText(markdown).isNotBlank()) { "笔记不能为空" }
+        val body = markdown.replace("\r\n", "\n").replace('\r', '\n')
+        val resolved = local.copy(markdown = body, plainText = MarkdownNoteCodec.toPlainText(body),
+            contentHash = MarkdownNoteCodec.sha256(body), baseMarkdown = body, baseContentHash = MarkdownNoteCodec.sha256(body),
+            updatedAt = nextTime(local), modifiedBy = deviceId, deleted = false, deletedAt = 0L)
+        check(dao.commitNote(local.noteId, local, resolved, resolvedId = conflict.conflictId, resolvedAt = maxOf(1L, now()))) { "notes_stale" }
         return resolved
     }
 
+    private fun metadataOrder(a: NoteEntity, b: NoteEntity): Int = compareValuesBy(a, b,
+        { maxOf(it.updatedAt, it.deletedAt) }, { it.modifiedBy }, { it.deleted }, { it.title },
+        { it.folderId != null }, { it.folderId.orEmpty() }, { it.pinned }, { it.createdAt }, { it.baseContentHash }, { it.baseMarkdown })
+
     suspend fun applyRemote(remote: NoteEntity, remoteDeviceId: String): MarkdownMergeResult {
-        val local = dao.note(remote.noteId)
-        if(local==remote)return MarkdownMergeResult.Merged(local.markdown)
-        if(local!=null && local.markdown==remote.markdown && local.contentHash==remote.contentHash) {
-            val order=compareValuesBy(remote,local,{maxOf(it.updatedAt,it.deletedAt)},{it.modifiedBy},{it.deleted},{it.title},{it.folderId!=null},{it.folderId.orEmpty()},{it.pinned},{it.createdAt},{it.baseContentHash},{it.baseMarkdown})
-            if(order>0)dao.upsertNotes(listOf(remote))
-            return MarkdownMergeResult.Merged(local.markdown)
-        }
-        if(local!=null && maxOf(remote.updatedAt,remote.deletedAt)<maxOf(local.updatedAt,local.deletedAt) && (local.deleted || remote.deleted))
-            return MarkdownMergeResult.Merged(local.markdown)
-        if (local == null || local.deleted || remote.updatedAt > local.updatedAt && local.contentHash == local.baseContentHash) {
-            dao.upsertNotes(listOf(remote))
-            return MarkdownMergeResult.Merged(remote.markdown)
-        }
-        val result = MarkdownThreeWayMerge.merge(local.baseMarkdown, local.markdown, remote.markdown)
-        if (result is MarkdownMergeResult.Merged) {
-            if (result.markdown != local.markdown) {
-                save(local.noteId, local.title, result.markdown, local.folderId, local.pinned)
+        repeat(8) {
+            val local = dao.note(remote.noteId)
+            if (local == remote) return MarkdownMergeResult.Merged(remote.markdown)
+            if (local != null && dao.conflictsFor(local.noteId).any {
+                it.resolvedAt > 0 && it.remoteMarkdown == remote.markdown &&
+                    it.remoteDeviceId == remoteDeviceId && it.baseMarkdown == remote.baseMarkdown
+            }) return MarkdownMergeResult.Merged(local.markdown)
+            var value: NoteEntity? = remote
+            var conflict: NoteConflictEntity? = null
+            var result: MarkdownMergeResult = MarkdownMergeResult.Merged(remote.markdown)
+            if (local != null) {
+                val meta = if (metadataOrder(remote, local) > 0) remote else local
+                if (local.markdown == remote.markdown) {
+                    value = meta
+                    result = MarkdownMergeResult.Merged(local.markdown)
+                } else {
+                    // A delete and a divergent edit are a conflict, regardless of wall clock.
+                    // An explicit restore based on the tombstone is a sequential edit.
+                    val restore = local.deleted && !remote.deleted && remote.baseMarkdown == local.markdown && remote.updatedAt > local.updatedAt
+                    val localRestore = remote.deleted && !local.deleted && local.baseMarkdown == remote.markdown && local.updatedAt > remote.updatedAt
+                    val sequentialDelete = remote.deleted && !local.deleted && remote.baseMarkdown == local.markdown && local.markdown == local.baseMarkdown
+                    val deletionConflict = local.deleted != remote.deleted && !restore && !localRestore && !sequentialDelete
+                    result = when {
+                        deletionConflict -> MarkdownMergeResult.Conflict
+                        restore -> MarkdownMergeResult.Merged(remote.markdown)
+                        localRestore -> MarkdownMergeResult.Merged(local.markdown)
+                        remote.baseMarkdown == local.markdown -> MarkdownMergeResult.Merged(remote.markdown)
+                        local.baseMarkdown == remote.markdown -> MarkdownMergeResult.Merged(local.markdown)
+                        local.baseMarkdown == remote.baseMarkdown -> MarkdownThreeWayMerge.merge(local.baseMarkdown, local.markdown, remote.markdown)
+                        else -> MarkdownMergeResult.Conflict
+                    }
+                    if (result is MarkdownMergeResult.Merged) {
+                        val body = result.markdown
+                        value = when (body) {
+                            remote.markdown -> remote.copy(title = meta.title, folderId = meta.folderId, pinned = meta.pinned)
+                            local.markdown -> local.copy(title = meta.title, folderId = meta.folderId, pinned = meta.pinned)
+                            else -> meta.copy(markdown = body, plainText = MarkdownNoteCodec.toPlainText(body),
+                                contentHash = MarkdownNoteCodec.sha256(body), updatedAt = nextTime(local, peer = remote),
+                                modifiedBy = deviceId, deleted = false, deletedAt = 0L)
+                        }
+                        if (body == remote.markdown && meta !== remote || body == local.markdown && meta !== local)
+                            value = value.copy(updatedAt = nextTime(local, peer = remote), modifiedBy = deviceId)
+                    } else {
+                        value = null
+                        conflict = NoteConflictEntity(noteConflictId(local.noteId, local.baseMarkdown, local.markdown, remote.markdown, remoteDeviceId),
+                            local.noteId, local.baseMarkdown, local.markdown, remote.markdown, remoteDeviceId, now())
+                    }
+                }
             }
-        } else {
-            dao.upsertConflicts(listOf(NoteConflictEntity(
-                conflictId = MarkdownNoteCodec.sha256(listOf(local.noteId,local.baseMarkdown,local.markdown,remote.markdown,remoteDeviceId).joinToString("\u0000")), noteId = local.noteId,
-                baseMarkdown = local.baseMarkdown, localMarkdown = local.markdown,
-                remoteMarkdown = remote.markdown, remoteDeviceId = remoteDeviceId, createdAt = now()
-            )))
+            if (dao.commitNote(remote.noteId, local, value, conflict)) return result
         }
-        return result
+        error("notes_stale")
     }
 }

@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
+import com.lightningstudio.watchrss.phone.data.note.MarkdownNoteCodec
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -26,7 +27,7 @@ internal object SyncV2NoteConflicts {
     }
     fun phone(rows: JSONArray, noteId: String): JSONObject {
         val list = (0 until rows.length()).map { rows.getJSONObject(it) }.sortedBy { it.getString("conflictId") }
-        return validate(JSONObject().put("version", 1).put("records", JSONArray(list)), noteId)
+        return merge(validate(JSONObject().put("version", 1).put("records", JSONArray(list)), noteId), JSONObject().put("version", 1).put("records", JSONArray()), noteId)
     }
     fun merge(left: JSONObject, right: JSONObject, noteId: String): JSONObject {
         validate(left, noteId); validate(right, noteId)
@@ -43,7 +44,20 @@ internal object SyncV2NoteConflicts {
                 map[id] = r
             }
         }
-        return validate(JSONObject().put("version", 1).put("records", JSONArray(map.values.toList())), noteId)
+        val tuples = mutableMapOf<List<String>, JSONObject>()
+        for (r in map.values) {
+            val tuple = listOf("noteId", "baseMarkdown", "localMarkdown", "remoteMarkdown", "remoteDeviceId").map { r.getString(it) }
+            val old = tuples[tuple]
+            if (old != null) {
+                val legacy = MarkdownNoteCodec.sha256(tuple.joinToString("\u0000"))
+                val ids = listOf(old.getString("conflictId"), r.getString("conflictId"))
+                r.put("conflictId", if (legacy in ids) legacy else ids.min())
+                r.put("createdAt", minOf(old.getLong("createdAt"), r.getLong("createdAt")))
+                r.put("resolvedAt", maxOf(old.getLong("resolvedAt"), r.getLong("resolvedAt")))
+            }
+            tuples[tuple] = r
+        }
+        return validate(JSONObject().put("version", 1).put("records", JSONArray(tuples.values.sortedBy { it.getString("conflictId") })), noteId)
     }
     fun openIds(value: JSONObject, noteId: String): List<String> = validate(value, noteId).getJSONArray("records").let { a ->
         (0 until a.length()).map { a.getJSONObject(it) }.filter { it.getLong("resolvedAt") == 0L }.map { it.getString("conflictId") }

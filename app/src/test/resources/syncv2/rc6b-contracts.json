@@ -326,16 +326,6 @@
                   "remoteMarkdown": "remote",
                   "remoteDeviceId": "old-device",
                   "createdAt": 3,
-                  "resolvedAt": 9
-                },
-                {
-                  "conflictId": "b",
-                  "noteId": "n",
-                  "baseMarkdown": "base",
-                  "localMarkdown": "local",
-                  "remoteMarkdown": "remote",
-                  "remoteDeviceId": "old-device",
-                  "createdAt": 4,
                   "resolvedAt": 10
                 }
               ]
@@ -518,16 +508,6 @@
                   "remoteMarkdown": "remote",
                   "remoteDeviceId": "old-device",
                   "createdAt": 3,
-                  "resolvedAt": 9
-                },
-                {
-                  "conflictId": "b",
-                  "noteId": "n",
-                  "baseMarkdown": "base",
-                  "localMarkdown": "local",
-                  "remoteMarkdown": "remote",
-                  "remoteDeviceId": "old-device",
-                  "createdAt": 4,
                   "resolvedAt": 10
                 }
               ]
@@ -1043,16 +1023,6 @@
                   "remoteMarkdown": "remote",
                   "remoteDeviceId": "old-device",
                   "createdAt": 3,
-                  "resolvedAt": 9
-                },
-                {
-                  "conflictId": "b",
-                  "noteId": "n",
-                  "baseMarkdown": "base",
-                  "localMarkdown": "local",
-                  "remoteMarkdown": "remote",
-                  "remoteDeviceId": "old-device",
-                  "createdAt": 4,
                   "resolvedAt": 10
                 }
               ]

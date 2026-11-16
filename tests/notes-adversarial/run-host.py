@@ -47,7 +47,7 @@ import java.util.Base64
 import kotlin.math.roundToInt
 ''' + '\n'.join(slices).removesuffix('@Composable\n'))
     inputs = [root / 'data/note' / s for s in [
-        'NoteEntities.kt', 'NoteDao.kt', 'NoteRepository.kt', 'MarkdownNoteCodec.kt',
+        'NoteConflictIdentity.kt', 'NoteEntities.kt', 'NoteDao.kt', 'NoteRepository.kt', 'MarkdownNoteCodec.kt',
         'MarkdownThreeWayMerge.kt', 'NoteCloudStateCodec.kt', 'MarkdownNoteArchive.kt',
     ]]
     inputs += [root / name for name in [

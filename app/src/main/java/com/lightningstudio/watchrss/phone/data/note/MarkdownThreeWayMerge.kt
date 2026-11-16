@@ -19,6 +19,10 @@ object MarkdownThreeWayMerge {
         val localHunk = singleHunk(source, local.lines()) ?: return MarkdownMergeResult.Conflict
         val remoteHunk = singleHunk(source, remote.lines()) ?: return MarkdownMergeResult.Conflict
         if (localHunk.end > remoteHunk.start && remoteHunk.end > localHunk.start) return MarkdownMergeResult.Conflict
+        // A zero-width insertion touching either edge is ambiguous. Reject it
+        // before applying offsets, including two inserts at the same position.
+        if (localHunk.start == localHunk.end && localHunk.start in remoteHunk.start..remoteHunk.end ||
+            remoteHunk.start == remoteHunk.end && remoteHunk.start in localHunk.start..localHunk.end) return MarkdownMergeResult.Conflict
         val merged = source.toMutableList()
         listOf(localHunk, remoteHunk).sortedByDescending { it.start }.forEach { hunk ->
             merged.subList(hunk.start, hunk.end).clear()

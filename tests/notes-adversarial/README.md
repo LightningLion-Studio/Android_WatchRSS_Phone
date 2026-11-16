@@ -44,3 +44,12 @@ The committed pC2 input is also saved under `pc2-committed-source/` in the evide
 NA-18 is a passing cross-editor fallback control. NA-19 is an unconfirmed malformed
 wrapper boundary assertion, not a confirmed pixel or data-loss finding. The visual
 snapshot's highlight tree difference also needs actual pixel confirmation.
+
+T-NOTES-MERGE-FIX selects NA-01/02/05/06/07/08/09/10/16 plus the wire control.
+Set NOTES_ADVERSARIAL_ALL=1 to run the separate editor/export/title audit as well.
+The DAO harness models commitNote as one atomic compare-and-commit operation;
+NoteMergeFixTest independently exercises the actual generated Room transaction.
+The runner exports merge-matrix.json for cross-client checks: 1728 merge inputs
+and Unicode/NUL conflict-ID tuples. Neither this evidence nor reports are committed.
+rc6b-contracts expected unions now collapse identical content tuples under NA-16;
+the original input records, collision rejection and resolution markers stay covered.

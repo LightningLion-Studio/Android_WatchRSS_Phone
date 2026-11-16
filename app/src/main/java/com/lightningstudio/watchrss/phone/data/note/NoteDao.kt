@@ -45,6 +45,27 @@ interface NoteDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun upsertConflicts(items: List<NoteConflictEntity>)
 
+    @Query("SELECT * FROM note_conflicts WHERE noteId = :noteId")
+    suspend fun conflictsFor(noteId: String): List<NoteConflictEntity>
+
+    /** Room serializes the read-basis check and every business write together. */
+    @androidx.room.Transaction
+    suspend fun commitNote(
+        noteId: String, expected: NoteEntity?, replacement: NoteEntity?,
+        conflict: NoteConflictEntity? = null, resolvedId: String? = null, resolvedAt: Long = 0L
+    ): Boolean {
+        if (note(noteId) != expected) return false
+        if (conflict != null) {
+            val known = conflictsFor(noteId)
+            val sameId = known.find { it.conflictId == conflict.conflictId }
+            check(sameId == null || sameConflictContent(sameId, conflict)) { "conflict_identity_mismatch" }
+            if (known.none { sameConflictContent(it, conflict) }) upsertConflicts(listOf(conflict))
+        }
+        if (replacement != null) upsertNotes(listOf(replacement))
+        if (resolvedId != null) resolveConflict(resolvedId, resolvedAt)
+        return true
+    }
+
     @Query("UPDATE note_conflicts SET resolvedAt = :resolvedAt WHERE conflictId = :conflictId")
     suspend fun resolveConflict(conflictId: String, resolvedAt: Long)
     @Query("DELETE FROM note_conflicts")

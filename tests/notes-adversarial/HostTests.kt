@@ -1,0 +1,150 @@
+package com.lightningstudio.watchrss.phone
+
+import com.lightningstudio.watchrss.phone.data.note.*
+import com.mohamedrejeb.richeditor.model.RichTextState
+import androidx.compose.ui.text.*
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.unit.em
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.graphics.Color
+import java.lang.reflect.Proxy
+import java.nio.file.*
+import kotlinx.coroutines.runBlocking
+
+private class Skipped: RuntimeException()
+private class Store {
+ val rows=linkedMapOf<String,NoteEntity>();val conflicts=linkedMapOf<String,NoteConflictEntity>();var clock=100L
+ var beforeWrite:(()->Unit)?=null
+ val dao=Proxy.newProxyInstance(NoteDao::class.java.classLoader,arrayOf(NoteDao::class.java)){_,m,a->when(m.name){
+  "note"->rows[a!![0]]
+  "upsertNotes"->{beforeWrite?.also{beforeWrite=null;it()};(a!![0] as List<NoteEntity>).forEach{rows[it.noteId]=it};Unit}
+  "upsertConflicts"->{(a!![0] as List<NoteConflictEntity>).forEach{conflicts[it.conflictId]=it};Unit}
+  "resolveConflict"->{val id=a!![0] as String;conflicts[id]=conflicts.getValue(id).copy(resolvedAt=a[1] as Long);Unit}
+  else->error("Unexpected DAO ${m.name}")
+ }} as NoteDao
+ val repo=NoteRepository(dao,"phone",{clock++})
+ suspend fun seed(body:String="a")=repo.save("n","Manual title",body)
+}
+private fun changed(n:NoteEntity,text:String,time:Long)=n.copy(markdown=text,contentHash=MarkdownNoteCodec.sha256(text),plainText=text,updatedAt=time,modifiedBy="peer")
+private fun equal(want:Any?,got:Any?){check(want==got){"expected=<$want> actual=<$got>"}}
+private fun render(e:RichTextState):String {
+ val a=e.annotatedString
+ val styles=(0 until a.length).map { i ->
+  val s=a.spanStyles.filter{it.start<=i&&i<it.end}.fold(SpanStyle()){v,r->v.merge(r.item)}
+  listOf(s.fontSize,s.fontWeight,s.fontStyle,s.letterSpacing,s.baselineShift,s.textDecoration,if(s.color.alpha>0)s.color else null,if(s.background.alpha>0)s.background else null).joinToString("|")
+ }
+ return "text="+a.text+"\nparagraphs="+a.paragraphStyles+"\ncharacterStyles="+styles
+}
+private fun load(s:String)=RichTextState().also{if(s.isNoteRichHtmlMarkup())it.setHtml(s.toNoteEditorMarkup()) else it.setMarkdown(s.toNoteEditorMarkup())}
+private fun storage(draft:Any):String = draft.javaClass.declaredMethods.single{it.name=="storageMarkup\$default"}.invoke(null,draft,null,1,null) as String
+// Reopen via the real draft when pC2 is selected; reflection keeps baseline compilable.
+private fun reopen(s:String):String {
+ val cls=runCatching{Class.forName("com.lightningstudio.watchrss.phone.NoteEditorDraft")}.getOrNull()?:return render(load(s))
+ val d=cls.getDeclaredConstructor(String::class.java).newInstance(s)
+ return if(cls.getMethod("getSourceMode").invoke(d)==true)"SOURCE text="+s else render(cls.getMethod("getEditor").invoke(d) as RichTextState)
+}
+fun main(args:Array<String>)=runBlocking {
+ if(args[0]=="--wire"){Files.write(Path.of(args[2]),NoteCloudStateCodec.encode(NoteCloudStateCodec.decode(Files.readAllBytes(Path.of(args[1])))));return@runBlocking}
+ val out=Path.of(args[0]);var fail=0;var pass=0;var skip=0
+ suspend fun case(id:String,block:suspend()->Unit){try{block();println("PASS $id");pass++}catch(t:Throwable){if(t is Skipped){println("SKIP $id");skip++}else{println("FAIL $id ${t.message?.take(180)}");fail++}}}
+ case("NA-01 insertion at replacement start must retain inserted text"){
+  val r=MarkdownThreeWayMerge.merge("a","x\na","b")
+  check(r==MarkdownMergeResult.Conflict||r==MarkdownMergeResult.Merged("x\nb")){"actual=$r"}
+ }
+ case("NA-02 equal-position insertions must converge or conflict"){
+  equal(MarkdownThreeWayMerge.merge("a","x\na","y\na"),MarkdownThreeWayMerge.merge("a","y\na","x\na"))
+ }
+ case("NA-03 export/import retains explicit title"){
+  val f=Store();val n=f.seed("body");equal(n.title,MarkdownNoteCodec.parse(MarkdownNoteCodec.export(n)).title)
+ }
+ case("NA-03 export/import retains body bytes independent of editor"){
+  val n=Store().seed("x").copy(markdown="x\r\ny");equal(n.markdown,MarkdownNoteCodec.parse(MarkdownNoteCodec.export(n)).markdown)
+ }
+ case("NA-05 cloud apply must not overwrite interleaved local edit"){
+  val f=Store();val n=f.seed();f.beforeWrite={f.rows["n"]=changed(n,"unsent local",300)}
+  f.repo.applyRemote(changed(n,"remote",200),"peer");equal("unsent local",f.rows["n"]!!.markdown)
+ }
+ case("NA-06 delete versus changed body must delete or expose conflict"){
+  val f=Store();val n=f.seed();f.repo.save("n",n.title,"local edit");f.repo.applyRemote(n.copy(deleted=true,deletedAt=300,updatedAt=300),"peer")
+  check(f.rows["n"]!!.deleted||f.conflicts.isNotEmpty()){"live body retained, remote deletion silently ignored"}
+ }
+ case("NA-07 sequential peer edits must use shared immediate ancestor"){
+  val f=Store();val n=f.seed();val b=f.repo.save("n",n.title,"b");val c=changed(b,"c",300).copy(baseMarkdown="b",baseContentHash=b.contentHash)
+  equal(MarkdownMergeResult.Merged("c"),f.repo.applyRemote(c,"peer"))
+ }
+ case("NA-08 resolved remote replay must not reopen same conflict"){
+  val f=Store();val n=f.seed();f.repo.save("n",n.title,"b");val remote=changed(n,"c",300);f.repo.applyRemote(remote,"peer")
+  f.repo.resolveConflict(f.conflicts.values.single(),"resolved");f.repo.applyRemote(remote,"peer")
+  equal(0,f.conflicts.values.count{it.resolvedAt==0L})
+ }
+ case("NA-09 clock rollback must not erase local metadata change"){
+  val f=Store();f.clock=1000;val n=f.seed();f.clock=100;f.repo.setPinned("n",true);f.repo.applyRemote(n,"peer");equal(true,f.rows["n"]!!.pinned)
+ }
+ case("NA-10 independent body merge must carry uncontested peer folder"){
+  val f=Store();val n=f.seed("a\nb");f.repo.save("n",n.title,"A\nb");val c=changed(n,"a\nB",300).copy(title="Peer title",folderId="peer-folder")
+  f.repo.applyRemote(c,"peer");equal("peer-folder",f.rows["n"]!!.folderId)
+ }
+ case("NA-CONTROL JSON unicode and line-ending roundtrip"){
+  val n=Store().seed().copy(markdown="\uFEFF\t\u00A0\u3000\u200B\r\n\r\u2028\u2029e\u0301é👨‍👩‍👧‍👦אבג\\\"\u0000")
+  var x=n;repeat(6){x=NoteCloudStateCodec.decode(NoteCloudStateCodec.encode(listOf(x))).single()};equal(n.markdown,x.markdown)
+ }
+
+ case("NA-16 NUL-separated conflict IDs must not erase another conflict"){
+  val f=Store();val n=f.seed();f.repo.save("n",n.title,"x\u0000y");f.repo.applyRemote(changed(n,"z",300),"peer")
+  f.repo.save("n",n.title,"x");f.repo.applyRemote(changed(n,"y\u0000z",400),"peer");equal(2,f.conflicts.size)
+ }
+ case("NA-15 title cap must not split a Unicode surrogate pair"){
+  val cls=runCatching{Class.forName("com.lightningstudio.watchrss.phone.data.note.NoteTitleKt")}.getOrNull()
+  if(cls==null)throw Skipped()
+  if(cls!=null){val m=cls.getDeclaredMethod("deriveNoteTitle",String::class.java,Int::class.javaPrimitiveType);val title=m.invoke(null,".".repeat(79)+"😀",3) as String;check(!title.last().isHighSurrogate()){"title ends with an unpaired high surrogate"}}
+ }
+ val operations=listOf<Pair<String,(RichTextState)->Unit>>(
+  "paste-number" to {it.replaceSelectedText("1. a\n6. b")},
+  "paste-heading" to {it.replaceSelectedText("# a")},
+  "paste-link" to {it.replaceSelectedText("[a](https://example.invalid)")},
+  "paste-hardbreak" to {it.replaceSelectedText("a  \nb")},
+  "underline" to {it.setText("a");it.selection=TextRange(0,1);it.toggleSpanStyle(SpanStyle(textDecoration=TextDecoration.Underline))},
+  "alignment-center" to {it.setText("a");it.selection=TextRange(0,1);it.addParagraphStyle(ParagraphStyle(textAlign=TextAlign.Center))},
+  "highlight" to {it.setText("a");it.selection=TextRange(0,1);it.addSpanStyle(SpanStyle(background=Color.Yellow))},
+  "bold" to {it.setText("a");it.selection=TextRange(0,1);it.toggleSpanStyle(SpanStyle(fontWeight=FontWeight.Bold))},
+  "heading" to {it.setText("a");it.selection=TextRange(0,1);it.addSpanStyle(SpanStyle(fontSize=2.em,fontWeight=FontWeight.Bold))},
+  "ordered-enter" to {it.setText("a");it.selection=TextRange(1);it.toggleOrderedList();it.addTextAfterSelection("\nb")},
+  "ordered-delete-item" to {it.setMarkdown("1. a\n2. b\n3. c");it.removeTextRange(TextRange(5,10))},
+  "ordered-remove-format" to {it.setMarkdown("1. a\n2. b\n3. c");it.selection=TextRange(0,it.annotatedString.length);it.removeOrderedList()},
+  "empty-enter" to {it.setText("a");it.selection=TextRange(1);it.addTextAfterSelection("\n")}
+ )
+ for((name,operation) in operations)case("NA-11 render/$name"){
+  val draftClass=runCatching{Class.forName("com.lightningstudio.watchrss.phone.NoteEditorDraft")}.getOrNull()
+  val draft=draftClass?.getDeclaredConstructor(String::class.java)?.newInstance("")
+  val e=if(draft==null)load("") else draftClass!!.getMethod("getEditor").invoke(draft) as RichTextState
+  if(draft!=null)check(draftClass!!.getMethod("getSourceMode").invoke(draft)==false){"new draft unexpectedly starts in source mode"}
+  operation(e);draftClass?.getMethod("markBodyEdited")?.invoke(draft)
+  val before=render(e)
+  val stored=if(draft==null)e.toNoteStorageMarkup() else storage(draft)
+  val after=reopen(stored)
+  Files.writeString(out.resolve("$name-before.txt"),before);Files.writeString(out.resolve("$name-storage.txt"),stored);Files.writeString(out.resolve("$name-after.txt"),after)
+  equal(before,after)
+ }
+ case("NA-18 peer visible-HTML edit must not be overwritten by stale embedded editor state"){
+  val cls=runCatching{Class.forName("com.lightningstudio.watchrss.phone.NoteEditorDraft")}.getOrNull()?:throw Skipped()
+  if(runCatching{Class.forName("com.lightningstudio.watchrss.phone.NoteVisualDocument")}.isFailure)throw Skipped()
+  val first=cls.getDeclaredConstructor(String::class.java).newInstance("")
+  val e=cls.getMethod("getEditor").invoke(first) as RichTextState;e.replaceSelectedText("a");cls.getMethod("markBodyEdited").invoke(first)
+  val encoded=storage(first);check(encoded.contains(">a<")){"fixture visible fallback missing"}
+  val peer=encoded.replace(">a<",">b<")
+  val next=cls.getDeclaredConstructor(String::class.java).newInstance(peer);val n=cls.getMethod("getEditor").invoke(next) as RichTextState
+  n.selection=TextRange(n.annotatedString.length);n.replaceSelectedText("c");cls.getMethod("markBodyEdited").invoke(next)
+  val saved=storage(next);Files.writeString(out.resolve("NA-18-peer.html"),peer);Files.writeString(out.resolve("NA-18-resaved.html"),saved)
+  equal("bc",n.annotatedString.text);check(saved.contains(">bc<"))
+ }
+ case("NA-19 malformed visual wrapper must not open as an empty rich document"){
+  val cls=runCatching{Class.forName("com.lightningstudio.watchrss.phone.NoteEditorDraft")}.getOrNull()?:throw Skipped()
+  if(runCatching{Class.forName("com.lightningstudio.watchrss.phone.NoteVisualDocument")}.isFailure)throw Skipped()
+  val text="<div data-watchrss-editor-v1=\"";val d=cls.getDeclaredConstructor(String::class.java).newInstance(text)
+  val e=cls.getMethod("getEditor").invoke(d) as RichTextState
+  check(cls.getMethod("getSourceMode").invoke(d)==true||e.annotatedString.text.isNotEmpty()){"nonempty malformed body opened as empty rich document"}
+ }
+ println("TOTAL pass=$pass fail=$fail skip=$skip");if(fail>0)kotlin.system.exitProcess(1)
+}

@@ -113,5 +113,70 @@
     "name": "supplementary-letter-cap",
     "plainText": "𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀",
     "expected": "𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀"
+  },
+  {
+    "name": "nfd-words",
+    "plainText": "école cafe noir suite",
+    "expected": "école cafe noir"
+  },
+  {
+    "name": "supplementary-first-word",
+    "plainText": "𐐀 alpha beta gamma",
+    "expected": "𐐀 alpha beta"
+  },
+  {
+    "name": "supplementary-han",
+    "plainText": "𠀀𠀀𠀀𠀀𠀀𠀀𠀀𠀀",
+    "expected": "𠀀𠀀𠀀𠀀𠀀𠀀"
+  },
+  {
+    "name": "bom-blank-line",
+    "plainText": "﻿\none two three four",
+    "expected": "one two three"
+  },
+  {
+    "name": "family-straddles-cap",
+    "plainText": "..............................................................................👨‍👩‍👧‍👦",
+    "expected": ".............................................................................."
+  },
+  {
+    "name": "accent-straddles-cap",
+    "plainText": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé",
+    "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "name": "flag-straddles-cap",
+    "plainText": "...............................................................................🇨🇳",
+    "expected": "..............................................................................."
+  },
+  {
+    "name": "modifier-straddles-cap",
+    "plainText": "...............................................................................👍🏽",
+    "expected": "..............................................................................."
+  },
+  {
+    "name": "keycap-straddles-cap",
+    "plainText": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1️⃣",
+    "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "name": "indic-straddles-cap",
+    "plainText": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaक्ष",
+    "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "name": "prepend-straddles-cap",
+    "plainText": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa؀ب",
+    "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "name": "word-end-modifier",
+    "plainText": "one two a🏽",
+    "expected": "one two a🏽"
+  },
+  {
+    "name": "word-start-prepend",
+    "plainText": "؀a b c d",
+    "expected": "؀a b c"
   }
 ]

@@ -219,14 +219,19 @@ internal class PhoneSyncSession internal constructor(
         val closeOnLegacyFallback: Boolean,
         private val remotelyClosed: () -> Boolean = { false },
         private val wireReadActivityNanos: () -> Long = { 0L },
+        private val wireWriteActivityNanos: (() -> Long)? = null,
+        private val wireConnectionId: Long = 0L,
+        private val enableWireWriteTracking: () -> Unit = {},
         private val closeTransport: () -> Unit
     ) : Closeable {
         companion object { private val sequence = java.util.concurrent.atomic.AtomicLong() }
         val generation = sequence.incrementAndGet()
         @Volatile var recoveryEnabled = false
+            set(value) { if (value) enableWireWriteTracking(); field = value }
         @Volatile var validateLibraryOperation: () -> Unit = {}
         private val io = LibraryIoGuard(generation, { recoveryEnabled }, { close() }, remotelyClosed = remotelyClosed,
-            beforeIo = { validateLibraryOperation() }, wireReadActivityNanos = wireReadActivityNanos)
+            beforeIo = { validateLibraryOperation() }, wireReadActivityNanos = wireReadActivityNanos,
+            wireWriteActivityNanos = wireWriteActivityNanos, wireConnectionId = wireConnectionId)
         val inputStream: InputStream = io.input(inputStream)
         val outputStream: OutputStream = io.output(outputStream)
         @Volatile private var closed = false
@@ -238,8 +243,8 @@ internal class PhoneSyncSession internal constructor(
             if (closed) return
             closed = true
             if (recoveryEnabled && owner.startsWith("ip:") && android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
-                // Cancellation originates on Main. Closing the WebSocket can write a close
-                // frame, so dispatch the captured old transport independently of that job.
+                // Cancellation originates on Main. Dispatch the captured old transport
+                // independently of that job; socket and pipe cleanup belongs off Main.
                 Dispatchers.IO.dispatch(kotlin.coroutines.EmptyCoroutineContext, Runnable { runCatching(closeTransport) })
             } else closeTransport()
         }
@@ -2177,6 +2182,9 @@ class PhoneBluetoothSyncClient(
                 closeOnLegacyFallback = false,
                 remotelyClosed = { ipSession.isClosed },
                 wireReadActivityNanos = { ipSession.wireReadActivityNanos() },
+                wireWriteActivityNanos = { ipSession.wireWriteActivityNanos() },
+                wireConnectionId = ipSession.wireConnectionId,
+                enableWireWriteTracking = { ipSession.enableWireWriteTracking() },
                 closeTransport = { ipSession.close() }
             ),
             persistentAccepted = false,

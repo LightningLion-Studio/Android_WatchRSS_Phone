@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth
 
+import android.util.Log
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import org.json.JSONObject
@@ -64,6 +65,8 @@ internal class LibraryTransferRecovery(private val now: () -> Long) {
     }
 }
 
+private class LibraryIoValidationFailure(val original: Exception) : RuntimeException(original)
+
 /** Timeouts belong to an individual network read/write, not to the whole resumed task. */
 internal class LibraryIoGuard(
     private val generation: Long,
@@ -75,9 +78,15 @@ internal class LibraryIoGuard(
     private val timeoutMs: Long = 30_000L,
     private val remotelyClosed: () -> Boolean = { false },
     private val beforeIo: () -> Unit = {},
-    private val wireReadActivityNanos: () -> Long = { 0L }
+    private val wireReadActivityNanos: () -> Long = { 0L },
+    private val wireWriteActivityNanos: (() -> Long)? = null,
+    private val wireConnectionId: Long = 0L
 ) {
+    private val completedWriteNanos = java.util.concurrent.atomic.AtomicLong()
     companion object {
+        private val closer = Executors.newCachedThreadPool { work ->
+            Thread(work, "library-io-close").apply { isDaemon = true }
+        }
         private val timer = Executors.newSingleThreadScheduledExecutor { work ->
             Thread(work, "library-io-deadline").apply { isDaemon = true }
         }
@@ -95,15 +104,22 @@ internal class LibraryIoGuard(
                 if (finished.get()) return
                 // A WebSocket may buffer an entire large message before feeding the
                 // application pipe. Observe this connection's raw reads, not just onMessage.
-                val activity = if (reading) maxOf(started, wireReadActivityNanos()) else started
-                val remaining = timeoutNanos - (System.nanoTime() - activity)
+                val rawRead = wireReadActivityNanos()
+                val rawWrite = wireWriteActivityNanos?.invoke() ?: completedWriteNanos.get()
+                val activity = maxOf(started, if (reading) rawRead else rawWrite)
+                val checked = System.nanoTime()
+                val remaining = timeoutNanos - (checked - activity)
+                if (wireConnectionId != 0L) Log.i("WatchRSS_IpSyncIO",
+                    "event=deadline.check connection=$wireConnectionId generation=$generation reading=$reading " +
+                        "checkNanos=$checked startedNanos=$started rawReadNanos=$rawRead " +
+                        "rawWriteNanos=$rawWrite remainingNanos=$remaining")
                 if (remaining > 0) {
                     val next = timer.schedule(this, remaining, TimeUnit.NANOSECONDS)
                     alarm.set(next)
                     if (finished.get()) next.cancel(false)
                 } else if (!finished.get()) {
                     timedOut.set(true)
-                    runCatching(close)
+                    closer.execute { runCatching(close) }
                 }
             }
         }
@@ -112,6 +128,8 @@ internal class LibraryIoGuard(
             val result = block()
             if (timedOut.get()) throw SocketTimeoutException("同步连接读写超时")
             return result
+        } catch (failure: LibraryIoValidationFailure) {
+            throw failure.original
         } catch (failure: IllegalStateException) {
             // The existing IP pipe uses check(!closed) rather than IOException. Only its
             // actual closed state may turn this exception into a transport disconnect.
@@ -134,14 +152,27 @@ internal class LibraryIoGuard(
         override fun close() = source.close()
     }
     fun output(target: OutputStream): OutputStream = object : OutputStream() {
-        override fun write(value: Int) = io { target.write(value) }
+        override fun write(value: Int) = io {
+            target.write(value)
+            completedWriteNanos.set(System.nanoTime())
+        }
         override fun write(bytes: ByteArray, offset: Int, length: Int) {
             if (!enabled()) { target.write(bytes, offset, length); return }
-            var written = 0
-            while (written < length) {
-                val count = minOf(length - written, 8192)
-                io { target.write(bytes, offset + written, count) }
-                written += count
+            // OutputStream has no partial-write result. Without a raw activity source,
+            // use the smallest observable unbuffered boundary: one accepted byte.
+            io {
+                var written = 0
+                while (written < length) {
+                    if (written > 0 && written % 8192 == 0) {
+                        // Validation is not a transport failure, even if the peer
+                        // concurrently closes. Preserve the original error type.
+                        try { beforeIo() } catch (failure: Exception) { throw LibraryIoValidationFailure(failure) }
+                    }
+                    val count = if (wireWriteActivityNanos == null) 1 else minOf(length - written, 8192)
+                    target.write(bytes, offset + written, count)
+                    completedWriteNanos.set(System.nanoTime())
+                    written += count
+                }
             }
         }
         override fun flush() = io { target.flush() }
@@ -204,8 +235,12 @@ internal class LibraryRecoveryContext(
     var receiveFrame: suspend (JSONObject) -> Unit = {}
     private var insideUnit = false
     private val confirmed = mutableSetOf<String>()
-    private data class SentArticle(val bodyHash: String, val chunkSize: Int,
-        val chunkHashes: List<String>, val chunks: MutableSet<Int>, val receipt: String)
+    private data class SentArticle(val expected: ArticleSyncManifestEntry,
+        val chunks: MutableSet<Int>, val receipt: String) {
+        val bodyHash get() = expected.bodyHash
+        val chunkSize get() = expected.chunkSize
+        val chunkHashes get() = expected.chunkHashes
+    }
     private val sentArticles = mutableMapOf<String, SentArticle>()
     fun validateOwner() = checkOwner()
 
@@ -219,23 +254,20 @@ internal class LibraryRecoveryContext(
 
     /** A successful write is only a candidate. It is never itself confirmed progress. */
     fun sentArticleFrame(frame: JSONObject) {
-        val articles = frame.optJSONArray("articles") ?: return
-        for (i in 0 until articles.length()) {
-            val article = articles.getJSONObject(i)
-            val id = article.getString("articleId")
-            val body = article.optJSONObject("body") ?: continue
-            val hashes = body.optJSONArray("chunkHashes") ?: continue
-            val bodyHash = body.getString("bodyHash")
-            val receipt = MessageDigest.getInstance("SHA-256").digest(
-                (JSONObject(article.toString()).apply { remove("body") }.toString() + "|$bodyHash").toByteArray())
+        for (payload in LibrarySyncPayload.parseChunkedArticles(frame)) {
+            val a = payload.article
+            val expected = ArticleSyncManifestEntry(a.articleId, a.sourceDeviceId, a.contentHash, a.updatedAt,
+                a.independentChangedAt, a.favoriteChangedAt, a.watchLaterChangedAt, a.deletedAt, a.deleted,
+                payload.bodyHash, payload.bodyByteCount, payload.chunkSize, payload.chunkHashes,
+                ArticleSyncBody.metadataHashFor(a), readingProgress = a.readingProgress,
+                readingPositionBytes = a.readingPositionBytes, readingPositionContentHash = a.readingPositionContentHash,
+                readingPositionChangedAt = a.readingPositionChangedAt, isRead = a.isRead)
+            val receipt = MessageDigest.getInstance("SHA-256").digest(expected.toString().toByteArray())
                 .joinToString("") { "%02x".format(it) }
-            val previous = sentArticles[id]
-            val candidate = if (previous != null && previous.receipt == receipt) previous else SentArticle(bodyHash,
-                body.getInt("chunkSize"), (0 until hashes.length()).map(hashes::getString), mutableSetOf(), receipt)
-            body.optJSONArray("chunks")?.let { chunks ->
-                for (n in 0 until chunks.length()) candidate.chunks += chunks.getJSONObject(n).getInt("index")
-            }
-            sentArticles[id] = candidate
+            val previous = sentArticles[a.articleId]
+            val candidate = if (previous?.receipt == receipt) previous else SentArticle(expected, mutableSetOf(), receipt)
+            payload.chunks.forEach { candidate.chunks += it.index }
+            sentArticles[a.articleId] = candidate
         }
     }
     fun confirmArticleBatch(articleIds: Set<String>) {
@@ -248,6 +280,11 @@ internal class LibraryRecoveryContext(
         sentArticles.forEach { (id, sent) ->
             val existing = remote[id]
             val request = missing[id]
+            // bodySyncMode describes the peer's transfer policy, not its business state.
+            // A matching body alone never proves that new metadata/reading state applied.
+            if (existing?.copy(bodySyncMode = sent.expected.bodySyncMode) == sent.expected) {
+                confirmedProgress("sendArticle", sent.receipt)
+            }
             val complete = existing?.bodyAvailable == true && existing.bodyHash == sent.bodyHash &&
                 existing.chunkSize == sent.chunkSize && existing.chunkHashes == sent.chunkHashes
             sent.chunks.forEach { index ->

@@ -15,13 +15,23 @@ internal class WatchIpSyncServer(
     private val descriptorProvider: IpEndpointProvider,
     port: Int
 ) : NanoWSD(port), AutoCloseable {
-    private val socketActivity = ThreadLocal<IpReadActivity>()
+    private data class Connection(val socket: Socket, val activity: IpReadActivity)
+    private val socketActivity = ThreadLocal<Connection>()
 
     override fun createClientHandler(socket: Socket, inputStream: InputStream): ClientHandler {
         val activity = IpReadActivity()
-        return object : ClientHandler(activity.input(inputStream), socket) {
+        val output = activity.output(socket.getOutputStream())
+        // NanoHTTPD obtains its output from the accepted Socket. Keep its parser and
+        // framing, but observe writes and retain the real socket for forced abort.
+        val observed = object : Socket() {
+            override fun getOutputStream() = output
+            override fun getInetAddress() = socket.inetAddress
+            override fun isClosed() = socket.isClosed
+            override fun close() = socket.close()
+        }
+        return object : ClientHandler(activity.input(inputStream), observed) {
             override fun run() {
-                socketActivity.set(activity)
+                socketActivity.set(Connection(socket, activity))
                 try { super.run() } finally { socketActivity.remove() }
             }
         }
@@ -45,7 +55,7 @@ internal class WatchIpSyncServer(
         PhoneIpSyncSessionRegistry.activeSessions().forEach(PhoneIpSyncSession::close)
     }
 
-    private inner class SyncWebSocket(handshake: IHTTPSession, private val readActivity: IpReadActivity?) : WebSocket(handshake) {
+    private inner class SyncWebSocket(handshake: IHTTPSession, private val connection: Connection?) : WebSocket(handshake) {
         private var authenticatedSession: PhoneIpSyncSession? = null
 
         override fun onOpen() {
@@ -126,13 +136,12 @@ internal class WatchIpSyncServer(
                 routeKind = routeKind,
                 remoteAddress = handshakeRequest.remoteIpAddress.orEmpty(),
                 sendBinary = { bytes -> send(bytes) },
-                closeSocket = {
-                    runCatching {
-                        close(WebSocketFrame.CloseCode.NormalClosure, "session replaced", false)
-                    }
-                }
+                closeSocket = { connection?.socket?.close() }
             )
-            session.wireReadActivityNanos = { readActivity?.lastNanos ?: 0L }
+            session.wireConnectionId = connection?.activity?.connectionId ?: 0L
+            session.wireReadActivityNanos = { connection?.activity?.lastNanos ?: 0L }
+            session.wireWriteActivityNanos = { connection?.activity?.lastWriteNanos ?: 0L }
+            session.enableWireWriteTracking = { connection?.activity?.trackWrites = true }
             authenticatedSession = session
             send(ack.toJson().toString())
             PhoneIpSyncSessionRegistry.register(session)

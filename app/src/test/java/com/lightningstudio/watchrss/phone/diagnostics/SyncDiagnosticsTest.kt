@@ -43,7 +43,7 @@ class SyncDiagnosticsTest {
             val reader=LibraryDiagnostics(db.openHelper.readableDatabase,File(context.cacheDir,"diagnostic-absent"),FileArticleContentStore(context))
             val row=reader.books().getJSONObject(0)
             assertEquals(setOf("bookId","title","chapterCount","packageBytes","packageSha256","status","reasonCode","readable","manifest"),row.keys().asSequence().toSet())
-            val rejected=LibraryDiagnostics(db.openHelper.readableDatabase,File(context.cacheDir,"diagnostic-absent"),FileArticleContentStore(context),mapOf(id to "book_package_invalid")).books().getJSONObject(0)
+            val rejected=LibraryDiagnostics(db.openHelper.readableDatabase,File(context.cacheDir,"diagnostic-absent"),FileArticleContentStore(context),mapOf(id.take(8) to "book_package_invalid")).books().getJSONObject(0)
             assertEquals("failed",rejected.getString("status"));assertEquals("book_package_invalid",rejected.getString("reasonCode"))
             assertEquals("package_missing",row.getString("reasonCode"));assertFalse(row.getBoolean("readable"));assertFalse(row.toString().contains("secret"));assertEquals(0,reader.summary().getInt("books"))
         }finally{db.close()}
@@ -74,7 +74,7 @@ class SyncDiagnosticsTest {
         val storage=Storage();var time=1L;val history=SyncDiagnostics(storage,{time},{time})
         repeat(17){time++;val trace=history.begin();trace.bytes(200);trace.item("book",id,"rejected","book_package_invalid");time+=1000;trace.finish(true)}
         assertEquals(3,history.last().length());assertEquals(12,SyncDiagnostics(storage,{time},{time}).last(12).length())
-        assertEquals("book_package_invalid",history.bookRejections()[id]);val row=history.last().getJSONObject(0);assertEquals(setOf("startedAt","endedAt","channel","result","totalBytes","bytesPerSecond","reconnectCount","items","itemsTruncated"),row.keys().asSequence().toSet());assertEquals("partial",row.getString("result"));assertEquals(200,row.getLong("bytesPerSecond"));assertEquals(id,row.getJSONArray("items").getJSONObject(0).getString("id"))
+        assertEquals("book_package_invalid",history.bookRejections()[id.take(8)]);val row=history.last().getJSONObject(0);assertEquals(setOf("startedAt","endedAt","channel","result","totalBytes","bytesPerSecond","reconnectCount","items","itemsTruncated"),row.keys().asSequence().toSet());assertEquals("partial",row.getString("result"));assertEquals(200,row.getLong("bytesPerSecond"));assertEquals(id.take(8),row.getJSONArray("items").getJSONObject(0).getString("bookIdPrefix"))
         time++;val trace=history.begin();repeat(DiagnosticFields.ITEM_LIMIT+1){trace.item("book",id,"applied","none")};trace.channel(true);trace.reconnect();trace.finish(false)
         val overflow=history.last(1).getJSONObject(0);assertEquals("failed",overflow.getString("result"));assertEquals("IP",overflow.getString("channel"));assertEquals(1,overflow.getInt("reconnectCount"));assertTrue(overflow.getBoolean("itemsTruncated"));assertEquals(DiagnosticFields.ITEM_LIMIT,overflow.getJSONArray("items").length())
     }
@@ -113,4 +113,23 @@ class SyncDiagnosticsTest {
         assertTrue(manifest.contains("android:name=\".diagnostics.SyncDiagnosticService\" android:exported=\"false\" android:permission=\"android.permission.DUMP\""))
         assertNull(SyncDiagnosticService().onBind(null))
     }
+    @Test fun `pC8 book refusal fields and reasons persist without legacy aliases or secrets`() {
+        val storage=Storage();val h=SyncDiagnostics(storage,{1},{1});val trace=h.begin()
+        trace.item("book",id,"rejected","book_manifest_invalid","Book\n\u202e https://private.invalid","manifest_instance_identity_unsupported");trace.finish(true)
+        val row=SyncDiagnostics(storage).last(1).getJSONObject(0);val item=row.getJSONArray("items").getJSONObject(0)
+        assertEquals(setOf("kind","bookIdPrefix","code","title","reason"),item.keys().asSequence().toSet());assertEquals(id.take(8),item.getString("bookIdPrefix"));assertEquals("manifest_instance_identity_unsupported",item.getString("reason"));assertEquals("partial",row.getString("result"));assertFalse(item.toString().contains("private.invalid"))
+        assertEquals("invalid",DiagnosticFields.item("book","https://private.invalid","rejected","bad").getString("bookIdPrefix"))
+        assertEquals("unknown",DiagnosticFields.item("book",id,"rejected","book_manifest_invalid",null,"secret/path").getString("reason"))
+        val legacy=DiagnosticFields.record(JSONObject().put("items",JSONArray().put(JSONObject().put("kind","book").put("id",id).put("result","rejected").put("reasonCode","book_manifest_invalid"))))
+        assertEquals("unknown",legacy.getJSONArray("items").getJSONObject(0).getString("reason"));assertFalse(legacy.toString().contains(id))
+    }
+    @Test fun `ambiguous prefix cannot label either local book as rejected`()=runBlocking {
+        val context=RuntimeEnvironment.getApplication();val db=Room.inMemoryDatabaseBuilder(context,PhoneCompanionDatabase::class.java).allowMainThreadQueries().build()
+        try {
+            for(key in listOf(id,id.take(8)+"c".repeat(56)))db.bookDao().put(BookEntity(key,JSONObject().put("title","Book").put("chapterCount",1).put("deleted",false).toString()))
+            val reader=LibraryDiagnostics(db.openHelper.readableDatabase,File(context.cacheDir,"absent-prefix"),FileArticleContentStore(context),mapOf(id.take(8) to "book_manifest_invalid"));val rows=reader.books()
+            assertEquals(2,rows.length());repeat(2){assertEquals("staged",rows.getJSONObject(it).getString("status"))}
+        }finally{db.close()}
+    }
+
 }

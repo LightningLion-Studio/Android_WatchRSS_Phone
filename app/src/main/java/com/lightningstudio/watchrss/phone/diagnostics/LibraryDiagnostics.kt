@@ -25,6 +25,9 @@ class LibraryDiagnostics(private val db:DiagnosticQuery,private val directory:Fi
         return groups.values.map{group->val first=group.first();DiagnosticFields.book("",first.third,group.size,0,null,"staged","registration_pending",readBodies&&articleReadable(first.first))}
     }
     fun books():JSONArray=JSONArray().apply {
+        val prefixCounts=mutableMapOf<String,Int>()
+        db.query("SELECT bookId FROM imported_books").use{rows->while(rows.moveToNext()){val prefix=rows.getString(0).take(8);prefixCounts[prefix]=(prefixCounts[prefix]?:0)+1}}
+
         db.query("SELECT bookId,stateJson,packageSha256,packageBytes FROM imported_books ORDER BY bookId").use{rows->while(rows.moveToNext()) {
             val id=rows.getString(0);val state=runCatching{JSONObject(rows.getString(1))}.getOrNull();val sha=rows.getString(2);val bytes=rows.getLong(3)
             var reason="none";var readable=false
@@ -37,8 +40,8 @@ class LibraryDiagnostics(private val db:DiagnosticQuery,private val directory:Fi
                     if(reason=="none"&&!readable)reason="body_missing"
                 }
             }catch(_:Exception){reason="read_failed"}
-            val wasRejected=reason=="package_missing"&&id in rejections
-            if(wasRejected)reason=requireNotNull(rejections[id])
+            val wasRejected=reason=="package_missing"&&prefixCounts[id.take(8)]==1&&id.take(8) in rejections
+            if(wasRejected)reason=requireNotNull(rejections[id.take(8)])
             if(state?.optBoolean("deleted")!=true)put(DiagnosticFields.book(id,state?.optString("title").orEmpty(),state?.optInt("chapterCount")?:0,bytes,sha,if(wasRejected)"failed" else if(reason=="none")"ready" else if(reason=="package_missing")"staged" else "failed",reason,readable,state))
         }}
         pending().forEach{put(it)}

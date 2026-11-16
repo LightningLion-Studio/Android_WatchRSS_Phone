@@ -47,8 +47,17 @@ running), `channel` (`RFCOMM`/`IP`, final selected data transport), `result`, `t
 directions and four-byte frame prefixes. Throughput is wire bytes divided by
 monotonic operation duration. The channel is the last selected data transport, including IP-to-RFCOMM fallback.
 Reconnects use the manager's visible retry budget.
-Each item has only `kind`, `id`, `result`, `reasonCode`. Full content-hash book
-IDs are retained; other identifiers outside the opaque-ID grammar become null.
+Book refusals use pC8's exact fields: `kind`, `bookIdPrefix`, `code`, `title`,
+`reason`. Prefixes are eight lowercase hexadecimal characters or `invalid` and
+are not unique keys. The nullable title uses the local manifest first, then the
+remote manifest, strips control/format characters and URLs, and is capped at
+120 UTF-16 units. `reason` is a fixed pC8 manifest subcode or `package_invalid`;
+unknown/missing historical subcodes become `unknown`. The pC8 validator and
+reason-preserving wrapper retain strict acceptance rules. Legacy stored book
+refusals are projected to these fields on read, without fabricated titles or
+subcodes. A prefix affects local book status only when it identifies exactly one
+registered book. Other refusals and applied items retain `kind`, `id`, `result`,
+`reasonCode`; full book IDs remain in inventory and applied items.
 Unknown reason strings become `unknown`. `itemsTruncated=true` is not complete
 item acceptance. Note-batch rejection records each submitted note ID. Asset
 rejection uses the content SHA-256 and never exposes its storage key or filename.

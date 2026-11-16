@@ -16,8 +16,9 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 
 /** A complete peer item was received, but its package is invalid. Never wrap IO/owner/cancellation failures. */
-internal class InvalidBookPackageException : IllegalArgumentException("book_package_invalid")
+internal class InvalidBookPackageException(val reason:String="package_invalid") : IllegalArgumentException("book_package_invalid")
 internal inline fun <T> validateBookPackage(block:()->T):T = try {block()}
+    catch(e:InvalidBookPackageException){throw e}
     catch(_:org.json.JSONException){throw InvalidBookPackageException()}
     catch(_:IllegalArgumentException){throw InvalidBookPackageException()}
 

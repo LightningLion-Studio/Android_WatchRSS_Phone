@@ -9,13 +9,21 @@ object DiagnosticFields {
     const val HISTORY_LIMIT=12
     const val ITEM_LIMIT=256
     private val codes=setOf("none","unknown","sync_failed","peer_rejected","ack_missing","book_manifest_invalid","book_package_invalid","book_request_invalid","book_sync_not_negotiated","book_reading_delta_not_negotiated","library_busy","library_exchange_failed","unsupported_action","account_required","binding_required","body_missing","package_missing","package_hash_mismatch","metadata_invalid","read_failed","staged","registration_pending")
+    private val bookReasons=setOf("manifest_not_object","manifest_fingerprint_invalid","manifest_book_id_invalid","manifest_identity_mismatch","manifest_instance_identity_unsupported","manifest_title_type","manifest_source_device_id_type","manifest_deleted_type","manifest_source_url_type","manifest_kind_type","manifest_deleted_chapters_type","manifest_duplicate_book_id","manifest_local_identity_conflict","manifest_requested_unknown_book","manifest_requested_deleted_book","manifest_requested_body_unavailable","package_invalid","manifest_chapter_count_type","manifest_chapter_count_range","manifest_deletion_clock_type","manifest_deletion_clock_range","manifest_deleted_at_type","manifest_deleted_at_range","manifest_updated_at_type","manifest_updated_at_range","manifest_deleted_chapter_type","manifest_deleted_chapter_range","manifest_deleted_chapter_order")
+    fun bookReason(value:String?)=value?.takeIf{it in bookReasons}?:"unknown"
+    fun bookPrefix(value:String?)=value?.takeIf{it.matches(Regex("[0-9a-f]{64}|[0-9a-f]{8}"))}?.take(8)?:"invalid"
+    fun rejectionTitle(value:String?)=value?.replace(Regex("[\\p{Cc}\\p{Cf}]")," ")?.replace(Regex("(?i)[a-z][a-z0-9+.-]{1,31}://[^\\s]+"),"[redacted]")?.trim()?.take(120)?.takeIf{it.isNotBlank()}
+    fun rejected(item:JSONObject)=item.optString("result")=="rejected"||item.optString("kind")=="book"&&item.has("code")
     fun code(value:String)=value.takeIf{it in codes}?:"unknown"
     fun id(value:String?)=value?.takeIf{it.matches(Regex("[0-9a-f]{64}"))}
     fun title(value:String)=value.replace(Regex("[\\x00-\\x1f\\x7f]")," ").replace(Regex("(?i)[a-z][a-z0-9+.-]{1,31}://[^\\s]+"),"[redacted]").take(256)
     fun number(value:Long)=value.coerceAtLeast(0)
-    fun item(kind:String,id:String?,result:String,code:String)=JSONObject()
+    fun item(kind:String,id:String?,result:String,code:String,title:String?=null,reason:String?=null):JSONObject {
+        if(kind=="book"&&result!="applied")return JSONObject().put("kind","book").put("bookIdPrefix",bookPrefix(id)).put("code",code(code)).put("title",rejectionTitle(title)?:JSONObject.NULL).put("reason",bookReason(reason))
+        return JSONObject()
         .put("kind",kind.takeIf{it in setOf("book","article","note","asset","reader","library","account","unknown")}?:"unknown")
         .put("id",if(kind in setOf("book","asset"))id(id)?:JSONObject.NULL else if(kind in setOf("article","note"))itemId(id)?:JSONObject.NULL else JSONObject.NULL).put("result",if(result=="applied")"applied" else "rejected").put("reasonCode",code(code))
+    }
     private fun itemId(value:String?)=value?.takeIf{it.matches(Regex("[0-9a-f]{64}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"))}
     fun requestItems(request:JSONObject):List<Pair<String,String?>> {
         val kind=when(request.optString("action")){"syncBooks"->"book";"syncNotes"->"note";"syncNoteAsset"->"asset";"syncReader"->"reader";"syncAccount"->"account";else->"library"}
@@ -36,7 +44,7 @@ object DiagnosticFields {
         .put("result",raw.optString("result").takeIf{it in setOf("running","success","partial","failed")}?:"failed")
         .put("totalBytes",number(raw.optLong("totalBytes"))).put("bytesPerSecond",number(raw.optLong("bytesPerSecond")))
         .put("reconnectCount",number(raw.optLong("reconnectCount")))
-        .put("items",JSONArray().apply { val items=raw.optJSONArray("items")?:JSONArray();repeat(minOf(items.length(),ITEM_LIMIT)){i->items.optJSONObject(i)?.let{put(item(it.optString("kind"),it.optString("id"),it.optString("result"),it.optString("reasonCode")))}} })
+        .put("items",JSONArray().apply { val items=raw.optJSONArray("items")?:JSONArray();repeat(minOf(items.length(),ITEM_LIMIT)){i->items.optJSONObject(i)?.let{put(item(it.optString("kind"),it.optString("bookIdPrefix",it.optString("id")),it.optString("result"),it.optString("code",it.optString("reasonCode")),it.optString("title").takeUnless{_->it.isNull("title")},it.optString("reason")))}} })
         .put("itemsTruncated",raw.optBoolean("itemsTruncated")||(raw.optJSONArray("items")?.length()?:0)>ITEM_LIMIT)
     fun selection(args:Array<out String>):Pair<String,Int> {
         if(args.isEmpty()||args.size==1&&args[0].matches(Regex("[0-9]+")))return "all" to lastCount(args)
@@ -73,7 +81,7 @@ class SyncDiagnostics(private val storage:DiagnosticStorage,private val now:()->
     }
     fun bookRejections():Map<String,String> {
         val seen=hashSetOf<String>();val reasons=linkedMapOf<String,String>();val sessions=last(DiagnosticFields.HISTORY_LIMIT)
-        for(i in 0 until sessions.length()){val items=sessions.getJSONObject(i).getJSONArray("items");for(j in items.length()-1 downTo 0){val item=items.getJSONObject(j);val id=item.optString("id");if(item.optString("kind")!="book"||DiagnosticFields.id(id)==null||!seen.add(id))continue;if(item.optString("result")=="rejected")reasons[id]=item.getString("reasonCode")}}
+        for(i in 0 until sessions.length()){val items=sessions.getJSONObject(i).getJSONArray("items");for(j in items.length()-1 downTo 0){val item=items.getJSONObject(j);val prefix=if(item.has("bookIdPrefix"))item.getString("bookIdPrefix")else DiagnosticFields.bookPrefix(item.optString("id"));if(item.optString("kind")!="book"||prefix=="invalid"||!seen.add(prefix))continue;if(DiagnosticFields.rejected(item))reasons[prefix]=item.getString("code")}}
         return reasons
     }
     fun begin()=Trace()
@@ -84,8 +92,8 @@ class SyncDiagnostics(private val storage:DiagnosticStorage,private val now:()->
         @Synchronized fun bytes(value:Long){bytes+=value.coerceAtLeast(0)}
         @Synchronized fun channel(ip:Boolean){channel=if(ip)"IP" else "RFCOMM"}
         @Synchronized fun reconnect(){reconnects++}
-        @Synchronized fun item(kind:String,id:String?,result:String,code:String){if(items.length()<DiagnosticFields.ITEM_LIMIT)items.put(DiagnosticFields.item(kind,id,result,code)) else truncated=true}
+        @Synchronized fun item(kind:String,id:String?,result:String,code:String,title:String?=null,reason:String?=null){if(items.length()<DiagnosticFields.ITEM_LIMIT)items.put(DiagnosticFields.item(kind,id,result,code,title,reason)) else truncated=true}
         private fun persist(result:String,end:Long?)=save(JSONObject().put("startedAt",at).put("endedAt",end?:JSONObject.NULL).put("channel",channel).put("result",result).put("totalBytes",bytes).put("bytesPerSecond",if(end==null)0 else bytes*1000/maxOf(1,monotonic()-tick)).put("reconnectCount",reconnects).put("items",items).put("itemsTruncated",truncated))
-        @Synchronized fun finish(success:Boolean){if(finished)return;finished=true;persist(if(!success)"failed" else if((0 until items.length()).any{items.getJSONObject(it).optString("result")=="rejected"})"partial" else "success",now())}
+        @Synchronized fun finish(success:Boolean){if(finished)return;finished=true;persist(if(!success)"failed" else if((0 until items.length()).any{DiagnosticFields.rejected(items.getJSONObject(it))})"partial" else "success",now())}
     }
 }

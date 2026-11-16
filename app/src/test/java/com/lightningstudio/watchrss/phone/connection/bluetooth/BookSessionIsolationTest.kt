@@ -97,7 +97,7 @@ class BookSessionIsolationTest {
         val diagnostic=com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnostics.open(context).last(1).getJSONObject(0)
         assertEquals("partial",diagnostic.getString("result"));assertTrue(diagnostic.getLong("totalBytes")>0)
         val rejected=diagnostic.getJSONArray("items").getJSONObject(0)
-        assertEquals(fixture.getString("bookId"),rejected.getString("id"));assertEquals("book_package_invalid",rejected.getString("reasonCode"))
+        assertEquals(fixture.getString("bookId").take(8),rejected.getString("bookIdPrefix"));assertEquals("book_package_invalid",rejected.getString("code"));assertEquals("package_invalid",rejected.getString("reason"));assertEquals("CLI book",rejected.getString("title"))
         assertFalse(diagnostic.toString().contains("javascript:"))
         assertEquals(1,result.bookSyncIssues.size);assertNotNull(result.bookSyncWarning)
         assertTrue(frames.any{it.optString("action")=="syncLibrary"&&it.optString("phase")=="cursor"})

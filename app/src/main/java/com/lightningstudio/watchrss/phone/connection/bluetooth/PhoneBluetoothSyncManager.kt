@@ -633,7 +633,7 @@ class PhoneBluetoothSyncManager(
                     bookSync.diagnosticItem={id,result,code->trace.item("book",id,result,code)}
                     bookSync.domainFastPath=fastPath!=null
                     bookSync.onApplied={if(it>0)locallyApplied=true}
-                    bookSync.onIssue={issue->debugLog.appendEvent("sync.book.isolated",sessionId,fields=mapOf("bookId" to issue.bookIdPrefix,"code" to issue.code))}
+                    bookSync.onIssue={issue->trace.item("book",issue.bookIdPrefix,"rejected",issue.code,issue.title,issue.reason);debugLog.appendEvent("sync.book.isolated",sessionId,fields=mapOf("bookId" to issue.bookIdPrefix,"code" to issue.code))}
                     bookSync.trace={stage->debugLog.appendEvent("sync.book.stage",sessionId,fields=mapOf("stage" to stage))}
                     val physicalSession=syncSession
                     if(active.capabilities.bookReadingDelta && physicalSession?.isPersistent==true) {

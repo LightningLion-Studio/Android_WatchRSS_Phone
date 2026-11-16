@@ -51,19 +51,50 @@ object BookSync {
     private fun hash(vararg strings:String)=CloudSnapshotCodec.sha256(CloudProtocolV2.lp(*strings))
     fun canonical(value:JSONObject)=PhoneCloudRecordCodec.canonical(value)
     fun integer(row:JSONObject,key:String):Long { val v=row.get(key);require(v is Int || v is Long);return (v as Number).toLong().also {require(it in 0..9_007_199_254_740_991L)} }
+    /** Fixed subcodes only. Never include peer values or parser exception text. */
     fun validate(value:JSONObject) {
-        val fingerprint=value.getString("fingerprint");require(hex.matches(fingerprint) && value.getString("bookId")==id(fingerprint))
-        val count=integer(value,"chapterCount");require(count in 1..100_000)
-        require(value.get("title") is String && value.get("sourceDeviceId") is String && value.get("deleted") is Boolean)
-        listOf("deletionClock","deletedAt","updatedAt").forEach {integer(value,it)}
-        listOf("sourceUrl","kind").forEach {if(value.has(it)) require(value.get(it) is String)}
-        val deleted=value.getJSONArray("deletedChapters");var previous=0L
-        for(i in 0 until deleted.length()) { val n=integer(JSONObject().put("i",deleted.get(i)),"i");require(n>previous && n<=count);previous=n }
+        fun check(ok:Boolean,reason:String){if(!ok)throw InvalidBookPackageException(reason)}
+        fun number(key:String,reason:String):Long {
+            val raw=value.opt(key)
+            check(raw is Int || raw is Long,reason+"_type")
+            return (raw as Number).toLong().also {check(it in 0..9_007_199_254_740_991L,reason+"_range")}
+        }
+        val fingerprint=value.opt("fingerprint")
+        check(fingerprint is String && hex.matches(fingerprint),"manifest_fingerprint_invalid")
+        val identity=value.opt("bookId")
+        check(identity is String && hex.matches(identity),"manifest_book_id_invalid")
+        val instance=value.opt("instanceId")
+        if(instance is String && instance.matches(Regex("[0-9a-f]{32}")) &&
+            identity==hash("watchrss/book/instance-id/v1",fingerprint as String,instance)) {
+            throw InvalidBookPackageException("manifest_instance_identity_unsupported")
+        }
+        check(identity==id(fingerprint as String),"manifest_identity_mismatch")
+        val count=number("chapterCount","manifest_chapter_count")
+        check(count in 1..100_000,"manifest_chapter_count_range")
+        check(value.opt("title") is String,"manifest_title_type")
+        check(value.opt("sourceDeviceId") is String,"manifest_source_device_id_type")
+        check(value.opt("deleted") is Boolean,"manifest_deleted_type")
+        number("deletionClock","manifest_deletion_clock")
+        number("deletedAt","manifest_deleted_at")
+        number("updatedAt","manifest_updated_at")
+        for(key in listOf("sourceUrl","kind"))check(!value.has(key)||value.opt(key) is String,
+            if(key=="sourceUrl")"manifest_source_url_type" else "manifest_kind_type")
+        val deleted=value.opt("deletedChapters")
+        check(deleted is JSONArray,"manifest_deleted_chapters_type")
+        var previous=0L
+        for(i in 0 until (deleted as JSONArray).length()) {
+            val raw=deleted.opt(i)
+            check(raw is Int || raw is Long,"manifest_deleted_chapter_type")
+            val n=(raw as Number).toLong()
+            check(n in 1..count,"manifest_deleted_chapter_range")
+            check(n>previous,"manifest_deleted_chapter_order")
+            previous=n
+        }
     }
     fun deletions(state:JSONObject):Set<Int> = state.getJSONArray("deletedChapters").let{a->(0 until a.length()).map{a.getInt(it)}.toSet()}
     fun merge(local:JSONObject?,remote:JSONObject):JSONObject {
         validate(remote);if(local==null)return JSONObject(remote.toString()).apply{remove("contentAvailable")}
-        validate(local);require(local.getString("bookId")==remote.getString("bookId") && local.getInt("chapterCount")==remote.getInt("chapterCount"))
+        validate(local);if(local.getString("bookId")!=remote.getString("bookId") || local.getInt("chapterCount")!=remote.getInt("chapterCount"))throw InvalidBookPackageException("manifest_local_identity_conflict")
         val winner=compareValuesBy(remote,local,{it.getLong("updatedAt")},{it.getString("sourceDeviceId")},{it.getString("title")},{it.optString("sourceUrl")},{it.optString("kind")})>0
         return JSONObject((if(winner)remote else local).toString()).apply {
             remove("contentAvailable");put("deletedChapters",JSONArray((deletions(local)+deletions(remote)).sorted()))

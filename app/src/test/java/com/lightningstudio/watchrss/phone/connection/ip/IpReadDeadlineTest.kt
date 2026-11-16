@@ -37,4 +37,17 @@ class IpReadDeadlineTest {
             assertTrue(task.get(2,TimeUnit.SECONDS) is SocketTimeoutException);assertTrue(s.isClosed)
         }finally{s.close();thread.join(2000)}
     }
+    @Test fun rawSocketBytesExtendBufferedPipeReadUntilActualSilence() {
+        val s = session(150)
+        val activity = java.util.concurrent.atomic.AtomicLong()
+        s.wireReadActivityNanos = { activity.get() }
+        val task = FutureTask { try { s.inputStream.read(); null } catch (e: Exception) { e } }
+        val reader = Thread(task).apply { start() }
+        try {
+            repeat(8) { activity.set(System.nanoTime()); Thread.sleep(40); assertFalse(s.isClosed) }
+            assertTrue(task.get(2, TimeUnit.SECONDS) is SocketTimeoutException)
+            assertTrue(s.isClosed)
+        } finally { s.close(); reader.join(2000); assertFalse(reader.isAlive) }
+    }
+
 }

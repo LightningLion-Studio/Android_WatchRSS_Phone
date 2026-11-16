@@ -14,9 +14,13 @@ import java.util.Locale
 internal fun deriveNoteTitle(plainText: String, maxWords: Int = 3): String {
     val line = plainText.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() } ?: return ""
     val words = wordRanges(line).take(maxWords).toList()
-    if (words.isEmpty()) return line.take(MAX_DERIVED_TITLE)
-    return line.substring(words.first().first, words.last().last + 1).take(MAX_DERIVED_TITLE)
+    if (words.isEmpty()) return line.takeTitleCodePoints()
+    return line.substring(words.first().first, words.last().last + 1).takeTitleCodePoints()
 }
+
+/** The shared limit is 80 Unicode code points, never UTF-16 code units. */
+private fun String.takeTitleCodePoints(): String =
+    substring(0, offsetByCodePoints(0, minOf(MAX_DERIVED_TITLE, codePointCount(0, length))))
 
 private fun wordRanges(line: String): Sequence<IntRange> = sequence {
     val iterator = BreakIterator.getWordInstance(Locale.CHINESE).apply { setText(line) }

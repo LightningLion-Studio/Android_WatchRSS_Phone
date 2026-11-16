@@ -62,3 +62,24 @@ expectation is explicitly replaced by the corrected r3 product expectation.
 RNR-07 review tests were policy controls for the old code-point-only behavior.
 Their expected strings now assert the authorized whole-grapheme policy. The
 RNR-01 through RNR-06 regression assertions remain intact.
+
+## r4 render boundary corrections
+
+The r4 review found four rendering defects on watch/mini; it found no new
+phone title defect. The phone branches retain the r3 Unicode title source and
+shared vectors unchanged. Phone note/editor/markdown host regression tests
+remain the compatibility gate for both main and hotfix; no device claim follows.
+
+Watch table row readers must inspect original indentation before trimming.
+Pipe, tab, aligned and degraded table continuation cannot consume indented code.
+Both JS clients accept U+2028/U+2029 inside fence info because source lines are
+split on CR/LF only. Closing fences accept only ASCII Space and Tab suffixes.
+Mini scans complete, quoted attribute tokens before recognizing comments and
+active elements. Attribute text resembling a tag cannot erase adjacent body.
+Active elements still drop their content; the existing tag/attribute allowlist,
+URL checks, unmatched-tag escaping and final projection check remain in force.
+
+Regression cases are tests/notes-render-r4.test.ts on watch and
+tests/notes-render-r4.test.mjs on mini. The isolated watch reader suite also
+checks literal HTML anchors after Unicode fence info. These are rendering
+projection checks; stored markdown and the title selection policy do not change.

@@ -8,6 +8,40 @@ import org.junit.Assert.assertSame
 import org.junit.Test
 
 class NoteRepositoryTest {
+    @Test fun `real user vocabulary sample keeps numbered title and original bodies on save and merge`() = runBlocking {
+        val vectors = org.json.JSONArray(requireNotNull(javaClass.getResourceAsStream("/notes-title-vectors.json")).bufferedReader().use { it.readText() })
+        val vector = (0 until vectors.length()).map(vectors::getJSONObject).single { it.getString("name") == "user-sample-vocab" }
+        val source = vector.getString("plainText")
+        val expected = vector.getString("expected")
+        assertEquals("1. republic 2", expected)
+        val dao = FakeNoteDao()
+        val repository = NoteRepository(dao, deviceId = "phone", now = { 123L })
+        val saved = repository.save(title = "", markdown = source)
+        println("USER-VOCAB phone save title=" + org.json.JSONObject.quote(saved.title))
+        assertEquals(expected, saved.title)
+        assertEquals(source, saved.markdown)
+        assertEquals(source, saved.baseMarkdown)
+        assertEquals(MarkdownNoteCodec.sha256(source), saved.contentHash)
+        assertEquals(source.lineSequence().first().removePrefix("1. "), saved.plainText.lineSequence().first())
+        val html = "<p>" + source.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>") + "</p>"
+        val rich = repository.save(title = "", markdown = html)
+        println("USER-VOCAB phone HTML save title=" + org.json.JSONObject.quote(rich.title))
+        assertEquals(expected, rich.title)
+        assertEquals(html, rich.markdown)
+        assertEquals(html, rich.baseMarkdown)
+        val baseBody = source.replaceFirst("1. republic", "base republic")
+        val base = repository.save(title = "base", markdown = baseBody)
+        val local = repository.save(noteId = base.noteId, title = "", markdown = source)
+        dao.notes[base.noteId] = local.copy(title = "")
+        val remote = base.copy(markdown = baseBody + "\nremote tail", contentHash = "remote-sample-hash", updatedAt = 500L, modifiedBy = "remote")
+        repository.applyRemote(remote, "remote")
+        val merged = dao.notes.getValue(base.noteId)
+        println("USER-VOCAB phone merge title=" + org.json.JSONObject.quote(merged.title))
+        assertEquals(expected, merged.title)
+        assertEquals(source + "\nremote tail", merged.markdown)
+        assertEquals(baseBody, merged.baseMarkdown)
+    }
+
     @Test fun `ordinary markdown uses source filename as title`() = runBlocking {
         val dao = FakeNoteDao()
         val repository = NoteRepository(dao, deviceId = "phone", now = { 123L })

@@ -122,15 +122,14 @@ class HotfixR2IndependentTest {
         val a=article();LibrarySyncPayload.buildChunkedArticleRequestFrames("phone",listOf(a),listOf(ArticleBodyRequest(a.articleId,entry(a).bodyHash,emptyList())),emptyList(),true).forEach(c::sentArticleFrame)
         now+=6000;assertThrows(LibraryNoProgressLimit::class.java){p.disconnected(6)}
     }
-    @Test fun sustainedByteWritesMustNotExpireInsideOneEightKiBOperation() {
-        val count=AtomicInteger();val closeAt=AtomicInteger(-1);val closed=AtomicBoolean()
+    @Test fun sustainedEightKiBWritesRefreshIdleDeadlineAfterEachCompletedChunk() {
+        val count=AtomicInteger();val closed=AtomicBoolean();val calls=AtomicInteger()
         val sink=object:OutputStream(){override fun write(n:Int){error("bulk expected")}
-            override fun write(b:ByteArray,o:Int,n:Int){repeat(n){if(closed.get())throw IOException("closed while bytes are moving");count.incrementAndGet();Thread.sleep(2)}}}
-        val guard=LibraryIoGuard(1,{true},{closeAt.set(count.get());closed.set(true)},100)
-        val failure=runCatching{guard.output(sink).write(ByteArray(256))}.exceptionOrNull()
-        println("continuous-write bytes=${count.get()} closeAt=${closeAt.get()} failure=$failure")
-        assertNull("one byte every 2ms is activity; 100ms idle deadline must not close it",failure)
-        assertFalse(closed.get());assertEquals(256,count.get())
+            override fun write(b:ByteArray,o:Int,n:Int){assertTrue(n<=8192);Thread.sleep(4);count.addAndGet(n);calls.incrementAndGet()}}
+        val guard=LibraryIoGuard(1,{true},{closed.set(true)},100)
+        val failure=runCatching{guard.output(sink).write(ByteArray(64*8192))}.exceptionOrNull()
+        assertNull("completed 8 KiB chunks must extend the idle deadline",failure)
+        assertFalse(closed.get());assertEquals(64*8192,count.get());assertEquals(64,calls.get())
     }
     @Test fun independentReadActivityExtendsOnlyItsOwnDeadlineThenSilenceExpires() {
         val activity=IpReadActivity();val end=CountDownLatch(1);val stopped=AtomicBoolean();val closed=AtomicBoolean()

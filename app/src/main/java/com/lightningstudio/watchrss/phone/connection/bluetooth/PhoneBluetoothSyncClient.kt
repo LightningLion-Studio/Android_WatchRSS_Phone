@@ -347,7 +347,8 @@ class PhoneBluetoothSyncClient(
     private val capabilitiesByAddress = mutableMapOf<String, PhoneWatchCapabilities>()
     private val connectionMutex = Mutex()
 
-    private fun withSyncObjectsProbe(request:JSONObject):JSONObject {
+    private fun withSyncObjectsProbe(original:JSONObject):JSONObject {
+        val request = com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Routing.probe(original, com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED)
         if(!com.lightningstudio.watchrss.phone.BuildConfig.SYNC_OBJECTS_V2_LOCAL_OBJECTS)return request
         val capability=syncObjectsCapability?.invoke()?:return request
         if(capability.opt("supportsSyncObjectsV2")!=true)return request
@@ -371,6 +372,20 @@ class PhoneBluetoothSyncClient(
             }
         }
     }
+    /** Explicit B2 handoff. The same raw streams retain trailing switch bytes.
+     * This connection is closed after B2; it never returns to the legacy exchange loop. */
+    internal suspend fun <T> withBinaryTransport(session: PhoneSyncSession, sessionId: String,
+        block: suspend (InputStream, OutputStream, () -> Unit) -> T): T = withContext(Dispatchers.IO) {
+        check(com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED)
+        check(session.isPersistent && !session.legacyFallback && session.transport?.owner?.startsWith("ip:") != true)
+        executeSessionOperation(session, sessionId, "syncLibraryBinary.switch", allowTransparentReplay = false) {
+            connectionMutex.withLock {
+                val transport = requireNotNull(session.transport)
+                try { block(transport.inputStream, transport.outputStream, session::close) } finally { session.close() }
+            }
+        }
+    }
+
     internal var probeSocketFactory: (BluetoothDevice) -> BluetoothSocket = {
         it.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
     }

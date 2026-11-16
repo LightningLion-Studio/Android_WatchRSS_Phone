@@ -1,0 +1,36 @@
+{
+  "format": "lb2-r3-planning-heartbeat-contracts",
+  "scope": "Finite documentation models only; no product or device execution.",
+  "cases": [
+    {
+      "id": "BV23",
+      "name": "planning_45s_real_progress_with_heartbeats",
+      "durationMs": 45000,
+      "workEveryMs": 5000,
+      "receiverPaused": false,
+      "networkBlackhole": false,
+      "ordinaryNoiseEveryMs": 0,
+      "expected": {"sender": "WAIT_REMOTE_WORK", "receiver": "WORKING", "recoveryEvents": 0, "completedReplies": 4}
+    },
+    {
+      "id": "BV24",
+      "name": "complete_manifest_write_then_blackhole_without_eof",
+      "durationMs": 45000,
+      "workEveryMs": 0,
+      "receiverPaused": true,
+      "networkBlackhole": true,
+      "ordinaryNoiseEveryMs": 5000,
+      "expected": {"sender": "IO_RECOVERY", "receiver": "WORKING", "recoveryEvents": 1, "heartbeatTimeoutAtMs": 40000}
+    },
+    {
+      "id": "BV25",
+      "name": "heartbeat_responsive_but_no_real_local_progress",
+      "durationMs": 45000,
+      "workEveryMs": 0,
+      "receiverPaused": false,
+      "networkBlackhole": false,
+      "ordinaryNoiseEveryMs": 0,
+      "expected": {"sender": "STOP", "receiver": "LOCAL_IO_STOP", "recoveryEvents": 0, "localStopAtMs": 30000}
+    }
+  ]
+}

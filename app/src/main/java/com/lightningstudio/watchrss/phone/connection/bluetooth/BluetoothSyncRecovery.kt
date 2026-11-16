@@ -13,6 +13,9 @@ internal class BluetoothSyncRecovery(
     private val onRetry: (Int, Long, Throwable) -> Unit
 ) {
     private var attempts = 0
+    // Installed only for the opt-in B2 logical operation, including its independent v1 tasks.
+    internal var b2Policy: com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Recovery? = null
+    internal var monotonic: () -> Long = { System.nanoTime() / 1_000_000 }
     suspend fun <T> run(operation: suspend () -> T): T {
         var needsReconnect = false
         while (true) {
@@ -23,10 +26,11 @@ internal class BluetoothSyncRecovery(
                 // A child operation timeout can be retried; cancelling the user operation cannot.
                 currentCoroutineContext().ensureActive()
                 if (!isRetryableBluetoothDisconnect(failure)) throw failure
-                if (attempts == BACKOFF.size) throw IOException(
+                b2Policy?.transportFailure(monotonic())
+                if (b2Policy == null && attempts == BACKOFF.size) throw IOException(
                     "连接中断，重连未成功。可直接点“同步”重试。", failure
                 )
-                val wait = BACKOFF[attempts++]
+                val wait = if (b2Policy == null) BACKOFF[attempts++] else 2000L.also { attempts++ }
                 onRetry(attempts, wait, failure)
                 pause(wait)
                 needsReconnect = true

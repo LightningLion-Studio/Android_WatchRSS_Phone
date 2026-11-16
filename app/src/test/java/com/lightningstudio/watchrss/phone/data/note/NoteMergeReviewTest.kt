@@ -113,4 +113,19 @@ class NoteMergeReviewTest {
         } finally { db.close() }
     }
 
+    @Test fun RVM04_sameWriterRestoreAndForeignMetadataConvergeInEitherOrder() = runBlocking {
+        val db=database()
+        try {
+            val dao=db.noteDao();val repo=NoteRepository(dao,"phone"){100}
+            val a=repo.save("n","T","a")
+            for(source in listOf("peer","other","")) for(reverse in listOf(false,true)) {
+                val dead=a.copy(deleted=true,deletedAt=101,updatedAt=101,modifiedBy="peer")
+                val live=a.copy(updatedAt=102,modifiedBy=source,pinned=true)
+                dao.upsertNotes(listOf(if(reverse)live else dead))
+                repo.applyRemote(if(reverse)dead else live,if(reverse)"peer" else source)
+                assertEquals(source!="peer",dao.note("n")!!.deleted)
+            }
+        } finally { db.close() }
+    }
+
 }

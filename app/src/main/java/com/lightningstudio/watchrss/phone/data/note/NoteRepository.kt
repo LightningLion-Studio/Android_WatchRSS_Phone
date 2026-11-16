@@ -129,7 +129,12 @@ class NoteRepository(
             if (local != null) {
                 val meta = if (metadataOrder(remote, local) > 0) remote else local
                 if (local.markdown == remote.markdown) {
-                    value = if (local.deleted != remote.deleted) { if (local.deleted) local else remote } else meta
+                    // One writer's monotone sequence can explicitly restore its own tombstone.
+                    // Another writer's metadata alone cannot prove that it observed the deletion.
+                    value = if (local.deleted != remote.deleted &&
+                        (local.modifiedBy.isEmpty() || local.modifiedBy != remote.modifiedBy)) {
+                        if (local.deleted) local else remote
+                    } else meta
                     result = MarkdownMergeResult.Merged(local.markdown)
                 } else {
                     // A delete and a divergent edit are a conflict, regardless of wall clock.

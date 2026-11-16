@@ -24,6 +24,7 @@ internal class DeviceSessionRefreshCoordinator(
     private var freshUntil = 0L
     private var retryOwner: String? = null
     private var retryAt = 0L
+    private var retryRequiresNetwork = false
 
     suspend fun <T> withSession(expectedOwner: String, operation: suspend (String?) -> T): T =
         requests.read {
@@ -39,7 +40,7 @@ internal class DeviceSessionRefreshCoordinator(
             if (rejectedToken != null && current.deviceAccessToken != rejectedToken) return@write current
             val now = elapsedMillis()
             if (retryOwner == expectedOwner && now < retryAt) {
-                throw DeviceSessionRefreshBackoffException(retryAt - now)
+                throw DeviceSessionRefreshBackoffException(retryAt - now, retryRequiresNetwork)
             }
             if (rejectedToken == null && lastOwner == expectedOwner && lastToken == current.deviceAccessToken &&
                 now < freshUntil && current.deviceAccessTokenExpiresAt > wallMillis()) {
@@ -58,11 +59,13 @@ internal class DeviceSessionRefreshCoordinator(
                 freshUntil = elapsedMillis() + RECONCILE_INTERVAL_MILLIS
                 retryOwner = null
                 retryAt = 0L
+                retryRequiresNetwork = false
                 next
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
                 val http = error.findAccountHttpException()
                 retryOwner = expectedOwner
+                retryRequiresNetwork = isAccountNetworkFailure(error)
                 retryAt = elapsedMillis() + if (http?.statusCode == 429) {
                     maxOf(RATE_LIMIT_BACKOFF_MILLIS, http.retryAfterMillis ?: 0L)
                 } else FAILED_REFRESH_BACKOFF_MILLIS
@@ -74,7 +77,7 @@ internal class DeviceSessionRefreshCoordinator(
     suspend fun checkBackoff(expectedOwner: String) = requests.read {
         requireOwner(expectedOwner)
         if (retryOwner == expectedOwner && elapsedMillis() < retryAt) {
-            throw DeviceSessionRefreshBackoffException(retryAt - elapsedMillis())
+            throw DeviceSessionRefreshBackoffException(retryAt - elapsedMillis(), retryRequiresNetwork)
         }
     }
 
@@ -89,7 +92,7 @@ internal class DeviceSessionRefreshCoordinator(
     }
 }
 
-internal class DeviceSessionRefreshBackoffException(val retryAfterMillis: Long) : IOException(
+internal class DeviceSessionRefreshBackoffException(val retryAfterMillis: Long, val networkRequired: Boolean = false) : IOException(
     "设备验证请求过于频繁，请在${(retryAfterMillis + 999) / 1000}秒后重试；本机云密钥已保留"
 )
 

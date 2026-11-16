@@ -40,6 +40,16 @@ internal fun isRetryableBluetoothDisconnect(failure: Throwable): Boolean {
     if (failure is CancellationException && failure !is TimeoutCancellationException) return false
     // Protocol rejection/validation is deliberately not matched by its human-readable message.
     if (failure is IllegalArgumentException || isTerminalAccountSyncFailure(failure)) return false
+    // DNS/routing/connect failures establish an IP failure. Socket read timeouts
+    // remain retryable here: RFCOMM deadlines use the same timeout classes. HTTP
+    // timeouts are classified at the account boundary before reaching recovery.
+    val causes = mutableSetOf<Throwable>()
+    var cause: Throwable? = failure
+    while (cause != null && causes.add(cause)) {
+        if (isTerminalAccountSyncFailure(cause) || cause is java.net.UnknownHostException ||
+            cause is java.net.NoRouteToHostException || cause is java.net.ConnectException) return false
+        cause = cause.cause
+    }
     var current: Throwable? = failure
     val seen = mutableSetOf<Throwable>()
     while (current != null && seen.add(current)) {

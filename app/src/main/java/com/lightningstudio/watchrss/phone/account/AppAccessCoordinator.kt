@@ -75,6 +75,25 @@ class AppAccessCoordinator(
     internal suspend fun buildWatchAccountSyncRequest(watch: String, install: String?, name: String?): JSONObject {
         if (!accountRepository.hasUsableSession) throw PhoneLoginRequired()
         val owner = accountRepository.session.value!!.userId
+        // Bluetooth needs no HTTP when both the signed local lease and the peer's
+        // previously issued grant remain valid. The manager verifies the peer root
+        // before this call; it removes the grant if the peer has rotated/revoked it.
+        // Do not wait behind a background HTTP reconciliation. A valid offline
+        // lease remains usable while that unrelated network request is pending.
+        val cachedRequest = run {
+            val cached = store.load()
+            val now = store.trustedNowMillis()
+            if (cached == null || now == null || !LeaseVerifier.verify(
+                    cached.lease, identity.deviceId, environment.appAccessPublicKey, now / 1000
+                )) return@run null
+            val request = accountRepository.cachedBluetoothAccount(watch, now) ?: return@run null
+            if (accountRepository.session.value?.userId != owner || !accountRepository.hasUsableSession) {
+                throw PhoneLoginRequired()
+            }
+            store.recordTrustedTime(now)
+            request
+        }
+        if (cachedRequest != null) return cachedRequest
         val readiness = operationMutex.withLock {
             val result = reconcileLocked()
             if (result != WatchAccountRefreshResult.Ready) return@withLock result
@@ -143,6 +162,10 @@ class AppAccessCoordinator(
 
     private suspend fun handleValidLeaseRefreshFailure(cached: AppAuthorization, error: Throwable): WatchAccountRefreshResult {
         val failure = accountSyncFailureResult(error) // Cancellation always escapes before fallback I/O.
+        // A known server rejection cannot turn back into an offline authorization.
+        if (failure is WatchAccountRefreshResult.AccountUnrecoverable || failure is WatchAccountRefreshResult.DeviceVerificationRequired) {
+            accountRepository.invalidateBluetoothAccounts()
+        }
         if (error.findAccountHttpException()?.statusCode != 403) {
             _state.value = AppAccessState.Authorized(cached.access, offline = true)
             return failure

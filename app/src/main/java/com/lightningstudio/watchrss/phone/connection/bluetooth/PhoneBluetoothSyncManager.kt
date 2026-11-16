@@ -362,12 +362,28 @@ class PhoneBluetoothSyncManager(
         }.getOrThrow()
     }
 
+    /** Read-only state check on the same connection which will receive the account. */
+    private suspend fun prepareAccountGrant(
+        watchDeviceId: String, probe: JSONObject, persistent: Boolean,
+        send: suspend (JSONObject) -> JSONObject
+    ) {
+        val domains = repository.bleDomains
+        val witness = if (domains != null && probe.optJSONObject("account")?.opt("bound") == true &&
+            DomainFastPath.enabled(BleSyncCapabilities.read(probe), persistent, false, LibrarySyncMode.MERGE)) {
+            val window = DomainFastPath(deviceId, watchDeviceId, emptyMap(), emptyMap(), domains.projectionVersions())
+            window.acceptSummary(send(window.summaryRequest()))
+            window.accountGrantWitness(window.remoteAccountRoot)
+        } else null
+        // Missing proof also invalidates the cached grant. An old watch must never
+        // receive credentials it may have independently rotated/revoked.
+        prepareAccountDomain(watchDeviceId, witness)
+    }
+
     internal suspend fun syncAccount(
         device: PhoneBluetoothWatchDevice,
         reusableSession: PhoneSyncSession? = null,
         finishSession: Boolean = true,
-        binding: BleSyncBindingSnapshot? = null,
-        reuseGrant:Boolean=false
+        binding: BleSyncBindingSnapshot? = null
     ): PhoneBluetoothSyncResult {
         val sessionId = BluetoothDebugLog.newSessionId("syncAccount")
         var syncSession = reusableSession ?: client.openPersistentSession(
@@ -392,8 +408,11 @@ class PhoneBluetoothSyncManager(
             )
         )
         val result = runCatching {
-            bindingSnapshot(sessionId,effectiveDevice.address,syncSession,binding)
-            if(!reuseGrant)prepareAccountDomain(watchDeviceId,null)
+            val activeBinding = bindingSnapshot(sessionId,effectiveDevice.address,syncSession,binding)
+            prepareAccountGrant(watchDeviceId, activeBinding.response, syncSession?.isPersistent == true) { request ->
+                exchange(request, deviceAddress = effectiveDevice.address,
+                    sessionId = "$sessionId-account-state", syncSession = syncSession).response
+            }
             val request = try {
                 buildAccountSyncRequest(watchDeviceId, null, effectiveDevice.name.ifBlank { "手表" })
             } catch (failure: CancellationException) {
@@ -1556,6 +1575,7 @@ class PhoneBluetoothSyncManager(
                     requireSuccess(probe)
                     require(BluetoothSyncProtocol.acceptsPersistentSession(probe)) { "手表未支持账号预览会话，请升级手表端" }
                     currentPhoneUserId()?.let { requireWatchSyncBinding(probe, it) }
+                    prepareAccountGrant(probe.getString("deviceId"), probe, true, send)
                     val request = try { buildAccountSyncRequest(probe.getString("deviceId"), null, "手表") }
                     catch (failure: Throwable) {
                         if (failure is CancellationException || isTerminalAccountSyncFailure(failure)) throw failure

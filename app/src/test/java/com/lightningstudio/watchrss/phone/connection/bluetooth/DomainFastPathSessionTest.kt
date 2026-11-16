@@ -86,9 +86,9 @@ class DomainFastPathSessionTest {
     @Test fun unchangedSevenDomainsOnlyExchangeSummaryCommitAndStrictComplete()=runBlocking<Unit> {
         seed();val result=manager.syncAll(device,reusableSession=session())
         assertEquals(0,cloudCalls);assertEquals(0,result.libraryStats?.sent)
-        assertEquals(listOf("syncLibrary:probe","syncAccount:apply","syncDomains:summary","syncDomains:commit","syncSession:complete"),frames.filter{it.optString("action")!="ack"}.map{it.getString("action")+":"+it.getString("phase")})
+        assertEquals(listOf("syncLibrary:probe","syncDomains:summary","syncAccount:apply","syncDomains:summary","syncDomains:commit","syncSession:complete"),frames.filter{it.optString("action")!="ack"}.map{it.getString("action")+":"+it.getString("phase")})
         assertEquals(7,store.receipts("scope","watch").size)
-        assertEquals(5,frames.count{it.optString("action")=="ack"})
+        assertEquals(6,frames.count{it.optString("action")=="ack"})
     }
     @Test fun lostCompleteAppliedAckDoesNotPublishStagedReceipts()=runBlocking<Unit> {
         seed();discardOldReceipts=true;failCompleteAck=true;manager.reconnectDelay={};manager.reconnectSession={_,_->throw IllegalArgumentException("offline fixture")}
@@ -131,7 +131,7 @@ class DomainFastPathSessionTest {
         for(state in listOf(SyncPeerStateEntity("watch",lastProtocolVersion=12,lastFullSyncAt=System.currentTimeMillis()),SyncPeerStateEntity("watch",lastProtocolVersion=14,lastFullSyncAt=System.currentTimeMillis()-BleDomainStore.RECEIPT_MAX_AGE_MS))) {
             frames.clear();db.syncPeerStateDao().upsert(state);seed();stopAtCursor=true;allowAccount=true
             assertTrue(runCatching{manager.syncAll(device,reusableSession=session())}.isFailure)
-            val summary=frames.single {it.optString("action")=="syncDomains"&&it.optString("phase")=="summary"}
+            val summary=frames.single {it.optString("action")=="syncDomains"&&it.optString("phase")=="summary"&&it.getJSONObject("roots").length()>0}
             assertFalse(summary.getJSONObject("roots").has("library"));assertFalse(summary.getJSONObject("known").has("library"))
             assertTrue(frames.any {it.optString("action")=="syncLibrary"&&it.optString("phase")=="cursor"})
         }
@@ -140,7 +140,7 @@ class DomainFastPathSessionTest {
         seed();db.openHelper.writableDatabase.execSQL("UPDATE ble_fast_receipts SET verifiedAt=?",arrayOf(System.currentTimeMillis()-BleDomainStore.RECEIPT_MAX_AGE_MS))
         stopAtCursor=true;allowAccount=true
         assertTrue(runCatching{manager.syncAll(device,reusableSession=session())}.isFailure)
-        assertEquals(0,frames.single{it.optString("action")=="syncDomains"&&it.optString("phase")=="summary"}.getJSONObject("known").length())
+        assertEquals(0,frames.single{it.optString("action")=="syncDomains"&&it.optString("phase")=="summary"&&it.getJSONObject("roots").length()>0}.getJSONObject("known").length())
         assertTrue(frames.any{it.optString("action")=="syncLibrary"&&it.optString("phase")=="cursor"})
         frames.clear();legacyOnly=true
         assertTrue(runCatching{manager.syncAll(device,reusableSession=session())}.isFailure)

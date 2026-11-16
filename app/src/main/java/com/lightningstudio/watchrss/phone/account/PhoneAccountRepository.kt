@@ -281,15 +281,25 @@ class PhoneAccountRepository(
         return token
     }
 
-    private fun bluetoothGrantKey(watch:String)=com.lightningstudio.watchrss.phone.data.ble.BleDomainStore.hash("${environment.backendBaseUrl}\n${session.value?.userId}\n$watch")
-    private suspend fun validBluetoothGrant(watch:String):JSONObject? {
+    private fun bluetoothGrantKey(watch:String, owner:String?=session.value?.userId)=com.lightningstudio.watchrss.phone.data.ble.BleDomainStore.hash("${environment.backendBaseUrl}\n$owner\n$watch")
+    private suspend fun validBluetoothGrant(watch:String, nowMillis:Long=System.currentTimeMillis()):JSONObject? {
         val current=session.value?:return null
+        if (!hasUsableSession) return null
+        if (current.expiresAtMillis > 0 && current.expiresAtMillis <= nowMillis) return null
         return sessionStore.bluetoothGrant(bluetoothGrantKey(watch))?.takeIf {
             val a=it.optJSONObject("account")
             a?.optString("userId")==current.userId && a.optString("phoneMasked")==current.phoneMasked &&
-                a.optLong("accessTokenExpiresAt")>System.currentTimeMillis()+300_000
+                a.optString("backendBaseUrl")==environment.backendBaseUrl &&
+                a.optString("watchAccessToken").isNotBlank() &&
+                a.optLong("accessTokenExpiresAt")>maxOf(nowMillis,System.currentTimeMillis())+300_000 &&
+                session.value == current && hasUsableSession
         }
     }
+
+    internal suspend fun cachedBluetoothAccount(watch:String, nowMillis:Long):JSONObject? =
+        validBluetoothGrant(watch, nowMillis)
+
+    internal suspend fun invalidateBluetoothAccounts() = sessionStore.clearBluetoothGrants()
     // A cached token may only be replayed while the peer still has the state acknowledged with it.
     // A watch can refresh/revoke its own credentials independently of this phone.
     internal suspend fun prepareBluetoothAccount(watch:String,remoteRoot:String?) {
@@ -355,8 +365,9 @@ class PhoneAccountRepository(
                 put("sampleRate", 1.0)
             })
         }
-        check(this.session.value?.userId==session.userId){"手机账号已变化，请重新同步"}
-        sessionStore.saveBluetoothGrant(bluetoothGrantKey(watchDeviceId),request)
+        check(this.session.value == session && hasUsableSession){"手机账号已变化，请重新同步"}
+        sessionStore.saveBluetoothGrant(bluetoothGrantKey(watchDeviceId, session.userId),request)
+        check(this.session.value == session && hasUsableSession){"手机账号已变化，请重新同步"}
         return request
     }
 }

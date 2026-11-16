@@ -13,8 +13,27 @@ internal sealed interface WatchAccountRefreshResult {
 
 internal class PhoneDeviceVerificationRequired(cause: Throwable? = null) :
     IllegalStateException("手机设备身份需要验证，请前往账号页面完成验证", cause)
-internal class PhoneAccountTemporarilyUnavailable(cause: Throwable, val retryAfterMillis: Long? = null) :
-    IllegalStateException("账号服务暂时不可用，请稍后重试", cause)
+internal open class PhoneAccountTemporarilyUnavailable(
+    cause: Throwable, val retryAfterMillis: Long? = null,
+    message: String = "账号服务暂时不可用，请稍后重试"
+) : IllegalStateException(message, cause)
+
+/** An HTTP transport failure is never a failure of the phone/watch transport. */
+internal class PhoneAccountNetworkRequired(cause: Throwable, retryAfterMillis: Long? = null) :
+    PhoneAccountTemporarilyUnavailable(cause, retryAfterMillis, message = "需要联网完成账号验证")
+
+internal fun isAccountNetworkFailure(error: Throwable): Boolean {
+    val seen = mutableSetOf<Throwable>()
+    var current: Throwable? = error
+    var hasIoFailure = false
+    while (current != null && seen.add(current)) {
+        if (current is DeviceSessionRefreshBackoffException) return current.networkRequired
+        if (current is PhoneAccountHttpException) return false
+        if (current is java.io.IOException) hasIoFailure = true
+        current = current.cause
+    }
+    return hasIoFailure
+}
 
 internal fun accountSyncFailureResult(error: Throwable): WatchAccountRefreshResult {
     if (error is CancellationException) throw error
@@ -32,7 +51,10 @@ internal fun WatchAccountRefreshResult.requireReady() {
         WatchAccountRefreshResult.Ready -> Unit
         is WatchAccountRefreshResult.AccountUnrecoverable -> throw PhoneLoginRequired(cause)
         is WatchAccountRefreshResult.DeviceVerificationRequired -> throw PhoneDeviceVerificationRequired(cause)
-        is WatchAccountRefreshResult.TemporaryFailure -> throw PhoneAccountTemporarilyUnavailable(cause, retryAfterMillis)
+        is WatchAccountRefreshResult.TemporaryFailure -> {
+            if (isAccountNetworkFailure(cause)) throw PhoneAccountNetworkRequired(cause, retryAfterMillis)
+            throw PhoneAccountTemporarilyUnavailable(cause, retryAfterMillis)
+        }
     }
 }
 

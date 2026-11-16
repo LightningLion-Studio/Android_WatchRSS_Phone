@@ -88,4 +88,29 @@ class NoteMergeReviewTest {
             assertTrue("RVM-04: metadata-only live peer resurrected an unchanged deleted body", dao.note("n")!!.deleted)
         } finally { db.close() }
     }
+    @Test fun RVM03_capturedNoteRejectsAnABAReturnToTheSameBody() = runBlocking {
+        val db = database()
+        try {
+            val dao=db.noteDao();val repo=NoteRepository(dao,"phone"){1000}
+            val a=repo.save("n","T","a");repo.save("n","T","b")
+            repo.applyRemote(peer(a,"c"),"peer")
+            val conflict=dao.conflictsFor("n").single();val captured=dao.note("n")!!
+            repo.save("n","T","later");val latest=repo.save("n","T","b")
+            val failure=runCatching { repo.resolveConflict(conflict,"c",captured) }.exceptionOrNull()
+            assertEquals("notes_stale",failure?.message);assertEquals(latest,dao.note("n"))
+            assertEquals(0L,dao.conflictsFor("n").single().resolvedAt)
+        } finally { db.close() }
+    }
+    @Test fun RVM08_bothCycleVersionsRemainRecoverable() = runBlocking {
+        val db=database()
+        try {
+            val dao=db.noteDao();val repo=NoteRepository(dao,"phone"){100}
+            repo.save("n","T","a");val b=repo.save("n","T","b")
+            repo.applyRemote(peer(b,"a","b"),"peer")
+            repo.applyRemote(b,"phone")
+            val bodies=dao.conflictsFor("n").flatMap { listOf(it.localMarkdown,it.remoteMarkdown) }
+            assertTrue(bodies.containsAll(listOf("a","b")));assertEquals("a",dao.note("n")!!.markdown)
+        } finally { db.close() }
+    }
+
 }

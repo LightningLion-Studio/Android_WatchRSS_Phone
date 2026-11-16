@@ -139,7 +139,7 @@ private fun NotesScreen(
     val conflicts by repository.observeConflicts().collectAsStateWithLifecycle(emptyList())
     var selected by remember { mutableStateOf<NoteEntity?>(null) }
     var creating by remember { mutableStateOf(false) }
-    var selectedConflict by remember { mutableStateOf<NoteConflictEntity?>(null) }
+    var selectedConflict by remember { mutableStateOf<Pair<NoteConflictEntity, NoteEntity>?>(null) }
     var movingNote by remember { mutableStateOf<NoteEntity?>(null) }
     var deletingNote by remember { mutableStateOf<NoteEntity?>(null) }
     var editorFullscreen by remember { mutableStateOf(false) }
@@ -349,7 +349,12 @@ private fun NotesScreen(
                 onMove = { movingNote = it },
                 onDelete = { deletingNote = it },
                 onNew = openNewNote,
-                onOpenConflict = { selectedConflict = conflicts.firstOrNull() },
+                onOpenConflict = {
+                    val conflict = conflicts.firstOrNull()
+                    if (conflict != null) scope.launch {
+                        repository.note(conflict.noteId)?.let { selectedConflict = conflict to it }
+                    }
+                },
                 onImportDirectory = { directoryImport.launch(null) },
                 onImportMarkdown = {
                     markdownImport.launch(arrayOf("text/markdown", "text/x-markdown", "text/plain", "application/octet-stream", "*/*"))
@@ -419,14 +424,16 @@ private fun NotesScreen(
             editorPane(true)
         }
     }
-    selectedConflict?.let { conflict ->
+    selectedConflict?.let { (conflict, capturedNote) ->
         NoteConflictDialog(
             conflict = conflict,
             onResolve = { markdown ->
                 scope.launch {
-                    repository.resolveConflict(conflict, markdown)
-                    runCatching { syncCloud() }
-                    selectedConflict = null
+                    runCatching { repository.resolveConflict(conflict, markdown, capturedNote) }
+                        .onSuccess { runCatching { syncCloud() }; selectedConflict = null }
+                        .onFailure {
+                            Toast.makeText(context, if (it.message == "notes_stale") "笔记已更新，请关闭冲突窗口后重新查看" else "解决冲突失败：${it.message}", Toast.LENGTH_LONG).show()
+                        }
                 }
             },
             onDismiss = { selectedConflict = null }

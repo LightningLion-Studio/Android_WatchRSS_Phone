@@ -41,12 +41,15 @@ class NoteMergeReviewV2Test {
             val record = JSONObject().put("meta", pair.meta).put("state", pair.state).put("value", value)
             val sql = db.openHelper.writableDatabase
             val apply = SyncV2PhoneApply(sql)
-            val effective = apply.effective(emptyList(), listOf(record), false)
+            // Cover first import, explicit replacement, and the final SQL entry point.
+            for (mode in listOf("first", "replace", "direct")) {
+            val effective = if(mode=="direct") listOf(record) else apply.effective(emptyList(), listOf(record), mode=="replace")
             sql.beginTransaction()
             try { apply.apply(emptyList(), effective); sql.setTransactionSuccessful() } finally { sql.endTransaction() }
             val stored = db.noteDao().conflictsFor("n")
             assertTrue("RVM-07: v2 import reopened an incident already resolved under its new alias", stored.all { it.resolvedAt > 0 })
             assertEquals(listOf(old), stored.map { it.conflictId })
+            }
         } finally { db.close() }
     }
 }

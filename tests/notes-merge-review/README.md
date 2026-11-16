@@ -13,3 +13,11 @@ flock /tmp/wrss-heavy-Android_WatchRSS_Phone.wt-notes-merge-review.lock capmem 8
 ```
 
 Expected review-snapshot result: 14 tests, 8 passing, 6 failing. These are behavioral failures in production Room/repository code, not screenshot tests. The report and corpus are outside version control at `.codex-tmp/cloud-v2/{reports,evidence}/T-REVIEW-NOTES-MERGE-FIX*` under OPPO_Develop. No product source is changed.
+
+T-NOTES-MERGE-FIX r2 retains every review assertion. Added coverage rejects an ABA
+return to the same text using the captured NoteEntity, preserves both cyclic
+ancestry versions, and exercises first import, explicit replacement and direct
+SQL apply with a resolved alias. The phone UI captures the note when opening the
+conflict dialog and passes it to resolveConflict; a stale operation reports an
+error without dismissing the user's draft. A caller without a captured row can
+only resolve while the current body still matches the conflict's local body.

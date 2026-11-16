@@ -59,10 +59,12 @@ internal object SyncV2NoteConflicts {
         }
         return validate(JSONObject().put("version", 1).put("records", JSONArray(tuples.values.sortedBy { it.getString("conflictId") })), noteId)
     }
-    fun openIds(value: JSONObject, noteId: String): List<String> = validate(value, noteId).getJSONArray("records").let { a ->
+    fun normalize(value: JSONObject, noteId: String): JSONObject =
+        merge(value, JSONObject().put("version", 1).put("records", JSONArray()), noteId)
+    fun openIds(value: JSONObject, noteId: String): List<String> = normalize(value, noteId).getJSONArray("records").let { a ->
         (0 until a.length()).map { a.getJSONObject(it) }.filter { it.getLong("resolvedAt") == 0L }.map { it.getString("conflictId") }
     }
-    fun latest(value: JSONObject, noteId: String): String = validate(value, noteId).getJSONArray("records").let { a ->
+    fun latest(value: JSONObject, noteId: String): String = normalize(value, noteId).getJSONArray("records").let { a ->
         (0 until a.length()).map { a.getJSONObject(it) }.filter { it.getLong("resolvedAt") == 0L }
             .sortedWith(compareByDescending<JSONObject> { it.getLong("createdAt") }.thenBy { it.getString("conflictId") })
             .firstOrNull()?.getString("conflictId") ?: SyncV2Codec.fail("notes_stale")
@@ -102,7 +104,7 @@ internal object SyncV2NoteConflicts {
         if (copy.getString("entityKey") != entity) SyncV2Codec.fail("invalid_schema")
         if(p.has("noteConflicts") || feature in SyncV2Wire.features(copy.getJSONArray("requiredFeatures")))SyncV2Codec.fail("invalid_schema")
         if(p.has("segmentOf"))SyncV2Codec.fail("invalid_schema")
-        p.put("noteConflicts", validate(conflicts, noteId))
+        p.put("noteConflicts", normalize(conflicts, noteId))
         copy.put("requiredFeatures", JSONArray((SyncV2Wire.features(copy.getJSONArray("requiredFeatures")) + feature).distinct().sorted()))
         measureGuard(copy)
         return copy
@@ -115,7 +117,7 @@ internal object SyncV2NoteConflicts {
         if ((feature in features) != p.has("noteConflicts")) SyncV2Codec.fail("invalid_schema")
         measureGuard(state)
         if (features.any { it !in supported }) SyncV2Codec.fail("unsupported_feature")
-        return if (feature in features) validate(p.getJSONObject("noteConflicts"), noteId) else null
+        return if (feature in features) normalize(p.getJSONObject("noteConflicts"), noteId) else null
     }
     /** Mandatory guard for the single planner: scan complete snapshots, including untouched notes. */
     fun plannerSets(base: JSONObject, local: JSONObject, cloud: JSONObject, generations: JSONObject?): Map<String, JSONObject> {
@@ -125,7 +127,7 @@ internal object SyncV2NoteConflicts {
             val row = snapshot.getJSONObject(id)
             if (!row.has("noteConflicts")) continue
             val identity = SyncV2Wire.string(row, "identity")
-            val set = validate(row.getJSONObject("noteConflicts"), identity)
+            val set = normalize(row.getJSONObject("noteConflicts"), identity)
             if (openIds(set, identity).isNotEmpty()) SyncV2Codec.fail("note_conflict")
             if (set.getJSONArray("records").length() != 0) nonempty = true
             val old = known[id]

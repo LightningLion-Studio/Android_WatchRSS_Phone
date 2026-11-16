@@ -97,10 +97,11 @@ class NoteRepository(
         return maxOf(clock, previous + 1)
     }
 
-    suspend fun resolveConflict(conflict: NoteConflictEntity, markdown: String): NoteEntity {
+    suspend fun resolveConflict(conflict: NoteConflictEntity, markdown: String, expected: NoteEntity? = null): NoteEntity {
         val local = dao.note(conflict.noteId) ?: error("冲突笔记不存在")
         val known = dao.conflictsFor(local.noteId).find { it.conflictId == conflict.conflictId }
-        check(known == conflict && known.resolvedAt == 0L) { "notes_stale" }
+        check(known == conflict && known.resolvedAt == 0L && local.markdown == conflict.localMarkdown &&
+            (expected == null || expected == local)) { "notes_stale" }
         require(local.title.isNotBlank() || MarkdownNoteCodec.toPlainText(markdown).isNotBlank()) { "笔记不能为空" }
         val body = markdown.replace("\r\n", "\n").replace('\r', '\n')
         val resolved = local.copy(markdown = body, plainText = MarkdownNoteCodec.toPlainText(body),
@@ -118,9 +119,9 @@ class NoteRepository(
         repeat(8) {
             val local = dao.note(remote.noteId)
             if (local == remote) return MarkdownMergeResult.Merged(remote.markdown)
-            if (local != null && dao.conflictsFor(local.noteId).any {
+            if (local != null && !remote.deleted && local.markdown != remote.markdown && dao.conflictsFor(local.noteId).any {
                 it.resolvedAt > 0 && it.remoteMarkdown == remote.markdown &&
-                    it.remoteDeviceId == remoteDeviceId && it.baseMarkdown == remote.baseMarkdown
+                    it.remoteDeviceId == remoteDeviceId
             }) return MarkdownMergeResult.Merged(local.markdown)
             var value: NoteEntity? = remote
             var conflict: NoteConflictEntity? = null
@@ -128,7 +129,7 @@ class NoteRepository(
             if (local != null) {
                 val meta = if (metadataOrder(remote, local) > 0) remote else local
                 if (local.markdown == remote.markdown) {
-                    value = meta
+                    value = if (local.deleted != remote.deleted) { if (local.deleted) local else remote } else meta
                     result = MarkdownMergeResult.Merged(local.markdown)
                 } else {
                     // A delete and a divergent edit are a conflict, regardless of wall clock.
@@ -136,9 +137,10 @@ class NoteRepository(
                     val restore = local.deleted && !remote.deleted && remote.baseMarkdown == local.markdown && remote.updatedAt > local.updatedAt
                     val localRestore = remote.deleted && !local.deleted && local.baseMarkdown == remote.markdown && local.updatedAt > remote.updatedAt
                     val sequentialDelete = remote.deleted && !local.deleted && remote.baseMarkdown == local.markdown && local.markdown == local.baseMarkdown
+                    val cycle = !local.deleted && !remote.deleted && remote.baseMarkdown == local.markdown && local.baseMarkdown == remote.markdown
                     val deletionConflict = local.deleted != remote.deleted && !restore && !localRestore && !sequentialDelete
                     result = when {
-                        deletionConflict -> MarkdownMergeResult.Conflict
+                        deletionConflict || cycle -> MarkdownMergeResult.Conflict
                         restore -> MarkdownMergeResult.Merged(remote.markdown)
                         localRestore -> MarkdownMergeResult.Merged(local.markdown)
                         remote.baseMarkdown == local.markdown -> MarkdownMergeResult.Merged(remote.markdown)
@@ -158,7 +160,8 @@ class NoteRepository(
                         if (body == remote.markdown && meta !== remote || body == local.markdown && meta !== local)
                             value = value.copy(updatedAt = nextTime(local, peer = remote), modifiedBy = deviceId)
                     } else {
-                        value = null
+                        // Ambiguous a -> b -> a ancestry retains both saved bodies.
+                        value = if (cycle) meta else null
                         conflict = NoteConflictEntity(noteConflictId(local.noteId, local.baseMarkdown, local.markdown, remote.markdown, remoteDeviceId),
                             local.noteId, local.baseMarkdown, local.markdown, remote.markdown, remoteDeviceId, now())
                     }

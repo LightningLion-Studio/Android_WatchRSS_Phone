@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.connection.guided
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -146,6 +147,8 @@ class PhoneGuidedSessionManager(
     }
 
     private fun createShortHotspotConfig(): ShortHotspotConfig? {
+        // Builder is a public SDK API only from 36. Older systems keep the platform config.
+        if (Build.VERSION.SDK_INT < 36) return null
         val ssid = "W${randomCode(SHORT_SSID_SUFFIX_LENGTH)}"
         val passphrase = randomCode(SHORT_PASSPHRASE_LENGTH)
         return runCatching {
@@ -168,6 +171,9 @@ class PhoneGuidedSessionManager(
         }.getOrNull()
     }
 
+    // Dormant legacy transport: do not add/request hotspot permissions. runCatching
+    // below returns SecurityException to the caller when the platform rejects access.
+    @SuppressLint("MissingPermission")
     private suspend fun startHotspotWithConfigInternal(
         config: SoftApConfiguration
     ): WifiManager.LocalOnlyHotspotReservation {
@@ -219,6 +225,8 @@ class PhoneGuidedSessionManager(
         reservation = null
     }
 
+    // This legacy path declares no new permissions and reports a platform denial.
+    @SuppressLint("MissingPermission")
     private suspend fun startHotspotInternal(): WifiManager.LocalOnlyHotspotReservation {
         return suspendCancellableCoroutine { continuation ->
             val callback = object : WifiManager.LocalOnlyHotspotCallback() {
@@ -237,10 +245,14 @@ class PhoneGuidedSessionManager(
                 }
             }
 
-            wifiManager.startLocalOnlyHotspot(
-                callback,
-                Handler(Looper.getMainLooper())
-            )
+            try {
+                wifiManager.startLocalOnlyHotspot(
+                    callback,
+                    Handler(Looper.getMainLooper())
+                )
+            } catch (failure: SecurityException) {
+                if (!continuation.isCompleted) continuation.resumeWithException(failure)
+            }
         }
     }
 

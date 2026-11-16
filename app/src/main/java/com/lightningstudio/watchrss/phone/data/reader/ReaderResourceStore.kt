@@ -608,8 +608,9 @@ class ReaderResourceStore(context: Context) {
                     height = info.size.height
                     val colorSpace = info.colorSpace
                     wideColor = wideColor || colorSpace?.isWideGamut == true
-                    hdr = colorSpace == ColorSpace.get(ColorSpace.Named.BT2020_HLG) ||
-                        colorSpace == ColorSpace.get(ColorSpace.Named.BT2020_PQ)
+                    hdr = Build.VERSION.SDK_INT >= 34 &&
+                        (colorSpace == ColorSpace.get(ColorSpace.Named.BT2020_HLG) ||
+                            colorSpace == ColorSpace.get(ColorSpace.Named.BT2020_PQ))
                     val longest = maxOf(width, height).coerceAtLeast(1)
                     if (longest > INSPECTION_MAX_DIMENSION) {
                         val scale = INSPECTION_MAX_DIMENSION.toFloat() / longest

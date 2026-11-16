@@ -14,19 +14,23 @@ import java.nio.file.*
 import kotlinx.coroutines.runBlocking
 
 private class Skipped: RuntimeException()
-private class Store {
+private class Store(device:String="phone") {
+ val receipts=mutableSetOf<String>()
  val rows=linkedMapOf<String,NoteEntity>();val conflicts=linkedMapOf<String,NoteConflictEntity>();var clock=100L
  var beforeWrite:(()->Unit)?=null
  val dao=Proxy.newProxyInstance(NoteDao::class.java.classLoader,arrayOf(NoteDao::class.java)){_,m,a->when(m.name){
   "note"->rows[a!![0]]
+  "hasRemoteReceipt"->a!![0] in receipts
   "conflictsFor"->conflicts.values.filter{it.noteId==a!![0]}
-  "commitNote"->{
+  "commitNote", "commitRemoteNote"->{
    beforeWrite?.also{beforeWrite=null;it()}
    val id=a!![0] as String
-   if(rows[id]!=a[1])false else {
+   if(rows[id]!=a[1] || m.name=="commitNote" && a[4]!=null &&
+       (a[3]!=conflicts[a[4]] || (a[3] as NoteConflictEntity).resolvedAt!=0L || (a[1] as NoteEntity).deleted))false else {
     (a[3] as NoteConflictEntity?)?.let{c->if(conflicts.values.none{sameConflictContent(it,c)})conflicts[c.conflictId]=c}
     (a[2] as NoteEntity?)?.let{rows[id]=it}
-    (a[4] as String?)?.let{conflicts[it]=conflicts.getValue(it).copy(resolvedAt=a[5] as Long)}
+    if(m.name=="commitRemoteNote")receipts.add((a[4] as NoteRemoteReceiptEntity).snapshotHash)
+    else (a[4] as String?)?.let{conflicts[it]=conflicts.getValue(it).copy(resolvedAt=a[5] as Long)}
     true
    }
   }
@@ -35,7 +39,7 @@ private class Store {
   "resolveConflict"->{val id=a!![0] as String;conflicts[id]=conflicts.getValue(id).copy(resolvedAt=a[1] as Long);Unit}
   else->error("Unexpected DAO ${m.name}")
  }} as NoteDao
- val repo=NoteRepository(dao,"phone",{clock++})
+ val repo=NoteRepository(dao,device,{clock++})
  suspend fun seed(body:String="a")=repo.save("n","Manual title",body)
 }
 private fun changed(n:NoteEntity,text:String,time:Long)=n.copy(markdown=text,contentHash=MarkdownNoteCodec.sha256(text),plainText=text,updatedAt=time,modifiedBy="peer")
@@ -69,6 +73,36 @@ fun main(args:Array<String>)=runBlocking {
  for(t in listOf(listOf("n","a","x\u0000y","z","peer"),listOf("😀","a:b","x","\u0000z","")))ids.put(org.json.JSONArray(t+noteConflictId(t[0],t[1],t[2],t[3],t[4])))
  Files.writeString(out.resolve("merge-matrix.json"),org.json.JSONObject().put("cases",matrix).put("identities",ids).toString())
  suspend fun case(id:String,block:suspend()->Unit){if(System.getenv("NOTES_ADVERSARIAL_ALL")==null && Regex("^NA-(03|11|15|18|19) ").containsMatchIn(id)){println("SKIP $id (outside T-NOTES-MERGE-FIX)");skip++;return};try{block();println("PASS $id");pass++}catch(t:Throwable){if(t is Skipped){println("SKIP $id");skip++}else{println("FAIL $id ${t.message?.take(180)}");fail++}}}
+ case("NA-CONTROL conservative repository vectors") {
+  val fixture=System.getenv("NOTES_REPOSITORY_VECTORS") ?: throw Skipped()
+  val vectors=org.json.JSONObject(Files.readString(Path.of(fixture))).getJSONArray("apply")
+  fun decode(row:org.json.JSONObject)=NoteCloudStateCodec.decode(org.json.JSONObject().put("format","watchrss-notes").put("version",1).put("notes",org.json.JSONArray().put(row)).toString().toByteArray()).single()
+  for(i in 0 until vectors.length()) {
+   val v=vectors.getJSONObject(i);val f=Store("mini");f.clock=999
+   if(!v.isNull("local")){val n=decode(v.getJSONObject("local"));f.rows[n.noteId]=n}
+   val remote=decode(v.getJSONObject("remote"));f.repo.applyRemote(remote,remote.modifiedBy)
+   val actual=org.json.JSONObject(String(NoteCloudStateCodec.encode(f.rows.values.toList()))).getJSONArray("notes").getJSONObject(0)
+   check(actual.similar(v.getJSONObject("expected").getJSONObject("note"))){"repository vector ${v.getString("name")}: $actual"}
+   val conflicts=org.json.JSONArray()
+   for(c in f.conflicts.values)conflicts.put(org.json.JSONObject().put("conflictId",c.conflictId).put("noteId",c.noteId).put("baseMarkdown",c.baseMarkdown).put("localMarkdown",c.localMarkdown).put("remoteMarkdown",c.remoteMarkdown).put("remoteDeviceId",c.remoteDeviceId).put("createdAt",c.createdAt))
+   check(conflicts.similar(v.getJSONObject("expected").getJSONArray("conflicts"))){"conflict vector ${v.getString("name")}: $conflicts"}
+  }
+ }
+ case("NA-CONTROL repository direction matrix") {
+  val seed=Store().seed()
+  val rows=listOf("a" to "a","b" to "a","a" to "b","c" to "z","A\nb" to "a\nb","a\nB" to "a\nb").mapIndexed {i,(body,base)->
+   changed(seed,body,200L+i).copy(baseMarkdown=base,baseContentHash=MarkdownNoteCodec.sha256(base),folderId="f$i",pinned=i%2==0)
+  }.let { it + it[0].copy(deleted=true,deletedAt=300) + it[1].copy(deleted=true,deletedAt=301) + it[2].copy(modifiedBy="") }
+  val vectors=org.json.JSONArray()
+  fun wire(n:NoteEntity)=org.json.JSONObject(String(NoteCloudStateCodec.encode(listOf(n)))).getJSONArray("notes").getJSONObject(0)
+  for(local in rows)for(remote in rows) {
+   val f=Store();f.clock=999;f.rows[local.noteId]=local;f.repo.applyRemote(remote,remote.modifiedBy)
+   val n=f.rows.getValue(local.noteId)
+   vectors.put(org.json.JSONObject().put("local",wire(local)).put("remote",wire(remote)).put("expected",org.json.JSONObject()
+    .put("markdown",n.markdown).put("deleted",n.deleted).put("title",n.title).put("folder",n.folderId ?: org.json.JSONObject.NULL).put("pinned",n.pinned).put("conflict",f.conflicts.isNotEmpty())))
+  }
+  Files.writeString(out.resolve("repository-matrix.json"),vectors.toString())
+ }
  case("NA-01 insertion at replacement start must retain inserted text"){
   val r=MarkdownThreeWayMerge.merge("a","x\na","b")
   check(r==MarkdownMergeResult.Conflict||r==MarkdownMergeResult.Merged("x\nb")){"actual=$r"}

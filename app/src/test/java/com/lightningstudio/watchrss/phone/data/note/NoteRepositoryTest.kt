@@ -83,6 +83,11 @@ class NoteRepositoryTest {
     private class FakeNoteDao : NoteDao {
         val notes = linkedMapOf<String, NoteEntity>()
         val assets = linkedMapOf<String, NoteAssetEntity>()
+        private val receipts = mutableSetOf<String>()
+        override suspend fun hasRemoteReceipt(hash: String) = hash in receipts
+        override suspend fun insertRemoteReceipt(receipt: NoteRemoteReceiptEntity) { receipts.add(receipt.snapshotHash) }
+        override suspend fun clearRemoteReceipts() { receipts.clear() }
+        override suspend fun allConflicts() = emptyList<NoteConflictEntity>()
         override suspend fun conflictsFor(noteId: String) = emptyList<NoteConflictEntity>()
         override suspend fun hasAny() = notes.isNotEmpty()
         private val noteFlow = MutableStateFlow<List<NoteEntity>>(emptyList())

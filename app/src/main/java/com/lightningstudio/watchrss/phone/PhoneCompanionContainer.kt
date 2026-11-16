@@ -75,7 +75,8 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_15_16,
             PhoneCompanionDatabase.MIGRATION_16_17,
             PhoneCompanionDatabase.MIGRATION_17_18,
-            PhoneCompanionDatabase.MIGRATION_18_19
+            PhoneCompanionDatabase.MIGRATION_18_19,
+            PhoneCompanionDatabase.MIGRATION_19_20
         )
             .addCallback(PhoneCompanionDatabase.ARTICLE_PROVENANCE_CALLBACK)
             .build()

@@ -56,7 +56,7 @@ class CliSingleTextBookTest {
         val seq=db.syncChangeLogDao().maxSeq();val hash=store.packageHash(id)
         store=ImportedBookStore(db,File(root,"books"),content,"phone")
         assertEquals(0,store.receivePackage(id,file));assertEquals(seq,db.syncChangeLogDao().maxSeq());assertEquals(hash,store.packageHash(id))
-        assertEquals(19,db.openHelper.readableDatabase.version);assertEquals(1,db.bookDao().all().size)
+        assertEquals(20,db.openHelper.readableDatabase.version);assertEquals(1,db.bookDao().all().size)
     }
     @Test fun largeCliTxtIsReceivedInChunksAndReadsBackThroughTheActualChunkedReader()=runBlocking<Unit> {
         val f=fixture();val text="合成🙂原文\n".repeat(25000);val c=f.getJSONObject("chapter").put("contentText",text)

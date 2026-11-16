@@ -1,6 +1,8 @@
 package com.lightningstudio.watchrss.phone.data.note
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.emitAll
 import java.util.UUID
 
 class NoteRepository(
@@ -12,7 +14,10 @@ class NoteRepository(
     suspend fun hasAny(): Boolean = dao.hasAny()
     fun observeNotes(): Flow<List<NoteEntity>> = dao.observeNotes()
     fun observeFolders(): Flow<List<NoteFolderEntity>> = dao.observeFolders()
-    fun observeConflicts(): Flow<List<NoteConflictEntity>> = dao.observeUnresolvedConflicts()
+    fun observeConflicts(): Flow<List<NoteConflictEntity>> = flow {
+        dao.normalizeConflicts()
+        emitAll(dao.observeUnresolvedConflicts())
+    }
     suspend fun allNotes(): List<NoteEntity> = dao.allNotes()
     suspend fun note(noteId:String):NoteEntity? = dao.note(noteId)
     suspend fun assets(noteId: String): List<NoteAssetEntity> = dao.assets(noteId)
@@ -100,14 +105,14 @@ class NoteRepository(
     suspend fun resolveConflict(conflict: NoteConflictEntity, markdown: String, expected: NoteEntity? = null): NoteEntity {
         val local = dao.note(conflict.noteId) ?: error("冲突笔记不存在")
         val known = dao.conflictsFor(local.noteId).find { it.conflictId == conflict.conflictId }
-        check(known == conflict && known.resolvedAt == 0L && local.markdown == conflict.localMarkdown &&
-            (expected == null || expected == local)) { "notes_stale" }
+        check(known == conflict && known.resolvedAt == 0L && !local.deleted &&
+            (if (expected == null) local.markdown == conflict.localMarkdown else expected == local)) { "notes_stale" }
         require(local.title.isNotBlank() || MarkdownNoteCodec.toPlainText(markdown).isNotBlank()) { "笔记不能为空" }
         val body = markdown.replace("\r\n", "\n").replace('\r', '\n')
         val resolved = local.copy(markdown = body, plainText = MarkdownNoteCodec.toPlainText(body),
             contentHash = MarkdownNoteCodec.sha256(body), baseMarkdown = body, baseContentHash = MarkdownNoteCodec.sha256(body),
             updatedAt = nextTime(local), modifiedBy = deviceId, deleted = false, deletedAt = 0L)
-        check(dao.commitNote(local.noteId, local, resolved, resolvedId = conflict.conflictId, resolvedAt = maxOf(1L, now()))) { "notes_stale" }
+        check(dao.commitNote(local.noteId, local, resolved, conflict = conflict, resolvedId = conflict.conflictId, resolvedAt = maxOf(1L, now()))) { "notes_stale" }
         return resolved
     }
 
@@ -116,40 +121,31 @@ class NoteRepository(
         { it.folderId != null }, { it.folderId.orEmpty() }, { it.pinned }, { it.createdAt }, { it.baseContentHash }, { it.baseMarkdown })
 
     suspend fun applyRemote(remote: NoteEntity, remoteDeviceId: String): MarkdownMergeResult {
+        val receipt = NoteRemoteReceiptEntity(noteRemoteSnapshotHash(remote, remoteDeviceId), remote.noteId)
         repeat(8) {
             val local = dao.note(remote.noteId)
-            if (local == remote) return MarkdownMergeResult.Merged(remote.markdown)
-            if (local != null && !remote.deleted && local.markdown != remote.markdown && dao.conflictsFor(local.noteId).any {
-                it.resolvedAt > 0 && it.remoteMarkdown == remote.markdown &&
-                    it.remoteDeviceId == remoteDeviceId
-            }) return MarkdownMergeResult.Merged(local.markdown)
+            if (local != null && dao.hasRemoteReceipt(receipt.snapshotHash)) return MarkdownMergeResult.Merged(local?.markdown ?: remote.markdown)
+            if (local == remote) {
+                if (dao.commitRemoteNote(remote.noteId, local, null, null, receipt)) return MarkdownMergeResult.Merged(remote.markdown)
+                return@repeat
+            }
             var value: NoteEntity? = remote
             var conflict: NoteConflictEntity? = null
             var result: MarkdownMergeResult = MarkdownMergeResult.Merged(remote.markdown)
             if (local != null) {
                 val meta = if (metadataOrder(remote, local) > 0) remote else local
-                if (local.markdown == remote.markdown) {
-                    // One writer's monotone sequence can explicitly restore its own tombstone.
-                    // Another writer's metadata alone cannot prove that it observed the deletion.
-                    value = if (local.deleted != remote.deleted &&
-                        (local.modifiedBy.isEmpty() || local.modifiedBy != remote.modifiedBy)) {
-                        if (local.deleted) local else remote
-                    } else meta
+                if (local.markdown == remote.markdown && local.deleted == remote.deleted) {
+                    value = meta
                     result = MarkdownMergeResult.Merged(local.markdown)
                 } else {
-                    // A delete and a divergent edit are a conflict, regardless of wall clock.
-                    // An explicit restore based on the tombstone is a sequential edit.
-                    val restore = local.deleted && !remote.deleted && remote.baseMarkdown == local.markdown && remote.updatedAt > local.updatedAt
-                    val localRestore = remote.deleted && !local.deleted && local.baseMarkdown == remote.markdown && local.updatedAt > remote.updatedAt
-                    val sequentialDelete = remote.deleted && !local.deleted && remote.baseMarkdown == local.markdown && local.markdown == local.baseMarkdown
-                    val cycle = !local.deleted && !remote.deleted && remote.baseMarkdown == local.markdown && local.baseMarkdown == remote.markdown
-                    val deletionConflict = local.deleted != remote.deleted && !restore && !localRestore && !sequentialDelete
+                    val forward = remote.baseMarkdown == local.markdown
+                    val backward = local.baseMarkdown == remote.markdown
+                    val known = local.modifiedBy.isNotEmpty() && remote.modifiedBy.isNotEmpty()
                     result = when {
-                        deletionConflict || cycle -> MarkdownMergeResult.Conflict
-                        restore -> MarkdownMergeResult.Merged(remote.markdown)
-                        localRestore -> MarkdownMergeResult.Merged(local.markdown)
-                        remote.baseMarkdown == local.markdown -> MarkdownMergeResult.Merged(remote.markdown)
-                        local.baseMarkdown == remote.markdown -> MarkdownMergeResult.Merged(local.markdown)
+                        local.deleted != remote.deleted || local.deleted || !known -> MarkdownMergeResult.Conflict
+                        forward && backward -> MarkdownMergeResult.Conflict
+                        forward -> MarkdownMergeResult.Merged(remote.markdown)
+                        backward -> MarkdownMergeResult.Merged(local.markdown)
                         local.baseMarkdown == remote.baseMarkdown -> MarkdownThreeWayMerge.merge(local.baseMarkdown, local.markdown, remote.markdown)
                         else -> MarkdownMergeResult.Conflict
                     }
@@ -165,14 +161,14 @@ class NoteRepository(
                         if (body == remote.markdown && meta !== remote || body == local.markdown && meta !== local)
                             value = value.copy(updatedAt = nextTime(local, peer = remote), modifiedBy = deviceId)
                     } else {
-                        // Ambiguous a -> b -> a ancestry retains both saved bodies.
-                        value = if (cycle) meta else null
+                        // A fork never replaces the current saved version.
+                        value = null
                         conflict = NoteConflictEntity(noteConflictId(local.noteId, local.baseMarkdown, local.markdown, remote.markdown, remoteDeviceId),
                             local.noteId, local.baseMarkdown, local.markdown, remote.markdown, remoteDeviceId, now())
                     }
                 }
             }
-            if (dao.commitNote(remote.noteId, local, value, conflict)) return result
+            if (dao.commitRemoteNote(remote.noteId, local, value, conflict, receipt)) return result
         }
         error("notes_stale")
     }

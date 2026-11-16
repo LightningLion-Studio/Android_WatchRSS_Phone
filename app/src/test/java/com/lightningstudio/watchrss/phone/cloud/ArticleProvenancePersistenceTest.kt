@@ -22,7 +22,7 @@ class ArticleProvenancePersistenceTest {
     private val names=mutableListOf<String>()
     private fun db(name:String?=null):PhoneCompanionDatabase = (if(name==null)Room.inMemoryDatabaseBuilder(context,PhoneCompanionDatabase::class.java)
         else Room.databaseBuilder(context,PhoneCompanionDatabase::class.java,name))
-        .addMigrations(PhoneCompanionDatabase.MIGRATION_18_19).addCallback(PhoneCompanionDatabase.ARTICLE_PROVENANCE_CALLBACK)
+        .addMigrations(PhoneCompanionDatabase.MIGRATION_18_19,PhoneCompanionDatabase.MIGRATION_19_20).addCallback(PhoneCompanionDatabase.ARTICLE_PROVENANCE_CALLBACK)
         .allowMainThreadQueries().build().also{databases+=it}
     private fun fixture()=JSONObject(ArticleProvenanceFixtures.resource("vectors.json").toString(Charsets.UTF_8))
     private fun record(v:JSONObject)=ArticleRegisterProvenance.decode(v.toString().toByteArray())
@@ -70,7 +70,7 @@ class ArticleProvenancePersistenceTest {
         assertEquals("legacy-a",db.articleProvenanceDao().get("synthetic-article")!!.legacySource)
         db.close();db=db(name)
         assertEquals(accepted.canonicalUtf8(),ArticleProvenanceStore(db).record("synthetic-article")!!.canonicalUtf8())
-        assertEquals(19,db.openHelper.readableDatabase.version)
+        assertEquals(20,db.openHelper.readableDatabase.version)
     }
     @Test fun knownEmptyBodyProjectionCannotAcquireMetadataClockAsANewReadingOperation()=runBlocking {
         val db=db();db.phoneArticleDao().upsert(legacy(text="",clock=900).copy(sourceDeviceId="z"))

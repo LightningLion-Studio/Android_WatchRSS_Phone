@@ -90,7 +90,7 @@ class PhoneLargeRowTest {
         dao.upsert(row.copy(contentHtml=null,contentText=""));same(row.copy(contentHtml=null,contentText=""),dao.getById(row.articleId))
         dao.upsert(row.copy(contentHtml="",contentText=""));same(row.copy(contentHtml="",contentText=""),dao.getById(row.articleId))
         assertNull(dao.getById("missing"))
-        assertEquals(19,db.openHelper.readableDatabase.version)
+        assertEquals(20,db.openHelper.readableDatabase.version)
     }
     @Test fun embeddedNulAndUtf8CharactersAcrossByteBoundariesRemainExact()=runBlocking<Unit>{
         val original=row()

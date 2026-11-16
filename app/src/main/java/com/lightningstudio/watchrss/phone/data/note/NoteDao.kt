@@ -48,6 +48,37 @@ interface NoteDao {
     @Query("SELECT * FROM note_conflicts WHERE noteId = :noteId")
     suspend fun conflictsFor(noteId: String): List<NoteConflictEntity>
 
+    @Query("SELECT * FROM note_conflicts")
+    suspend fun allConflicts(): List<NoteConflictEntity>
+
+    @androidx.room.Transaction
+    suspend fun normalizeConflicts() {
+        val rows = allConflicts()
+        val normalized = normalizeNoteConflicts(rows)
+        if (normalized.size != rows.size) {
+            clearConflicts()
+            upsertConflicts(normalized)
+        }
+    }
+
+    @Query("SELECT EXISTS(SELECT 1 FROM note_remote_receipts WHERE snapshotHash=:hash)")
+    suspend fun hasRemoteReceipt(hash: String): Boolean
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertRemoteReceipt(receipt: NoteRemoteReceiptEntity)
+
+    @Query("DELETE FROM note_remote_receipts")
+    suspend fun clearRemoteReceipts()
+
+    @androidx.room.Transaction
+    suspend fun commitRemoteNote(noteId: String, expected: NoteEntity?, replacement: NoteEntity?,
+        conflict: NoteConflictEntity?, receipt: NoteRemoteReceiptEntity): Boolean {
+        if (expected != null && hasRemoteReceipt(receipt.snapshotHash)) return true
+        if (!commitNote(noteId, expected, replacement, conflict)) return false
+        insertRemoteReceipt(receipt)
+        return true
+    }
+
     /** Room serializes the read-basis check and every business write together. */
     @androidx.room.Transaction
     suspend fun commitNote(
@@ -55,11 +86,17 @@ interface NoteDao {
         conflict: NoteConflictEntity? = null, resolvedId: String? = null, resolvedAt: Long = 0L
     ): Boolean {
         if (note(noteId) != expected) return false
-        if (conflict != null) {
+        if (resolvedId != null) {
+            normalizeConflicts()
+            // The captured conflict and note are checked inside this final transaction.
+            if (expected == null || expected.deleted || conflict == null || conflict.conflictId != resolvedId ||
+                conflict.resolvedAt != 0L || conflictsFor(noteId).find { it.conflictId == resolvedId } != conflict) return false
+        } else if (conflict != null) {
             val known = conflictsFor(noteId)
             val sameId = known.find { it.conflictId == conflict.conflictId }
             check(sameId == null || sameConflictContent(sameId, conflict)) { "conflict_identity_mismatch" }
             if (known.none { sameConflictContent(it, conflict) }) upsertConflicts(listOf(conflict))
+            else System.err.println("notes_conflict_tuple_seen")
         }
         if (replacement != null) upsertNotes(listOf(replacement))
         if (resolvedId != null) resolveConflict(resolvedId, resolvedAt)
@@ -77,5 +114,5 @@ interface NoteDao {
     @Query("DELETE FROM note_folders")
     suspend fun clearFolders()
     @androidx.room.Transaction
-    suspend fun clearForAccountSwitch() { clearConflicts(); clearAssets(); clearNotes(); clearFolders() }
+    suspend fun clearForAccountSwitch() { clearRemoteReceipts(); clearConflicts(); clearAssets(); clearNotes(); clearFolders() }
 }

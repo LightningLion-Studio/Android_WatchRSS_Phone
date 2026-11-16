@@ -69,3 +69,7 @@ data class NoteConflictEntity(
     val createdAt: Long,
     val resolvedAt: Long = 0L
 )
+
+/** Local-only, exact remote snapshot receipts. Never exported on the wire. */
+@Entity(tableName = "note_remote_receipts")
+data class NoteRemoteReceiptEntity(@PrimaryKey val snapshotHash: String, val noteId: String)

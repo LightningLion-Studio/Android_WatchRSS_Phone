@@ -352,7 +352,7 @@ private fun NotesScreen(
                 onOpenConflict = {
                     val conflict = conflicts.firstOrNull()
                     if (conflict != null) scope.launch {
-                        repository.note(conflict.noteId)?.let { selectedConflict = conflict to it }
+                        repository.note(conflict.noteId)?.let { if (!it.deleted) selectedConflict = conflict to it }
                     }
                 },
                 onImportDirectory = { directoryImport.launch(null) },
@@ -427,6 +427,7 @@ private fun NotesScreen(
     selectedConflict?.let { (conflict, capturedNote) ->
         NoteConflictDialog(
             conflict = conflict,
+            currentMarkdown = capturedNote.markdown,
             onResolve = { markdown ->
                 scope.launch {
                     runCatching { repository.resolveConflict(conflict, markdown, capturedNote) }
@@ -485,10 +486,11 @@ private fun Context.queryDisplayName(uri: android.net.Uri): String? = runCatchin
 @Composable
 private fun NoteConflictDialog(
     conflict: NoteConflictEntity,
+    currentMarkdown: String,
     onResolve: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var merged by remember(conflict.conflictId) { mutableStateOf(conflict.localMarkdown) }
+    var merged by remember(conflict.conflictId, currentMarkdown) { mutableStateOf(currentMarkdown) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("笔记同步冲突") },
@@ -497,7 +499,7 @@ private fun NoteConflictDialog(
                 Text("共同祖先", fontWeight = FontWeight.Bold)
                 Text(conflict.baseMarkdown.take(500), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text("本地版本", fontWeight = FontWeight.Bold)
-                TextButton(onClick = { merged = conflict.localMarkdown }) { Text("使用本地版本") }
+                TextButton(onClick = { merged = currentMarkdown }) { Text("使用本地版本") }
                 Text("远端版本（${conflict.remoteDeviceId}）", fontWeight = FontWeight.Bold)
                 TextButton(onClick = { merged = conflict.remoteMarkdown }) { Text("使用远端版本") }
                 OutlinedTextField(merged, { merged = it }, label = { Text("合并后的 Markdown") }, modifier = Modifier.fillMaxWidth())

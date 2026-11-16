@@ -24,9 +24,10 @@ class NoteMergeReviewTest {
             repo.save("n", "T", "a")
             val b = repo.save("n", "T", "b")
             repo.applyRemote(peer(b, "a", "b"), "peer")
-            assertEquals("a", dao.note("n")!!.markdown)
+            assertEquals("b", dao.note("n")!!.markdown) // superseded: "a"; r3 retains current cycle branch.
             repo.applyRemote(b, "phone")
-            assertEquals("RVM-08: replay of a -> b reversed the later b -> a edit", "a", dao.note("n")!!.markdown)
+            assertEquals("RVM-08: cycle must retain current branch", "b", dao.note("n")!!.markdown)
+            assertTrue(dao.conflictsFor("n").any { it.resolvedAt == 0L && it.localMarkdown == "b" && it.remoteMarkdown == "a" })
         } finally { db.close() }
     }
     private fun database() = Room.inMemoryDatabaseBuilder(
@@ -109,7 +110,7 @@ class NoteMergeReviewTest {
             repo.applyRemote(peer(b,"a","b"),"peer")
             repo.applyRemote(b,"phone")
             val bodies=dao.conflictsFor("n").flatMap { listOf(it.localMarkdown,it.remoteMarkdown) }
-            assertTrue(bodies.containsAll(listOf("a","b")));assertEquals("a",dao.note("n")!!.markdown)
+            assertTrue(bodies.containsAll(listOf("a","b")));assertEquals("b",dao.note("n")!!.markdown) // superseded: "a"; r3 retains current cycle branch.
         } finally { db.close() }
     }
 
@@ -123,7 +124,9 @@ class NoteMergeReviewTest {
                 val live=a.copy(updatedAt=102,modifiedBy=source,pinned=true)
                 dao.upsertNotes(listOf(if(reverse)live else dead))
                 repo.applyRemote(if(reverse)dead else live,if(reverse)"peer" else source)
-                assertEquals(source!="peer",dao.note("n")!!.deleted)
+                // superseded: source!="peer"; deletion state never follows writer/clock heuristics.
+                assertEquals(!reverse,dao.note("n")!!.deleted)
+                assertTrue(dao.conflictsFor("n").any { it.resolvedAt == 0L })
             }
         } finally { db.close() }
     }

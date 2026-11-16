@@ -30,7 +30,9 @@ class NoteMergeR2ReviewTest {
             repo.save("n","T","a");val b=repo.save("n","T","b")
             repo.applyRemote(peer(b,"a","b"),"peer")
             val conflict=dao.conflictsFor("n").single();val captured=dao.note("n")!!
-            assertEquals("a",captured.markdown)
+            // superseded: assertEquals("a",captured.markdown); r3 keeps the current branch.
+            assertEquals("b",captured.markdown)
+            assertEquals(setOf("a","b"),setOf(conflict.localMarkdown,conflict.remoteMarkdown))
             val error=runCatching { repo.resolveConflict(conflict,"chosen",captured) }.exceptionOrNull()
             assertNull("RVM2-09: fresh cycle window reports notes_stale forever: $error",error)
             assertEquals("chosen",dao.note("n")!!.markdown)
@@ -59,10 +61,12 @@ class NoteMergeR2ReviewTest {
             val metadata=a.copy(updatedAt=103,modifiedBy="third",pinned=true)
             val outcomes=mutableListOf<Boolean>()
             for(rows in listOf(listOf(dead,restored,metadata),listOf(restored,metadata,dead))) {
-                dao.clearNotes();for(r in rows)repo.applyRemote(r,r.modifiedBy)
+                dao.clearRemoteReceipts();dao.clearConflicts();dao.clearNotes();for(r in rows)repo.applyRemote(r,r.modifiedBy)
                 outcomes.add(dao.note("n")!!.deleted)
+                assertTrue(dao.conflictsFor("n").any { it.resolvedAt == 0L && it.localMarkdown == "a" && it.remoteMarkdown == "a" })
             }
-            assertEquals("RVM2-11: the same delete, restore and later pin must converge",listOf(false,false),outcomes)
+            // superseded: listOf(false,false); deletion disagreements now retain the initial branch.
+            assertEquals(listOf(true,false),outcomes)
         } finally {db.close()}
     }
 
@@ -122,7 +126,9 @@ class NoteMergeR2ReviewTest {
             val a=repo.save("n","T","a")
             for(r in listOf(peer(a,"b","a",101),peer(a,"a","b",300),peer(a,"b","a",400),peer(a,"a","b",500)))
                 repo.applyRemote(r,"peer")
-            assertEquals("a",dao.note("n")!!.markdown);assertEquals(500L,dao.note("n")!!.updatedAt)
+            // superseded: "a" at 500; a mutual-base cycle must never choose a body by clock.
+            assertEquals("b",dao.note("n")!!.markdown);assertEquals(400L,dao.note("n")!!.updatedAt)
+            assertEquals(setOf("a","b"),dao.conflictsFor("n").filter { it.resolvedAt == 0L }.flatMap { listOf(it.localMarkdown,it.remoteMarkdown) }.toSet())
         } finally {db.close()}
     }
 }

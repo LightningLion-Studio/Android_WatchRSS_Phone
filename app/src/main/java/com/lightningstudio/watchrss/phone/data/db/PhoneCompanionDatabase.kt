@@ -31,6 +31,7 @@ import com.lightningstudio.watchrss.phone.data.note.NoteFolderEntity
         NoteEntity::class,
         NoteAssetEntity::class,
         NoteConflictEntity::class,
+        com.lightningstudio.watchrss.phone.data.note.NoteRemoteReceiptEntity::class,
         AppMetaEntity::class,
         ArticleProvenanceEntity::class,
         ArticleOriginalEntity::class,
@@ -49,7 +50,7 @@ import com.lightningstudio.watchrss.phone.data.note.NoteFolderEntity
         com.lightningstudio.watchrss.phone.data.book.BookReadingPeerEntity::class,
         com.lightningstudio.watchrss.phone.data.book.BookCaptureMetaEntity::class
     ],
-    version = 19,
+    version = 20,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
@@ -82,9 +83,16 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
         val ARTICLE_PROVENANCE_CALLBACK=object:RoomDatabase.Callback() {
             override fun onOpen(db:SupportSQLiteDatabase) {
                 com.lightningstudio.watchrss.phone.syncv2.SyncV2Schema.beforeBusinessOpen(db)
+                com.lightningstudio.watchrss.phone.data.note.normalizeStoredNoteConflicts(db)
                 installArticleProvenanceWitnesses(db)
                 installCloudLocalChanges(db)
                 com.lightningstudio.watchrss.phone.syncv2.SyncV2Schema.onOpen(db)
+            }
+        }
+        val MIGRATION_19_20=object:Migration(19,20) {
+            override fun migrate(database:SupportSQLiteDatabase) {
+                database.execSQL("CREATE TABLE IF NOT EXISTS note_remote_receipts (snapshotHash TEXT NOT NULL PRIMARY KEY,noteId TEXT NOT NULL)")
+                com.lightningstudio.watchrss.phone.data.note.normalizeStoredNoteConflicts(database)
             }
         }
         val MIGRATION_18_19=object:Migration(18,19) {

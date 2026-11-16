@@ -26,7 +26,7 @@ private class Store(device:String="phone") {
    beforeWrite?.also{beforeWrite=null;it()}
    val id=a!![0] as String
    if(rows[id]!=a[1] || m.name=="commitNote" && a[4]!=null &&
-       (a[3]!=conflicts[a[4]] || (a[3] as NoteConflictEntity).resolvedAt!=0L || (a[1] as NoteEntity).deleted))false else {
+       (conflicts.values.filter{it.noteId==id&&it.resolvedAt==0L}.sortedBy{it.conflictId} != ((a[6] as List<NoteConflictEntity>?)?:listOf(a[3] as NoteConflictEntity)).sortedBy{it.conflictId} || a[3]!=conflicts[a[4]] || (a[3] as NoteConflictEntity).resolvedAt!=0L || (a[1] as NoteEntity).deleted))false else {
     (a[3] as NoteConflictEntity?)?.let{c->if(conflicts.values.none{sameConflictContent(it,c)})conflicts[c.conflictId]=c}
     (a[2] as NoteEntity?)?.let{rows[id]=it}
     if(m.name=="commitRemoteNote")receipts.add((a[4] as NoteRemoteReceiptEntity).snapshotHash)

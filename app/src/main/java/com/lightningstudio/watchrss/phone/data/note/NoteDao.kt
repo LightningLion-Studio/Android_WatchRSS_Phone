@@ -79,18 +79,31 @@ interface NoteDao {
         return true
     }
 
+    @androidx.room.Transaction
+    suspend fun captureConflict(noteId: String, conflictId: String): NoteConflictCapture? {
+        normalizeConflicts()
+        val current = note(noteId)?.takeUnless { it.deleted } ?: return null
+        val open = conflictsFor(noteId).filter { it.resolvedAt == 0L }.sortedBy { it.conflictId }
+        val selected = open.find { it.conflictId == conflictId } ?: return null
+        return NoteConflictCapture(selected, current, java.util.Collections.unmodifiableList(open.toList()))
+    }
+
     /** Room serializes the read-basis check and every business write together. */
     @androidx.room.Transaction
     suspend fun commitNote(
         noteId: String, expected: NoteEntity?, replacement: NoteEntity?,
-        conflict: NoteConflictEntity? = null, resolvedId: String? = null, resolvedAt: Long = 0L
+        conflict: NoteConflictEntity? = null, resolvedId: String? = null, resolvedAt: Long = 0L,
+        expectedConflicts: List<NoteConflictEntity>? = null
     ): Boolean {
         if (note(noteId) != expected) return false
         if (resolvedId != null) {
             normalizeConflicts()
             // The captured conflict and note are checked inside this final transaction.
             if (expected == null || expected.deleted || conflict == null || conflict.conflictId != resolvedId ||
-                conflict.resolvedAt != 0L || conflictsFor(noteId).find { it.conflictId == resolvedId } != conflict) return false
+                conflict.resolvedAt != 0L) return false
+            val open = conflictsFor(noteId).filter { it.resolvedAt == 0L }.sortedBy { it.conflictId }
+            if (open != (expectedConflicts ?: listOf(conflict)).sortedBy { it.conflictId } ||
+                open.find { it.conflictId == resolvedId } != conflict) return false
         } else if (conflict != null) {
             val known = conflictsFor(noteId)
             val sameId = known.find { it.conflictId == conflict.conflictId }

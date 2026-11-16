@@ -80,9 +80,9 @@ class NoteMergeR2ReviewTest {
             // read checks but before commitNote enters its transaction. No product stubs.
             val race=object:NoteDao by dao {
                 override suspend fun commitNote(noteId:String,expected:NoteEntity?,replacement:NoteEntity?,
-                    conflict:NoteConflictEntity?,resolvedId:String?,resolvedAt:Long):Boolean {
+                    conflict:NoteConflictEntity?,resolvedId:String?,resolvedAt:Long,expectedConflicts:List<NoteConflictEntity>?):Boolean {
                     dao.resolveConflict(c.conflictId,9999L)
-                    return dao.commitNote(noteId,expected,replacement,conflict,resolvedId,resolvedAt)
+                    return dao.commitNote(noteId,expected,replacement,conflict,resolvedId,resolvedAt,expectedConflicts)
                 }
             }
             val error=runCatching {NoteRepository(race,"phone"){1000}.resolveConflict(c,"c",captured)}.exceptionOrNull()

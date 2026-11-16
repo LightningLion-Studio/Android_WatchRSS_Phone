@@ -73,3 +73,10 @@ data class NoteConflictEntity(
 /** Local-only, exact remote snapshot receipts. Never exported on the wire. */
 @Entity(tableName = "note_remote_receipts")
 data class NoteRemoteReceiptEntity(@PrimaryKey val snapshotHash: String, val noteId: String)
+
+/** Local immutable window capture; never serialized into a sync record. */
+data class NoteConflictCapture internal constructor(
+    val conflict: NoteConflictEntity,
+    val note: NoteEntity,
+    val openConflicts: List<NoteConflictEntity>
+)

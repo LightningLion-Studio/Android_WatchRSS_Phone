@@ -71,9 +71,9 @@ class NoteMergeR3SafetyTest {
             repo.applyRemote(a.copy(markdown="c",modifiedBy="peer"),"peer")
             val conflict=dao.conflictsFor("n").single();val current=repo.save("n","T","later")
             val race=object:NoteDao by dao {
-                override suspend fun commitNote(noteId:String,expected:NoteEntity?,replacement:NoteEntity?,conflict:NoteConflictEntity?,resolvedId:String?,resolvedAt:Long):Boolean {
+                override suspend fun commitNote(noteId:String,expected:NoteEntity?,replacement:NoteEntity?,conflict:NoteConflictEntity?,resolvedId:String?,resolvedAt:Long,expectedConflicts:List<NoteConflictEntity>?):Boolean {
                     dao.clearConflicts()
-                    return dao.commitNote(noteId,expected,replacement,conflict,resolvedId,resolvedAt)
+                    return dao.commitNote(noteId,expected,replacement,conflict,resolvedId,resolvedAt,expectedConflicts)
                 }
             }
             assertEquals("notes_stale",runCatching { NoteRepository(race,"phone"){100}.resolveConflict(conflict,"chosen",current) }.exceptionOrNull()?.message)

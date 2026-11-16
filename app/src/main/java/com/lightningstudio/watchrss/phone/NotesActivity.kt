@@ -139,7 +139,7 @@ private fun NotesScreen(
     val conflicts by repository.observeConflicts().collectAsStateWithLifecycle(emptyList())
     var selected by remember { mutableStateOf<NoteEntity?>(null) }
     var creating by remember { mutableStateOf(false) }
-    var selectedConflict by remember { mutableStateOf<Pair<NoteConflictEntity, NoteEntity>?>(null) }
+    var selectedConflict by remember { mutableStateOf<com.lightningstudio.watchrss.phone.data.note.NoteConflictCapture?>(null) }
     var movingNote by remember { mutableStateOf<NoteEntity?>(null) }
     var deletingNote by remember { mutableStateOf<NoteEntity?>(null) }
     var editorFullscreen by remember { mutableStateOf(false) }
@@ -352,7 +352,7 @@ private fun NotesScreen(
                 onOpenConflict = {
                     val conflict = conflicts.firstOrNull()
                     if (conflict != null) scope.launch {
-                        repository.note(conflict.noteId)?.let { if (!it.deleted) selectedConflict = conflict to it }
+                        selectedConflict = repository.captureConflict(conflict)
                     }
                 },
                 onImportDirectory = { directoryImport.launch(null) },
@@ -424,13 +424,13 @@ private fun NotesScreen(
             editorPane(true)
         }
     }
-    selectedConflict?.let { (conflict, capturedNote) ->
+    selectedConflict?.let { capture ->
         NoteConflictDialog(
-            conflict = conflict,
-            currentMarkdown = capturedNote.markdown,
+            conflict = capture.conflict,
+            currentMarkdown = capture.note.markdown,
             onResolve = { markdown ->
                 scope.launch {
-                    runCatching { repository.resolveConflict(conflict, markdown, capturedNote) }
+                    runCatching { repository.resolveConflict(capture, markdown) }
                         .onSuccess { runCatching { syncCloud() }; selectedConflict = null }
                         .onFailure {
                             Toast.makeText(context, if (it.message == "notes_stale") "笔记已更新，请关闭冲突窗口后重新查看" else "解决冲突失败：${it.message}", Toast.LENGTH_LONG).show()

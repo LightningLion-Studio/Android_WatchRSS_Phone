@@ -102,7 +102,15 @@ class NoteRepository(
         return maxOf(clock, previous + 1)
     }
 
-    suspend fun resolveConflict(conflict: NoteConflictEntity, markdown: String, expected: NoteEntity? = null): NoteEntity {
+    suspend fun captureConflict(conflict: NoteConflictEntity): NoteConflictCapture? =
+        dao.captureConflict(conflict.noteId, conflict.conflictId)
+
+    suspend fun resolveConflict(capture: NoteConflictCapture, markdown: String): NoteEntity =
+        resolveConflict(capture.conflict, markdown, capture.note, capture.openConflicts)
+
+    // Older callers only captured one row. They may commit only while it is the entire open set.
+    suspend fun resolveConflict(conflict: NoteConflictEntity, markdown: String, expected: NoteEntity? = null,
+        expectedConflicts: List<NoteConflictEntity> = listOf(conflict)): NoteEntity {
         val local = dao.note(conflict.noteId) ?: error("冲突笔记不存在")
         val known = dao.conflictsFor(local.noteId).find { it.conflictId == conflict.conflictId }
         check(known == conflict && known.resolvedAt == 0L && !local.deleted &&
@@ -112,7 +120,7 @@ class NoteRepository(
         val resolved = local.copy(markdown = body, plainText = MarkdownNoteCodec.toPlainText(body),
             contentHash = MarkdownNoteCodec.sha256(body), baseMarkdown = body, baseContentHash = MarkdownNoteCodec.sha256(body),
             updatedAt = nextTime(local), modifiedBy = deviceId, deleted = false, deletedAt = 0L)
-        check(dao.commitNote(local.noteId, local, resolved, conflict = conflict, resolvedId = conflict.conflictId, resolvedAt = maxOf(1L, now()))) { "notes_stale" }
+        check(dao.commitNote(local.noteId, local, resolved, conflict = conflict, resolvedId = conflict.conflictId, resolvedAt = maxOf(1L, now()), expectedConflicts = expectedConflicts)) { "notes_stale" }
         return resolved
     }
 

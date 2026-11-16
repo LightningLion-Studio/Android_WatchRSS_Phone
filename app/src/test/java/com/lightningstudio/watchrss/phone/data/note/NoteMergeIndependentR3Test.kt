@@ -58,4 +58,46 @@ class NoteMergeIndependentR3Test {
    assertEquals(a,dao.note("n"));assertFalse(dao.hasRemoteReceipt(noteRemoteSnapshotHash(remote,"a")))
   }finally{db.close()}
  }
+ @Test fun completeCaptureRejectsConflictSetChangesInsideFinalTransaction()=runBlocking {
+  for(mode in listOf("add","remove","edit","resolve")) {
+   val db=db();try {
+    val dao=db.noteDao();val repo=NoteRepository(dao,"phone"){1000}
+    val a=repo.save("n","T","a");repo.save("n","T","b")
+    repo.applyRemote(peer(a,"c","a"),"peer");val selected=dao.conflictsFor("n").single()
+    repo.applyRemote(peer(a,"d","a","third"),"third")
+    val capture=repo.captureConflict(selected)!!
+    assertEquals(2,capture.openConflicts.size)
+    var latest=emptyList<NoteConflictEntity>()
+    val race=object:NoteDao by dao {
+     override suspend fun commitNote(noteId:String,expected:NoteEntity?,replacement:NoteEntity?,conflict:NoteConflictEntity?,resolvedId:String?,resolvedAt:Long,expectedConflicts:List<NoteConflictEntity>?):Boolean {
+      val other=capture.openConflicts.single{it.conflictId!=selected.conflictId}
+      when(mode) {
+       "add" -> dao.upsertConflicts(listOf(other.copy(conflictId="new-incident",remoteMarkdown="e")))
+       "remove" -> {dao.clearConflicts();dao.upsertConflicts(listOf(selected))}
+       "edit" -> {dao.clearConflicts();dao.upsertConflicts(listOf(selected,other.copy(createdAt=other.createdAt+1)))}
+       "resolve" -> dao.resolveConflict(other.conflictId,9999)
+      }
+      latest=dao.conflictsFor("n")
+      return dao.commitNote(noteId,expected,replacement,conflict,resolvedId,resolvedAt,expectedConflicts)
+     }
+    }
+    assertEquals(mode,"notes_stale",runCatching{NoteRepository(race,"phone"){1000}.resolveConflict(capture,"c")}.exceptionOrNull()?.message)
+    assertEquals(capture.note,dao.note("n"));assertEquals(latest,dao.conflictsFor("n"))
+   }finally{db.close()}
+  }
+ }
+ @Test fun freshCompleteCaptureWithMultipleConflictsCanResolveSelectedRow()=runBlocking {
+  val db=db();try {
+   val dao=db.noteDao();val repo=NoteRepository(dao,"phone"){1000}
+   val a=repo.save("n","T","a");repo.save("n","T","b")
+   repo.applyRemote(peer(a,"c","a"),"peer");val selected=dao.conflictsFor("n").single()
+   val stale=repo.captureConflict(selected)!!
+   repo.applyRemote(peer(a,"d","a","third"),"third")
+   assertEquals("notes_stale",runCatching{repo.resolveConflict(stale,"c")}.exceptionOrNull()?.message)
+   val fresh=repo.captureConflict(selected)!!;assertEquals(2,fresh.openConflicts.size)
+   assertEquals("c",repo.resolveConflict(fresh,"c").markdown)
+   assertEquals(1,dao.conflictsFor("n").count{it.resolvedAt==0L})
+  }finally{db.close()}
+ }
+
 }

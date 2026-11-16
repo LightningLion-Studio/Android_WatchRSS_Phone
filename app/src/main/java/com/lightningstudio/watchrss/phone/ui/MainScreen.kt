@@ -84,6 +84,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
+import com.lightningstudio.watchrss.phone.BuildConfig
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -2642,6 +2643,15 @@ private fun MainTopBar(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (page == MainPage.DASHBOARD) {
+                    Text(
+                        text = " v${BuildConfig.VERSION_NAME}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        modifier = Modifier.testTag("topbar_version")
+                    )
+                }
                 if (page == MainPage.CHANNEL && selectedChannel?.source != null) {
                     IconButton(
                         onClick = onOpenChannelSettings,

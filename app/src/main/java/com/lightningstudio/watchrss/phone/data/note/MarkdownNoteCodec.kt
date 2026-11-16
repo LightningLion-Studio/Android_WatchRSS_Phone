@@ -43,7 +43,12 @@ object MarkdownNoteCodec {
         )
     }
 
-    fun toPlainText(markdown: String): String {
+    fun toPlainText(markdown: String): String = projectText(markdown, preserveListNumbers = false)
+
+    // Literal ordered-list numbers count as words only in the title projection.
+    internal fun titlePlainText(markdown: String): String = projectText(markdown, preserveListNumbers = true)
+
+    private fun projectText(markdown: String, preserveListNumbers: Boolean): String {
         val hasHtml = HTML_TAG.containsMatchIn(markdown)
         val withoutHtml = if (hasHtml) {
             markdown
@@ -62,7 +67,7 @@ object MarkdownNoteCodec {
             .replace(Regex("\\[([^]]+)]\\([^)]*\\)"), "$1")
             .replace(Regex("(?m)^#{1,6}\\s+"), "")
             .replace(Regex("(?m)^>\\s?"), "")
-            .replace(Regex("(?m)^\\s*([-*+] |\\d+\\. )"), "")
+            .replace(Regex(if (preserveListNumbers) "(?m)^\\s*[-*+] " else "(?m)^\\s*([-*+] |\\d+\\. )"), "")
             .replace("**", "").replace("__", "").replace("~~", "").replace("`", "")
         return if (hasHtml) {
             plain.lineSequence()

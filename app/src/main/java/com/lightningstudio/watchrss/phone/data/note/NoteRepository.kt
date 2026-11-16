@@ -36,7 +36,7 @@ class NoteRepository(
         val saved = NoteEntity(
             noteId = previous?.noteId ?: noteId ?: UUID.randomUUID().toString(),
             folderId = folderId,
-            title = title.trim().ifBlank { deriveNoteTitle(MarkdownNoteCodec.toPlainText(canonical)) },
+            title = title.trim().ifBlank { deriveNoteTitle(MarkdownNoteCodec.titlePlainText(canonical)) },
             markdown = canonical,
             plainText = MarkdownNoteCodec.toPlainText(canonical),
             contentHash = hash,

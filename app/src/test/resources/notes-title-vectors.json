@@ -1,0 +1,92 @@
+[
+  {
+    "name": "english",
+    "plainText": "one  two, three four",
+    "expected": "one  two, three"
+  },
+  {
+    "name": "phone-screenshot-word-list",
+    "plainText": "republic 2. postpone3. data 4. charge5. standout",
+    "expected": "republic 2. postpone3"
+  },
+  {
+    "name": "phone-leading-blank",
+    "plainText": "\n  \n  Hello, big world again\nsecond",
+    "expected": "Hello, big world"
+  },
+  {
+    "name": "cr-lf-leading-blank",
+    "plainText": "\r\n\t\r  Hello, big world again\rnext",
+    "expected": "Hello, big world"
+  },
+  {
+    "name": "punctuation-only",
+    "plainText": "  !!!，……？  \nignored",
+    "expected": "!!!，……？"
+  },
+  {
+    "name": "punctuation-first-nonempty-line",
+    "plainText": "\n !!! \nwords come later",
+    "expected": "!!!"
+  },
+  {
+    "name": "mixed",
+    "plainText": "中文 hello 世界 123",
+    "expected": "中文 hello 世界"
+  },
+  {
+    "name": "chinese-long",
+    "plainText": "今天天气很好我们一起去公园散步然后回家吃饭",
+    "expected": "今天天气很好"
+  },
+  {
+    "name": "short-line",
+    "plainText": "only two",
+    "expected": "only two"
+  },
+  {
+    "name": "short-line-punctuation",
+    "plainText": "only two!",
+    "expected": "only two"
+  },
+  {
+    "name": "short-chinese",
+    "plainText": "你好世界",
+    "expected": "你好世界"
+  },
+  {
+    "name": "unicode-letters-numbers",
+    "plainText": "café Ω １２３ final",
+    "expected": "café Ω １２３"
+  },
+  {
+    "name": "outer-punctuation",
+    "plainText": "「hello」 -- 42、world! next",
+    "expected": "hello」 -- 42、world"
+  },
+  {
+    "name": "empty",
+    "plainText": "   \n\t",
+    "expected": ""
+  },
+  {
+    "name": "empty-string",
+    "plainText": "",
+    "expected": ""
+  },
+  {
+    "name": "word-limit-80",
+    "plainText": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa two three four",
+    "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "name": "no-word-limit-80",
+    "plainText": "！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！",
+    "expected": "！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！"
+  },
+  {
+    "name": "user-sample-vocab",
+    "plainText": "1. republic 2. postpone3. data 4. charge5. standout \n6. credit 7. intend8. politician 9. responsibility \n10. container11.家庭的，家用的,家务的12.脑力的;有才智\n\n1. deadly; dying; death 2. broaden 3. experimental4. trial 5. limited; limitless; limitation 6. sufficiently; sufficiency 7. wisdom; wisely 8. conductor; conduction; conductive 9. illustration10. surrounding; surroundings 11. indication; indicator 12. accidental; accidentally 13. intelligence 14. favourable; favourite 15. electricity; electric; electrical 16. theoretical; theoretically17. atomic18. involvement; involved19. scientific; scientist 20. morally; immoral 21. negative 22. freedom 23. authority 24. permission 25. declare 26. publish 27. marriage \n\n1. with the intention of doing sth. 2. take on responsibilities 3. household water containers 4. be surrounded by/with 5. speed up the process: 6. pay off 7. through trial and error 8. draw on the wisdom of traditional Chinese medicine 9. apply for a permit 10. in ignorance of 11. by accident12. take it for granted 13. declare war (on/against) 14. be involved in 15. let sb. down \n",
+    "expected": "1. republic 2"
+  }
+]

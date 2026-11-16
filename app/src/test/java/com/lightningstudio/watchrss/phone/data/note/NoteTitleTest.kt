@@ -4,6 +4,16 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class NoteTitleTest {
+    @Test fun sharedThreeWordVectorsIncludeTheExactUserVocabularySample() {
+        val raw = requireNotNull(javaClass.getResourceAsStream("/notes-title-vectors.json")).bufferedReader().use { it.readText() }
+        val cases = org.json.JSONArray(raw)
+        for (i in 0 until cases.length()) {
+            val vector = cases.getJSONObject(i)
+            assertEquals(vector.getString("name"), vector.getString("expected"), deriveNoteTitle(vector.getString("plainText")))
+            assertEquals(vector.getString("name") + " title projection", vector.getString("expected"), deriveNoteTitle(MarkdownNoteCodec.titlePlainText(vector.getString("plainText"))))
+        }
+    }
+
     @Test fun englishTakesFirstThreeWordsKeepingOriginalSpacing() {
         assertEquals("republic 2. postpone3", deriveNoteTitle("republic 2. postpone3. data 4. charge5. standout"))
     }

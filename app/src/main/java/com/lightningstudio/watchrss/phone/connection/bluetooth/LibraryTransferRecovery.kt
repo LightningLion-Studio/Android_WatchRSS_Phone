@@ -159,16 +159,17 @@ internal class LibraryIoGuard(
         override fun write(bytes: ByteArray, offset: Int, length: Int) {
             if (!enabled()) { target.write(bytes, offset, length); return }
             // Keep RFCOMM writes bounded without per-byte socket calls. Each
-            // completed chunk refreshes activity; IP also observes raw writes.
+            // completed 1 KiB chunk refreshes activity (4 seconds at 256 B/s).
+            // IP retains 8 KiB chunks because it also observes raw writes.
             io {
                 var written = 0
                 while (written < length) {
-                    if (written > 0 && written % 8192 == 0) {
+                    if (written > 0) {
                         // Validation is not a transport failure, even if the peer
                         // concurrently closes. Preserve the original error type.
                         try { beforeIo() } catch (failure: Exception) { throw LibraryIoValidationFailure(failure) }
                     }
-                    val count = minOf(length - written, 8192)
+                    val count = minOf(length - written, if (wireWriteActivityNanos == null) 1024 else 8192)
                     target.write(bytes, offset + written, count)
                     completedWriteNanos.set(System.nanoTime())
                     written += count

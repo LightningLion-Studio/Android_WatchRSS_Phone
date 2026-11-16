@@ -78,12 +78,12 @@ class LibraryTransferRecoveryTest {
             override fun write(b:ByteArray,o:Int,n:Int){assertTrue(n<=8192);calls++;Thread.sleep(3)}}
         guard.output(target).write(ByteArray(2*1024*1024));assertTrue(calls>1);assertFalse(closed)
     }
-    @Test fun rfcommEightySevenKilobyteFrameUsesAtMostTwelveUnderlyingWrites() {
+    @Test fun rfcommEightySevenKilobyteFrameUsesEightySixBoundedWrites() {
         val frame=ByteArray(87759){(it%251).toByte()};val received=ByteArrayOutputStream();var calls=0
         val sink=object:OutputStream(){override fun write(value:Int)=error("bulk writes expected")
-            override fun write(b:ByteArray,o:Int,n:Int){assertTrue(n<=8192);calls++;received.write(b,o,n)}}
+            override fun write(b:ByteArray,o:Int,n:Int){assertTrue(n<=1024);calls++;received.write(b,o,n)}}
         LibraryIoGuard(1,{true},{fail("active RFCOMM write must not expire")}).output(sink).write(frame)
-        assertTrue("87 KB RFCOMM frame used $calls underlying writes",calls<=12)
+        assertTrue("87 KB RFCOMM frame used $calls underlying writes",calls==86)
         assertArrayEquals(frame,received.toByteArray())
     }
     @Test fun thirdSearchFailureStopsAndSuccessResetsOnlySearchCounter() {

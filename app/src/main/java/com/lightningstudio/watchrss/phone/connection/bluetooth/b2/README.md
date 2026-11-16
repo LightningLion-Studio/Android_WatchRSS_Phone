@@ -41,6 +41,9 @@ The Android ports live next to this directory: `B2RoomStore`,
 `B2NoteAssetBusiness`, and `B2NoteAssetSync`. The Room port creates private
 B2 tables only on first enabled use; it does not migrate or delete old v1 data.
 Its persistent quota ledger avoids scanning the journal on each DATA block.
+The Room port re-establishes FULL before each write transaction and verifies
+the pinned writer inside it; a standalone reader PRAGMA cannot prove durability
+of a replacement pooled writer.
 `B2RequestBindings` keeps immutable requestId/digest bindings in an independent,
 bounded native journal, so heartbeats do not wait for business transactions.
 The native journal and business journal each reserve half maxJournalBytes;

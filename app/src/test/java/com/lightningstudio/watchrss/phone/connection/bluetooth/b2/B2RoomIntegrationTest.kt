@@ -43,6 +43,29 @@ class B2RoomIntegrationTest {
         } finally { db.close() }
         Unit
     }
+    @Test fun restoredWriterConfigurationStillRequiresFullDurabilityForEveryWrite() = runBlocking {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val db = Room.inMemoryDatabaseBuilder(context, PhoneCompanionDatabase::class.java).allowMainThreadQueries().build()
+        try {
+            val store = B2RoomStore(db)
+            val sql = db.openHelper.writableDatabase
+            fun mode() = sql.query("PRAGMA synchronous").use { it.moveToFirst(); it.getInt(0) }
+            store.exclusive {
+                // A replacement Android pooled connection uses the DB's default mode,
+                // not the raw PRAGMA previously executed on another connection.
+                sql.execSQL("PRAGMA synchronous=NORMAL"); assertEquals(1, mode())
+                store.transaction {
+                    assertEquals(2, mode())
+                    store.put("scope", "test", "one", obj("value" to 1))
+                }
+                sql.execSQL("PRAGMA synchronous=NORMAL")
+                store.put("scope", "test", "two", obj("value" to 2)); assertEquals(2, mode())
+                sql.execSQL("PRAGMA synchronous=NORMAL")
+                store.delete("scope", "test", "two"); assertEquals(2, mode())
+            }
+        } finally { db.close() }
+        Unit
+    }
     @Test fun assetReferenceAndAppliedReceiptShareTheRealRoomTransaction() = runBlocking {
         val context = RuntimeEnvironment.getApplication() as Context
         val db = Room.inMemoryDatabaseBuilder(context, PhoneCompanionDatabase::class.java).allowMainThreadQueries().build()

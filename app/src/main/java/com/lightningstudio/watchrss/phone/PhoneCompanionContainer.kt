@@ -46,6 +46,19 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 class PhoneCompanionContainer(context: Context) {
+    val syncDiagnostics by lazy {com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnostics.open(context.applicationContext)}
+    private fun <T> withDiagnosticLibrary(empty:()->T,read:(com.lightningstudio.watchrss.phone.diagnostics.LibraryDiagnostics)->T):T {
+        val file=appContext.getDatabasePath("watchrss-phone.db")
+        if(!file.isFile)return empty()
+        // Never open Room here: opening it can create a database or run migrations.
+        return android.database.sqlite.SQLiteDatabase.openDatabase(file.path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use { database ->
+            val query=object:com.lightningstudio.watchrss.phone.diagnostics.DiagnosticQuery {override fun query(sql:String,args:Array<String>)=database.rawQuery(sql,args)}
+            read(com.lightningstudio.watchrss.phone.diagnostics.LibraryDiagnostics(query,java.io.File(appContext.filesDir,"imported_books"),articleContentStore,syncDiagnostics.bookRejections()))
+        }
+    }
+    fun diagnosticLibraryBooks()=withDiagnosticLibrary({org.json.JSONArray()}){it.books()}
+    fun diagnosticLibrarySummary()=withDiagnosticLibrary({com.lightningstudio.watchrss.phone.diagnostics.DiagnosticFields.summary()}){it.summary()}
+    fun diagnosticLibrarySnapshot()=withDiagnosticLibrary({org.json.JSONArray() to com.lightningstudio.watchrss.phone.diagnostics.DiagnosticFields.summary()}){it.books() to it.summary()}
     private val appContext = context.applicationContext
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val accountEnvironment: AccountEnvironment by lazy {

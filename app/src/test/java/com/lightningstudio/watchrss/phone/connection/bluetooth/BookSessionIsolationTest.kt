@@ -94,6 +94,11 @@ class BookSessionIsolationTest {
     }
     @Test fun invalidBookContinuesLibraryNotesAndFinalAckWithoutABooksDomainReceipt()=runBlocking<Unit> {
         val result=runSession(true)
+        val diagnostic=com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnostics.open(context).last(1).getJSONObject(0)
+        assertEquals("partial",diagnostic.getString("result"));assertTrue(diagnostic.getLong("totalBytes")>0)
+        val rejected=diagnostic.getJSONArray("items").getJSONObject(0)
+        assertEquals(fixture.getString("bookId"),rejected.getString("id"));assertEquals("book_package_invalid",rejected.getString("reasonCode"))
+        assertFalse(diagnostic.toString().contains("javascript:"))
         assertEquals(1,result.bookSyncIssues.size);assertNotNull(result.bookSyncWarning)
         assertTrue(frames.any{it.optString("action")=="syncLibrary"&&it.optString("phase")=="cursor"})
         assertTrue(frames.any{it.optString("action")=="syncNotes"})
@@ -114,6 +119,8 @@ class BookSessionIsolationTest {
     }
     @Test fun realCliPackageContinuesAllPhasesAndHasNoBookWarning()=runBlocking<Unit> {
         val result=runSession(false)
+        val diagnostic=com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnostics.open(context).last(1).getJSONObject(0)
+        assertEquals("success",diagnostic.getString("result"));assertTrue(diagnostic.getLong("totalBytes")>0)
         assertTrue(result.bookSyncIssues.isEmpty());assertNull(result.bookSyncWarning)
         assertEquals(fixture.getJSONObject("chapter").getString("contentText"),db.phoneArticleDao().getAllForSync().single().contentText)
         assertTrue(frames.any{it.optString("action")=="syncNotes"})

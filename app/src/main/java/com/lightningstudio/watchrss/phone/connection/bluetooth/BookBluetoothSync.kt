@@ -20,10 +20,12 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
     private val itemIssues=mutableListOf<BookSyncIssue>()
     val issues:List<BookSyncIssue> get()=itemIssues.toList()
     val booksComplete:Boolean get()=itemIssues.isEmpty()
+    var diagnosticItem:(String,String,String)->Unit={_,_,_->}
     var onIssue:(BookSyncIssue)->Unit={}
     private fun reject(id:String,code:String) {
         if(!rejected.add(id))return
         val issue=BookSyncIssue(id.takeIf{it.matches(Regex("[0-9a-f]{64}"))}?.take(8)?:"invalid",code)
+        diagnosticItem(id,"rejected",code)
         itemIssues+=issue;trace("book-item-isolated:id=${issue.bookIdPrefix}:code=$code");onIssue(issue)
     }
     var domainFastPath=false
@@ -35,6 +37,7 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
     private fun recordApplied(count:Int){if(count>0)onApplied(count)}
     private fun request(phase:String)=JSONObject().put("action","syncBooks").put("version",1).put("deviceId",deviceId).put("phase",phase)
     private suspend fun send(request:JSONObject):JSONObject=exchange(request).also {
+        if(!it.optBoolean("success"))diagnosticItem(request.optString("bookId"),"rejected",it.optString("errorCode","book_request_invalid"))
         require(it.optBoolean("success")&&it.optString("action")=="syncBooks"&&it.optInt("version")==1) {"手表书籍同步失败"}
     }
     suspend fun sync(syncBooks:Boolean=true,syncReading:Boolean=true):Int {
@@ -103,6 +106,8 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
             } catch(_:InvalidBookPackageException) {reject(id,"book_package_invalid")}
             finally {tmp.delete()}
         }
+        for(state in remote.filter{it.getString("bookId") !in rejected})diagnosticItem(state.getString("bookId"),"applied","none")
+        for(state in local.filter{it.getString("bookId") !in rejected})diagnosticItem(state.getString("bookId"),"applied","none")
         trace("packages-ready:ms=${(System.nanoTime()-started)/1_000_000}")
         if(domainFastPath && booksComplete && missing.length()>0) {
             val confirmed=send(request("manifest").put("books",JSONArray(store.manifests())).put("supportsBookSyncV1",true).put("supportsBookReadingDeltaV1",true))

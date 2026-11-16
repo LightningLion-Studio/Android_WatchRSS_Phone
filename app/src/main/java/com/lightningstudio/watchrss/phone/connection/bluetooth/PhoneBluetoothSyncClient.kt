@@ -2792,6 +2792,9 @@ class PhoneBluetoothSyncClient(
         }
     }
 
+    internal var diagnosticBytes:(Long)->Unit={}
+    internal var diagnosticRequest:(JSONObject)->Unit={}
+    internal var diagnosticResponse:(JSONObject)->Unit={}
     private fun writeFrameLogged(
         socket: BluetoothSocket,
         sessionId: String,
@@ -2821,8 +2824,10 @@ class PhoneBluetoothSyncClient(
         var wireBytes=0L
         debugLog.appendEvent("bt.frame.write.start", sessionId, mapOf("label" to label) + fields)
         try {
+            diagnosticRequest(payload)
             BluetoothSyncProtocol.writeFrame(outputStream, payload) { bytes ->
                 wireBytes+=bytes
+                diagnosticBytes(bytes)
                 byteTracker?.add(bytes)
                 onBytesTransferred?.invoke(bytes)
             }
@@ -2874,9 +2879,11 @@ class PhoneBluetoothSyncClient(
         return try {
             BluetoothSyncProtocol.readFrame(inputStream) { bytes ->
                 wireBytes+=bytes
+                diagnosticBytes(bytes)
                 byteTracker?.add(bytes)
                 onBytesTransferred?.invoke(bytes)
             }.also { payload ->
+                diagnosticResponse(payload)
                 debugLog.appendEvent(
                     event = "bt.frame.read.success",
                     sessionId = sessionId,

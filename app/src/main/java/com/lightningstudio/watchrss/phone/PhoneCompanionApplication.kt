@@ -68,6 +68,7 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
         super.onCreate()
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
+                runCatching { startService(android.content.Intent(this@PhoneCompanionApplication,com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnosticService::class.java)) }
                 resumedActivity = activity
                 resumedAtMillis = SystemClock.elapsedRealtime()
                 val privacyConsent = PhonePrivacyConsentStore(this@PhoneCompanionApplication)

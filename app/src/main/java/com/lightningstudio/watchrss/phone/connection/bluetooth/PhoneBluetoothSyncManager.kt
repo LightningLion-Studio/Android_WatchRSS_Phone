@@ -132,6 +132,7 @@ class PhoneBluetoothSyncManager(
     private val prepareAccountDomain:suspend(String,String?)->Unit={_,_->},
     private val acknowledgeAccountDomain:suspend(String,String)->Unit={_,_->}
 ) {
+    private val syncDiagnostics=com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnostics.open(context.applicationContext)
     /** P1 optional local projection copy; null leaves the legacy path byte-for-byte unchanged. */
     internal var recordLegacyProjection:((peer:String,version:Int,cursor:String,payload:JSONObject)->Unit)?=null
     private val appContext = context.applicationContext
@@ -488,11 +489,26 @@ class PhoneBluetoothSyncManager(
             emptyMap()
         }
     ): PhoneBluetoothSyncResult {
+        val trace=syncDiagnostics.begin()
+        val diagnosticClients=mutableSetOf<PhoneBluetoothSyncClient>()
+        fun observeDiagnostics(session:PhoneSyncSession?) {
+            val observed=session?.client?:client
+            diagnosticClients+=observed
+            observed.diagnosticBytes={trace.bytes(it)}
+            var pending=listOf("library" to null as String?)
+            observed.diagnosticRequest={request->pending=com.lightningstudio.watchrss.phone.diagnostics.DiagnosticFields.requestItems(request)}
+            observed.diagnosticResponse={response->if(response.opt("success")==false)pending.forEach{(kind,id)->trace.item(kind,id,"rejected",response.optString("errorCode","peer_rejected"))}}
+            trace.channel(session?.transport?.owner?.startsWith("ip:")==true)
+        }
+        observeDiagnostics(null);observeDiagnostics(reusableSession)
+        var diagnosticSuccess=false
         onSyncActiveChanged(true)
         try {
         val sessionId = BluetoothDebugLog.newSessionId("syncAll")
         var syncSession = reusableSession
         var effectiveDevice = device
+        trace.channel(reusableSession?.transport?.owner?.startsWith("ip:")==true)
+        var diagnosticConnections=if(reusableSession!=null)1 else 0
         var opened = reusableSession != null
         lateinit var accountGate: AccountSyncGate
         var sharedBinding: BleSyncBindingSnapshot? = null
@@ -524,6 +540,7 @@ class PhoneBluetoothSyncManager(
         var bookSyncIssues:List<BookSyncIssue> = emptyList()
         var locallyApplied = false
         suspend fun connect() {
+            if(diagnosticConnections++>0)trace.reconnect()
             syncSession?.close()
             syncSession = null
             check(currentPhoneUserId() == owner) { "手机账号已变化，请重新同步" }
@@ -531,6 +548,7 @@ class PhoneBluetoothSyncManager(
                 ?: if (reconnectSession == null) client.openPersistentSession(device, deviceId, "$sessionId-open",allowIpUpgrade=!bluetoothOnlyRecovery) else null
             // All recovery for this operation uses the visible, bounded manager budget.
             syncSession?.recoveryGate?.tryAcquire()
+            observeDiagnostics(syncSession)
             effectiveDevice = syncSession?.device ?: device
             accountGate.invalidate()
             sharedBinding = null
@@ -574,6 +592,7 @@ class PhoneBluetoothSyncManager(
             recovery.run {
                 if (!opened) connect()
                 syncSession = syncSession?.let { client.promoteLateIpSession(it, "$sessionId-ip-upgrade") }
+                observeDiagnostics(syncSession)
                 effectiveDevice = syncSession?.device ?: device
                 syncSession?.recoveryGate?.tryAcquire()
                 binding()
@@ -611,6 +630,7 @@ class PhoneBluetoothSyncManager(
                             }
                         }
                     }
+                    bookSync.diagnosticItem={id,result,code->trace.item("book",id,result,code)}
                     bookSync.domainFastPath=fastPath!=null
                     bookSync.onApplied={if(it>0)locallyApplied=true}
                     bookSync.onIssue={issue->debugLog.appendEvent("sync.book.isolated",sessionId,fields=mapOf("bookId" to issue.bookIdPrefix,"code" to issue.code))}
@@ -706,8 +726,12 @@ class PhoneBluetoothSyncManager(
         if (changed) runCatching { onLibrarySyncCompleted() }.onFailure {
             debugLog.appendEvent("sync.cloud.schedule.failed", sessionId, fields = failureFields(it), throwable = it)
         }
+        if(completed.readerSyncWarning!=null)trace.item("reader",null,"rejected","unknown")
+        if(completed.tokenUsageSyncWarning!=null)trace.item("unknown",null,"rejected","unknown")
+        if(completed.accountSyncWarning!=null)trace.item("account",null,"rejected","unknown")
+        diagnosticSuccess=true
         return completed
-        } finally {onSyncActiveChanged(false)}
+        } finally {trace.finish(diagnosticSuccess);diagnosticClients.forEach{it.diagnosticBytes={};it.diagnosticRequest={};it.diagnosticResponse={}};onSyncActiveChanged(false)}
     }
 
     suspend fun syncSavedItems(type: PhoneSavedItemType, deviceAddress: String? = null): PhoneBluetoothSyncResult {

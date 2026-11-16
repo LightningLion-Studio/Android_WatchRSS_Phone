@@ -237,6 +237,7 @@ internal class LibraryRecoveryContext(
     var receiveFrame: suspend (JSONObject) -> Unit = {}
     private var insideUnit = false
     private val confirmed = mutableSetOf<String>()
+    private var appliedReceiptSequence = 0L
     private data class SentArticle(val expected: ArticleSyncManifestEntry,
         val chunks: MutableSet<Int>, val receipt: String) {
         val bodyHash get() = expected.bodyHash
@@ -251,6 +252,11 @@ internal class LibraryRecoveryContext(
             policy.confirmedProgress()
             event("library.progress.confirmed", mapOf("kind" to kind, "confirmedUnits" to confirmed.size))
         }
+    }
+    /** Only repositories that report actual new committed business rows may call this.
+     * Idempotent replays report zero, so a Ready or a repeated peer receipt cannot renew it. */
+    fun appliedProgress(kind: String, changed: Int) {
+        if (changed > 0) confirmedProgress("apply:$kind", (++appliedReceiptSequence).toString())
     }
     fun stageComplete(name: String) = confirmedProgress("stage", name)
 

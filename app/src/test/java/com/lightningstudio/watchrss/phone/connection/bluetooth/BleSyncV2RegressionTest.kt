@@ -652,4 +652,24 @@ class BleSyncV2RegressionTest {
         assertTrue(failure?.message.orEmpty().contains("两端均缺少字体"));assertTrue(failure?.message.orEmpty().contains("aaaaaaaa"));assertTrue(failure?.message.orEmpty().contains("重新导入"));assertEquals(1,payloads().size);assertFalse(db.readerPresetDao().fontById(sha)!!.deleted);s.close()
     }
 
+    @Test fun newlyCommittedUsagePagesKeepFourReadyIntervalsAlive() = runBlocking<Unit> {
+        var now = 0L; var opens = 0
+        val policy = LibraryTransferRecovery { now }
+        fun binding() = bindingResponse().put("supportsTokenUsageCursor", true)
+        val first = session(binding(), ok("syncAccount"), ok("syncLibrary", "cursor"), emptyManifest(), emptyComplete(),
+            noteResponse(null), usage("confirmed-epoch", 1, listOf(1), more = true, reset = true))
+        manager.reconnectSession = { _, _ ->
+            opens++; now += 6000
+            val id = (opens + 1).toLong()
+            val responses = mutableListOf(binding(), ok("syncAccount"),
+                usage("confirmed-epoch", id, listOf(id), more = id < 5))
+            if (id == 5L) responses += finishResponse()
+            session(*responses.toTypedArray())
+        }
+        val failure = runCatching { manager.syncAll(device, reusableSession = first, recoveryPolicy = policy) }.exceptionOrNull()
+        assertNull("new validated usage pages must reset the no-progress budget: $failure", failure)
+        assertEquals(4, opens)
+        assertEquals(5, tokens.observeRecent(1000).first().size)
+    }
+
 }

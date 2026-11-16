@@ -1835,8 +1835,12 @@ class PhoneBluetoothSyncManager(
                 require(response.response.optString("action")==BluetoothSyncProtocol.ACTION_SYNC_LLM_TOKEN_USAGE) { "手表词元用量响应无效" }
                 val records=response.response.getJSONArray("records")
                 recordsCount+=records.length()
-                if(activeBinding.capabilities.tokenCursor)llmTokenUsageRepository.applyIncremental(peer,response.response)
-                else llmTokenUsageRepository.replaceRecords((0 until records.length()).map { records.getJSONObject(it) })
+                if(activeBinding.capabilities.tokenCursor) {
+                    llmTokenUsageRepository.applyIncremental(peer,response.response)
+                    val committed=llmTokenUsageRepository.cursor(peer)
+                    if(records.length()>0 && committed!=null && committed!=cursor) currentCoroutineContext()[LibraryRecoveryContext]
+                        ?.confirmedProgress("usagePage","$peer|${committed.usageEpoch}|${committed.afterId}")
+                } else llmTokenUsageRepository.replaceRecords((0 until records.length()).map { records.getJSONObject(it) })
                 val more=activeBinding.capabilities.tokenCursor && response.response.getBoolean("hasMore")
             } while(more)
             currentCoroutineContext()[LibraryRecoveryContext]?.stageComplete("usage")

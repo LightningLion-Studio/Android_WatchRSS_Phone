@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 import com.lightningstudio.watchrss.phone.data.book.*
 import com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec
 import org.json.*
+import kotlinx.coroutines.currentCoroutineContext
 import java.io.File
 import java.io.RandomAccessFile
 import java.security.MessageDigest
@@ -37,7 +38,17 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
     fun enableReadingDelta(peer:String,exchange:suspend(JSONObject,(JSONObject)->Unit)->BluetoothSyncExchange):BookBluetoothSync {
         require(peer.isNotBlank());deltaPeer=peer;appliedExchange=exchange;return this
     }
-    private fun recordApplied(count:Int){if(count>0)onApplied(count)}
+    private suspend fun recordApplied(count:Int) {
+        if(count>0) {
+            onApplied(count)
+            currentCoroutineContext()[LibraryRecoveryContext]?.appliedProgress("books",count)
+        }
+    }
+    private fun metadataReceipt(value:JSONObject):String = BookSync.canonical(JSONObject().apply {
+        listOf("bookId","fingerprint","title","chapterCount","deletedChapters","deletionClock",
+            "deleted","deletedAt","updatedAt","sourceDeviceId").forEach { put(it,value.get(it)) }
+        put("sourceUrl",value.optString("sourceUrl"));put("kind",value.optString("kind"))
+    })
     private fun request(phase:String)=JSONObject().put("action","syncBooks").put("version",1).put("deviceId",deviceId).put("phase",phase)
     private suspend fun send(request:JSONObject):JSONObject=exchange(request).also {
         require(it.optBoolean("success")&&it.optString("action")=="syncBooks"&&it.optInt("version")==1) {"手表书籍同步失败"}
@@ -70,7 +81,13 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
         candidates.groupBy{it.getString("bookId")}.filterValues{it.size>1}.keys.forEach{reject(it,"book_manifest_invalid","manifest_duplicate_book_id")}
         val remote=candidates.filter{it.getString("bookId") !in rejected}
         var metadataApplied=0
+        val sentMetadata=local.associateBy { it.getString("bookId") }
         remote.forEach { state ->
+            sentMetadata[state.getString("bookId")]?.let { sent ->
+                val receipt=metadataReceipt(sent)
+                if(metadataReceipt(state)==receipt) currentCoroutineContext()[LibraryRecoveryContext]
+                    ?.confirmedProgress("sendBookMetadata",CloudSnapshotCodec.sha256(receipt.toByteArray()))
+            }
             try {val count=store.merge(state);metadataApplied+=count;applied+=count;recordApplied(count)}
             catch(e:InvalidBookPackageException){reject(state.getString("bookId"),"book_manifest_invalid",e.reason)}
         }
@@ -88,7 +105,12 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
             RandomAccessFile(file,"r").use {input->repeat(count){index->val bytes=ByteArray(minOf(CHUNK.toLong(),file.length()-input.filePointer).toInt());input.readFully(bytes)
                 val ack=send(request("body").put("bookId",id).put("fingerprint",state.getString("fingerprint")).put("packageSha256",store.packageHash(id))
                     .put("byteCount",file.length()).put("chunkIndex",index).put("chunkCount",count).put("dataBase64",Base64.getEncoder().encodeToString(bytes)))
-                require(ack.getString("phase")=="body"&&ack.getBoolean("received"));if(index==count-1)require(ack.getBoolean("complete"))
+                require(ack.getString("phase")=="body"&&ack.getBoolean("received"))
+                if(index==count-1) {
+                    require(ack.getBoolean("complete"))
+                    currentCoroutineContext()[LibraryRecoveryContext]?.confirmedProgress("sendBook",
+                        "$id|${state.getString("fingerprint")}|${store.packageHash(id)}")
+                }
             }}
         }
         staging.mkdirs()

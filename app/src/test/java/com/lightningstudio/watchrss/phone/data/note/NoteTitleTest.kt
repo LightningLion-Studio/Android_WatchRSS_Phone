@@ -4,6 +4,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class NoteTitleTest {
+    // NA-15 from adversarial test commit 072912e5.
+    @Test fun derivedTitleRetainsUnicodeScalarsAtTheLimit() {
+        val title = deriveNoteTitle(".".repeat(79) + "😀")
+        assertEquals(".".repeat(79) + "😀", title)
+    }
+
     @Test fun sharedThreeWordVectorsIncludeTheExactUserVocabularySample() {
         val raw = requireNotNull(javaClass.getResourceAsStream("/notes-title-vectors.json")).bufferedReader().use { it.readText() }
         val cases = org.json.JSONArray(raw)

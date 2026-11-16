@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 import kotlinx.coroutines.*
 import org.junit.Assert.*
 import org.junit.Test
+import org.json.JSONObject
 import java.io.*
 import java.net.ProtocolException
 import java.net.SocketTimeoutException
@@ -16,9 +17,66 @@ class LibraryTransferRecoveryTest {
         assertEquals(0,writes)
     }
     @Test fun retryLimitsShowTheirChineseReasonWithoutImplementationClassNames() {
-        for (failure in listOf(LibraryReconnectLimit(), LibraryDisconnectLimit())) {
+        for (failure in listOf(LibraryReconnectLimit(), LibraryDisconnectLimit(), LibraryNoProgressLimit())) {
             assertEquals(failure.message, com.lightningstudio.watchrss.phone.viewmodel.syncFailureMessage(failure, "信息传输中"))
         }
+    }
+    @Test fun sixSecondEofLoopStopsAfterThirdReadyWithoutProgress()=runBlocking {
+        var now=0L;var generation=1L;var searches=0;var attempts=0
+        val p=LibraryTransferRecovery{now};p.observe(generation)
+        val c=LibraryRecoveryContext(p,LibrarySyncMode.MERGE,{true},
+            {searches++;generation++;p.observe(generation)},{},{},{_,_->},{})
+        val failure=runCatching { c.unit("articles") {
+            attempts++;now+=6000;throw LibraryTransportFailure(generation,EOFException())
+        }}.exceptionOrNull()
+        assertTrue(failure is LibraryNoProgressLimit)
+        assertEquals("同步多次中断且没有进展，请稍后重试",failure!!.message)
+        assertEquals(3,searches);assertEquals(4,attempts);assertEquals(3,p.consecutiveNoProgress)
+        assertEquals(0,p.consecutiveFailures)
+    }
+    @Test fun newConfirmedProgressResetsStreakButDuplicateReceiptAndReadyDoNot() {
+        var now=0L;val p=LibraryTransferRecovery{now}
+        val c=LibraryRecoveryContext(p,LibrarySyncMode.MERGE,{true},{},{},{},{_,_->},{})
+        fun drop(generation:Long){p.observe(generation);p.ready(true);now+=6000;p.disconnected(generation)}
+        drop(1);drop(2);assertEquals(2,p.consecutiveNoProgress)
+        p.observe(3);p.ready(true);c.confirmedProgress("receiveChunk","a|body|0|hash")
+        assertEquals(0,p.consecutiveNoProgress);now+=6000;p.disconnected(3)
+        drop(4);assertEquals(1,p.consecutiveNoProgress)
+        p.observe(5);p.ready(true);c.confirmedProgress("receiveChunk","a|body|0|hash")
+        now+=6000;p.disconnected(5);assertEquals(2,p.consecutiveNoProgress)
+        p.observe(6);p.ready(true);c.stageComplete("reader");assertEquals(0,p.consecutiveNoProgress)
+        now+=6000;p.disconnected(6);drop(7)
+        p.observe(8);p.ready(true);c.stageComplete("reader");now+=6000;p.disconnected(8)
+        assertEquals(2,p.consecutiveNoProgress)
+    }
+    @Test fun senderWritesDoNotCountUntilPeerConfirmsAndReceiptsAreDeduplicated() {
+        val article=PhoneArticleReceiveCheckpointTest().article();val m=ArticleSyncBody.metadataFor(article)
+        val frames=LibrarySyncPayload.buildChunkedArticleRequestFrames("phone",listOf(article),
+            listOf(ArticleBodyRequest(article.articleId,m.bodyHash,m.chunkHashes.indices.toList())),emptyList(),true)
+        var now=0L;val p=LibraryTransferRecovery{now}
+        val c=LibraryRecoveryContext(p,LibrarySyncMode.MERGE,{true},{},{},{},{_,_->},{})
+        fun drop(n:Long){p.observe(n);p.ready(true);now+=6000;p.disconnected(n)}
+        drop(1);frames.forEach(c::sentArticleFrame);assertEquals(1,p.consecutiveNoProgress)
+        p.observe(2);p.ready(true);c.confirmPeerChunks(emptyList(),listOf(ArticleBodyRequest(article.articleId,m.bodyHash,emptyList())))
+        now+=6000;p.disconnected(2);assertEquals(2,p.consecutiveNoProgress) // empty list means request full body
+        p.observe(3);p.ready(true);c.confirmPeerChunks(emptyList(),listOf(ArticleBodyRequest(article.articleId,m.bodyHash,listOf(1))))
+        assertEquals(0,p.consecutiveNoProgress);now+=6000;p.disconnected(3)
+        drop(4);p.observe(5);p.ready(true)
+        c.confirmPeerChunks(emptyList(),listOf(ArticleBodyRequest(article.articleId,m.bodyHash,listOf(1))))
+        now+=6000;p.disconnected(5);assertEquals(2,p.consecutiveNoProgress)
+        p.observe(6);p.ready(true);c.confirmArticleBatch(setOf(article.articleId));assertEquals(0,p.consecutiveNoProgress)
+    }
+    @Test fun activeSlowFrameAndWritesCanExceedIdleDeadlineWithoutTimingOut() {
+        val frame=JSONObject().put("data","x".repeat(4096));val encoded=ByteArrayOutputStream().also{BluetoothSyncProtocol.writeFrame(it,frame)}.toByteArray()
+        var offset=0;var closed=false
+        val source=object:InputStream(){override fun read():Int {Thread.sleep(3);return if(offset<encoded.size)encoded[offset++].toInt()and 255 else -1}
+            override fun read(b:ByteArray,o:Int,n:Int):Int {Thread.sleep(3);val count=minOf(n,16,encoded.size-offset);if(count==0)return -1;encoded.copyInto(b,o,offset,offset+count);offset+=count;return count}}
+        val guard=LibraryIoGuard(1,{true},{closed=true},500)
+        assertEquals(frame.toString(),BluetoothSyncProtocol.readFrame(guard.input(source)).toString());assertFalse(closed)
+        var calls=0
+        val target=object:OutputStream(){override fun write(value:Int)=error("bulk writes expected")
+            override fun write(b:ByteArray,o:Int,n:Int){assertTrue(n<=8192);calls++;Thread.sleep(3)}}
+        guard.output(target).write(ByteArray(2*1024*1024));assertTrue(calls>1);assertFalse(closed)
     }
     @Test fun thirdSearchFailureStopsAndSuccessResetsOnlySearchCounter() {
         var now = 0L

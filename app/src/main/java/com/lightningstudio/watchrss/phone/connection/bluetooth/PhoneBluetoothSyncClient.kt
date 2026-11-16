@@ -218,6 +218,7 @@ internal class PhoneSyncSession internal constructor(
         val owner: String,
         val closeOnLegacyFallback: Boolean,
         private val remotelyClosed: () -> Boolean = { false },
+        private val wireReadActivityNanos: () -> Long = { 0L },
         private val closeTransport: () -> Unit
     ) : Closeable {
         companion object { private val sequence = java.util.concurrent.atomic.AtomicLong() }
@@ -225,7 +226,7 @@ internal class PhoneSyncSession internal constructor(
         @Volatile var recoveryEnabled = false
         @Volatile var validateLibraryOperation: () -> Unit = {}
         private val io = LibraryIoGuard(generation, { recoveryEnabled }, { close() }, remotelyClosed = remotelyClosed,
-            beforeIo = { validateLibraryOperation() })
+            beforeIo = { validateLibraryOperation() }, wireReadActivityNanos = wireReadActivityNanos)
         val inputStream: InputStream = io.input(inputStream)
         val outputStream: OutputStream = io.output(outputStream)
         @Volatile private var closed = false
@@ -713,9 +714,14 @@ class PhoneBluetoothSyncClient(
             session.close()
             return@withContext
         }
+        // Capture this generation before waiting for the mutex/read. Cancellation must
+        // also wake a blocking complete response, without closing a replacement session.
+        val finishingTransport = session.transport ?: return@withContext
+        val cancellationHandle = installSessionCancellationLogger(session, sessionId, BluetoothSyncProtocol.ACTION_SYNC_SESSION)
         try {
             connectionMutex.withLock {
-                val transport = session.transport ?: return@withLock
+                val transport = finishingTransport
+                check(session.transport === transport) { "同步连接已替换" }
                 val request = session.requestForExchange(
                     BluetoothSyncProtocol.buildSessionControlRequest(
                         version = LibrarySyncPayload.PROTOCOL_VERSION,
@@ -739,12 +745,13 @@ class PhoneBluetoothSyncClient(
                 session.recordNegotiation(response)
             }
         } finally {
+            cancellationHandle?.dispose()
             debugLog.appendEvent(
                 event = "sync.session.closed",
                 sessionId = sessionId,
                 fields = mapOf("phase" to phase, "deviceAddress" to session.device.address)
             )
-            session.close()
+            if (session.transport === finishingTransport) session.close() else finishingTransport.close()
         }
     }
 
@@ -1696,12 +1703,14 @@ class PhoneBluetoothSyncClient(
                 throw failure
             }
             recovery?.bodies?.frame("send", articleRequest)
+            recovery?.sentArticleFrame(articleRequest)
             articleRequest.optJSONArray("articles")?.let { entries ->
                 for (n in 0 until entries.length()) sentArticleIds += entries.getJSONObject(n).getString("articleId")
             }
             if (checkpoint) {
                 LibrarySyncPayload.requireArticleBatchAck(readFrameLogged(transport.inputStream, sessionId, "libraryBatchAck"),
                     "phoneToWatch", index, sentArticleIds.size)
+                recovery?.confirmArticleBatch(sentArticleIds)
             }
         }
         report(PhoneBluetoothSyncStage.TRANSFERRING, 58)
@@ -2167,6 +2176,7 @@ class PhoneBluetoothSyncClient(
                 owner = "ip:${ipSession.routeKind.wireName}",
                 closeOnLegacyFallback = false,
                 remotelyClosed = { ipSession.isClosed },
+                wireReadActivityNanos = { ipSession.wireReadActivityNanos() },
                 closeTransport = { ipSession.close() }
             ),
             persistentAccepted = false,

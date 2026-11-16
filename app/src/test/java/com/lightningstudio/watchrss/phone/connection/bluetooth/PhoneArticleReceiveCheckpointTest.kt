@@ -5,10 +5,11 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
+import java.io.File
 import java.nio.file.Files
 
 class PhoneArticleReceiveCheckpointTest {
-    private fun article(): PhoneArticleEntity {
+    internal fun article(): PhoneArticleEntity {
         val random = java.util.Random(81)
         val text = CharArray(600_000) { (33 + random.nextInt(80)).toChar() }.concatToString()
         return PhoneArticleEntity("article", "watch", "https://example.invalid/a", "title", "site", "excerpt", null,
@@ -17,6 +18,50 @@ class PhoneArticleReceiveCheckpointTest {
     private fun entry(a: PhoneArticleEntity, m: ArticleBodyMetadata) = ArticleSyncManifestEntry(a.articleId, a.sourceDeviceId,
         a.contentHash, a.updatedAt, 0, a.favoriteChangedAt, 0, 0, bodyHash=m.bodyHash,bodyByteCount=m.bodyByteCount,
         chunkSize=m.chunkSize,chunkHashes=m.chunkHashes,metadataHash=m.metadataHash)
+
+    // RVHF1313-01: keep the independent review's valid sparse-response counterexample.
+    @Test fun validLocalReusableChunksMustNotBecomeAnIncompleteCheckpoint()=runBlocking {
+        val old=article();val updated=old.copy(contentText=old.contentText.dropLast(100)+"changed suffix".repeat(10),contentHash="new",updatedAt=3)
+        val local=entry(old,ArticleSyncBody.metadataFor(old));val remote=entry(updated,ArticleSyncBody.metadataFor(updated))
+        val request=LibrarySyncPayload.buildBodyRequestsForRemoteArticles(listOf(local),listOf(remote)).single()
+        assertTrue(request.chunkIndexes.size in 1 until remote.chunkHashes.size)
+        val response=ArticleSyncBody.payloadForRequest(updated,request)
+        assertEquals(updated.contentText,ArticleSyncBody.rebuildBody(old,response).second)
+        val root=Files.createTempDirectory("phone-local-reuse").toFile()
+        try {
+            var applications=0
+            val cp=PhoneArticleReceiveCheckpoint(root,"owner","peer",localArticle={old});cp.bind(listOf(remote))
+            assertTrue(cp.apply(response){applications++;assertEquals(updated.contentText,ArticleSyncBody.rebuildBody(old,it).second);1})
+            assertEquals(1,applications)
+            // A body with different bytes cannot satisfy omitted chunks merely by its cached hashes.
+            val invalid=PhoneArticleReceiveCheckpoint(File(root,"invalid"),"owner","peer",localArticle={old.copy(contentText="wrong")})
+            invalid.bind(listOf(remote));assertFalse(invalid.apply(response){fail("unverified local bytes applied");0})
+        }finally{root.deleteRecursively()}
+    }
+
+    // RVHF1313-02: reading state changes independently of body and metadataHash.
+    @Test fun aNewReadingPositionAfterReconnectMustNotReuseTheOldAppliedReceipt()=runBlocking {
+        val first=article();val updated=first.copy(readingProgress=.9f,readingPositionBytes=5000,
+            readingPositionContentHash=first.contentHash,readingPositionChangedAt=400,isRead=true)
+        val before=entry(first,ArticleSyncBody.metadataFor(first))
+        val after=before.copy(readingProgress=.9f,readingPositionBytes=5000,readingPositionContentHash=first.contentHash,
+            readingPositionChangedAt=400,isRead=true)
+        assertEquals(before.metadataHash,after.metadataHash);assertEquals(before.updatedAt,after.updatedAt)
+        val request=LibrarySyncPayload.buildBodyRequestsForRemoteArticles(listOf(before),listOf(after)).single()
+        val root=Files.createTempDirectory("phone-reading-receipt").toFile()
+        try {
+            var latest=first;var applications=0
+            val cp=PhoneArticleReceiveCheckpoint(root,"owner","peer",localArticle={latest})
+            cp.bind(listOf(before));assertTrue(cp.apply(ArticleSyncBody.payloadForRequest(first,
+                ArticleBodyRequest(first.articleId,before.bodyHash,before.chunkHashes.indices.toList()))){latest=it.article;applications++;1})
+            cp.bind(listOf(after));assertFalse(cp.isApplied(first.articleId))
+            val response=ArticleSyncBody.payloadForRequest(updated,request)
+            assertTrue(cp.apply(response){latest=it.article;applications++;1})
+            assertEquals(400L,latest.readingPositionChangedAt);assertTrue(latest.isRead);assertEquals(5000L,latest.readingPositionBytes)
+            assertEquals(2,applications)
+            assertTrue(cp.apply(response){fail("same full state applied twice");0})
+        }finally{root.deleteRecursively()}
+    }
 
     @Test fun recreatedStoreRequestsOnlyMissingChunksAndAppliesExactlyOnce()=runBlocking {
         val root=Files.createTempDirectory("phone-receive").toFile()

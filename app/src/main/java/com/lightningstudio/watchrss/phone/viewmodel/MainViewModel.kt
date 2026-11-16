@@ -17,6 +17,7 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncDeleteCo
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryTransferRecovery
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryReconnectLimit
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryDisconnectLimit
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryNoProgressLimit
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryProgressHold
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibrarySyncMode
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
@@ -90,7 +91,7 @@ data class MainSyncProgressUi(
 )
 
 internal fun syncFailureMessage(throwable: Throwable, phase: String?): String {
-    if (throwable is LibraryReconnectLimit || throwable is LibraryDisconnectLimit) return throwable.message.orEmpty()
+    if (throwable is LibraryReconnectLimit || throwable is LibraryDisconnectLimit || throwable is LibraryNoProgressLimit) return throwable.message.orEmpty()
     if (isTerminalAccountSyncFailure(throwable)) return throwable.message ?: "账号同步失败"
     val detail = generateSequence(throwable) { it.cause }
         .mapNotNull { cause -> cause.message?.trim()?.takeIf(String::isNotEmpty) }

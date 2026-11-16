@@ -507,7 +507,9 @@ class PhoneBluetoothSyncManager(
                     event = { name, fields -> debugLog.appendEvent(name, task, fields) },
                     reconnecting = { progress(lastProgress.copy(stage = PhoneBluetoothSyncStage.RECONNECTING, bytesPerSecond = 0L)) })
                 val checkpoints = PhoneArticleReceiveCheckpoint(
-                    File(appContext.cacheDir, "library-receive/$task"), owner.orEmpty(), target.remoteDeviceId.ifBlank { target.bluetoothAddress.ifBlank { target.address } })
+                    File(appContext.cacheDir, "library-receive/$task"), owner.orEmpty(), target.remoteDeviceId.ifBlank { target.bluetoothAddress.ifBlank { target.address } },
+                    localArticle = { id -> repository.getArticlesForSync(listOf(id)).firstOrNull() },
+                    confirmed = recovery::confirmedProgress)
                 try {
                     if (session != null) session = client.promoteLateIpSession(session!!, "$task-ip")
                     attach()
@@ -756,6 +758,7 @@ class PhoneBluetoothSyncManager(
                     conflictMergeResolutions = conflictPlan.mergeResolutions
                     if (supportsChunkedBodies) {
                         val watchRequests = LibrarySyncPayload.parseBodyRequests(manifestResponse)
+                        recovery?.confirmPeerChunks(remoteManifest, watchRequests)
                         var phoneRequests = if (mode == LibrarySyncMode.PHONE_TO_WATCH_REPLACE) {
                             emptyList()
                         } else mergeBodyRequests(
@@ -924,6 +927,7 @@ class PhoneBluetoothSyncManager(
                     "fallbackReason" to window.fallbackReason
                 )
             )
+            taskRecovery?.stageComplete("articles")
             val readerSyncWarning = if (mode == LibrarySyncMode.MERGE && exchange.manifestResponse.optInt("version") >= 11 &&
                 exchange.manifestResponse.optBoolean("supportsReaderPresets", true)
             ) {
@@ -1025,6 +1029,7 @@ class PhoneBluetoothSyncManager(
                     conflicts += 1
                 }
             }
+            currentCoroutineContext()[LibraryRecoveryContext]?.stageComplete("notesText")
             syncNoteAssets(localNotes, deviceAddress, sessionId, syncSession)
             NoteSyncStats(
                 sent = localNotes.size,
@@ -1098,7 +1103,16 @@ class PhoneBluetoothSyncManager(
                         require(response.optString("action") == NoteAssetSyncPayload.ACTION) {
                             "手表不支持备忘录图片同步，请升级手表端"
                         }
-                        if (response.optBoolean("alreadyPresent")) return
+                        currentCoroutineContext()[LibraryRecoveryContext]?.confirmedProgress("sendImageChunk",
+                            "$storageKey|$sha256|$chunkIndex")
+                        if (response.optBoolean("alreadyPresent")) {
+                            currentCoroutineContext()[LibraryRecoveryContext]?.confirmedProgress("sendImageComplete", "$storageKey|$sha256")
+                            return
+                        }
+                        if (chunkIndex == chunkCount - 1) {
+                            require(response.optBoolean("complete")) { "手表未确认备忘录图片完整落盘" }
+                            currentCoroutineContext()[LibraryRecoveryContext]?.confirmedProgress("sendImageComplete", "$storageKey|$sha256")
+                        }
                     }
                 }
                 }
@@ -1161,6 +1175,8 @@ class PhoneBluetoothSyncManager(
                     if (chunkIndex == frame.optInt("chunkCount") - 1) {
                         require(ack.optBoolean("applied")) { "手表未确认资源完整落盘" }
                     }
+                    currentCoroutineContext()[LibraryRecoveryContext]?.confirmedProgress("sendReaderChunk",
+                        "${resource.kind}|${resource.fileName}|${resource.sha256}|$chunkIndex")
                     completedChunks += 1
                     onResourceProgress(completedChunks, totalChunks)
                 }
@@ -1183,11 +1199,14 @@ class PhoneBluetoothSyncManager(
                         resource,
                         readerPresetRepository
                     )
+                    currentCoroutineContext()[LibraryRecoveryContext]?.confirmedProgress("receiveReaderChunk",
+                        "${resource.kind}|${resource.fileName}|${resource.sha256}|${response.getInt("chunkIndex")}")
                     chunkIndex += 1
                     completedChunks += 1
                     onResourceProgress(completedChunks.coerceAtMost(totalChunks), totalChunks)
                 }
             }
+        currentCoroutineContext()[LibraryRecoveryContext]?.stageComplete("reader")
     }
 
     private suspend fun exchangeReaderFrame(
@@ -1589,6 +1608,7 @@ class PhoneBluetoothSyncManager(
             val records = exchange.response.optJSONArray("records") ?: org.json.JSONArray()
             val recordsList = (0 until records.length()).map { records.getJSONObject(it) }
             llmTokenUsageRepository.replaceRecords(recordsList)
+            currentCoroutineContext()[LibraryRecoveryContext]?.stageComplete("usage")
             debugLog.appendEvent(
                 event = "sync.llmTokenUsage.complete",
                 sessionId = sessionId,

@@ -2,11 +2,22 @@ package com.lightningstudio.watchrss.phone.connection.ip
 
 import java.io.Closeable
 import java.io.InputStream
+import java.io.FilterInputStream
 import java.io.OutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+
+/** Per socket, before WebSocket message buffering. It is activity, not an applied receipt. */
+internal class IpReadActivity {
+    @Volatile var lastNanos: Long = 0L; private set
+    fun input(source: InputStream): InputStream = object : FilterInputStream(source) {
+        override fun read(): Int = source.read().also { if (it >= 0) lastNanos = System.nanoTime() }
+        override fun read(bytes: ByteArray, offset: Int, length: Int): Int = source.read(bytes, offset, length)
+            .also { if (it > 0) lastNanos = System.nanoTime() }
+    }
+}
 
 internal class PhoneIpSyncSession(
     val watchDeviceId: String,
@@ -16,6 +27,7 @@ internal class PhoneIpSyncSession(
     private val sendBinary: (ByteArray) -> Unit,
     private val closeSocket: () -> Unit
 ) : Closeable {
+    @Volatile var wireReadActivityNanos: () -> Long = { 0L }
     private val closed = AtomicBoolean(false)
     private val incoming = PipedInputStream(PIPE_BUFFER_BYTES)
     private val incomingWriter = PipedOutputStream(incoming)
@@ -36,7 +48,11 @@ internal class PhoneIpSyncSession(
         get() = closed.get()
 
     fun acceptBinary(bytes: ByteArray) {
-        if (!closed.get()) incomingWriter.write(bytes)
+        if (!closed.get()) {
+            incomingWriter.write(bytes)
+            // PipedInputStream otherwise polls an empty pipe at one-second intervals.
+            incomingWriter.flush()
+        }
     }
 
     override fun close() {

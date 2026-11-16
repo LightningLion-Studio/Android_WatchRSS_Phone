@@ -5,6 +5,8 @@ import fi.iki.elonen.NanoHTTPD
 import fi.iki.elonen.NanoWSD
 import org.json.JSONObject
 import java.io.IOException
+import java.io.InputStream
+import java.net.Socket
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.UUID
@@ -13,7 +15,19 @@ internal class WatchIpSyncServer(
     private val descriptorProvider: IpEndpointProvider,
     port: Int
 ) : NanoWSD(port), AutoCloseable {
-    override fun openWebSocket(handshake: IHTTPSession): WebSocket = SyncWebSocket(handshake)
+    private val socketActivity = ThreadLocal<IpReadActivity>()
+
+    override fun createClientHandler(socket: Socket, inputStream: InputStream): ClientHandler {
+        val activity = IpReadActivity()
+        return object : ClientHandler(activity.input(inputStream), socket) {
+            override fun run() {
+                socketActivity.set(activity)
+                try { super.run() } finally { socketActivity.remove() }
+            }
+        }
+    }
+
+    override fun openWebSocket(handshake: IHTTPSession): WebSocket = SyncWebSocket(handshake, socketActivity.get())
 
     override fun serveHttp(session: IHTTPSession): Response {
         return when (session.uri) {
@@ -31,7 +45,7 @@ internal class WatchIpSyncServer(
         PhoneIpSyncSessionRegistry.activeSessions().forEach(PhoneIpSyncSession::close)
     }
 
-    private inner class SyncWebSocket(handshake: IHTTPSession) : WebSocket(handshake) {
+    private inner class SyncWebSocket(handshake: IHTTPSession, private val readActivity: IpReadActivity?) : WebSocket(handshake) {
         private var authenticatedSession: PhoneIpSyncSession? = null
 
         override fun onOpen() {
@@ -118,6 +132,7 @@ internal class WatchIpSyncServer(
                     }
                 }
             )
+            session.wireReadActivityNanos = { readActivity?.lastNanos ?: 0L }
             authenticatedSession = session
             send(ack.toJson().toString())
             PhoneIpSyncSessionRegistry.register(session)

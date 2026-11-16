@@ -1,5 +1,7 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth
 
+import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.file.Files
@@ -8,11 +10,14 @@ import java.security.MessageDigest
 
 /** A cache of verified body chunks, never an assertion that the library cursor was applied. */
 internal class PhoneArticleReceiveCheckpoint(
-    private val root: File, private val owner: String, private val peer: String
+    private val root: File, private val owner: String, private val peer: String,
+    private val localArticle: suspend (String) -> PhoneArticleEntity? = { null },
+    private val confirmed: (String, String) -> Unit = { _, _ -> }
 ) {
     private var entries = emptyMap<String, ArticleSyncManifestEntry>()
     private var responseMayChange = emptySet<String>()
     private val applied = mutableSetOf<String>()
+    private val appliedInManifest = mutableSetOf<String>()
     val receivedIds = mutableSetOf<String>()
     var merged = 0; private set
 
@@ -24,6 +29,7 @@ internal class PhoneArticleReceiveCheckpoint(
         require(manifest.map { it.articleId }.distinct().size == manifest.size) { "同步清单包含重复文章" }
         entries = manifest.associateBy { it.articleId }
         responseMayChange = emptySet()
+        appliedInManifest.clear()
     }
     fun allowResponseChanges(sentArticleIds: Set<String>) { responseMayChange = sentArticleIds }
     private fun verified(e: ArticleSyncManifestEntry, index: Int): ByteArray? {
@@ -64,26 +70,65 @@ internal class PhoneArticleReceiveCheckpoint(
             require(incoming.index in e.chunkHashes.indices && incoming.hash == e.chunkHashes[incoming.index] &&
                 incoming.bytes.size.toLong() == minOf(e.chunkSize.toLong(), e.bodyByteCount - incoming.index.toLong() * e.chunkSize) &&
                 hash(incoming.bytes) == incoming.hash) { "同步正文分块校验失败" }
+            if (verified(e, incoming.index) != null) continue
             val target = chunk(e, incoming.index)
             check(target.parentFile!!.isDirectory || target.parentFile!!.mkdirs()) { "同步检查点目录不可写" }
             val temporary = File(target.parentFile, target.name + ".tmp")
             FileOutputStream(temporary).use { it.write(incoming.bytes); it.fd.sync() }
             Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            confirmed("receiveChunk", "${e.articleId}|${e.bodyHash}|${incoming.index}|${incoming.hash}")
         }
         return payload.copy(chunks = e.chunkHashes.indices.mapNotNull { n -> verified(e, n)?.let { ArticleBodyChunk(n, e.chunkHashes[n], it) } })
     }
     suspend fun apply(payload: ChunkedArticlePayload, merge: suspend (ChunkedArticlePayload) -> Int): Boolean {
-        val staged = stage(payload)
+        var staged = stage(payload)
         val e = entries.getValue(payload.article.articleId)
-        if (key(e) in applied) { File(root, key(e)).deleteRecursively(); return true }
+        // Body staging can be shared across reading-state changes. An applied receipt
+        // cannot: metadataHash intentionally excludes these independently updated fields.
+        val reading = JSONObject().apply {
+            put("progress", payload.article.readingProgress)
+            put("position", payload.article.readingPositionBytes)
+            put("contentHash", payload.article.readingPositionContentHash)
+            put("changedAt", payload.article.readingPositionChangedAt)
+            put("isRead", payload.article.isRead)
+        }
+        val receipt = hash((key(e) + "|" + ArticleSyncBody.metadataHashFor(payload.article) + "|" + reading).toByteArray())
+        if (receipt in applied) {
+            appliedInManifest += e.articleId
+            File(root, key(e)).deleteRecursively()
+            return true
+        }
+        if (!staged.metadataOnly && staged.chunks.size != staged.chunkHashes.size) {
+            // bodyRequests legitimately omits unchanged chunks from the existing local
+            // body. Re-encode and hash those bytes; cached metadata alone is not proof.
+            localArticle(e.articleId)?.let { local ->
+                val metadata = ArticleSyncBody.metadataFor(local)
+                if (metadata.chunkSize == staged.chunkSize) {
+                    val present = staged.chunks.mapTo(mutableSetOf()) { it.index }
+                    val missing = staged.chunkHashes.indices.filter { it !in present && it in metadata.chunkHashes.indices }
+                    if (missing.isNotEmpty()) {
+                        val localChunks = ArticleSyncBody.payloadForRequest(local,
+                            ArticleBodyRequest(e.articleId, metadata.bodyHash, missing), metadata).chunks
+                        val reusable = localChunks.filter { chunk ->
+                            chunk.hash == staged.chunkHashes[chunk.index] &&
+                                chunk.bytes.size.toLong() == minOf(staged.chunkSize.toLong(),
+                                    staged.bodyByteCount - chunk.index.toLong() * staged.chunkSize)
+                        }
+                        staged = staged.copy(chunks = (staged.chunks + reusable).sortedBy { it.index })
+                    }
+                }
+            }
+        }
         if (!staged.metadataOnly && staged.chunks.size != staged.chunkHashes.size) return false
         // The repository rebuild validates the complete encoded body and its hash before commit.
         merged += merge(staged)
-        applied += key(e)
+        applied += receipt
+        appliedInManifest += e.articleId
         receivedIds += e.articleId
+        confirmed("receiveArticle", receipt)
         File(root, key(e)).deleteRecursively()
         return true
     }
-    fun isApplied(id: String): Boolean = entries[id]?.let { key(it) in applied } == true
+    fun isApplied(id: String): Boolean = id in appliedInManifest
     fun close() { root.deleteRecursively() }
 }

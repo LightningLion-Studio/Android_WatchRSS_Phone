@@ -9,9 +9,12 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.ProtocolException
 import java.net.SocketTimeoutException
+import java.security.MessageDigest
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 
@@ -22,16 +25,27 @@ internal class LibraryTransportFailure(val generation: Long, cause: IOException)
 internal class LibrarySearchFailure(cause: Throwable? = null) : IOException("未找到可重新连接的原手表", cause)
 internal class LibraryReconnectLimit : IOException("连续 3 次搜索或重新连接手表失败")
 internal class LibraryDisconnectLimit : IOException("10 秒内同步连接断开 3 次")
+internal class LibraryNoProgressLimit : IOException("同步多次中断且没有进展，请稍后重试")
 
 internal class LibraryTransferRecovery(private val now: () -> Long) {
     var consecutiveFailures = 0; private set
     var generation: Long = -1; private set
     private val disconnected = mutableSetOf<Long>()
     private val times = ArrayDeque<Long>()
+    var consecutiveNoProgress = 0; private set
+    private var monitoringReady = false
+    private var progressSinceReady = false
 
     fun clockMillis(): Long = now()
     fun observe(value: Long) { generation = value }
-    fun ready() { consecutiveFailures = 0 }
+    fun ready(reconnected: Boolean = false) {
+        consecutiveFailures = 0
+        if (reconnected) { monitoringReady = true; progressSinceReady = false }
+    }
+    fun confirmedProgress() {
+        progressSinceReady = true
+        consecutiveNoProgress = 0
+    }
     fun searchFailed() {
         consecutiveFailures += 1
         if (consecutiveFailures >= 3) throw LibraryReconnectLimit()
@@ -42,6 +56,11 @@ internal class LibraryTransferRecovery(private val now: () -> Long) {
         while (times.isNotEmpty() && at - times.first() > 10_000L) times.removeFirst()
         times.addLast(at)
         if (times.size >= 3) throw LibraryDisconnectLimit()
+        if (monitoringReady) {
+            monitoringReady = false
+            consecutiveNoProgress = if (progressSinceReady) 0 else consecutiveNoProgress + 1
+            if (consecutiveNoProgress >= 3) throw LibraryNoProgressLimit()
+        }
     }
 }
 
@@ -50,20 +69,45 @@ internal class LibraryIoGuard(
     private val generation: Long,
     private val enabled: () -> Boolean,
     private val close: () -> Unit,
-    private val timeoutMs: Long = 120_000L,
+    // 40 frozen-APK cases: longest successful complete read <= 6001 ms.
+    // This conservatively includes snapshot generation and wire time:
+    // min(60s, max(30s, 3 * 6001ms)) = 30s. Reset at each stream I/O, not per frame.
+    private val timeoutMs: Long = 30_000L,
     private val remotelyClosed: () -> Boolean = { false },
-    private val beforeIo: () -> Unit = {}
+    private val beforeIo: () -> Unit = {},
+    private val wireReadActivityNanos: () -> Long = { 0L }
 ) {
     companion object {
         private val timer = Executors.newSingleThreadScheduledExecutor { work ->
             Thread(work, "library-io-deadline").apply { isDaemon = true }
         }
     }
-    private fun <T> io(block: () -> T): T {
+    private fun <T> io(reading: Boolean = false, block: () -> T): T {
         if (!enabled()) return block()
         beforeIo()
         val timedOut = AtomicBoolean(false)
-        val alarm = timer.schedule({ timedOut.set(true); runCatching(close) }, timeoutMs, TimeUnit.MILLISECONDS)
+        val finished = AtomicBoolean(false)
+        val alarm = AtomicReference<ScheduledFuture<*>?>()
+        val started = System.nanoTime()
+        val timeoutNanos = TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        val deadline = object : Runnable {
+            override fun run() {
+                if (finished.get()) return
+                // A WebSocket may buffer an entire large message before feeding the
+                // application pipe. Observe this connection's raw reads, not just onMessage.
+                val activity = if (reading) maxOf(started, wireReadActivityNanos()) else started
+                val remaining = timeoutNanos - (System.nanoTime() - activity)
+                if (remaining > 0) {
+                    val next = timer.schedule(this, remaining, TimeUnit.NANOSECONDS)
+                    alarm.set(next)
+                    if (finished.get()) next.cancel(false)
+                } else if (!finished.get()) {
+                    timedOut.set(true)
+                    runCatching(close)
+                }
+            }
+        }
+        alarm.set(timer.schedule(deadline, timeoutNanos, TimeUnit.NANOSECONDS))
         try {
             val result = block()
             if (timedOut.get()) throw SocketTimeoutException("同步连接读写超时")
@@ -77,20 +121,29 @@ internal class LibraryIoGuard(
             if (failure is ProtocolException || failure is LibraryTransportFailure) throw failure
             throw LibraryTransportFailure(generation,
                 if (timedOut.get()) SocketTimeoutException("同步连接读写超时").apply { initCause(failure) } else failure)
-        } finally { alarm.cancel(false) }
+        } finally { finished.set(true); alarm.get()?.cancel(false) }
     }
     fun input(source: InputStream): InputStream = object : InputStream() {
-        override fun read(): Int = io {
+        override fun read(): Int = io(reading = true) {
             source.read().also { if (enabled() && it < 0) throw EOFException("同步连接读取结束") }
         }
-        override fun read(bytes: ByteArray, offset: Int, length: Int): Int = io {
-            source.read(bytes, offset, length).also { if (enabled() && length > 0 && it < 0) throw EOFException("同步连接读取结束") }
+        override fun read(bytes: ByteArray, offset: Int, length: Int): Int = io(reading = true) {
+            source.read(bytes, offset, if (enabled()) minOf(length, 8192) else length)
+                .also { if (enabled() && length > 0 && it < 0) throw EOFException("同步连接读取结束") }
         }
         override fun close() = source.close()
     }
     fun output(target: OutputStream): OutputStream = object : OutputStream() {
         override fun write(value: Int) = io { target.write(value) }
-        override fun write(bytes: ByteArray, offset: Int, length: Int) = io { target.write(bytes, offset, length) }
+        override fun write(bytes: ByteArray, offset: Int, length: Int) {
+            if (!enabled()) { target.write(bytes, offset, length); return }
+            var written = 0
+            while (written < length) {
+                val count = minOf(length - written, 8192)
+                io { target.write(bytes, offset + written, count) }
+                written += count
+            }
+        }
         override fun flush() = io { target.flush() }
         override fun close() = target.close()
     }
@@ -150,7 +203,60 @@ internal class LibraryRecoveryContext(
     var checkpoints = false
     var receiveFrame: suspend (JSONObject) -> Unit = {}
     private var insideUnit = false
+    private val confirmed = mutableSetOf<String>()
+    private data class SentArticle(val bodyHash: String, val chunkSize: Int,
+        val chunkHashes: List<String>, val chunks: MutableSet<Int>, val receipt: String)
+    private val sentArticles = mutableMapOf<String, SentArticle>()
     fun validateOwner() = checkOwner()
+
+    fun confirmedProgress(kind: String, identity: String) {
+        if (confirmed.add("$kind|$identity")) {
+            policy.confirmedProgress()
+            event("library.progress.confirmed", mapOf("kind" to kind, "confirmedUnits" to confirmed.size))
+        }
+    }
+    fun stageComplete(name: String) = confirmedProgress("stage", name)
+
+    /** A successful write is only a candidate. It is never itself confirmed progress. */
+    fun sentArticleFrame(frame: JSONObject) {
+        val articles = frame.optJSONArray("articles") ?: return
+        for (i in 0 until articles.length()) {
+            val article = articles.getJSONObject(i)
+            val id = article.getString("articleId")
+            val body = article.optJSONObject("body") ?: continue
+            val hashes = body.optJSONArray("chunkHashes") ?: continue
+            val bodyHash = body.getString("bodyHash")
+            val receipt = MessageDigest.getInstance("SHA-256").digest(
+                (JSONObject(article.toString()).apply { remove("body") }.toString() + "|$bodyHash").toByteArray())
+                .joinToString("") { "%02x".format(it) }
+            val previous = sentArticles[id]
+            val candidate = if (previous != null && previous.receipt == receipt) previous else SentArticle(bodyHash,
+                body.getInt("chunkSize"), (0 until hashes.length()).map(hashes::getString), mutableSetOf(), receipt)
+            body.optJSONArray("chunks")?.let { chunks ->
+                for (n in 0 until chunks.length()) candidate.chunks += chunks.getJSONObject(n).getInt("index")
+            }
+            sentArticles[id] = candidate
+        }
+    }
+    fun confirmArticleBatch(articleIds: Set<String>) {
+        articleIds.forEach { id -> sentArticles[id]?.let { confirmedProgress("sendArticle", it.receipt) } }
+    }
+    /** Old peers' current missing-chunk list (or complete body hash) is their receipt. */
+    fun confirmPeerChunks(manifest: List<ArticleSyncManifestEntry>, requests: List<ArticleBodyRequest>) {
+        val remote = manifest.associateBy { it.articleId }
+        val missing = requests.associateBy { it.articleId }
+        sentArticles.forEach { (id, sent) ->
+            val existing = remote[id]
+            val request = missing[id]
+            val complete = existing?.bodyAvailable == true && existing.bodyHash == sent.bodyHash &&
+                existing.chunkSize == sent.chunkSize && existing.chunkHashes == sent.chunkHashes
+            sent.chunks.forEach { index ->
+                val omitted = request != null && request.bodyHash == sent.bodyHash && !request.metadataOnly &&
+                    request.chunkIndexes.isNotEmpty() && index !in request.chunkIndexes
+                if (complete || omitted) confirmedProgress("sendChunk", "$id|${sent.bodyHash}|$index|${sent.chunkHashes[index]}")
+            }
+        }
+    }
 
     private suspend fun repair() {
         while (true) {
@@ -164,7 +270,7 @@ internal class LibraryRecoveryContext(
                 confirm()
                 currentCoroutineContext().ensureActive()
                 checkOwner()
-                policy.ready()
+                policy.ready(reconnected = true)
                 event("library.reconnect.ready", mapOf("generation" to policy.generation) + bodies.snapshot())
                 return
             } catch (failure: Exception) {

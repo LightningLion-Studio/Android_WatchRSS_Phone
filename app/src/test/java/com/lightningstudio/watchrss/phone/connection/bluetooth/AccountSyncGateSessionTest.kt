@@ -43,6 +43,8 @@ class AccountSyncGateSessionTest {
     private var unbound=false
     private var failFirstCursor=false
     private var dropCursorCount=0
+    private var onCursorDrop:(()->Unit)?=null
+    private var downloadArticle:PhoneArticleEntity?=null
     private var closeIpAtCursor=false
     private var protocolCursor=false
     private var cancelAtCursor:Job?=null
@@ -88,12 +90,12 @@ class AccountSyncGateSessionTest {
                 "syncAccount"->{accountCount++;answer(action).put("boundUserId",simulatedUserId?:"owner")}
                 "syncLibrary"->when(phase){
                     "probe"->answer(action,phase).put("supportsPersistentSession",true).put("persistentSessionAccepted",true).apply { if(unbound)put("account",JSONObject().put("bound",false)) }
-                    "cursor"->{if(closeIpAtCursor){closeIpAtCursor=false;ip!!.close();throw IllegalStateException("IP 同步连接已关闭")};if(protocolCursor)throw java.net.ProtocolException("bad frame");cancelAtCursor?.let{it.cancel();throw IOException("cancelled socket")};if(dropCursorCount>0){dropCursorCount--;throw IOException("reset by peer")};if(failFirstCursor){failFirstCursor=false;throw IOException("synthetic disconnect")};cursorCount++;if(cursorCount<=rejectCount)answer(action,phase).put("success",false)
+                    "cursor"->{if(closeIpAtCursor){closeIpAtCursor=false;ip!!.close();throw IllegalStateException("IP 同步连接已关闭")};if(protocolCursor)throw java.net.ProtocolException("bad frame");cancelAtCursor?.let{it.cancel();throw IOException("cancelled socket")};if(dropCursorCount>0){dropCursorCount--;onCursorDrop?.invoke();throw IOException("reset by peer")};if(failFirstCursor){failFirstCursor=false;throw IOException("synthetic disconnect")};cursorCount++;if(cursorCount<=rejectCount)answer(action,phase).put("success",false)
                         .put("message","请重新连接并同步账号后再同步资料").apply {rejectionCode?.let {put("errorCode",it)}}
                         else LibrarySyncPayload.buildCursorResponse("watch",LibrarySyncCursor(0,0,0)).put("supportsAuthoritativeLibraryReplace",true).apply{if(supportsCheckpoints && q.optBoolean(LibrarySyncPayload.ARTICLE_CHECKPOINT_FEATURE))put(LibrarySyncPayload.ARTICLE_CHECKPOINT_FEATURE,true)}}
-                    "manifest"->LibrarySyncPayload.buildManifestResponse("watch",emptyList()).put("supportsReaderPresets",rejectReader||enableReader)
+                    "manifest"->LibrarySyncPayload.buildManifestResponse("watch",listOfNotNull(downloadArticle)).put("supportsReaderPresets",rejectReader||enableReader)
                         .put("supportsNoteManifestV2",false).put("supportsNoteAssetInventory",false)
-                    "articles"->LibrarySyncPayload.buildChunkedResponseFrames("watch",emptyList(),emptyList(),useBatches=false).single()
+                    "articles"->LibrarySyncPayload.buildChunkedResponseFrames("watch",listOfNotNull(downloadArticle),LibrarySyncPayload.parseBodyRequests(q),useBatches=false).single()
                     else->error("unexpected library phase $phase")
                 }
                 "syncReader"->if(dropReaderCount>0){dropReaderCount--;throw IOException("reader socket closed")}else if(rejectReader)answer(action,phase).put("success",false).put("message","请重新连接并同步账号后再同步资料")
@@ -154,6 +156,51 @@ class AccountSyncGateSessionTest {
         val requests=frames.filter{it.optString("action")!="ack"}
         assertEquals(listOf("syncAccount","syncLibrary"),requests.take(2).map{it.optString("action")})
         assertEquals(1,accountCount);assertEquals(1,cursorCount)
+    }}
+    @Test fun sparseLocalBodyReuseReachesRealRepositoryOnBothRoutes()=runBlocking<Unit>{runBoth {
+        val old=PhoneArticleReceiveCheckpointTest().article().copy(independentSaved=true,independentChangedAt=2)
+        db.phoneArticleDao().upsert(old)
+        val remote=old.copy(contentText=old.contentText.dropLast(100)+"changed suffix".repeat(10),contentHash="new",updatedAt=3)
+        val metadata=ArticleSyncBody.metadataFor(remote)
+        downloadArticle=remote.copy(syncBodyHash=metadata.bodyHash,syncBodyByteCount=metadata.bodyByteCount,syncChunkSize=metadata.chunkSize,
+            syncChunkHashesJson=org.json.JSONArray(metadata.chunkHashes).toString(),syncMetadataHash=metadata.metadataHash)
+        manager.syncAll(device,reusableSession=session())
+        val request=frames.first{it.optString("phase")=="articles"}.let(LibrarySyncPayload::parseBodyRequests).single()
+        assertTrue(request.chunkIndexes.size in 1 until ArticleSyncBody.metadataFor(remote).chunkHashes.size)
+        assertEquals(remote.contentText,repo.getArticlesForSync(listOf(old.articleId)).single().contentText)
+    }}
+    @Test fun sixSecondEofManagerStopsAfterThreeReadyIntervalsWithoutProgress()=runBlocking<Unit>{runBoth {
+        var now=0L;dropCursorCount=100;onCursorDrop={now+=6000}
+        val policy=LibraryTransferRecovery{now}
+        assertTrue(runCatching{manager.syncAll(device,reusableSession=session(),recoveryPolicy=policy)}.exceptionOrNull() is LibraryNoProgressLimit)
+        assertEquals(3,reconnects);assertEquals(4,accountCount);assertEquals(3,policy.consecutiveNoProgress)
+        assertFalse(frames.any{it.optString("phase")=="articles"})
+    }}
+    // RVHF1313-03: real manager/client at a Java read of syncSession/complete.
+    @Test fun cancellingWhileWaitingForSessionCompleteMustCloseTransportImmediately()=runBlocking<Unit>{runBoth {
+        val active=session();val original=active.transport!!
+        val finishing=java.util.concurrent.atomic.AtomicBoolean(false)
+        val entered=java.util.concurrent.CountDownLatch(1);val released=java.util.concurrent.CountDownLatch(1)
+        val closed=java.util.concurrent.atomic.AtomicBoolean(false);val pending=ByteArrayOutputStream()
+        val input=object:InputStream(){override fun read():Int {
+            if(finishing.get()){entered.countDown();check(released.await(5,java.util.concurrent.TimeUnit.SECONDS));throw IOException("closed")}
+            return original.inputStream.read()
+        }}
+        val output=object:OutputStream(){override fun write(value:Int){pending.write(value)}
+            override fun write(b:ByteArray,o:Int,n:Int){pending.write(b,o,n)}
+            override fun flush(){if(pending.size()==0)return;val bytes=pending.toByteArray();pending.reset()
+                val q=BluetoothSyncProtocol.readFrame(bytes.inputStream())
+                if(q.optString("action")=="syncSession"){finishing.set(true);return}
+                original.outputStream.write(bytes);original.outputStream.flush()}}
+        active.transport=PhoneSyncSession.Transport(input,output,transport,false,closeTransport={closed.set(true);released.countDown();original.close()})
+        val job=launch(Dispatchers.Default){manager.syncAll(active.device,reusableSession=active)}
+        try {
+            assertTrue(withContext(Dispatchers.IO){entered.await(5,java.util.concurrent.TimeUnit.SECONDS)})
+            job.cancel();delay(300);assertTrue(closed.get());assertTrue(job.isCompleted);withTimeout(1000){job.join()}
+            assertTrue(closed.get());assertTrue(job.isCompleted);assertEquals(0,reconnects)
+            // The same client mutex is available to a following task immediately.
+            manager.syncAll(device,reusableSession=session())
+        }finally{released.countDown();job.cancelAndJoin();active.close()}
     }}
     @Test fun promotedIpNegotiationRecoveryAndCompletionUseBackgroundIo()=runBlocking<Unit>{
         transport="ip:test";requireBackgroundIo=true;failFirstCursor=true

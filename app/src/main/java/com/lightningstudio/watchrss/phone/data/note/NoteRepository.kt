@@ -3,6 +3,12 @@ package com.lightningstudio.watchrss.phone.data.note
 import kotlinx.coroutines.flow.Flow
 import java.util.UUID
 
+data class NoteRemoteApplyResult(
+    val mergeResult: MarkdownMergeResult,
+    val changedNotes: Int = 0,
+    val addedConflicts: Int = 0
+)
+
 class NoteRepository(
     private val dao: NoteDao,
     private val deviceId: String,
@@ -101,32 +107,38 @@ class NoteRepository(
         return resolved
     }
 
-    suspend fun applyRemote(remote: NoteEntity, remoteDeviceId: String): MarkdownMergeResult {
+    suspend fun applyRemote(remote: NoteEntity, remoteDeviceId: String): MarkdownMergeResult =
+        applyRemoteWithChanges(remote, remoteDeviceId).mergeResult
+
+    /** Counts only successful business writes; ignored conflict inserts report zero. */
+    suspend fun applyRemoteWithChanges(remote: NoteEntity, remoteDeviceId: String): NoteRemoteApplyResult {
         val local = dao.note(remote.noteId)
-        if(local==remote)return MarkdownMergeResult.Merged(local.markdown)
+        if(local==remote)return NoteRemoteApplyResult(MarkdownMergeResult.Merged(local.markdown))
         if(local!=null && local.markdown==remote.markdown && local.contentHash==remote.contentHash) {
             val order=compareValuesBy(remote,local,{maxOf(it.updatedAt,it.deletedAt)},{it.modifiedBy},{it.deleted},{it.title},{it.folderId!=null},{it.folderId.orEmpty()},{it.pinned},{it.createdAt},{it.baseContentHash},{it.baseMarkdown})
             if(order>0)dao.upsertNotes(listOf(remote))
-            return MarkdownMergeResult.Merged(local.markdown)
+            return NoteRemoteApplyResult(MarkdownMergeResult.Merged(local.markdown), changedNotes = if(order>0) 1 else 0)
         }
         if(local!=null && maxOf(remote.updatedAt,remote.deletedAt)<maxOf(local.updatedAt,local.deletedAt) && (local.deleted || remote.deleted))
-            return MarkdownMergeResult.Merged(local.markdown)
+            return NoteRemoteApplyResult(MarkdownMergeResult.Merged(local.markdown))
         if (local == null || local.deleted || remote.updatedAt > local.updatedAt && local.contentHash == local.baseContentHash) {
             dao.upsertNotes(listOf(remote))
-            return MarkdownMergeResult.Merged(remote.markdown)
+            return NoteRemoteApplyResult(MarkdownMergeResult.Merged(remote.markdown), changedNotes = 1)
         }
         val result = MarkdownThreeWayMerge.merge(local.baseMarkdown, local.markdown, remote.markdown)
         if (result is MarkdownMergeResult.Merged) {
             if (result.markdown != local.markdown) {
                 save(local.noteId, local.title, result.markdown, local.folderId, local.pinned)
+                return NoteRemoteApplyResult(result, changedNotes = 1)
             }
         } else {
-            dao.upsertConflicts(listOf(NoteConflictEntity(
+            val inserted = dao.upsertConflicts(listOf(NoteConflictEntity(
                 conflictId = MarkdownNoteCodec.sha256(listOf(local.noteId,local.baseMarkdown,local.markdown,remote.markdown,remoteDeviceId).joinToString("\u0000")), noteId = local.noteId,
                 baseMarkdown = local.baseMarkdown, localMarkdown = local.markdown,
                 remoteMarkdown = remote.markdown, remoteDeviceId = remoteDeviceId, createdAt = now()
             )))
+            return NoteRemoteApplyResult(result, addedConflicts = inserted.count { it != -1L })
         }
-        return result
+        return NoteRemoteApplyResult(result)
     }
 }

@@ -1313,11 +1313,12 @@ class PhoneBluetoothSyncManager(
         val incoming=NoteSyncPayload.decodeNotes(response)
         var conflicts=0;var applied=0
         for(note in incoming) {
-            val previous=noteRepository.note(note.noteId)
-            if(noteRepository.applyRemote(note,remoteDevice) is MarkdownMergeResult.Conflict)conflicts++
-            if(previous!=noteRepository.note(note.noteId))applied++
+            val committed=noteRepository.applyRemoteWithChanges(note,remoteDevice)
+            if(committed.mergeResult is MarkdownMergeResult.Conflict)conflicts++
+            applied+=committed.changedNotes
+            currentCoroutineContext()[LibraryRecoveryContext]
+                ?.appliedProgress("notes",committed.changedNotes+committed.addedConflicts)
         }
-        currentCoroutineContext()[LibraryRecoveryContext]?.stageComplete("notes")
         onLocalApplied(applied)
         syncNoteAssets(localAssets,remoteAssets,deviceAddress,sessionId,syncSession)
         NoteSyncStats(changed.size,incoming.size,response.optInt("applied"),conflicts,applied).also { stats ->
@@ -1836,14 +1837,11 @@ class PhoneBluetoothSyncManager(
                 val records=response.response.getJSONArray("records")
                 recordsCount+=records.length()
                 if(activeBinding.capabilities.tokenCursor) {
-                    llmTokenUsageRepository.applyIncremental(peer,response.response)
-                    val committed=llmTokenUsageRepository.cursor(peer)
-                    if(records.length()>0 && committed!=null && committed!=cursor) currentCoroutineContext()[LibraryRecoveryContext]
-                        ?.confirmedProgress("usagePage","$peer|${committed.usageEpoch}|${committed.afterId}")
+                    val applied=llmTokenUsageRepository.applyIncremental(peer,response.response)
+                    currentCoroutineContext()[LibraryRecoveryContext]?.appliedProgress("usage",applied)
                 } else llmTokenUsageRepository.replaceRecords((0 until records.length()).map { records.getJSONObject(it) })
                 val more=activeBinding.capabilities.tokenCursor && response.response.getBoolean("hasMore")
             } while(more)
-            currentCoroutineContext()[LibraryRecoveryContext]?.stageComplete("usage")
             debugLog.appendEvent(
                 event = "sync.llmTokenUsage.complete",
                 sessionId = sessionId,

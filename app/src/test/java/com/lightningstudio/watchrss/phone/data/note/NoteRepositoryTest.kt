@@ -117,10 +117,11 @@ class NoteRepositoryTest {
     private class FakeNoteDao : NoteDao {
         val notes = linkedMapOf<String, NoteEntity>()
         val assets = linkedMapOf<String, NoteAssetEntity>()
+        val conflicts = linkedSetOf<String>()
         override suspend fun hasAny() = notes.isNotEmpty()
         private val noteFlow = MutableStateFlow<List<NoteEntity>>(emptyList())
 
-        override suspend fun clearConflicts() = Unit
+        override suspend fun clearConflicts() { conflicts.clear() }
         override suspend fun clearAssets() { assets.clear() }
         override suspend fun clearNotes() { notes.clear(); noteFlow.value = emptyList() }
         override suspend fun clearFolders() = Unit
@@ -144,7 +145,8 @@ class NoteRepositoryTest {
         override suspend fun upsertAssets(items: List<NoteAssetEntity>) {
             items.forEach { assets[it.assetId] = it }
         }
-        override suspend fun upsertConflicts(items: List<NoteConflictEntity>) = Unit
+        override suspend fun upsertConflicts(items: List<NoteConflictEntity>): List<Long> =
+            items.map { if(conflicts.add(it.conflictId)) conflicts.size.toLong() else -1L }
         override suspend fun resolveConflict(conflictId: String, resolvedAt: Long) = Unit
     }
 }

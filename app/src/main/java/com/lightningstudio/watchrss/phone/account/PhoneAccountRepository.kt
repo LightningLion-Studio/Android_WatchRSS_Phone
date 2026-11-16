@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.account
 
 import kotlinx.coroutines.flow.StateFlow
+import com.lightningstudio.watchrss.phone.connection.bluetooth.AuthorizedBluetoothRequest
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -305,13 +306,25 @@ class PhoneAccountRepository(
         val current=session.value?:return null
         if (!hasUsableSession || offlineAuthorizationBlocked(current.userId)) return null
         if (current.expiresAtMillis > 0 && current.expiresAtMillis <= nowMillis) return null
-        return sessionStore.bluetoothGrant(bluetoothGrantKey(watch))?.takeIf {
+        val snapshot = sessionStore.bluetoothGrantSnapshot(bluetoothGrantKey(watch, current.userId), offlineScope(current.userId)) ?: return null
+        val request = runCatching { JSONObject(snapshot.raw) }.getOrNull() ?: return null
+        return request.takeIf {
             val a=it.optJSONObject("account")
             a?.optString("userId")==current.userId && a.optString("phoneMasked")==current.phoneMasked &&
                 a.optString("backendBaseUrl")==environment.backendBaseUrl &&
                 a.optString("watchAccessToken").isNotBlank() &&
                 a.optLong("accessTokenExpiresAt")>maxOf(nowMillis,System.currentTimeMillis())+300_000 &&
-                session.value == current && hasUsableSession && !offlineAuthorizationBlocked(current.userId)
+                session.value == current && hasUsableSession && sessionStore.isCurrentBluetoothGrant(snapshot)
+        }?.let { guardedBluetoothGrant(it, snapshot, current) }
+    }
+
+    private fun guardedBluetoothGrant(request: JSONObject, snapshot: EncryptedAccountSessionStore.BluetoothGrantSnapshot,
+        expectedSession: PhoneAccountSession): JSONObject = AuthorizedBluetoothRequest(request) { write ->
+        sessionStore.withCurrentBluetoothGrant(snapshot) {
+            if (session.value != expectedSession || !hasUsableSession) throw PhoneAccountNetworkRequired(
+                IllegalStateException("手机账号已变化，请重新验证")
+            )
+            write()
         }
     }
 
@@ -384,8 +397,8 @@ class PhoneAccountRepository(
             })
         }
         check(this.session.value == session && hasUsableSession){"手机账号已变化，请重新同步"}
-        sessionStore.saveAuthorizedBluetoothGrant(bluetoothGrantKey(watchDeviceId, session.userId), offlineScope(session.userId), authorizationVersion, request)
+        val snapshot = sessionStore.saveAuthorizedBluetoothGrant(bluetoothGrantKey(watchDeviceId, session.userId), offlineScope(session.userId), authorizationVersion, request)
         check(this.session.value == session && hasUsableSession){"手机账号已变化，请重新同步"}
-        return request
+        return guardedBluetoothGrant(request, snapshot, session)
     }
 }

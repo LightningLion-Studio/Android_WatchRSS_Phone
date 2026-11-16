@@ -67,6 +67,14 @@ object BluetoothSyncProtocol {
         payload: JSONObject,
         onBytesTransferred: ((Long) -> Unit)? = null
     ) {
+        if (payload is AuthorizedBluetoothRequest) {
+            payload.writeAuthorized { writeAuthorizedFrame(output, payload, onBytesTransferred) }
+        } else {
+            writeAuthorizedFrame(output, payload, onBytesTransferred)
+        }
+    }
+
+    private fun writeAuthorizedFrame(output: OutputStream, payload: JSONObject, onBytesTransferred: ((Long) -> Unit)?) {
         val bytes = encodeFrame(payload)
         require(bytes.size <= MAX_FRAME_BYTES) { "同步消息过大：${bytes.size}" }
         val dataOutput = DataOutputStream(output)
@@ -87,11 +95,13 @@ object BluetoothSyncProtocol {
     fun wireSize(payload: JSONObject): Long =
         encodedSize(payload).toLong() + LENGTH_PREFIX_BYTES.toLong()
 
-    fun withPersistentSessionRequest(payload: JSONObject): JSONObject =
-        JSONObject(payload.toString()).apply {
+    fun withPersistentSessionRequest(payload: JSONObject): JSONObject {
+        val copy = JSONObject(payload.toString()).apply {
             put(FIELD_REQUEST_PERSISTENT_SESSION, true)
             put(FIELD_SUPPORTS_PERSISTENT_SESSION, true)
         }
+        return if (payload is AuthorizedBluetoothRequest) payload.copyWithPayload(copy) else copy
+    }
 
     fun requestsPersistentSession(payload: JSONObject): Boolean =
         payload.optBoolean(FIELD_REQUEST_PERSISTENT_SESSION, false) &&

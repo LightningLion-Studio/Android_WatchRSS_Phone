@@ -38,13 +38,15 @@ internal fun isAccountNetworkFailure(error: Throwable): Boolean {
     val seen = mutableSetOf<Throwable>()
     var current: Throwable? = error
     var hasIoFailure = false
+    var backoffRequiresNetwork: Boolean? = null
     while (current != null && seen.add(current)) {
-        if (current is DeviceSessionRefreshBackoffException) return current.networkRequired
         if (current is PhoneAccountHttpException) return false
-        if (current is java.io.IOException) hasIoFailure = true
+        if (current is DeviceSessionRefreshBackoffException) {
+            backoffRequiresNetwork = current.networkRequired
+        } else if (current is java.io.IOException) hasIoFailure = true
         current = current.cause
     }
-    return hasIoFailure
+    return backoffRequiresNetwork ?: hasIoFailure
 }
 
 internal fun accountSyncFailureResult(error: Throwable): WatchAccountRefreshResult {
@@ -54,7 +56,7 @@ internal fun accountSyncFailureResult(error: Throwable): WatchAccountRefreshResu
     // Device/session rejection does not establish failure of the account authentication.
     if (http?.statusCode == 401) return WatchAccountRefreshResult.AccountUnrecoverable(error)
     if (http?.statusCode == 403) return WatchAccountRefreshResult.DeviceVerificationRequired(error)
-    val retry = http?.let { runCatching { JSONObject(it.responseBody).optLong("retryAfterMillis").takeIf { n -> n > 0 } }.getOrNull() }
+    val retry = http?.retryAfterMillis ?: http?.let { runCatching { JSONObject(it.responseBody).optLong("retryAfterMillis").takeIf { n -> n > 0 } }.getOrNull() }
     return WatchAccountRefreshResult.TemporaryFailure(error, retry)
 }
 

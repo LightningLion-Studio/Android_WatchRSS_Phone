@@ -464,7 +464,7 @@ class PhoneAccountClient(
             .withWatchRssAppVersionHeader()
             .build()
         return try {
-            val response = httpClient.newCall(versionedRequest).execute()
+            val response = httpClient.newCall(versionedRequest).execute().withAccountResponseStatus()
             try {
                 if (owner != null && response.code in setOf(401, 403)) {
                     onAuthenticatedFailure(owner, PhoneAccountHttpException(response.code, ""))
@@ -480,10 +480,7 @@ class PhoneAccountClient(
 
     private fun checkResponse(response: okhttp3.Response): okhttp3.Response {
         if (!response.isSuccessful) {
-            val text = try { response.body?.string().orEmpty() } catch (error: java.io.IOException) {
-                if (response.code in setOf(401, 403)) throw PhoneAccountHttpException(response.code, "").apply { initCause(error) }
-                throw error
-            }
+            val text = response.body?.string().orEmpty()
             val error = PhoneAccountHttpException(
                 statusCode = response.code,
                 responseBody = text,

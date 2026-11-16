@@ -409,6 +409,53 @@ class BleSyncV2RegressionTest {
         assertTrue(db.phoneArticleDao().getById("canonical")!!.deleted);assertTrue(db.phoneRssSourceDao().getByUrl(source.url)!!.deleted)
     }
 
+    private fun b2Probe():JSONObject = ok("syncLibrary","probe")
+        .put("libraryPeer",JSONObject().put("implementation","podjs").put("appVersion","2.0.2"))
+        .put("libraryBinary",com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Negotiation.capability(setOf("noteAsset"),setOf("noteAsset")))
+        .put("supportsManifestBatches",false).put("supportsReaderPresets",false).put("supportsReaderAssets",false)
+        .put("supportsResourceChunkAck",false).put("supportsReaderPresetPreview",false)
+        .put("supportsPersistentSession",true).put("supportsTransferByteProgress",true)
+        .put("supportsNoteManifestV2",false).put("supportsNoteAssetInventory",false)
+        .put("account",JSONObject().put("bound",true).put("userIdHash",CloudSnapshotCodec.sha256("owner".toByteArray())))
+    private fun emptyReplacementResponses():List<JSONObject> = listOf(
+        ok("syncLibrary","cursor").put("supportsAuthoritativeLibraryReplace",true),
+        LibrarySyncPayload.buildManifestRequestFromEntries("watch",emptyList(),emptyList()).put("success",true).put("supportsReaderPresets",false).put("supportsNoteManifestV2",false).put("supportsNoteAssetInventory",false),
+        ok("syncLibrary","complete").put("articles",JSONArray()))
+    private suspend fun checkB2Replacement(mode:LibrarySyncMode) {
+        val baselineSession=session(*emptyReplacementResponses().toTypedArray())
+        val baseline=manager.syncLibrary(device.address,baselineSession,forceFull=true,mode=mode,
+            binding=BleSyncBindingSnapshot(device.address,"owner",baselineSession,b2Probe()),syncAuxiliary=false,booksPrepared=true)
+        // Independent executions have different wall clocks. Pin only the v1
+        // sentAt input; all other fields and length-prefixed bytes must match.
+        fun pinClock(messages:List<JSONObject>) = messages.map { JSONObject(it.toString()).apply { if(has("sentAt"))put("sentAt",100) } }
+        fun encode(messages:List<JSONObject>)=ByteArrayOutputStream().also{out->messages.forEach{BluetoothSyncProtocol.writeFrame(out,it)}}.toByteArray()
+        val expectedMessages=pinClock(frames());val expected=encode(expectedMessages);baselineSession.close()
+        val replies=mutableListOf(b2Probe())
+        replies+=emptyReplacementResponses();replies+=BluetoothSyncProtocol.buildSessionControlResponse(14,"complete")
+        val actual=manager.syncAll(device,forceFull=true,mode=mode,reusableSession=session(*replies.toTypedArray()))
+        assertEquals(baseline.libraryStats,actual.libraryStats)
+        val wire=frames()
+        assertEquals(0,wire.count{it.optString("action")=="syncLibraryBinary"&&it.optString("phase")=="switch"})
+        assertEquals(0,wire.count{it.optString("action")=="syncLibraryBinary"&&it.optString("phase")=="prepare"})
+        val start=wire.indexOfFirst{it.optString("action")=="syncLibrary"&&it.optString("phase")=="cursor"}
+        val end=wire.indexOfFirst{it.optString("action")==BluetoothSyncProtocol.ACTION_SYNC_SESSION&&it.optString("phase")=="complete"}.takeIf{it>=0}?:wire.size
+        val actualMessages=pinClock(wire.subList(start,end))
+        assertEquals(expectedMessages.map{it.toString()},actualMessages.map{it.toString()})
+        assertArrayEquals(expected,encode(actualMessages))
+    }
+    @Test fun b2ReplacePhoneToWatchDoesNotSwitchOrPrepare()=runBlocking<Unit>{checkB2Replacement(LibrarySyncMode.PHONE_TO_WATCH_REPLACE)}
+    @Test fun b2ReplaceWatchToPhoneDoesNotSwitchOrPrepare()=runBlocking<Unit>{checkB2Replacement(LibrarySyncMode.WATCH_TO_PHONE_REPLACE)}
+    @Test fun b2ExcludedAssetsDoNotSwitchOrPrepare()=runBlocking<Unit>{
+        val replies=mutableListOf(b2Probe())
+        replies+=ok("syncAccount");replies+=emptyReplacementResponses()
+        replies+=noteResponse(null);replies+=ok("syncLlmTokenUsage").put("records",JSONArray())
+        replies+=BluetoothSyncProtocol.buildSessionControlResponse(14,"complete")
+        val result=manager.syncAll(device,includeNoteAssets=false,reusableSession=session(*replies.toTypedArray()))
+        assertFalse(result.hasActualLibraryChanges())
+        assertEquals(0,frames().count{it.optString("action")=="syncLibraryBinary"})
+        assertEquals(0,frames().count{it.optString("action")=="syncNoteAsset"})
+    }
+
     private suspend fun syncAllResponses(note:NoteEntity?=null):PhoneSyncSession {
         val binding=ok("syncLibrary").put("account",JSONObject().put("bound",true).put("userIdHash",CloudSnapshotCodec.sha256("owner".toByteArray())))
         val cursor=ok("syncLibrary","cursor")

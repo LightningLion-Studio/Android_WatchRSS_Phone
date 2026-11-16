@@ -60,3 +60,7 @@ Frozen specification/review vectors and source-derived peer fixtures are under
 `src/test/resources/b2`. Host pipe tests exercise the actual frame dispatcher;
 Room tests exercise business reference/receipt rollback. They are not device,
 released APK classification, filesystem power-cut, PSS or radio throughput tests.
+
+Frozen source inventories use bounded persistent JSON pages. Restoring validates
+one page at a time and retains the original whole-inventory digest. The CONTROL
+node/byte limits stay unchanged; old local inventory journals migrate by page.

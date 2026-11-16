@@ -397,14 +397,17 @@ class PhoneBluetoothSyncManager(
         forceFull: Boolean = false,
         mode: LibrarySyncMode = LibrarySyncMode.MERGE,
         reusableSession: PhoneSyncSession? = null,
+        includeNoteAssets: Boolean = true,
         onProgress: (PhoneBluetoothSyncProgress) -> Unit = {},
         resolveDeleteConflicts: suspend (List<PhoneSyncDeleteConflict>) -> Map<String, PhoneSyncConflictResolution> = {
             emptyMap()
         }
     ): PhoneBluetoothSyncResult {
+        val binaryAssetScopeSelected = mode == LibrarySyncMode.MERGE && includeNoteAssets
+        val b2OperationEnabled = com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED && binaryAssetScopeSelected
         var lastVisibleProgress = PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.CONNECTING, 0)
         val progressReporter: (PhoneBluetoothSyncProgress) -> Unit = { update ->
-            val visible = if (com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED && update.stage == PhoneBluetoothSyncStage.RECONNECTING)
+            val visible = if (b2OperationEnabled && update.stage == PhoneBluetoothSyncStage.RECONNECTING)
                 lastVisibleProgress.copy(stage = update.stage, reconnectAttempt = update.reconnectAttempt) else update
             if (update.stage != PhoneBluetoothSyncStage.RECONNECTING) lastVisibleProgress = update
             onProgress(visible)
@@ -439,7 +442,7 @@ class PhoneBluetoothSyncManager(
             roots
         }
         fun skipped(domain:String)=fastPath?.skipped?.contains(domain)==true
-        val logicalB2Recovery = if (com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED) com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Recovery() else null
+        val logicalB2Recovery = if (b2OperationEnabled) com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Recovery() else null
         var physicalConnection = "initial"
         var connectionNumber = if (opened) 1 else 0
         var bluetoothOnlyRecovery=false
@@ -514,8 +517,8 @@ class PhoneBluetoothSyncManager(
                         logicalB2Recovery.connected(physicalConnection, false)
                     }
                     val ready = com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Routing.Ready(true, true, true)
-                    binarySendPlanned = com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Routing.selected(active.response, ready, true, b2Capability, "phoneToWatch", "noteAsset")
-                    binaryAssetsPlanned = binarySendPlanned || com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Routing.selected(active.response, ready, true, b2Capability, "watchToPhone", "noteAsset")
+                    binarySendPlanned = binaryAssetScopeSelected && com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Routing.selected(active.response, ready, true, b2Capability, "phoneToWatch", "noteAsset")
+                    binaryAssetsPlanned = binaryAssetScopeSelected && (binarySendPlanned || com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Routing.selected(active.response, ready, true, b2Capability, "watchToPhone", "noteAsset"))
                 }
             }
             recovery.run {
@@ -608,7 +611,7 @@ class PhoneBluetoothSyncManager(
                 noteStats = if(skipped("notes")) NoteSyncStats(0,0,0,0) else recovery.run {
                     reportProgress(progressReporter, PhoneBluetoothSyncStage.SYNCING_NOTES, 0)
                     syncNotes(effectiveDevice.address, sessionId, syncSession, libraryDeclarations?.let { binding().capabilities.withDeclarations(it) } ?: binding().capabilities,
-                        syncAssets = !binarySendPlanned,
+                        syncAssets = includeNoteAssets && !binarySendPlanned,
                         onLocalApplied = { if (it > 0) locallyApplied = true }, legacyVersion=binding().response.optInt("version")).also{completedDomains.add("notes"); logicalB2Recovery?.confirmed("v1:notes")}
                 }
                 runCatching { recovery.run { if(!skipped("usage")){syncLlmTokenUsage(effectiveDevice, syncSession, binding());completedDomains.add("usage"); logicalB2Recovery?.confirmed("v1:usage")} } }
@@ -638,7 +641,7 @@ class PhoneBluetoothSyncManager(
                     } else syncSession?.complete("$sessionId-complete")
                 }
             }
-            if (binaryAssetsPlanned) {
+            if (binaryAssetScopeSelected && binaryAssetsPlanned) {
                 reportProgress(progressReporter, PhoneBluetoothSyncStage.SYNCING_NOTES, 0)
                 syncSession?.close(); syncSession = null
                 syncBinaryNoteAssets(effectiveDevice, "$sessionId-b2", requireNotNull(logicalB2Recovery), progressReporter)

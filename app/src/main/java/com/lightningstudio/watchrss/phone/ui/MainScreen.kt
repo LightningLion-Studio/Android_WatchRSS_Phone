@@ -3264,10 +3264,9 @@ private fun SyncStatusCard(
                 }
             }
             message?.takeIf { syncProgress == null && it.isNotBlank() }?.let {
+                // Book isolation notices include recovery steps that must remain readable.
                 Text(
                     text = it,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier
                         .fillMaxWidth()

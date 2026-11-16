@@ -39,7 +39,7 @@ class BookSessionIsolationTest {
         .put("sourceUrl",fixture.getString("sourceUrl")).put("kind","txt").put("deletedChapters",JSONArray()).put("deletionClock",0).put("deleted",false).put("deletedAt",0).put("updatedAt",1).put("sourceDeviceId","cli").put("contentAvailable",true)
     private fun reply(action:String,phase:String)=JSONObject().put("success",true).put("action",action).put("phase",phase).put("version",if(action=="syncDomains")2 else if(action=="syncBooks")1 else 14).put("deviceId","watch")
     @After fun close(){scope.cancel();db.close();root.deleteRecursively()}
-    private suspend fun runSession(invalid:Boolean,fatalLibrary:Boolean=false):PhoneBluetoothSyncResult {
+    private suspend fun runSession(invalid:Boolean,fatalLibrary:Boolean=false,invalidManifest:Boolean=false):PhoneBluetoothSyncResult {
         books.manifests()
         repo.markLibrarySyncSuccess("watch",0,0,14,true,true,domains.libraryDefinition())
         val initial=domains.roots("account");val remote=BleDomainStore.DOMAINS.associateWith{"b".repeat(64)}
@@ -71,7 +71,7 @@ class BookSessionIsolationTest {
                         }
                     }
                     "syncBooks"->when(phase) {
-                        "manifest"->reply(action,phase).put("books",JSONArray().put(state())).put("missingBookIds",JSONArray())
+                        "manifest"->reply(action,phase).put("books",JSONArray().put(state().apply{if(invalidManifest)put("chapterCount",0)})).put("missingBookIds",JSONArray())
                         "pull"->reply(action,"body").put("bookId",fixture.getString("bookId")).put("fingerprint",fixture.getString("fingerprint")).put("packageSha256",CloudSnapshotCodec.sha256(bytes))
                             .put("byteCount",bytes.size).put("chunkIndex",0).put("chunkCount",1).put("dataBase64",Base64.getEncoder().encodeToString(bytes))
                         "reading"->reply(action,phase).put("states",JSONArray()).put("hasMore",false).put("nextAfter",0)
@@ -110,6 +110,18 @@ class BookSessionIsolationTest {
         assertFalse(frames.any{it.optString("action")=="syncDomains"&&it.optString("phase")=="commit"})
         assertFalse(frames.any{it.optString("action")=="syncSession"&&it.optString("phase")=="complete"})
         assertFalse(domains.receipts("scope","watch").containsKey("library"))
+    }
+    @Test fun manifestRejectionExportsTitleAndSubcodeToLocalLogAndLogcat()=runBlocking<Unit> {
+        val result=runSession(false,invalidManifest=true)
+        val issue=result.bookSyncIssues.single()
+        assertEquals("CLI book",issue.title);assertEquals("manifest_chapter_count_range",issue.reason)
+        val line=log.snapshot().lineSequence().single{it.contains("event=\"sync.book.isolated\"")}
+        for(field in listOf("kind=\"book\"","id=\"${issue.bookIdPrefix}\"","bookIdPrefix=\"${issue.bookIdPrefix}\"","title=\"CLI book\"","reason=\"manifest_chapter_count_range\""))assertTrue(field,line.contains(field))
+        val logcat=org.robolectric.shadows.ShadowLog.getLogsForTag("WatchRSSBluetooth").map{it.msg}.single{it.contains("event=sync.book.isolated")}
+        assertTrue(logcat.contains("title=\"CLI book\""));assertTrue(logcat.contains("reason=\"manifest_chapter_count_range\""))
+        assertFalse(line.contains("sourceUrl"));assertFalse(line.contains("contentText"));assertFalse(line.contains("watchrss://"))
+        assertTrue(result.bookSyncWarning!!.contains("CLI book"))
+        assertTrue(frames.any{it.optString("action")=="syncSession"&&it.optString("phase")=="complete"})
     }
     @Test fun realCliPackageContinuesAllPhasesAndHasNoBookWarning()=runBlocking<Unit> {
         val result=runSession(false)

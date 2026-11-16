@@ -48,7 +48,7 @@ data class PhoneBluetoothSyncResult(
     val tokenUsageSyncWarning: String? = null,
     val bookSyncIssues: List<BookSyncIssue> = emptyList()
 ) {
-    val bookSyncWarning:String? get()=bookSyncIssues.takeIf{it.isNotEmpty()}?.let{"${it.size} 本书的包校验失败，已隔离；可直接点同步重试"}
+    val bookSyncWarning:String? get()=BookSyncWarningText.format(bookSyncIssues)
 }
 
 internal data class PhoneBluetoothProbeTargets(
@@ -516,7 +516,7 @@ class PhoneBluetoothSyncManager(
                     }
                     bookSync.domainFastPath=fastPath!=null
                     bookSync.onApplied={if(it>0)locallyApplied=true}
-                    bookSync.onIssue={issue->debugLog.appendEvent("sync.book.isolated",sessionId,fields=mapOf("bookId" to issue.bookIdPrefix,"code" to issue.code))}
+                    bookSync.onIssue={issue->debugLog.appendEvent("sync.book.isolated",sessionId,fields=mapOf("kind" to "book","id" to issue.bookIdPrefix,"bookIdPrefix" to issue.bookIdPrefix,"bookId" to issue.bookIdPrefix,"code" to issue.code,"title" to issue.title,"reason" to issue.reason))}
                     bookSync.trace={stage->debugLog.appendEvent("sync.book.stage",sessionId,fields=mapOf("stage" to stage))}
                     val physicalSession=syncSession
                     if(active.capabilities.bookReadingDelta && physicalSession?.isPersistent==true) {

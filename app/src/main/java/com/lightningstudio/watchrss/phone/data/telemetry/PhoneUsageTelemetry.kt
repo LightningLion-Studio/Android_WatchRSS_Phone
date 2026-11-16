@@ -162,7 +162,11 @@ class PhoneUsageTelemetry(
                 .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
             httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return
+                if (!response.isSuccessful) {
+                    accountRepository.recordAuthenticationResponse(session.userId, response.code,
+                        if (response.code in setOf(401, 403)) "" else response.peekBody(4096).string())
+                    return
+                }
             }
         }
     }

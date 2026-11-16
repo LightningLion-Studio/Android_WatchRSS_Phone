@@ -53,6 +53,7 @@ class PhoneDeviceReauthenticationFlowTest {
     private var clears=0
     private lateinit var beforeState:Map<String,*>
     @Before fun setup()=runBlocking<Unit>{
+        android.provider.Settings.Global.putInt(context.contentResolver, android.provider.Settings.Global.BOOT_COUNT, 100)
         java.security.Security.addProvider(object:java.security.Provider("device-flow-keystore",1.0,"synthetic identity") {
             init {put("KeyStore.AndroidKeyStore",com.lightningstudio.watchrss.phone.cloud.CloudContentRebuildIntegrationTest.FixtureKeyStore::class.java.name)}
         })

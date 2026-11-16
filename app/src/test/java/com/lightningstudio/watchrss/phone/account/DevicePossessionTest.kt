@@ -52,9 +52,6 @@ class DevicePossessionTest {
                 rollbackToleranceMillis = 300_000L
             )
         )
-        assertEquals(
-            anchor,
-            trustedTimeDecision(anchor, anchorElapsed, anchor, elapsedMillis = 5_000L)
-        )
+        assertNull(trustedTimeDecision(anchor, anchorElapsed, anchor, elapsedMillis = 5_000L))
     }
 }

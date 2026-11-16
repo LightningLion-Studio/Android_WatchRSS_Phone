@@ -9,7 +9,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
-import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -48,11 +47,13 @@ class PhonePushRegistrationUploader(
                 if (response.isSuccessful) {
                     true
                 } else {
+                    accountRepository.recordAuthenticationResponse(session.userId, response.code,
+                        if (response.code in setOf(401, 403)) "" else response.peekBody(4096).string())
                     Log.w(TAG, "push-registration rejected: HTTP ${response.code}")
                     false
                 }
             }
-        } catch (error: IOException) {
+        } catch (error: Exception) {
             Log.w(TAG, "push-registration upload failed", error)
             false
         }

@@ -21,7 +21,8 @@ class SupportFailure(val code: String) : Exception(when(code) {
     else -> "客服暂时无法回答，请重试或联系人工客服"
 })
 
-class SupportClient(private val environment: AccountEnvironment, private val sessions: StateFlow<PhoneAccountSession?>) {
+class SupportClient(private val environment: AccountEnvironment, private val sessions: StateFlow<PhoneAccountSession?>,
+    private val onAuthenticationResponse:(String,Int,String)->Unit={_,_,_->}) {
     private val http = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(135, TimeUnit.SECONDS).callTimeout(140, TimeUnit.SECONDS).build()
     fun cancel() = http.dispatcher.cancelAll()
@@ -38,7 +39,9 @@ class SupportClient(private val environment: AccountEnvironment, private val ses
     }
     suspend fun json(user: String, path: String, body: JSONObject? = null): JSONObject = withContext(Dispatchers.IO) {
         http.newCall(request(user, path, body)).execute().use { response ->
+            if (response.code in setOf(401, 403)) onAuthenticationResponse(user, response.code, "")
             val raw = response.body?.string().orEmpty()
+            if (!response.isSuccessful) onAuthenticationResponse(user, response.code, raw)
             if (identity() != user) throw SupportFailure("support_login_required")
             val data = runCatching { JSONObject(raw) }.getOrDefault(JSONObject())
             if (!response.isSuccessful) throw SupportFailure(if(response.code == 401) "invalid_session" else data.optString("error").ifBlank { data.optString("code") })
@@ -48,8 +51,11 @@ class SupportClient(private val environment: AccountEnvironment, private val ses
     suspend fun send(user: String, conversation: String, id: String, content: String, event: suspend (String, JSONObject) -> Unit) = withContext(Dispatchers.IO) {
         val body = JSONObject().put("request_id", id).put("content", content)
         http.newCall(request(user, "/conversations/$conversation/messages", body)).execute().use { response ->
+            if (response.code in setOf(401, 403)) onAuthenticationResponse(user, response.code, "")
             if (!response.isSuccessful) {
-                val error = runCatching { JSONObject(response.body?.string().orEmpty()) }.getOrDefault(JSONObject())
+                val raw = response.body?.string().orEmpty()
+                onAuthenticationResponse(user, response.code, raw)
+                val error = runCatching { JSONObject(raw) }.getOrDefault(JSONObject())
                 throw SupportFailure(if(response.code == 401) "invalid_session" else error.optString("error").ifBlank { error.optString("code") })
             }
             check(response.header("Content-Type").orEmpty().startsWith("text/event-stream")) { "客服响应格式错误" }

@@ -150,7 +150,8 @@ class PhoneCloudSyncService(
             verifyKeys={account,keys->val bootstrap=trustedBootstrap?:error("authentication_required")
                 CloudKeyTrust.validate(account.userId,bootstrap.libraryEpoch,bootstrap.keyVersionFloor,bootstrap.keyCommitments,keys)},
             approved={id->val session=accountRepository.session.value;val bootstrap=trustedBootstrap
-                session!=null && bootstrap!=null && bootstrap.devices.any{it.deviceId==id && it.revokedAt==null && deviceAuthenticated(session,bootstrap,it)}})
+                session!=null && bootstrap!=null && bootstrap.devices.any{it.deviceId==id && it.revokedAt==null && deviceAuthenticated(session,bootstrap,it)}},
+            onAuthenticationResponse=accountRepository::recordAuthenticationResponse)
     }
     internal val syncV2UiPort get()=syncV2Product.uiPort
     internal fun captureSyncV2Legacy(peer:String,version:Int,cursor:String,payload:JSONObject)=syncV2Product.captureLegacyMetadata(peer,version,cursor,payload)

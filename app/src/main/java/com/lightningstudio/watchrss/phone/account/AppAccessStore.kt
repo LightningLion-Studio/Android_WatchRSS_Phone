@@ -4,9 +4,15 @@ import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import android.os.SystemClock
+import android.provider.Settings
 import org.json.JSONObject
 
-class AppAccessStore(context: Context, suffix: String = "", preferencesOverride: android.content.SharedPreferences? = null) {
+class AppAccessStore(context: Context, suffix: String = "", preferencesOverride: android.content.SharedPreferences? = null,
+    private val bootIdentity: () -> String? = {
+        runCatching { Settings.Global.getInt(context.contentResolver, Settings.Global.BOOT_COUNT, -1) }
+            .getOrNull()?.takeIf { it >= 0 }?.toString()
+    }
+) {
     private val prefs = preferencesOverride ?: EncryptedSharedPreferences.create(
         context,
         "watchrss_app_access$suffix",
@@ -40,7 +46,7 @@ class AppAccessStore(context: Context, suffix: String = "", preferencesOverride:
             put("access", value.access.toJson())
             put("serverTimeMillis", value.serverTimeMillis)
         }.toString()).apply()
-        if (value.serverTimeMillis > 0L) recordTrustedTime(value.serverTimeMillis)
+        if (value.serverTimeMillis > 0L) recordServerTime(value.serverTimeMillis)
     }
 
     fun clear() { prefs.edit().remove(KEY_AUTHORIZATION).apply() }
@@ -96,19 +102,32 @@ class AppAccessStore(context: Context, suffix: String = "", preferencesOverride:
         val anchor = prefs.getLong(KEY_TRUSTED_TIME, 0L)
         val anchorElapsed = prefs.getLong(KEY_TRUSTED_ELAPSED, -1L)
         val wall = System.currentTimeMillis()
-        if (anchor <= 0L || anchorElapsed < 0L) return wall
+        if (anchor <= 0L || anchorElapsed < 0L) return null
+        val boot = bootIdentity() ?: return null
+        if (prefs.getString(KEY_TRUSTED_BOOT, null) != boot) return null
         val elapsed = SystemClock.elapsedRealtime()
         return trustedTimeDecision(anchor, anchorElapsed, wall, elapsed)
     }
 
     fun recordTrustedTime(value: Long) {
         if (value <= 0L) return
-        val hasAnchor = prefs.getLong(KEY_TRUSTED_TIME, 0L) > 0L
-        val previous = if (hasAnchor) trustedNowMillis() ?: return else value
-        prefs.edit()
+        val previous = trustedNowMillis() ?: return
+        check(prefs.edit()
             .putLong(KEY_TRUSTED_TIME, maxOf(value, previous))
             .putLong(KEY_TRUSTED_ELAPSED, SystemClock.elapsedRealtime())
-            .apply()
+            .commit()) { "受信时间保存失败" }
+    }
+
+    /** Only a newly authenticated server response may establish a boot's anchor. */
+    private fun recordServerTime(value: Long) {
+        val boot = bootIdentity()
+        val edit = prefs.edit().remove(KEY_TRUSTED_TIME).remove(KEY_TRUSTED_ELAPSED).remove(KEY_TRUSTED_BOOT)
+        if (boot != null) {
+            val now = trustedNowMillis()
+            edit.putLong(KEY_TRUSTED_TIME, maxOf(value, now ?: value))
+                .putLong(KEY_TRUSTED_ELAPSED, SystemClock.elapsedRealtime()).putString(KEY_TRUSTED_BOOT, boot)
+        }
+        check(edit.commit()) { "受信时间保存失败" }
     }
 
     private companion object {
@@ -119,6 +138,7 @@ class AppAccessStore(context: Context, suffix: String = "", preferencesOverride:
         const val KEY_ORDER_CREATE = "order_idempotency"
         const val KEY_TRUSTED_TIME = "trusted_time"
         const val KEY_TRUSTED_ELAPSED = "trusted_elapsed"
+        const val KEY_TRUSTED_BOOT = "trusted_boot"
         const val CLOCK_ROLLBACK_TOLERANCE_MILLIS = 5 * 60 * 1000L
     }
 }
@@ -130,11 +150,8 @@ internal fun trustedTimeDecision(
     elapsedMillis: Long,
     rollbackToleranceMillis: Long = 5 * 60 * 1000L
 ): Long? {
-    val estimated = if (elapsedMillis >= anchorElapsedMillis) {
-        anchorMillis + (elapsedMillis - anchorElapsedMillis)
-    } else {
-        anchorMillis
-    }
+    if (elapsedMillis < anchorElapsedMillis) return null
+    val estimated = anchorMillis + (elapsedMillis - anchorElapsedMillis)
     if (wallMillis + rollbackToleranceMillis < estimated) return null
     return maxOf(wallMillis, estimated)
 }

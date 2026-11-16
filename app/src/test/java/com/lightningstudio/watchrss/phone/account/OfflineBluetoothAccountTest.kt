@@ -64,6 +64,7 @@ class OfflineBluetoothAccountTest {
     private lateinit var repo:PhoneAccountRepository
     private lateinit var coordinator:AppAccessCoordinator
     @Before fun setup()=runBlocking<Unit>{
+        android.provider.Settings.Global.putInt(context.contentResolver, android.provider.Settings.Global.BOOT_COUNT, 100)
         java.security.Security.addProvider(object:java.security.Provider("offline-keystore",1.0,"synthetic identity") {
             init { put("KeyStore.AndroidKeyStore",com.lightningstudio.watchrss.phone.cloud.CloudContentRebuildIntegrationTest.FixtureKeyStore::class.java.name) }
         })
@@ -93,20 +94,23 @@ class OfflineBluetoothAccountTest {
         sessionStore.saveBluetoothGrant(key,grant)
         sessionStore.saveBluetoothGrant("$key:peer",JSONObject().put("root",peerWitness()).put("grant",BleDomainStore.hash(grant.toString())))
     }
-    @Test fun offlineWithVerifiedCacheDoesNotCallAccountNetwork()=runBlocking<Unit> {
+    @Test fun offlineWithVerifiedCacheFallsBackAfterNetworkFailure()=runBlocking<Unit> {
         seedCache()
         val request=coordinator.buildWatchAccountSyncRequest("watch",null,"watch")
-        assertEquals("syncAccount",request.getString("action"));assertEquals(0,networkCalls)
+        assertEquals("syncAccount",request.getString("action"));assertEquals(1,networkCalls)
     }
-    @Test fun cachedBluetoothAccountDoesNotWaitForBackgroundHttpReconciliation()=runBlocking<Unit> {
+    @Test fun cachedBluetoothAccountWaitsForOnlineResultBeforeNetworkFallback()=runBlocking<Unit> {
         seedCache()
         val entered=CompletableDeferred<Unit>();val release=java.util.concurrent.CountDownLatch(1)
         beforeNetwork={entered.complete(Unit);check(release.await(5,java.util.concurrent.TimeUnit.SECONDS))}
         val background=scope.async{coordinator.reconcile()}
         try {
             withTimeout(2000){entered.await()}
-            val request=withTimeout(2000){coordinator.buildWatchAccountSyncRequest("watch",null,"watch")}
-            assertEquals("syncAccount",request.getString("action"));assertEquals(1,networkCalls)
+            val request=scope.async{coordinator.buildWatchAccountSyncRequest("watch",null,"watch")}
+            delay(50);assertFalse(request.isCompleted)
+            release.countDown();withTimeout(5000){background.await()}
+            assertEquals("syncAccount",withTimeout(2000){request.await()}.getString("action"))
+            assertEquals(1,networkCalls)
         } finally {release.countDown();withTimeout(5000){background.await()}}
     }
     @Test fun offlineWithoutCacheNeedsNetworkVerificationAndNoBluetoothRetry()=runBlocking<Unit> {
@@ -162,9 +166,9 @@ class OfflineBluetoothAccountTest {
         assertArrayEquals(root,keys.getAccountKey("owner",1))
         assertEquals("synthetic-K_id",keys.syncV2Read("owner","secret/K_id"))
     }
-    @Test fun offlineCacheCompletesFullManagerSessionWithZeroHttpAndZeroReconnects()=runBlocking<Unit> {
+    @Test fun offlineCacheCompletesFullManagerSessionAfterNetworkFailureWithZeroReconnects()=runBlocking<Unit> {
         seedCache();sync()
-        assertEquals(0,networkCalls);assertEquals(0,reconnects)
+        assertEquals(1,networkCalls);assertEquals(0,reconnects)
         assertTrue(frames.any{it.optString("action")=="syncLibrary"&&it.optString("phase")=="cursor"})
         assertTrue(frames.any{it.optString("action")=="syncSession"&&it.optString("phase")=="complete"})
         assertFalse(progress.any{it.stage==PhoneBluetoothSyncStage.RECONNECTING})
@@ -278,7 +282,7 @@ class OfflineBluetoothAccountTest {
         sync()
         assertEquals(3,networkCalls);assertEquals(0,reconnects)
         networkFailure=java.net.UnknownHostException("offline");frames.clear();sync()
-        assertEquals(3,networkCalls);assertEquals(0,reconnects)
+        assertEquals(4,networkCalls);assertEquals(0,reconnects)
         assertTrue(frames.any{it.optString("action")=="syncSession"&&it.optString("phase")=="complete"})
     }
     @Test fun dnsFailureIsNotBluetoothDisconnect() {

@@ -30,7 +30,8 @@ internal class SyncV2CloudClient(
     private val http: OkHttpClient = OkHttpClient.Builder().retryOnConnectionFailure(false)
         .followRedirects(false).followSslRedirects(false).callTimeout(30, TimeUnit.SECONDS).build(),
     authenticatedBackend: HttpUrl? = null,
-    private val trustedTime:SyncV2TrustedTime?=null
+    private val trustedTime:SyncV2TrustedTime?=null,
+    private val onAuthenticationResponse:(String,Int,String)->Unit={_,_,_->}
 ):AutoCloseable {
     @Volatile private var closed=false
     private val calls=java.util.concurrent.ConcurrentHashMap.newKeySet<okhttp3.Call>()
@@ -95,6 +96,7 @@ internal class SyncV2CloudClient(
         try {
         active()
         call.execute().use { response ->
+            if (response.code in setOf(401, 403)) onAuthenticationResponse(s.userId, response.code, "")
             if(response.code in 300..399)SyncV2Codec.fail("isolated_backend_required")
             val limit = if(raw && response.isSuccessful) 266264 else 1048576
             val data = response.body?.byteStream()?.use { input ->
@@ -103,6 +105,7 @@ internal class SyncV2CloudClient(
             } ?: SyncV2Codec.fail("invalid_encoding")
             active() // An auth refresh may keep ownership; account/old epoch changes invalidate this round.
             if (!response.isSuccessful) {
+                onAuthenticationResponse(s.userId, response.code, String(data, Charsets.UTF_8))
                 val error = SyncV2Wire.parse(data).getJSONObject("error")
                 SyncV2Codec.exact(error,setOf("code","retryable","retryAfterMillis","details"))
                 val code=SyncV2Wire.string(error,"code")

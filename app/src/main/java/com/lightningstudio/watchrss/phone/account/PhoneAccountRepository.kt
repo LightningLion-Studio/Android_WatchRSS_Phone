@@ -15,6 +15,25 @@ class PhoneAccountRepository(
     internal var onClearCloudState: (PhoneAccountSession) -> Unit = {}
     val session: StateFlow<PhoneAccountSession?> = sessionStore.session
 
+    init {
+        accountClient.authenticatedOwner = { token -> session.value?.takeIf { it.accessToken == token }?.userId }
+        accountClient.onAuthenticatedFailure = ::recordAuthenticationFailure
+    }
+
+    private fun offlineScope(owner: String) = com.lightningstudio.watchrss.phone.data.ble.BleDomainStore.hash("${environment.backendBaseUrl}\n$owner")
+    internal fun offlineAuthorizationVersion(owner: String) = sessionStore.offlineAuthorizationVersion(offlineScope(owner))
+    internal fun offlineAuthorizationBlocked(owner: String) = sessionStore.offlineAuthorizationBlocked(offlineScope(owner))
+    internal fun confirmOnlineAuthorization(owner: String, version: Long) = sessionStore.confirmOnlineAuthorization(offlineScope(owner), version)
+
+    internal fun recordAuthenticationResponse(owner: String, status: Int, body: String) =
+        recordAuthenticationFailure(owner, PhoneAccountHttpException(status, body))
+
+    internal fun recordAuthenticationFailure(owner: String, error: Throwable) {
+        if (isExplicitAccountRejection(error)) {
+            sessionStore.rejectOfflineAuthorization(offlineScope(owner), owner, environment.backendBaseUrl)
+        }
+    }
+
     val reauthenticationOwner: StateFlow<String?> = sessionStore.reauthenticationOwner
 
     suspend fun beginSameAccountReauthentication() = sessionStore.beginSameAccountReauthentication()
@@ -284,7 +303,7 @@ class PhoneAccountRepository(
     private fun bluetoothGrantKey(watch:String, owner:String?=session.value?.userId)=com.lightningstudio.watchrss.phone.data.ble.BleDomainStore.hash("${environment.backendBaseUrl}\n$owner\n$watch")
     private suspend fun validBluetoothGrant(watch:String, nowMillis:Long=System.currentTimeMillis()):JSONObject? {
         val current=session.value?:return null
-        if (!hasUsableSession) return null
+        if (!hasUsableSession || offlineAuthorizationBlocked(current.userId)) return null
         if (current.expiresAtMillis > 0 && current.expiresAtMillis <= nowMillis) return null
         return sessionStore.bluetoothGrant(bluetoothGrantKey(watch))?.takeIf {
             val a=it.optJSONObject("account")
@@ -292,14 +311,13 @@ class PhoneAccountRepository(
                 a.optString("backendBaseUrl")==environment.backendBaseUrl &&
                 a.optString("watchAccessToken").isNotBlank() &&
                 a.optLong("accessTokenExpiresAt")>maxOf(nowMillis,System.currentTimeMillis())+300_000 &&
-                session.value == current && hasUsableSession
+                session.value == current && hasUsableSession && !offlineAuthorizationBlocked(current.userId)
         }
     }
 
     internal suspend fun cachedBluetoothAccount(watch:String, nowMillis:Long):JSONObject? =
         validBluetoothGrant(watch, nowMillis)
 
-    internal suspend fun invalidateBluetoothAccounts() = sessionStore.clearBluetoothGrants()
     // A cached token may only be replayed while the peer still has the state acknowledged with it.
     // A watch can refresh/revoke its own credentials independently of this phone.
     internal suspend fun prepareBluetoothAccount(watch:String,remoteRoot:String?) {
@@ -327,7 +345,7 @@ class PhoneAccountRepository(
         watchDisplayName: String? = null
     ): JSONObject {
         val session = requireSession()
-        validBluetoothGrant(watchDeviceId)?.let{return it}
+        val authorizationVersion = offlineAuthorizationVersion(session.userId)
         val token = accountClient.issueWatchDeviceToken(
             session = session,
             phoneDeviceId = phoneDeviceId,
@@ -366,7 +384,7 @@ class PhoneAccountRepository(
             })
         }
         check(this.session.value == session && hasUsableSession){"手机账号已变化，请重新同步"}
-        sessionStore.saveBluetoothGrant(bluetoothGrantKey(watchDeviceId, session.userId),request)
+        sessionStore.saveAuthorizedBluetoothGrant(bluetoothGrantKey(watchDeviceId, session.userId), offlineScope(session.userId), authorizationVersion, request)
         check(this.session.value == session && hasUsableSession){"手机账号已变化，请重新同步"}
         return request
     }

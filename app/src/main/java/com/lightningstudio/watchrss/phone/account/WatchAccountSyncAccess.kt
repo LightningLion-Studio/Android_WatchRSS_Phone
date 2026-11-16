@@ -22,6 +22,18 @@ internal open class PhoneAccountTemporarilyUnavailable(
 internal class PhoneAccountNetworkRequired(cause: Throwable, retryAfterMillis: Long? = null) :
     PhoneAccountTemporarilyUnavailable(cause, retryAfterMillis, message = "需要联网完成账号验证")
 
+internal fun isExplicitAccountRejection(error: Throwable): Boolean {
+    val http = error.findAccountHttpException() ?: return false
+    val code = runCatching {
+        val body = JSONObject(http.responseBody)
+        (body.opt("error") as? JSONObject)?.optString("code") ?: body.optString("error").ifBlank { body.optString("code") }
+    }.getOrDefault("")
+    return http.statusCode in setOf(401, 403) || code in setOf(
+        "device_session_invalid", "device_session_expired", "device_session_revoked",
+        "account_session_invalid", "account_session_expired", "account_session_revoked", "invalid_session"
+    )
+}
+
 internal fun isAccountNetworkFailure(error: Throwable): Boolean {
     val seen = mutableSetOf<Throwable>()
     var current: Throwable? = error

@@ -33,7 +33,8 @@ class SupportViewModel internal constructor(
     constructor(application: Application) : this(
         application,
         (application as PhoneCompanionApplication).container.accountRepository.session,
-        SupportClient(AccountEnvironment.active(application), (application as PhoneCompanionApplication).container.accountRepository.session)
+        SupportClient(AccountEnvironment.active(application), (application as PhoneCompanionApplication).container.accountRepository.session,
+            application.container.accountRepository::recordAuthenticationResponse)
     )
     private val mutable = MutableStateFlow(SupportState())
     val state = mutable.asStateFlow()

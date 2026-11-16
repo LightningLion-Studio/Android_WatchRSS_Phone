@@ -8,8 +8,8 @@ import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.IOException
@@ -21,7 +21,9 @@ class EncryptedAccountSessionStore(
     private val prefsName: String = "watchrss_account_session"
 ) {
     private val appContext = context.applicationContext
-    private val mutex = Mutex()
+    // Preference transactions do not suspend. The same lock also serves synchronous
+    // HTTP response observers, so a refusal is durable before a response escapes.
+    private val mutex = ReentrantLock()
     private var prefsRef: SharedPreferences? = null
     private val _session = MutableStateFlow<PhoneAccountSession?>(null)
     val session: StateFlow<PhoneAccountSession?> = _session
@@ -80,6 +82,42 @@ class EncryptedAccountSessionStore(
         withPrefs {prefs->prefs.edit().apply {prefs.all.keys.filter{it.startsWith("ble_grant:")}.forEach{remove(it)}}.commit()}
     }
 
+    internal fun offlineAuthorizationVersion(scope: String): Long = withPrefs {
+        it.getLong("ble_auth_version:$scope", 0L)
+    }
+
+    internal fun offlineAuthorizationBlocked(scope: String): Boolean = withPrefs {
+        it.getBoolean("ble_auth_rejected:$scope", false)
+    }
+
+    internal fun rejectOfflineAuthorization(scope: String, owner: String, origin: String) = withPrefs { prefs ->
+        val edit = prefs.edit().putBoolean("ble_auth_rejected:$scope", true)
+            .putLong("ble_auth_version:$scope", prefs.getLong("ble_auth_version:$scope", 0L) + 1)
+        for ((key, raw) in prefs.all) {
+            if (!key.startsWith("ble_grant:") || raw !is String) continue
+            val account = runCatching { JSONObject(raw).optJSONObject("account") }.getOrNull() ?: continue
+            if (account.optString("userId") == owner && account.optString("backendBaseUrl") == origin) {
+                edit.remove(key).remove("$key:peer")
+            }
+        }
+        check(edit.commit()) { "离线授权失效状态保存失败" }
+    }
+
+    internal fun confirmOnlineAuthorization(scope: String, version: Long) = withPrefs { prefs ->
+        if (prefs.getLong("ble_auth_version:$scope", 0L) == version) {
+            check(prefs.edit().remove("ble_auth_rejected:$scope").commit()) { "在线验证状态保存失败" }
+        }
+    }
+
+    internal suspend fun saveAuthorizedBluetoothGrant(key: String, scope: String, version: Long, value: JSONObject) = withContext(Dispatchers.IO) {
+        withPrefs { prefs ->
+            if (prefs.getBoolean("ble_auth_rejected:$scope", false) || prefs.getLong("ble_auth_version:$scope", 0L) != version) {
+                throw PhoneDeviceVerificationRequired()
+            }
+            check(prefs.edit().putString("ble_grant:$key", value.toString()).commit())
+        }
+    }
+
     suspend fun queueRevocation(session: PhoneAccountSession) = withContext(Dispatchers.IO) {
         withPrefs { prefs ->
             val existing = prefs.getString(KEY_PENDING_REVOCATION, null)?.let(::decodeSession)
@@ -104,7 +142,7 @@ class EncryptedAccountSessionStore(
         SessionRevocationWorker.schedule(appContext)
     }
 
-    private suspend fun <T> withPrefs(block: (SharedPreferences) -> T): T {
+    private fun <T> withPrefs(block: (SharedPreferences) -> T): T {
         return mutex.withLock {
             try {
                 block(ensurePrefsLocked())

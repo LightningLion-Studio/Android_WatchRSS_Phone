@@ -22,7 +22,8 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
     private val enabled:()->Boolean={BuildConfig.SYNC_V2},
     private val signals:()->SyncV2TransportSignals={SyncV2AndroidTransport.sample(context)},
     private val clock:()->Long=android.os.SystemClock::elapsedRealtime,
-    private val contentEnabled:Boolean=true) {
+    private val contentEnabled:Boolean=true,
+    private val onAuthenticationResponse:(String,Int,String)->Unit={_,_,_->}) {
     data class Account(val userId:String,val backendBaseUrl:String,val legacyDeviceId:String,val epoch:String,val generation:String,
         val bearer:String,val apiKey:String,val deviceAuthorization:String?) {
         fun owner()=listOf(userId,backendBaseUrl,legacyDeviceId,epoch,generation)
@@ -97,7 +98,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             fun client(scope:JSONObject,deviceId:String):SyncV2CloudClient=life.own(SyncV2CloudClient(base,{
                 life.check();val current=current()?:SyncV2Codec.fail("authentication_required")
                 SyncV2CloudClient.Session(current.userId,current.legacyDeviceId,current.epoch,current.generation,SyncV2Codec.scope(scope),deviceId,current.bearer,current.apiKey,current.deviceAuthorization)
-            },trust,true,authenticatedBackend=account.backendBaseUrl.toHttpUrl(),trustedTime=time))
+            },trust,true,authenticatedBackend=account.backendBaseUrl.toHttpUrl(),trustedTime=time,onAuthenticationResponse=onAuthenticationResponse))
             val pending=store.pending()
             var capsule:JSONObject?=null
             var discovery=client(JSONObject().put("repoId","00".repeat(16)).put("libraryEpoch","1").put("contentGeneration","1"),"00".repeat(16))

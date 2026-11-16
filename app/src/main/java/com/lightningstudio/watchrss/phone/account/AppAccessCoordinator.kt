@@ -28,11 +28,16 @@ class AppAccessCoordinator(
     private val onAuthorized: () -> Unit = {}
 ) {
     private val operationMutex = Mutex()
+    private data class OnlineProof(val session: PhoneAccountSession, val version: Long)
+    private var refreshProof: OnlineProof? = null
     private val sessionRefresh = DeviceSessionRefreshCoordinator(
         load = store::load,
-        save = store::save,
+        save = { authorization -> saveOnlineAuthorization(authorization, refreshProof); refreshProof = null },
         owner = { accountRepository.session.value?.userId },
-        refresh = accountRepository::refreshAppAccess,
+        refresh = { current ->
+            refreshProof = onlineProof()
+            accountRepository.refreshAppAccess(current)
+        },
         elapsedMillis = android.os.SystemClock::elapsedRealtime,
         wallMillis = { store.trustedNowMillis() ?: System.currentTimeMillis() }
     )
@@ -41,12 +46,23 @@ class AppAccessCoordinator(
     private val _state = MutableStateFlow<AppAccessState>(AppAccessState.Loading)
     val state: StateFlow<AppAccessState> = _state.asStateFlow()
 
-    val isAuthorized: Boolean get() = _state.value is AppAccessState.Authorized
+    val isAuthorized: Boolean get() = _state.value is AppAccessState.Authorized &&
+        accountRepository.session.value?.userId?.let { !accountRepository.offlineAuthorizationBlocked(it) } != false
     val deviceAccessToken: String? get() = store.load()?.deviceAccessToken
 
     /** Wait for a rotation, then retain that session until the HTTP response headers arrive. */
     suspend fun <T> withDeviceSession(expectedUserId: String, request: suspend (String?) -> T): T =
-        sessionRefresh.withSession(expectedUserId, request)
+        try {
+            sessionRefresh.withSession(expectedUserId, request).also { result ->
+                if (result is okhttp3.Response && !result.isSuccessful) {
+                    accountRepository.recordAuthenticationResponse(expectedUserId, result.code,
+                        if (result.code in setOf(401, 403)) "" else result.peekBody(4096).string())
+                }
+            }
+        } catch (error: Throwable) {
+            accountRepository.recordAuthenticationFailure(expectedUserId, error)
+            throw error
+        }
 
     init {
         scope.launch(Dispatchers.IO) {
@@ -75,40 +91,61 @@ class AppAccessCoordinator(
     internal suspend fun buildWatchAccountSyncRequest(watch: String, install: String?, name: String?): JSONObject {
         if (!accountRepository.hasUsableSession) throw PhoneLoginRequired()
         val owner = accountRepository.session.value!!.userId
-        // Bluetooth needs no HTTP when both the signed local lease and the peer's
-        // previously issued grant remain valid. The manager verifies the peer root
-        // before this call; it removes the grant if the peer has rotated/revoked it.
-        // Do not wait behind a background HTTP reconciliation. A valid offline
-        // lease remains usable while that unrelated network request is pending.
-        val cachedRequest = run {
-            val cached = store.load()
-            val now = store.trustedNowMillis()
-            if (cached == null || now == null || !LeaseVerifier.verify(
-                    cached.lease, identity.deviceId, environment.appAccessPublicKey, now / 1000
-                )) return@run null
-            val request = accountRepository.cachedBluetoothAccount(watch, now) ?: return@run null
-            if (accountRepository.session.value?.userId != owner || !accountRepository.hasUsableSession) {
-                throw PhoneLoginRequired()
+        try {
+            val readiness = operationMutex.withLock {
+                val result = reconcileLocked()
+                if (result != WatchAccountRefreshResult.Ready) return@withLock result
+                if (accountRepository.session.value?.userId != owner) WatchAccountRefreshResult.DeviceVerificationRequired()
+                else if (!accountRepository.hasUsableSession) WatchAccountRefreshResult.AccountUnrecoverable()
+                else if (deviceAccessToken.isNullOrBlank()) WatchAccountRefreshResult.DeviceVerificationRequired()
+                else result
             }
-            store.recordTrustedTime(now)
-            request
+            readiness.requireReady()
+            authorizationNotifier.afterReconcile(isAuthorized)
+            return withWatchAccountDeviceRefresh(
+                deviceToken = { deviceAccessToken },
+                refresh = { rejected -> refreshWatchDeviceSession(rejected, owner) },
+                build = { withDeviceSession(owner) { accountRepository.buildAccountSyncRequest(watch, install, name) } }
+            )
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            accountRepository.recordAuthenticationFailure(owner, error)
+            if (isAccountNetworkFailure(error) && !accountRepository.offlineAuthorizationBlocked(owner)) {
+                val cached = store.load()
+                val now = store.trustedNowMillis()
+                if (cached != null && now != null && LeaseVerifier.verify(
+                        cached.lease, identity.deviceId, environment.appAccessPublicKey, now / 1000
+                    )) {
+                    val request = accountRepository.cachedBluetoothAccount(watch, now)
+                    if (request != null && accountRepository.session.value?.userId == owner && accountRepository.hasUsableSession) {
+                        store.recordTrustedTime(now)
+                        return request
+                    }
+                }
+            }
+            throw error
         }
-        if (cachedRequest != null) return cachedRequest
-        val readiness = operationMutex.withLock {
-            val result = reconcileLocked()
-            if (result != WatchAccountRefreshResult.Ready) return@withLock result
-            if (accountRepository.session.value?.userId != owner) WatchAccountRefreshResult.DeviceVerificationRequired()
-            else if (!accountRepository.hasUsableSession) WatchAccountRefreshResult.AccountUnrecoverable()
-            else if (deviceAccessToken.isNullOrBlank()) WatchAccountRefreshResult.DeviceVerificationRequired()
-            else result
+    }
+
+    /** A response to an older request cannot clear a newer explicit refusal. */
+    private suspend fun onlineAuthorization(request: suspend () -> AppAuthorization): AppAuthorization {
+        val proof = onlineProof()
+        val authorization = request()
+        saveOnlineAuthorization(authorization, proof)
+        return authorization
+    }
+
+    private fun onlineProof(): OnlineProof? = accountRepository.session.value?.let {
+        OnlineProof(it, accountRepository.offlineAuthorizationVersion(it.userId))
+    }
+
+    private fun saveOnlineAuthorization(authorization: AppAuthorization, proof: OnlineProof?) {
+        store.save(authorization)
+        if (proof != null && accountRepository.session.value == proof.session &&
+            authorization.serverTimeMillis > 0 && LeaseVerifier.verify(authorization.lease,
+                identity.deviceId, environment.appAccessPublicKey, authorization.serverTimeMillis / 1000)) {
+            accountRepository.confirmOnlineAuthorization(proof.session.userId, proof.version)
         }
-        readiness.requireReady()
-        authorizationNotifier.afterReconcile(isAuthorized)
-        return withWatchAccountDeviceRefresh(
-            deviceToken = { deviceAccessToken },
-            refresh = { rejected -> refreshWatchDeviceSession(rejected, owner) },
-            build = { withDeviceSession(owner) { accountRepository.buildAccountSyncRequest(watch, install, name) } }
-        )
     }
 
     internal suspend fun refreshWatchDeviceSession(rejectedToken: String, expectedUserId: String): WatchAccountRefreshResult = try { operationMutex.withLock {
@@ -136,8 +173,12 @@ class AppAccessCoordinator(
             compact = cached.lease, expectedDeviceId = identity.deviceId,
             publicKeyPem = environment.appAccessPublicKey, nowSeconds = trustedNow / 1000
         )
+        // A signed old-boot lease is usable only as an input to online possession
+        // refresh. A malformed/unverified cache retains the baseline status path.
+        val refreshWithoutTime = cached != null && trustedNow == null && LeaseVerifier.verify(
+            cached.lease, identity.deviceId, environment.appAccessPublicKey, 0)
         if (cachedValid) store.recordTrustedTime(trustedNow!!)
-        if (cached != null && !cachedValid) store.clear()
+        if (cached != null && !cachedValid && !refreshWithoutTime) store.clear()
         val hasUsableSession = accountRepository.hasUsableSession
         initialAppAccessState(cached?.access, cachedValid, hasUsableSession)?.let { _state.value = it }
         if (!hasUsableSession) WatchAccountRefreshResult.AccountUnrecoverable()
@@ -148,8 +189,10 @@ class AppAccessCoordinator(
                     _state.value = AppAccessState.PaymentPending(order)
                     refreshPaymentLocked(order.orderId)
                 }
-                !cachedValid -> loadServerStatusLocked()
-                else -> refreshLeaseLocked(requireNotNull(cached), rejectedToken)
+                cached == null || (!cachedValid && !refreshWithoutTime) -> loadServerStatusLocked()
+                else -> refreshLeaseLocked(requireNotNull(cached), rejectedToken ?: cached.deviceAccessToken.takeIf {
+                    accountRepository.offlineAuthorizationBlocked(accountRepository.session.value!!.userId)
+                })
             }
         }
     } catch (error: Throwable) { accountSyncFailureResult(error) }
@@ -162,21 +205,26 @@ class AppAccessCoordinator(
 
     private suspend fun handleValidLeaseRefreshFailure(cached: AppAuthorization, error: Throwable): WatchAccountRefreshResult {
         val failure = accountSyncFailureResult(error) // Cancellation always escapes before fallback I/O.
-        // A known server rejection cannot turn back into an offline authorization.
-        if (failure is WatchAccountRefreshResult.AccountUnrecoverable || failure is WatchAccountRefreshResult.DeviceVerificationRequired) {
-            accountRepository.invalidateBluetoothAccounts()
+        val now = store.trustedNowMillis()
+        val offlineValid = now != null &&
+            accountRepository.session.value?.userId?.let { accountRepository.offlineAuthorizationBlocked(it) } != true &&
+            LeaseVerifier.verify(cached.lease, identity.deviceId, environment.appAccessPublicKey, now / 1000)
+        fun retainOfflineState() {
+            _state.value = if (offlineValid) AppAccessState.Authorized(cached.access, offline = true)
+                else AppAccessState.ValidationError("需要联网完成账号验证")
         }
         if (error.findAccountHttpException()?.statusCode != 403) {
-            _state.value = AppAccessState.Authorized(cached.access, offline = true)
+            retainOfflineState()
             return failure
         }
         val summary = try { accountRepository.appAccessStatus() } catch (statusError: Throwable) {
-            _state.value = AppAccessState.Authorized(cached.access, offline = true)
+            retainOfflineState()
             return accountSyncFailureResult(statusError)
         }
         val decision = validLeaseRefreshDecision(cached.access, summary)
         if (decision.clearCache) store.clear()
-        _state.value = decision.state
+        _state.value = if (!offlineValid && decision.state is AppAccessState.Authorized)
+            AppAccessState.ValidationError("需要联网完成账号验证") else decision.state
         return failure
     }
 
@@ -192,8 +240,7 @@ class AppAccessCoordinator(
         operationMutex.withLock {
             val activationProof = accountRepository.session.value?.activationProof.orEmpty()
             try {
-                val authorization = accountRepository.startTrialAppAccess(store.claimIdempotencyKey())
-                store.save(authorization)
+                val authorization = onlineAuthorization { accountRepository.startTrialAppAccess(store.claimIdempotencyKey()) }
                 store.clearClaimIdempotencyKey()
                 accountRepository.consumeActivationProof(activationProof)
                 _state.value = AppAccessState.Authorized(authorization.access, false)
@@ -218,8 +265,7 @@ class AppAccessCoordinator(
             return WatchAccountRefreshResult.DeviceVerificationRequired()
         }
         return try {
-            val authorization = accountRepository.claimAppAccess(store.claimIdempotencyKey())
-            store.save(authorization)
+            val authorization = onlineAuthorization { accountRepository.claimAppAccess(store.claimIdempotencyKey()) }
             store.clearClaimIdempotencyKey()
             accountRepository.consumeActivationProof(activationProof)
             _state.value = AppAccessState.Authorized(authorization.access, false)

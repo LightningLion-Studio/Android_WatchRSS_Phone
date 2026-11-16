@@ -19,6 +19,8 @@ class PhoneAccountClient(
     private val deviceAccessToken: () -> String? = { null },
     private val httpClient: OkHttpClient = defaultHttpClient()
 ) {
+    internal var authenticatedOwner: (String) -> String? = { null }
+    internal var onAuthenticatedFailure: (String, Throwable) -> Unit = { _, _ -> }
     suspend fun accountSafetyProfile(session:PhoneAccountSession):AccountSafetyProfile = withContext(Dispatchers.IO) {
         val request=Request.Builder().url(environment.backendBaseUrl.trimEnd('/')+"/functions/v1/account/profile")
             .header("apikey",environment.supabaseAnonKey).header("authorization","Bearer ${session.accessToken}").get().build()
@@ -457,15 +459,31 @@ class PhoneAccountClient(
     }
 
     private fun execute(request: Request): okhttp3.Response {
+        val owner = request.header("authorization")?.removePrefix("Bearer ")?.let(authenticatedOwner)
         val versionedRequest = request.newBuilder()
             .withWatchRssAppVersionHeader()
             .build()
-        return checkResponse(httpClient.newCall(versionedRequest).execute())
+        return try {
+            val response = httpClient.newCall(versionedRequest).execute()
+            try {
+                if (owner != null && response.code in setOf(401, 403)) {
+                    onAuthenticatedFailure(owner, PhoneAccountHttpException(response.code, ""))
+                }
+                checkResponse(response)
+            } catch (error: Throwable) { response.close(); throw error }
+        }
+        catch (error: Throwable) {
+            if (owner != null) onAuthenticatedFailure(owner, error)
+            throw error
+        }
     }
 
     private fun checkResponse(response: okhttp3.Response): okhttp3.Response {
         if (!response.isSuccessful) {
-            val text = response.body?.string().orEmpty()
+            val text = try { response.body?.string().orEmpty() } catch (error: java.io.IOException) {
+                if (response.code in setOf(401, 403)) throw PhoneAccountHttpException(response.code, "").apply { initCause(error) }
+                throw error
+            }
             val error = PhoneAccountHttpException(
                 statusCode = response.code,
                 responseBody = text,

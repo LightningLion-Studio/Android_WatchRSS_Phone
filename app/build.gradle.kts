@@ -157,6 +157,8 @@ android {
         jvmTarget = "11"
     }
 
+    testOptions { unitTests.isIncludeAndroidResources = true }
+
     buildFeatures {
         compose = true
         buildConfig = true
@@ -221,6 +223,9 @@ dependencies {
     testImplementation(libs.json)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    testImplementation("io.github.takahirom.roborazzi:roborazzi:1.50.0")
+    testImplementation("io.github.takahirom.roborazzi:roborazzi-core:1.50.0")
     testImplementation(libs.okhttp.tls)
     testImplementation(libs.okhttp.mockwebserver)
     androidTestImplementation(libs.androidx.junit)

@@ -336,7 +336,17 @@ internal class LibraryRecoveryContext(
     }
 
     suspend fun <T> unit(name: String, block: suspend () -> T): T {
-        if (insideUnit) return block()
+        if (insideUnit) {
+            currentCoroutineContext().ensureActive()
+            checkOwner()
+            // A committed response can invalidate its transport when its ACK fails.
+            // Restart the enclosing connection-bound unit, not just this nested I/O,
+            // so it rebuilds its manifest/cursor from the already committed state.
+            if (!connected() && policy.generation >= 0) {
+                throw LibraryTransportFailure(policy.generation, EOFException("同步连接已关闭"))
+            }
+            return block()
+        }
         insideUnit = true
         try {
             while (true) {

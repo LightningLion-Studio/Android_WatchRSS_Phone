@@ -612,7 +612,12 @@ class PhoneBluetoothSyncManager(
                     reportProgress(progressReporter, PhoneBluetoothSyncStage.SYNCING_NOTES, 0)
                     syncNotes(effectiveDevice.address, sessionId, syncSession, libraryDeclarations?.let { binding().capabilities.withDeclarations(it) } ?: binding().capabilities,
                         syncAssets = includeNoteAssets && !binarySendPlanned,
-                        onLocalApplied = { if (it > 0) locallyApplied = true }, legacyVersion=binding().response.optInt("version")).also{completedDomains.add("notes"); logicalB2Recovery?.confirmed("v1:notes")}
+                        onLocalApplied = { if (it > 0) locallyApplied = true }, legacyVersion=binding().response.optInt("version")).also {
+                            // A full notes-domain receipt also certifies its assets,
+                            // independently of whether B2 is enabled on this build.
+                            if (includeNoteAssets) completedDomains.add("notes")
+                            logicalB2Recovery?.confirmed("v1:notes")
+                        }
                 }
                 runCatching { recovery.run { if(!skipped("usage")){syncLlmTokenUsage(effectiveDevice, syncSession, binding());completedDomains.add("usage"); logicalB2Recovery?.confirmed("v1:usage")} } }
                     .onFailure { tokenUsageSyncWarning = warningOrThrow(it, "词元用量同步失败") }

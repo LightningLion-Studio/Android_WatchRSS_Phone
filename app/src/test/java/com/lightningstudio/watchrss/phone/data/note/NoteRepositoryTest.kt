@@ -8,6 +8,13 @@ import org.junit.Assert.assertSame
 import org.junit.Test
 
 class NoteRepositoryTest {
+    @Test fun `derived repository title preserves complete Unicode and shared words`() = runBlocking {
+        val repository = NoteRepository(FakeNoteDao(), deviceId = "phone", now = { 123L })
+        assertEquals(".".repeat(79) + "😀", repository.save(title = "", markdown = ".".repeat(79) + "😀").title)
+        assertEquals("one two three", repository.save(title = "", markdown = "one two three four").title)
+        assertEquals("a".repeat(79), repository.save(title = "", markdown = "a".repeat(79) + "e\u0301").title)
+    }
+
     @Test fun `ordinary markdown uses source filename as title`() = runBlocking {
         val dao = FakeNoteDao()
         val repository = NoteRepository(dao, deviceId = "phone", now = { 123L })

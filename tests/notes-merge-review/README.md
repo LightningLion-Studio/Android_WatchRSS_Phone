@@ -9,7 +9,7 @@ Test-only review of phone 897a1e37. The six red acceptance tests are intentional
 Run from this worktree, offline:
 
 ```sh
-flock /tmp/wrss-heavy-Android_WatchRSS_Phone.wt-notes-merge-review.lock capmem 8G env JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew :app:testDebugUnitTest --tests '*NoteMergeReview*' --tests '*NoteMergeFixTest' --tests '*NoteConflictAliasTest' --tests '*NoteRepositoryTest' --offline --no-daemon -Dorg.gradle.workers.max=2
+flock /tmp/wrss-heavy-Android_WatchRSS_Phone.lock capmem 8G env JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew :app:testDebugUnitTest --tests '*NoteMergeReview*' --tests '*NoteMergeFixTest' --tests '*NoteConflictAliasTest' --tests '*NoteRepositoryTest' --offline --no-daemon -Dorg.gradle.workers.max=2
 ```
 
 Expected review-snapshot result: 14 tests, 8 passing, 6 failing. These are behavioral failures in production Room/repository code, not screenshot tests. The report and corpus are outside version control at `.codex-tmp/cloud-v2/{reports,evidence}/T-REVIEW-NOTES-MERGE-FIX*` under OPPO_Develop. No product source is changed.

@@ -7,7 +7,7 @@ The original RVM tests and their assertions are unchanged in this review branch.
 Normal execution (when no other Gradle is running):
 
 ```sh
-flock /tmp/wrss-heavy-Android_WatchRSS_Phone.wt-notes-merge-review-r2.lock capmem 8G env JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew :app:testDebugUnitTest --tests '*NoteMergeReviewTest' --tests '*NoteMergeReviewV2Test' --tests '*NoteMergeR2ReviewTest' --offline --no-daemon -Dorg.gradle.workers.max=2
+flock /tmp/wrss-heavy-Android_WatchRSS_Phone.lock capmem 8G env JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew :app:testDebugUnitTest --tests '*NoteMergeReviewTest' --tests '*NoteMergeReviewV2Test' --tests '*NoteMergeR2ReviewTest' --offline --no-daemon -Dorg.gradle.workers.max=2
 ```
 
 This review used `run-room.py` instead because other sessions held active Gradle

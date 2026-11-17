@@ -7,7 +7,7 @@ No network, Android runtime, emulator, device or HTTP server is needed.
 From `/home/wilf/data/OPPO_Develop`:
 
 ```sh
-flock /tmp/wrss-heavy-Android_WatchRSS_Phone.wt-notes-adversarial.lock capmem 16G python Android_WatchRSS_Phone.wt-notes-adversarial/tests/notes-adversarial/run-host.py --product Android_WatchRSS_Phone.wt-notes-lossless --classpath .codex-tmp/cloud-v2/evidence/T-NOTES-FORMAT-RCA/classpath.txt --out .codex-tmp/cloud-v2/evidence/T-NOTES-ADVERSARIAL/phone-pc2-final
+flock /tmp/wrss-heavy-Android_WatchRSS_Phone.lock capmem 16G python Android_WatchRSS_Phone/tests/notes-adversarial/run-host.py --product Android_WatchRSS_Phone --classpath .codex-tmp/cloud-v2/evidence/T-NOTES-FORMAT-RCA/classpath.txt --out .codex-tmp/cloud-v2/evidence/T-NOTES-ADVERSARIAL/phone-pc2-final
 ```
 
 Exit 1 is expected while findings remain. Remove `--product` to use this branch's
@@ -30,7 +30,7 @@ between the product's read and write. It does not test Android Room scheduling.
 Generate the untracked corpus (contains NUL and exact CR/LF bytes):
 
 ```sh
-python Android_WatchRSS_Phone.wt-notes-adversarial/tests/notes-adversarial/generate-corpus.py --out .codex-tmp/cloud-v2/evidence/T-NOTES-ADVERSARIAL/corpus --user-sample .codex-tmp/cloud-v2/evidence/T-NOTES-FORMAT-RCA/user-sample-vocab.txt
+python Android_WatchRSS_Phone/tests/notes-adversarial/generate-corpus.py --out .codex-tmp/cloud-v2/evidence/T-NOTES-ADVERSARIAL/corpus --user-sample .codex-tmp/cloud-v2/evidence/T-NOTES-FORMAT-RCA/user-sample-vocab.txt
 ```
 
 The compiled entry point also supports `HostTestsKt --wire input.json output.json`

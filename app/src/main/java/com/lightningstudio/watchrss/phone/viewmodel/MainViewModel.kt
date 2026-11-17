@@ -1241,7 +1241,7 @@ class MainViewModel(
             ) {
                 "已与 $deviceName 同步完成"
             } else {
-                if(bookWarning!=null)"已与 $deviceName 同步；部分书籍待处理" else "已与 $deviceName 完成资料库和备忘录同步"
+                if(bookWarning!=null)"已与 $deviceName 同步；$bookWarning" else "已与 $deviceName 完成资料库和备忘录同步"
             }
             sessionState.value = sessionState.value.copy(
                 message = message,
@@ -1258,7 +1258,6 @@ class MainViewModel(
                         accountWarning?.let { append("；账号授权同步失败：$it") }
                         readerWarning?.let { append("；阅读器资源同步失败：$it") }
                         tokenWarning?.let { append("；词元用量同步失败：$it") }
-                        bookWarning?.let { append("；书籍：$it") }
                     }
                 } else if (stats != null) {
                     buildString {

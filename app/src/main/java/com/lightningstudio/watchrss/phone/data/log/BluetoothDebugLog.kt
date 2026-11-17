@@ -60,7 +60,7 @@ class BluetoothDebugLog(context: Context) {
             Log.i("WatchRSSBluetooth",buildString {
                 append("monotonicNanos=$elapsedNanos event=$event")
                 if(sessionId!=null)append(" session=$sessionId")
-                fields.filterKeys{it in timingKeys||it.endsWith("Action")||it.endsWith("Phase")||it.endsWith("Version")}.forEach{(key,value)->append(" $key=${value.formatValue()}")}
+                fields.filterKeys{(event=="sync.book.isolated" && it in setOf("kind","id","bookIdPrefix","code","title","reason"))||it in timingKeys||it.endsWith("Action")||it.endsWith("Phase")||it.endsWith("Version")}.forEach{(key,value)->append(" $key=${value.formatValue()}")}
             })
         }
         synchronized(lock) {

@@ -146,3 +146,11 @@ and allows inline script/events so CSP does not conceal an unsafe output.
 Phone title logic and shared vectors do not change in r5. Phone main/hotfix
 commits document the shared rendering contract; host note/editor/markdown tests
 remain the compatibility gate. Reports and generated evidence are never committed.
+
+P3 also prohibits code-origin images: each generated Markdown image occurrence
+gets a unique asset URL. The independent cmark code blocks identify protected
+URLs. Watch image blocks, mini image nodes and mini asset callbacks must never
+contain those URLs. The browser repeats that check against actual DOM images.
+Mutation controls reject an appended code image or code asset callback while
+allowing ordinary body images. This distinguishes literal text retention from
+unwanted image side effects.

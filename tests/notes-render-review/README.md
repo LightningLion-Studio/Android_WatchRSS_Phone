@@ -3,7 +3,7 @@
 Test-only review of 1226acc. Run from OPPO_Develop using cached dependencies:
 
 ```sh
-flock /tmp/wrss-heavy-Android_WatchRSS_Phone.wt-notes-render-review.lock capmem 8G python Android_WatchRSS_Phone.wt-notes-render-review/tests/notes-render-review/run-host.py .codex-tmp/cloud-v2/evidence/T-REVIEW-NOTES-RENDER-FIX/phone-main Android_WatchRSS_Phone.wt-notes-render-review
+flock /tmp/wrss-heavy-Android_WatchRSS_Phone.lock capmem 8G python Android_WatchRSS_Phone/tests/notes-render-review/run-host.py .codex-tmp/cloud-v2/evidence/T-REVIEW-NOTES-RENDER-FIX/phone-main Android_WatchRSS_Phone
 ```
 
 The runner compiles actual product sources and original JUnit tests, plus `NoteRenderReviewTest`. Expected snapshot result: 21 tests, 20 passing and one deliberate RNR-06 failure. A supplementary-plane letter is skipped by the UTF-16 Char word predicate. `title-probe.json` supplies actual JVM outputs for the watch/mini comparison.

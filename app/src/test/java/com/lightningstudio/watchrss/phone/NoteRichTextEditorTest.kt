@@ -44,16 +44,14 @@ class NoteRichTextEditorTest {
     }
 
     @Test
-    fun `preview markup remains authoritative when saving without editing`() {
+    fun `preview and save preserve untouched table source`() {
         val original = "| Option | Type |\n| --- | --- |\n| `outer_padding` | int |"
+        val draft = NoteEditorDraft(original)
 
-        val saved = selectNoteStorageMarkup(
-            previewMode = true,
-            previewMarkup = original,
-            editorMarkup = "Option Type outer_padding int"
-        )
-
-        assertEquals(original, saved)
+        repeat(6) {
+            assertEquals(original, draft.storageMarkup { error("Untouched preview must not export") })
+            assertEquals(original, draft.storageMarkup { error("Untouched save must not export") })
+        }
     }
 
     @Test
@@ -151,7 +149,6 @@ class NoteRichTextEditorTest {
         assertEquals("示例", image.description)
         assertTrue((blocks.first() as NotePreviewBlock.RichText).markup.contains("Before"))
         assertTrue((blocks.last() as NotePreviewBlock.RichText).markup.contains("After"))
-        assertTrue("Before\n![示例](assets/example.jpg)\nAfter".shouldOpenInNotePreview())
     }
 
     @Test
@@ -166,9 +163,9 @@ class NoteRichTextEditorTest {
     }
 
     @Test
-    fun `plain text stays editable while persisted images reopen in preview`() {
-        assertFalse("普通正文".shouldOpenInNotePreview())
-        assertTrue("<p>前文</p><img src=\"assets/example.jpg\" alt=\"示例\"><p>后文</p>".shouldOpenInNotePreview())
+    fun `preview parser recognizes images without choosing the initial editor view`() {
+        assertFalse(parseNotePreviewBlocks("普通正文").any { it is NotePreviewBlock.Image })
+        assertTrue(parseNotePreviewBlocks("<p>前文</p><img src=\"assets/example.jpg\" alt=\"示例\"><p>后文</p>").any { it is NotePreviewBlock.Image })
     }
 
     @Test

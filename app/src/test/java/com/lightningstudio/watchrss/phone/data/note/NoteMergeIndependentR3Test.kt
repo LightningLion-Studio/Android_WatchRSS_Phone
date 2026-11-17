@@ -17,7 +17,8 @@ import org.robolectric.annotation.SQLiteMode
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 class NoteMergeIndependentR3Test {
 
- private fun db()=Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Context>(),PhoneCompanionDatabase::class.java).allowMainThreadQueries().build()
+ private fun db()=Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Context>(),PhoneCompanionDatabase::class.java)
+  .addCallback(NoteEditorPreferenceMigration).allowMainThreadQueries().build()
  private fun peer(n:NoteEntity,body:String,base:String,who:String="peer")=n.copy(markdown=body,plainText=body,contentHash=MarkdownNoteCodec.sha256(body),baseMarkdown=base,baseContentHash=MarkdownNoteCodec.sha256(base),modifiedBy=who,updatedAt=300)
  @Test fun RVM303_addedConflictInvalidatesOpenWindow()=runBlocking {
   val db=db();try{

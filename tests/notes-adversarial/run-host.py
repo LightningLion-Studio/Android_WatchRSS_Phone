@@ -13,10 +13,16 @@ p.add_argument('--product', type=Path, default=Path(__file__).resolve().parents[
 p.add_argument('--replay-sources', type=Path)
 p.add_argument('--out', type=Path, required=True)
 p.add_argument('--classpath', type=Path, required=True)
+p.add_argument('--case', action='append', default=[], help='Run only case IDs with this prefix (repeatable)')
+p.add_argument('--gradle-cache', type=Path, default=Path.home() / '.gradle/caches/modules-2/files-2.1')
+p.add_argument('--unfocused', action='store_true', help='Use the product focus-loss projection on both render trees')
 a = p.parse_args()
 a.out.mkdir(parents=True, exist_ok=True)
-cp = a.classpath.read_text().strip()
-cache = Path.home() / '.gradle/caches/modules-2/files-2.1'
+cache = a.gradle_cache
+shared = str(Path.home() / '.gradle/caches/modules-2/files-2.1')
+cp = ':'.join(str(cache / x[len(shared)+1:]) if x.startswith(shared + '/') and
+              (cache / x[len(shared)+1:]).exists() else x
+              for x in a.classpath.read_text().strip().split(':'))
 compiler = next((cache / 'org.jetbrains.kotlin/kotlin-compiler-embeddable/2.2.10').rglob('*.jar'))
 extra = [next((cache / s).rglob('*.jar')) for s in [
     'org.jetbrains.kotlin/kotlin-stdlib/2.2.10',
@@ -41,17 +47,18 @@ else:
     ]
     helper.write_text('''package com.lightningstudio.watchrss.phone
 import com.mohamedrejeb.richeditor.model.RichTextState
+import com.lightningstudio.watchrss.phone.data.note.NoteEditorStorage
 import androidx.compose.ui.text.TextRange
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 import kotlin.math.roundToInt
 ''' + '\n'.join(slices).removesuffix('@Composable\n'))
     inputs = [root / 'data/note' / s for s in [
-        'NoteConflictIdentity.kt', 'NoteEntities.kt', 'NoteDao.kt', 'NoteRepository.kt', 'MarkdownNoteCodec.kt',
+        'NoteEntities.kt', 'NoteDao.kt', 'NoteRepository.kt', 'MarkdownNoteCodec.kt',
         'MarkdownThreeWayMerge.kt', 'NoteCloudStateCodec.kt', 'MarkdownNoteArchive.kt',
     ]]
     inputs += [root / name for name in [
-        'data/note/NoteTitle.kt', 'NoteEditorDraft.kt', 'NoteVisualDocument.kt',
+        'data/note/NoteConflictIdentity.kt', 'data/note/NoteTitle.kt', 'data/note/NoteEditorStorage.kt', 'NoteEditorDraft.kt', 'NoteVisualDocument.kt',
     ] if (root / name).exists()]
 # Freeze all compiler inputs so a concurrent product edit cannot change them mid-compile.
 sources = []
@@ -73,7 +80,8 @@ if r.returncode:
     print(r.stdout + r.stderr)
     raise SystemExit(r.returncode)
 r = subprocess.run(['java', '-cp', str(a.out / 'host.jar') + ':' + cp,
-                    'com.lightningstudio.watchrss.phone.HostTestsKt', str(a.out)],
+                    'com.lightningstudio.watchrss.phone.HostTestsKt', str(a.out), *a.case,
+                    *(['--unfocused'] if a.unfocused else [])],
                    capture_output=True, text=True)
 (a.out / 'results.log').write_text(r.stdout + r.stderr)
 print(r.stdout + r.stderr)

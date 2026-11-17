@@ -53,3 +53,10 @@ The runner exports merge-matrix.json for cross-client checks: 1728 merge inputs
 and Unicode/NUL conflict-ID tuples. Neither this evidence nor reports are committed.
 rc6b-contracts expected unions now collapse identical content tuples under NA-16;
 the original input records, collision rejection and resolution markers stay covered.
+
+Pixel r2 keeps the CAS-aware 1.4.0 store and all existing merge assertions.
+Use `--case NA-03 --case NA-11 --unfocused` for the assigned editor cases.
+Without selectors the original merge scope and skip rules remain unchanged.
+`--unfocused` applies the product focus-loss projection on both render trees;
+it does not replace pixel tests. `--gradle-cache PATH` selects an existing
+modules-2/files-2.1 cache. Empty selections fail. No downloads occur.

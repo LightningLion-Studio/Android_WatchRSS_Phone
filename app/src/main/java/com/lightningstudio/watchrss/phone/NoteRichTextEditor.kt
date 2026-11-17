@@ -3,6 +3,8 @@ package com.lightningstudio.watchrss.phone
 import android.graphics.BitmapFactory
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -77,6 +79,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -92,6 +95,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -100,6 +104,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.ParagraphStyle
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontSynthesis
@@ -115,6 +120,7 @@ import androidx.compose.ui.window.DialogProperties
 import coil.compose.rememberAsyncImagePainter
 import com.lightningstudio.watchrss.phone.data.note.NoteAssetStore
 import com.lightningstudio.watchrss.phone.data.note.NoteEntity
+import com.lightningstudio.watchrss.phone.data.note.NoteEditorStorage
 import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.ui.reader.LocalReaderPresetRuntime
 import com.lightningstudio.watchrss.phone.ui.reader.ReaderBackgroundSurface
@@ -124,7 +130,6 @@ import com.mohamedrejeb.richeditor.model.RichTextState
 import com.mohamedrejeb.richeditor.model.ImageData
 import com.mohamedrejeb.richeditor.model.ImageLoader
 import com.mohamedrejeb.richeditor.model.LocalImageLoader
-import com.mohamedrejeb.richeditor.model.rememberRichTextState
 import com.mohamedrejeb.richeditor.ui.BasicRichTextEditor
 import com.mohamedrejeb.richeditor.ui.BasicRichText
 import kotlinx.coroutines.CoroutineScope
@@ -148,21 +153,28 @@ internal fun NoteEditor(
     onSaved: () -> Unit,
     scope: CoroutineScope,
     syncCloud: suspend () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    editorScrollState: ScrollState = rememberScrollState()
 ) {
+    // Wait for the local preference before mounting either editor mode.
+    var loadedDraft by remember(repository, note?.noteId) {
+        mutableStateOf(if (note == null) NoteEditorDraft("") else null)
+    }
+    LaunchedEffect(repository, note?.noteId) {
+        if (note != null) loadedDraft = NoteEditorDraft(note.markdown, repository.editorSourceMode(note.noteId))
+    }
+    val draft = loadedDraft ?: return
     var title by remember(note?.noteId) { mutableStateOf(note?.title.orEmpty()) }
     var keepOriginal by remember(note?.noteId) { mutableStateOf(false) }
     var linkDialogVisible by remember { mutableStateOf(false) }
     var tableDialogVisible by remember { mutableStateOf(false) }
     var previewMarkup by remember(note?.noteId) { mutableStateOf(note?.markdown.orEmpty()) }
-    var previewMode by remember(note?.noteId) {
-        mutableStateOf(note?.markdown?.shouldOpenInNotePreview() == true)
-    }
+    var previewMode by remember(note?.noteId) { mutableStateOf(false) }
     var focusEditorAfterPreview by remember(note?.noteId) { mutableStateOf(false) }
     var viewerImage by remember(note?.noteId) { mutableStateOf<NotePreviewBlock.Image?>(null) }
     val editorNoteId = remember(note?.noteId) { note?.noteId ?: UUID.randomUUID().toString() }
-    val editor = rememberRichTextState()
-    val editorScrollState = rememberScrollState()
+    val editor = draft.editor
+    var sourceValue by remember(draft) { mutableStateOf(TextFieldValue(draft.sourceText)) }
     val editorFocusRequester = remember { FocusRequester() }
     var editorFocused by remember(note?.noteId) { mutableStateOf(false) }
     var editorTextLayout by remember(note?.noteId) {
@@ -203,21 +215,24 @@ internal fun NoteEditor(
                 imageWidthSp,
                 imageHeightSp
             )
-            previewMarkup = editor.toNoteStorageMarkup()
+            draft.markBodyEdited()
             focusManager.clearFocus()
             keyboardController?.hide()
-            previewMode = true
         }
     }
 
     LaunchedEffect(editor, note?.noteId) {
-        val markup = note?.markdown.orEmpty()
-        val editorMarkup = markup.toNoteEditorMarkup()
-        if (markup.isNoteRichHtmlMarkup()) editor.setHtml(editorMarkup) else editor.setMarkdown(editorMarkup)
+        if (draft.sourceMode) return@LaunchedEffect
         editor.selection = TextRange.Zero
         var previousText = editor.annotatedString.text
-        snapshotFlow { editor.annotatedString.text to editor.selection }
-            .collectLatest { (currentText, selection) ->
+        var previousLogicalText = editor.toText()
+        var previousFocus = editorFocused
+        snapshotFlow { Triple(editor.annotatedString to editor.toText(), editor.selection, editor.composition) to editorFocused }
+            .collectLatest { (snapshot, focused) ->
+                val (content, selection) = snapshot
+                val (projection, logicalText) = content
+                val currentText = projection.text
+                if (logicalText != previousLogicalText) draft.markBodyEdited()
                 if (
                     shouldExitHeadingAfterEdit(
                         previousText = previousText,
@@ -229,6 +244,14 @@ internal fun NoteEditor(
                     HeadingStyles.forEach(editor::removeSpanStyle)
                 }
                 previousText = currentText
+                previousLogicalText = logicalText
+                // rc10 can refresh its selected-background mask after the focus callback.
+                // Observe the annotations too, and keep the unfocused projection canonical.
+                // While typing, only a focus transition refreshes this cache.
+                if (!focused || focused != previousFocus) {
+                    NoteVisualDocument.focusProjection(editor, focused)
+                }
+                previousFocus = focused
             }
     }
     LaunchedEffect(previewMode, focusEditorAfterPreview) {
@@ -278,25 +301,29 @@ internal fun NoteEditor(
                 modifier = Modifier.fillMaxWidth()
             )
         } else {
-            NoteFormattingToolbar(
-                editor = editor,
-                readerTextColor = bodyTextStyle.color,
-                onRestoreEditorFocus = restoreEditorFocus,
-                onPreview = {
-                    previewMarkup = editor.toNoteStorageMarkup()
-                    focusManager.clearFocus()
-                    keyboardController?.hide()
-                    previewMode = true
-                },
-                onEditLink = { linkDialogVisible = true },
-                onInsertTable = { tableDialogVisible = true },
-                onInsertImage = { imagePicker.launch("image/*") },
-                modifier = Modifier.fillMaxWidth()
-            )
+            CompositionLocalProvider(LocalNoteFormattingEnabled provides !draft.sourceMode) {
+                NoteFormattingToolbar(
+                    editor = editor,
+                    onBodyEdited = draft::markBodyEdited,
+                    readerTextColor = bodyTextStyle.color,
+                    onRestoreEditorFocus = restoreEditorFocus,
+                    onPreview = {
+                        previewMarkup = draft.previewMarkup()
+                        focusManager.clearFocus()
+                        keyboardController?.hide()
+                        previewMode = true
+                    },
+                    onEditLink = { linkDialogVisible = true },
+                    onInsertTable = { tableDialogVisible = true },
+                    onInsertImage = { imagePicker.launch("image/*") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
 
         ReaderBackgroundSurface(
             modifier = Modifier
+                .testTag("note_editor_body")
                 .weight(1f)
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
@@ -321,6 +348,21 @@ internal fun NoteEditor(
                             imageLoader = imageLoader,
                             onImageClick = { viewerImage = it },
                             modifier = Modifier.fillMaxSize()
+                        )
+                    } else if (draft.sourceMode) {
+                        BasicTextField(
+                            value = sourceValue,
+                            onValueChange = {
+                                sourceValue = it
+                                draft.editSource(it.text)
+                            },
+                            textStyle = editorTextStyle,
+                            modifier = Modifier
+                                .testTag("note_body_input")
+                                .fillMaxSize()
+                                .verticalScroll(editorScrollState)
+                                .focusRequester(editorFocusRequester)
+                                .padding(horizontal = 20.dp, vertical = 16.dp)
                         )
                     } else {
                         val editorContentPadding = 20.dp
@@ -350,6 +392,7 @@ internal fun NoteEditor(
                                         state = editor,
                                         textStyle = editorTextStyle,
                                         modifier = Modifier
+                                            .testTag("note_body_input")
                                             .fillMaxWidth()
                                             .heightIn(min = editorViewportHeight)
                                             .focusRequester(editorFocusRequester)
@@ -423,17 +466,13 @@ internal fun NoteEditor(
             Button(
                 onClick = {
                     scope.launch {
-                        val editorMarkup = editor.toNoteStorageMarkup()
                         repository.save(
                             editorNoteId,
                             title,
-                            selectNoteStorageMarkup(
-                                previewMode = previewMode,
-                                previewMarkup = previewMarkup,
-                                editorMarkup = editorMarkup
-                            ),
+                            draft.storageMarkup(),
                             note?.folderId,
-                            note?.pinned ?: false
+                            note?.pinned ?: false,
+                            editorSourceMode = draft.sourceMode
                         )
                         // The encrypted cloud service remains the authority for account checks.
                         runCatching { syncCloud() }
@@ -451,6 +490,7 @@ internal fun NoteEditor(
     if (linkDialogVisible) {
         LinkEditorDialog(
             editor = editor,
+            onBodyEdited = draft::markBodyEdited,
             onDismiss = {
                 linkDialogVisible = false
                 restoreEditorFocus()
@@ -461,11 +501,10 @@ internal fun NoteEditor(
         TableInsertDialog(
             onConfirm = { rows, columns ->
                 editor.addTextAfterSelection(markdownTable(rows, columns))
-                previewMarkup = editor.toNoteStorageMarkup()
+                draft.markBodyEdited()
                 tableDialogVisible = false
                 focusManager.clearFocus()
                 keyboardController?.hide()
-                previewMode = true
             },
             onDismiss = {
                 tableDialogVisible = false
@@ -486,6 +525,7 @@ internal fun NoteEditor(
 private fun NoteFormattingToolbar(
     editor: RichTextState,
     readerTextColor: Color,
+    onBodyEdited: () -> Unit,
     onRestoreEditorFocus: () -> Unit,
     onPreview: () -> Unit,
     onEditLink: () -> Unit,
@@ -500,6 +540,7 @@ private fun NoteFormattingToolbar(
         ?: TextAlign.Justify
     val applyAndRestoreFocus: (() -> Unit) -> Unit = { action ->
         action()
+        onBodyEdited()
         onRestoreEditorFocus()
     }
 
@@ -509,12 +550,13 @@ private fun NoteFormattingToolbar(
         tonalElevation = 2.dp
     ) {
         LazyRow(
+            modifier = Modifier.testTag("note_formatting_toolbar"),
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             item {
-                EditorToolButton(label = "预览", onClick = onPreview) {
+                EditorToolButton(label = "预览", enabled = true, onClick = onPreview) {
                     Icon(Icons.Default.Visibility, contentDescription = null)
                 }
             }
@@ -596,7 +638,7 @@ private fun NoteFormattingToolbar(
                 TextColorToolButton(
                     editor = editor,
                     readerTextColor = readerTextColor,
-                    onApplied = onRestoreEditorFocus
+                    onApplied = { onBodyEdited(); onRestoreEditorFocus() }
                 )
             }
             item {
@@ -838,7 +880,7 @@ private fun String.preserveNoteEditorRepeatedSpaces(): String =
 private fun String.restoreNoteEditorRepeatedSpaces(): String =
     replace(NOTE_EDITOR_PRESERVED_SPACE, ' ')
 
-private fun String.restoreNoteImagePlaceholders(): String {
+internal fun String.restoreNoteImagePlaceholders(): String {
     val htmlConverted = NoteEditorHtmlLinkRegex.replace(this) { match ->
         match.groupValues[1].toNoteEditorImagePayload()?.toHtmlImage() ?: match.value
     }
@@ -974,18 +1016,14 @@ internal enum class NoteTableAlignment { Start, Center, End }
 internal fun String.containsMarkdownTable(): Boolean =
     !isNoteRichHtmlMarkup() && parseNotePreviewBlocks(this).any { it is NotePreviewBlock.Table }
 
-internal fun String.shouldOpenInNotePreview(): Boolean =
-    parseNotePreviewBlocks(this).any {
-        it is NotePreviewBlock.Image || it is NotePreviewBlock.Table
-    }
-
 /**
  * Splits portable Markdown into rich-text runs and independently scrollable tables. Besides GFM
  * pipe tables, pasted TSV blocks are accepted so tabular text does not collapse into one line.
  */
 internal fun parseNotePreviewBlocks(markup: String): List<NotePreviewBlock> {
-    if (markup.isNoteRichHtmlMarkup()) return parseHtmlNotePreviewBlocks(markup)
-    return parseMarkdownImagePreviewBlocks(markup)
+    val content = NoteEditorStorage.sourceText(markup) ?: markup
+    if (content.isNoteRichHtmlMarkup()) return parseHtmlNotePreviewBlocks(content)
+    return parseMarkdownImagePreviewBlocks(content)
 }
 
 private fun parseHtmlNotePreviewBlocks(markup: String): List<NotePreviewBlock> {
@@ -1582,15 +1620,19 @@ private fun HeadingToolButton(
     }
 }
 
+private val LocalNoteFormattingEnabled = staticCompositionLocalOf { true }
+
 @Composable
 private fun EditorToolButton(
     label: String,
     selected: Boolean = false,
+    enabled: Boolean = LocalNoteFormattingEnabled.current,
     onClick: () -> Unit,
     content: @Composable () -> Unit
 ) {
     IconToggleButton(
         checked = selected,
+        enabled = enabled,
         onCheckedChange = { onClick() },
         modifier = Modifier
             .size(42.dp)
@@ -1813,7 +1855,11 @@ private fun CustomColorDialog(
 }
 
 @Composable
-private fun LinkEditorDialog(editor: RichTextState, onDismiss: () -> Unit) {
+private fun LinkEditorDialog(
+    editor: RichTextState,
+    onBodyEdited: () -> Unit,
+    onDismiss: () -> Unit
+) {
     var text by remember { mutableStateOf(editor.selectedLinkText.orEmpty()) }
     var url by remember { mutableStateOf(editor.selectedLinkUrl.orEmpty()) }
     val editingExistingLink = editor.isLink
@@ -1854,6 +1900,7 @@ private fun LinkEditorDialog(editor: RichTextState, onDismiss: () -> Unit) {
                         !editor.selectedLinkText.isNullOrBlank() -> editor.addLinkToSelection(url.trim())
                         else -> editor.addLink(text.trim(), url.trim())
                     }
+                    onBodyEdited()
                     onDismiss()
                 }
             ) { Text("完成") }
@@ -1861,7 +1908,7 @@ private fun LinkEditorDialog(editor: RichTextState, onDismiss: () -> Unit) {
         dismissButton = {
             Row {
                 if (editingExistingLink) {
-                    TextButton(onClick = { editor.removeLink(); onDismiss() }) { Text("移除链接") }
+                    TextButton(onClick = { editor.removeLink(); onBodyEdited(); onDismiss() }) { Text("移除链接") }
                 }
                 TextButton(onClick = onDismiss) { Text("取消") }
             }
@@ -1882,16 +1929,10 @@ internal fun RichTextState.toNoteStorageMarkup(): String {
         .normalizeNoteImageDimensionAttributes()
 }
 
-internal fun selectNoteStorageMarkup(
-    previewMode: Boolean,
-    previewMarkup: String,
-    editorMarkup: String
-): String = if (previewMode) previewMarkup else editorMarkup
-
 private const val NOTE_EDITOR_PRESERVED_SPACE = '\u00A0'
 private val NOTE_EDITOR_REPEATED_SPACE_REGEX = Regex(" {2,}")
 
-internal fun String.isNoteRichHtmlMarkup(): Boolean = listOf(
+internal fun String.isNoteRichHtmlMarkup(): Boolean = NoteVisualDocument.isEncoded(this) || listOf(
         "color:",
         "background:",
         "text-align:",

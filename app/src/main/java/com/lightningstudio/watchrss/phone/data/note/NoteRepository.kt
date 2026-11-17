@@ -8,10 +8,12 @@ import java.util.UUID
 class NoteRepository(
     private val dao: NoteDao,
     private val deviceId: String,
+    private val editorPreferenceOwner: String = deviceId,
     private val now: () -> Long = System::currentTimeMillis
 ) {
     suspend fun clearForAccountSwitch() = dao.clearForAccountSwitch()
     suspend fun hasAny(): Boolean = dao.hasAny()
+    internal suspend fun editorSourceMode(noteId: String): Boolean? = dao.editorSourceMode(noteId, editorPreferenceOwner)
     fun observeNotes(): Flow<List<NoteEntity>> = dao.observeNotes()
     fun observeFolders(): Flow<List<NoteFolderEntity>> = dao.observeFolders()
     fun observeConflicts(): Flow<List<NoteConflictEntity>> = flow {
@@ -32,14 +34,16 @@ class NoteRepository(
         title: String,
         markdown: String,
         folderId: String? = null,
-        pinned: Boolean = false
+        pinned: Boolean = false,
+        editorSourceMode: Boolean? = null
     ): NoteEntity {
         require(title.trim().isNotBlank() || MarkdownNoteCodec.toPlainText(markdown).isNotBlank()) {
             "笔记不能为空"
         }
         val previous = if (noteId == null) null else dao.note(noteId)
         val instant = nextTime(previous)
-        val canonical = markdown.replace("\r\n", "\n").replace('\r', '\n')
+        // Preserve authoritative body bytes; retain this branch's monotonic clock and CAS.
+        val canonical = markdown
         val hash = MarkdownNoteCodec.sha256(canonical)
         val saved = NoteEntity(
             noteId = previous?.noteId ?: noteId ?: UUID.randomUUID().toString(),
@@ -57,7 +61,9 @@ class NoteRepository(
             deleted = false,
             deletedAt = 0L
         )
-        check(dao.commitNote(saved.noteId, previous, saved)) { "notes_stale" }
+        val committed = if (editorSourceMode == null) dao.commitNote(saved.noteId, previous, saved)
+        else dao.upsertEditorNote(previous, saved, editorPreferenceOwner, editorSourceMode)
+        check(committed) { "notes_stale" }
         return saved
     }
 

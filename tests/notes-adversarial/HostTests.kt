@@ -44,7 +44,12 @@ private class Store(device:String="phone") {
 }
 private fun changed(n:NoteEntity,text:String,time:Long)=n.copy(markdown=text,contentHash=MarkdownNoteCodec.sha256(text),plainText=text,updatedAt=time,modifiedBy="peer")
 private fun equal(want:Any?,got:Any?){check(want==got){"expected=<$want> actual=<$got>"}}
+private var unfocusedProjection=false
 private fun render(e:RichTextState):String {
+ if(unfocusedProjection){
+  val cls=runCatching{Class.forName("com.lightningstudio.watchrss.phone.NoteVisualDocument")}.getOrNull()
+  if(cls!=null)cls.getMethod("focusProjection",RichTextState::class.java,Boolean::class.javaPrimitiveType).invoke(cls.getField("INSTANCE").get(null),e,false)
+ }
  val a=e.annotatedString
  val styles=(0 until a.length).map { i ->
   val s=a.spanStyles.filter{it.start<=i&&i<it.end}.fold(SpanStyle()){v,r->v.merge(r.item)}
@@ -63,6 +68,8 @@ private fun reopen(s:String):String {
 fun main(args:Array<String>)=runBlocking {
  if(args[0]=="--wire"){Files.write(Path.of(args[2]),NoteCloudStateCodec.encode(NoteCloudStateCodec.decode(Files.readAllBytes(Path.of(args[1])))));return@runBlocking}
  val out=Path.of(args[0]);var fail=0;var pass=0;var skip=0
+ unfocusedProjection=args.contains("--unfocused")
+ val selected=args.drop(1).filterNot{it=="--unfocused"}.toSet()
  val strings=listOf("", "a", "b", "x\na", "y\na", "a\nx", "a\ny", "A\nb", "a\nB", "a\nb", "x\u0000y", "😀")
  val matrix=org.json.JSONArray()
  for(base in strings)for(local in strings)for(remote in strings){
@@ -72,7 +79,7 @@ fun main(args:Array<String>)=runBlocking {
  val ids=org.json.JSONArray()
  for(t in listOf(listOf("n","a","x\u0000y","z","peer"),listOf("😀","a:b","x","\u0000z","")))ids.put(org.json.JSONArray(t+noteConflictId(t[0],t[1],t[2],t[3],t[4])))
  Files.writeString(out.resolve("merge-matrix.json"),org.json.JSONObject().put("cases",matrix).put("identities",ids).toString())
- suspend fun case(id:String,block:suspend()->Unit){if(System.getenv("NOTES_ADVERSARIAL_ALL")==null && Regex("^NA-(03|11|15|18|19) ").containsMatchIn(id)){println("SKIP $id (outside T-NOTES-MERGE-FIX)");skip++;return};try{block();println("PASS $id");pass++}catch(t:Throwable){if(t is Skipped){println("SKIP $id");skip++}else{println("FAIL $id ${t.message?.take(180)}");fail++}}}
+ suspend fun case(id:String,block:suspend()->Unit){if(selected.isNotEmpty()&&selected.none{id.startsWith(it)})return;if(selected.isEmpty()&&System.getenv("NOTES_ADVERSARIAL_ALL")==null && Regex("^NA-(03|11|15|18|19) ").containsMatchIn(id)){println("SKIP $id (outside T-NOTES-MERGE-FIX)");skip++;return};try{block();println("PASS $id");pass++}catch(t:Throwable){if(t is Skipped){println("SKIP $id");skip++}else{println("FAIL $id ${t.message?.take(180)}");fail++}}}
  case("NA-CONTROL conservative repository vectors") {
   val fixture=System.getenv("NOTES_REPOSITORY_VECTORS") ?: throw Skipped()
   val vectors=org.json.JSONObject(Files.readString(Path.of(fixture))).getJSONArray("apply")
@@ -200,5 +207,6 @@ fun main(args:Array<String>)=runBlocking {
   val e=cls.getMethod("getEditor").invoke(d) as RichTextState
   check(cls.getMethod("getSourceMode").invoke(d)==true||e.annotatedString.text.isNotEmpty()){"nonempty malformed body opened as empty rich document"}
  }
+ check(pass+fail+skip>0){"No test cases matched $selected"}
  println("TOTAL pass=$pass fail=$fail skip=$skip");if(fail>0)kotlin.system.exitProcess(1)
 }

@@ -4,10 +4,32 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.SkipQueryVerification
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface NoteDao {
+    // This local table is installed by NoteEditorPreferenceMigration after Room opens.
+    @SkipQueryVerification
+    @Query("SELECT sourceMode FROM note_editor_preferences WHERE noteId = :noteId AND installationId = :installationId")
+    suspend fun editorSourceMode(noteId: String, installationId: String): Boolean?
+
+    @SkipQueryVerification
+    @Query("INSERT OR REPLACE INTO note_editor_preferences (noteId, installationId, sourceMode) VALUES (:noteId, :installationId, :sourceMode)")
+    suspend fun writeEditorSourceMode(noteId: String, installationId: String, sourceMode: Boolean)
+
+    @Transaction
+    suspend fun upsertEditorNote(expected: NoteEntity?, note: NoteEntity, installationId: String, sourceMode: Boolean): Boolean {
+        if (!commitNote(note.noteId, expected, note)) return false
+        writeEditorSourceMode(note.noteId, installationId, sourceMode)
+        return true
+    }
+
+    @SkipQueryVerification
+    @Query("DELETE FROM note_editor_preferences")
+    suspend fun clearEditorPreferences()
+
     @Query("SELECT EXISTS(SELECT 1 FROM notes) OR EXISTS(SELECT 1 FROM note_folders)") suspend fun hasAny(): Boolean
     @Query("SELECT * FROM note_folders WHERE deleted = 0 ORDER BY sortOrder, name COLLATE NOCASE")
     fun observeFolders(): Flow<List<NoteFolderEntity>>
@@ -127,5 +149,12 @@ interface NoteDao {
     @Query("DELETE FROM note_folders")
     suspend fun clearFolders()
     @androidx.room.Transaction
-    suspend fun clearForAccountSwitch() { clearRemoteReceipts(); clearConflicts(); clearAssets(); clearNotes(); clearFolders() }
+    suspend fun clearForAccountSwitch() {
+        clearRemoteReceipts()
+        clearConflicts()
+        clearAssets()
+        clearNotes()
+        clearFolders()
+        clearEditorPreferences()
+    }
 }

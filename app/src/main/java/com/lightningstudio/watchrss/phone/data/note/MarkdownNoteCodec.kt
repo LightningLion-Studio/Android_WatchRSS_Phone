@@ -1,6 +1,9 @@
 package com.lightningstudio.watchrss.phone.data.note
 
+import com.lightningstudio.watchrss.phone.NoteVisualDocument
 import org.jsoup.parser.Parser
+import org.json.JSONArray
+import org.json.JSONObject
 import java.security.MessageDigest
 
 data class ImportedMarkdownNote(
@@ -18,29 +21,56 @@ object MarkdownNoteCodec {
         appendLine("---")
         appendLine("watchrss-note: 1")
         appendLine("id: ${note.noteId}")
+        appendLine("title: ${JSONObject.quote(note.title)}")
         note.folderId?.let { appendLine("folder: $it") }
         appendLine("created-at: ${note.createdAt}")
         appendLine("updated-at: ${note.updatedAt}")
         appendLine("---")
         append(note.markdown)
-        if (!note.markdown.endsWith('\n')) appendLine()
     }
 
     fun parse(input: String): ImportedMarkdownNote {
-        val normalized = input.replace("\r\n", "\n").replace('\r', '\n')
-        if (!normalized.startsWith("---\n")) return ImportedMarkdownNote(null, null, null, normalized)
-        val end = normalized.indexOf("\n$FRONT_MATTER_END\n", startIndex = 4)
-        if (end < 0) return ImportedMarkdownNote(null, null, null, normalized)
-        val fields = normalized.substring(4, end).lineSequence()
-            .mapNotNull { line -> line.substringBefore(':', "").trim().takeIf { it.isNotBlank() }?.let { it to line.substringAfter(':').trim() } }
-            .toMap()
-        if (fields["watchrss-note"] != "1") return ImportedMarkdownNote(null, null, null, normalized)
+        // Scan only the envelope. Normalizing the entire file changes CRLF/CR in the body.
+        var cursor = when {
+            input.startsWith("---\r\n") -> 5
+            input.startsWith("---\n") || input.startsWith("---\r") -> 4
+            else -> return ImportedMarkdownNote(null, null, null, input)
+        }
+        val fields = mutableMapOf<String, String>()
+        var bodyStart = -1
+        while (cursor < input.length) {
+            val end = input.indexOfAny(charArrayOf('\r', '\n'), cursor).let { if (it < 0) input.length else it }
+            val line = input.substring(cursor, end)
+            val next = when {
+                end == input.length -> end
+                input[end] == '\r' && input.getOrNull(end + 1) == '\n' -> end + 2
+                else -> end + 1
+            }
+            if (line == FRONT_MATTER_END) {
+                bodyStart = next
+                break
+            }
+            val key = line.substringBefore(':', "").trim()
+            if (key.isNotEmpty()) fields[key] = line.substringAfter(':').trim()
+            if (next == input.length) break
+            cursor = next
+        }
+        if (bodyStart < 0 || fields["watchrss-note"] != "1") return ImportedMarkdownNote(null, null, null, input)
         return ImportedMarkdownNote(
             noteId = fields["id"]?.takeIf { it.isNotBlank() },
             folderId = fields["folder"]?.takeIf { it.isNotBlank() },
-            title = fields["title"]?.takeIf { it.isNotBlank() },
-            markdown = normalized.substring(end + FRONT_MATTER_END.length + 2)
+            title = fields["title"]?.takeIf { it.isNotBlank() }?.let(::decodeTitle),
+            markdown = input.substring(bodyStart)
         )
+    }
+
+    private fun decodeTitle(value: String): String {
+        if (!value.startsWith('"')) return value // Legacy unquoted front matter.
+        return runCatching {
+            val encoded = JSONArray("[$value]")
+            require(encoded.length() == 1)
+            encoded.getString(0)
+        }.getOrDefault(value)
     }
 
     fun toPlainText(markdown: String): String = projectText(markdown, preserveListNumbers = false)
@@ -49,9 +79,12 @@ object MarkdownNoteCodec {
     internal fun titlePlainText(markdown: String): String = projectText(markdown, preserveListNumbers = true)
 
     private fun projectText(markdown: String, preserveListNumbers: Boolean): String {
-        val hasHtml = HTML_TAG.containsMatchIn(markdown)
+        val content = NoteEditorStorage.sourceText(markdown)
+            ?: (if (preserveListNumbers) NoteVisualDocument.legacyTitleMarkup(markdown) else null)
+            ?: markdown
+        val hasHtml = HTML_TAG.containsMatchIn(content)
         val withoutHtml = if (hasHtml) {
-            markdown
+            content
                 .replace(Regex("(?is)<img\\b[^>]*alt=[\"']([^\"']*)[\"'][^>]*>"), "[图片：$1]")
                 .replace(Regex("(?is)<img\\b[^>]*>"), "[图片]")
                 .replace(Regex("(?i)<br\\s*/?>"), "\n")
@@ -60,7 +93,7 @@ object MarkdownNoteCodec {
                 .replace(HTML_TAG, "")
                 .let { Parser.unescapeEntities(it, false) }
         } else {
-            markdown
+            content
         }
         val plain = withoutHtml
             .replace(Regex("!\\[([^]]*)]\\([^)]*\\)"), "[图片：$1]")

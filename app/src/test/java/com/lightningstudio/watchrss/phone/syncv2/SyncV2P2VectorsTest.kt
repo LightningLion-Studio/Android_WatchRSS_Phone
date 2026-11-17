@@ -194,4 +194,23 @@ class SyncV2P2VectorsTest {
         p.consume(proof);error("choice_stale"){p.check(st,x.getString("key"),proof)}
         cases(x.getJSONArray("unsupported")){c->val changed=JSONObject(st.toString());val entry=changed.getJSONObject("legacyInbox").getJSONObject(x.getString("key"));if(c.has("replaceBody"))entry.put("body",c.get("replaceBody"))else mutate(entry,c.getJSONArray("path"),c.get("value"));if(c.has("removed"))entry.put("removedEntityKeys",c.get("removed"));error(c.getJSONObject("expected").getString("error")){SyncV2LegacyMerge().plan(changed,x.getString("key"))}}
     }
+
+    @Test fun noteResolutionZeroRollbackAndEqualClocksKeepPositiveMarkers() {
+        val initial=v("notes-conflict").getJSONObject("initial")
+        for(now in listOf(0L,50L,initial.getJSONObject("note").getLong("updatedAt")))for(choice in listOf("local","remote","manual")) {
+            val capture=SyncV2NoteResolution.capture(initial)
+            val (next,_)=SyncV2NoteResolution.prepare(initial,capture,choice,if(choice=="manual")"chosen" else null,now,"device")
+            assertTrue(next.getJSONObject("note").getLong("updatedAt")>initial.getJSONObject("note").getLong("updatedAt"))
+            val rows=next.getJSONObject("conflicts").getJSONArray("records")
+            val before=initial.getJSONObject("conflicts").getJSONArray("records")
+            for(i in 0 until rows.length()) {
+                val old=before.getJSONObject(i);val expected=JSONObject(old.toString())
+                if(old.getLong("resolvedAt")==0L)expected.put("resolvedAt",maxOf(1L,now))
+                same(expected,rows.getJSONObject(i));assertTrue(rows.getJSONObject(i).getLong("resolvedAt")>0L)
+            }
+            val original=SyncV2Codec.canonical(next)
+            error("choice_stale"){SyncV2NoteResolution.prepare(next,capture,"remote",null,0,"device")}
+            assertEquals(original,SyncV2Codec.canonical(next))
+        }
+    }
 }

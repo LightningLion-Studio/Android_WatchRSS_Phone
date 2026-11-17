@@ -114,8 +114,7 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
             } catch(e:InvalidBookPackageException) {reject(id,"book_package_invalid",e.reason)}
             finally {tmp.delete()}
         }
-        for(state in remote.filter{it.getString("bookId") !in rejected})diagnosticItem(state.getString("bookId"),"applied","none")
-        for(state in local.filter{it.getString("bookId") !in rejected})diagnosticItem(state.getString("bookId"),"applied","none")
+        for(id in (remote.asSequence()+local.asSequence()).map{it.getString("bookId")}.filter{it !in rejected}.distinct())diagnosticItem(id,"applied","none")
         trace("packages-ready:ms=${(System.nanoTime()-started)/1_000_000}")
         if(domainFastPath && booksComplete && missing.length()>0) {
             val confirmed=send(request("manifest").put("books",JSONArray(store.manifests())).put("supportsBookSyncV1",true).put("supportsBookReadingDeltaV1",true))

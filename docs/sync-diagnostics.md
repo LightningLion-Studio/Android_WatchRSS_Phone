@@ -69,3 +69,18 @@ The framework performs the DUMP authorization before dispatching into the app's
 service callback; checking Binder caller identity inside the main-thread dump
 would inspect the forwarding call rather than the original shell identity.
 No debug-only registration or debuggable gate is used.
+
+## r2 bounded diagnostics (supersedes earlier unpaged dump examples)
+
+`Service.dump` never builds a library snapshot on the application thread. The first call returns `{"status":"pending"}`. Repeat the same command to poll one background job. Only one job and one cached page exist. A completed page expires after 10 seconds. `snapshotAt` identifies that collected result; different pages can observe library changes. Callers must not treat separately collected library/history sections as one database transaction.
+
+- `library.books [offset limit]`: default offset 0, limit 8; limit 1–12. Output retains `books`, and adds `offset,nextOffset`. Continue until `nextOffset=null`. Only this page plus one lookahead book is inspected. Metadata fields and pending import grouping are projected/aggregated in SQL.
+- `sync.last [n itemOffset itemLimit]`: n 1–12, offset 0–256, limit 1–4. The existing `sync.last n` form remains valid. Output adds `itemOffset,nextItemOffset` inside `sync.last`.
+- Default output includes the first bounded book/history pages and summary. It does not imply full inventory acceptance.
+- Each book page has an 8-second cooperative deadline and 64 MiB total streaming-hash budget. A file exceeding the remaining budget is `staged/hash_budget_exceeded`; its digest is not validated. Polling cannot turn this into a successful digest check. A deadline failure produces a fixed diagnostic error. No exception text is exported.
+
+`pendingCount` is the number of rejected business-result events observed in this recorded synchronization, including missing acknowledgements. The unit is one reported item outcome, including reader/account warnings and each member of a refused manifest batch. It is not a count of package chunks, future work, or the cloud queue. A later successful session does not rewrite historical counts. `rejectedCount` has the same scope. `omittedCount`, `omittedRejectedCount`, and `omittedAppliedCount` count outcomes excluded by the 256-detail limit. These counters update before truncation, in constant space. Old truncated records without counters report null rather than inventing an exact number. Session `startedAt` identifies the counters' session. Library summary remains a separate inventory count.
+
+A manifest-wide refusal emits one `book_batch_rejected` outcome for each submitted identity. This means the batch was refused, not that every member independently failed validation. A producer without a specific subreason records `unknown`. Body refusals preserve the peer's allowlisted reason and any available sanitized title. Local/remote success inventory duplicates for the same book are emitted once.
+
+Titles contain display text only. URL, control, formatting, and credential assignment patterns (`Cookie`, `Authorization`, token/key variants, `K_id`) are redacted before truncation. Tests use synthetic strings only.

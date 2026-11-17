@@ -56,6 +56,7 @@ class PhoneCompanionContainer(context: Context) {
             read(com.lightningstudio.watchrss.phone.diagnostics.LibraryDiagnostics(query,java.io.File(appContext.filesDir,"imported_books"),articleContentStore,syncDiagnostics.bookRejections()))
         }
     }
+    fun diagnosticLibraryPage(offset:Int=0,limit:Int=8)=withDiagnosticLibrary({org.json.JSONObject().put("books",org.json.JSONArray()).put("offset",offset).put("nextOffset",org.json.JSONObject.NULL)}){it.page(offset,limit)}
     fun diagnosticLibraryBooks()=withDiagnosticLibrary({org.json.JSONArray()}){it.books()}
     fun diagnosticLibrarySummary()=withDiagnosticLibrary({com.lightningstudio.watchrss.phone.diagnostics.DiagnosticFields.summary()}){it.summary()}
     fun diagnosticLibrarySnapshot()=withDiagnosticLibrary({org.json.JSONArray() to com.lightningstudio.watchrss.phone.diagnostics.DiagnosticFields.summary()}){it.books() to it.summary()}

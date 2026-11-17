@@ -495,9 +495,11 @@ class PhoneBluetoothSyncManager(
             val observed=session?.client?:client
             diagnosticClients+=observed
             observed.diagnosticBytes={trace.bytes(it)}
-            var pending=listOf("library" to null as String?)
-            observed.diagnosticRequest={request->pending=com.lightningstudio.watchrss.phone.diagnostics.DiagnosticFields.requestItems(request)}
-            observed.diagnosticResponse={response->if(response.opt("success")==false)pending.forEach{(kind,id)->trace.item(kind,id,"rejected",response.optString("errorCode","peer_rejected"))}}
+            var diagnosticRequest=JSONObject();val diagnosticTitles=linkedMapOf<String,String>()
+            observed.diagnosticRequest={request->diagnosticRequest=request
+                if(request.optString("action")=="syncBooks"){val rows=request.optJSONArray("books");if(rows!=null)for(i in 0 until minOf(rows.length(),256)){val row=rows.optJSONObject(i)?:continue;val id=com.lightningstudio.watchrss.phone.diagnostics.DiagnosticFields.id(row.optString("bookId"))?:continue;val title=com.lightningstudio.watchrss.phone.diagnostics.DiagnosticFields.rejectionTitle(row.optString("title"))?:continue;if(id in diagnosticTitles||diagnosticTitles.size<256)diagnosticTitles[id]=title}}
+            }
+            observed.diagnosticResponse={response->com.lightningstudio.watchrss.phone.diagnostics.DiagnosticFields.recordResponse(trace,diagnosticRequest,response){diagnosticTitles[it]};diagnosticRequest=JSONObject()}
             trace.channel(session?.transport?.owner?.startsWith("ip:")==true)
         }
         observeDiagnostics(null);observeDiagnostics(reusableSession)

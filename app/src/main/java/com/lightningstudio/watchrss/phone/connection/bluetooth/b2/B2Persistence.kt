@@ -11,6 +11,8 @@ interface B2Persistence {
     suspend fun <T> transaction(block: suspend () -> T): T
     suspend fun get(scope: String, ns: String, id: String): JSONObject?
     suspend fun list(scope: String, ns: String): List<Pair<String, JSONObject>>
+    suspend fun listForJob(scope: String, namespace: String, jobId: String): List<JSONObject> =
+        list(scope, namespace).map { it.second }.filter { it.optString("jobId") == jobId }
     suspend fun all(): List<Record>
     suspend fun put(scope: String, ns: String, id: String, value: JSONObject)
     suspend fun delete(scope: String, ns: String, id: String)

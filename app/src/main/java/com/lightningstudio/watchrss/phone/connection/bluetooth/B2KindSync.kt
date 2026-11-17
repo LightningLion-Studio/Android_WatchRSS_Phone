@@ -9,16 +9,25 @@ import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 
-/** Product seam for the S2 noteAsset subset. Construction is strictly behind b2Enabled.
- * Transport discovery/account/Ready and the legacy split remain manager responsibilities. */
-internal class B2NoteAssetSync(private val store: B2Persistence, private val directory: File,
+/** Connects selected business ports to the persistent B2 session. */
+internal class B2KindSync(private val store: B2Persistence, private val directory: File,
     private val assetDirectory: File, private val account: String, private val phone: String,
     private val watch: String, private val authorize: () -> Unit,
-    private val progress: (String) -> Unit) {
+    private val progress: (String) -> Unit,
+    private val route: B2KindRoute,
+    private val business: B2InheritedKinds) {
     private val files = B2Files(directory)
     private val snapshots = B2Snapshots(store, files)
-    private val key = B2Digests.d("wrss.library-binary.v2/asset-attempt", listOf(account, phone, watch))
-    val capability: JSONObject get() = B2Negotiation.capability(setOf("noteAsset"), setOf("noteAsset"))
+    private val key = if (route.isAssetOnly) {
+        B2Digests.d("wrss.library-binary.v2/asset-attempt", listOf(account, phone, watch))
+    } else B2Digests.d("wrss.library-binary.v2/kind-attempt", listOf(account, phone, watch,
+        route.send.sorted().joinToString(","), route.receive.sorted().joinToString(",")))
+    private val capability = B2Negotiation.capability(route.send, route.receive, B2Wire.s2Limits().apply {
+        if (route.hasBinaryLibrary) {
+            put("maxManifestBytes", 1024 * 1024)
+            put("maxPlanObjects", 1024)
+        }
+    })
     private var preparing: () -> Unit = {}
     private fun id() = java.util.UUID.randomUUID().toString().replace("-", "")
     suspend fun resetPlan() = store.exclusive { store.transaction {
@@ -33,45 +42,76 @@ internal class B2NoteAssetSync(private val store: B2Persistence, private val dir
             }
         }
     } }
-    private suspend fun attempt(assets: List<NoteAssetInventoryEntry>): JSONObject = try { B2LocalWork.run { unit ->
-        preparing = unit; files.onProgress = { unit() }
-        try { createOrResume(assets) } finally { preparing = {} }
-    } }
-        catch (_: java.io.IOException) { throw B2Exception("LOCAL_IO") }
-        catch (_: android.database.SQLException) { throw B2Exception("LOCAL_IO") }
-    private suspend fun createOrResume(assets: List<NoteAssetInventoryEntry>): JSONObject {
-        store.exclusive { store.get(account, "attempt", key) }?.takeIf { it.optString("state") in setOf("PREPARED", "RETIRING", "CANCELLED") }?.let { return it }
-        val descriptors = assets.sortedBy { it.storageKey }.map { asset ->
-            authorize()
-            val source = File(assetDirectory, asset.storageKey)
-            val hashes = JSONArray(); val buffer = ByteArray(65536); val whole = java.security.MessageDigest.getInstance("SHA-256")
-            var total = 0L
-            runInterruptible(Dispatchers.IO) { source.inputStream().use { input ->
-                while (true) {
-                    var n = 0
-                    while (n < buffer.size) { val got = input.channel.read(java.nio.ByteBuffer.wrap(buffer, n, buffer.size - n)); if (got < 0) break; if (got > 0) n += got }
-                    if (n == 0) break
-                    total += n; whole.update(buffer, 0, n); hashes.put(B2Digests.hash(buffer.copyOf(n))); preparing()
-                }
-            }
-            }
-            if (total != asset.size || B2Frames.hex(whole.digest()) != asset.sha256) throw B2Exception("SOURCE_CHANGED")
-            val metadata = JSONObject().put("storageKey", asset.storageKey).put("sha256", asset.sha256).put("size", asset.size).toString()
-            val d = JSONObject().put("objectId", "0".repeat(64)).put("kind", "noteAsset").put("schemaVersion", 1)
-                .put("businessId", asset.storageKey).put("contentVersion", asset.sha256).put("encoding", "raw")
-                .put("size", asset.size).put("chunkBytes", 65536).put("sha256", asset.sha256).put("chunkHashes", hashes)
-                .put("metadataUtf8", metadata).put("metadataSha256", B2Digests.hash(B2Json.utf8(metadata))).put("dependsOn", JSONArray())
-            d.put("objectId", B2Digests.objectId(d)); B2Wire.descriptor(d); B2Metadata.validate(d); d
-        }
-        val witness = snapshots.freeze(account, "asset-" + id(), descriptors) { File(assetDirectory, it.getString("businessId")) }
-        return JSONObject().put("state", "PREPARED").put("phoneSnapshot", witness).put("watchSnapshot", JSONObject.NULL).put("bindings", JSONArray()).also { a ->
-            store.exclusive { authorize(); store.budget(B2Json.utf8(a.toString()).size.toLong() + 1024); store.put(account, "attempt", key, a) }
-        }
+    suspend fun prepare(probe: JSONObject, assets: List<NoteAssetInventoryEntry>) {
+        createOrResume(probe, assets)
     }
-    suspend fun run(input: InputStream, output: OutputStream, probe: JSONObject, assets: List<NoteAssetInventoryEntry>, close: () -> Unit) = supervisorScope {
+
+    private suspend fun createOrResume(probe: JSONObject, assets: List<NoteAssetInventoryEntry>): JSONObject = try {
+        B2LocalWork.run { unit ->
+            preparing = unit
+            files.onProgress = { unit() }
+            try { freeze(probe, assets) } finally { preparing = {} }
+        }
+    } catch (_: java.io.IOException) {
+        throw B2Exception("LOCAL_IO")
+    } catch (_: android.database.SQLException) {
+        throw B2Exception("LOCAL_IO")
+    }
+
+    private suspend fun freeze(probe: JSONObject, assets: List<NoteAssetInventoryEntry>): JSONObject {
+        store.exclusive { store.get(account, "attempt", key) }
+            ?.takeIf { it.optString("state") in setOf("PREPARED", "RETIRING", "CANCELLED") }?.let { return it }
+        val selection = B2Negotiation.select(capability, probe.getJSONObject("libraryBinary"), "phoneToWatch")
+        val descriptors = mutableListOf<JSONObject>()
+        val sources = mutableMapOf<String, File>()
+        val limits = selection?.getJSONObject("limits")
+        var inventoryBytes = 0L
+        var payloadBytes = 0L
+        fun add(descriptor: JSONObject, source: File) {
+            inventoryBytes += B2Json.utf8(descriptor.toString()).size + 1
+            payloadBytes += descriptor.getLong("size")
+            if (descriptors.size >= requireNotNull(limits).getInt("maxPlanObjects") ||
+                inventoryBytes > limits.getLong("maxManifestBytes") || payloadBytes > 64L * 1024 * 1024 ||
+                descriptor.getLong("size") * 2 > limits.getLong("maxStagingBytes") ||
+                descriptor.getLong("size") > limits.getLong("maxObjectBytes") ||
+                B2Json.utf8(descriptor.getString("metadataUtf8")).size > limits.getInt("maxMetadataBytes")) {
+                throw B2Exception("LIMIT_EXCEEDED")
+            }
+            descriptors += descriptor
+            sources[descriptor.getString("objectId")] = source
+        }
+        directory.mkdirs()
+        val scratch = java.nio.file.Files.createTempDirectory(directory.toPath(), ".freeze-").toFile()
+        val witness = try {
+            if (B2_NOTE_ASSET in route.send) for (asset in assets.sortedBy { it.storageKey }) {
+                authorize()
+                val source = File(assetDirectory, asset.storageKey)
+                val hashes = binaryFileHashes(source, preparing)
+                if (hashes.size != asset.size || hashes.sha256 != asset.sha256) throw B2Exception("SOURCE_CHANGED")
+                val metadata = JSONObject().put("storageKey", asset.storageKey)
+                    .put("sha256", asset.sha256).put("size", asset.size)
+                add(binaryDescriptor(B2_NOTE_ASSET, asset.storageKey, metadata, hashes), source)
+            }
+            business.freeze(route.send, scratch, preparing, ::add)
+            descriptors.sortBy { it.getString("objectId") }
+            if (selection != null && B2Planner.preflight("merge", selection, descriptors) is B2Planner.Admission.UseLegacy) {
+                throw B2Exception("LIMIT_EXCEEDED")
+            }
+            snapshots.freeze(account, "asset-" + id(), descriptors) { sources.getValue(it.getString("objectId")) }
+        } finally {
+            scratch.deleteRecursively()
+        }
+        return JSONObject().put("state", "PREPARED").put("phoneSnapshot", witness)
+            .put("watchSnapshot", JSONObject.NULL).put("bindings", JSONArray()).also { attempt ->
+                store.exclusive { authorize(); store.budget(B2Json.utf8(attempt.toString()).size.toLong() + 1024)
+                    store.put(account, "attempt", key, attempt) }
+            }
+    }
+
+    suspend fun run(input: InputStream, output: OutputStream, probe: JSONObject,
+        assets: List<NoteAssetInventoryEntry>, close: () -> Unit) = supervisorScope {
         authorize()
-        val sendSelected = B2Negotiation.select(capability, probe.getJSONObject("libraryBinary"), "phoneToWatch") != null
-        val a = attempt(if (sendSelected) assets else emptyList())
+        val a = createOrResume(probe, assets)
         val retiring = a.getString("state") in setOf("RETIRING", "CANCELLED")
         if (retiring) {
             val oldBindings = a.getJSONArray("bindings")
@@ -103,10 +143,16 @@ internal class B2NoteAssetSync(private val store: B2Persistence, private val dir
             if (!retiring) a.put("bindings", JSONArray(bindings))
             store.exclusive { authorize(); store.put(account, "attempt", key, a) }
             client.confirm(bindings) { auth ->
-                val business = B2NoteAssetBusiness(store, account, assetDirectory, authorize)
                 val receiver = B2Receiver(store, files, auth, business, progress = progress)
                 session.install(receiver) { request ->
-                    client.handleRequest(request, receiver).also { answer ->
+                    val apply = request.getString("phase") == "apply"
+                    if (apply) business.applyWork = { session.workProgress(request.getString("jobId")) }
+                    val answer = try {
+                        client.handleRequest(request, receiver)
+                    } finally {
+                        if (apply) business.applyWork = {}
+                    }
+                    answer.also {
                         if (request.getString("phase") == "complete" && answer.getBoolean("success")) { progress("complete:watchToPhone"); reverseDone.complete(Unit) }
                         if (request.getString("phase") == "begin" && answer.getJSONObject("result").getString("state") == "COMPLETE") reverseDone.complete(Unit)
                     }
@@ -131,7 +177,27 @@ internal class B2NoteAssetSync(private val store: B2Persistence, private val dir
             select<Unit> { work.onAwait { }; terminated.onAwait { throw it } }
             terminated.cancel()
             session.flush()
-            store.exclusive { authorize(); a.put("state", "COMPLETE"); store.put(account, "attempt", key, a) }
+            val snapshot = a.getJSONObject("phoneSnapshot")
+            val sent = snapshots.descriptors(account, snapshot)
+            val stats = store.exclusive {
+                authorize()
+                val reverse = bindings.find { it.getString("direction") == "watchToPhone" }?.getString("jobId")
+                val received = if (reverse == null || !route.hasBinaryLibrary) emptyList() else
+                    store.listForJob(account, "object", reverse)
+                a.put("state", "COMPLETE")
+                store.put(account, "attempt", key, a)
+                fun article(kind: String) = kind == B2_ARTICLE_BODY || kind == B2_ARTICLE_METADATA
+                fun incoming(test: (String) -> Boolean) = received.filter { test(it.getJSONObject("descriptor").getString("kind")) }
+                val articles = incoming(::article)
+                val sources = incoming { it == B2_RSS_SOURCE }
+                fun merged(rows: List<JSONObject>) = rows.count { it.getJSONObject("receipt").getString("outcome") == "merged" }
+                LibrarySyncStats(sent.count { article(it.getString("kind")) }, articles.size, merged(articles),
+                    sent.count { it.getString("kind") == B2_RSS_SOURCE }, sources.size, merged(sources))
+            }
+            if (route.hasBinaryLibrary) for (descriptor in sent) {
+                files.frozen(account, snapshot.getString("snapshotId"), descriptor.getString("objectId")).delete()
+            }
+            stats
         } catch (e: Throwable) {
             val authorized = runCatching(authorize).isSuccess
             if (e is CancellationException && authorized) session.cancelUser() else session.close()

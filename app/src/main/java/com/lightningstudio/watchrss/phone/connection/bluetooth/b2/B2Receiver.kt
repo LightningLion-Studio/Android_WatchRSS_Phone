@@ -12,6 +12,7 @@ class B2RejectedData(val request: JSONObject, val hash: String, val rejection: S
 interface B2BusinessPort {
     val kinds: Set<String>
     suspend fun apply(descriptor: JSONObject, metadata: JSONObject, staged: File): String
+    fun applicationScratchBytes(objects: List<JSONObject>): Long = 0L
     fun canCommitRange(description: JSONObject): Boolean = false
     suspend fun complete(description: JSONObject, completion: JSONObject) {}
 }
@@ -64,7 +65,7 @@ class B2Receiver(
     private val sourcePeer get() = if (receiveDirection == "watchToPhone") auth.watchDeviceId else auth.phoneDeviceId
     private fun key(vararg p: String) = B2Digests.d("wrss.library-binary.v2/record-key", p.toList())
     private fun objectKey(job: String, oid: String) = key(job, oid)
-    private suspend fun objects(job: String) = store.list(scope, "object").map { it.second }.filter { it.s("jobId") == job }.sortedBy { it.o("descriptor").s("objectId") }
+    private suspend fun objects(job: String) = store.listForJob(scope, "object", job).sortedBy { it.o("descriptor").s("objectId") }
     private suspend fun objectRow(job: String, oid: String) = store.get(scope, "object", objectKey(job, oid)) ?: fail()
     private suspend fun job(id: String) = store.get(scope, "job", id) ?: fail("NOT_FOUND")
     private fun terminal(j: JSONObject) = j.s("state") in listOf("COMPLETE", "CANCELLED")
@@ -275,7 +276,8 @@ class B2Receiver(
         val full = index + 1 == counts.size
         if (full) { if (all.size.toLong() != ds.n("objectCount") || B2Digests.objects(all.map { it.s("objectId") }) != ds.s("objectsRoot")) fail("PLAN_CONFLICT"); validateGraph(all)
             // Whole-plan physical peak admission precedes READY and all DATA/apply.
-            val incoming = all.sumOf { it.n("size") * 3 + B2Json.utf8(it.toString()).size + 1024 }
+            val incoming = all.sumOf { it.n("size") * 3 + B2Json.utf8(it.toString()).size + 1024 } +
+                business.applicationScratchBytes(all)
             val other = store.list(scope, "job").filter { it.first != j.s("jobId") && !terminal(it.second) }.sumOf { it.second.optLong("stagingReservation", 0) }
             if (incoming + other + files.dataBytes() + lim(j).n("maxJournalBytes") > lim(j).n("maxStagingBytes") || incoming + other + lim(j).n("maxJournalBytes") + 1048576 > files.availableBytes()) fail("STORAGE_PRESSURE")
             j.put("stagingReservation", incoming)

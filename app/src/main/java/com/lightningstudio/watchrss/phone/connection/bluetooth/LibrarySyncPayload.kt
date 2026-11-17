@@ -1337,6 +1337,22 @@ object LibrarySyncPayload {
         return this
     }
 
+    internal fun binaryArticleMetadata(article: PhoneArticleEntity, body: ArticleBodyMetadata?,
+        metadataOnly: Boolean, aliases: Map<String, List<String>>): JSONObject =
+        article.toJson(includeBody = false).withAliases(aliases).put("body", JSONObject()
+            .put("bodyHash", body?.bodyHash.orEmpty())
+            .put("bodyByteCount", body?.bodyByteCount ?: 0)
+            .put("chunkSize", body?.chunkSize ?: 0)
+            .put("chunkHashes", JSONArray(body?.chunkHashes.orEmpty()))
+            .put("metadataOnly", metadataOnly))
+
+    internal fun binaryRssMetadata(source: PhoneRssSourceEntity): JSONObject = source.toJson().apply {
+        remove("useOriginalContent")
+        remove("continuePlaybackInBackground")
+        put("siteUrl", source.siteUrl ?: JSONObject.NULL)
+        put("imageUrl", source.imageUrl ?: JSONObject.NULL)
+    }
+
     private fun PhoneArticleEntity.toChunkedJson(
         payload: ChunkedArticlePayload,
         chunks: List<ArticleBodyChunk>

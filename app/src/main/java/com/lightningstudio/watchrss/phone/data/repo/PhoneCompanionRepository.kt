@@ -3,6 +3,9 @@ package com.lightningstudio.watchrss.phone.data.repo
 import com.lightningstudio.watchrss.phone.data.book.BodyAuthority
 import com.lightningstudio.watchrss.phone.data.local.isArticleContentMarker
 import com.lightningstudio.watchrss.phone.cloud.compactCloudExcerpt
+import com.lightningstudio.watchrss.phone.connection.bluetooth.B2FileHashes
+import com.lightningstudio.watchrss.phone.connection.bluetooth.binaryFileHashes
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleSyncBody
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyMetadata
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ArticleBodyRequest
@@ -35,6 +38,7 @@ import com.lightningstudio.watchrss.phone.data.importer.RssSourceImporter
 import com.lightningstudio.watchrss.phone.data.importer.WebArticleImporter
 import com.lightningstudio.watchrss.phone.data.local.ARTICLE_TEXT_CHUNK_BYTES
 import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
+import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.model.canRecoverSavedRssBodyFrom
@@ -154,6 +158,10 @@ private object NoopAppMetaDao : AppMetaDao {
     override suspend fun getAll(): List<AppMetaEntity> = emptyList()
     override suspend fun deleteAll() = Unit
 }
+
+private const val LOCAL_BODY = "local-body"
+private const val REMOTE_BODY = "remote-body"
+private class MissingBinaryArticleFile : Exception()
 
 private const val CONTENT_CHANNEL_SORT_STEP = 10_000L
 private const val KEY_FIRST_USE_AT = "first_use_at"
@@ -1041,6 +1049,193 @@ class PhoneCompanionRepository(
             if(local==null || local.sourceDeviceId!=peer || appMetaDao.getString(echoPrefix(peer)+entry.articleId)!=articleSignature(local))retained+=entry
         }
         return retained
+    }
+
+    internal fun binaryArticleStorageReady(): Boolean =
+        articleContentStore is FileArticleContentStore
+
+    internal suspend fun binaryArticleIds(after: String?) = articleDao.binaryArticleIds(after)
+
+    internal suspend fun freezeBinaryArticle(id: String, scratch: java.io.File, encoded: java.io.File,
+        includeBody: Boolean, work: () -> Unit): Pair<PhoneArticleEntity, B2FileHashes?>? {
+        val row = articleDao.getBodyMetadataById(id)?.takeIf { it.shouldSyncThroughLibrary() } ?: return null
+        articleProvenance?.requireExportable(id)
+        if (!includeBody || row.deleted) return row to null
+        val content = articleContentStore as? FileArticleContentStore
+        val htmlScratch = java.io.File(scratch, "source-html")
+        val textScratch = java.io.File(scratch, "source-text")
+        val (html, text) = try {
+            val html = copyBinaryArticleField(htmlScratch, content, work) { start, count ->
+                articleDao.getContentHtmlChunk(id, start, count)
+            }
+            val text = checkNotNull(copyBinaryArticleField(textScratch, content, work) { start, count ->
+                articleDao.getContentTextChunk(id, start, count)
+            })
+            html to text
+        } catch (_: MissingBinaryArticleFile) {
+            return row to null
+        }
+        val availability = row.copy(contentHtml = html?.takeIf { it.length() > 0L }?.name,
+            contentText = if (text.length() == 0L) "" else text.name)
+        if (availability.isMissingSavedRssBody() || availability.contentText.isEmpty() && availability.contentHtml == null) {
+            return row to null
+        }
+
+        ArticleSyncBody.writeFileBody(html, text, encoded.outputStream(), work)
+        val hashes = binaryFileHashes(encoded, work)
+        if (row.syncBodyHash.matches(Regex("[0-9a-f]{64}")) && hashes.sha256 != row.syncBodyHash) {
+            // The legacy encoder has emitted three gzip OS markers. Restore the
+            // original marker when the complete digest proves the same bytes.
+            java.io.RandomAccessFile(encoded, "rw").use { file ->
+                for (os in listOf(0, 3)) {
+                    file.seek(9)
+                    file.write(os)
+                    val compatible = binaryFileHashes(encoded, work)
+                    if (compatible.sha256 == row.syncBodyHash) return row to compatible
+                }
+                file.seek(9)
+                file.write(255)
+            }
+        }
+        return row to hashes
+    }
+
+    private suspend fun copyBinaryArticleField(target: java.io.File,
+        store: FileArticleContentStore?, work: () -> Unit,
+        read: suspend (Int, Int) -> ByteArray?): java.io.File? {
+        val blockBytes = 65536
+        var bytes = read(1, blockBytes) ?: return null
+        if (bytes.size < 256) {
+            val value = bytes.toString(Charsets.UTF_8)
+            if (isArticleContentMarker(value)) return store?.openTextFile(value)
+                ?: throw MissingBinaryArticleFile()
+        }
+        target.outputStream().use { output ->
+            var offset = 1
+            while (true) {
+                output.write(bytes)
+                offset += bytes.size
+                work()
+                if (offset > 32 * 1024 * 1024 + 1) {
+                    throw B2Exception("LIMIT_EXCEEDED")
+                }
+                if (bytes.size < blockBytes) break
+                bytes = checkNotNull(read(offset, blockBytes))
+            }
+        }
+        return target
+    }
+
+    internal suspend fun acceptBinaryArticleAlias(remote: PhoneArticleEntity, legacyIds: List<String>) {
+        if (remote.rssSourceUrl.isNullOrBlank() || ImportedContentIds.isImportedContentUrl(remote.rssSourceUrl)) return
+        val legacy = WebArticleImporter.stableArticleId(remote.url)
+        if (legacy == remote.articleId || legacy !in legacyIds) return
+        val old = articleDao.getBodyMetadataById(legacy) ?: return
+        if (old.url != remote.url || old.rssSourceUrl != remote.rssSourceUrl) return
+        articleProvenance?.requireExportable(legacy)
+        articleProvenance?.requireExportable(remote.articleId)
+        if (articleDao.getBodyMetadataById(remote.articleId) != null) throw B2Exception("BUSINESS_REJECTED")
+        articleDao.rekeyBinaryArticle(legacy, remote.articleId)
+        appMetaDao.set(AppMetaEntity(rssIdentityAliasPrefix() + legacy, remote.articleId))
+        appMetaDao.getString(conflictDecisionKey(legacy))?.let { decision ->
+            appMetaDao.set(AppMetaEntity(conflictDecisionKey(remote.articleId), decision))
+        }
+        recordArticleChange(remote.articleId, "bluetoothIdentityMigration", old.latestOperationAt())
+        if (old.sourceDeviceId == deviceId && syncChangeLogDao.lastConflictResolution(legacy) == old.latestOperationAt()) {
+            recordArticleChange(remote.articleId, "conflictResolution", old.latestOperationAt())
+        }
+    }
+
+    /** B2Receiver owns the FULL writer transaction for these rows and their APPLIED receipt. */
+    internal suspend fun applyBinaryArticle(payload: ChunkedArticlePayload, html: java.io.File?, text: java.io.File?): String {
+        val candidate = payload.article
+        val remote = books?.canonicalArticle(candidate) ?: candidate
+        articleProvenance?.requireExportable(remote.articleId)
+        // Query bounded prefixes only. The body winner is materialized as a reference below.
+        val local = articleDao.getBodyMetadataById(remote.articleId)
+        val store = articleContentStore as? FileArticleContentStore
+            ?: throw B2Exception("LOCAL_IO")
+        val htmlPrefix = local?.let { articleDao.getContentHtmlChunk(it.articleId, 1, 512)?.toString(Charsets.UTF_8) }
+        val textPrefix = local?.let { articleDao.getContentTextChunk(it.articleId, 1, 512)?.toString(Charsets.UTF_8) }.orEmpty()
+        fun present(prefix: String?) = !prefix.isNullOrEmpty() &&
+            (!isArticleContentMarker(prefix) || store.openTextFile(prefix)?.length()?.let { it > 0L } == true)
+        val localBody = present(htmlPrefix) || present(textPrefix)
+        val hasRemoteBody = text != null && (text.length() > 0L || (html?.length() ?: 0L) > 0L)
+        val localForMerge = local?.copy(contentHtml = LOCAL_BODY.takeIf { present(htmlPrefix) },
+            contentText = LOCAL_BODY.takeIf { present(textPrefix) }.orEmpty())
+        val remoteForMerge = remote.copy(contentHtml = REMOTE_BODY.takeIf { (html?.length() ?: 0L) > 0L },
+            contentText = REMOTE_BODY.takeIf { (text?.length() ?: 0L) > 0L }.orEmpty(),
+            syncBodyHash = payload.bodyHash.takeIf { hasRemoteBody }.orEmpty(),
+            syncBodyByteCount = if (hasRemoteBody) payload.bodyByteCount else 0L,
+            syncChunkSize = if (hasRemoteBody) payload.chunkSize else 0,
+            syncChunkHashesJson = if (hasRemoteBody) JSONArray(payload.chunkHashes).toString() else "")
+        val merged = localForMerge?.let { mergeArticleByLatest(it, remoteForMerge) } ?: remoteForMerge
+        val next = books?.constrainDeletion(merged) ?: merged
+        val retainLocalBody = localBody && (payload.metadataOnly || remote.deleted ||
+            next.contentText == LOCAL_BODY || next.contentHtml == LOCAL_BODY)
+        val useRemoteBody = !retainLocalBody && hasRemoteBody &&
+            (next.contentHtml == REMOTE_BODY || next.contentText == REMOTE_BODY)
+        val body = when {
+            retainLocalBody -> requireNotNull(local)
+            useRemoteBody -> remoteForMerge
+            else -> next.copy(syncBodyHash = "", syncBodyByteCount = 0L, syncChunkSize = 0, syncChunkHashesJson = "")
+        }
+        val result = next.copy(
+            contentHash = if (retainLocalBody) body.contentHash else next.contentHash,
+            contentHtml = null, contentText = "",
+            syncBodyHash = body.syncBodyHash, syncBodyByteCount = body.syncBodyByteCount,
+            syncChunkSize = body.syncChunkSize, syncChunkHashesJson = body.syncChunkHashesJson)
+        val committed = result.copy(syncMetadataHash = if (result.syncBodyHash.isBlank()) "" else ArticleSyncBody.metadataHashFor(result))
+        if (local != null && committed == local && !useRemoteBody) {
+            val remoteState = remoteForMerge.copy(contentHtml = null, contentText = "",
+                syncBodyHash = local.syncBodyHash, syncBodyByteCount = local.syncBodyByteCount,
+                syncChunkSize = local.syncChunkSize, syncChunkHashesJson = local.syncChunkHashesJson,
+                syncMetadataHash = local.syncMetadataHash)
+            val sameBody = !hasRemoteBody || payload.bodyHash == local.syncBodyHash
+            return if (sameBody && remoteState == local) "alreadyPresent" else "retainedLocal"
+        }
+        if (retainLocalBody) {
+            // Preserve even legacy inline bodies without decoding them through the JVM.
+            articleDao.updateBinaryArticleKeepingBody(committed)
+        } else {
+            val htmlRef = html?.takeIf { useRemoteBody }?.let { store.publishTextFile("${remote.articleId}-html", it) }
+            val textRef = text?.takeIf { useRemoteBody && it.length() > 0L }?.let { store.publishTextFile("${remote.articleId}-text", it) }.orEmpty()
+            articleDao.upsert(committed.copy(contentHtml = htmlRef, contentText = textRef))
+        }
+        recordArticleChange(committed.articleId, "merge", committed.latestOperationAt(), committed.sourceDeviceId)
+        val localVersionRetained = local != null && (
+            local.updatedAt > remote.updatedAt || local.deletedAt > remote.deletedAt ||
+                local.independentChangedAt > remote.independentChangedAt ||
+                local.favoriteChangedAt > remote.favoriteChangedAt || local.watchLaterChangedAt > remote.watchLaterChangedAt ||
+                local.readingPositionChangedAt > remote.readingPositionChangedAt
+            )
+        return if (localVersionRetained || hasRemoteBody && !useRemoteBody && payload.bodyHash != local?.syncBodyHash)
+            "retainedLocal" else "merged"
+    }
+
+    internal suspend fun applyBinaryRssSource(source: PhoneRssSourceEntity): String {
+        val local = rssSourceDao.getByUrl(source.url)
+        val compatible = local?.let {
+            source.copy(useOriginalContent = it.useOriginalContent, continuePlaybackInBackground = it.continuePlaybackInBackground)
+        } ?: source
+        if (compatible == local) return "alreadyPresent"
+        if (local != null && !compatible.isNewerThan(local)) return "retainedLocal"
+        if (compatible.deleted && ImportedContentIds.isImportedContentUrl(compatible.url)) {
+            var after: String? = null
+            var offset = 0
+            while (true) {
+                val page = articleDao.binarySourceArticlePage(compatible.url, after)
+                if (page.isEmpty()) break
+                for (article in page) {
+                    val index = offset++
+                    if (articleProvenance?.protected(article.articleId) == true) continue
+                    articleDao.updateBinaryArticleKeepingBody(article.applyRemoteSourceDelete(compatible, index))
+                }
+                after = page.last().articleId
+            }
+        }
+        rssSourceDao.upsert(compatible)
+        return "merged"
     }
 
     suspend fun getArticlesForSync(): List<PhoneArticleEntity> = withContext(Dispatchers.IO) {

@@ -4,6 +4,8 @@ import android.content.Context
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
+import java.nio.channels.FileChannel
+import java.nio.file.StandardOpenOption
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -74,6 +76,34 @@ class FileArticleContentStore internal constructor(
         } finally {
             runCatching { temporary.delete() }
         }
+        return marker
+    }
+
+    internal fun openTextFile(marker: String): File? = fileFor(marker)?.takeIf { it.isFile }
+
+    /** Publish the decoded temporary file before the transaction writes its marker. */
+    internal fun publishTextFile(articleId: String, source: File): String {
+        check(directory.isDirectory || directory.mkdirs()) { "无法创建正文存储目录" }
+        val digest = MessageDigest.getInstance(SHA_256)
+        source.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        val hash = digest.digest().toHex()
+        val marker = buildV2Marker(articleId, hash)
+        val target = checkNotNull(fileFor(marker))
+        if (!target.matchesContent(source.length(), hash)) {
+            FileChannel.open(source.toPath(), StandardOpenOption.WRITE).use { it.force(true) }
+            CloudExportFileWitness.changing(target) {
+                Files.move(source.toPath(), target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            }
+        }
+        FileChannel.open(directory.toPath(), StandardOpenOption.READ).use { it.force(true) }
         return marker
     }
 

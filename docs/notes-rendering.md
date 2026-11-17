@@ -45,7 +45,7 @@ the unchanged 2,350,000-byte main source budget. Do not edit generated modules.
 Local identifiers are compacted; object property names and exports are retained.
 
 The HTML writer emits only approved complete tags and attributes. It escapes
-all unmatched '<' text, drops event attributes and active URL schemes, checks
+parsed text, drops event attributes and active URL schemes, checks
 rewritten image URLs, removes active elements with their content and rechecks
 the final concatenated projection. Incomplete tags cannot capture later code
 paragraphs. Wire originals and title-only saves retain their existing behavior.
@@ -83,3 +83,66 @@ Regression cases are tests/notes-render-r4.test.ts on watch and
 tests/notes-render-r4.test.mjs on mini. The isolated watch reader suite also
 checks literal HTML anchors after Unicode fence info. These are rendering
 projection checks; stored markdown and the title selection policy do not change.
+
+## r5 structural rendering boundaries and generated tests
+
+The watch and mini use byte-identical code.ts lexical state machines. Fences,
+container prefixes (nested lists/quotes), indentation, closing markers and
+container exits are classified before image or table interpretation. Table
+lookahead uses these same classifications and stops before every code boundary.
+The reader removes container prefixes only from displayed code, retaining source
+offsets into original markup. The scanner is not a full CommonMark renderer.
+
+Mini sanitization now parses an HTML div fragment with pinned parse5 8.1.1,
+then iteratively serializes the existing tag/attribute allowlist. The parser
+owns template scope, malformed/raw-text end tags and quoted attributes. The
+writer never runs HTML or scripts; it drops active subtrees and event/unsafe
+URL/CSS attributes. Parser/decoder licenses are in notes-html-parser-LICENSE.txt
+and included in the generated runtime bundle.
+
+The note format has no interactive select control. HTML-namespace select tokens
+are normalized to neutral div containers before tree construction. Foreign
+SVG/MathML content keeps the parser's namespace rules. This policy avoids parser
+generation differences for select children while preserving adjacent text. It
+does not extend the allowed attributes or activate forms.
+
+The old r4 control that called a head token in body an active head subtree was
+incorrect: a div fragment ignores that head token and keeps the body text. Only
+that head entry is removed from the active-subtree control; r5 adds the explicit
+KEEPBODYTAIL control. Actual script/style/iframe/object/template removal and all
+independent review defect assertions remain intact.
+
+Build: npm ci, then node scripts/build-notes-render.mjs; --check verifies bytes.
+NOTES_PARSE5_ROOT may point to a pinned local installation for offline builds.
+The build checks the exact version. Existing crypto/URL bundle sources are kept
+under dev/notes-render/vendor-source and only compacted, without changing their
+implementation or dependency versions, to keep the original main-package budget.
+After an intentional vendor upgrade, refresh those readable snapshots from the
+original build outputs before regenerating the notes modules.
+
+Generated tests are tests/notes-render-generated.test.{ts,mjs}. Both repositories
+keep identical tests/helpers/notes-render-corpus.mjs and notes-cmark-oracle.py.
+The host prerequisite is libcmark (this run: 0.31.2) and Python 3. Each Markdown
+input is parsed independently through the C API, including its own EOF. This
+avoids a marked 18 closing-Tab discrepancy and cross-document parser leakage.
+
+The grammar combines fences, bogus/Unicode closing suffixes, indented code,
+tables, nested lists/quotes and raw/active HTML. Four xorshift32 seeds are fixed:
+4e4f5445, 524e5235, 20261117, c0decafe. NOTES_FUZZ_CASES sets cases per seed (128
+by default, 5000 for the large run). Each case has both HTML and Markdown.
+Long runs use 256-case tests without increasing test timeouts.
+
+Content invariants compare text projections with active subtrees excluded, not
+CSS layout or device pixels. Mini retains every non-whitespace reference text
+character in order. Watch retains generated visible body atoms in order, and
+both clients retain every nonempty reference code line literally. Markdown
+structure delimiters are not body atoms. A separate browser differential test
+compares the original source in Chromium, not the product parser's own tree.
+It verifies text retention and allowed nodes/attributes through three fragment
+reparses, while dispatching error/load/click/focus/animationstart events. The
+browser reads only temporary local files, blocks external resources/connections,
+and allows inline script/events so CSP does not conceal an unsafe output.
+
+Phone title logic and shared vectors do not change in r5. Phone main/hotfix
+commits document the shared rendering contract; host note/editor/markdown tests
+remain the compatibility gate. Reports and generated evidence are never committed.

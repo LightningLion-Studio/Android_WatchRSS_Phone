@@ -16,6 +16,7 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.ChunkedArticlePay
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictPlan
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncDeleteConflict
+import com.lightningstudio.watchrss.phone.data.db.B2ArticleDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleDao
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceDao
@@ -1054,8 +1055,6 @@ class PhoneCompanionRepository(
     internal fun binaryArticleStorageReady(): Boolean =
         articleContentStore is FileArticleContentStore
 
-    internal suspend fun binaryArticleIds(after: String?) = articleDao.binaryArticleIds(after)
-
     internal suspend fun freezeBinaryArticle(id: String, scratch: java.io.File, encoded: java.io.File,
         includeBody: Boolean, work: () -> Unit): Pair<PhoneArticleEntity, B2FileHashes?>? {
         val row = articleDao.getBodyMetadataById(id)?.takeIf { it.shouldSyncThroughLibrary() } ?: return null
@@ -1126,7 +1125,7 @@ class PhoneCompanionRepository(
         return target
     }
 
-    internal suspend fun acceptBinaryArticleAlias(remote: PhoneArticleEntity, legacyIds: List<String>) {
+    internal suspend fun acceptBinaryArticleAlias(binary: B2ArticleDao, remote: PhoneArticleEntity, legacyIds: List<String>) {
         if (remote.rssSourceUrl.isNullOrBlank() || ImportedContentIds.isImportedContentUrl(remote.rssSourceUrl)) return
         val legacy = WebArticleImporter.stableArticleId(remote.url)
         if (legacy == remote.articleId || legacy !in legacyIds) return
@@ -1135,7 +1134,7 @@ class PhoneCompanionRepository(
         articleProvenance?.requireExportable(legacy)
         articleProvenance?.requireExportable(remote.articleId)
         if (articleDao.getBodyMetadataById(remote.articleId) != null) throw B2Exception("BUSINESS_REJECTED")
-        articleDao.rekeyBinaryArticle(legacy, remote.articleId)
+        binary.rekeyBinaryArticle(legacy, remote.articleId)
         appMetaDao.set(AppMetaEntity(rssIdentityAliasPrefix() + legacy, remote.articleId))
         appMetaDao.getString(conflictDecisionKey(legacy))?.let { decision ->
             appMetaDao.set(AppMetaEntity(conflictDecisionKey(remote.articleId), decision))
@@ -1147,7 +1146,7 @@ class PhoneCompanionRepository(
     }
 
     /** B2Receiver owns the FULL writer transaction for these rows and their APPLIED receipt. */
-    internal suspend fun applyBinaryArticle(payload: ChunkedArticlePayload, html: java.io.File?, text: java.io.File?): String {
+    internal suspend fun applyBinaryArticle(binary: B2ArticleDao, payload: ChunkedArticlePayload, html: java.io.File?, text: java.io.File?): String {
         val candidate = payload.article
         val remote = books?.canonicalArticle(candidate) ?: candidate
         articleProvenance?.requireExportable(remote.articleId)
@@ -1196,7 +1195,7 @@ class PhoneCompanionRepository(
         }
         if (retainLocalBody) {
             // Preserve even legacy inline bodies without decoding them through the JVM.
-            articleDao.updateBinaryArticleKeepingBody(committed)
+            binary.updateBinaryArticleKeepingBody(committed)
         } else {
             val htmlRef = html?.takeIf { useRemoteBody }?.let { store.publishTextFile("${remote.articleId}-html", it) }
             val textRef = text?.takeIf { useRemoteBody && it.length() > 0L }?.let { store.publishTextFile("${remote.articleId}-text", it) }.orEmpty()
@@ -1213,7 +1212,7 @@ class PhoneCompanionRepository(
             "retainedLocal" else "merged"
     }
 
-    internal suspend fun applyBinaryRssSource(source: PhoneRssSourceEntity): String {
+    internal suspend fun applyBinaryRssSource(binary: B2ArticleDao, source: PhoneRssSourceEntity): String {
         val local = rssSourceDao.getByUrl(source.url)
         val compatible = local?.let {
             source.copy(useOriginalContent = it.useOriginalContent, continuePlaybackInBackground = it.continuePlaybackInBackground)
@@ -1224,12 +1223,12 @@ class PhoneCompanionRepository(
             var after: String? = null
             var offset = 0
             while (true) {
-                val page = articleDao.binarySourceArticlePage(compatible.url, after)
+                val page = binary.binarySourceArticlePage(compatible.url, after)
                 if (page.isEmpty()) break
                 for (article in page) {
                     val index = offset++
                     if (articleProvenance?.protected(article.articleId) == true) continue
-                    articleDao.updateBinaryArticleKeepingBody(article.applyRemoteSourceDelete(compatible, index))
+                    binary.updateBinaryArticleKeepingBody(article.applyRemoteSourceDelete(compatible, index))
                 }
                 after = page.last().articleId
             }

@@ -19,6 +19,7 @@ internal class B2InheritedKinds(
     private val authorize: () -> Unit,
     private val canonicalIds: Boolean = false
 ) : B2BusinessPort {
+    private val binary = db.b2ArticleDao()
     @Volatile var applyWork: () -> Unit = {}
 
     suspend fun freeze(sendKinds: Set<String>, scratch: File, work: () -> Unit,
@@ -38,7 +39,7 @@ internal class B2InheritedKinds(
         if (B2_ARTICLE_METADATA !in sendKinds) return
         var after: String? = null
         while (true) {
-            val ids = repository.binaryArticleIds(after)
+            val ids = binary.binaryArticleIds(after)
             if (ids.isEmpty()) return
             for (id in ids) {
                 authorize()
@@ -77,7 +78,7 @@ internal class B2InheritedKinds(
                 val source = LibrarySyncPayload.parseRssSources(JSONArray().put(metadata)).singleOrNull()
                     ?: throw B2Exception("BUSINESS_REJECTED")
                 if (source.url != descriptor.getString("businessId")) throw B2Exception("BUSINESS_REJECTED")
-                repository.applyBinaryRssSource(source)
+                repository.applyBinaryRssSource(binary, source)
             }
             B2_ARTICLE_BODY, B2_ARTICLE_METADATA -> applyArticle(descriptor, metadata, staged)
             else -> throw B2Exception("BUSINESS_REJECTED")
@@ -105,10 +106,10 @@ internal class B2InheritedKinds(
         val aliases = metadata.optJSONArray("legacyArticleIds")
         suspend fun apply(html: File?, text: File?): String {
             if (canonicalIds && aliases != null) {
-                repository.acceptBinaryArticleAlias(payload.article, (0 until aliases.length()).map(aliases::getString))
+                repository.acceptBinaryArticleAlias(binary, payload.article, (0 until aliases.length()).map(aliases::getString))
             }
             val projected = identity.incoming(payload)
-            return repository.applyBinaryArticle(projected, html, text)
+            return repository.applyBinaryArticle(binary, projected, html, text)
         }
         if (payload.metadataOnly) return apply(null, null)
 

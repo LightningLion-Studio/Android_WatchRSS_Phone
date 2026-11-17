@@ -84,3 +84,5 @@ No debug-only registration or debuggable gate is used.
 A manifest-wide refusal emits one `book_batch_rejected` outcome for each submitted identity. This means the batch was refused, not that every member independently failed validation. A producer without a specific subreason records `unknown`. Body refusals preserve the peer's allowlisted reason and any available sanitized title. Local/remote success inventory duplicates for the same book are emitted once.
 
 Titles contain display text only. URL, control, formatting, and credential assignment patterns (`Cookie`, `Authorization`, token/key variants, `K_id`) are redacted before truncation. Tests use synthetic strings only.
+
+Mnemonic-labelled title tails (`mnemonic:` / `助记词：`, including ASCII and fullwidth colons) are redacted before the final title limit. Tests use synthetic placeholders only.

@@ -5,7 +5,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.selects.select
 import org.json.JSONObject
 import java.io.*
-import java.net.SocketTimeoutException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -84,7 +83,7 @@ class B2Session(private val input: InputStream, private val output: OutputStream
     suspend fun switch(capability: JSONObject, enabled: Boolean) {
         check(!started); checkOpen()
         val done = CompletableDeferred<Unit>()
-        val timer = scope.launch { delay(30000); val e = SocketTimeoutException("B2 switch deadline"); done.completeExceptionally(e); abort(e) }
+        val timer = scope.launch { delay(30000); val e = B2NetworkTimeout("B2 switch deadline"); done.completeExceptionally(e); abort(e) }
         scope.launch { try { B2Switch.perform(input, output, capability, enabled); done.complete(Unit) } catch (e: Throwable) { done.completeExceptionally(e); abort(e) } }
         try { done.await() } finally { timer.cancel() }
     }
@@ -194,12 +193,12 @@ class B2Session(private val input: InputStream, private val output: OutputStream
                 while (isActive) {
                     delay(100)
                     val now = clock()
-                    if (readingSince != 0L && (now - readingSince >= 60000 || now - lastRead >= 30000)) throw SocketTimeoutException("B2 partial frame deadline")
-                    if (writingSince != 0L && (now - writingSince >= 60000 || now - lastWrite >= 30000)) throw SocketTimeoutException("B2 write deadline")
+                    if (readingSince != 0L && (now - readingSince >= 60000 || now - lastRead >= 30000)) throw B2NetworkTimeout("B2 partial frame deadline")
+                    if (writingSince != 0L && (now - writingSince >= 60000 || now - lastWrite >= 30000)) throw B2NetworkTimeout("B2 write deadline")
                     pending.values.forEach { w ->
                         val r = w.request; val phase = r.s("phase")
                         val heartbeat = phase == "missing" && r.o("payload").n("limit") == 0L
-                        if ((heartbeat || phase in listOf("prepare", "begin", "missing", "complete", "cancel")) && w.start?.let { now - it >= 30000 } == true) throw SocketTimeoutException("B2 response deadline")
+                        if ((heartbeat || phase in listOf("prepare", "begin", "missing", "complete", "cancel")) && w.start?.let { now - it >= 30000 } == true) throw B2NetworkTimeout("B2 response deadline")
                     }
                     localWork.values.forEach { it.check() }
                     for ((id, g) in grants) {

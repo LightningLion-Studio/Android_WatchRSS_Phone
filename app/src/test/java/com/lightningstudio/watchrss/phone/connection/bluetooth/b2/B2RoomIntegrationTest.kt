@@ -4,7 +4,11 @@ import android.content.Context
 import androidx.room.Room
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2RoomStore
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2NoteAssetBusiness
-import com.lightningstudio.watchrss.phone.connection.bluetooth.BluetoothSyncRecovery
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryNoProgressLimit
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryRecoveryContext
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibrarySyncMode
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryTransferRecovery
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryTransportFailure
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -16,7 +20,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.io.File
-import java.io.IOException
+import java.io.EOFException
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], manifest = Config.NONE, application = android.app.Application::class)
@@ -95,22 +99,56 @@ class B2RoomIntegrationTest {
         Unit
     }
     @Test fun commonRecoverySurvivesMoreThanThreeProgressingReconnects() = runBlocking {
-        val policy = B2Recovery(); var now = 0L; var calls = 0; var connects = 0
-        policy.connected("initial", false)
-        val recovery = BluetoothSyncRecovery({}, { now += 20000; policy.connected("r${++connects}", true) }, { _, _, _ -> })
-        recovery.b2Policy = policy; recovery.monotonic = { now }
-        val answer = recovery.run {
-            calls++; policy.confirmed("v1-or-b2-semantic-content:$calls")
-            if (calls <= 5) throw IOException("EOF")
+        var now = 0L
+        var generation = 1L
+        var binaryOpens = 0
+        var calls = 0
+        val policy = LibraryTransferRecovery { now }
+        policy.observe(generation)
+        val recovery = LibraryRecoveryContext(policy, LibrarySyncMode.MERGE, { true },
+            { error("must reopen the binary route") }, {}, {}, { _, _ -> }, {})
+        recovery.stageComplete("notes")
+        val answer = recovery.handoff("noteAssetsB2", openReady = {
+            binaryOpens++
+            policy.observe(++generation)
+        }, connected = { true }) {
+            calls++
+            recovery.confirmedProgress("b2:noteAsset", "image|version|$calls")
+            if (calls <= 5) {
+                now += 20_000L
+                throw LibraryTransportFailure(generation, EOFException())
+            }
             "COMPLETE"
         }
-        assertEquals("COMPLETE", answer); assertEquals(5, connects)
+        assertEquals("COMPLETE", answer)
+        assertEquals(6, binaryOpens)
     }
-    @Test fun plannedHandoffKeepsTheNoProgressIntervals() {
-        val policy = B2Recovery()
-        repeat(2) { policy.connected("r$it", true); policy.transportFailure(it * 20000L) }
-        policy.connected("r3", true)
-        policy.handoffReady("planned-B2-connection")
-        rejected { policy.transportFailure(60000) }
+
+    @Test fun plannedHandoffKeepsTheNoProgressIntervals() = runBlocking {
+        var now = 0L
+        val policy = LibraryTransferRecovery { now }
+        for (generation in 1L..2L) {
+            policy.observe(generation)
+            policy.ready(reconnected = true)
+            now += 20_000L
+            policy.disconnected(generation)
+        }
+        policy.observe(3)
+        policy.ready(reconnected = true)
+        val recovery = LibraryRecoveryContext(policy, LibrarySyncMode.MERGE, { true },
+            { error("must reopen the binary route") }, {}, {}, { _, _ -> }, {})
+        var binaryOpens = 0
+        val failure = runCatching {
+            recovery.handoff("noteAssetsB2", openReady = {
+                binaryOpens++
+                check(binaryOpens == 1) { "must stop at the third empty Ready interval" }
+                policy.observe(4)
+            }, connected = { true }) {
+                now += 20_000L
+                throw LibraryTransportFailure(4, EOFException())
+            }
+        }.exceptionOrNull()
+        assertTrue(failure is LibraryNoProgressLimit)
+        assertEquals(1, binaryOpens)
     }
 }

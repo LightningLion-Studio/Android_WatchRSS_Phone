@@ -52,8 +52,8 @@ android {
         applicationId = "com.lightningstudio.watchrss.phone"
         minSdk = 30
         targetSdk = 36
-        versionCode = 108
-        versionName = "1.3.0-48"
+        versionCode = 115
+        versionName = "1.3.0-50"
         // B2 is local opt-in; every build type, including release, defaults off.
         buildConfigField("boolean", "B2_ENABLED", providers.gradleProperty("b2Enabled").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         // P1 is local-only and opt-in. This flag never enables cloud/apply/GC.

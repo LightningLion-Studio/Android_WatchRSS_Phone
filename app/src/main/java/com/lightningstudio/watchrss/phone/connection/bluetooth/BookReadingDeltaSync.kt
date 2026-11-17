@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import com.lightningstudio.watchrss.phone.data.book.*
+import com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import org.json.JSONArray
@@ -56,7 +57,7 @@ internal class BookReadingDeltaSync(
                     val page=exchange(request("readingDelta").put("windowId",window).put("batchIndex",batch++)
                         .put("after",after).put("entries",JSONArray(entries.map{it.json()})).put("done",at==outgoing.size))
                     validate(page,"readingDelta",window)
-                    BookSync.integer(page,"applied")
+                    val peerApplied=BookSync.integer(page,"applied")
                     val rows=page.getJSONArray("entries");require(rows.length()<=100)
                     val incoming=(0 until rows.length()).map { i ->
                         val entry=rows.getJSONObject(i);val seq=BookSync.integer(entry,"seq")
@@ -72,6 +73,12 @@ internal class BookReadingDeltaSync(
                     remoteFinished=!more
                     receivedCount+=incoming.size;require(receivedCount<=remote.count)
                     val changed=store.mergeReadingBatch(incoming);applied+=changed;onApplied(changed)
+                    currentCoroutineContext()[LibraryRecoveryContext]?.appliedProgress("bookReading",changed)
+                    if(peerApplied>0 && entries.isNotEmpty()) {
+                        val receipt=entries.map { BookSync.canonical(it.state) }.sorted().joinToString("\n")
+                        currentCoroutineContext()[LibraryRecoveryContext]?.confirmedProgress("sendBookReadingPage",
+                            "$peer|${CloudSnapshotCodec.sha256(receipt.toByteArray())}")
+                    }
                     after=next;sentCount+=entries.size
                 } while(at<outgoing.size || more)
             }
@@ -90,6 +97,7 @@ internal class BookReadingDeltaSync(
             if(result.response.getBoolean("committed")) {
                 currentCoroutineContext().ensureActive()
                 store.acknowledgeReading(peer,local,remote,merged.root)
+                currentCoroutineContext()[LibraryRecoveryContext]?.confirmedProgress("bookReadingCommit","$peer|${merged.root}")
                 trace("reading-committed:round=$round")
                 return applied
             }

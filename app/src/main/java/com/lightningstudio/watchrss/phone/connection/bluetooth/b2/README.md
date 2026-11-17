@@ -33,9 +33,10 @@ just because the codec knows its name.
 * `B2Files.onProgress` reports completed file/hash work units to the local
   watchdog. Heartbeat replies read a committed lightweight state projection,
   independently of business work, including PLANNING before peak admission.
-* `B2Recovery` belongs to the entire user operation. Share it across independent
-  v1 tasks, B2 connections and replanning. Planned handoffs preserve its counters
-  and semantic progress set. Only actual transport failures enter recovery.
+* The Android manager uses one `LibraryRecoveryContext` and
+  `LibraryTransferRecovery` for v1 tasks and B2 assets. Planned handoffs and
+  replans preserve the counters and semantic progress set. Only tagged transport
+  failures enter recovery. `B2Recovery` is the standalone host fixture policy.
 
 The Android ports live next to this directory: `B2RoomStore`,
 `B2NoteAssetBusiness`, and `B2NoteAssetSync`. The Room port creates private

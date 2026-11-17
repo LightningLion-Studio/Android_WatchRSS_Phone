@@ -76,7 +76,7 @@ object B2Routing {
     }
 }
 
-/** Logical counters survive planned route handoffs and replans. No total retry/time cap. */
+/** Standalone host fixture policy. The Android app uses its shared library recovery owner. */
 class B2Recovery {
     private var failures = 0
     private var emptyIntervals = 0
@@ -112,6 +112,9 @@ class B2Recovery {
     }
 }
 
+/** Distinguishes a wire deadline from an error in local file or database work. */
+internal class B2NetworkTimeout(message: String) : java.net.SocketTimeoutException(message)
+
 /** Deterministic liveness state shared by tests and the live session timer. */
 class B2Heartbeat(private val clock: () -> Long) {
     private var next = clock() + 10000
@@ -121,7 +124,7 @@ class B2Heartbeat(private val clock: () -> Long) {
     @Synchronized fun queue() { if (sent != null || queued) fail("BUSY"); queued = true }
     @Synchronized fun beginWrite() { if (sent != null) fail("BUSY"); queued = false; sent = clock() }
     @Synchronized fun reply() { if (sent == null) fail(); sent = null; queued = false; next = clock() + 10000 }
-    @Synchronized fun checkDeadline() { if (sent?.let { clock() - it >= 30000 } == true) throw java.net.SocketTimeoutException("B2 heartbeat deadline") }
+    @Synchronized fun checkDeadline() { if (sent?.let { clock() - it >= 30000 } == true) throw B2NetworkTimeout("B2 heartbeat deadline") }
 }
 
 class B2LocalWatchdog(private val clock: () -> Long) {

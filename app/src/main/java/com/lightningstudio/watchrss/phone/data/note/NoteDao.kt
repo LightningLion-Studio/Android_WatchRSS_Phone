@@ -4,10 +4,27 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.SkipQueryVerification
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface NoteDao {
+    // This local table is installed by NoteEditorPreferenceMigration after Room opens.
+    @SkipQueryVerification
+    @Query("SELECT sourceMode FROM note_editor_preferences WHERE noteId = :noteId AND installationId = :installationId")
+    suspend fun editorSourceMode(noteId: String, installationId: String): Boolean?
+
+    @SkipQueryVerification
+    @Query("INSERT OR REPLACE INTO note_editor_preferences (noteId, installationId, sourceMode) VALUES (:noteId, :installationId, :sourceMode)")
+    suspend fun writeEditorSourceMode(noteId: String, installationId: String, sourceMode: Boolean)
+
+    @Transaction
+    suspend fun upsertEditorNote(note: NoteEntity, installationId: String, sourceMode: Boolean) {
+        upsertNotes(listOf(note))
+        writeEditorSourceMode(note.noteId, installationId, sourceMode)
+    }
+
     @Query("SELECT * FROM note_folders WHERE deleted = 0 ORDER BY sortOrder, name COLLATE NOCASE")
     fun observeFolders(): Flow<List<NoteFolderEntity>>
 

@@ -200,6 +200,8 @@ dependencies {
     testImplementation(libs.androidx.compose.ui.test.junit4)
     testImplementation(libs.junit)
     testImplementation(libs.json)
+    testImplementation("io.github.takahirom.roborazzi:roborazzi:1.50.0")
+    testImplementation("io.github.takahirom.roborazzi:roborazzi-core:1.50.0")
     androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.junit.ktx)

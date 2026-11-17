@@ -6,8 +6,10 @@ import java.util.UUID
 class NoteRepository(
     private val dao: NoteDao,
     private val deviceId: String,
+    private val editorPreferenceOwner: String = deviceId,
     private val now: () -> Long = System::currentTimeMillis
 ) {
+    internal suspend fun editorSourceMode(noteId: String): Boolean? = dao.editorSourceMode(noteId, editorPreferenceOwner)
     fun observeNotes(): Flow<List<NoteEntity>> = dao.observeNotes()
     fun observeFolders(): Flow<List<NoteFolderEntity>> = dao.observeFolders()
     fun observeConflicts(): Flow<List<NoteConflictEntity>> = dao.observeUnresolvedConflicts()
@@ -24,14 +26,16 @@ class NoteRepository(
         title: String,
         markdown: String,
         folderId: String? = null,
-        pinned: Boolean = false
+        pinned: Boolean = false,
+        editorSourceMode: Boolean? = null
     ): NoteEntity {
         require(title.trim().isNotBlank() || MarkdownNoteCodec.toPlainText(markdown).isNotBlank()) {
             "笔记不能为空"
         }
         val previous = if (noteId == null) null else dao.note(noteId)
         val instant = now()
-        val canonical = markdown.replace("\r\n", "\n").replace('\r', '\n')
+        // Markdown is authoritative, including existing CRLF/CR/LF and trailing whitespace.
+        val canonical = markdown
         val hash = MarkdownNoteCodec.sha256(canonical)
         val saved = NoteEntity(
             noteId = previous?.noteId ?: noteId ?: UUID.randomUUID().toString(),
@@ -49,7 +53,8 @@ class NoteRepository(
             deleted = false,
             deletedAt = 0L
         )
-        dao.upsertNotes(listOf(saved))
+        if (editorSourceMode == null) dao.upsertNotes(listOf(saved))
+        else dao.upsertEditorNote(saved, editorPreferenceOwner, editorSourceMode)
         return saved
     }
 

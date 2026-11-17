@@ -23,6 +23,7 @@ import com.lightningstudio.watchrss.phone.data.importer.AndroidWebArticleImporte
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
+import com.lightningstudio.watchrss.phone.data.note.NoteEditorPreferenceMigration
 import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
@@ -73,6 +74,7 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_13_14,
             PhoneCompanionDatabase.MIGRATION_14_15
         )
+            .addCallback(NoteEditorPreferenceMigration)
             .build()
     }
 
@@ -249,7 +251,11 @@ class PhoneCompanionContainer(context: Context) {
     }
 
     val noteRepository: NoteRepository by lazy {
-        NoteRepository(database.noteDao(), deviceIdentity.deviceId)
+        NoteRepository(
+            database.noteDao(),
+            deviceIdentity.deviceId,
+            editorPreferenceOwner = installationIdentity.installId
+        )
     }
 
     val backupService: WatchRssBackupService by lazy {

@@ -22,8 +22,8 @@ class B2SessionTest {
             val sourceFile = File(sourceRoot, "original").apply { writeBytes(x.bytes) }
             val sourceSnapshots = B2Snapshots(sourceStore, B2Files(File(sourceRoot, "frozen")))
             val witness = sourceSnapshots.freeze(x.account, "source", listOf(x.descriptor)) { sourceFile }
-            val cap = x.cap
-            val selection = B2Negotiation.select(cap, cap, "phoneToWatch")!!
+            val cap = B2Negotiation.capability(setOf("noteAsset"), setOf("noteAsset"), B2Wire.s2Limits())
+            val selection = B2Negotiation.select(x.cap, cap, "phoneToWatch")!!
             val binding = obj("direction" to "phoneToWatch", "jobId" to x.job, "intent" to "create", "selection" to selection)
             val phone = B2Session(phoneIn, phoneOut, this, close)
             val watch = B2Session(watchIn, watchOut, this, close)
@@ -54,7 +54,7 @@ class B2SessionTest {
             val client = B2Client(sourceStore, sourceSnapshots, phone::exchange, {}, phone)
             client.acceptProbe(obj("libraryBinary" to cap))
             try {
-                client.offer(x.account, "phone", "watch", cap, witness)
+                client.offer(x.account, "phone", "watch", x.cap, witness)
                 client.confirm(listOf(binding)) { }
                 val complete = client.send(x.job)
                 assertEquals("COMPLETE", complete.s("state")); assertEquals(1, commits.get())
@@ -67,6 +67,86 @@ class B2SessionTest {
         }
         Unit
     }
+    @Test fun readWindowAndHeartbeatWhileDurableGroupIsBlocked() = runBlocking {
+        withTimeout(20000) {
+            val x = ReceiverRig(ByteArray(B2Wire.CHUNK * 8 + 13) { (it * 7).toByte() })
+            val blocked = java.util.concurrent.CountDownLatch(1)
+            val resume = java.util.concurrent.CountDownLatch(1)
+            val link = java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())
+            val peer = java.net.Socket(link.inetAddress, link.localPort)
+            val transport = link.use { it.accept() }
+            peer.soTimeout = 5000
+            val receiver = B2Receiver(x.store, x.files,
+                B2Authorization(x.account, "phone", "watch", x.snapshot, x.snapshot, listOf(x.binding)) { true },
+                object : B2BusinessPort {
+                    override val kinds = setOf("noteAsset")
+                    override suspend fun apply(descriptor: JSONObject, metadata: JSONObject, staged: File) = "merged"
+                }, fault = { phase ->
+                    if (phase == "afterChunkDurable") {
+                        blocked.countDown()
+                        check(resume.await(8, java.util.concurrent.TimeUnit.SECONDS))
+                    }
+                })
+            val session = B2Session(transport.getInputStream(), transport.getOutputStream(), this, transport::close)
+            session.install(receiver) { receiver.handle(it) }
+            session.start()
+            try {
+                val fromPeer = peer.getInputStream()
+                val toPhone = peer.getOutputStream()
+                suspend fun request(frame: JSONObject): JSONObject = withContext(Dispatchers.IO) {
+                    B2Frames.write(toPhone, B2Frame.Control(frame))
+                    (B2Frames.read(fromPeer) as B2Frame.Control).value
+                }
+                fun heartbeat(epoch: Long) = B2Wire.request("missing", x.job, x.plan, epoch,
+                    obj("limit" to 0, "afterObjectId" to null, "afterChunkIndex" to null))
+                val e = request(B2Wire.request("begin", x.job, x.plan, null, x.description)).n("epoch")
+                assertEquals("PLANNING", request(heartbeat(e)).o("result").s("state"))
+                val page = obj("pageIndex" to 0, "startIndex" to 0, "previousPageDigest" to "0".repeat(64),
+                    "pageDigest" to "0".repeat(64), "entries" to JSONArray(listOf(x.descriptor)))
+                page.put("pageDigest", B2Digests.page(x.plan, page))
+                assertTrue(request(B2Wire.request("manifestPage", x.job, x.plan, e, page)).getBoolean("success"))
+                fun data(index: Int): B2Frame.Data {
+                    val put = B2Wire.request("putChunk", x.job, x.plan, e,
+                        obj("objectId" to x.descriptor.s("objectId"), "chunkIndex" to index))
+                    val bytes = x.bytes.copyOfRange(index * B2Wire.CHUNK, minOf((index + 1) * B2Wire.CHUNK, x.bytes.size))
+                    return B2Frame.Data(B2DataHeader(2, 0, e, index + 1L, index, bytes.size,
+                        put.s("requestId"), put.s("requestDigest")), bytes)
+                }
+                withContext(Dispatchers.IO) {
+                    repeat(8) { B2Frames.write(toPhone, data(it)) }
+                    check(blocked.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                }
+                val whileBlocked = request(heartbeat(e))
+                assertTrue(whileBlocked.o("result").a("items").length() == 0)
+                assertTrue(x.store.list(x.account, "chunk").isEmpty())
+                resume.countDown()
+                withContext(Dispatchers.IO) {
+                    val settled = mutableListOf<Long>()
+                    val sizes = mutableListOf<Int>()
+                    while (settled.size < 8) {
+                        val ack = B2Frames.read(fromPeer) as B2Frame.Ack
+                        sizes.add(ack.entries.size)
+                        settled.addAll(ack.entries.map { it.txSeq })
+                    }
+                    assertEquals((1L..8L).toList(), settled)
+                    assertTrue(sizes.any { it > 1 })
+                    assertTrue(sizes.all { it <= 4 })
+                    B2Frames.write(toPhone, data(8))
+                    val tail = B2Frames.read(fromPeer) as B2Frame.Ack
+                    assertEquals(listOf(B2AckEntry(9, 1)), tail.entries)
+                }
+                assertEquals(9, x.store.list(x.account, "chunk").size)
+            } finally {
+                resume.countDown()
+                session.close()
+                peer.close()
+                transport.close()
+                x.root.deleteRecursively()
+            }
+        }
+        Unit
+    }
+
     @Test fun switchLeavesGluedBinaryBytesAndNeverWritesLegacyAck() {
         val cap = fixture("spec-r3-vectors.json").getJSONObject("s2Capability")
         val requestOutput = ByteArrayOutputStream()

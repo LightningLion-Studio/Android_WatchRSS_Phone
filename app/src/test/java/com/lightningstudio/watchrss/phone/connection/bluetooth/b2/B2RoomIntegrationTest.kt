@@ -98,6 +98,46 @@ class B2RoomIntegrationTest {
         } finally { db.close(); x.root.deleteRecursively() }
         Unit
     }
+    @Test fun stagedChunkGroupRollsBackTogetherWhenSecondReceiptFails() = runBlocking {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val db = Room.inMemoryDatabaseBuilder(context, PhoneCompanionDatabase::class.java).allowMainThreadQueries().build()
+        val x = ReceiverRig(ByteArray(B2Wire.CHUNK + 19) { (it * 11).toByte() })
+        try {
+            val store = B2RoomStore(db)
+            val auth = B2Authorization(x.account, "phone", "watch", x.snapshot, x.snapshot, listOf(x.binding)) { true }
+            val receiver = B2Receiver(store, x.files, auth, object : B2BusinessPort {
+                override val kinds = setOf("noteAsset")
+                override suspend fun apply(descriptor: org.json.JSONObject, metadata: org.json.JSONObject, staged: File) = "merged"
+            })
+            val epoch = x.begin(receiver)
+            x.manifest(receiver, epoch)
+            val oid = x.descriptor.s("objectId")
+            val group = (0..1).map { i ->
+                val payload = x.bytes.copyOfRange(i * B2Wire.CHUNK, minOf((i + 1) * B2Wire.CHUNK, x.bytes.size))
+                val req = B2Wire.request("putChunk", x.job, x.plan, epoch, obj("objectId" to oid, "chunkIndex" to i))
+                val header = B2DataHeader(2, 0, epoch, i + 1L, i, payload.size, req.s("requestId"), req.s("requestDigest"))
+                receiver.inspect(header)
+                receiver.writeChunk(B2Frame.Data(header, payload), req)!!
+            }
+            val sql = db.openHelper.writableDatabase
+            sql.execSQL("""CREATE TRIGGER reject_second_chunk
+                BEFORE INSERT ON library_binary_records
+                WHEN NEW.namespace = 'chunk' AND (SELECT count(*) FROM library_binary_records WHERE namespace = 'chunk') = 1
+                BEGIN SELECT RAISE(ABORT, 'reject second chunk'); END""")
+            try {
+                receiver.commitChunks(group)
+                assertionFailed("expected the second receipt to abort the group")
+            } catch (_: android.database.SQLException) {}
+            assertTrue(store.list(x.account, "chunk").isEmpty())
+            assertTrue(store.list(x.account, "request").none { it.second.optJSONObject("result")?.has("chunkIndex") == true })
+            sql.execSQL("DROP TRIGGER reject_second_chunk")
+            val recovered = x.missing(receiver, epoch).a("items").getJSONObject(0)
+            assertEquals(0, recovered.a("missingRanges").length())
+            assertEquals(2, store.list(x.account, "chunk").size)
+        } finally { db.close(); x.root.deleteRecursively() }
+        Unit
+    }
+
     @Test fun commonRecoverySurvivesMoreThanThreeProgressingReconnects() = runBlocking {
         var now = 0L
         var generation = 1L

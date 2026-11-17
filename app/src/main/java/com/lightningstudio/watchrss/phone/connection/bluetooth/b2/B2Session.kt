@@ -20,22 +20,30 @@ class B2Session(private val input: InputStream, private val output: OutputStream
     private val job = SupervisorJob(parent.coroutineContext[Job])
     private val scope = CoroutineScope(parent.coroutineContext + job + Dispatchers.IO)
     private val ended = CompletableDeferred<Throwable>()
-    private val high = Channel<B2Frame>(8)
-    private val normal = Channel<B2Frame>(8)
+    private sealed interface Outgoing {
+        data class Frame(val frame: B2Frame, val heartbeatJob: String? = null) : Outgoing
+        data class Data(val request: JSONObject, val slot: Int, val bytes: ByteArray, val answer: CompletableDeferred<Int>) : Outgoing
+        data class Durable(val replies: List<B2ReceivePipeline.Reply>) : Outgoing
+    }
+    private val high = Channel<Outgoing>(8)
+    private val durable = Channel<Outgoing>(8)
+    private val normal = Channel<Outgoing>(8)
+    private val dataQueue = Channel<Outgoing.Data>(Channel.RENDEZVOUS) { it.answer.cancel() }
     private val stopped = AtomicBoolean(false)
     private val outstandingWrites = java.util.concurrent.atomic.AtomicInteger()
     @Volatile private var cause: Throwable? = null
     private data class Wait(val request: JSONObject, val answer: CompletableDeferred<JSONObject>, @Volatile var start: Long? = null)
     private data class Grant(val stream: Int, val job: String, val plan: String, val selection: String, val epoch: Long, val heartbeat: B2Heartbeat)
     private val pending = ConcurrentHashMap<String, Wait>()
-    private val dataWait = ConcurrentHashMap<String, CompletableDeferred<Int>>()
-    private val dataRequests = ConcurrentHashMap<String, JSONObject>()
+    private data class DataWait(val request: JSONObject, val answer: CompletableDeferred<Int>)
+    private val dataWait = mutableMapOf<String, DataWait>() // guarded by lifecycle
     private val busy = ConcurrentHashMap.newKeySet<String>()
     private val inbound = ConcurrentHashMap<String, Any>()
     private val inboundDirections = ConcurrentHashMap<String, Int>()
     private val inboundHeartbeats = ConcurrentHashMap.newKeySet<String>()
     private val sendFlows = mapOf(1 to B2Flow(1), 2 to B2Flow(2))
     private val grants = ConcurrentHashMap<String, Grant>()
+    private val sourceBindings = mutableMapOf<String, Grant>() // guarded by lifecycle
     private val receiveEpochs = ConcurrentHashMap<String, Long>()
     private val expectedSources = ConcurrentHashMap.newKeySet<String>()
     private var confirmedBinding: String? = null
@@ -46,6 +54,7 @@ class B2Session(private val input: InputStream, private val output: OutputStream
     private val workers = listOf(Channel<suspend () -> Unit>(1), Channel<suspend () -> Unit>(1))
     @Volatile private var handler: (suspend (JSONObject) -> JSONObject)? = null
     @Volatile private var receiver: B2Receiver? = null
+    @Volatile private var pipeline: B2ReceivePipeline? = null
     private val controls = B2Rate(128.0, 64.0, clock)
     private val acks = B2Rate(256.0, 128.0, clock)
     private val staleAcks = B2Rate(32.0, 16.0, clock)
@@ -64,13 +73,36 @@ class B2Session(private val input: InputStream, private val output: OutputStream
             }
         }
     }
-    fun install(receiver: B2Receiver, handler: suspend (JSONObject) -> JSONObject) { this.receiver = receiver; this.handler = handler }
-    fun bindSource(stream: Int, job: String, plan: String, selection: String, epoch: Long) {
-        if (sendFlows.getValue(stream).epoch != epoch) replay.reset()
-        sendFlows.getValue(stream).bind(job, plan, selection, epoch)
-        grants[job] = Grant(stream, job, plan, selection, epoch, B2Heartbeat(clock))
+    fun install(receiver: B2Receiver, handler: suspend (JSONObject) -> JSONObject) {
+        pipeline?.close()
+        this.receiver = receiver
+        this.pipeline = B2ReceivePipeline(scope, receiver, clock, { replies ->
+            enqueue(Outgoing.Durable(replies), true)
+        }, ::abort)
+        this.handler = handler
     }
-    fun finishSource(job: String) { grants.remove(job) }
+    fun bindSource(stream: Int, job: String, plan: String, selection: String, epoch: Long,
+        chunks: Int = 1, bytes: Int = chunks * B2Wire.CHUNK) = synchronized(lifecycle) {
+        checkOpen()
+        val flow = sendFlows.getValue(stream)
+        if (flow.epoch != epoch) {
+            replay.reset()
+            dataWait.values.filter { it.request.s("jobId") == job }.forEach {
+                dataWait.remove(it.request.s("requestId"))
+                it.answer.completeExceptionally(B2Exception("LEASE_EXPIRED"))
+            }
+        }
+        flow.bind(job, plan, selection, epoch, chunks, bytes)
+        if (grants[job]?.epoch != epoch) {
+            val grant = Grant(stream, job, plan, selection, epoch, B2Heartbeat(clock))
+            grants[job] = grant
+            sourceBindings[job] = grant
+        }
+    }
+    fun finishSource(job: String, completed: Boolean = true) {
+        if (completed) receiver?.sourceCompleted(job)
+        grants.remove(job)
+    }
     fun workProgress(job: String) { localWork[job]?.completedWorkUnit() }
     suspend fun <T> localWork(job: String, block: () -> T): T {
         val watch = B2LocalWatchdog(clock)
@@ -93,20 +125,40 @@ class B2Session(private val input: InputStream, private val output: OutputStream
         scope.launch {
             try {
                 while (isActive) {
-                    val frame = high.tryReceive().getOrNull() ?: select { high.onReceive { it }; normal.onReceive { it } }
-                    synchronized(lifecycle) { checkOpen(); writingSince = clock(); lastWrite = writingSince }
-                    if (frame is B2Frame.Control && frame.value.s("type") == "request") {
-                        val r = frame.value
-                        pending[r.s("requestId")]?.start = clock()
-                        if (r.s("phase") == "missing" && r.o("payload").n("limit") == 0L) grants[r.s("jobId")]?.heartbeat?.beginWrite()
+                    val outgoing = high.tryReceive().getOrNull() ?: durable.tryReceive().getOrNull() ?: select {
+                        high.onReceive { it }
+                        durable.onReceive { it }
+                        normal.onReceive { it }
+                        dataQueue.onReceive { it }
                     }
-                    B2Frames.write(object : OutputStream() {
-                        override fun write(b: Int) { checkOpen(); output.write(b); lastWrite = clock() }
-                        override fun write(b: ByteArray, off: Int, len: Int) { checkOpen(); output.write(b, off, len); lastWrite = clock() }
-                        override fun flush() { checkOpen(); output.flush() }
-                    }, frame)
-                    if (frame is B2Frame.Control && frame.value.s("type") == "response" && frame.value.s("phase") == "missing") inboundHeartbeats.remove(frame.value.s("jobId"))
-                    writingSince = 0; outstandingWrites.decrementAndGet()
+                    when (outgoing) {
+                        is Outgoing.Frame -> {
+                            writeFrame(outgoing.frame, outgoing.heartbeatJob)
+                        }
+                        is Outgoing.Durable -> writeDurable(outgoing.replies)
+                        is Outgoing.Data -> {
+                            try {
+                                val frame = synchronized(lifecycle) {
+                                    checkOpen()
+                                    val r = outgoing.request
+                                    val g = grants[r.s("jobId")] ?: fail("AUTH_REVOKED")
+                                    if (r.n("epoch") != g.epoch) fail("LEASE_EXPIRED")
+                                    val p = r.o("payload")
+                                    val h = sendFlows.getValue(g.stream).reserve(outgoing.slot, p.n("chunkIndex").toInt(),
+                                        outgoing.bytes.size, r.s("requestId"), r.s("requestDigest"), p.s("objectId"))
+                                    dataWait[h.requestId] = DataWait(outgoing.request, outgoing.answer)
+                                    writingSince = clock()
+                                    lastWrite = writingSince
+                                    B2Frame.Data(h, outgoing.bytes)
+                                }
+                                writeFrame(frame)
+                            } catch (e: B2Exception) {
+                                if (e.code != "LEASE_EXPIRED") throw e
+                                outgoing.answer.completeExceptionally(e)
+                            }
+                        }
+                    }
+                    outstandingWrites.decrementAndGet()
                 }
             } catch (e: Throwable) { abort(e) }
         }
@@ -117,41 +169,58 @@ class B2Session(private val input: InputStream, private val output: OutputStream
             }
             try {
                 while (isActive) {
-                    var dataRequest: JSONObject? = null
-                    val frame = try { B2Frames.read(tracked) { h ->
-                        // Only a bounded, committed descriptor lookup; no business worker/DB lane.
-                        val target = receiver ?: fail("AUTH_REVOKED")
-                        val inspected = try { runBlocking { target.inspect(h, inbound.containsKey(target.jobFor(h.stream))) } }
-                        catch (rejected: B2RejectedData) {
-                            replay.take(); B2Frames.drain(tracked, h.length, rejected.hash)
-                            enqueue(B2Frame.Control(B2Results.answer(rejected.request, null, h.epoch, rejected.rejection)), true)
-                            throw DiscardedOldData()
+                    var binding: Pair<JSONObject, String>? = null
+                    var buffer: ByteArray? = null
+                    val frame = try {
+                        B2Frames.readInto(tracked) { h ->
+                            val target = receiver ?: fail("AUTH_REVOKED")
+                            val pipe = pipeline ?: fail("AUTH_REVOKED")
+                            var acquired = false
+                            val inspected = try {
+                                runBlocking { target.inspect(h) { _, _ ->
+                                    if (inbound.containsKey(target.jobFor(h.stream))) fail("BUSY")
+                                    pipe.acquire(h)
+                                    acquired = true
+                                } }
+                            } catch (rejected: B2RejectedData) {
+                                if (acquired) pipe.release(h)
+                                replay.take()
+                                B2Frames.drain(tracked, h.length, rejected.hash)
+                                enqueue(Outgoing.Durable(listOf(B2ReceivePipeline.Reply(h, rejected.request, 0, rejected.rejection))), true)
+                                throw DiscardedOldData()
+                            }
+                            if (target.isOld(h)) {
+                                if (acquired) pipe.release(h)
+                                replay.take()
+                                B2Frames.drain(tracked, h.length, inspected.second)
+                                throw DiscardedOldData()
+                            }
+                            binding = inspected
+                            pipe.buffer(h.stream).also { buffer = it }
                         }
-                        dataRequest = inspected.first
-                        if (target.isOld(h)) { replay.take(); B2Frames.drain(tracked, h.length, inspected.second); throw DiscardedOldData() }
-                    } } catch (_: DiscardedOldData) { readingSince = 0; continue }
+                    } catch (_: DiscardedOldData) { readingSince = 0; continue }
+                    catch (e: Throwable) { buffer?.let { pipeline?.recycle(it) }; throw e }
                     readingSince = 0
                     checkOpen()
                     when (frame) {
-                        is B2Frame.Ack -> {
+                        is B2Frame.Ack -> synchronized(lifecycle) {
                             acks.take()
                             val settled = sendFlows.getValue(frame.stream).settle(frame)
-                            if (settled.isEmpty()) { staleAcks.take(); continue }
-                            settled.forEach { row -> dataWait[row.header.requestId]?.complete(frame.entries.single().disposition) ?: fail() }
+                            if (settled.isEmpty()) staleAcks.take()
+                            else for ((entry, row) in frame.entries.zip(settled)) {
+                                dataWait.remove(row.header.requestId)?.answer?.complete(entry.disposition) ?: fail()
+                            }
                         }
                         is B2Frame.Data -> {
-                            val request = dataRequest ?: fail()
-                            dispatch(request) { release ->
-                                val ack = (receiver ?: fail("AUTH_REVOKED")).data(frame, request)
-                                release()
-                                enqueue(ack, true) // durable callback; no timer or batching wait
-                            }
+                            val (request, hash) = binding ?: fail()
+                            (pipeline ?: fail("AUTH_REVOKED")).submit(frame, request, hash)
                         }
                         is B2Frame.Control -> {
                             controls.take()
                             val r = frame.value
                             if (r.s("type") == "response") acceptResponse(r)
                             else if (r.s("phase") == "missing" && r.o("payload").n("limit") == 0L) {
+                                if (receiveEpochs[r.s("jobId")] != r.n("epoch")) fail("STALE_EPOCH")
                                 if (!inboundHeartbeats.add(r.s("jobId"))) fail("INVALID_FRAME")
                                 // Separate lightweight IO work; neither DB work nor its mutex
                                 // can hold this job's reserved heartbeat response slot.
@@ -160,8 +229,14 @@ class B2Session(private val input: InputStream, private val output: OutputStream
                                     localWork[key] = watch
                                     try {
                                         val answer = runInterruptible(Dispatchers.IO) { (receiver ?: fail("AUTH_REVOKED")).heartbeat(r) }
-                                        enqueue(B2Frame.Control(answer), true)
-                                    } catch (e: B2Exception) { abort(e, listOf(B2Results.answer(r, null, r.n("epoch"), e.code))) }
+                                        enqueue(Outgoing.Frame(B2Frame.Control(answer), r.s("jobId")), true)
+                                    } catch (e: B2Exception) {
+                                        val answer = B2Results.answer(r, null, r.n("epoch"), e.code)
+                                        if (e.code == "LEASE_EXPIRED") {
+                                            try { enqueue(Outgoing.Frame(B2Frame.Control(answer), r.s("jobId")), true) }
+                                            catch (failure: Throwable) { abort(failure) }
+                                        } else abort(e, listOf(answer))
+                                    }
                                     catch (e: Throwable) { abort(e) }
                                     finally { localWork.remove(key, watch) }
                                 }
@@ -178,10 +253,15 @@ class B2Session(private val input: InputStream, private val output: OutputStream
                                 val answer = (handler ?: fail("AUTH_REVOKED"))(r)
                                 if (r.s("phase") == "begin" && answer.getBoolean("success")) {
                                     val epoch = answer.n("epoch")
-                                    if (receiveEpochs.put(r.s("jobId"), epoch) != epoch) replay.reset()
+                                    if (receiveEpochs.put(r.s("jobId"), epoch) != epoch) {
+                                        replay.reset()
+                                        pipeline?.awaitIdle()
+                                    }
                                 }
-                                release()
-                                enqueue(B2Frame.Control(answer), false)
+                                synchronized(lifecycle) {
+                                    enqueue(B2Frame.Control(answer), false)
+                                    release()
+                                }
                             }
                         }
                     }
@@ -201,13 +281,18 @@ class B2Session(private val input: InputStream, private val output: OutputStream
                         if ((heartbeat || phase in listOf("prepare", "begin", "missing", "complete", "cancel")) && w.start?.let { now - it >= 30000 } == true) throw B2NetworkTimeout("B2 response deadline")
                     }
                     localWork.values.forEach { it.check() }
+                    pipeline?.checkWatchdog()
                     for ((id, g) in grants) {
                         g.heartbeat.checkDeadline()
                         if (!g.heartbeat.due() || pending.values.any { it.request.optString("jobId") == id && it.request.optString("phase") == "missing" && it.request.o("payload").n("limit") == 0L }) continue
                         g.heartbeat.queue()
                         scope.launch {
                             try { exchange(B2Wire.request("missing", id, g.plan, g.epoch, obj("afterObjectId" to null, "afterChunkIndex" to null, "limit" to 0))); g.heartbeat.reply() }
-                            catch (e: Throwable) { abort(e) }
+                            catch (e: B2Exception) {
+                                if (e.code == "LEASE_EXPIRED") g.heartbeat.reply()
+                                else if (grants[id] === g) abort(e)
+                            }
+                            catch (e: Throwable) { if (grants[id] === g) abort(e) }
                         }
                     }
                 }
@@ -240,27 +325,91 @@ class B2Session(private val input: InputStream, private val output: OutputStream
         }
         return inboundDirections[r.optString("jobId")] ?: 2
     }
-    private fun enqueue(frame: B2Frame, priority: Boolean) {
+    private fun writeDurable(replies: List<B2ReceivePipeline.Reply>) {
+        val h = replies.first().header
+        val target = receiver ?: fail("AUTH_REVOKED")
+        if (!target.current(h.stream, h.epoch)) return
+        val entries = replies.filter { it.error == null }.map { B2AckEntry(it.header.seq, it.disposition) }
+        if (entries.isNotEmpty()) {
+            val ack = target.ack(h.stream, h.epoch, entries) ?: return
+            writeFrame(ack) { replies.filter { it.error == null }.forEach { pipeline?.release(it.header) } }
+        }
+        for (reply in replies) if (reply.error != null) {
+            writeFrame(B2Frame.Control(B2Results.answer(reply.request, null, h.epoch, reply.error))) {
+                pipeline?.release(reply.header)
+            }
+        }
+    }
+
+    private fun writeFrame(frame: B2Frame, heartbeatJob: String? = null, starting: () -> Unit = {}) {
+        synchronized(lifecycle) {
+            checkOpen()
+            authorize()
+            if (frame is B2Frame.Ack && receiver?.current(frame.stream, frame.epoch) != true) return
+            if (frame is B2Frame.Control) {
+                val r = frame.value
+                if (heartbeatJob != null) {
+                    inboundHeartbeats.remove(heartbeatJob)
+                    if (receiveEpochs[heartbeatJob] != r.n("epoch")) return
+                }
+                if (r.s("type") == "response" && r.s("phase") == "putChunk" &&
+                    receiver?.let { it.current(it.streamFor(r.s("jobId")), r.n("epoch")) } != true) return
+                if (r.s("type") == "request") {
+                    val waiter = pending[r.s("requestId")]
+                    if (r.s("phase") == "missing" && r.o("payload").n("limit") == 0L) {
+                        val grant = sourceBindings[r.s("jobId")]
+                        if (grant != null && grant.epoch != r.n("epoch")) {
+                            waiter?.answer?.completeExceptionally(B2Exception("STALE_EPOCH"))
+                            return
+                        }
+                        grant?.heartbeat?.beginWrite()
+                    }
+                    waiter?.start = clock()
+                }
+            }
+            starting()
+            writingSince = clock()
+            lastWrite = writingSince
+        }
+        B2Frames.write(object : OutputStream() {
+            override fun write(b: Int) { checkOpen(); output.write(b); lastWrite = clock() }
+            override fun write(b: ByteArray, off: Int, len: Int) { checkOpen(); output.write(b, off, len); lastWrite = clock() }
+            override fun flush() { checkOpen(); output.flush() }
+        }, frame)
+        writingSince = 0
+    }
+
+    private fun enqueue(frame: B2Frame, priority: Boolean) = enqueue(Outgoing.Frame(frame), priority)
+    private fun enqueue(frame: Outgoing, priority: Boolean) = synchronized(lifecycle) {
         checkOpen()
         outstandingWrites.incrementAndGet()
-        if (!(if (priority) high else normal).trySend(frame).isSuccess) { outstandingWrites.decrementAndGet(); fail("LIMIT_EXCEEDED") }
+        val queue = when {
+            frame is Outgoing.Durable -> durable
+            priority -> high
+            else -> normal
+        }
+        if (!queue.trySend(frame).isSuccess) {
+            outstandingWrites.decrementAndGet()
+            fail("LIMIT_EXCEEDED")
+        }
     }
     private fun acceptResponse(r: JSONObject) {
         val id = r.s("requestId")
-        val grant = grants[r.optString("jobId")]
-        if (r.s("phase") == "putChunk" && grant != null && !r.nil("epoch") && r.n("epoch") < grant.epoch) {
-            if (r.s("planDigest") != grant.plan || r.getBoolean("success")) fail()
-            staleAcks.take(); return
-        }
-        val data = dataRequests[id]
-        if (data != null) {
-            validateCorrelation(data, r)
-            if (r.s("phase") != "putChunk" || r.getBoolean("success")) fail()
-            val flow = sendFlows.values.singleOrNull { it.pendingCount > 0 } ?: fail()
-            flow.negative(r.s("jobId"), r.s("planDigest"), r.n("epoch"), id, r.s("requestDigest"))
-            val error = B2Exception(r.o("error").s("code"))
-            if (r.o("error").s("recovery") in listOf("STOP", "REPLAN")) { abort(error); return }
-            dataWait[id]?.completeExceptionally(error) ?: fail(); return
+        if (r.s("phase") == "putChunk") {
+            synchronized(lifecycle) {
+                val grant = sourceBindings[r.s("jobId")] ?: fail("REQUEST_CONFLICT")
+                val flow = sendFlows.getValue(grant.stream)
+                if (r.s("planDigest") != grant.plan || r.getBoolean("success")) fail()
+                if (flow.isOld(r.n("epoch"))) { staleAcks.take(); return }
+                val data = dataWait[id] ?: fail("REQUEST_CONFLICT")
+                validateCorrelation(data.request, r)
+                flow.negative(r.s("jobId"), r.s("planDigest"), r.n("epoch"), id, r.s("requestDigest"))
+                dataWait.remove(id)
+                val error = B2Exception(r.o("error").s("code"), r.o("error").n("retryAfterMillis"))
+                if (r.o("error").s("recovery") in listOf("STOP", "REPLAN")) abort(error)
+                data.answer.completeExceptionally(error)
+            }
+            return
         }
         val w = pending[id] ?: fail("REQUEST_CONFLICT")
         validateCorrelation(w.request, r)
@@ -277,22 +426,25 @@ class B2Session(private val input: InputStream, private val output: OutputStream
         try {
             enqueue(B2Frame.Control(r), heartbeat)
             val answer = w.answer.await(); checkOpen()
-            if (!answer.getBoolean("success")) fail(answer.o("error").s("code"))
+            if (!answer.getBoolean("success")) throw B2Exception(answer.o("error").s("code"), answer.o("error").n("retryAfterMillis"))
             return answer
         } finally { pending.remove(r.s("requestId")); busy.remove(key) }
     }
-    suspend fun sendData(request: JSONObject, slot: Int, bytes: ByteArray): Int {
-        checkOpen(); B2Wire.envelope(request)
-        val g = grants[request.s("jobId")] ?: fail("AUTH_REVOKED")
-        val stream = sendFlows.getValue(g.stream)
-        val h = stream.reserve(slot, request.o("payload").n("chunkIndex").toInt(), bytes.size, request.s("requestId"), request.s("requestDigest"), request.o("payload").s("objectId"))
-        if (h.epoch != g.epoch) fail("STALE_EPOCH")
-        val waiter = CompletableDeferred<Int>()
-        dataRequests[h.requestId] = request; dataWait[h.requestId] = waiter
-        try { enqueue(B2Frame.Data(h, bytes), false); return waiter.await().also { checkOpen() } }
-        finally { dataRequests.remove(h.requestId); dataWait.remove(h.requestId) }
+    internal suspend fun queueData(request: JSONObject, slot: Int, bytes: ByteArray): Deferred<Int> {
+        checkOpen()
+        B2Wire.envelope(request)
+        val answer = CompletableDeferred<Int>()
+        outstandingWrites.incrementAndGet()
+        try { dataQueue.send(Outgoing.Data(request, slot, bytes, answer)) }
+        catch (e: Throwable) { outstandingWrites.decrementAndGet(); checkOpen(); throw e }
+        return answer
     }
-    suspend fun flush() { while (outstandingWrites.get() > 0) { checkOpen(); delay(1) } }
+    suspend fun sendData(request: JSONObject, slot: Int, bytes: ByteArray): Int =
+        queueData(request, slot, bytes).await().also { checkOpen() }
+
+    suspend fun flush() {
+        while (outstandingWrites.get() > 0 || inbound.isNotEmpty()) { checkOpen(); delay(1) }
+    }
     suspend fun awaitTermination(): Throwable = ended.await()
     fun cancelUser() {
         val requests = grants.values.map { B2Wire.request("cancel", it.job, it.plan, it.epoch, obj("reason" to "USER_CANCEL")) } +
@@ -307,7 +459,11 @@ class B2Session(private val input: InputStream, private val output: OutputStream
             cause = error; receiver?.fenceNow(); sendFlows.values.forEach { it.clear() }
             while (normal.tryReceive().isSuccess) { }
             while (high.tryReceive().isSuccess) { }
-            pending.values.forEach { it.answer.completeExceptionally(error) }; dataWait.values.forEach { it.completeExceptionally(error) }
+            while (durable.tryReceive().isSuccess) { }
+            dataQueue.cancel()
+            pending.values.forEach { it.answer.completeExceptionally(error) }
+            dataWait.values.forEach { it.answer.completeExceptionally(error) }
+            dataWait.clear()
             ended.complete(error); cancellationHandle?.dispose(); job.cancel()
         }
         // A user cancellation never waits for output or reconnects. If no frame is in
@@ -317,6 +473,7 @@ class B2Session(private val input: InputStream, private val output: OutputStream
             cleanup.launch { try { cancelRequests.forEach { B2Frames.write(output, B2Frame.Control(it)) } } catch (_: Exception) { }
                 finally { runCatching(closeTransport) } }
         } else cleanup.launch { runCatching(closeTransport) }
+        cleanup.launch { receiver?.closeIndex() }
     }
     override fun close() { abort(CancellationException("B2 connection closed")) }
     companion object {

@@ -15,7 +15,7 @@ object B2Negotiation {
     }
     /** Capabilities come ONLY from transaction adapters installed on this connection.
      * Never infer receive readiness from application version or the watch's rows. */
-    fun capability(sendKinds: Set<String>, receiveKinds: Set<String>, limits: JSONObject = B2Wire.s2Limits()): JSONObject {
+    fun capability(sendKinds: Set<String>, receiveKinds: Set<String>, limits: JSONObject = B2Wire.s3Limits()): JSONObject {
         val rows = (sendKinds + receiveKinds).sorted().map { obj("kind" to it, "schemaVersion" to 1, "send" to (it in sendKinds), "receive" to (it in receiveKinds)) }
         return obj("version" to 2, "profile" to "merge-b2", "chunkSizes" to JSONArray(listOf(65536)), "kinds" to JSONArray(rows), "limits" to copy(limits)).also { B2Wire.capability(it) }
     }

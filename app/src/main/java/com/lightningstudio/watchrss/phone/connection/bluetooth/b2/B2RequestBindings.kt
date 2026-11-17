@@ -14,9 +14,11 @@ internal class B2RequestBindings(private val directory: File) {
     private class State {
         var initialized = false
         var charged = 0L
-        val cache = object : LinkedHashMap<String, String>(512, .75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 512
-        }
+        val bindingLocks = mutableMapOf<String, BindingLock>()
+        val unsynced = mutableSetOf<String>()
+    }
+    private class BindingLock {
+        var users = 0
     }
     companion object {
         private const val CHARGE = 8192L // one inode/block, directory/index and atomic-publish scratch
@@ -37,44 +39,69 @@ internal class B2RequestBindings(private val directory: File) {
     }
     private fun key(scope: String, job: String, peer: String, id: String) =
         B2Digests.d("wrss.library-binary.v2/request-binding-file", listOf(scope, job, peer, id))
-    private fun existing(key: String): String? {
-        state.cache[key]?.let { return it }
+    private fun readBinding(key: String): String? {
         val target = File(directory, key)
         if (!target.exists()) return null
         if (Files.isSymbolicLink(target.toPath()) || !target.isFile || target.length() != 64L) fail("JOURNAL_CORRUPT")
         val bytes = ByteArray(64)
         target.inputStream().use { input -> java.io.DataInputStream(input).readFully(bytes); if (input.read() != -1) fail("JOURNAL_CORRUPT") }
         val value = B2Json.decode(bytes); B2Json.hex(value)
-        state.cache[key] = value
         return value
     }
-    fun check(scope: String, job: String, peer: String, id: String, digest: String) = synchronized(state) {
+    fun check(scope: String, job: String, peer: String, id: String, digest: String) {
         try {
-            initialize()
-            val old = existing(key(scope, job, peer, id))
+            val old = readBinding(key(scope, job, peer, id))
             if (old != null && old != digest) fail("REQUEST_CONFLICT")
         } catch (_: java.io.IOException) { fail("LOCAL_IO") }
     }
-    fun bind(scope: String, job: String, peer: String, id: String, digest: String, limit: Long) = synchronized(state) {
-        try {
+    fun bind(scope: String, job: String, peer: String, id: String, digest: String, limit: Long) {
+        val key = key(scope, job, peer, id)
+        val ceiling = minOf(33554432L, limit / 2)
+        val lock = synchronized(state) {
             initialize()
-            val key = key(scope, job, peer, id)
-            val old = existing(key)
-            if (old != null) {
-                if (old != digest) fail("REQUEST_CONFLICT")
-                if (state.charged > minOf(33554432L, limit / 2)) fail("STORAGE_PRESSURE")
-                return@synchronized
+            state.bindingLocks.getOrPut(key, ::BindingLock).also { it.users++ }
+        }
+        try {
+            synchronized(lock) {
+                val old = readBinding(key)
+                if (old != null) {
+                    if (old != digest) fail("REQUEST_CONFLICT")
+                    if (synchronized(state) { state.charged } > ceiling) fail("STORAGE_PRESSURE")
+                    if (synchronized(state) { key in state.unsynced }) syncDirectory(key)
+                    return
+                }
+                if (directory.usableSpace < 16384) fail("STORAGE_PRESSURE")
+                synchronized(state) {
+                    if (state.charged + CHARGE > ceiling) fail("STORAGE_PRESSURE")
+                    state.charged += CHARGE
+                }
+                var published = false
+                var temp: File? = null
+                try {
+                    temp = File.createTempFile("binding-", ".tmp", directory)
+                    FileOutputStream(temp).use { it.write(B2Json.utf8(digest)); it.fd.sync() }
+                    try {
+                        Files.createLink(File(directory, key).toPath(), temp.toPath())
+                        published = true
+                        synchronized(state) { state.unsynced.add(key) }
+                    } catch (_: java.nio.file.FileAlreadyExistsException) {
+                        if (readBinding(key) != digest) fail("REQUEST_CONFLICT")
+                    }
+                    syncDirectory(key)
+                } finally {
+                    if (!published) synchronized(state) { state.charged -= CHARGE }
+                    temp?.delete()
+                }
             }
-            if (state.charged + CHARGE > minOf(33554432L, limit / 2) || directory.usableSpace < 16384) fail("STORAGE_PRESSURE")
-            val temp = File.createTempFile("binding-", ".tmp", directory)
-            try {
-                FileOutputStream(temp).use { it.write(B2Json.utf8(digest)); it.fd.sync() }
-                try { Files.createLink(File(directory, key).toPath(), temp.toPath()); state.charged += CHARGE }
-                catch (_: java.nio.file.FileAlreadyExistsException) { if (existing(key) != digest) fail("REQUEST_CONFLICT") }
-                FileChannel.open(directory.toPath(), StandardOpenOption.READ).use { it.force(true) }
-                state.cache[key] = digest
-            } finally { temp.delete() }
         } catch (_: java.io.IOException) { fail("LOCAL_IO") }
+        finally {
+            synchronized(state) { if (--lock.users == 0) state.bindingLocks.remove(key) }
+        }
     }
+    private fun syncDirectory(key: String) {
+        FileChannel.open(directory.toPath(), StandardOpenOption.READ).use { it.force(true) }
+        synchronized(state) { state.unsynced.remove(key) }
+    }
+
     fun chargedBytes(): Long = synchronized(state) { initialize(); state.charged }
 }

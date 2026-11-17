@@ -36,6 +36,40 @@ class B2Files internal constructor(private val root: File, private val deleteCac
         } catch (e: java.io.IOException) { throw B2Exception("LOCAL_IO") }
         finally { temp.delete() }
     }
+    internal fun receiveIndex(job: String, descriptors: List<JSONObject>): B2ReceiveIndex {
+        val file = try { File.createTempFile("receive-index-", ".tmp", root) }
+        catch (_: java.io.IOException) { fail("LOCAL_IO") }
+        return working(job) { B2ReceiveIndex.create(file, descriptors, ::progress) }
+    }
+
+    internal fun writeChunk(bytes: ByteArray, length: Int, check: () -> Unit): File {
+        check()
+        val temp = try { File.createTempFile("publish-", ".tmp", root) } catch (_: java.io.IOException) { fail("LOCAL_IO") }
+        try {
+            FileOutputStream(temp).use { it.write(bytes, 0, length) }
+            return temp
+        } catch (e: Throwable) {
+            temp.delete()
+            if (e is java.io.IOException) fail("LOCAL_IO")
+            throw e
+        }
+    }
+
+    internal fun publishChunks(chunks: List<Pair<File, File>>, check: () -> Unit) {
+        if (chunks.isEmpty()) return
+        try {
+            for ((temp, _) in chunks) {
+                check()
+                FileChannel.open(temp.toPath(), StandardOpenOption.WRITE).use { it.force(true) }
+            }
+            for ((temp, target) in chunks) {
+                check()
+                java.nio.file.Files.move(temp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            }
+            FileChannel.open(root.toPath(), StandardOpenOption.READ).use { it.force(true) }
+        } catch (_: java.io.IOException) { fail("LOCAL_IO") }
+    }
+
     internal fun verified(file: File, size: Long, hash: String): Boolean = file.isFile && file.length() == size && file.inputStream().use { hashStream(it) } == hash
     internal fun hashStream(input: java.io.InputStream): String {
         val digest = java.security.MessageDigest.getInstance("SHA-256"); val buffer = ByteArray(65536)

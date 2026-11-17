@@ -44,9 +44,18 @@ class B2Receiver(
     private val light = java.util.concurrent.ConcurrentHashMap<String, JSONObject>()
     private val firstEpoch = java.util.concurrent.ConcurrentHashMap<Int, Long>()
     private val streamJobs = java.util.concurrent.ConcurrentHashMap<Int, String>()
-    private val slots = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
+    @Volatile private var receiveIndex: B2ReceiveIndex? = null
+    private val applied = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val finishedSources = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val flows = mapOf(1 to B2Flow(1), 2 to B2Flow(2))
+    private val epochs = Any()
+    private val active = mutableSetOf<String>()
     fun fenceNow() { revoked = true }
+    internal fun closeIndex() = synchronized(epochs) {
+        receiveIndex?.close()
+        receiveIndex = null
+    }
+    internal fun sourceCompleted(job: String) { finishedSources.add(job) }
     private val leases = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val begun = mutableSetOf<String>()
     private val scope get() = auth.accountScope
@@ -156,37 +165,126 @@ class B2Receiver(
             "expiresAtMillis" to j.n("expiresAtMillis"), "items" to JSONArray(), "next" to null,
             "done" to true, "completion" to j.get("completion")), j.n("epoch"))
     }
-    /** Validated before reading payload. This compact slot index contains no chunk hashes. */
-    suspend fun inspect(h: B2DataHeader, busy: Boolean = false): Pair<JSONObject, String> {
+    /** Read only committed registration here. The socket reader never acquires
+     * the writer lane or waits for a chunk to be written or synced. */
+    suspend fun inspect(h: B2DataHeader, busy: Boolean = false): Pair<JSONObject, String> =
+        inspect(h) { _, _ -> if (busy) fail("BUSY") }
+
+    internal suspend fun inspect(h: B2DataHeader, credit: (JSONObject, String) -> Unit): Pair<JSONObject, String> {
         check()
-        val job = streamJobs[h.stream] ?: fail("AUTH_REVOKED")
+        val job = jobFor(h.stream)
         val j = light[job] ?: fail("AUTH_REVOKED")
-        val oid = slots[job]?.getOrNull(h.slot) ?: fail()
         if (j.s("state") == "PLANNING") fail("MANIFEST_INCOMPLETE")
-        val p = obj("objectId" to oid, "chunkIndex" to h.index)
-        val r = B2Wire.request("putChunk", job, j.s("planDigest"), h.epoch, p, h.requestId)
+        val registration = (receiveIndex ?: fail()).chunk(h.slot, h.index, h.length)
+        val oid = registration.objectId
+        val r = B2Wire.request("putChunk", job, j.s("planDigest"), h.epoch,
+            obj("objectId" to oid, "chunkIndex" to h.index), h.requestId)
         if (h.digest != r.s("requestDigest")) fail("REQUEST_CONFLICT")
         files.checkRequest(scope, job, sourcePeer, h.requestId, h.digest)
-        val old = isOld(h)
-        if (!old) fence(j, r)
-        val d = objectRow(job, oid).o("descriptor")
-        if (h.index >= d.a("chunkHashes").length() || h.length.toLong() != minOf(65536L, d.n("size") - h.index * 65536L)) fail()
-        val hash = d.a("chunkHashes").getString(h.index)
+        val hash = registration.hash
+        val old = synchronized(epochs) {
+            isOld(h).also { if (!it) flows.getValue(h.stream).receive(h) }
+        }
         if (!old) {
-            flows.getValue(h.stream).receive(h)
-            // Hold the in-use lease through this bounded (60 s absolute) DATA frame.
-            leases[job] = monotonic() + 60000
-            if (busy) throw B2RejectedData(r, hash, "BUSY")
-            try { store.exclusive {
+            try {
                 fence(j, r)
-                val current = objectRow(job, oid)
-                if (receipt(j, current) == null) { runnable(j, d); admit(j, d) }
-            } } catch (e: B2Exception) {
-                if (B2Results.errorValue(e.code).s("recovery") in listOf("WAIT", "QUERY", "BEGIN")) throw B2RejectedData(r, hash, e.code)
+                credit(r, hash)
+                if (oid !in applied) {
+                    if (terminal(j)) fail("JOB_CANCELLED")
+                    if (!applied.containsAll(registration.dependencies)) fail("DEPENDENCIES_PENDING")
+                    val cap = objectLimit(j)
+                    synchronized(epochs) {
+                        if (isOld(h)) return r to hash
+                        synchronized(active) {
+                            if (cap == 0L || oid !in active && active.size >= cap) fail("WINDOW_FULL")
+                            active.add(oid)
+                        }
+                    }
+                }
+                // Hold the in-use lease through this bounded DATA frame.
+                leases[job] = monotonic() + 60000
+            } catch (e: B2Exception) {
+                if (B2Results.errorValue(e.code).s("recovery") in listOf("WAIT", "QUERY", "BEGIN"))
+                    throw B2RejectedData(r, hash, e.code)
                 throw e
             }
         }
         return r to hash
+    }
+
+    internal fun current(stream: Int, epoch: Long): Boolean =
+        !revoked && streamJobs[stream]?.let { light[it]?.n("epoch") } == epoch
+
+    internal fun streamFor(job: String): Int = streamJobs.entries.firstOrNull { it.value == job }?.key ?: fail("AUTH_REVOKED")
+
+    internal fun window(stream: Int): Int = lim(light[jobFor(stream)] ?: fail("AUTH_REVOKED")).n("maxInFlightChunks").toInt()
+
+    internal data class WrittenChunk(val header: B2DataHeader, val request: JSONObject, val temp: File)
+
+    internal fun writeChunk(frame: B2Frame.Data, request: JSONObject): WrittenChunk? {
+        if (!current(frame.header.stream, frame.header.epoch)) return null
+        val temp = files.writeChunk(frame.bytes, frame.header.length) {
+            check()
+            if (!current(frame.header.stream, frame.header.epoch)) fail("STALE_EPOCH")
+        }
+        return WrittenChunk(frame.header, request, temp)
+    }
+
+    internal fun ack(stream: Int, epoch: Long, entries: List<B2AckEntry>): B2Frame.Ack? = synchronized(epochs) {
+        if (!current(stream, epoch)) null else flows.getValue(stream).durable(epoch, entries)
+    }
+
+    /** The staged temp files can be written ahead while this lane syncs a group.
+     * Canonical files and the single FULL journal transaction belong to this grant. */
+    internal data class CommittedChunk(val chunk: WrittenChunk, val disposition: Int, val progressKey: String? = null)
+
+    internal fun reportChunkProgress(key: String) { progress(key) }
+
+    internal suspend fun commitChunks(group: List<WrittenChunk>): List<CommittedChunk> = store.exclusive {
+        val first = group.first().header
+        if (!current(first.stream, first.epoch)) return@exclusive emptyList()
+        val j = job(group.first().request.s("jobId"))
+        group.forEach { fence(j, it.request) }
+        val staged = mutableListOf<Pair<File, File>>()
+        val outcomes = group.map { chunk ->
+            val oid = chunk.request.o("payload").s("objectId")
+            val row = objectRow(j.s("jobId"), oid)
+            if (receipt(j, row) != null) return@map CommittedChunk(chunk, 2)
+            if (terminal(j)) fail("JOB_CANCELLED")
+            val descriptor = row.o("descriptor")
+            runnable(j, descriptor)
+            staged.add(chunk.temp to files.chunk(scope, j.s("jobId"), oid, chunk.header.index))
+            CommittedChunk(chunk, 1, receiveDirection + ":" + B2Progress.chunk(descriptor, chunk.header.index))
+        }
+        val budget = stagingLimit(j)
+        if (files.usedBytes() > budget) fail("STORAGE_PRESSURE")
+        files.publishChunks(staged) { fence(j, group.first().request) }
+        if (staged.isNotEmpty()) fault("afterChunkDurable")
+        store.transaction {
+            for ((chunk, disposition) in outcomes) {
+                fence(j, chunk.request)
+                val p = chunk.request.o("payload")
+                val oid = p.s("objectId")
+                val row = objectRow(j.s("jobId"), oid)
+                val receipt = if (disposition == 2) receipt(j, row) else null
+                bind(j, chunk.request, obj("objectId" to oid, "chunkIndex" to p.n("chunkIndex"),
+                    "chunkState" to if (disposition == 1) "STAGED" else null,
+                    "objectState" to if (disposition == 1) "PARTIAL" else "APPLIED", "receipt" to receipt))
+                if (disposition == 1) {
+                    val hash = row.o("descriptor").a("chunkHashes").getString(chunk.header.index)
+                    store.put(scope, "chunk", key(j.s("jobId"), oid, chunk.header.index.toString()), obj("sha256" to hash))
+                    if (!row.optBoolean("active", false)) {
+                        row.put("active", true)
+                        store.put(scope, "object", objectKey(j.s("jobId"), oid), row)
+                    }
+                }
+            }
+            if (staged.isNotEmpty()) j.put("state", "TRANSFERRING")
+            touch(j, clock())
+            fence(j, group.first().request)
+        }
+        light[j.s("jobId")] = copy(j)
+        outcomes
     }
     fun cancellationRequests(reason: String): List<JSONObject> {
         check()
@@ -244,12 +342,31 @@ class B2Receiver(
             bind(j, r); touch(j, now)
         }
         val stream = if (p.s("direction") == "phoneToWatch") 1 else 2
-        val prior = streamJobs.putIfAbsent(stream, id)
-        if (prior != null && prior != id) fail("PLAN_CONFLICT")
-        firstEpoch.putIfAbsent(stream, epoch)
-        flows.getValue(stream).bind(id, r.s("planDigest"), p.s("selectionDigest"), epoch)
-        if (old != null) slots[id] = objects(id).map { it.o("descriptor").s("objectId") }
-        light[id] = copy(j)
+        val rows = if (old != null && !sameLease) objects(id) else null
+        val resumedIndex = if (receiveIndex == null && rows != null && rows.isNotEmpty() && j.s("state") != "PLANNING")
+            files.receiveIndex(id, rows.map { it.o("descriptor") }) else null
+        synchronized(epochs) {
+            val prior = streamJobs.putIfAbsent(stream, id)
+            if (prior != null && prior != id) fail("PLAN_CONFLICT")
+            firstEpoch.putIfAbsent(stream, epoch)
+            flows.getValue(stream).bind(id, r.s("planDigest"), p.s("selectionDigest"), epoch,
+                limits.n("maxInFlightChunks").toInt(), limits.n("maxInFlightBytes").toInt())
+            if (rows != null) {
+                applied.clear()
+                rows.filter { receipt(j, it) != null }.forEach { applied.add(it.o("descriptor").s("objectId")) }
+                synchronized(active) {
+                    active.clear()
+                    rows.filter { it.optBoolean("active", false) && it.nil("receipt") }
+                        .forEach { active.add(it.o("descriptor").s("objectId")) }
+                }
+            }
+            if (revoked) {
+                resumedIndex?.close()
+                fail("AUTH_REVOKED")
+            }
+            if (resumedIndex != null) receiveIndex = resumedIndex
+            light[id] = copy(j)
+        }
         begun.add(id)
         cleanupApplied(j)
         return B2Results.answer(r, obj("disposition" to if (old == null) "CREATED" else "RESUMED", "selectionDigest" to p.s("selectionDigest"), "state" to j.s("state"), "expiresAtMillis" to j.n("expiresAtMillis"), "nextManifestPage" to j.n("nextManifestPage"), "completion" to j.get("completion")), epoch)
@@ -275,7 +392,7 @@ class B2Receiver(
         val full = index + 1 == counts.size
         if (full) { if (all.size.toLong() != ds.n("objectCount") || B2Digests.objects(all.map { it.s("objectId") }) != ds.s("objectsRoot")) fail("PLAN_CONFLICT"); validateGraph(all)
             // Whole-plan physical peak admission precedes READY and all DATA/apply.
-            val incoming = all.sumOf { it.n("size") * 3 + B2Json.utf8(it.toString()).size + 1024 }
+            val incoming = all.sumOf { it.n("size") * 3 + B2Json.utf8(it.toString()).size + B2ReceiveIndex.cost(it) + 1024 }
             val other = store.list(scope, "job").filter { it.first != j.s("jobId") && !terminal(it.second) }.sumOf { it.second.optLong("stagingReservation", 0) }
             if (incoming + other + files.dataBytes() + lim(j).n("maxJournalBytes") > lim(j).n("maxStagingBytes") || incoming + other + lim(j).n("maxJournalBytes") + 1048576 > files.availableBytes()) fail("STORAGE_PRESSURE")
             j.put("stagingReservation", incoming)
@@ -286,9 +403,18 @@ class B2Receiver(
             entries.forEach { d -> store.put(scope, "object", objectKey(j.s("jobId"), d.s("objectId")), obj("jobId" to j.s("jobId"), "descriptor" to d, "receipt" to null)) }
             store.put(scope, "page", key(j.s("jobId"), index.toString()), obj("digest" to p.s("pageDigest"), "result" to result))
             j.put("state", result.s("state")).put("nextManifestPage", index + 1); store.put(scope, "job", j.s("jobId"), j); bind(j, r, result)
-        }; light[j.s("jobId")] = copy(j); if (full) slots[j.s("jobId")] = all.map { it.s("objectId") }; return result
+        }
+        if (full) {
+            val index = files.receiveIndex(j.s("jobId"), all)
+            synchronized(epochs) {
+                if (revoked) { index.close(); fail("AUTH_REVOKED") }
+                receiveIndex = index
+            }
+        }
+        light[j.s("jobId")] = copy(j)
+        return result
     }
-    private suspend fun receipt(j: JSONObject, row: JSONObject): JSONObject? {
+    private fun receipt(j: JSONObject, row: JSONObject): JSONObject? {
         if (row.nil("receipt")) return null
         val r = try { row.o("receipt").also { B2Results.receipt(it) } } catch (_: B2Exception) { fail("RECEIPT_CONFLICT") }
         if (r.s("jobId") != j.s("jobId") || r.s("planDigest") != j.s("planDigest") || r.s("receiverDeviceId") != (if (receiveDirection == "watchToPhone") auth.phoneDeviceId else auth.watchDeviceId) || r.s("objectId") != row.o("descriptor").s("objectId")) fail("RECEIPT_CONFLICT")
@@ -317,6 +443,7 @@ class B2Receiver(
         if (missing.size == d.a("chunkHashes").length() && row.optBoolean("active", false)) {
             // Lost/corrupt cache bytes hold no active object buffer after revalidation.
             row.put("active", false); store.put(scope, "object", objectKey(j.s("jobId"), d.s("objectId")), row)
+            synchronized(active) { active.remove(d.s("objectId")) }
         }
         val staged = missing.isEmpty() && files.verified(files.composed(scope, j.s("jobId"), d.s("objectId")), d.n("size"), d.s("sha256"))
         return (if (staged) "STAGED" else if (missing.size < d.a("chunkHashes").length()) "PARTIAL" else "PENDING") to missing
@@ -352,19 +479,26 @@ class B2Receiver(
     private suspend fun runnable(j: JSONObject, d: JSONObject) {
         for (id in d.a("dependsOn").strings()) if (receipt(j, objectRow(j.s("jobId"), id)) == null) fail("DEPENDENCIES_PENDING")
     }
+    private suspend fun objectLimit(j: JSONObject): Long {
+        val max = lim(j).n("maxInFlightObjects")
+        if (auth.bindings.size == 1) return max
+        if (receiveDirection == "phoneToWatch") return (max + 1) / 2
+        if (max > 1) return max / 2
+        val forward = auth.bindings.first { it.s("direction") == "phoneToWatch" }.s("jobId")
+        if (forward in finishedSources) return 1
+        if (store.get(scope, "peerAck", forward) == null) return 0
+        sourceCompleted(forward)
+        return 1
+    }
     private suspend fun admit(j: JSONObject, d: JSONObject) {
         val row = objectRow(j.s("jobId"), d.s("objectId"))
         if (!row.optBoolean("active", false)) {
-            val active = objects(j.s("jobId")).count { it.optBoolean("active", false) && it.nil("receipt") }
-            val max = lim(j).n("maxInFlightObjects")
-            val cap = if (auth.bindings.size == 2) {
-                if (receiveDirection == "phoneToWatch") (max + 1) / 2
-                else if (max == 1L) {
-                    val forward = auth.bindings.first { it.s("direction") == "phoneToWatch" }.s("jobId")
-                    if (store.get(scope, "peerAck", forward) != null) 1L else 0L
-                } else max / 2
-            } else max
-            if (active >= cap) fail("WINDOW_FULL")
+            val cap = objectLimit(j)
+            synchronized(active) {
+                val oid = d.s("objectId")
+                if (oid !in active && active.size >= cap) fail("WINDOW_FULL")
+                active.add(oid)
+            }
             row.put("active", true); store.put(scope, "object", objectKey(j.s("jobId"), d.s("objectId")), row)
         }
     }
@@ -424,6 +558,8 @@ class B2Receiver(
             store.put(scope, "job", j.s("jobId"), j)
             obj("state" to "APPLIED", "receipt" to rc).also { bind(j, r, it) }
         }
+        applied.add(d.s("objectId"))
+        synchronized(active) { active.remove(d.s("objectId")) }
         progress(receiveDirection + ":" + B2Progress.applied(d))
         fault("afterApplyCommit")
         files.release(scope, j.s("jobId"), d)

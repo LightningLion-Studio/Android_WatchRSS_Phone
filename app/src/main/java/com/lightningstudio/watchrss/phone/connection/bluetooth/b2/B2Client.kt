@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 
 import kotlinx.coroutines.*
+import kotlinx.coroutines.selects.select
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -25,6 +26,7 @@ class B2Client(
     private var bindings = emptyList<JSONObject>()
     private val waitBackoff = B2Backoff()
     private var lastGrantedEpoch = 0L
+    private var rejectedChunks = 0
     private var sourceObjects = emptyList<JSONObject>()
     private var account = ""
     private var phone = ""
@@ -52,7 +54,7 @@ class B2Client(
         if (generation != connectionGeneration) fail("STALE_EPOCH")
         authorize(); if (job != null && job in cancelledSources && phase != "cancel") fail("JOB_CANCELLED")
         B2Session.validateCorrelation(request, answer)
-        if (!answer.getBoolean("success")) fail(answer.o("error").s("code"))
+        if (!answer.getBoolean("success")) throw B2Exception(answer.o("error").s("code"), answer.o("error").n("retryAfterMillis"))
         val result = answer.o("result")
         if (phase == "begin" && answer.n("epoch") != lastGrantedEpoch) { waitBackoff.reset(); lastGrantedEpoch = answer.n("epoch") }
         if (phase in listOf("manifestPage", "apply")) waitBackoff.reset()
@@ -119,25 +121,26 @@ class B2Client(
     /** B2 uses the exact persisted plan and files. Errors are returned to A/B/C
      * orchestration as typed errors; this method never reconnects or downgrades. */
     suspend fun send(job: String): JSONObject {
+        var resume = false
         while (true) {
-            try { return transfer(job) }
+            rejectedChunks = 0
+            try { return transfer(job, resume) }
             catch (e: B2Exception) {
-                // In-connection state recovery is NOT a disconnect/reconnect attempt.
-                when (e.code) {
-                    "WINDOW_FULL", "BUSY" -> delay(waitBackoff.next())
-                    "LEASE_EXPIRED", "MANIFEST_INCOMPLETE", "CHUNKS_MISSING", "DEPENDENCIES_PENDING" -> delay(waitBackoff.next())
-                    else -> throw e
-                }
+                // A multiplexed window can consume several entries of the peer's
+                // recovery bucket at once. Give those entries time to refill.
+                if (e.code !in setOf("WINDOW_FULL", "BUSY", "LEASE_EXPIRED", "MANIFEST_INCOMPLETE", "CHUNKS_MISSING", "DEPENDENCIES_PENDING")) throw e
+                delay(maxOf(waitBackoff.next(e.retryAfterMillis), rejectedChunks * 250L))
+                resume = true
                 authorize()
             }
         }
     }
-    private suspend fun transfer(job: String): JSONObject {
+    private suspend fun transfer(job: String, resume: Boolean): JSONObject {
         val b = bindings.find { it.s("jobId") == job && it.s("direction") == "phoneToWatch" } ?: fail("AUTH_REVOKED")
         val o = offer!!; val offered = offerReply!!
         val saved = store.get(account, "sourceJob", job)
         var ds: List<JSONObject>? = null
-        val p = if (b.s("intent") == "resume") {
+        val p = if (b.s("intent") == "resume" || resume && saved != null && saved.has("epoch")) {
             val old = saved ?: fail("NOT_FOUND"); copy(old.o("description")).put("intent", "resume")
         } else {
             ds = snapshots.descriptors(account, o.o("phoneSnapshot")).filter { d -> b.o("selection").a("kinds").values().any { (it as JSONObject).s("kind") == d.s("kind") } }
@@ -166,7 +169,9 @@ class B2Client(
         } catch (e: Throwable) { ready.completeExceptionally(e); throw e }
         finally { sourceBegins.remove(job, ready) }
         val epoch = began.n("epoch"); val br = began.o("result")
-        session.bindSource(1, job, plan, p.s("selectionDigest"), epoch)
+        val limits = p.o("selection").o("limits")
+        val window = limits.n("maxInFlightChunks").toInt()
+        session.bindSource(1, job, plan, p.s("selectionDigest"), epoch, window, limits.n("maxInFlightBytes").toInt())
         if (br.s("state") == "CANCELLED") fail("JOB_CANCELLED")
         if (br.s("state") == "COMPLETE") { val c = br.o("completion"); acceptCompletion(job, plan, p, c); session.finishSource(job); return c }
         try { ds = ds ?: snapshots.descriptors(account, p.o("phoneSnapshot")).filter { d -> b.o("selection").a("kinds").values().any { (it as JSONObject).s("kind") == d.s("kind") } } }
@@ -222,9 +227,11 @@ class B2Client(
             val ready = B2Scheduling.runnable(objects, applied.keys, observedStates, slots)
             for (d in ready) {
                 val ranges = observed[d.s("objectId")] ?: fail("RECEIPT_CONFLICT")
-                for ((from, to) in ranges) for (index in from until to) {
-                    val bytes = try { withHeartbeat(job, plan, epoch) { snapshots.read(account, p.o("phoneSnapshot"), d, index) } } catch (e: B2Exception) { if (e.code == "SOURCE_CHANGED") cancel(job, plan, epoch, "SOURCE_CHANGED"); throw e }
-                    put(job, plan, epoch, d.s("objectId"), index, bytes)
+                try {
+                    transferChunks(job, plan, epoch, p.o("phoneSnapshot"), d, ranges, window)
+                } catch (e: B2Exception) {
+                    if (e.code == "SOURCE_CHANGED") cancel(job, plan, epoch, "SOURCE_CHANGED")
+                    throw e
                 }
                 val rc = apply(job, plan, epoch, d.s("objectId")); validateReceipt(rc, job, plan, d.s("objectId")); applied[d.s("objectId")] = rc
             }
@@ -281,30 +288,80 @@ class B2Client(
         val began = call("begin", job, plan, null, p)
         if (began.o("result").s("state") !in listOf("COMPLETE", "CANCELLED")) {
             val epoch = began.n("epoch")
-            session.bindSource(1, job, plan, p.s("selectionDigest"), epoch)
+            val limits = p.o("selection").o("limits")
+            session.bindSource(1, job, plan, p.s("selectionDigest"), epoch,
+                limits.n("maxInFlightChunks").toInt(), limits.n("maxInFlightBytes").toInt())
             cancel(job, plan, epoch, reason)
-            session.finishSource(job)
+            session.finishSource(job, completed = false)
         }
         store.exclusive { store.transaction {
             source.put("state", if (began.o("result").s("state") == "COMPLETE") "COMPLETE" else "CANCELLED")
             store.put(account, "sourceJob", job, source)
         } }
     }
+    /** Payload ownership ends at the writer. The source only retains settlement
+     * handles and waits for any completion, so a selective ACK returns credit. */
+    private suspend fun transferChunks(job: String, plan: String, epoch: Long, snapshot: JSONObject,
+        descriptor: JSONObject, ranges: List<Pair<Int, Int>>, window: Int) {
+        val oid = descriptor.s("objectId")
+        val slot = sourceObjects.indexOfFirst { it.s("objectId") == oid }
+        if (slot < 0) fail()
+        val indices = ranges.asSequence().flatMap { (from, to) -> (from until to).asSequence() }.iterator()
+        val queued = linkedMapOf<Deferred<Int>, Int>()
+        var error: B2Exception? = null
+        while (queued.isNotEmpty() || error == null && indices.hasNext()) {
+            if (queued.isNotEmpty()) {
+                val settled = queued.keys.firstOrNull { it.isCompleted }
+                    ?: if (queued.size == window || error != null || !indices.hasNext()) {
+                        select<Deferred<Int>> { for (pending in queued.keys) pending.onJoin { pending } }
+                    } else null
+                if (settled != null) {
+                    val index = queued.remove(settled)!!
+                    try {
+                        if (settled.await() == 1) progress("phoneToWatch:" + B2Progress.chunk(descriptor, index))
+                    } catch (e: B2Exception) {
+                        val recovery = B2Results.errorValue(e.code).s("recovery")
+                        if (recovery !in listOf("QUERY", "WAIT", "BEGIN")) throw e
+                        rejectedChunks++
+                        val previous = error
+                        if (previous == null || e.code == "LEASE_EXPIRED" ||
+                            previous.code != "LEASE_EXPIRED" && e.retryAfterMillis > previous.retryAfterMillis) error = e
+                    }
+                    continue
+                }
+            }
+            val index = indices.next()
+            val bytes = withHeartbeat(job, plan, epoch) { snapshots.read(account, snapshot, descriptor, index) }
+            queued[session.queueData(chunkRequest(job, plan, epoch, oid, index), slot, bytes)] = index
+        }
+        error?.let { throw it }
+        waitBackoff.reset()
+    }
+
     suspend fun put(job: String, plan: String, epoch: Long, oid: String, index: Int, bytes: ByteArray) {
-        val p = obj("objectId" to oid, "chunkIndex" to index)
-        val digest = B2Digests.request(job, plan, "putChunk", p)
+        val slot = sourceObjects.indexOfFirst { it.s("objectId") == oid }
+        if (slot < 0) fail()
+        val disposition = session.sendData(chunkRequest(job, plan, epoch, oid, index), slot, bytes)
+        if (disposition == 1) progress("phoneToWatch:" + B2Progress.chunk(sourceObjects[slot], index))
+        waitBackoff.reset()
+    }
+
+    private suspend fun chunkRequest(job: String, plan: String, epoch: Long, oid: String, index: Int): JSONObject {
+        val payload = obj("objectId" to oid, "chunkIndex" to index)
+        val digest = B2Digests.request(job, plan, "putChunk", payload)
         val id = B2Digests.d("wrss.library-binary.v2/source-request", listOf(job, digest)).take(32)
         // Persist operation binding before emitting DATA. Retries and reconnects retain it.
-        store.exclusive { authorize(); val key = job + ":" + oid + ":" + index
+        store.exclusive {
+            authorize()
+            val key = "$job:$oid:$index"
             val old = store.get(account, "sourceChunk", key)
             if (old != null && (old.s("requestDigest") != digest || old.s("requestId") != id)) fail("JOURNAL_CORRUPT")
-            if (old == null) { store.budget(1024); store.put(account, "sourceChunk", key, obj("requestId" to id, "requestDigest" to digest)) }
+            if (old == null) {
+                store.budget(1024)
+                store.put(account, "sourceChunk", key, obj("requestId" to id, "requestDigest" to digest))
+            }
         }
-        val slot = sourceObjects.indexOfFirst { it.s("objectId") == oid }; if (slot < 0) fail()
-        val disposition = session.sendData(B2Wire.request("putChunk", job, plan, epoch, p, id), slot, bytes)
-        waitBackoff.reset()
-        val d = sourceObjects[slot]
-        if (disposition == 1) progress("phoneToWatch:" + B2Progress.chunk(d, index))
+        return B2Wire.request("putChunk", job, plan, epoch, payload, id)
     }
 
     suspend fun apply(job: String, plan: String, epoch: Long, oid: String): JSONObject {

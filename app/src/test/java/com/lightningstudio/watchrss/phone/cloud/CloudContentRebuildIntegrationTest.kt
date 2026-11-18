@@ -82,7 +82,11 @@ class CloudContentRebuildIntegrationTest {
     private inner class Fixture(val initialEmpty:Boolean=true, val failStage:String?=null, val alwaysFail:Boolean=false, val backend:String="https://test.invalid", val accountSession:PhoneAccountSession=session) {
         val context:Context=RuntimeEnvironment.getApplication()
         val scope=CoroutineScope(SupervisorJob()+Dispatchers.Default)
-        val db=Room.inMemoryDatabaseBuilder(context,PhoneCompanionDatabase::class.java).addCallback(PhoneCompanionDatabase.ARTICLE_PROVENANCE_CALLBACK).allowMainThreadQueries().build()
+        val db = Room.inMemoryDatabaseBuilder(context, PhoneCompanionDatabase::class.java)
+            .addCallback(NoteEditorPreferenceMigration)
+            .addCallback(PhoneCompanionDatabase.ARTICLE_PROVENANCE_CALLBACK)
+            .allowMainThreadQueries()
+            .build()
         val bookDir=java.io.File.createTempFile("cloud-r45-local-books-","",context.cacheDir).apply{delete();mkdirs()}
         val books=com.lightningstudio.watchrss.phone.data.book.ImportedBookStore(db,bookDir,null,"phone")
         val repository=PhoneCompanionRepository(db.phoneSavedItemDao(),db.phoneArticleDao(),db.phoneRssSourceDao(),"phone",syncChangeLogDao=db.syncChangeLogDao(),syncPeerStateDao=db.syncPeerStateDao(),appMetaDao=db.appMetaDao(),cloudBackendBaseUrl="https://test.invalid",books=books)
@@ -739,6 +743,20 @@ class CloudContentRebuildIntegrationTest {
         assertEquals(row.contentHtml,f.repository.getArticle(row.articleId)!!.contentHtml)
         assertEquals(row.contentText,f.repository.getArticle(row.articleId)!!.contentText)
     }
+    @Test fun cloudRebuildPreservesEditorPreferenceUntilOwnerReplacement() = runBlocking {
+        val f = fixture()
+        val notes = notes(f)
+        val saved = notes.save("editor-note", "Title", "legacy\r\nbody\r\n", editorSourceMode = true)
+
+        assertTrue(f.service.syncNow(manual = true).snapshotUploaded)
+        assertEquals(saved, f.db.noteDao().note(saved.noteId))
+        assertEquals(true, notes.editorSourceMode(saved.noteId))
+
+        f.service.resolveLibraryOwner(merge = false)
+        assertNull(f.db.noteDao().note(saved.noteId))
+        assertNull(notes.editorSourceMode(saved.noteId))
+    }
+
     @Test fun clearedServerRebuildsRealRecordsAndEncryptedSnapshotWithoutLosingIdentityOrLocalLibrary()=runBlocking {
         val f=fixture();val result=f.service.syncNow(manual=true);assertTrue(result.snapshotUploaded);assertEquals(1,f.completed);assertTrue(f.recordsPosted>0)
         assertEquals(CloudSyncPhase.COMPLETE,f.service.state.value.phase);assertEquals(777,f.service.state.value.member!!.usedBytes);assertEquals(0,f.service.state.value.member!!.reservedBytes)

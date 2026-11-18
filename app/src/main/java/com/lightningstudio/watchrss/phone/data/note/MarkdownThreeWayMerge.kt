@@ -7,18 +7,41 @@ sealed interface MarkdownMergeResult {
 
 /** Conservative line-based diff3: it only auto-merges edits with an unambiguous shared base. */
 object MarkdownThreeWayMerge {
-    fun merge(base: String, local: String, remote: String): MarkdownMergeResult = when {
+    fun merge(base: String, local: String, remote: String): MarkdownMergeResult =
+        merge(base, local, remote, syncV2 = false)
+
+    fun mergeSyncV2(base: String, local: String, remote: String): MarkdownMergeResult =
+        merge(base, local, remote, syncV2 = true)
+
+    private fun merge(base: String, local: String, remote: String, syncV2: Boolean): MarkdownMergeResult = when {
         local == remote -> MarkdownMergeResult.Merged(local)
         local == base -> MarkdownMergeResult.Merged(remote)
         remote == base -> MarkdownMergeResult.Merged(local)
-        else -> mergeIndependentSingleHunks(base, local, remote)
+        syncV2 && base.isEmpty() -> MarkdownMergeResult.Conflict
+        else -> mergeIndependentSingleHunks(base, local, remote, syncV2)
     }
 
-    private fun mergeIndependentSingleHunks(base: String, local: String, remote: String): MarkdownMergeResult {
+    private fun mergeIndependentSingleHunks(base: String, local: String, remote: String, syncV2: Boolean): MarkdownMergeResult {
         val source = base.lines()
-        val localHunk = singleHunk(source, local.lines()) ?: return MarkdownMergeResult.Conflict
-        val remoteHunk = singleHunk(source, remote.lines()) ?: return MarkdownMergeResult.Conflict
+        fun editedLines(text: String) = if (syncV2 && text.isEmpty()) emptyList() else text.lines()
+        val localHunk = singleHunk(source, editedLines(local)) ?: return MarkdownMergeResult.Conflict
+        val remoteHunk = singleHunk(source, editedLines(remote)) ?: return MarkdownMergeResult.Conflict
         if (localHunk.end > remoteHunk.start && remoteHunk.end > localHunk.start) return MarkdownMergeResult.Conflict
+        if (syncV2) {
+            val (first, second) = listOf(localHunk, remoteHunk).sortedWith(
+                compareBy<Hunk> { it.start }.thenBy { it.end }.thenComparator { a, b ->
+                    compareInsertions(a.replacement, b.replacement)
+                }
+            )
+            // A zero-width insertion at the same start precedes the replacement.
+            return MarkdownMergeResult.Merged(buildList {
+                addAll(source.subList(0, first.start))
+                addAll(first.replacement)
+                addAll(source.subList(first.end, second.start))
+                addAll(second.replacement)
+                addAll(source.subList(second.end, source.size))
+            }.joinToString("\n"))
+        }
         // A zero-width insertion touching either edge is ambiguous. Reject it
         // before applying offsets, including two inserts at the same position.
         if (localHunk.start == localHunk.end && localHunk.start in remoteHunk.start..remoteHunk.end ||
@@ -29,6 +52,14 @@ object MarkdownThreeWayMerge {
             merged.addAll(hunk.start, hunk.replacement)
         }
         return MarkdownMergeResult.Merged(merged.joinToString("\n"))
+    }
+
+    private fun compareInsertions(a: List<String>, b: List<String>): Int {
+        for (index in 0 until minOf(a.size, b.size)) {
+            val order = b[index].compareTo(a[index])
+            if (order != 0) return order
+        }
+        return b.size.compareTo(a.size)
     }
 
     private fun singleHunk(base: List<String>, changed: List<String>): Hunk? {

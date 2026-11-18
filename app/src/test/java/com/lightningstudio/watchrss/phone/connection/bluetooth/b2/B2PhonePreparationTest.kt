@@ -68,18 +68,25 @@ class B2PhonePreparationTest {
 
     @Test fun watchProbeLimitsCoverSingleAndAggregateBodyPeaks() {
         val limits = B2Wire.s2Limits().put("maxJournalBytes", 32L * MIB)
-        for (size in listOf(16 * MIB, 16 * MIB - 1)) {
-            assertEquals("LIMIT_EXCEEDED", assertThrows(B2Exception::class.java) {
-                B2WatchReceiveBudget(limits).add(descriptor(size))
-            }.code)
+        for (delta in -1..0) {
+            B2WatchReceiveBudget(limits).add(descriptor(16 * MIB + delta))
+            B2WatchReceiveBudget(limits).apply {
+                add(descriptor(8 * MIB))
+                add(descriptor(8 * MIB + delta))
+            }
         }
-        val half = descriptor(8 * MIB)
-        val one = B2WatchReceiveBudget(limits)
-        one.add(half)
-        assertEquals("LIMIT_EXCEEDED", assertThrows(B2Exception::class.java) { one.add(half) }.code)
+        assertEquals("LIMIT_EXCEEDED", assertThrows(B2Exception::class.java) {
+            B2WatchReceiveBudget(limits).add(descriptor(16 * MIB + 1))
+        }.code)
+        assertEquals("LIMIT_EXCEEDED", assertThrows(B2Exception::class.java) {
+            B2WatchReceiveBudget(limits).apply {
+                add(descriptor(8 * MIB))
+                add(descriptor(8 * MIB + 1))
+            }
+        }.code)
 
         val small = descriptor(3 * MIB)
-        val peak = 64L * MIB + 4L * (3 * MIB) + B2Json.utf8(small.toString()).size + 1024L
+        val peak = 64L * MIB + 4L * (3 * MIB)
         B2WatchReceiveBudget(B2Wire.s2Limits().put("maxStagingBytes", peak).put("maxObjectBytes", 3 * MIB))
             .add(small)
         assertEquals("LIMIT_EXCEEDED", assertThrows(B2Exception::class.java) {
@@ -87,6 +94,14 @@ class B2PhonePreparationTest {
         }.code)
         assertEquals("LIMIT_EXCEEDED", assertThrows(B2Exception::class.java) {
             B2WatchReceiveBudget(B2Wire.s2Limits().put("maxObjectBytes", 3 * MIB - 1)).add(small)
+        }.code)
+    }
+
+    @Test fun assetOnlyStagingDoesNotChargeTheJournalBudget() {
+        val limits = B2Wire.s2Limits().put("maxStagingBytes", 8 * MIB).put("maxJournalBytes", 32 * MIB)
+        B2WatchReceiveBudget(limits).add(descriptor(2 * MIB).put("kind", B2_NOTE_ASSET))
+        assertEquals("LIMIT_EXCEEDED", assertThrows(B2Exception::class.java) {
+            B2WatchReceiveBudget(limits).add(descriptor(2 * MIB + 1).put("kind", B2_NOTE_ASSET))
         }.code)
     }
 

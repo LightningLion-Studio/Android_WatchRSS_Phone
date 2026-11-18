@@ -8,8 +8,7 @@ import org.json.JSONObject
 internal class B2WatchReceiveBudget(private val limits: JSONObject) {
     private var count = 0
     private var manifestBytes = 0L
-    private var payloadBytes = 0L
-    private var objectPeakBytes = 0L
+    private var encodedBytes = 0L
     private var hasBody = false
 
     fun add(descriptor: JSONObject) {
@@ -17,15 +16,16 @@ internal class B2WatchReceiveBudget(private val limits: JSONObject) {
         val descriptorBytes = B2Json.utf8(descriptor.toString()).size
         count++
         manifestBytes += descriptorBytes + 1L
-        payloadBytes += size
-        // Match the watch's complete-manifest reservation, including both decoded file copies.
-        objectPeakBytes += size * 4 + descriptorBytes + 1024
+        encodedBytes += size
         hasBody = hasBody || descriptor.getString("kind") == B2_ARTICLE_BODY
-        val overhead = if (hasBody) 64L * 1024 * 1024 else limits.getLong("maxJournalBytes")
+        // The watch reserves four encoded copies and one import workspace per body job.
+        // Manifest and receipts are checked separately by the planner's journal budget.
+        val importBytes = if (hasBody) 64L * 1024 * 1024 else 0L
+        val stagingBytes = encodedBytes * 4 + importBytes
         if (size > limits.getLong("maxObjectBytes") ||
             B2Json.utf8(descriptor.getString("metadataUtf8")).size > limits.getInt("maxMetadataBytes") ||
             count > limits.getInt("maxPlanObjects") || manifestBytes > limits.getLong("maxManifestBytes") ||
-            payloadBytes > 64L * 1024 * 1024 || objectPeakBytes + overhead > limits.getLong("maxStagingBytes")) {
+            encodedBytes > 64L * 1024 * 1024 || stagingBytes > limits.getLong("maxStagingBytes")) {
             throw B2Exception("LIMIT_EXCEEDED")
         }
     }

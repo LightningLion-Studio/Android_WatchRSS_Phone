@@ -70,8 +70,9 @@ internal class SyncV2AccountCatalog(private val db:SupportSQLiteDatabase,private
             val bytes=db.controlQuery("SELECT body FROM syncv2_p5_channels WHERE scope=? AND side=? AND entity_key=?",arrayOf(scope,side,entity)).use{if(!it.moveToFirst())SyncV2Codec.fail("closure_incomplete");it.getBlob(0)}
             if(SyncV2Codec.hex(SyncV2Codec.sha(bytes))!=hash)SyncV2Codec.fail("hash_mismatch")
             val value=open("channel",bytes);if(value.getString("entityKey")!=entity)SyncV2Codec.fail("identity_conflict")
-            if(value.isNull("noteConflicts"))SyncV2Codec.fail("unsupported_feature")
-            return JSONObject().put("identity",value.getString("identity")).put("noteConflicts",value.getJSONObject("noteConflicts"))
+            return JSONObject().put("identity",value.getString("identity")).also {
+                if(value.get("noteConflicts")!=JSONObject.NULL)it.put("noteConflicts",value.getJSONObject("noteConflicts"))
+            }
         }
         return object:AbstractMap<String,JSONObject>() {
             override val keys get()=channelHashes.keys

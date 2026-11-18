@@ -467,7 +467,8 @@ internal class SyncV2Projection(
             }}
             val signed=value.getJSONObject("refs");if(value.opt("postRefs")!=false)refs.add(signed)
             objects[SyncV2Codec.oid("state-refs",signed)]=SyncV2Codec.utf8(SyncV2Codec.canonical(signed))
-            if(value.opt("postRefs")!=false && SyncV2Codec.canonical(value)!=SyncV2Codec.canonical(prior))prepared[entity]=seal("wire-candidate",value)
+            // The article body worker also reads authenticated rows with reused refs.
+            if((value.opt("postRefs")!=false || c[1]=="article") && SyncV2Codec.canonical(value)!=SyncV2Codec.canonical(prior))prepared[entity]=seal("wire-candidate",value)
             if(c[1]=="note")fault("note-publish-staged")
         }
         val tree=SyncV2Index.build(identity.scope,rows);objects.putAll(tree.objects)

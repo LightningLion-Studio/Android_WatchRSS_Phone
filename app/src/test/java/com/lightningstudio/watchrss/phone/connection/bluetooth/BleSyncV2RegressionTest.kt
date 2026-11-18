@@ -505,7 +505,7 @@ class BleSyncV2RegressionTest {
                 emptyComplete(), noteResponse(null), ok("syncLlmTokenUsage").put("records", JSONArray()), finishResponse())
         }
         manager.syncAll(device, reusableSession = first, onProgress = { if (it.reconnectAttempt > 0) attempts += it.reconnectAttempt })
-        assertEquals(listOf(2000L), waits); assertEquals(listOf(1), attempts); assertEquals(1, opens)
+        assertTrue(waits.isEmpty()); assertEquals(listOf(1), attempts); assertEquals(1, opens)
         assertEquals(1, payloads(0).count { it.optString("action") == "syncAccount" })
         assertEquals(1, payloads(1).count { it.optString("action") == "syncAccount" })
         val manifest = payloads(1).single { it.optString("phase") == "manifest" && it.optString("action") == "syncLibrary" }
@@ -532,7 +532,7 @@ class BleSyncV2RegressionTest {
         }
         try {
             manager.syncAll(device,reusableSession=first)
-            assertEquals(1,opens);assertEquals(listOf(2000L),waits);assertEquals(0,cloudCalls)
+            assertEquals(1,opens);assertTrue(waits.isEmpty());assertEquals(0,cloudCalls)
         }finally{first.close();ip.close()}
     }
 
@@ -584,8 +584,25 @@ class BleSyncV2RegressionTest {
         manager.reconnectSession = { _, _ -> opens++; throw IOException("bt socket closed, read return: -1") }
         val first = session(bindingResponse(), ok("syncAccount"), ok("syncLibrary", "cursor"), emptyManifest())
         val failure = runCatching { manager.syncAll(device, reusableSession = first, onProgress = { if (it.reconnectAttempt > 0) attempts += it.reconnectAttempt }) }.exceptionOrNull()
-        assertEquals(listOf(2000L, 5000L, 10000L), waits); assertEquals(listOf(1, 2, 3), attempts); assertEquals(3, opens)
-        assertTrue(failure!!.message!!.contains("可直接点“同步”重试")); assertEquals(0, cloudCalls); assertTrue(transportClosed)
+        assertTrue(waits.isEmpty()); assertEquals(listOf(1, 2, 3), attempts); assertEquals(3, opens)
+        assertTrue(failure is LibraryReconnectLimit); assertEquals(0, cloudCalls); assertTrue(transportClosed)
+    }
+
+    @Test fun adapterTurningBackOnResumesTheInterruptedLibraryStage() = runBlocking<Unit> {
+        val first = session(bindingResponse(), ok("syncAccount"), ok("syncLibrary", "cursor"))
+        val waits = mutableListOf<Long>()
+        var searches = 0
+        manager.reconnectDelay = { waits += it }
+        manager.reconnectSession = { _, _ ->
+            if (++searches < 3) throw LibraryBluetoothUnavailable()
+            session(bindingResponse(), ok("syncAccount"), ok("syncLibrary", "cursor"),
+                emptyManifest(), emptyComplete(), noteResponse(null),
+                ok("syncLlmTokenUsage").put("records", JSONArray()), finishResponse())
+        }
+        manager.syncAll(device, reusableSession = first)
+        assertEquals(listOf(6000L, 6000L), waits)
+        assertEquals(3, searches)
+        assertTrue(payloads(1).any { it.optString("action") == "syncLibrary" && it.optString("phase") == "cursor" })
     }
 
     @Test fun explicitPeerRejectionNeverReconnectsEvenWhenMessageMentionsSocketClosed() = runBlocking<Unit> {

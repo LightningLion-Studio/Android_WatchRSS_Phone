@@ -2,6 +2,8 @@ package com.lightningstudio.watchrss.phone.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryDisconnectLimit
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryReconnectLimit
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncProgress
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncStage
@@ -88,6 +90,7 @@ data class MainSyncProgressUi(
 )
 
 internal fun syncFailureMessage(throwable: Throwable, phase: String?): String {
+    if (throwable is LibraryReconnectLimit || throwable is LibraryDisconnectLimit) return throwable.message.orEmpty()
     if (throwable is com.lightningstudio.watchrss.phone.account.PhoneDeviceVerificationRequired ||
         throwable is com.lightningstudio.watchrss.phone.account.PhoneAccountTemporarilyUnavailable) return throwable.message!!
     if (throwable is com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired) return throwable.message!!

@@ -12,6 +12,7 @@ internal class IpReadDeadline(
     private val source:InputStream,
     private val defaultTimeoutMs:Long=30_000,
     private val onProgress:(Int)->Unit={},
+    private val timeoutMessage:(Long)->String={"IP 同步读取无进展（${it}ms），正在回退蓝牙"},
     private val disconnect:(Long)->Unit
 ):InputStream() {
     private data class Budget(val initial:Long,val progress:Long,var received:Boolean=false)
@@ -31,11 +32,11 @@ internal class IpReadDeadline(
         try {
             val count=read()
             outcome.compareAndSet(0,1)
-            if(outcome.get()==2)throw SocketTimeoutException("IP 同步读取无进展（${limit}ms），正在回退蓝牙")
+            if(outcome.get()==2)throw SocketTimeoutException(timeoutMessage(limit))
             if(count>0){current?.received=true;onProgress(count)}
             return count
         }catch(error:java.io.IOException){
-            if(outcome.get()==2 && error !is SocketTimeoutException)throw SocketTimeoutException("IP 同步读取无进展（${limit}ms），正在回退蓝牙").also{it.initCause(error)}
+            if(outcome.get()==2 && error !is SocketTimeoutException)throw SocketTimeoutException(timeoutMessage(limit)).also{it.initCause(error)}
             throw error
         }finally{outcome.compareAndSet(0,1);timer.cancel(false)}
     }

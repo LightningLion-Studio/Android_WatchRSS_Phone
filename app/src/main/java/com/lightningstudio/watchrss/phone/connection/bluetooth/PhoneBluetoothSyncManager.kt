@@ -541,17 +541,29 @@ class PhoneBluetoothSyncManager(
         var booksApplied = 0
         var bookSyncIssues:List<BookSyncIssue> = emptyList()
         var locallyApplied = false
+        val expectedPeerId = reusableSession?.device?.remoteDeviceId.orEmpty().ifBlank { device.remoteDeviceId }
+        val targetDevice = (reusableSession?.device ?: device).copy(
+            remoteDeviceId = expectedPeerId,
+            supportsPersistentSession = true
+        )
         suspend fun connect() {
-            if(diagnosticConnections++>0)trace.reconnect()
             syncSession?.close()
             syncSession = null
             check(currentPhoneUserId() == owner) { "手机账号已变化，请重新同步" }
-            syncSession = reconnectSession?.invoke(device, "$sessionId-open")
-                ?: if (reconnectSession == null) client.openPersistentSession(device, deviceId, "$sessionId-open",allowIpUpgrade=!bluetoothOnlyRecovery) else null
+            val open = reconnectSession
+            val replacement = (if (open != null) open(targetDevice, "$sessionId-open")
+                else client.openPersistentSession(targetDevice, deviceId, "$sessionId-open", allowIpUpgrade = !bluetoothOnlyRecovery))
+                ?: throw IOException("未找到可重新连接的原手表")
+            if (expectedPeerId.isNotBlank() && replacement.device.remoteDeviceId != expectedPeerId) {
+                replacement.close()
+                throw IllegalStateException("手表身份已变化，请重新选择")
+            }
+            syncSession = replacement
+            if (diagnosticConnections++ > 0) trace.reconnect()
             // All recovery for this operation uses the visible, bounded manager budget.
-            syncSession?.recoveryGate?.tryAcquire()
-            observeDiagnostics(syncSession)
-            effectiveDevice = syncSession?.device ?: device
+            replacement.recoveryGate.tryAcquire()
+            observeDiagnostics(replacement)
+            effectiveDevice = replacement.device
             accountGate.invalidate()
             sharedBinding = null
             libraryDeclarations = null
@@ -562,13 +574,22 @@ class PhoneBluetoothSyncManager(
             check(currentPhoneUserId()==owner){"手机账号已变化，请重新同步"}
             return sharedBinding ?: bindingSnapshot(sessionId, effectiveDevice.address, syncSession).also { sharedBinding = it }
         }
-        val recovery = BluetoothSyncRecovery(reconnectDelay, ::connect) { attempt, wait, failure ->
-            if(syncSession?.transport?.owner?.startsWith("ip:")==true)bluetoothOnlyRecovery=true
-            syncSession?.close()
-            debugLog.appendEvent("sync.reconnect", sessionId,
-                fields = failureFields(failure) + mapOf("attempt" to attempt, "delayMs" to wait,"bluetoothOnly" to bluetoothOnlyRecovery), throwable = failure)
-            onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.RECONNECTING, 0, reconnectAttempt = attempt))
-        }
+        val recovery = LibrarySyncRecovery(
+            now = SystemClock::elapsedRealtime,
+            pause = reconnectDelay,
+            reconnect = { connect(); accountGate.ensure() },
+            onInterrupted = { failure ->
+                if (syncSession?.transport?.owner?.startsWith("ip:") == true) bluetoothOnlyRecovery = true
+                syncSession?.close()
+                debugLog.appendEvent("library.connection.interrupted", sessionId, fields = failureFields(failure) +
+                    mapOf("monotonicMillis" to SystemClock.elapsedRealtime()), throwable = failure)
+            },
+            onSearch = { attempt ->
+                debugLog.appendEvent("library.reconnect.search", sessionId, fields = mapOf("attempt" to attempt))
+                onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.RECONNECTING, 0, reconnectAttempt = attempt))
+            },
+            onReady = { debugLog.appendEvent("library.reconnect.ready", sessionId) }
+        )
         var accountSync: AccountSyncResult? = null
         var tokenUsageSyncWarning: String? = null
         var readerSyncWarning: String? = null
@@ -591,8 +612,8 @@ class PhoneBluetoothSyncManager(
         val completed = try {
             // Check login before opening a transport or sending any library request.
             requirePhoneLogin()
+            if (!opened) recovery.search()
             recovery.run {
-                if (!opened) connect()
                 syncSession = syncSession?.let { client.promoteLateIpSession(it, "$sessionId-ip-upgrade") }
                 observeDiagnostics(syncSession)
                 effectiveDevice = syncSession?.device ?: device

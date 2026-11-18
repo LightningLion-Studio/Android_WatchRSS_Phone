@@ -292,7 +292,12 @@ class CloudMigrationInitiatorTest {
     @Test fun ciphertextCorruptionAndCandidateExpiryNeverReachPublisher()=runBlocking {
         for(corrupt in listOf(true,false)) {
             val f=Fixture();val client=f.client();client.create(f.draft);client.consent(f.planId,true);f.state="awaiting_validation"
-            if(corrupt)f.resultBlobs.getValue("fixture://receipt")[40]=0 else f.now=f.originalPlan.getLong("createdAt")+1_209_600_000
+            if (corrupt) {
+                val receipt = f.resultBlobs.getValue("fixture://receipt")
+                receipt[40] = (receipt[40].toInt() xor 0xFF).toByte()
+            } else {
+                f.now = f.originalPlan.getLong("createdAt") + 1_209_600_000
+            }
             assertTrue(runCatching{client.validateAndPublish(f.planId,CloudMigrationRunBudget{0})}.isFailure)
             assertEquals(0,f.publishCalls)
         }

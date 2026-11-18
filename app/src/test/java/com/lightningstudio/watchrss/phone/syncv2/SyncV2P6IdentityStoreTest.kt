@@ -33,7 +33,7 @@ class SyncV2P6IdentityStoreTest {
             catch(e:IllegalStateException){assertEquals("identity_conflict",e.message)}
         }
         store.write("pin",original)
-        val bad=JSONObject(candidate.recoveryCapsule.toString()).put("ciphertext","AAAA")
+        val bad = SyncV2Fixtures.tamperRecoveryCapsule(candidate.recoveryCapsule)
         try{store.install(candidate.descriptor,bad,pin,recovery,ring);fail("bad capsule accepted")}
         catch(e:IllegalStateException){assertEquals("hash_mismatch",e.message)}
         life.close()

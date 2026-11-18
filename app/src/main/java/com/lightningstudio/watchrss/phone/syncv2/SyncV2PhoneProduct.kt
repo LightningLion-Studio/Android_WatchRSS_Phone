@@ -36,6 +36,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
     @Volatile private var announcement:JSONObject?=null
     private val _uiPort=MutableStateFlow<SyncV2PhoneUiPort?>(null)
     val uiPort:StateFlow<SyncV2PhoneUiPort?> = _uiPort
+    val productEnabled: Boolean get() = enabled()
 
     /** Called before v1 credential deletion, even while start is waiting for HTTP. */
     fun release() {
@@ -43,6 +44,10 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         opening?.close();runtime?.life?.close()
         opening=null;runtime=null;announcement=null;_uiPort.value=null
     }
+    fun observeBootstrap(syncV2: JSONObject?) {
+        if (syncV2 == null && announcement != null) release()
+    }
+
     fun captureLegacyMetadata(peer:String,version:Int,cursor:String,payload:JSONObject) {
         if(!enabled() || announcement==null)return
         val live=runtime?:return
@@ -52,12 +57,11 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
     }
     suspend fun sync(syncV2:JSONObject?):Result=withContext(Dispatchers.IO) {
         if(!enabled() || syncV2==null) {
-            announcement=null
-            _uiPort.value?.disabled()
+            release()
             return@withContext Result(false,if(!enabled())"feature_disabled"else"not_announced")
         }
         announcement=JSONObject(syncV2.toString())
-        mutex.withLock {
+        try { mutex.withLock {
             val account=current()?:SyncV2Codec.fail("authentication_required")
             val old=runtime
             if(old!=null && old.account.owner()!=account.owner()) {
@@ -73,6 +77,11 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 _uiPort.value?.failed(e)
                 throw e
             }
+        }} catch(error:SyncV2CloudError) {
+            // A closed v2 gate pauses this round without entering the retired legacy lane.
+            if(error.code!="feature_disabled")throw error
+            _uiPort.value?.disabled()
+            Result(false,"feature_disabled")
         }
     }
     private fun open(account:Account,syncV2:JSONObject):Runtime {

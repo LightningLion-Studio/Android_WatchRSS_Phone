@@ -22,6 +22,7 @@ import com.lightningstudio.watchrss.phone.data.reader.ReaderTypographyRole
 import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundPreparationException
 import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundTranscoder
 import android.os.SystemClock
+import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
@@ -542,10 +543,7 @@ class PhoneBluetoothSyncManager(
         var bookSyncIssues:List<BookSyncIssue> = emptyList()
         var locallyApplied = false
         val expectedPeerId = reusableSession?.device?.remoteDeviceId.orEmpty().ifBlank { device.remoteDeviceId }
-        val targetDevice = (reusableSession?.device ?: device).copy(
-            remoteDeviceId = expectedPeerId,
-            supportsPersistentSession = true
-        )
+        val targetDevice = (reusableSession?.device ?: device).copy(remoteDeviceId = expectedPeerId)
         suspend fun connect() {
             syncSession?.close()
             syncSession = null
@@ -577,7 +575,10 @@ class PhoneBluetoothSyncManager(
         val recovery = LibrarySyncRecovery(
             now = SystemClock::elapsedRealtime,
             pause = reconnectDelay,
-            reconnect = { connect(); accountGate.ensure() },
+            reconnect = { confirmAccount ->
+                connect()
+                if (confirmAccount) accountGate.ensure()
+            },
             onInterrupted = { failure ->
                 if (syncSession?.transport?.owner?.startsWith("ip:") == true) bluetoothOnlyRecovery = true
                 syncSession?.close()
@@ -587,6 +588,9 @@ class PhoneBluetoothSyncManager(
             onSearch = { attempt ->
                 debugLog.appendEvent("library.reconnect.search", sessionId, fields = mapOf("attempt" to attempt))
                 onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.RECONNECTING, 0, reconnectAttempt = attempt))
+            },
+            onSearchFailed = { attempt ->
+                debugLog.appendEvent("library.reconnect.search.failed", sessionId, fields = mapOf("consecutiveFailures" to attempt))
             },
             onReady = { debugLog.appendEvent("library.reconnect.ready", sessionId) }
         )
@@ -612,7 +616,7 @@ class PhoneBluetoothSyncManager(
         val completed = try {
             // Check login before opening a transport or sending any library request.
             requirePhoneLogin()
-            if (!opened) recovery.search()
+            if (!opened) recovery.search(confirmAccount = false)
             recovery.run {
                 syncSession = syncSession?.let { client.promoteLateIpSession(it, "$sessionId-ip-upgrade") }
                 observeDiagnostics(syncSession)

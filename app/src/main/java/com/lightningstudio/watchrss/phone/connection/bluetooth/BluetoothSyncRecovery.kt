@@ -44,9 +44,10 @@ internal class LibraryDisconnectLimit(cause: Throwable) : IOException("10 秒内
 internal class LibrarySyncRecovery(
     private val now: () -> Long,
     private val pause: suspend (Long) -> Unit,
-    private val reconnect: suspend () -> Unit,
+    private val reconnect: suspend (confirmAccount: Boolean) -> Unit,
     private val onInterrupted: (Throwable) -> Unit,
     private val onSearch: (Int) -> Unit,
+    private val onSearchFailed: (Int) -> Unit = {},
     private val onReady: () -> Unit
 ) {
     private val disconnectTimes = ArrayDeque<Long>()
@@ -70,17 +71,20 @@ internal class LibrarySyncRecovery(
         }
     }
 
-    suspend fun search() {
+    suspend fun search(confirmAccount: Boolean = true) {
         for (attempt in 1..3) {
             currentCoroutineContext().ensureActive()
             onSearch(attempt)
             try {
-                reconnect()
+                reconnect(confirmAccount)
+                currentCoroutineContext().ensureActive()
             } catch (failure: Exception) {
                 currentCoroutineContext().ensureActive()
                 if (!isRetryableBluetoothDisconnect(failure)) throw failure
+                onSearchFailed(attempt)
                 if (attempt == 3) throw LibraryReconnectLimit(failure)
-                if (failure is LibraryBluetoothUnavailable) pause(6_000L)
+                // Let the adapter or the watch's previous session settle before the next search.
+                pause(8_000L)
                 continue
             }
             onReady()

@@ -584,23 +584,26 @@ class BleSyncV2RegressionTest {
         manager.reconnectSession = { _, _ -> opens++; throw IOException("bt socket closed, read return: -1") }
         val first = session(bindingResponse(), ok("syncAccount"), ok("syncLibrary", "cursor"), emptyManifest())
         val failure = runCatching { manager.syncAll(device, reusableSession = first, onProgress = { if (it.reconnectAttempt > 0) attempts += it.reconnectAttempt }) }.exceptionOrNull()
-        assertTrue(waits.isEmpty()); assertEquals(listOf(1, 2, 3), attempts); assertEquals(3, opens)
+        assertEquals(listOf(8_000L, 8_000L), waits); assertEquals(listOf(1, 2, 3), attempts); assertEquals(3, opens)
         assertTrue(failure is LibraryReconnectLimit); assertEquals(0, cloudCalls); assertTrue(transportClosed)
     }
 
-    @Test fun adapterTurningBackOnResumesTheInterruptedLibraryStage() = runBlocking<Unit> {
+    @Test fun adapterAndPeerSettlingDoNotExhaustSearchesBeforeResumingTheLibraryStage() = runBlocking<Unit> {
         val first = session(bindingResponse(), ok("syncAccount"), ok("syncLibrary", "cursor"))
         val waits = mutableListOf<Long>()
         var searches = 0
         manager.reconnectDelay = { waits += it }
         manager.reconnectSession = { _, _ ->
-            if (++searches < 3) throw LibraryBluetoothUnavailable()
+            when (++searches) {
+                1 -> throw LibraryBluetoothUnavailable()
+                2 -> throw IOException("previous peer session still closing")
+            }
             session(bindingResponse(), ok("syncAccount"), ok("syncLibrary", "cursor"),
                 emptyManifest(), emptyComplete(), noteResponse(null),
                 ok("syncLlmTokenUsage").put("records", JSONArray()), finishResponse())
         }
         manager.syncAll(device, reusableSession = first)
-        assertEquals(listOf(6000L, 6000L), waits)
+        assertEquals(listOf(8_000L, 8_000L), waits)
         assertEquals(3, searches)
         assertTrue(payloads(1).any { it.optString("action") == "syncLibrary" && it.optString("phase") == "cursor" })
     }

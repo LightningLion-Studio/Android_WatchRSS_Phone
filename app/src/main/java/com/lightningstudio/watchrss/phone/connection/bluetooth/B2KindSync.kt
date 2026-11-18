@@ -59,24 +59,32 @@ internal class B2KindSync(private val store: B2Persistence, private val director
     }
 
     private suspend fun freeze(probe: JSONObject, assets: List<NoteAssetInventoryEntry>): JSONObject {
-        store.exclusive { store.get(account, "attempt", key) }
-            ?.takeIf { it.optString("state") in setOf("PREPARED", "RETIRING", "CANCELLED") }?.let { return it }
         val selection = B2Negotiation.select(capability, probe.getJSONObject("libraryBinary"), "phoneToWatch")
+        val budget = selection?.getJSONObject("limits")?.let(::B2WatchReceiveBudget)
+        store.exclusive { store.get(account, "attempt", key) }
+            ?.takeIf { it.optString("state") in setOf("PREPARED", "RETIRING", "CANCELLED") }?.let { attempt ->
+                if (attempt.getString("state") == "PREPARED") {
+                    val descriptors = snapshots.descriptors(account, attempt.getJSONObject("phoneSnapshot"))
+                    checkFrozenPlan(selection, descriptors)
+                    val bindings = attempt.getJSONArray("bindings")
+                    for (i in 0 until bindings.length()) {
+                        val binding = bindings.getJSONObject(i)
+                        if (binding.getString("direction") == "phoneToWatch") {
+                            // Resumes send the original selection, even if the new probe raised a limit.
+                            val original = binding.getJSONObject("selection")
+                            if (selection == null || B2Digests.selection(original) != B2Digests.selection(selection)) {
+                                checkFrozenPlan(original, descriptors)
+                            }
+                            break
+                        }
+                    }
+                }
+                return attempt
+            }
         val descriptors = mutableListOf<JSONObject>()
         val sources = mutableMapOf<String, File>()
-        val limits = selection?.getJSONObject("limits")
-        var inventoryBytes = 0L
-        var payloadBytes = 0L
         fun add(descriptor: JSONObject, source: File) {
-            inventoryBytes += B2Json.utf8(descriptor.toString()).size + 1
-            payloadBytes += descriptor.getLong("size")
-            if (descriptors.size >= requireNotNull(limits).getInt("maxPlanObjects") ||
-                inventoryBytes > limits.getLong("maxManifestBytes") || payloadBytes > 64L * 1024 * 1024 ||
-                descriptor.getLong("size") * 2 > limits.getLong("maxStagingBytes") ||
-                descriptor.getLong("size") > limits.getLong("maxObjectBytes") ||
-                B2Json.utf8(descriptor.getString("metadataUtf8")).size > limits.getInt("maxMetadataBytes")) {
-                throw B2Exception("LIMIT_EXCEEDED")
-            }
+            (budget ?: throw B2Exception("CAPABILITY_MISMATCH")).add(descriptor)
             descriptors += descriptor
             sources[descriptor.getString("objectId")] = source
         }
@@ -94,9 +102,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             }
             business.freeze(route.send, scratch, preparing, ::add)
             descriptors.sortBy { it.getString("objectId") }
-            if (selection != null && B2Planner.preflight("merge", selection, descriptors) is B2Planner.Admission.UseLegacy) {
-                throw B2Exception("LIMIT_EXCEEDED")
-            }
+            checkPlan(selection, descriptors)
             snapshots.freeze(account, "asset-" + id(), descriptors) { sources.getValue(it.getString("objectId")) }
         } finally {
             scratch.deleteRecursively()
@@ -106,6 +112,21 @@ internal class B2KindSync(private val store: B2Persistence, private val director
                 store.exclusive { authorize(); store.budget(B2Json.utf8(attempt.toString()).size.toLong() + 1024)
                     store.put(account, "attempt", key, attempt) }
             }
+    }
+
+    private fun checkFrozenPlan(selection: JSONObject?, descriptors: List<JSONObject>) {
+        if (descriptors.isNotEmpty()) {
+            val limits = selection?.getJSONObject("limits") ?: throw B2Exception("CAPABILITY_MISMATCH")
+            val budget = B2WatchReceiveBudget(limits)
+            for (descriptor in descriptors) budget.add(descriptor)
+        }
+        checkPlan(selection, descriptors)
+    }
+
+    private fun checkPlan(selection: JSONObject?, descriptors: List<JSONObject>) {
+        if (selection != null && B2Planner.preflight("merge", selection, descriptors) is B2Planner.Admission.UseLegacy) {
+            throw B2Exception("LIMIT_EXCEEDED")
+        }
     }
 
     suspend fun run(input: InputStream, output: OutputStream, probe: JSONObject,

@@ -960,28 +960,47 @@ class PhoneCompanionRepository(
         appMetaDao.getString("ble_identity_mode:"+WebArticleImporter.sha256(peer)) != canonical.toString()
 
     private val bleIdentityMigrationKey="ble_rss_identity_dedup_v2"
-    internal suspend fun bluetoothIdentityProjection(canonical:Boolean):com.lightningstudio.watchrss.phone.connection.bluetooth.BluetoothArticleIdentityProjection {
+    internal suspend fun bluetoothIdentityProjection(canonical:Boolean, readOnly:Boolean=false):com.lightningstudio.watchrss.phone.connection.bluetooth.BluetoothArticleIdentityProjection {
         val aliases=legacyRssArticleIds().flatMap { (id,old)->old.map { it to id } }.toMap()
-        val indexed=if(canonical)bleDomains?.identities() else null
+        val indexed=if(canonical && !readOnly)bleDomains?.identities() else null
         return com.lightningstudio.watchrss.phone.connection.bluetooth.BluetoothArticleIdentityProjection(indexed?.rows?:articleDao.getAllMetadataForSync(),aliases,canonical,indexed?.legacy.orEmpty())
     }
 
     /** Retire only a provable URL-hash alias. Distinct real guid IDs sharing a URL stay distinct. */
     internal suspend fun repairBluetoothRssDuplicates():Int=withContext(Dispatchers.IO) {
         if(appMetaDao.getString(bleIdentityMigrationKey)=="done")return@withContext 0
-        var changed=0
-        val groups=articleDao.getAllMetadataForSync().filter { !it.rssSourceUrl.isNullOrBlank() &&
+        val aliases = bluetoothRssDuplicates(articleDao.getAllMetadataForSync())
+        for ((old, canonical) in aliases) migrateBluetoothAlias(old, canonical)
+        appMetaDao.set(AppMetaEntity(bleIdentityMigrationKey,"done"))
+        aliases.size
+    }
+
+    private fun bluetoothRssDuplicates(rows: List<PhoneArticleEntity>): List<Pair<String, String>> =
+        rows.filter { !it.rssSourceUrl.isNullOrBlank() &&
             !ImportedContentIds.isImportedContentUrl(it.rssSourceUrl) && !ImportedContentIds.isImportedContentUrl(it.url) }
-            .groupBy { it.rssSourceUrl to it.url }
-        for((_,rows) in groups) {
-            if(rows.size<2)continue
-            val legacy=WebArticleImporter.stableArticleId(rows.first().url)
-            val candidates=rows.filter { it.articleId!=legacy }
-            if(candidates.size!=1)continue
-            val old=rows.firstOrNull { it.articleId==legacy }?:continue
-            migrateBluetoothAlias(old.articleId,candidates.single().articleId);changed++
+            .groupBy { it.rssSourceUrl to it.url }.values.mapNotNull { group ->
+                if (group.size != 2) return@mapNotNull null
+                val legacy = WebArticleImporter.stableArticleId(group.first().url)
+                if (group.none { it.articleId == legacy }) return@mapNotNull null
+                legacy to group.single { it.articleId != legacy }.articleId
+            }
+
+    /** The legacy path owns repair and registration. Route these candidates before freezing any body. */
+    internal suspend fun binaryLibraryNeedsLegacyPreparation(excludeBooks: Boolean): Boolean {
+        val rows = articleDao.getAllMetadataForSync()
+        if (appMetaDao.getString(bleIdentityMigrationKey) != "done" && bluetoothRssDuplicates(rows).isNotEmpty()) {
+            return true
         }
-        appMetaDao.set(AppMetaEntity(bleIdentityMigrationKey,"done"));changed
+        if (excludeBooks && books != null && articleDao.unregisteredBookMetadata().isNotEmpty()) return true
+        val sources = rssSourceDao.getAllForSync()
+        val importedRows = if (bleDomains != null) articleDao.unregisteredBookMetadata() else rows
+        if (sources.none { it.url == ImportedContentIds.ROOT_SOURCE_URL } &&
+            liveImportedTextArticles(importedRows).isNotEmpty()) return true
+        return sources.any { source ->
+            source.deleted && ImportedContentIds.isImportedContentUrl(source.url) &&
+                if (ImportedContentIds.isImportedTextSourceUrl(source.url)) liveImportedTextArticles(importedRows).isNotEmpty()
+                else importedRows.any { !it.deleted && it.rssSourceUrl == source.url }
+        }
     }
 
     internal suspend fun acceptBluetoothAliases(manifest:List<ArticleSyncManifestEntry>):Map<String,String> {

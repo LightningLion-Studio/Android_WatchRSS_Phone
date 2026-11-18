@@ -601,34 +601,13 @@ class PhoneBluetoothSyncManager(
                             active.response.optString("deviceId") != effectiveDevice.remoteDeviceId) {
                             throw B2Exception("CAPABILITY_MISMATCH")
                         }
+                        val (selected, runtime) = prepareBinaryRoute(route, active.response, effectiveDevice) {
+                            recovery.confirmedProgress("b2", it)
+                        }
                         val generation = syncSession?.transport?.generation
-                        if (binaryAccountGeneration == null || binaryAccountGeneration != generation) {
+                        if (!selected.isEmpty && (binaryAccountGeneration == null || binaryAccountGeneration != generation)) {
                             syncAccount(effectiveDevice, syncSession, false, active)
                             binaryAccountGeneration = generation
-                        }
-                        val database = db ?: throw B2Exception("LOCAL_IO")
-                        if (route.hasBinaryLibrary) {
-                            repository.repairImportedContentSourceStates()
-                            repository.repairBluetoothRssDuplicates()
-                            if (active.capabilities.books) repository.books?.ensureRegistered()
-                        }
-                        var selected = route
-                        var runtime: B2KindSync? = createBinaryRuntime(database, effectiveDevice, active.capabilities, selected, recovery)
-                        try {
-                            requireNotNull(runtime).prepare(active.response, binaryAssetInventory(selected))
-                        } catch (failure: B2Exception) {
-                            if (failure.code != "LIMIT_EXCEEDED") throw failure
-                            // Route decisions can change only before any v1 business write or B2 switch.
-                            selected = selected.assetsOnly()
-                            runtime = if (selected.isEmpty) null else
-                                createBinaryRuntime(database, effectiveDevice, active.capabilities, selected, recovery)
-                            try {
-                                runtime?.prepare(active.response, binaryAssetInventory(selected))
-                            } catch (assetFailure: B2Exception) {
-                                if (assetFailure.code != "LIMIT_EXCEEDED") throw assetFailure
-                                selected = B2KindRoute.legacy
-                                runtime = null
-                            }
                         }
                         binaryRoute = selected
                         binaryRuntime = runtime
@@ -1474,23 +1453,52 @@ class PhoneBluetoothSyncManager(
         }
     }
 
+    internal suspend fun prepareBinaryRoute(
+        requested: B2KindRoute,
+        probe: JSONObject,
+        device: PhoneBluetoothWatchDevice,
+        progress: (String) -> Unit = {}
+    ): Pair<B2KindRoute, B2KindSync?> {
+        if (requested.isEmpty) return B2KindRoute.legacy to null
+        val database = b2Database() ?: throw B2Exception("LOCAL_IO")
+        val capabilities = BleSyncCapabilities.read(probe)
+        // Check readiness while the library is still read-only. In particular, v1 alias repair can
+        // hydrate both old bodies and must run only once the legacy library route has been chosen.
+        val candidate = if (requested.hasBinaryLibrary && repository.binaryLibraryNeedsLegacyPreparation(capabilities.books)) {
+            requested.assetsOnly()
+        } else requested
+        for (route in listOf(candidate, candidate.assetsOnly()).distinct()) {
+            if (route.isEmpty) break
+            val runtime = createBinaryRuntime(database, device, capabilities, route, progress)
+            try {
+                runtime.prepare(probe, binaryAssetInventory(route))
+                return route to runtime
+            } catch (failure: B2Exception) {
+                if (failure.code != "LIMIT_EXCEEDED") throw failure
+                // v14's library cursor covers the whole library. Keep the affected article/source
+                // scope on v1 and retry independent note assets before sending anything on either.
+            }
+        }
+        return B2KindRoute.legacy to null
+    }
+
     private suspend fun createBinaryRuntime(
         db: com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase,
         device: PhoneBluetoothWatchDevice,
         capabilities: BleSyncCapabilities,
         route: B2KindRoute,
-        recovery: LibraryRecoveryContext
+        progress: (String) -> Unit
     ): B2KindSync {
         val (scope, authorize) = binaryAuthorization()
         val assets = File(appContext.filesDir, "notes/assets")
         val store = B2RoomStore(db)
-        val identity = if (route.hasBinaryLibrary) repository.bluetoothIdentityProjection(capabilities.canonicalRssIds)
+        val identity = if (route.hasBinaryLibrary) repository.bluetoothIdentityProjection(capabilities.canonicalRssIds, readOnly = true)
             else BluetoothArticleIdentityProjection(emptyList(), emptyMap(), false)
         val business = B2InheritedKinds(db, repository, identity,
             B2NoteAssetBusiness(store, scope, assets, authorize), route.receive, capabilities.books, authorize,
             canonicalIds = capabilities.canonicalRssIds)
         return B2KindSync(store, File(appContext.filesDir, "library-binary-v2"), assets, scope, deviceId,
-            device.remoteDeviceId, authorize, { recovery.confirmedProgress("b2", it) }, route, business)
+            device.remoteDeviceId, authorize, progress, route, business)
     }
 
     private suspend fun syncBinaryKinds(

@@ -639,7 +639,8 @@ class SyncV2P6ProductTest {
         private val epoch="11111111-1111-4111-8111-111111111111"
         private val generation="22222222-2222-4222-8222-222222222222"
         private val scope=kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob()+kotlinx.coroutines.Dispatchers.Default)
-        val settings=com.lightningstudio.watchrss.phone.cloud.PhoneCloudStateStore(com.lightningstudio.watchrss.phone.testing.MemoryPreferences())
+        val preferences=com.lightningstudio.watchrss.phone.testing.MemoryPreferences()
+        val settings=com.lightningstudio.watchrss.phone.cloud.PhoneCloudStateStore(preferences)
         var announced=true;var failAuthentication=false;var unsupported=false;var legacyCalls=0;var bootstraps=0
         private val env=com.lightningstudio.watchrss.phone.account.AccountEnvironment(backendBaseUrl=h.server.http.url("/").toString(),supabaseAnonKey="synthetic-api")
         private val session=com.lightningstudio.watchrss.phone.account.PhoneAccountSession(user,"***","synthetic-account","synthetic-refresh",Long.MAX_VALUE)
@@ -658,7 +659,7 @@ class SyncV2P6ProductTest {
                 .put("member",JSONObject().put("active",true).put("writable",true).put("readable",true).put("quotaBytes",1000000).put("usedBytes",0).put("reservedBytes",0))
                 .put("keyVersionFloor",0).put("keyCommitments",JSONArray().put(JSONObject().put("keyVersion",1).put("commitment",com.lightningstudio.watchrss.phone.cloud.CloudProtocolV2.commitment(h.server.wrap,user,epoch,1))))
                 .put("keyEnvelopes",JSONArray()).put("devices",JSONArray()).also{if(announced)it.put("syncV2",h.server.announcement)}
-                else JSONObject().put("error",if(unsupported)"client_upgrade_required"else if(failAuthentication)"invalid_token"else JSONObject().put("code","upgrade_required"))
+                else JSONObject().put("error",if(unsupported)"client_upgrade_required"else if(failAuthentication)"invalid_token"else JSONObject().put("code","upgrade_required").put("details",JSONObject().put("requiredFeatures",JSONArray().put("sync-objects.v2"))))
             okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1).code(status).message("synthetic")
                 .body(body.toString().toResponseBody("application/json".toMediaType())).build()
         }.build())
@@ -689,15 +690,43 @@ class SyncV2P6ProductTest {
             assertEquals("body_channel_write_disabled",h.product.uiPort.value!!.state.value.errorCode)
         }}}
     }
-    @Test fun formalEntryClosedProductOrMissingAnnouncementNeverProbesV2OrRequestsAnUpgrade() {
-        for(announced in listOf(false,true))Server().use{server->Host(server,"closed",localSwitch=!announced).use{h->ServiceEntry(h).use{entry->
-            entry.announced=announced
-            repeat(2){assertTrue(runCatching{entry.sync(false)}.isFailure)}
-            assertEquals(0,server.http.requestCount);assertEquals(2,entry.bootstraps);assertEquals(2,entry.legacyCalls)
+    @Test fun formalEntryClosedProductRetainsLegacyFenceAndLocalLibrary() {
+        Server().use{server->Host(server,"closed",localSwitch=false).use{h->ServiceEntry(h).use{entry->
+            h.note()
+            assertTrue(runCatching{entry.sync(false)}.isFailure)
+            entry.sync(false)
+            assertEquals(0,server.http.requestCount);assertEquals(1,entry.bootstraps);assertEquals(1,entry.legacyCalls)
             assertEquals(0,entry.settings.formatUpgradeRequiredVersion);assertFalse(entry.service.formatStatus.value.upgradeRequired)
-            assertFalse(entry.service.state.value.message.contains("请升级"))
+            assertFalse(entry.service.state.value.message.contains("请升级"));assertEquals("local",h.text())
         }}}
     }
+
+    @Test fun formalEntryStopsBothCloudChannelsAfterBootstrapWithdrawsAnnouncement() {
+        Server().use{server->Host(server,"withdrawal").use{h->ServiceEntry(h).use{entry->
+            h.note();entry.sync(false)
+            assertTrue(server.http.requestCount>0)
+            val requests=server.http.requestCount
+            val preferences=entry.preferences.all.toMap()
+            entry.announced=false
+            repeat(2){entry.sync(false)}
+            assertEquals(requests,server.http.requestCount);assertEquals(0,entry.legacyCalls)
+            assertEquals(3,entry.bootstraps);assertEquals("local",h.text())
+            assertNull(h.product.uiPort.value)
+            assertEquals(preferences,entry.preferences.all)
+            assertFalse(entry.service.formatStatus.value.upgradeRequired)
+        }}}
+    }
+
+    @Test fun formalEntryNeverFallsBackToLegacyWhenV2ReadGateCloses() {
+        Server().use{server->Host(server,"read-closed").use{h->ServiceEntry(h).use{entry->
+            h.note();entry.sync(false)
+            server.readGate=false
+            entry.sync(false)
+            assertEquals(0,entry.legacyCalls);assertEquals("local",h.text())
+            assertFalse(entry.service.formatStatus.value.upgradeRequired)
+        }}}
+    }
+
     @Test fun formalEntryRequiresAuthenticatedBootstrapAndOnlyServerUnsupportedBuildShowsUpgrade() {
         for(unsupported in listOf(false,true))Server().use{server->Host(server,"auth").use{h->ServiceEntry(h).use{entry->
             entry.unsupported=unsupported;entry.failAuthentication=!unsupported

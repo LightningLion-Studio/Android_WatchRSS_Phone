@@ -756,6 +756,16 @@ internal fun serverRequiresCloudClientUpgrade(error:Throwable):Boolean =
     error is com.lightningstudio.watchrss.phone.syncv2.SyncV2CloudError && error.code=="upgrade_required" ||
         error is CloudHttpException && error.status==426 && error.serverResponse && declaresCloudClientUpgrade(error.detail)
 
+internal fun isLegacySyncFence(error: Throwable): Boolean {
+    if (error !is CloudHttpException || error.status != 426 || !error.serverResponse) return false
+    return runCatching {
+        val response = JSONObject(error.detail).getJSONObject("error")
+        val features = response.getJSONObject("details").getJSONArray("requiredFeatures")
+        response.optString("code") == "upgrade_required" &&
+            features.length() == 1 && features.opt(0) == "sync-objects.v2"
+    }.getOrDefault(false)
+}
+
 private fun declaresCloudClientUpgrade(detail:String):Boolean = runCatching {
     val error=JSONObject(detail).get("error")
     (if(error is JSONObject)error.optString("code")else error)=="client_upgrade_required"

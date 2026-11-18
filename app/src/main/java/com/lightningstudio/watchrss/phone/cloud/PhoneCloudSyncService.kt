@@ -130,6 +130,7 @@ class PhoneCloudSyncService(
         afterPull = { session -> backupService.applyRssInteractions(recordStore.rssStates(client.scopeId(session))) { checkApprovalOwner(session) } })
     private val noteTransfer = NoteImportExportService(context, noteRepository)
     private val syncMutex = CloudSyncSingleFlight()
+    private var legacyFenceScope: String? = null
     private val _state = MutableStateFlow(PhoneCloudSyncState())
     val state: StateFlow<PhoneCloudSyncState> = _state
 
@@ -439,6 +440,7 @@ class PhoneCloudSyncService(
         client.useEpoch(session, bootstrap.libraryEpoch)
         pairingEpochState.value = bootstrap.libraryEpoch
         if (changed) throw CloudTrustException()
+        if (syncV2Database != null) syncV2Product.observeBootstrap(bootstrap.syncV2)
         val keys = localKeys(session)
         val remoteDevice = bootstrap.devices.firstOrNull { it.deviceId == deviceId }
         clearRevokedCloudDeviceIdentity(bootstrap, deviceId) { keyManager.clearDeviceKey(session.userId, deviceId) }
@@ -466,15 +468,17 @@ class PhoneCloudSyncService(
         trustedBootstrap = bootstrap
         _needsReapproval.value = if (keyManager.hasAccountKey(session.userId)) bootstrap.devices.filter { it.revokedAt == null && !it.deviceId.startsWith("reader-migration-") && !deviceAuthenticated(session, bootstrap, it) } else emptyList()
     }
-    private suspend fun validatedBootstrap(session: PhoneAccountSession): CloudBootstrap {
+    private suspend fun validatedBootstrap(session: PhoneAccountSession, requireV2Announcement: Boolean = false): CloudBootstrap {
         val versionsBefore=keyManager.keyVersions(session.userId).toSet()
         var bootstrap = client.bootstrap(session)
+        if (requireV2Announcement && bootstrap.syncV2 == null) return bootstrap
         val operationEpoch = bootstrap.libraryEpoch
         // The observer can quarantine a bad local version. Re-read the server after that
         // transition, rather than validating a stale bootstrap against the reduced key set.
         if(keyManager.keyVersions(session.userId).toSet()!=versionsBefore) {
             bootstrap=client.bootstrap(session)
             checkCloudEpoch(session,operationEpoch)
+            if (requireV2Announcement && bootstrap.syncV2 == null) return bootstrap
         }
         // The first v2 writer claims every legacy key, in order. Conflicts are re-read and verified.
         val keys = localKeys(session)
@@ -1153,6 +1157,17 @@ class PhoneCloudSyncService(
     fun setBluetoothSyncActive(active:Boolean) {bluetoothFence.setActive(active)}
     val hasDeferredBluetoothSync:Boolean get()=bluetoothFence.needsResume
 
+    private suspend fun prepareCloudSyncKeys(session: PhoneAccountSession, bootstrap: CloudBootstrap): CloudBootstrap {
+        if (keyManager.hasAccountKey(session.userId)) return bootstrap
+        requestDeviceApproval(bootstrap.libraryEpoch)
+        if (!acceptDeviceApproval()) {
+            error("当前设备尚未获得云端解密密钥，请在其他已登录设备上批准后重试")
+        }
+        val refreshed = client.bootstrap(session)
+        checkCloudEpoch(session, bootstrap.libraryEpoch)
+        return refreshed
+    }
+
     suspend fun syncNow(manual: Boolean = false): PhoneCloudSyncResult = withContext(Dispatchers.IO) {
         if(!manual && bluetoothFence.active)return@withContext PhoneCloudSyncResult(0,0,0,false,0)
         val activeSession=accountRepository.session.value
@@ -1163,6 +1178,7 @@ class PhoneCloudSyncService(
             if(!manual && bluetoothFence.active)return@run PhoneCloudSyncResult(0,0,0,false,0)
             bluetoothFence.started(manual,automaticJob)
             var retryingTransfer = false
+            var legacyAttemptScope: String? = null
             try {
                 if(!manual && bluetoothFence.active)return@run PhoneCloudSyncResult(0,0,0,false,0)
                 val legacyResult=retryDiscardedCloudTransfer(rebuild = { failure ->
@@ -1175,20 +1191,37 @@ class PhoneCloudSyncService(
                     update(CloudSyncPhase.CHECKING,"云端内容已清理，正在从本机重建同步")
                     client.bootstrap(session)
                 }, attempt = {
-                    val session=requireSession()
-                    val admission=settings.admitCycle()
-                    if (paused.value || !networkGate.isConnected()) syncOnePass(manual, retryingTransfer, admission=admission)
-                    else {
-                        update(CloudSyncPhase.CHECKING,"正在检查云端")
-                        val bootstrap=validatedBootstrap(session)
-                        // Authenticated bootstrap selects the channel before any legacy business request.
-                        val v2=if(syncV2Database!=null)syncV2Product.sync(bootstrap.syncV2,manual)else null
-                        if(v2?.enabled==true) {
-                            settings.formatUpgradeRequiredVersion=0
-                            _formatStatus.value=_formatStatus.value.copy(upgradeRequired=false)
-                            update(CloudSyncPhase.COMPLETE,"云同步完成",bootstrap.member,completedAt=System.currentTimeMillis())
-                            PhoneCloudSyncResult(0,0,0,false,0)
-                        } else client.inContentGeneration(session) { syncOnePass(manual, retryingTransfer, bootstrap, admission) }
+                    val session = requireSession()
+                    val empty = PhoneCloudSyncResult(0, 0, 0, false, 0)
+                    if (paused.value) {
+                        update(CloudSyncPhase.PAUSED, "已暂停同步")
+                        return@retryDiscardedCloudTransfer empty
+                    }
+                    require(networkGate.isConnected()) { "当前没有可用网络" }
+                    val product = if (syncV2Database == null) null else syncV2Product.takeIf { it.productEnabled }
+                    val scope = client.scopeId(session)
+                    if (product == null && legacyFenceScope == scope) {
+                        update(CloudSyncPhase.IDLE, "旧同步通道已关闭，本机资料已保留")
+                        return@retryDiscardedCloudTransfer empty
+                    }
+
+                    val admission = if (product == null) settings.admitCycle() else null
+                    update(CloudSyncPhase.CHECKING, "正在检查云端")
+                    val bootstrap = validatedBootstrap(session, requireV2Announcement = product != null)
+                    if (product == null) {
+                        legacyAttemptScope = scope
+                        client.inContentGeneration(session) { syncOnePass(manual, retryingTransfer, bootstrap, admission) }
+                    } else {
+                        val ready = if (bootstrap.syncV2 != null) prepareCloudSyncKeys(session, bootstrap) else bootstrap
+                        val result = product.sync(ready.syncV2, manual)
+                        if (result.enabled) {
+                            settings.formatUpgradeRequiredVersion = 0
+                            _formatStatus.value = _formatStatus.value.copy(upgradeRequired = false)
+                            update(CloudSyncPhase.COMPLETE, "云同步完成", ready.member, completedAt = System.currentTimeMillis())
+                        } else {
+                            update(CloudSyncPhase.IDLE, "Sync v2 服务暂不可用，本机资料已保留", ready.member)
+                        }
+                        empty
                     }
                 })
                 legacyResult
@@ -1213,6 +1246,7 @@ class PhoneCloudSyncService(
                 } else if (_state.value.phase !in setOf(CloudSyncPhase.NEEDS_RECOVERY,CloudSyncPhase.ERROR)) {
                     update(CloudSyncPhase.ERROR, if(error.message=="device_alias_recovery_required")SyncV2View.errorText("device_alias_recovery_required")else error.message ?: "云同步失败")
                 }
+                if (isLegacySyncFence(error)) legacyAttemptScope?.let { legacyFenceScope = it }
                 if(serverRequiresCloudClientUpgrade(error)) {
                     settings.formatUpgradeRequiredVersion=com.lightningstudio.watchrss.phone.BuildConfig.VERSION_CODE
                     _formatStatus.value=_formatStatus.value.copy(upgradeRequired=true)
@@ -1246,14 +1280,7 @@ class PhoneCloudSyncService(
                 var bootstrap = initialBootstrap ?: validatedBootstrap(session)
                 val syncEpoch = bootstrap.libraryEpoch
                 pausedResult()?.let { return@run it }
-                if (!keyManager.hasAccountKey(session.userId)) {
-                    bootstrap = requestDeviceApproval(syncEpoch)
-                    if (!acceptDeviceApproval()) {
-                        error("当前设备尚未获得云端解密密钥，请在其他已登录设备上批准后重试")
-                    }
-                    bootstrap = client.bootstrap(session)
-                    checkCloudEpoch(session, syncEpoch)
-                }
+                bootstrap = prepareCloudSyncKeys(session, bootstrap)
                 val fullTransfer = networkGate.allowsPrivateBodies(
                     settings.networkPolicy,
                     manual

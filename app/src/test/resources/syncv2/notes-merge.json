@@ -91,6 +91,250 @@
       "remote": "A\n",
       "local": "a\nx",
       "base": "a\n"
+    },
+    {
+      "name": "left boundary",
+      "base": "a\nb",
+      "local": "x\na\nb",
+      "remote": "A\nb",
+      "expected": {
+        "markdown": "x\nA\nb"
+      }
+    },
+    {
+      "name": "left boundary swapped",
+      "base": "a\nb",
+      "local": "A\nb",
+      "remote": "x\na\nb",
+      "expected": {
+        "markdown": "x\nA\nb"
+      }
+    },
+    {
+      "name": "right boundary",
+      "base": "a\nb",
+      "local": "a\nx\nb",
+      "remote": "A\nb",
+      "expected": {
+        "markdown": "A\nx\nb"
+      }
+    },
+    {
+      "name": "right boundary swapped",
+      "base": "a\nb",
+      "local": "A\nb",
+      "remote": "a\nx\nb",
+      "expected": {
+        "markdown": "A\nx\nb"
+      }
+    },
+    {
+      "name": "same point swapped",
+      "base": "a\nb",
+      "local": "y\na\nb",
+      "remote": "x\na\nb",
+      "expected": {
+        "markdown": "y\nx\na\nb"
+      }
+    },
+    {
+      "name": "same point multi-line",
+      "base": "a\nb",
+      "local": "a\nx1\nx2\nb",
+      "remote": "a\ny1\ny2\nb",
+      "expected": {
+        "markdown": "a\ny1\ny2\nx1\nx2\nb"
+      }
+    },
+    {
+      "name": "same point multi-line swapped",
+      "base": "a\nb",
+      "local": "a\ny1\ny2\nb",
+      "remote": "a\nx1\nx2\nb",
+      "expected": {
+        "markdown": "a\ny1\ny2\nx1\nx2\nb"
+      }
+    },
+    {
+      "name": "same point prefix",
+      "base": "a",
+      "local": "x\na",
+      "remote": "x\nz\na",
+      "expected": {
+        "markdown": "x\nz\nx\na"
+      }
+    },
+    {
+      "name": "same point UTF-16 order",
+      "base": "a",
+      "local": "𐀀\na",
+      "remote": "\na",
+      "expected": {
+        "markdown": "\n𐀀\na"
+      }
+    },
+    {
+      "name": "same point identical edit",
+      "base": "a",
+      "local": "x\ny\na",
+      "remote": "x\ny\na",
+      "expected": {
+        "markdown": "x\ny\na"
+      }
+    },
+    {
+      "name": "left boundary of deletion",
+      "base": "a\nb",
+      "local": "x\na\nb",
+      "remote": "b",
+      "expected": {
+        "markdown": "x\nb"
+      }
+    },
+    {
+      "name": "left boundary of deletion swapped",
+      "base": "a\nb",
+      "local": "b",
+      "remote": "x\na\nb",
+      "expected": {
+        "markdown": "x\nb"
+      }
+    },
+    {
+      "name": "right boundary of deletion swapped",
+      "base": "a\nb",
+      "local": "a\nb\nc",
+      "remote": "a",
+      "expected": {
+        "markdown": "a\nc"
+      }
+    },
+    {
+      "name": "insertion inside replacement",
+      "base": "a\nb\nc",
+      "local": "a\nx\nb\nc",
+      "remote": "A\nc",
+      "expected": {
+        "conflict": true
+      }
+    },
+    {
+      "name": "whole document deletion with left insertion",
+      "base": "a",
+      "local": "",
+      "remote": "x\na",
+      "expected": {
+        "markdown": "x"
+      }
+    },
+    {
+      "name": "whole document deletion with right insertion",
+      "base": "a",
+      "local": "a\nx",
+      "remote": "",
+      "expected": {
+        "markdown": "x"
+      }
+    },
+    {
+      "name": "trailing empty line retained",
+      "base": "a\nb\n",
+      "local": "x\na\nb\n",
+      "remote": "A\nb\n",
+      "expected": {
+        "markdown": "x\nA\nb\n"
+      }
+    },
+    {
+      "name": "empty-base-two-trailing-blanks",
+      "base": "",
+      "local": "本地😀\n",
+      "remote": "云端𐐀\n",
+      "expected": {
+        "conflict": true
+      }
+    },
+    {
+      "name": "empty-base-two-leading-blanks",
+      "base": "",
+      "local": "\n本地😀",
+      "remote": "\n云端𐐀",
+      "expected": {
+        "conflict": true
+      }
+    },
+    {
+      "name": "empty-base-leading-and-trailing",
+      "base": "",
+      "local": "\r\n本地",
+      "remote": "云端\n",
+      "expected": {
+        "conflict": true
+      }
+    },
+    {
+      "name": "empty-base-one-trailing-blank",
+      "base": "",
+      "local": "本地\n",
+      "remote": "云端",
+      "expected": {
+        "conflict": true
+      }
+    },
+    {
+      "name": "empty-base-blank-only",
+      "base": "",
+      "local": "\n\n",
+      "remote": "云端",
+      "expected": {
+        "conflict": true
+      }
+    },
+    {
+      "name": "empty-base-unilateral-remote",
+      "base": "",
+      "local": "",
+      "remote": "云端\r\n",
+      "expected": {
+        "markdown": "云端\r\n"
+      }
+    },
+    {
+      "name": "empty-base-unilateral-local",
+      "base": "",
+      "local": "本地😀\n",
+      "remote": "",
+      "expected": {
+        "markdown": "本地😀\n"
+      }
+    },
+    {
+      "name": "empty-base-same",
+      "base": "",
+      "local": "\r\n云端",
+      "remote": "\r\n云端",
+      "expected": {
+        "markdown": "\r\n云端"
+      }
+    },
+    {
+      "name": "empty-base-both-empty",
+      "base": "",
+      "local": "",
+      "remote": "",
+      "expected": {
+        "markdown": ""
+      }
     }
-  ]
+  ],
+  "properties": {
+    "seeds": [
+      1,
+      17,
+      1729,
+      2654435769
+    ],
+    "casesPerSeed": 256,
+    "outputSha256": "0e2294650c40deb05228bade50e7c2e1bbfa4ceaaed50f0cb5c488d4194ed761"
+  }
 }

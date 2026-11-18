@@ -83,7 +83,7 @@ class B2BookPlanTest {
         }
     }
 
-    @Test fun reconnectReportsOnlyMissingBookBlocksAndCancelKeepsAppliedState() = runBlocking<Unit> {
+    @Test fun reconnectAcrossBookSegmentsResendsOnlyMissingDataAndRetainsRequestBinding() = runBlocking<Unit> {
         val root = java.nio.file.Files.createTempDirectory("b2-book-resume").toFile()
         try {
             val stateBytes = "{}".toByteArray()
@@ -91,33 +91,49 @@ class B2BookPlanTest {
             val state = binaryDescriptor(B2Wire.BOOK_STATE, id, obj("bookId" to id),
                 B2FileHashes(stateBytes.size.toLong(), stateHash, listOf(stateHash), emptyList()))
             val block = ByteArray(B2Wire.CHUNK) { 107 }
-            val bytes = block.size * 2L
-            val hash = B2Digests.hash(block + block)
+            val blockHash = B2Digests.hash(block)
+            val segmentChunks = (B2Wire.BOOK_SEGMENT_BYTES / block.size).toInt()
+            fun hashBlocks(count: Int): String = B2Frames.hex(java.security.MessageDigest.getInstance("SHA-256").run {
+                repeat(count) { update(block) }
+                digest()
+            })
+            val bytes = (segmentChunks + 2) * block.size.toLong()
+            val hash = hashBlocks(segmentChunks + 2)
             val metadata = obj("bookId" to id, "fingerprint" to this@B2BookPlanTest.hash,
                 "packageSha256" to hash, "packageBytes" to bytes)
-            val part = binaryDescriptor(B2Wire.BOOK_SEGMENT, "$id:$hash:0",
-                copy(metadata).put("segmentIndex", 0).put("segmentCount", 1).put("segmentOffset", 0),
-                B2FileHashes(bytes, hash, List(2) { B2Digests.hash(block) }, emptyList()), listOf(state.s("objectId")))
+            val parts = listOf(segmentChunks, 2).mapIndexed { index, chunks ->
+                binaryDescriptor(B2Wire.BOOK_SEGMENT, "$id:$hash:$index",
+                    copy(metadata).put("segmentIndex", index).put("segmentCount", 2)
+                        .put("segmentOffset", index * B2Wire.BOOK_SEGMENT_BYTES),
+                    B2FileHashes(chunks * block.size.toLong(), hashBlocks(chunks), List(chunks) { blockHash }, emptyList()),
+                    listOf(state.s("objectId")))
+            }
+            val partIds = parts.map { it.s("objectId") }
             val commit = binaryDescriptor(B2Wire.BOOK_COMMIT, id,
-                copy(metadata).put("segmentObjectIds", JSONArray(listOf(part.s("objectId")))), empty,
-                listOf(state.s("objectId"), part.s("objectId")).sorted())
-            val objects = listOf(state, part, commit).sortedBy { it.s("objectId") }
+                copy(metadata).put("segmentObjectIds", JSONArray(partIds)), empty,
+                (listOf(state.s("objectId")) + partIds).sorted())
+            val objects = (listOf(state, commit) + parts).sortedBy { it.s("objectId") }
             val job = "1".repeat(32)
             val account = "2".repeat(64)
             val snapshot = obj("snapshotId" to "book-resume", "manifestDigest" to hash, "fromExclusive" to 0, "toInclusive" to 0)
             val cap = B2Negotiation.capability(B2Wire.bookKinds, B2Wire.bookKinds, B2Wire.s4Limits())
             val selection = B2Negotiation.select(cap, cap, "watchToPhone")!!
             val store = MemoryB2Store()
-            val files = B2Files(root)
-            var stateApplies = 0
+            val applied = mutableListOf<String>()
+            var rejectTransaction = false
+            val journal = object : B2Persistence by store {
+                override suspend fun <T> transaction(block: suspend () -> T): T = store.transaction {
+                    block().also { if (rejectTransaction) fail("LOCAL_IO") }
+                }
+            }
             fun receiver(intent: String): B2Receiver {
                 val binding = obj("direction" to "watchToPhone", "jobId" to job, "intent" to intent, "selection" to selection)
-                return B2Receiver(store, files, B2Authorization(account, "phone", "watch", snapshot, snapshot, listOf(binding)) { true },
+                return B2Receiver(journal, B2Files(root), B2Authorization(account, "phone", "watch", snapshot, snapshot, listOf(binding)) { true },
                     object : B2BusinessPort {
                         override val kinds = B2Wire.bookKinds
                         override suspend fun apply(descriptor: JSONObject, metadata: JSONObject, staged: File): String {
-                            assertEquals(B2Wire.BOOK_STATE, descriptor.s("kind"))
-                            stateApplies++
+                            assertEquals(descriptor.n("size"), staged.length())
+                            applied += descriptor.s("objectId")
                             return "merged"
                         }
                     })
@@ -133,31 +149,68 @@ class B2BookPlanTest {
                 "pageDigest" to "0".repeat(64), "entries" to JSONArray(objects))
             page.put("pageDigest", B2Digests.page(plan, page))
             assertTrue(first.handle(B2Wire.request("manifestPage", job, plan, epoch, page)).o("result").getBoolean("manifestVerified"))
-            suspend fun durable(d: JSONObject, seq: Long, payload: ByteArray) {
-                val request = B2Wire.request("putChunk", job, plan, epoch, obj("objectId" to d.s("objectId"), "chunkIndex" to 0))
-                val head = B2DataHeader(2, objects.indexOf(d), epoch, seq, 0, payload.size, request.s("requestId"), request.s("requestDigest"))
-                first.inspect(head)
-                val chunk = first.writeChunk(B2Frame.Data(head, payload), request)!!
-                assertEquals(1, first.commitChunks(listOf(chunk)).single().disposition)
+            fun chunkRequest(generation: Long, d: JSONObject, index: Int) =
+                B2Wire.request("putChunk", job, plan, generation, obj("objectId" to d.s("objectId"), "chunkIndex" to index))
+            suspend fun durable(
+                target: B2Receiver, generation: Long, d: JSONObject, seq: Long, index: Int, payload: ByteArray,
+                request: JSONObject = chunkRequest(generation, d, index)
+            ) {
+                val head = B2DataHeader(2, objects.indexOf(d), generation, seq, index, payload.size,
+                    request.s("requestId"), request.s("requestDigest"))
+                target.inspect(head)
+                val chunk = target.writeChunk(B2Frame.Data(head, payload), request)!!
+                assertEquals(1, target.commitChunks(listOf(chunk)).single().disposition)
+                assertNotNull(target.ack(2, generation, listOf(B2AckEntry(seq, 1))))
             }
-            durable(state, 1, stateBytes)
-            first.handle(B2Wire.request("apply", job, plan, epoch, obj("objectId" to state.s("objectId"))))
-            durable(part, 2, block)
+            suspend fun apply(target: B2Receiver, generation: Long, d: JSONObject) =
+                target.handle(B2Wire.request("apply", job, plan, generation, obj("objectId" to d.s("objectId")))).o("result")
+            durable(first, epoch, state, 1, 0, stateBytes)
+            apply(first, epoch, state)
+            for (index in 0 until segmentChunks) {
+                durable(first, epoch, parts[0], index + 2L, index, block)
+            }
+            val firstSegment = apply(first, epoch, parts[0])
+            // The bytes and native binding survive the aborted business transaction.
+            val unacked = chunkRequest(epoch, parts[1], 0)
+            rejectTransaction = true
+            val rollback = runCatching { durable(first, epoch, parts[1], segmentChunks + 2L, 0, block, unacked) }
+            assertEquals("LOCAL_IO", (rollback.exceptionOrNull() as B2Exception).code)
+            rejectTransaction = false
+            val requestKey = B2Digests.d("wrss.library-binary.v2/record-key", listOf(job, "watch", unacked.s("requestId")))
+            assertNull(store.get(account, "request", requestKey))
             first.fenceNow()
             first.closeIndex()
             val next = receiver("resume")
-            val resumed = next.handle(B2Wire.request("begin", job, plan, null, copy(begin).put("intent", "resume")))
-            val later = resumed.n("epoch")
+            suspend fun resume(target: B2Receiver): Long =
+                target.handle(B2Wire.request("begin", job, plan, null, copy(begin).put("intent", "resume"))).n("epoch")
+            val later = resume(next)
             assertEquals(epoch + 1, later)
             val result = next.handle(B2Wire.request("missing", job, plan, later,
                 obj("afterObjectId" to null, "afterChunkIndex" to null, "limit" to 16))).o("result")
-            val partStatus = result.a("items").values().map { it as JSONObject }.single { it.s("objectId") == part.s("objectId") }
+            val statuses = result.a("items").values().map { it as JSONObject }.associateBy { it.s("objectId") }
+            val partStatus = statuses.getValue(parts[1].s("objectId"))
             assertEquals("[[1,2]]", partStatus.a("missingRanges").toString())
-            next.handle(B2Wire.request("cancel", job, plan, later, obj("reason" to "USER_CANCEL")))
-            assertEquals(1, stateApplies)
-            assertEquals("CANCELLED", store.get(account, "job", job)!!.s("state"))
-            assertEquals(1, store.listForJob(account, "object", job).count { !it.nil("receipt") })
+            val appliedPart = statuses.getValue(parts[0].s("objectId"))
+            assertEquals(firstSegment.o("receipt").s("resultDigest"), appliedPart.o("receipt").s("resultDigest"))
+
+            val conflict = B2Wire.request("missing", job, plan, later,
+                obj("afterObjectId" to null, "afterChunkIndex" to null, "limit" to 16), unacked.s("requestId"))
+            val error = runCatching { next.handle(conflict) }.exceptionOrNull() as B2Exception
+            assertEquals("REQUEST_CONFLICT", error.code)
+            assertEquals("STOP", B2Results.errorValue(error.code).s("recovery"))
+
+            next.fenceNow()
             next.closeIndex()
+            val resumed = receiver("resume")
+            val finalEpoch = resume(resumed)
+            assertEquals(later + 1, finalEpoch)
+            durable(resumed, finalEpoch, parts[1], 1, 1, block)
+            apply(resumed, finalEpoch, parts[1])
+            resumed.handle(B2Wire.request("cancel", job, plan, finalEpoch, obj("reason" to "USER_CANCEL")))
+            assertEquals(listOf(state.s("objectId")) + partIds, applied)
+            assertEquals("CANCELLED", store.get(account, "job", job)!!.s("state"))
+            assertEquals(3, store.listForJob(account, "object", job).count { !it.nil("receipt") })
+            resumed.closeIndex()
         } finally {
             root.deleteRecursively()
         }

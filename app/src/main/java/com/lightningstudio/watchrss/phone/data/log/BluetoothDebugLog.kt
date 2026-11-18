@@ -56,7 +56,7 @@ class BluetoothDebugLog(context: Context) {
         }
         // Release timing evidence without exporting bodies, tokens, account IDs or Bluetooth addresses.
         val timingKeys=setOf("action","phase","label","elapsedMs","wireBytes","prepareMs","bookPrepareMs","rootCount","remoteRootCount","missingRemote","retryDomains","localChanged","remoteChanged","errorClass","readerError","phoneMissing","watchMissing","skipped","domains","actualChanges","sourceTag","changedFields","localClock","remoteClock","localOrder","remoteOrder","articlesMerged","sourcesMerged","booksApplied","localApplied","notesPhone","notesWatch","appliedOnWatch","appliedOnPhone","bluetoothOnly","stage","deltaArticles","fullArticles","deltaSources","fullSnapshot","fallbackReason","sentArticles","sentSources","merged","mergedSources","received","sourcesReceived","applied","count","success","attempt","delayMs","elapsedNanos",
-            "unit","generation","monotonicMillis","consecutiveFailures","priorNoProgress")
+            "unit","generation","monotonicMillis","consecutiveFailures","priorNoProgress","stageElapsedMs")
         if(event.startsWith("sync.") || event.startsWith("bt.frame.") || event.startsWith("bt.socket.") ||
             event.startsWith("bt.library.probe.") || event.startsWith("library.reconnect.") ||
             event == "library.connection.interrupted") {

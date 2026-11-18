@@ -6,7 +6,7 @@ import java.nio.ByteBuffer
 import java.nio.CharBuffer
 import java.nio.charset.CodingErrorAction
 
-class B2Exception(val code: String) : Exception(code)
+class B2Exception(val code: String, val retryAfterMillis: Long = 0) : Exception(code)
 internal fun fail(code: String = "INVALID_FRAME"): Nothing = throw B2Exception(code)
 internal fun obj(vararg pairs: Pair<String, Any?>) = JSONObject().also { o -> pairs.forEach { o.put(it.first, it.second ?: JSONObject.NULL) } }
 internal fun JSONObject.s(k: String) = opt(k) as? String ?: fail()

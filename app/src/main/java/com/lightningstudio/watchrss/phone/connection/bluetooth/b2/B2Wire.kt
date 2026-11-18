@@ -38,7 +38,8 @@ object B2Wire {
         if ("articleBody" in ks && "articleMetadata" !in ks || "readerResource" in ks && "readerMetadata" !in ks) fail("CAPABILITY_MISMATCH")
         limits(o.o("limits"))
     }
-    fun s2Limits() = JSONObject(hardLimits as Map<*, *>).put("maxStagingBytes", 134217728).put("maxInFlightChunks", 1).put("maxInFlightBytes", CHUNK)
+    fun s3Limits() = JSONObject(hardLimits as Map<*, *>).put("maxStagingBytes", 134217728)
+    fun s2Limits() = s3Limits().put("maxInFlightChunks", 1).put("maxInFlightBytes", CHUNK)
     fun capability(o: JSONObject) { B2Json.exact(o, "version", "profile", "kinds", "chunkSizes", "limits"); if (o.n("version") != 2L || o.s("profile") != "merge-b2" || o.a("chunkSizes").length() != 1 || B2Json.integer(o.a("chunkSizes").get(0)) != 65536L) fail("CAPABILITY_MISMATCH"); kindRows(o, true) }
     fun selection(o: JSONObject) { B2Json.exact(o, "profile", "kinds", "chunkBytes", "limits"); if (o.s("profile") != "merge-b2" || o.n("chunkBytes") != 65536L) fail("CAPABILITY_MISMATCH"); kindRows(o, false) }
     fun snapshot(o: JSONObject) {

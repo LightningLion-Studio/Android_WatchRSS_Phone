@@ -81,7 +81,10 @@ object B2Frames {
     }
     /** beforePayload checks the authenticated registration, slot and expected length before
      * allocating a payload buffer. Recoverable rejection must use drain() with frozen hash. */
-    fun read(input: InputStream, beforePayload: (B2DataHeader) -> Unit = {}): B2Frame {
+    fun read(input: InputStream, beforePayload: (B2DataHeader) -> Unit = {}): B2Frame =
+        readInto(input) { header -> beforePayload(header); ByteArray(header.length) }
+
+    internal fun readInto(input: InputStream, payloadBuffer: (B2DataHeader) -> ByteArray): B2Frame {
         val d = DataInputStream(input)
         val length = d.readInt()
         if (length !in 12..MAX_FRAME) fail()
@@ -104,8 +107,9 @@ object B2Frames {
             val id = ByteArray(16).also { h.get(it) }; val digest = ByteArray(32).also { h.get(it) }
             val data = B2DataHeader(stream, slot, epoch, seq, index, n, hex(id), hex(digest)); validate(data)
             if (n != payload) fail()
-            beforePayload(data)
-            return B2Frame.Data(data, ByteArray(payload).also { d.readFully(it) })
+            val bytes = payloadBuffer(data)
+            d.readFully(bytes, 0, payload)
+            return B2Frame.Data(data, bytes)
         }
         val stream = h.int
         if (h.int != 0) fail()

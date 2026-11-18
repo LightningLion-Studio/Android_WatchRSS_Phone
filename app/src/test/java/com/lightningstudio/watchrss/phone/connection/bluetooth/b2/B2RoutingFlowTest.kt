@@ -78,6 +78,46 @@ class B2RoutingFlowTest {
         assertEquals(1, flow.reserve(0, 1, 1, id, digest, "o").seq)
         rejected("PLAN_CONFLICT") { flow.bind("different", "b", "c", 2) }
     }
+    @Test fun selectiveWindowEightAckValidatesAtomicallyAndRejectsUngrantEpoch() {
+        val flow = B2Flow(1)
+        flow.bind("job", "plan", "selection", 2, 8, 524288)
+        val digest = "e".repeat(64)
+        fun reserve(index: Int) = flow.reserve(0, index, 65536, index.toString(16).padStart(32, '0'), digest, "o")
+        repeat(8) { reserve(it) }
+        rejected("WINDOW_FULL") { reserve(8) }
+        rejected("STALE_EPOCH") { flow.settle(B2Frame.Ack(1, 1, 1, listOf(B2AckEntry(1, 1)))) }
+        rejected { flow.settle(B2Frame.Ack(1, 2, 1, listOf(B2AckEntry(2, 1), B2AckEntry(9, 2)))) }
+        assertEquals(524288, flow.pendingBytes)
+        assertEquals(listOf(2L, 8L), flow.settle(B2Frame.Ack(1, 2, 1,
+            listOf(B2AckEntry(2, 1), B2AckEntry(8, 2)))).map { it.header.seq })
+        assertEquals(6, flow.pendingCount)
+        val rejected = flow.negative("job", "plan", 2, "0".repeat(32), digest)
+        assertEquals(1L, rejected.header.seq)
+        assertEquals(9L, reserve(0).seq)
+        flow.bind("job", "plan", "selection", 3, 8, 524288)
+        assertTrue(flow.settle(B2Frame.Ack(1, 2, 2, listOf(B2AckEntry(9, 1)))).isEmpty())
+        assertEquals(1L, reserve(0).seq)
+    }
+
+    @Test fun s3NegotiatesS2SubsetAndBindsWindowInDigest() {
+        val kinds = setOf("noteAsset")
+        val s2 = B2Negotiation.capability(kinds, kinds, B2Wire.s2Limits())
+        val s3 = B2Negotiation.capability(kinds, kinds)
+        for (direction in listOf("phoneToWatch", "watchToPhone")) {
+            val s2Selection = B2Negotiation.select(s2, s2, direction)!!
+            val mixed = B2Negotiation.select(s3, s2, direction)!!
+            val s3Selection = B2Negotiation.select(s3, s3, direction)!!
+            assertEquals(1, mixed.o("limits").getInt("maxInFlightChunks"))
+            assertEquals(65536, mixed.o("limits").getInt("maxInFlightBytes"))
+            assertEquals(8, s3Selection.o("limits").getInt("maxInFlightChunks"))
+            assertEquals(524288, s3Selection.o("limits").getInt("maxInFlightBytes"))
+            assertEquals(B2Digests.selection(s2Selection), B2Digests.selection(mixed))
+            assertNotEquals(B2Digests.selection(mixed), B2Digests.selection(s3Selection))
+            assertEquals(B2Digests.selection(mixed),
+                B2Digests.selection(B2Negotiation.select(s3, s3, direction, mixed)!!))
+        }
+    }
+
     @Test fun receiveSequencesConsumeWaitAttemptAndDoNotAcceptGaps() {
         val flow = B2Flow(2); flow.bind("a", "b", "c", 1)
         val h = B2DataHeader(2, 0, 1, 1, 0, 3, "1".repeat(32), "2".repeat(64))

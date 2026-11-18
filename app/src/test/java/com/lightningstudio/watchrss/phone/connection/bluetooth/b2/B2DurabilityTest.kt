@@ -13,7 +13,7 @@ import java.nio.file.Files
 
 internal class MemoryB2Store : B2Persistence {
     private val lane = Mutex()
-    val rows = linkedMapOf<Triple<String, String, String>, String>()
+    val rows = java.util.concurrent.ConcurrentHashMap<Triple<String, String, String>, String>()
     override suspend fun <T> exclusive(block: suspend () -> T): T = lane.withLock { block() }
     override suspend fun <T> transaction(block: suspend () -> T): T {
         val before = rows.toMap()
@@ -173,6 +173,53 @@ class B2DurabilityTest {
         x.store.put(x.account, "peerAck", forwardJob, obj("state" to "COMPLETE"))
         assertEquals(2, x.put(r, epoch, 2).entries.single().txSeq)
         x.root.deleteRecursively(); Unit
+    }
+
+    @Test fun bidirectionalWindowEightDoesNotBorrowOddObjectSlots() = runBlocking {
+        for ((direction, stream, cap) in listOf(Triple("phoneToWatch", 1, 2), Triple("watchToPhone", 2, 1))) {
+            val x = ReceiverRig()
+            try {
+                val ds = (0..2).map { assetDescriptor(x.bytes, "asset-$it.png") }.sortedBy { it.s("objectId") }
+                x.selection.o("limits").put("maxInFlightObjects", 3)
+                val opposite = if (stream == 1) "watchToPhone" else "phoneToWatch"
+                val bindings = listOf(x.binding.put("direction", direction),
+                    x.binding.put("direction", opposite).put("jobId", "9".repeat(32)))
+                val receiver = B2Receiver(x.store, x.files,
+                    B2Authorization(x.account, "phone", "watch", x.snapshot, x.snapshot, bindings) { true },
+                    object : B2BusinessPort {
+                        override val kinds = setOf("noteAsset")
+                        override suspend fun apply(descriptor: JSONObject, metadata: JSONObject, staged: File) = "merged"
+                    }, receiveDirection = direction)
+                val description = x.description.put("direction", direction).put("objectCount", ds.size)
+                    .put("objectsRoot", B2Digests.objects(ds.map { it.s("objectId") })).put("pageObjectCounts", JSONArray(listOf(ds.size)))
+                val plan = B2Digests.plan(description)
+                val epoch = receiver.handle(B2Wire.request("begin", x.job, plan, null, description)).n("epoch")
+                val page = obj("pageIndex" to 0, "startIndex" to 0, "previousPageDigest" to "0".repeat(64),
+                    "pageDigest" to "0".repeat(64), "entries" to JSONArray(ds))
+                page.put("pageDigest", B2Digests.page(plan, page))
+                receiver.handle(B2Wire.request("manifestPage", x.job, plan, epoch, page))
+                fun header(slot: Int, seq: Long): B2DataHeader {
+                    val request = B2Wire.request("putChunk", x.job, plan, epoch,
+                        obj("objectId" to ds[slot].s("objectId"), "chunkIndex" to 0), slot.toString().repeat(32))
+                    return B2DataHeader(stream, slot, epoch, seq, 0, x.bytes.size, request.s("requestId"), request.s("requestDigest"))
+                }
+                repeat(cap) { i ->
+                    val h = header(i, i + 1L)
+                    receiver.data(B2Frame.Data(h, x.bytes), receiver.inspect(h).first)
+                }
+                val first = header(cap, cap + 1L)
+                val rejectedData = try {
+                    receiver.inspect(first)
+                    error("the other direction's slots cannot be borrowed")
+                } catch (e: B2RejectedData) { e }
+                assertEquals("WINDOW_FULL", rejectedData.rejection)
+                B2Frames.drain(java.io.ByteArrayInputStream(x.bytes), x.bytes.size, rejectedData.hash)
+                receiver.handle(B2Wire.request("apply", x.job, plan, epoch, obj("objectId" to ds[0].s("objectId"))))
+                val retry = first.copy(seq = first.seq + 1)
+                assertEquals(retry.seq, receiver.data(B2Frame.Data(retry, x.bytes), receiver.inspect(retry).first).entries.single().txSeq)
+            } finally { x.root.deleteRecursively() }
+        }
+        Unit
     }
 
     @Test fun heartbeatRequestIdCannotBeReboundToBusinessAfterReconnect() = runBlocking {

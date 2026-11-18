@@ -492,7 +492,8 @@ internal class SyncV2Projection(
             }}
             val signed=value.getJSONObject("refs");if(value.opt("postRefs")!=false)refs.add(signed)
             objects[SyncV2Codec.oid("state-refs",signed)]=SyncV2Codec.utf8(SyncV2Codec.canonical(signed))
-            if((value.opt("postRefs")!=false || c[1] in setOf("asset","book")) && SyncV2Codec.canonical(value)!=SyncV2Codec.canonical(prior))prepared[entity]=seal("wire-candidate",value)
+            // Body workers read this cache even when the authenticated refs are reused.
+            if((value.opt("postRefs")!=false || c[1] in setOf("article","asset","book")) && SyncV2Codec.canonical(value)!=SyncV2Codec.canonical(prior))prepared[entity]=seal("wire-candidate",value)
             if(c[1]=="note")fault("note-publish-staged")
         }
         val tree=SyncV2Index.build(identity.scope,rows);objects.putAll(tree.objects)

@@ -250,7 +250,7 @@ object LibrarySyncPayload {
     fun buildManifestFrames(payload: JSONObject): List<JSONObject> {
         require(payload.optString("phase") == PHASE_MANIFEST) { "只能分批资料库清单消息" }
         payload.put(FIELD_SUPPORTS_MANIFEST_BATCHES, true)
-        if (BluetoothSyncProtocol.encodedSize(payload) <= BluetoothSyncProtocol.MAX_FRAME_BYTES) {
+        if (BluetoothSyncProtocol.encodedSize(payload) <= MANIFEST_BATCH_TARGET_BYTES) {
             return listOf(payload)
         }
 
@@ -287,9 +287,9 @@ object LibrarySyncPayload {
             "资料库清单批次数过多：$batchCount"
         }
         val totalArticles = payload.optJSONArray("articleManifest")?.length() ?: 0
-        val header = JSONObject(payload.toString()).apply {
-            MANIFEST_ARRAY_FIELDS.forEach { field ->
-                if (has(field)) put(field, JSONArray())
+        val header = JSONObject().apply {
+            payload.keys().forEach { field ->
+                put(field, if (field in MANIFEST_ARRAY_FIELDS) JSONArray() else payload.get(field))
             }
             putManifestBatchFields(0, batchCount, totalArticles)
         }
@@ -1654,7 +1654,7 @@ object LibrarySyncPayload {
     }
 
     private const val ARTICLE_BATCH_TARGET_BYTES = 512 * 1024
-    private const val MANIFEST_BATCH_TARGET_BYTES = 1024 * 1024L
+    private const val MANIFEST_BATCH_TARGET_BYTES = 192 * 1024L
     private const val RESPONSE_PROGRESS_HEADER_MIN_BODY_BYTES = 16 * 1024
     private const val MAX_DECOMPRESSED_TEXT_BYTES = 32 * 1024 * 1024
     private const val EXACT_CHUNKED_ARTICLE_SIZE_MAX_BYTES = 64 * 1024L

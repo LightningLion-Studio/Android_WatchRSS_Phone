@@ -75,6 +75,7 @@ class LibraryFatalResponseTest {
 
         // A corrected peer applies the real article request frames before replying success.
         val pending=ArrayDeque<Byte>();val requestFrames=mutableListOf<JSONObject>();val articleFrames=mutableListOf<JSONObject>()
+        val manifestFrames=mutableListOf<JSONObject>()
         val output=object:ByteArrayOutputStream(){override fun flush(){
             if(size()==0)return
             val q=BluetoothSyncProtocol.readFrame(toByteArray().inputStream());reset();requestFrames+=q
@@ -83,11 +84,16 @@ class LibraryFatalResponseTest {
                 "syncLibrary"->when(q.optString("phase")) {
                     "probe"->binding()
                     "cursor"->LibrarySyncPayload.buildCursorResponse("watch",LibrarySyncCursor(0,0,0)).put("supportsRssCanonicalIds",false)
-                    "manifest"->manifest().put("bodyRequests",JSONArray().apply{
-                        LibrarySyncPayload.buildBodyRequestsForRemoteArticles(emptyList(),LibrarySyncPayload.parseArticleManifest(q)).forEach{r->
-                            put(JSONObject().put("articleId",r.articleId).put("chunkIndexes",JSONArray(r.chunkIndexes)).put("metadataOnly",r.metadataOnly))
-                        }
-                    })
+                    "manifest"->{
+                        manifestFrames+=q
+                        if(manifestFrames.size<LibrarySyncPayload.manifestBatchCount(manifestFrames.first()))return
+                        val remote=LibrarySyncPayload.parseArticleManifest(LibrarySyncPayload.combineManifestFrames(manifestFrames))
+                        manifest().put("bodyRequests",JSONArray().apply{
+                            LibrarySyncPayload.buildBodyRequestsForRemoteArticles(emptyList(),remote).forEach{r->
+                                put(JSONObject().put("articleId",r.articleId).put("chunkIndexes",JSONArray(r.chunkIndexes)).put("metadataOnly",r.metadataOnly))
+                            }
+                        })
+                    }
                     "articles"->{
                         articleFrames+=q
                         if(q.optInt("batchIndex",0)+1<q.optInt("batchCount",1))return
@@ -106,6 +112,7 @@ class LibraryFatalResponseTest {
         val input=object:InputStream(){override fun read()=if(pending.isEmpty())-1 else pending.removeFirst().toInt() and 255}
         val retry=PhoneSyncSession(client,device,"phone",PhoneSyncSession.Transport(input,output,"test",false,{}),true,false,false)
         val result=manager.syncAll(device,reusableSession=retry)
+        assertTrue("the corrected peer must collect a batched request",manifestFrames.size>1)
         assertEquals(500,result.libraryStats!!.sent)
         val durable=watchDb.phoneArticleDao().getAllForSync()
         assertEquals(500,durable.size);assertEquals(local.associate{it.articleId to it.contentText},durable.associate{it.articleId to it.contentText})

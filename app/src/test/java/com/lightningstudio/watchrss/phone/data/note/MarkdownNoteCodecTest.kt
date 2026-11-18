@@ -11,13 +11,46 @@ class MarkdownNoteCodecTest {
         val parsed = MarkdownNoteCodec.parse(MarkdownNoteCodec.export(note))
         assertEquals("n-1", parsed.noteId)
         assertEquals("work", parsed.folderId)
-        assertEquals("# 标题\n\n正文\n", parsed.markdown)
+        assertEquals("标题", parsed.title)
+        assertEquals(note.markdown, parsed.markdown)
     }
 
     @Test fun `ordinary markdown remains portable and creates a new note`() {
         val parsed = MarkdownNoteCodec.parse("# 外部笔记\n")
         assertNull(parsed.noteId)
         assertEquals("# 外部笔记\n", parsed.markdown)
+    }
+
+    @Test fun `NA-03 export parse preserves title and every body byte for six rounds`() {
+        val bodies = com.lightningstudio.watchrss.phone.NoteLosslessSamples.all.map { it.second } +
+            listOf("x\r\ny", "x\ry\r", "", "\n\n", "---\r\nunknown: value\r\n---\r\nbody")
+        for (title in listOf("Manual title", "手填：标题 👨‍👩‍👧‍👦", "a\"b\\c\nnext\rline\tend", "  preserved  ")) {
+            for (body in bodies) {
+                var note = NoteEntity("stable", "folder", title, body, "", "h", "h", body, false, 1, 2, "phone")
+                repeat(6) {
+                    val parsed = MarkdownNoteCodec.parse(MarkdownNoteCodec.export(note))
+                    assertEquals(title, parsed.title)
+                    org.junit.Assert.assertArrayEquals(body.toByteArray(Charsets.UTF_8), parsed.markdown.toByteArray(Charsets.UTF_8))
+                    assertEquals("stable", parsed.noteId)
+                    assertEquals("folder", parsed.folderId)
+                    note = note.copy(title = parsed.title!!, markdown = parsed.markdown)
+                }
+            }
+        }
+    }
+
+    @Test fun `NA-03 envelope line endings never change body line endings`() {
+        val body = "\r\nx\ry\n\nlast  "
+        for (ending in listOf("\n", "\r\n", "\r")) {
+            val header = listOf("---", "watchrss-note: 1", "id: n", "title: Legacy title", "---", "").joinToString(ending)
+            val parsed = MarkdownNoteCodec.parse(header + body)
+            assertEquals("Legacy title", parsed.title)
+            assertEquals(body, parsed.markdown)
+        }
+        val external = "---\r\nother: value\r\n---\r\nx\ry"
+        assertEquals(external, MarkdownNoteCodec.parse(external).markdown)
+        assertEquals("plain\r\ntext\r", MarkdownNoteCodec.parse("plain\r\ntext\r").markdown)
+        assertEquals("", MarkdownNoteCodec.parse("---\nwatchrss-note: 1\n---").markdown)
     }
 
     @Test fun `watch projection preserves image meaning without markdown syntax`() {

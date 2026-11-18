@@ -1,5 +1,9 @@
 package com.lightningstudio.watchrss.phone.data.note
 
+import com.lightningstudio.watchrss.phone.NoteEditorDraft
+import com.lightningstudio.watchrss.phone.NoteLosslessSamples
+import com.lightningstudio.watchrss.phone.connection.bluetooth.NoteSyncPayload
+import org.junit.Assert.assertArrayEquals
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
@@ -102,6 +106,70 @@ class NoteRepositoryTest {
         assertEquals("phone", deleted.modifiedBy)
     }
 
+    @Test fun `six title pin and sync cycles preserve all source bytes and hashes`() = runBlocking {
+        for ((name, body) in NoteLosslessSamples.all) {
+            val dao = FakeNoteDao()
+            val repository = NoteRepository(dao, deviceId = "phone", now = { 123L })
+            var saved = repository.save(title = "手填标题", markdown = body)
+            repeat(6) { round ->
+                val draft = NoteEditorDraft(saved.markdown)
+                saved = repository.save(saved.noteId, "改标题 $round", draft.storageMarkup {
+                    error("Metadata-only save exported: $name")
+                })
+                saved = repository.setPinned(saved.noteId, round % 2 == 0)
+                val remote = NoteCloudStateCodec.decode(NoteCloudStateCodec.encode(listOf(saved))).single()
+                val bluetooth = NoteSyncPayload.decodeNotes(NoteSyncPayload.manifest("phone", listOf(remote))).single()
+                repository.applyRemote(bluetooth, "peer")
+                saved = dao.notes.getValue(saved.noteId)
+                assertArrayEquals(name, body.toByteArray(), saved.markdown.toByteArray())
+                assertArrayEquals(name, body.toByteArray(), saved.baseMarkdown.toByteArray())
+                assertEquals(name, MarkdownNoteCodec.sha256(body), saved.contentHash)
+                assertEquals(name, MarkdownNoteCodec.sha256(body), saved.baseContentHash)
+                assertEquals("改标题 $round", saved.title)
+            }
+        }
+    }
+
+    @Test fun `verbatim user vocabulary survives six unedited open save and sync cycles`() = runBlocking {
+        val originalBytes = NoteLosslessSamples.userVocabBytes()
+        val body = originalBytes.toString(Charsets.UTF_8)
+        assertEquals(1122, originalBytes.size)
+        assertEquals("fa21ba9f806652452ee0739d85ca68ab8e2817b08a3ec7033d426efb8ac73e4e",
+            MarkdownNoteCodec.sha256(body))
+        assertEquals(7, body.count { it == '\n' })
+        assertEquals(4, body.lines().count { it.endsWith(" ") })
+        assertEquals(true, body.endsWith(" \n"))
+
+        val dao = FakeNoteDao()
+        val repository = NoteRepository(dao, deviceId = "phone", now = { 123L })
+        var saved = repository.save(title = "用户原文", markdown = body)
+        repeat(6) { round ->
+            val draft = NoteEditorDraft(saved.markdown)
+            assertEquals("Source mode on open $round", true, draft.sourceMode)
+            assertEquals(false, draft.bodyEdited)
+            val untouched = draft.storageMarkup { error("Unedited user vocabulary exported at $round") }
+            assertArrayEquals(originalBytes, untouched.toByteArray(Charsets.UTF_8))
+            saved = repository.save(saved.noteId, saved.title, untouched, saved.folderId, saved.pinned)
+            assertArrayEquals(originalBytes, saved.markdown.toByteArray(Charsets.UTF_8))
+            val wire = org.json.JSONObject(NoteSyncPayload.manifest("phone", listOf(saved)).toString())
+            val bluetooth = NoteSyncPayload.decodeNotes(wire).single()
+            assertArrayEquals(originalBytes, bluetooth.markdown.toByteArray(Charsets.UTF_8))
+            val cloud = NoteCloudStateCodec.decode(NoteCloudStateCodec.encode(listOf(bluetooth))).single()
+            assertArrayEquals(originalBytes, cloud.markdown.toByteArray(Charsets.UTF_8))
+            repository.applyRemote(cloud, "peer")
+            saved = dao.notes.getValue(saved.noteId)
+            assertArrayEquals(originalBytes, saved.markdown.toByteArray(Charsets.UTF_8))
+            assertArrayEquals(originalBytes, saved.baseMarkdown.toByteArray(Charsets.UTF_8))
+            assertEquals("用户原文", saved.title)
+            assertEquals(true, saved.markdown.contains("postpone3."))
+            assertEquals(true, saved.markdown.contains("container11."))
+            val secondBlock = saved.markdown.split("\n\n")[1]
+            val markers = Regex("""(?<!\d)(\d+)\.""").findAll(secondBlock)
+                .map { it.groupValues[1].toInt() }.toList()
+            assertEquals("Literal 1..27 markers after round $round", (1..27).toList(), markers)
+        }
+    }
+
     private fun noteAsset(id: String, key: String) = NoteAssetEntity(
         assetId = id,
         noteId = "note",
@@ -114,7 +182,15 @@ class NoteRepositoryTest {
         createdAt = 1L
     )
 
-    private class FakeNoteDao : NoteDao {
+    internal class FakeNoteDao : NoteDao {
+        val editorModes = mutableMapOf<String, Pair<String, Boolean>>()
+        override suspend fun editorSourceMode(noteId: String, installationId: String): Boolean? =
+            editorModes[noteId]?.takeIf { it.first == installationId }?.second
+        override suspend fun writeEditorSourceMode(noteId: String, installationId: String, sourceMode: Boolean) {
+            editorModes[noteId] = installationId to sourceMode
+        }
+        override suspend fun clearEditorPreferences() = editorModes.clear()
+
         val notes = linkedMapOf<String, NoteEntity>()
         val assets = linkedMapOf<String, NoteAssetEntity>()
         val conflicts = linkedSetOf<String>()

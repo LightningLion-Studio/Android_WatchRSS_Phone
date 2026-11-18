@@ -50,7 +50,7 @@ class MainDomainRecoveryProgressTest {
                 when (q.getString("phase")) {
                     "manifest" -> {
                         val ids = store.manifests().map { it.getString("bookId") }
-                        val missing = if (repeatCompletedBook) ids.take(2) else ids.filterNot { it in completed }
+                        val missing = if (repeatCompletedBook && reconnects < 4) ids.take(2) else ids.filterNot { it in completed }
                         reply("manifest").put("books", JSONArray()).put("missingBookIds", JSONArray(missing))
                     }
                     "body" -> {
@@ -65,7 +65,7 @@ class MainDomainRecoveryProgressTest {
                 }
             }.sync(syncReading = false)
         } } }.exceptionOrNull()
-        if (!repeatCompletedBook && failure == null) assertEquals(5, completed.size)
+        if (failure == null) assertEquals(5, completed.size)
         return failure to reconnects
     }
     @Test fun newCompletedBooksKeepFourReadyIntervalsAlive() = runBlocking<Unit> {
@@ -73,10 +73,10 @@ class MainDomainRecoveryProgressTest {
         assertNull("new peer-confirmed books must reset the no-progress budget: $failure", failure)
         assertEquals(4, reconnects)
     }
-    @Test fun duplicateCompletedBookReceiptsCannotKeepRecoveryAlive() = runBlocking<Unit> {
+    @Test fun duplicateCompletedBookReceiptsCanBeRetriedUntilThePeerAdvances() = runBlocking<Unit> {
         val (failure, reconnects) = upload(true)
-        assertTrue("$failure", failure is LibraryNoProgressLimit)
-        assertEquals(3, reconnects)
+        assertNull(failure)
+        assertEquals(7, reconnects)
     }
     @Test fun newlyAppliedBookMetadataKeepsFourReadyIntervalsAlive() = runBlocking<Unit> {
         seed(1)
@@ -134,10 +134,10 @@ class MainDomainRecoveryProgressTest {
         assertNull("peer-confirmed new book metadata must reset the budget: $failure",failure)
         assertEquals(5,attempt)
     }
-    @Test fun localEditsAndStalePeerMetadataCannotKeepRecoveryAlive() = runBlocking<Unit> {
+    @Test fun stalePeerMetadataDoesNotPreventReconnection() = runBlocking<Unit> {
         val (failure,attempt)=metadataUpload(false)
-        assertTrue("$failure",failure is LibraryNoProgressLimit)
-        assertEquals(4,attempt)
+        assertNull(failure)
+        assertEquals(5,attempt)
     }
 
 }

@@ -258,6 +258,13 @@ internal class PhoneSyncSession internal constructor(
         val inputStream: InputStream = io.input(rawInput)
         val outputStream: OutputStream = io.output(rawOutput)
 
+        fun <T> readManifest(initialTimeoutMs: Long, read: (InputStream) -> T): T {
+            val input = io.input(rawInput, firstByteTimeoutMs = initialTimeoutMs)
+            val ip = rawInput as? IpReadDeadline
+            return if (ip == null) read(input)
+            else ip.withBudget(initialTimeoutMs, progressMs = 30_000L) { read(input) }
+        }
+
         // B2 owns its wire deadlines. Tag only physical I/O errors here so local
         // file/database failures cannot enter the library reconnection loop.
         private fun <T> binaryIo(operation: () -> T): T {
@@ -509,7 +516,7 @@ class PhoneBluetoothSyncClient(
         val bluetoothManager = context.getSystemService(BluetoothManager::class.java)
             ?: error("此设备没有蓝牙适配器")
         val adapter = bluetoothManager.adapter ?: error("此设备没有蓝牙适配器")
-        require(adapter.isEnabled) { "蓝牙未开启" }
+        if (!adapter.isEnabled) throw LibraryBluetoothUnavailable()
 
         val bondedDevices = adapter.bondedDevices.orEmpty()
         logAdapterSnapshot(sessionId, adapter, bondedDevices)
@@ -670,7 +677,7 @@ class PhoneBluetoothSyncClient(
         val adapter = context.getSystemService(BluetoothManager::class.java)
             ?.adapter
             ?: error("此设备没有蓝牙适配器")
-        require(adapter.isEnabled) { "蓝牙未开启" }
+        if (!adapter.isEnabled) throw LibraryBluetoothUnavailable()
         val bluetoothDevice = selectBondedWatchDevice(
             devices = adapter.bondedDevices.orEmpty(),
             deviceAddress = device.bluetoothAddress.ifBlank {
@@ -1658,8 +1665,7 @@ class PhoneBluetoothSyncClient(
             val manifestResponse = readManifestFrames(
                 ipSession.inputStream,
                 sessionId,
-                tracker,
-                initialIdleTimeoutMs=if(request.optBoolean("fullSnapshot",true))90_000 else 20_000
+                tracker
             )
             // Every manifest frame was validated before any success ACK or callback.
             val supportsArticleBatches = manifestResponse.optBoolean("supportsArticleBatches", false)
@@ -1830,7 +1836,9 @@ class PhoneBluetoothSyncClient(
             )
         }
         report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
-        val manifestResponse = readManifestFrames(transport.inputStream, sessionId, tracker,initialIdleTimeoutMs=if(request.optBoolean("fullSnapshot",true))90_000 else 20_000)
+        val manifestResponse = transport.readManifest(MANIFEST_PREPARATION_TIMEOUT_MS) {
+            readManifestFramesBody(it, sessionId, tracker)
+        }
         // Every manifest frame was validated before any success ACK or callback.
         val supportsArticleBatches = manifestResponse.optBoolean("supportsArticleBatches", false)
         val articleRequests = buildArticleRequests(manifestResponse, supportsArticleBatches)
@@ -2500,12 +2508,13 @@ class PhoneBluetoothSyncClient(
     private fun readManifestFrames(
         inputStream: InputStream,
         sessionId: String,
-        byteTracker: ByteTransferTracker,
-        initialIdleTimeoutMs:Long=90_000
+        byteTracker: ByteTransferTracker
     ): JSONObject {
         val guarded=inputStream as? IpReadDeadline
         return if(guarded==null)readManifestFramesBody(inputStream,sessionId,byteTracker)
-        else guarded.withBudget(initialIdleTimeoutMs){readManifestFramesBody(inputStream,sessionId,byteTracker)}
+        else guarded.withBudget(MANIFEST_PREPARATION_TIMEOUT_MS, progressMs = 30_000L) {
+            readManifestFramesBody(inputStream, sessionId, byteTracker)
+        }
     }
     private fun readManifestFramesBody(
         inputStream: InputStream,
@@ -3478,6 +3487,9 @@ class PhoneBluetoothSyncClient(
         SystemClock.elapsedRealtime() - startedAt
 
     companion object {
+        // A delta request can force the watch to rebuild a cold, full inventory.
+        // The first byte has a generation deadline; subsequent bytes use the usual idle timeout.
+        private const val MANIFEST_PREPARATION_TIMEOUT_MS = 180_000L
         private const val PREVIEW_MIN_FRAME_INTERVAL_MS = 32L
         private const val TAG = "WatchRSS_BtSyncClient"
         private const val PHASE_COMPLETE = "complete"

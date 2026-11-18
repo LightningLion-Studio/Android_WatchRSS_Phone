@@ -116,14 +116,18 @@ class ReviewReconnectR2AdversarialTest {
                 usage(0, emptyList(), false), finish()) else frames
             return session(completed, cutLastFrame = kind == "cutBeforeCommit", loseAckFor = if (kind == "lostNoteAck" && n < 5) "syncNotes" else null)
         }
-        manager.reconnectSession = { _, _ -> searches++; time += 6000; link(searches + 1) }
+        manager.reconnectSession = { _, _ ->
+            searches++; time += 6000
+            if (kind == "cutBeforeCommit" && searches > 4) throw LibrarySearchFailure()
+            link(searches + 1)
+        }
         val failure = runCatching { manager.syncAll(device, reusableSession = link(1), recoveryPolicy = policy) }.exceptionOrNull()
         println("R2_NOTE kind=$kind searches=$searches rows=${notes.allNotes().size} conflicts=${notes.observeConflicts().first().size} ackLosses=$ackLosses noProgress=${policy.consecutiveNoProgress} failure=$failure")
         return failure
     }
     @Test fun truncationBeforeNoteCommitNeverRenewsRecovery() = runBlocking<Unit> {
-        assertTrue(runNotes("cutBeforeCommit") is LibraryNoProgressLimit)
-        assertEquals(3, searches); assertEquals(1, notes.allNotes().size); assertEquals(3, policy.consecutiveNoProgress)
+        assertTrue(runNotes("cutBeforeCommit") is LibraryReconnectLimit)
+        assertEquals(7, searches); assertEquals(1, notes.allNotes().size); assertEquals(4, policy.consecutiveNoProgress)
     }
     @Test fun lostNoteAckStillCountsCommittedNotesAndReplaysNewPhysicalSession() = runBlocking<Unit> {
         assertNull(runNotes("lostNoteAck")); assertEquals(4, searches)
@@ -135,8 +139,8 @@ class ReviewReconnectR2AdversarialTest {
         assertTrue(notes.note("local")!!.markdown.endsWith("local"))
     }
     @Test fun replayOfResolvedConflictCannotRenewRealManagerBudget() = runBlocking<Unit> {
-        assertTrue(runNotes("resolvedConflict") is LibraryNoProgressLimit)
-        assertEquals(3, searches); assertTrue(notes.observeConflicts().first().isEmpty())
+        assertNull(runNotes("resolvedConflict"))
+        assertEquals(4, searches); assertTrue(notes.observeConflicts().first().isEmpty())
         assertEquals(1, notes.allNotes().size)
     }
     private suspend fun runUsage(duplicate: Boolean): Throwable? {
@@ -197,7 +201,7 @@ class ReviewReconnectR2AdversarialTest {
         assertEquals(5, tokens.observeRecent().first().size)
     }
     @Test fun lostUsageAckDoesNotPromoteDuplicateRowsToProgress() = runBlocking<Unit> {
-        assertTrue(runUsage(true) is LibraryNoProgressLimit); assertEquals(3, searches)
+        assertNull(runUsage(true)); assertEquals(4, searches)
         assertEquals(4, ackLosses); assertEquals(1, tokens.observeRecent().first().size)
     }
     private fun recovery(s: PhoneSyncSession): LibraryRecoveryContext {

@@ -26,12 +26,12 @@ internal class LibraryTransportFailure(val generation: Long, cause: IOException)
 internal class LibrarySearchFailure(cause: Throwable? = null) : IOException("未找到可重新连接的原手表", cause)
 internal class LibraryReconnectLimit : IOException("连续 3 次搜索或重新连接手表失败")
 internal class LibraryDisconnectLimit : IOException("10 秒内同步连接断开 3 次")
-internal class LibraryNoProgressLimit : IOException("同步多次中断且没有进展，请稍后重试")
+internal class LibraryBluetoothUnavailable : IOException("蓝牙未开启")
 
 internal class LibraryTransferRecovery(private val now: () -> Long) {
     var consecutiveFailures = 0; private set
     var generation: Long = -1; private set
-    private val disconnected = mutableSetOf<Long>()
+    private var lastDisconnectedGeneration: Long? = null
     private val times = ArrayDeque<Long>()
     var consecutiveNoProgress = 0; private set
     private var monitoringReady = false
@@ -52,7 +52,8 @@ internal class LibraryTransferRecovery(private val now: () -> Long) {
         if (consecutiveFailures >= 3) throw LibraryReconnectLimit()
     }
     fun disconnected(value: Long) {
-        if (value != generation || !disconnected.add(value)) return
+        if (value != generation || value == lastDisconnectedGeneration) return
+        lastDisconnectedGeneration = value
         val at = now()
         while (times.isNotEmpty() && at - times.first() > 10_000L) times.removeFirst()
         times.addLast(at)
@@ -60,7 +61,7 @@ internal class LibraryTransferRecovery(private val now: () -> Long) {
         if (monitoringReady) {
             monitoringReady = false
             consecutiveNoProgress = if (progressSinceReady) 0 else consecutiveNoProgress + 1
-            if (consecutiveNoProgress >= 3) throw LibraryNoProgressLimit()
+
         }
     }
 }
@@ -73,8 +74,7 @@ internal class LibraryIoGuard(
     private val enabled: () -> Boolean,
     private val close: () -> Unit,
     // 40 frozen-APK cases: longest successful complete read <= 6001 ms.
-    // This conservatively includes snapshot generation and wire time:
-    // min(60s, max(30s, 3 * 6001ms)) = 30s. Reset at each stream I/O, not per frame.
+    // Reset at each stream I/O. Manifest preparation has a separate first-byte budget.
     private val timeoutMs: Long = 30_000L,
     private val remotelyClosed: () -> Boolean = { false },
     private val beforeIo: () -> Unit = {},
@@ -91,14 +91,18 @@ internal class LibraryIoGuard(
             Thread(work, "library-io-deadline").apply { isDaemon = true }
         }
     }
-    private fun <T> io(reading: Boolean = false, block: () -> T): T {
+    private fun <T> io(
+        reading: Boolean = false,
+        firstByteTimeoutMs: Long? = null,
+        block: () -> T
+    ): T {
         if (!enabled()) return block()
         beforeIo()
         val timedOut = AtomicBoolean(false)
         val finished = AtomicBoolean(false)
         val alarm = AtomicReference<ScheduledFuture<*>?>()
         val started = System.nanoTime()
-        val timeoutNanos = TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        val timeoutNanos = TimeUnit.MILLISECONDS.toNanos(firstByteTimeoutMs ?: timeoutMs)
         val deadline = object : Runnable {
             override fun run() {
                 if (finished.get()) return
@@ -106,7 +110,8 @@ internal class LibraryIoGuard(
                 // application pipe. Observe this connection's raw reads, not just onMessage.
                 val rawRead = wireReadActivityNanos()
                 val rawWrite = wireWriteActivityNanos?.invoke() ?: completedWriteNanos.get()
-                val activity = maxOf(started, if (reading) rawRead else rawWrite)
+                val activity = if (firstByteTimeoutMs != null) started
+                    else maxOf(started, if (reading) rawRead else rawWrite)
                 val checked = System.nanoTime()
                 val remaining = timeoutNanos - (checked - activity)
                 if (wireConnectionId != 0L) Log.i("WatchRSS_IpSyncIO",
@@ -141,13 +146,24 @@ internal class LibraryIoGuard(
                 if (timedOut.get()) SocketTimeoutException("同步连接读写超时").apply { initCause(failure) } else failure)
         } finally { finished.set(true); alarm.get()?.cancel(false) }
     }
-    fun input(source: InputStream): InputStream = object : InputStream() {
-        override fun read(): Int = io(reading = true) {
-            source.read().also { if (enabled() && it < 0) throw EOFException("同步连接读取结束") }
+    fun input(source: InputStream, firstByteTimeoutMs: Long? = null): InputStream = object : InputStream() {
+        private var initialTimeout = firstByteTimeoutMs
+
+        private fun receive(read: () -> Int): Int =
+            io(reading = true, firstByteTimeoutMs = initialTimeout, block = read)
+
+        override fun read(): Int = receive {
+            source.read().also {
+                if (enabled() && it < 0) throw EOFException("同步连接读取结束")
+                if (it >= 0) initialTimeout = null
+            }
         }
-        override fun read(bytes: ByteArray, offset: Int, length: Int): Int = io(reading = true) {
-            source.read(bytes, offset, if (enabled()) minOf(length, 8192) else length)
-                .also { if (enabled() && length > 0 && it < 0) throw EOFException("同步连接读取结束") }
+
+        override fun read(bytes: ByteArray, offset: Int, length: Int): Int = if (length == 0) 0 else receive {
+            source.read(bytes, offset, if (enabled()) minOf(length, 8192) else length).also {
+                if (enabled() && it < 0) throw EOFException("同步连接读取结束")
+                if (it > 0) initialTimeout = null
+            }
         }
         override fun close() = source.close()
     }
@@ -227,7 +243,8 @@ internal class LibraryRecoveryContext(
     private val confirm: suspend () -> Unit,
     private val checkOwner: () -> Unit,
     private val event: (String, Map<String, Any>) -> Unit,
-    private val reconnecting: () -> Unit
+    private val reconnecting: () -> Unit,
+    private val waitForBluetooth: suspend () -> Unit = {}
 ) : AbstractCoroutineContextElement(Key) {
     companion object Key : CoroutineContext.Key<LibraryRecoveryContext>
     val bodies = LibraryBodyTransferStats()
@@ -328,7 +345,7 @@ internal class LibraryRecoveryContext(
                 when (failure) {
                     is LibraryTransportFailure -> {
                         event("library.connection.interrupted", mapOf("unit" to "account", "generation" to failure.generation,
-                            "monotonicMillis" to policy.clockMillis()) + bodies.snapshot())
+                            "monotonicMillis" to policy.clockMillis(), "priorNoProgress" to policy.consecutiveNoProgress) + bodies.snapshot())
                         policy.disconnected(failure.generation)
                     }
                     is LibrarySearchFailure -> Unit
@@ -336,6 +353,9 @@ internal class LibraryRecoveryContext(
                 }
                 event("library.reconnect.search.failed", mapOf("consecutiveFailures" to policy.consecutiveFailures + 1))
                 policy.searchFailed()
+                if (failure is LibrarySearchFailure && failure.cause is LibraryBluetoothUnavailable) {
+                    waitForBluetooth()
+                }
                 reportReconnect = true
             }
         }
@@ -391,7 +411,7 @@ internal class LibraryRecoveryContext(
                 } catch (failure: LibraryTransportFailure) {
                     currentCoroutineContext().ensureActive()
                     if (policy.generation >= 0 && failure.generation != policy.generation) continue
-                    event("library.connection.interrupted", mapOf("unit" to name, "generation" to failure.generation, "monotonicMillis" to policy.clockMillis()) + bodies.snapshot())
+                    event("library.connection.interrupted", mapOf("unit" to name, "generation" to failure.generation, "monotonicMillis" to policy.clockMillis(), "priorNoProgress" to policy.consecutiveNoProgress) + bodies.snapshot())
                     policy.disconnected(failure.generation)
                     repairConnection()
                 }

@@ -563,7 +563,8 @@ class PhoneBluetoothSyncManager(
                 checkOwner()
             }, checkOwner = ::checkOwner,
             event = { name, fields -> debugLog.appendEvent(name, sessionId, fields) },
-            reconnecting = { report(lastProgress.copy(stage = PhoneBluetoothSyncStage.RECONNECTING, bytesPerSecond = 0)) })
+            reconnecting = { report(lastProgress.copy(stage = PhoneBluetoothSyncStage.RECONNECTING, bytesPerSecond = 0)) },
+            waitForBluetooth = { reconnectDelay(BLUETOOTH_REENABLE_RETRY_DELAY_MS) })
         val checkpoints = PhoneArticleReceiveCheckpoint(File(appContext.cacheDir, "library-receive/$sessionId"),
             owner.orEmpty(), device.remoteDeviceId.ifBlank { device.bluetoothAddress.ifBlank { device.address } },
             localArticle = { id -> recovery.localArticle(id) },
@@ -2244,6 +2245,9 @@ class PhoneBluetoothSyncManager(
     companion object {
         // Nine sequential ColorOS SDP probes can each consume a full PAGE timeout.
         private const val LIBRARY_PROBE_TIMEOUT_MS = 90_000L
+        // Adapter toggles can take several seconds. Keep distinct search attempts
+        // while the adapter restarts instead of exhausting all three immediately.
+        private const val BLUETOOTH_REENABLE_RETRY_DELAY_MS = 6_000L
         private const val CLEAR_LIBRARY_TIMEOUT_MS = 75_000L
         private const val QUICK_EXCHANGE_TIMEOUT_MS = 30_000L
         // Allow the initial exchange plus the single supported recovery attempt.

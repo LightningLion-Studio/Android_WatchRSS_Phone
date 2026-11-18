@@ -42,10 +42,12 @@ internal fun isRetryableBluetoothDisconnect(failure: Throwable): Boolean {
     if (failure is IllegalArgumentException || failure is WatchSyncBlocked) return false
     var current: Throwable? = failure
     val seen = mutableSetOf<Throwable>()
+    var retryable = false
     while (current != null && seen.add(current)) {
-        if (current is IOException || current is TimeoutCancellationException) return true
-        if (current is IllegalStateException && current.message in setOf("持久同步连接已关闭", "IP 同步连接已关闭", "IP 同步通道已关闭")) return true
+        if (current is java.nio.file.FileSystemException) return false
+        if (current is IOException || current is TimeoutCancellationException) retryable = true
+        if (current is IllegalStateException && current.message in setOf("持久同步连接已关闭", "IP 同步连接已关闭", "IP 同步通道已关闭")) retryable = true
         current = current.cause
     }
-    return false
+    return retryable
 }

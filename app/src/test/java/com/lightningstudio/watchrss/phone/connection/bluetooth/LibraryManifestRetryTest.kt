@@ -11,6 +11,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LibraryManifestRetryTest {
+    @org.junit.Test
+    fun localStorageDenialDoesNotReconnect() {
+        val denial = java.nio.file.AccessDeniedException("book package")
+        org.junit.Assert.assertFalse(isRetryableBluetoothDisconnect(denial))
+        org.junit.Assert.assertFalse(isRetryableBluetoothDisconnect(java.io.IOException("book write failed", denial)))
+    }
+
     private fun frame(sentAt: Long, head: String = "article") = JSONObject()
         .put("version", 14).put("action", "syncLibrary").put("phase", "manifest")
         .put("sentAt", sentAt).put("articleManifest", JSONArray().put(JSONObject().put("articleId", head)))

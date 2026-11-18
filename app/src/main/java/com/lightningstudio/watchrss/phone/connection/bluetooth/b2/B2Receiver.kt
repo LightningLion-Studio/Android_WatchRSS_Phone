@@ -168,9 +168,9 @@ class B2Receiver(
     /** Read only committed registration here. The socket reader never acquires
      * the writer lane or waits for a chunk to be written or synced. */
     suspend fun inspect(h: B2DataHeader, busy: Boolean = false): Pair<JSONObject, String> =
-        inspect(h) { _, _ -> if (busy) fail("BUSY") }
+        inspect(h) { if (busy) fail("BUSY") }
 
-    internal suspend fun inspect(h: B2DataHeader, credit: (JSONObject, String) -> Unit): Pair<JSONObject, String> {
+    internal suspend fun inspect(h: B2DataHeader, credit: () -> Unit): Pair<JSONObject, String> {
         check()
         val job = jobFor(h.stream)
         val j = light[job] ?: fail("AUTH_REVOKED")
@@ -187,8 +187,8 @@ class B2Receiver(
         }
         if (!old) {
             try {
+                credit()
                 fence(j, r)
-                credit(r, hash)
                 if (oid !in applied) {
                     if (terminal(j)) fail("JOB_CANCELLED")
                     if (!applied.containsAll(registration.dependencies)) fail("DEPENDENCIES_PENDING")
@@ -204,7 +204,7 @@ class B2Receiver(
                 // Hold the in-use lease through this bounded DATA frame.
                 leases[job] = monotonic() + 60000
             } catch (e: B2Exception) {
-                if (B2Results.errorValue(e.code).s("recovery") in listOf("WAIT", "QUERY", "BEGIN"))
+                if (e.code == "FLOW_CONTROL_VIOLATION" || B2Results.errorValue(e.code).s("recovery") in listOf("WAIT", "QUERY", "BEGIN"))
                     throw B2RejectedData(r, hash, e.code)
                 throw e
             }
@@ -217,7 +217,10 @@ class B2Receiver(
 
     internal fun streamFor(job: String): Int = streamJobs.entries.firstOrNull { it.value == job }?.key ?: fail("AUTH_REVOKED")
 
-    internal fun window(stream: Int): Int = lim(light[jobFor(stream)] ?: fail("AUTH_REVOKED")).n("maxInFlightChunks").toInt()
+    private fun receiveLimits(stream: Int) = lim(light[jobFor(stream)] ?: fail("AUTH_REVOKED"))
+
+    internal fun window(stream: Int): Int = receiveLimits(stream).n("maxInFlightChunks").toInt()
+    internal fun byteWindow(stream: Int): Int = receiveLimits(stream).n("maxInFlightBytes").toInt()
 
     internal data class WrittenChunk(val header: B2DataHeader, val request: JSONObject, val temp: File)
 

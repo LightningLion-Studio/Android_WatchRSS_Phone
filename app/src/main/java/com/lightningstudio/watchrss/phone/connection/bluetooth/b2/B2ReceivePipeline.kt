@@ -31,7 +31,10 @@ internal class B2ReceivePipeline(
     private val buffers = Channel<ByteArray>(8)
     private var reserved = false
     private fun stop(cause: Throwable, replies: List<JSONObject>) { if (job.isActive) abort(cause, replies) }
-    fun close() { job.cancel() }
+    fun close() {
+        synchronized(credits) { credits.clear() }
+        job.cancel()
+    }
     private val hashing = Channel<Block>(8) { recycle(it.frame.bytes) }
     private val writing = Channel<Block>(8) { recycle(it.frame.bytes) }
     private val committing = Channel<Written>(8) { it.chunk.temp.delete() }
@@ -42,8 +45,9 @@ internal class B2ReceivePipeline(
 
     fun acquire(h: B2DataHeader) = synchronized(credits) {
         credits.removeAll { !receiver.current(it.stream, it.epoch) }
+        if (credits.size >= receiver.window(h.stream) ||
+            credits.sumOf { it.length } + h.length > receiver.byteWindow(h.stream)) fail("FLOW_CONTROL_VIOLATION")
         if (credits.any { it.requestId == h.requestId || it.slot == h.slot && it.index == h.index }) fail("REQUEST_CONFLICT")
-        if (credits.size >= receiver.window(h.stream)) fail("WINDOW_FULL")
         credits.add(h)
     }
 

@@ -67,9 +67,14 @@ class B2SessionTest {
         }
         Unit
     }
-    @Test fun readWindowAndHeartbeatWhileDurableGroupIsBlocked() = runBlocking {
+    @Test fun readWindowAndHeartbeatWhileDurableGroupIsBlocked() = exerciseBlockedWindow(overflow = false)
+
+    @Test fun ninthFullChunkStopsTheConnectionAndRevokesAllUnsettledWork() = exerciseBlockedWindow(overflow = true)
+
+    private fun exerciseBlockedWindow(overflow: Boolean) = runBlocking {
         withTimeout(20000) {
-            val x = ReceiverRig(ByteArray(B2Wire.CHUNK * 8 + 13) { (it * 7).toByte() })
+            val fullChunks = if (overflow) 9 else 8
+            val x = ReceiverRig(ByteArray(B2Wire.CHUNK * fullChunks + 13) { (it * 7).toByte() })
             val blocked = java.util.concurrent.CountDownLatch(1)
             val resume = java.util.concurrent.CountDownLatch(1)
             val link = java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())
@@ -119,6 +124,29 @@ class B2SessionTest {
                 val whileBlocked = request(heartbeat(e))
                 assertTrue(whileBlocked.o("result").a("items").length() == 0)
                 assertTrue(x.store.list(x.account, "chunk").isEmpty())
+                if (overflow) {
+                    val ninth = data(8)
+                    assertEquals(B2Wire.CHUNK, ninth.header.length)
+                    withContext(Dispatchers.IO) {
+                        val wire = B2Frames.encode(ninth)
+                        // A credit violation aborts once the header is known, with no payload drain.
+                        toPhone.write(wire, 0, wire.size - ninth.bytes.size)
+                        toPhone.flush()
+                        val error = (B2Frames.read(fromPeer) as B2Frame.Control).value
+                        assertEquals(ninth.header.requestId, error.s("requestId"))
+                        assertEquals(ninth.header.digest, error.s("requestDigest"))
+                        assertEquals("FLOW_CONTROL_VIOLATION", error.o("error").s("code"))
+                        assertEquals("PROTOCOL", error.o("error").s("class"))
+                        assertEquals("STOP", error.o("error").s("recovery"))
+                        assertFalse(error.o("error").getBoolean("retryable"))
+                        resume.countDown()
+                        assertEquals(-1, fromPeer.read()) // No ACK before or after releasing the blocked commit.
+                    }
+                    assertEquals("FLOW_CONTROL_VIOLATION", (session.awaitTermination() as B2Exception).code)
+                    // Join the writer lane to establish that the blocked group could not commit after STOP.
+                    assertTrue(x.store.exclusive { x.store.list(x.account, "chunk").isEmpty() })
+                    return@withTimeout
+                }
                 resume.countDown()
                 withContext(Dispatchers.IO) {
                     val settled = mutableListOf<Long>()

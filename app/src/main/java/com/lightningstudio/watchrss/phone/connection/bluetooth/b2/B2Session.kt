@@ -175,22 +175,25 @@ class B2Session(private val input: InputStream, private val output: OutputStream
                         B2Frames.readInto(tracked) { h ->
                             val target = receiver ?: fail("AUTH_REVOKED")
                             val pipe = pipeline ?: fail("AUTH_REVOKED")
-                            var acquired = false
                             val inspected = try {
-                                runBlocking { target.inspect(h) { _, _ ->
-                                    if (inbound.containsKey(target.jobFor(h.stream))) fail("BUSY")
+                                runBlocking { target.inspect(h) {
                                     pipe.acquire(h)
-                                    acquired = true
+                                    if (inbound.containsKey(target.jobFor(h.stream))) fail("BUSY")
                                 } }
                             } catch (rejected: B2RejectedData) {
-                                if (acquired) pipe.release(h)
+                                if (rejected.rejection == "FLOW_CONTROL_VIOLATION") {
+                                    val failure = B2Exception(rejected.rejection)
+                                    abort(failure, listOf(B2Results.answer(rejected.request, null, h.epoch, failure.code)))
+                                    throw failure
+                                }
+                                // A recoverable rejection holds credit until its reply starts.
                                 replay.take()
                                 B2Frames.drain(tracked, h.length, rejected.hash)
                                 enqueue(Outgoing.Durable(listOf(B2ReceivePipeline.Reply(h, rejected.request, 0, rejected.rejection))), true)
                                 throw DiscardedOldData()
                             }
                             if (target.isOld(h)) {
-                                if (acquired) pipe.release(h)
+                                pipe.release(h)
                                 replay.take()
                                 B2Frames.drain(tracked, h.length, inspected.second)
                                 throw DiscardedOldData()
@@ -456,7 +459,10 @@ class B2Session(private val input: InputStream, private val output: OutputStream
         synchronized(lifecycle) {
             if (!stopped.compareAndSet(false, true)) return
             idle = writingSince == 0L
-            cause = error; receiver?.fenceNow(); sendFlows.values.forEach { it.clear() }
+            cause = error
+            receiver?.fenceNow()
+            pipeline?.close()
+            sendFlows.values.forEach { it.clear() }
             while (normal.tryReceive().isSuccess) { }
             while (high.tryReceive().isSuccess) { }
             while (durable.tryReceive().isSuccess) { }

@@ -42,22 +42,28 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
         val known=before.indexRows()
         val present=target.map{it.getJSONObject("meta").getString("entityKey")}.toSet()
         for((entity,record)in known)if(!replaceConflicts && entity !in present && record.getJSONObject("meta").getString("kind")=="note" &&
-            record.getJSONObject("value").getJSONObject("noteConflicts").getJSONArray("records").length()!=0)SyncV2Codec.fail("closure_incomplete")
+            (SyncV2NoteConflicts.declared(record.optJSONObject("value"))?.getJSONArray("records")?.length() ?: 0)>0)SyncV2Codec.fail("closure_incomplete")
         return target.mapRows {incoming->
-            val m=incoming.getJSONObject("meta");val old=known[m.getString("entityKey")]
-            // F1/R3: an isolated wire row has no value and never joins, validates or reads a body.
-            if(m.getString("kind")!="note" || incoming.has(SyncV2NoteWiring.ISOLATED_KEY))incoming else {
-                val value=JSONObject(incoming.getJSONObject("value").toString())
-                val set=if(old==null || replaceConflicts) SyncV2NoteConflicts.normalize(value.getJSONObject("noteConflicts"),m.getString("logicalId"))
-                    else SyncV2NoteConflicts.merge(old.getJSONObject("value").getJSONObject("noteConflicts"),value.getJSONObject("noteConflicts"),m.getString("logicalId"))
-                if(SyncV2Codec.canonical(set)==SyncV2Codec.canonical(value.getJSONObject("noteConflicts")))incoming else {
-                    value.put("noteConflicts",set)
-                    val pair=SyncV2Business.split("note",m.getString("logicalId"),m.getString("entityKey"),value,null)
-                    pair.meta.put("addedAtSource",m.getString("addedAtSource"))
-                    JSONObject(incoming.toString()).put("value",value).put("meta",pair.meta).put("state",pair.state)
-                        .put("wire",JSONObject(incoming.toString()))
-                }
+            val meta=incoming.getJSONObject("meta")
+            if(meta.getString("kind")!="note" || incoming.has(SyncV2NoteWiring.ISOLATED_KEY))return@mapRows incoming
+            val entity=meta.getString("entityKey")
+            val noteId=meta.getString("logicalId")
+            val value=incoming.getJSONObject("value")
+            val received=SyncV2NoteConflicts.declared(value)
+            val previous=SyncV2NoteConflicts.declared(known[entity]?.optJSONObject("value"))
+            // Missing is unknown. Preserve local facts in the same generation and keep the
+            // authenticated incoming row separate from the effective Room value.
+            val set=when {
+                received==null -> previous?.takeIf{!replaceConflicts && it.getJSONArray("records").length()>0}
+                replaceConflicts || previous==null -> SyncV2NoteConflicts.normalize(received,noteId)
+                else -> SyncV2NoteConflicts.merge(previous,received,noteId)
             }
+            if(set==null || SyncV2Codec.canonical(set)==SyncV2Codec.canonical(received))return@mapRows incoming
+            val effective=JSONObject(value.toString()).put("noteConflicts",set)
+            val pair=SyncV2Business.split("note",noteId,entity,effective,null)
+            pair.meta.put("addedAtSource",meta.getString("addedAtSource"))
+            JSONObject(incoming.toString()).put("value",effective).put("meta",pair.meta).put("state",pair.state)
+                .put("wire",JSONObject(incoming.toString()))
         }
     }
     fun validate(rows:List<JSONObject>) {
@@ -70,8 +76,14 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
             if(!row.has("value")||row.has(SyncV2NoteWiring.ISOLATED_KEY))continue
             val value=row.getJSONObject("value");val kind=meta.getString("kind")
             if(SyncV2Business.logicalId(kind,value)!=meta.getString("logicalId"))SyncV2Codec.fail("identity_conflict")
-            val split=SyncV2Business.split(kind,meta.getString("logicalId"),meta.getString("entityKey"),value,null)
-            SyncV2Business.join(kind,split.meta,split.state)
+            if(kind=="note" && !value.has("noteConflicts")) {
+                val state=row.getJSONObject("state")
+                if(SyncV2NoteConflicts.read(state,meta.getString("logicalId"),meta.getString("entityKey"))!=null ||
+                    SyncV2Codec.canonical(SyncV2Business.join(kind,meta,state))!=SyncV2Codec.canonical(value))SyncV2Codec.fail("invalid_schema")
+            }else {
+                val split=SyncV2Business.split(kind,meta.getString("logicalId"),meta.getString("entityKey"),value,null)
+                SyncV2Business.join(kind,split.meta,split.state)
+            }
             if(kind!="rss-state" && SyncV2Schema.domains.none{it.kind==kind})SyncV2Codec.fail("unsupported_feature")
         }
     }
@@ -118,8 +130,9 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
                 }
                 "book-reading"->upsert("imported_book_reading",listOf("bookId","chapterIndex"),JSONObject().put("bookId",v.get("bookId")).put("chapterIndex",v.get("chapterIndex")).put("stateJson",SyncV2LocalJson.canonical(v)))
                 "note"->{
-                    val conflicts=SyncV2NoteConflicts.normalize(v.optJSONObject("noteConflicts")?:SyncV2Codec.fail("unsupported_feature"),v.getString("noteId"))
                     upsert("notes",listOf("noteId"),v)
+                    val declared=SyncV2NoteConflicts.declared(v)?:continue
+                    val conflicts=SyncV2NoteConflicts.normalize(declared,v.getString("noteId"))
                     // A confirmed cloud choice may replace the current conflict channel. The
                     // discarded local channel is part of the encrypted minimal recovery value.
                     val a=conflicts.getJSONArray("records");val ids=(0 until a.length()).map{a.getJSONObject(it).getString("conflictId")}.toSet()

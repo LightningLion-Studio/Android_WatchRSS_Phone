@@ -110,9 +110,15 @@ internal object SyncV2Business {
         else -> SyncV2Codec.fail("unsupported_feature")
     }
     fun split(kind: String, logicalId: String, entityKey: String, value: JSONObject, addedAt: Long?): PairObjects {
+        return encode(kind,logicalId,entityKey,value,addedAt,allowUndeclaredChannel=false)
+    }
+    // The local projection can represent an authenticated note with no declared channel.
+    fun project(kind: String, logicalId: String, entityKey: String, value: JSONObject, addedAt: Long?): PairObjects {
+        return encode(kind,logicalId,entityKey,value,addedAt,allowUndeclaredChannel=true)
+    }
+    private fun encode(kind: String, logicalId: String, entityKey: String, value: JSONObject, addedAt: Long?, allowUndeclaredChannel: Boolean): PairObjects {
         validate(kind,value)
-        // A missing channel is readable unknown data, never permission to rewrite an empty set.
-        if(kind=="note" && !value.has("noteConflicts"))SyncV2Codec.fail("unsupported_feature")
+        if(kind=="note" && !allowUndeclaredChannel && !value.has("noteConflicts"))SyncV2Codec.fail("unsupported_feature")
         val meta=JSONObject(); val state=JSONObject()
         for(key in value.keys()) {
             if(key=="readingProgress") state.put("readingProgressMicros",kotlin.math.floor(value.getDouble(key)*1000000.0+0.5).toLong())

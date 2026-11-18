@@ -8,6 +8,9 @@ import org.json.JSONObject
 internal object SyncV2NoteConflicts {
     const val feature = "note-conflicts.v1"
     private val fields = setOf("conflictId", "noteId", "baseMarkdown", "localMarkdown", "remoteMarkdown", "remoteDeviceId", "createdAt", "resolvedAt")
+    fun declared(value: JSONObject?): JSONObject? =
+        value?.takeIf { it.has("noteConflicts") }?.getJSONObject("noteConflicts")
+
     fun validate(value: JSONObject, noteId: String): JSONObject = SyncV2Wire.schema {
         SyncV2Codec.text(noteId, 1024); if (noteId.isEmpty()) SyncV2Codec.fail("invalid_schema")
         SyncV2Codec.exact(value, setOf("version", "records"))

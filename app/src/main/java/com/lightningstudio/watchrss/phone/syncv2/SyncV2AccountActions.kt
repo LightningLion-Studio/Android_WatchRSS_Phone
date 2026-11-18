@@ -297,8 +297,13 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             // Authenticate the selector's channel even when this entity already has a
             // full row. A missing channel must not be hidden by the row fallback.
             val channelValues=channels.mapValues{(_,rows)->rows[entity]}
+            var unknownChannel=channelValues.values.any{it!=null && !it.has("noteConflicts")}
             fun plannerValue(record:JSONObject?,side:String):JSONObject? {
-                if(record!=null&&!record.has(SyncV2NoteWiring.ISOLATED_KEY))return values(listOf(record),true).optJSONObject(entity)
+                if(record!=null&&!record.has(SyncV2NoteWiring.ISOLATED_KEY)) {
+                    val value=values(listOf(record),true).optJSONObject(entity)
+                    if(record.getJSONObject("meta").getString("kind")=="note" && value?.has("noteConflicts")!=true)unknownChannel=true
+                    return value
+                }
                 return channelValues[side]
             }
             val localValue=plannerValue(localBy[entity],"candidate")
@@ -315,6 +320,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                     if(b==null)base.remove(entity)else {
                         val kind=localBy[entity]?.getJSONObject("meta")?.getString("kind")?:remoteBy[entity]?.getJSONObject("meta")?.getString("kind")
                         if(kind==null){missing=true;continue}
+                        if(kind=="note" && !b.has("noteConflicts"))unknownChannel=true
                         base.put(entity,copy(b).put("identity",SyncV2Business.logicalId(kind,b)))
                     }
                     val fields=if(l==null||b==null)emptyList()else (l.keys().asSequence().toSet()+b.keys().asSequence().toSet()).filter{it!="identity"&&!same(l.opt(it),b.opt(it))}.sorted()
@@ -325,6 +331,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             val input=JSONObject().put("base",base).put("local",localOne).put("cloud",cloudOne).put("ops",ops)
             if(editBase!=null)input.put("noteConflictGenerations",JSONObject().put("base",editBase.getString("generation")).put("local",editBase.getString("generation")).put("cloud",capture.generation))
             inputs.append(input)
+            if(unknownChannel){missing=true;continue}
             val result=SyncV2Planner.canMerge(input)
             if(!result.getBoolean("canMerge")){if(reason==null)reason=result.getString("reason");continue}
             val tree=result.getJSONObject("tree")
@@ -409,6 +416,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                 noteMetadata[entity]=JSONObject().also{out->for(key in listOf(SyncV2NoteWiring.SEGMENTS_KEY,SyncV2NoteWiring.REFS_MAPS_KEY,SyncV2NoteWiring.REVISION_KEY))if(remote.has(key))out.put(key,remote.get(key))}
                 rows.add(row);r.put("row",row).remove("wire");continue
             }
+            if(kind=="note" && SyncV2NoteConflicts.declared(r.getJSONObject("value"))==null)SyncV2Codec.fail("merge_unavailable")
             val known=projection.accountBinding(entity)
             fun part(type:String,plain:JSONObject):String {
                 if(remote!=null && same(remote.getJSONObject(type),plain)) {

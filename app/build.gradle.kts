@@ -250,6 +250,8 @@ val prepareQrNativeTests by tasks.registering(Exec::class) {
 }
 tasks.withType<Test>().configureEach {
     inputs.property("syncV2LocalProfile",providers.environmentVariable("WRSS_P4_PROFILE").orNull ?: "0")
+    inputs.property("syncV2PodjsBodySource", providers.environmentVariable("WATCHRSS_PODJS_BODY_SOURCE").orElse(""))
+    inputs.property("syncV2MiniBodySource", providers.environmentVariable("WATCHRSS_MINI_BODY_SOURCE").orElse(""))
     inputs.property("syncV2LocalProfileOutput",providers.environmentVariable("WRSS_P4_PROFILE_OUTPUT").orNull ?: "throughput.json")
     inputs.property("syncV2CrashBoundary", providers.environmentVariable("WRSS_P1_CRASH_AT").orNull ?: "")
     inputs.property("syncV2CrashJournal", providers.environmentVariable("WRSS_P1_CRASH_JOURNAL").orNull ?: "")

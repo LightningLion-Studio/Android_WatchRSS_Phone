@@ -1,6 +1,8 @@
 package com.lightningstudio.watchrss.phone.connection.guided
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.wifi.SoftApConfiguration
@@ -16,6 +18,7 @@ import com.lightningstudio.watchrss.phone.connection.PhoneConnectionAbility
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import fi.iki.elonen.NanoHTTPD
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -24,8 +27,6 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.security.SecureRandom
 import java.util.Locale
-import java.util.concurrent.Executor
-import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 data class GuidedSessionState(
@@ -58,6 +59,8 @@ class PhoneGuidedSessionManager(
         remoteUrl: String? = null
     ): GuidedSessionState = withContext(Dispatchers.Main) {
         stopSession()
+        val currentWifi = resolveCurrentWifiTarget()
+        if (currentWifi == null) requireHotspotPermissions()
 
         val token = randomCode(TOKEN_LENGTH)
         val guidedServer = GuidedSessionServer(
@@ -69,7 +72,7 @@ class PhoneGuidedSessionManager(
         guidedServer.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
 
         try {
-            resolveCurrentWifiTarget()?.let { target ->
+            currentWifi?.let { target ->
                 val payload = AcousticConnectionProtocol.buildGuidedWifi(
                     ability = ability,
                     ssid = target.ssid,
@@ -99,13 +102,15 @@ class PhoneGuidedSessionManager(
             var activeShortConfig: ShortHotspotConfig? = null
             val hotspotReservation = shortConfig
                 ?.let { config ->
-                    runCatching {
-                        startHotspotWithConfigInternal(config.configuration)
-                    }.onSuccess {
-                        activeShortConfig = config
-                    }.getOrNull()
+                    try {
+                        startHotspot(config.configuration).also { activeShortConfig = config }
+                    } catch (failure: Exception) {
+                        if (failure is CancellationException || failure is SecurityException) throw failure
+                        null
+                    }
                 }
-                ?: startHotspotInternal()
+                ?: startHotspot()
+            reservation = hotspotReservation
             val config = hotspotReservation.softApConfiguration
             val ssid = resolveSsid(config, hotspotReservation.wifiConfiguration, activeShortConfig?.ssid)
             val passphrase = resolvePassphrase(
@@ -125,7 +130,6 @@ class PhoneGuidedSessionManager(
             )
             val packet = AcousticCodec.encode(payload)
 
-            reservation = hotspotReservation
             server = guidedServer
 
             GuidedSessionState(
@@ -141,11 +145,28 @@ class PhoneGuidedSessionManager(
             )
         } catch (throwable: Throwable) {
             guidedServer.stop()
+            reservation?.close()
+            reservation = null
             throw throwable
         }
     }
 
+    private fun requireHotspotPermissions() {
+        val accessPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.NEARBY_WIFI_DEVICES
+        } else {
+            Manifest.permission.ACCESS_FINE_LOCATION
+        }
+        if (appContext.checkSelfPermission(Manifest.permission.CHANGE_WIFI_STATE) != PackageManager.PERMISSION_GRANTED ||
+            appContext.checkSelfPermission(accessPermission) != PackageManager.PERMISSION_GRANTED
+        ) {
+            throw SecurityException("缺少启动手机热点所需的权限")
+        }
+    }
+
     private fun createShortHotspotConfig(): ShortHotspotConfig? {
+        // Builder is a public SDK API only from 36. Older systems keep the platform config.
+        if (Build.VERSION.SDK_INT < 36) return null
         val ssid = "W${randomCode(SHORT_SSID_SUFFIX_LENGTH)}"
         val passphrase = randomCode(SHORT_PASSPHRASE_LENGTH)
         return runCatching {
@@ -168,50 +189,6 @@ class PhoneGuidedSessionManager(
         }.getOrNull()
     }
 
-    private suspend fun startHotspotWithConfigInternal(
-        config: SoftApConfiguration
-    ): WifiManager.LocalOnlyHotspotReservation {
-        return suspendCancellableCoroutine { continuation ->
-            val callback = object : WifiManager.LocalOnlyHotspotCallback() {
-                override fun onStarted(reservation: WifiManager.LocalOnlyHotspotReservation) {
-                    if (!continuation.isCompleted) {
-                        continuation.resume(reservation)
-                    }
-                }
-
-                override fun onFailed(reason: Int) {
-                    if (!continuation.isCompleted) {
-                        continuation.resumeWithException(
-                            IllegalStateException("手机热点启动失败，原因码：$reason")
-                        )
-                    }
-                }
-            }
-
-            runCatching {
-                if (Build.VERSION.SDK_INT >= 36) {
-                    wifiManager.startLocalOnlyHotspotWithConfiguration(
-                        config,
-                        appContext.mainExecutor,
-                        callback
-                    )
-                } else {
-                    val method = wifiManager.javaClass.getMethod(
-                        "startLocalOnlyHotspot",
-                        SoftApConfiguration::class.java,
-                        Executor::class.java,
-                        WifiManager.LocalOnlyHotspotCallback::class.java
-                    )
-                    method.invoke(wifiManager, config, appContext.mainExecutor, callback)
-                }
-            }.onFailure { throwable ->
-                if (!continuation.isCompleted) {
-                    continuation.resumeWithException(throwable)
-                }
-            }
-        }
-    }
-
     fun stopSession() {
         server?.stop()
         server = null
@@ -219,28 +196,37 @@ class PhoneGuidedSessionManager(
         reservation = null
     }
 
-    private suspend fun startHotspotInternal(): WifiManager.LocalOnlyHotspotReservation {
-        return suspendCancellableCoroutine { continuation ->
-            val callback = object : WifiManager.LocalOnlyHotspotCallback() {
-                override fun onStarted(reservation: WifiManager.LocalOnlyHotspotReservation) {
-                    if (!continuation.isCompleted) {
-                        continuation.resume(reservation)
-                    }
-                }
-
-                override fun onFailed(reason: Int) {
-                    if (!continuation.isCompleted) {
-                        continuation.resumeWithException(
-                            IllegalStateException("手机热点启动失败，原因码：$reason")
-                        )
+    private suspend fun startHotspot(
+        config: SoftApConfiguration? = null
+    ): WifiManager.LocalOnlyHotspotReservation = suspendCancellableCoroutine { continuation ->
+        val callback = object : WifiManager.LocalOnlyHotspotCallback() {
+            override fun onStarted(reservation: WifiManager.LocalOnlyHotspotReservation) {
+                if (continuation.isCompleted) {
+                    reservation.close()
+                } else {
+                    continuation.resume(reservation) { _, cancelledReservation, _ ->
+                        cancelledReservation.close()
                     }
                 }
             }
 
-            wifiManager.startLocalOnlyHotspot(
-                callback,
-                Handler(Looper.getMainLooper())
-            )
+            override fun onFailed(reason: Int) {
+                if (!continuation.isCompleted) {
+                    continuation.resumeWithException(
+                        IllegalStateException("手机热点启动失败，原因码：$reason")
+                    )
+                }
+            }
+        }
+
+        try {
+            if (Build.VERSION.SDK_INT >= 36 && config != null) {
+                wifiManager.startLocalOnlyHotspotWithConfiguration(config, appContext.mainExecutor, callback)
+            } else {
+                wifiManager.startLocalOnlyHotspot(callback, Handler(Looper.getMainLooper()))
+            }
+        } catch (failure: SecurityException) {
+            if (!continuation.isCompleted) continuation.resumeWithException(failure)
         }
     }
 

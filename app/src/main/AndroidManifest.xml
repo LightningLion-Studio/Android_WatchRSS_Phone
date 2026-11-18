@@ -202,10 +202,6 @@
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />
         <activity
-            android:name=".DebugGuidedSessionActivity"
-            android:exported="false"
-            android:theme="@style/Theme.WatchRSS" />
-        <activity
             android:name=".DebugBluetoothSyncActivity"
             android:exported="false"
             android:theme="@style/Theme.WatchRSS" />

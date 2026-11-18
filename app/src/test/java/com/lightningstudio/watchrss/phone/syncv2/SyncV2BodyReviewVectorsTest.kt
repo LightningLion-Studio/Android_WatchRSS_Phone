@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.syncv2
 import org.json.JSONObject
 import org.json.JSONArray
 import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -28,6 +29,19 @@ class SyncV2BodyReviewVectorsTest {
         return JSONObject().put("bookId",id).put("fingerprint",fp).put("chapterCount",1).put("deleted",false) to raw
     }
     @Test fun independentThreeKindCrossLanguageAndBoundaryVectors() {
+        val watchSource = File(System.getenv("WATCHRSS_PODJS_BODY_SOURCE")
+            ?: "/home/wilf/data/OPPO_Develop/PodJS_WatchRSS.wt-notes").absoluteFile
+        val miniSource = File(System.getenv("WATCHRSS_MINI_BODY_SOURCE")
+            ?: "/home/wilf/data/OPPO_Develop/WatchRSS_WeChat.wt-body").absoluteFile
+        val missing = listOf(
+            File(watchSource, "src/sync-v2/body-channel-codec.ts"),
+            File(miniSource, "miniprogram/lib/sync-v2/body-channel-codec.js")
+        ).filterNot { it.isFile }
+        val reason = "Missing cross-language source: ${missing.joinToString()}. " +
+            "Set WATCHRSS_PODJS_BODY_SOURCE and WATCHRSS_MINI_BODY_SOURCE to compatible checkouts."
+        if (missing.isNotEmpty()) println(reason)
+        assumeTrue(reason, missing.isEmpty())
+
         SyncV2P5Fixture().use {f->
             val (bookValue,bookRaw)=book();val items=JSONArray()
             val samples=(listOf(0,1,262144,262145,5*1024*1024).map{Triple("asset","n$it.bin",ByteArray(it){n->(n%251).toByte()})}+Triple("book",bookValue.getString("bookId"),bookRaw))
@@ -47,7 +61,15 @@ class SyncV2BodyReviewVectorsTest {
             val input=JSONObject().put("scope",scope).put("anchor",anchor).put("publicHex",f.f.signer.publicHex).put("items",items).put("article",JSONObject().put("entityKey",entity).put("raw",b64(articleRaw)).put("bodyRevision",revision).put("objects",articleObjects))
             val inputFile=File(f.root,"vectors-input.json");val outputFile=File(f.root,"vectors-output.json");inputFile.writeText(input.toString())
             val script=File("src/test/body/review-body-oracle.ts").absoluteFile.takeIf{it.isFile}?:File("app/src/test/body/review-body-oracle.ts").absoluteFile
-            val p=ProcessBuilder("bun",script.path,inputFile.path,outputFile.path).redirectErrorStream(true).start();val log=p.inputStream.bufferedReader().readText();assertEquals(log,0,p.waitFor())
+            val process = ProcessBuilder("bun", script.path, inputFile.path, outputFile.path)
+                .redirectErrorStream(true)
+                .apply {
+                    environment()["WATCHRSS_PODJS_BODY_SOURCE"] = watchSource.path
+                    environment()["WATCHRSS_MINI_BODY_SOURCE"] = miniSource.path
+                }
+                .start()
+            val log = process.inputStream.bufferedReader().readText()
+            assertEquals(log, 0, process.waitFor())
             val output=JSONObject(outputFile.readText());val publicHex=output.getString("publicHex")
             for(i in samples.indices){val item=output.getJSONArray("items").getJSONObject(i);val sample=samples[i];val bind=b(sample.first,sample.second,sample.third)
                 assertEquals("PASS",item.getString("phoneToPodjs"));assertEquals("PASS",item.getString("phoneToMini"))

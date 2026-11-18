@@ -1082,14 +1082,23 @@ class CloudContentRebuildIntegrationTest {
 
     @Test fun notesArchiveThreeDistinctForeignArchivesRetireAfterAllNotesStatesMerge()=runBlocking {
         val f=fixture();val repo=notes(f)
-        val live=repo.save("last","Last","text")
-        val deleted=live.copy(deleted=true,deletedAt=2000,updatedAt=2000,modifiedBy="mini")
-        val heads=(1..3).map { i -> seedNotesHead(f,"peer-$i",NoteCloudStateCodec.encode(listOf(deleted)),assetZip(text="peer-$i")) }
-        assertEquals(3,heads.map { it.objects.single{d->d.name=="notes-assets.zip"}.toRawString() }.distinct().size)
-        assertTrue(f.service.syncNow(manual=true).snapshotUploaded)
-        assertFalse(completedNotesObjects(f).containsKey("notes-assets.zip"))
-        assertEquals(heads.map{it.sourceDeviceId}.toSet(),completedNotesManifest(f).parentHeads.keys)
+        val local = repo.delete(repo.save("last", "Last", "text").noteId)
+        // A deletion racing a live branch is a conflict on this line. Each foreign
+        // tombstone here must apply before the phone can retire the asset archive.
+        val remote = (1..3).map { i -> local.copy(noteId = "note-$i", modifiedBy = "peer-$i") }
+        val heads = remote.map { note ->
+            seedNotesHead(f, note.modifiedBy, NoteCloudStateCodec.encode(listOf(note)), assetZip(text = note.modifiedBy))
+        }
+        assertEquals(3, heads.map { it.objects.single { d -> d.name == "notes-assets.zip" }.toRawString() }.distinct().size)
+        assertTrue(f.service.syncNow(manual = true).snapshotUploaded)
+
+        val objects = completedNotesObjects(f)
+        val expected = (remote + local).toSet()
+        assertFalse(objects.containsKey("notes-assets.zip"))
+        assertEquals(heads.map { it.sourceDeviceId }.toSet(), completedNotesManifest(f).parentHeads.keys)
         assertTrue(repo.note("last")!!.deleted)
+        assertEquals(expected, repo.allNotes().toSet())
+        assertEquals(expected, NoteCloudStateCodec.decode(objects.getValue("notes-state.json")).toSet())
     }
 
     @Test fun notesArchiveSingleForeignArchiveAlsoRetiresWithEmptyRepository()=runBlocking {

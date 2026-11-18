@@ -9,10 +9,15 @@ import androidx.activity.ComponentActivity
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.acoustic.AcousticAudioPlayer
 import com.lightningstudio.watchrss.phone.connection.PhoneConnectionAbility
+import com.lightningstudio.watchrss.phone.connection.guided.PhoneGuidedSessionManager
 import kotlinx.coroutines.launch
 
 class DebugGuidedSessionActivity : ComponentActivity() {
     private val acousticPlayer = AcousticAudioPlayer()
+    private val sessionManager = lazy {
+        val app = application as PhoneCompanionApplication
+        PhoneGuidedSessionManager(app, app.container.repository)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -37,13 +42,10 @@ class DebugGuidedSessionActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             runCatching {
-                val session = (application as PhoneCompanionApplication)
-                    .container
-                    .guidedSessionManager
-                    .startSession(
-                        ability = ability,
-                        remoteUrl = if (ability == PhoneConnectionAbility.REMOTE_INPUT) remoteUrl else null
-                    )
+                val session = sessionManager.value.startSession(
+                    ability = ability,
+                    remoteUrl = if (ability == PhoneConnectionAbility.REMOTE_INPUT) remoteUrl else null
+                )
                 val payloadJson = session.payload.toString(Charsets.UTF_8)
                 val payloadBase64 = Base64.encodeToString(session.payload, Base64.NO_WRAP)
                 val message = buildString {
@@ -73,6 +75,11 @@ class DebugGuidedSessionActivity : ComponentActivity() {
                 statusView.text = message
             }
         }
+    }
+
+    override fun onDestroy() {
+        if (sessionManager.isInitialized()) sessionManager.value.stopSession()
+        super.onDestroy()
     }
 
     companion object {

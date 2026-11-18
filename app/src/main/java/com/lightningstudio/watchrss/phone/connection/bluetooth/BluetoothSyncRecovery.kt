@@ -103,7 +103,8 @@ internal fun isRetryableBluetoothDisconnect(failure: Throwable): Boolean {
     val causes = mutableSetOf<Throwable>()
     var cause: Throwable? = failure
     while (cause != null && causes.add(cause)) {
-        if (isTerminalAccountSyncFailure(cause) || cause is java.net.UnknownHostException ||
+        if (isTerminalAccountSyncFailure(cause) || cause is java.nio.file.FileSystemException ||
+            cause is java.net.UnknownHostException ||
             cause is java.net.NoRouteToHostException || cause is java.net.ConnectException) return false
         cause = cause.cause
     }

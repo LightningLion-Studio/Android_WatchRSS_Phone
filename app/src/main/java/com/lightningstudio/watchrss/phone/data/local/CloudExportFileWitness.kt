@@ -94,9 +94,8 @@ internal object CloudExportFileWitness {
                 fileSyncs.incrementAndGet();output.fd.sync()
             }
             Files.move(temporary.toPath(),current.toPath(),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING)
-            java.nio.channels.FileChannel.open(root.toPath(),java.nio.file.StandardOpenOption.READ).use {
-                directorySyncs.incrementAndGet();it.force(true)
-            }
+            directorySyncs.incrementAndGet()
+            syncDirectory(root)
         } finally {temporary.delete()}
         return record
     }

@@ -33,4 +33,27 @@ class ConditionalBodyFileTest {
             assertEquals("new local",target.readText());assertTrue(ConditionalBodyFile.conflictRecord(target).isFile)
         }finally{root.deleteRecursively()}
     }
+
+    @Test fun privateBookInstallPublishesOnceAndPreservesConcurrentWinner() {
+        val root = Files.createTempDirectory("private-book-cas-").toFile()
+        try {
+            val target = File(root, "imported_books/test.jsonl")
+            val incoming = File(root, "incoming").apply { writeText("received package") }
+            val local = File(root, "local").apply { writeText("local package") }
+            try {
+                ConditionalBodyFile.installPrivateBook(target, incoming, expectedSha = null) {
+                    ConditionalBodyFile.installPrivateBook(target, local)
+                }
+                fail("received package overwrote the concurrent local package")
+            } catch (failure: IllegalStateException) {
+                assertEquals("body_revision_changed", failure.message)
+            }
+
+            ConditionalBodyFile.installPrivateBook(target, local)
+            assertEquals("local package", target.readText())
+            assertTrue(ConditionalBodyFile.conflictRecord(target).isFile)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
 }

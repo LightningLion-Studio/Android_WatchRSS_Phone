@@ -51,14 +51,26 @@ internal object ConditionalBodyFile {
         throw IllegalStateException("body_revision_changed")
     }
     fun conflictRecord(target:File):File=File(stateDirectory(target),id(target)+".conflict.json")
-    private fun syncDirectory(directory:File)=java.nio.channels.FileChannel.open(directory.toPath(),java.nio.file.StandardOpenOption.READ).use{it.force(true)}
     fun install(target:File,raw:ByteArray,expectedSha:String?=hex(MessageDigest.getInstance("SHA-256").digest(raw)),beforeCommit:()->Unit={}) {
         target.parentFile!!.mkdirs();val stage=File.createTempFile(".body-cas-",".part",target.parentFile)
         try{FileOutputStream(stage).use{it.write(raw);it.fd.sync()};install(target,stage,expectedSha,beforeCommit)}finally{stage.delete()}
     }
     /** The final comparison and publication are inside both process and OS leases.
      * link(2) also preserves a target created by an uncooperative writer after the comparison. */
-    fun install(target:File,staged:File,expectedSha:String?=digest(staged),beforeCommit:()->Unit={}) {
+    fun install(target:File,staged:File,expectedSha:String?=digest(staged),beforeCommit:()->Unit={}) =
+        installStaged(target,staged,expectedSha,beforeCommit,useHardLink=true)
+
+    // Every book publisher shares the lock below. Android can deny link(2) in app data.
+    fun installPrivateBook(target: File, staged: File, expectedSha: String? = digest(staged), beforeCommit: () -> Unit = {}) =
+        installStaged(target,staged,expectedSha,beforeCommit,useHardLink=false)
+
+    private fun installStaged(
+        target: File,
+        staged: File,
+        expectedSha: String?,
+        beforeCommit: () -> Unit,
+        useHardLink: Boolean
+    ) {
         val incoming=digest(staged)?:error("closure_incomplete")
         val expected=expectedSha
         target.parentFile!!.mkdirs();beforeCommit()
@@ -71,7 +83,7 @@ internal object ConditionalBodyFile {
                 try {
                     staged.inputStream().use{input->FileOutputStream(local).use{out->input.copyTo(out);out.fd.sync()}}
                     check(digest(local)==incoming){"hash_mismatch"}
-                    if(actual==null) {
+                    if(actual==null && useHardLink) {
                         try{Files.createLink(target.toPath(),local.toPath())}
                         catch(_:FileAlreadyExistsException){val raced=digest(target);if(raced!=expected)conflict(target,expected,raced,incoming)}
                     } else Files.move(local.toPath(),target.toPath(),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING)

@@ -621,7 +621,7 @@ class PhoneCloudClient(
     private fun okhttp3.Response.throwHttp(): Nothing {
         val detail = body?.string().orEmpty()
         close()
-        throw CloudHttpException(code, detail.ifBlank { message })
+        throw CloudHttpException(code, detail.ifBlank { message }, serverResponse = true)
     }
 
     private fun okhttp3.Response.jsonBody(): JSONObject {
@@ -713,7 +713,36 @@ internal fun isRefreshableCloudDeviceSessionError(code: String): Boolean =
 
 internal class CloudDeviceAuthorizationException : IOException("设备身份需要重新验证，请前往账号页面完成验证")
 
-internal class CloudHttpException(val status: Int, val detail: String) : IOException(if (status == 426) "请升级到最新版本以继续同步" else if (status == 409 && runCatching { JSONObject(detail).optString("error") }.getOrDefault("") == "device_key_conflict") "本机设备身份冲突，请重新登记本机" else "HTTP $status: $detail")
+private fun declaresLegacySyncFence(detail: String): Boolean = runCatching {
+    val response = JSONObject(detail).getJSONObject("error")
+    val features = response.getJSONObject("details").getJSONArray("requiredFeatures")
+    response.optString("code") == "upgrade_required" &&
+        features.length() == 1 && features.opt(0) == "sync-objects.v2"
+}.getOrDefault(false)
+
+internal fun isLegacySyncFence(error: Throwable): Boolean =
+    error is CloudHttpException && error.status == 426 && error.serverResponse && declaresLegacySyncFence(error.detail)
+
+internal fun serverRequiresCloudClientUpgrade(error: Throwable): Boolean {
+    if (error is com.lightningstudio.watchrss.phone.syncv2.SyncV2CloudError) return error.code == "upgrade_required"
+    if (error !is CloudHttpException || error.status != 426 || !error.serverResponse) return false
+    val code = runCatching {
+        val value = JSONObject(error.detail).get("error")
+        if (value is JSONObject) value.optString("code") else value as? String
+    }.getOrNull()
+    return code == "client_upgrade_required" || code == "cloud_format_upgrade_required" ||
+        code == "snapshot_content_layout_unsupported"
+}
+
+internal class CloudHttpException(val status: Int, val detail: String, val serverResponse: Boolean = false) : IOException(
+    when {
+        status == 426 && serverResponse && declaresLegacySyncFence(detail) -> "旧同步通道已关闭，请等待可用的 Sync v2 服务"
+        status == 426 -> "请升级到最新版本以继续同步"
+        status == 409 && runCatching { JSONObject(detail).optString("error") }.getOrDefault("") == "device_key_conflict" ->
+            "本机设备身份冲突，请重新登记本机"
+        else -> "HTTP $status: $detail"
+    }
+)
 
 /** A malicious/misconfigured candidate response cannot allocate beyond the advertised local run budget. */
 internal fun readMigrationBody(input:java.io.InputStream,maximumBytes:Long):ByteArray {

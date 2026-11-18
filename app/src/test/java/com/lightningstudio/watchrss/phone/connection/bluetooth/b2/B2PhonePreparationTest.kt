@@ -142,6 +142,49 @@ class B2PhonePreparationTest {
         assertEquals(2, db.phoneArticleDao().getAllMetadataForSync().size)
     }
 
+    @Test fun oversizedOldSnapshotRetiresWhenBeginAckWasLost() = runBlocking<Unit> {
+        val store = B2RoomStore(db)
+        val directory = File(root, "b2")
+        val files = B2Files(directory)
+        val bookId = "d".repeat(64)
+        val source = File(root, "oversized-state.json").apply {
+            writeText(obj("title" to "x".repeat(1024 * 1024)).toString())
+        }
+        val state = binaryDescriptor(B2Wire.BOOK_STATE, bookId, obj("bookId" to bookId), binaryFileHashes(source))
+        val snapshot = B2Snapshots(store, files).freeze(account, "old", listOf(state)) { source }
+        val jobId = "e".repeat(32)
+        val bookKinds = B2Wire.bookKinds
+        val capability = B2Negotiation.capability(bookKinds, bookKinds, B2Wire.s4Limits())
+        val selection = requireNotNull(B2Negotiation.select(capability, capability, "phoneToWatch"))
+        val watcher = obj("snapshotId" to "watch-old", "manifestDigest" to "f".repeat(64), "fromExclusive" to 0, "toInclusive" to 0)
+        val description = obj("intent" to "create", "accountScope" to account, "phoneDeviceId" to "phone",
+            "watchDeviceId" to "watch", "direction" to "phoneToWatch", "phoneSnapshot" to snapshot,
+            "watchSnapshot" to watcher, "selection" to selection, "selectionDigest" to B2Digests.selection(selection),
+            "objectCount" to 1, "objectsRoot" to B2Digests.objects(listOf(state.s("objectId"))),
+            "pageObjectCounts" to JSONArray(listOf(1)))
+        val binding = obj("direction" to "phoneToWatch", "jobId" to jobId, "intent" to "create", "selection" to selection)
+        val kindList = bookKinds.sorted().joinToString(",")
+        val attemptKey = B2Digests.d("wrss.library-binary.v2/kind-attempt", listOf(account, "phone", "watch", kindList, kindList))
+        store.exclusive {
+            store.put(account, "attempt", attemptKey, obj("state" to "PREPARED", "phoneSnapshot" to snapshot,
+                "watchSnapshot" to watcher, "bindings" to JSONArray(listOf(binding))))
+            // B2Client persists the plan before sending begin. The state and epoch come from its ACK.
+            store.put(account, "sourceJob", jobId, obj("planDigest" to B2Digests.plan(description), "description" to description))
+        }
+        val repo = PhoneCompanionRepository(db.phoneSavedItemDao(), db.phoneArticleDao(), db.phoneRssSourceDao(), "phone")
+        val assets = File(root, "assets")
+        val business = B2InheritedKinds(db, repo, BluetoothArticleIdentityProjection(emptyList(), emptyMap(), false),
+            B2NoteAssetBusiness(store, account, assets) {}, bookKinds, false, {})
+        val runtime = B2KindSync(store, directory, assets, account, "phone", "watch", {}, {},
+            B2KindRoute(bookKinds, bookKinds), business)
+
+        runtime.prepare(obj("libraryBinary" to capability), emptyList())
+
+        assertEquals("RETIRING", store.get(account, "attempt", attemptKey)?.getString("state"))
+        assertEquals("CANCELLED", store.get(account, "sourceJob", jobId)?.getString("state"))
+        assertFalse(files.frozen(account, snapshot.s("snapshotId"), state.s("objectId")).exists())
+    }
+
     @Test fun preparedArticleUsesEightInFlightAndAcceptsBatchedAcks() = runBlocking<Unit> {
         val text = java.util.Base64.getEncoder().encodeToString(Random(12).nextBytes(500_000))
         db.phoneArticleDao().upsert(article("3".repeat(64)).copy(contentText = text))

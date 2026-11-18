@@ -71,7 +71,8 @@ internal class B2KindSync(private val store: B2Persistence, private val director
                     val job = binding.s("jobId")
                     val ns = if (binding.s("direction") == "watchToPhone") "job" else "sourceJob"
                     val row = store.get(account, ns, job)
-                    if (row != null && row.s("state") != "COMPLETE") {
+                    // A source saved before the begin response has no state yet.
+                    if (row != null && row.optString("state") != "COMPLETE") {
                         row.put("state", "CANCELLED").put("stagingReservation", 0)
                         store.put(account, ns, job, row)
                     }

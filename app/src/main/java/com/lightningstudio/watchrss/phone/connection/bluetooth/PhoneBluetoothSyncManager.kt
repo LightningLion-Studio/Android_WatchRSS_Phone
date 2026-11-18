@@ -22,7 +22,6 @@ import com.lightningstudio.watchrss.phone.data.reader.ReaderTypographyRole
 import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundPreparationException
 import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundTranscoder
 import android.os.SystemClock
-import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
@@ -38,6 +37,7 @@ import kotlinx.coroutines.channels.ReceiveChannel
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 
 data class PhoneBluetoothSyncResult(
     val deviceName: String,
@@ -587,7 +587,9 @@ class PhoneBluetoothSyncManager(
             },
             onSearch = { attempt ->
                 debugLog.appendEvent("library.reconnect.search", sessionId, fields = mapOf("attempt" to attempt))
-                onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.RECONNECTING, 0, reconnectAttempt = attempt))
+                if (opened || attempt > 1) {
+                    onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.RECONNECTING, 0, reconnectAttempt = attempt))
+                }
             },
             onSearchFailed = { attempt ->
                 debugLog.appendEvent("library.reconnect.search.failed", sessionId, fields = mapOf("consecutiveFailures" to attempt))

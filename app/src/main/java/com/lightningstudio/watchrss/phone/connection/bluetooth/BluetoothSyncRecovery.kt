@@ -59,8 +59,8 @@ internal class LibrarySyncRecovery(
             } catch (failure: Exception) {
                 currentCoroutineContext().ensureActive()
                 if (!isRetryableBluetoothDisconnect(failure)) throw failure
-                onInterrupted(failure)
                 val at = now()
+                onInterrupted(failure)
                 while (disconnectTimes.isNotEmpty() && at - disconnectTimes.first() > 10_000L) {
                     disconnectTimes.removeFirst()
                 }

@@ -433,7 +433,7 @@ class PhoneBluetoothSyncManager(
         resolveDeleteConflicts: suspend (List<PhoneSyncDeleteConflict>) -> Map<String, PhoneSyncConflictResolution> = {
             emptyMap()
         }
-    ): PhoneBluetoothSyncResult = withContext(Dispatchers.IO) {
+    ): PhoneBluetoothSyncResult = withContext(Dispatchers.IO + LibraryManifestRetry()) {
         onSyncActiveChanged(true)
         try {
         val sessionId = BluetoothDebugLog.newSessionId("syncAll")

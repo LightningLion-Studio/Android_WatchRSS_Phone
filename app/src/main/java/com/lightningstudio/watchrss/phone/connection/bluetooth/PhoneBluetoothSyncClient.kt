@@ -1468,7 +1468,7 @@ class PhoneBluetoothSyncClient(
             } else {
                 listOf(request)
             }
-            manifestRequests.forEachIndexed { index, frame ->
+            val manifestResponse = exchangeManifest(manifestRequests, write = { index, frame ->
                 writeFrameLogged(
                     connectedSocket,
                     sessionId,
@@ -1476,9 +1476,10 @@ class PhoneBluetoothSyncClient(
                     frame,
                     tracker
                 )
+            }) { attempt ->
+                report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
+                readManifestFrames(connectedSocket.inputStream, sessionId, tracker, attempt)
             }
-            report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
-            val manifestResponse = readManifestFrames(connectedSocket.inputStream, sessionId, tracker)
             // Every manifest frame was validated before any success ACK or callback.
             val supportsArticleBatches = manifestResponse.optBoolean("supportsArticleBatches", false)
             var articleRequestStats = EMPTY_FRAME_STATS
@@ -1652,7 +1653,7 @@ class PhoneBluetoothSyncClient(
             } else {
                 listOf(request)
             }
-            manifestRequests.forEachIndexed { index, frame ->
+            val manifestResponse = exchangeManifest(manifestRequests, write = { index, frame ->
                 writeFrameLogged(
                     ipSession.outputStream,
                     sessionId,
@@ -1660,13 +1661,10 @@ class PhoneBluetoothSyncClient(
                     frame,
                     tracker
                 )
+            }) { attempt ->
+                report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
+                readManifestFrames(ipSession.inputStream, sessionId, tracker, attempt)
             }
-            report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
-            val manifestResponse = readManifestFrames(
-                ipSession.inputStream,
-                sessionId,
-                tracker
-            )
             // Every manifest frame was validated before any success ACK or callback.
             val supportsArticleBatches = manifestResponse.optBoolean("supportsArticleBatches", false)
             val articleRequests = buildArticleRequests(manifestResponse, supportsArticleBatches)
@@ -1826,7 +1824,7 @@ class PhoneBluetoothSyncClient(
         } else {
             listOf(request)
         }
-        manifestRequests.forEachIndexed { index, frame ->
+        val manifestResponse = exchangeManifest(manifestRequests, write = { index, frame ->
             writeFrameLogged(
                 transport.outputStream,
                 sessionId,
@@ -1834,10 +1832,11 @@ class PhoneBluetoothSyncClient(
                 frame,
                 tracker
             )
-        }
-        report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
-        val manifestResponse = transport.readManifest(MANIFEST_PREPARATION_TIMEOUT_MS) {
-            readManifestFramesBody(it, sessionId, tracker)
+        }) { attempt ->
+            report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
+            transport.readManifest(MANIFEST_PREPARATION_TIMEOUT_MS) {
+                readManifestFramesBody(it, sessionId, tracker, attempt)
+            }
         }
         // Every manifest frame was validated before any success ACK or callback.
         val supportsArticleBatches = manifestResponse.optBoolean("supportsArticleBatches", false)
@@ -2513,19 +2512,22 @@ class PhoneBluetoothSyncClient(
     private fun readManifestFrames(
         inputStream: InputStream,
         sessionId: String,
-        byteTracker: ByteTransferTracker
+        byteTracker: ByteTransferTracker,
+        attempt: LibraryManifestRetry.Attempt?
     ): JSONObject {
         val guarded=inputStream as? IpReadDeadline
-        return if(guarded==null)readManifestFramesBody(inputStream,sessionId,byteTracker)
+        return if(guarded==null)readManifestFramesBody(inputStream,sessionId,byteTracker,attempt)
         else guarded.withBudget(MANIFEST_PREPARATION_TIMEOUT_MS, progressMs = 30_000L) {
-            readManifestFramesBody(inputStream, sessionId, byteTracker)
+            readManifestFramesBody(inputStream, sessionId, byteTracker, attempt)
         }
     }
     private fun readManifestFramesBody(
         inputStream: InputStream,
         sessionId: String,
-        byteTracker: ByteTransferTracker
+        byteTracker: ByteTransferTracker,
+        attempt: LibraryManifestRetry.Attempt?
     ): JSONObject {
+        attempt?.reading(0)
         val first = readFrameLogged(
             inputStream = inputStream,
             sessionId = sessionId,
@@ -2535,9 +2537,11 @@ class PhoneBluetoothSyncClient(
         requireLibraryFrameAccepted(first)
         val batchCount = LibrarySyncPayload.manifestBatchCount(first)
         if (batchCount <= 1) return first
+        require(batchCount <= LibrarySyncPayload.MAX_MANIFEST_BATCH_COUNT) { "资料库清单批次数过多" }
         val frames = ArrayList<JSONObject>(batchCount)
         frames += first
         for (index in 1 until batchCount) {
+            attempt?.reading(index)
             frames += readFrameLogged(
                 inputStream = inputStream,
                 sessionId = sessionId,

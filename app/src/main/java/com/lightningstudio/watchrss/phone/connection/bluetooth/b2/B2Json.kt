@@ -20,6 +20,9 @@ internal fun copy(o: JSONObject) = B2Json.parse(o.toString(), false)
 
 /** C-only parser. Never reuse the permissive v14 JSONObject constructor on network bytes. */
 object B2Json {
+    private val number = Regex("-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
+    private val unsigned = Regex("0|[1-9][0-9]*")
+    private val literals = listOf("true", "false", "null")
     const val MAX_SAFE = 9007199254740991L
     fun utf8(s: String): ByteArray = try {
         val b = Charsets.UTF_8.newEncoder().onMalformedInput(CodingErrorAction.REPORT)
@@ -47,7 +50,7 @@ object B2Json {
     fun hex(v: Any, n: Int = 64) = (v as? String)?.takeIf { it.length == n && it.all { char -> char in "0123456789abcdef" } } ?: fail()
     fun bool(v: Any) = v as? Boolean ?: fail()
     fun parse(bytes: ByteArray, integersOnly: Boolean = true) = parse(decode(bytes), integersOnly)
-    fun parse(source: String, integersOnly: Boolean = true): JSONObject {
+    fun parse(source: String, integersOnly: Boolean = true, maxNodes: Int = 32768): JSONObject {
         var i = 0
         fun ws() { while (i < source.length && source[i] in " \t\r\n") i++ }
         fun string(): String {
@@ -69,7 +72,7 @@ object B2Json {
         }
         var nodes = 0
         fun value(depth: Int) { // Local recursive function retains the lexical numeric spelling.
-            if (depth > 16 || ++nodes > 32768) fail()
+            if (depth > 16 || ++nodes > maxNodes) fail()
             ws(); if (i >= source.length) fail()
             when (source[i]) {
                 '"' -> { string(); return }
@@ -88,11 +91,11 @@ object B2Json {
                     while (true) { value(depth + 1); ws(); if (i >= source.length) fail(); when (source[i++]) { ']' -> return; ',' -> {}; else -> fail() } }
                 }
             }
-            for (literal in listOf("true", "false", "null")) if (source.startsWith(literal, i)) { i += literal.length; return }
-            val token = Regex("-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?").find(source, i)?.takeIf { it.range.first == i }?.value ?: fail()
+            for (literal in literals) if (source.startsWith(literal, i)) { i += literal.length; return }
+            val token = number.matchAt(source, i)?.value ?: fail()
             i += token.length
             if (!token.toDouble().isFinite() || token.toDouble() == 0.0 && token.startsWith("-") || kotlin.math.abs(token.toDouble()) > MAX_SAFE) fail()
-            if (integersOnly && (!token.matches(Regex("0|[1-9][0-9]*")) || token.toLongOrNull()?.let { it <= MAX_SAFE } != true)) fail()
+            if (integersOnly && (!unsigned.matches(token) || token.toLongOrNull()?.let { it <= MAX_SAFE } != true)) fail()
         }
         value(0); ws(); if (i != source.length) fail()
         return try { JSONObject(source) } catch (_: Exception) { fail() }

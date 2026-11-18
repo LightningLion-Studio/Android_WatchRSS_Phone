@@ -12,11 +12,23 @@ class B2RejectedData(val request: JSONObject, val hash: String, val rejection: S
 interface B2BusinessPort {
     val kinds: Set<String>
     suspend fun apply(descriptor: JSONObject, metadata: JSONObject, staged: File): String
+    suspend fun prepareFile(context: B2ApplyContext, descriptor: JSONObject, metadata: JSONObject) {}
+    suspend fun applyFile(context: B2ApplyContext, descriptor: JSONObject, metadata: JSONObject, staged: B2FileRef): String =
+        apply(descriptor, metadata, staged.file)
     fun validatePlan(objects: List<JSONObject>) {}
     fun applicationScratchBytes(objects: List<JSONObject>): Long = 0L
     fun canCommitRange(description: JSONObject): Boolean = false
     suspend fun complete(description: JSONObject, completion: JSONObject) {}
 }
+
+class B2ApplyContext internal constructor(
+    val jobId: String,
+    internal val segment: suspend (String) -> B2FileRef,
+    internal val check: () -> Unit,
+    internal val assembly: File? = null,
+    internal val publishAssembly: suspend (File, List<String>) -> Unit = { _, _ -> },
+    internal val assemblyReady: suspend () -> Boolean = { false }
+)
 
 /** Construct only after LOCAL consent + current account/peer verification + successful
  * prepare confirmation. The controller owns consent; begin cannot manufacture it. */
@@ -69,7 +81,7 @@ class B2Receiver(
             // A late old-controller cancellation cannot cancel a newer connection.
             if (j.s("connection") != connection || terminal(j)) continue
             store.transaction { j.put("state", "CANCELLED"); store.put(scope, "job", j.s("jobId"), j) }
-            objects(j.s("jobId")).forEach { files.release(scope, j.s("jobId"), it.o("descriptor")) }
+            objects(j.s("jobId")).forEach { files.release(scope, j.s("jobId"), it.o("descriptor"), keepObject = it.o("descriptor").s("kind") == B2Wire.BOOK_SEGMENT) }
         }
     }
     private val sourcePeer get() = if (receiveDirection == "watchToPhone") auth.watchDeviceId else auth.phoneDeviceId
@@ -224,7 +236,7 @@ class B2Receiver(
     internal fun window(stream: Int): Int = receiveLimits(stream).n("maxInFlightChunks").toInt()
     internal fun byteWindow(stream: Int): Int = receiveLimits(stream).n("maxInFlightBytes").toInt()
 
-    internal data class WrittenChunk(val header: B2DataHeader, val request: JSONObject, val temp: File)
+    internal data class WrittenChunk(val header: B2DataHeader, val request: JSONObject, val temp: B2FileRef)
 
     internal fun writeChunk(frame: B2Frame.Data, request: JSONObject): WrittenChunk? {
         if (!current(frame.header.stream, frame.header.epoch)) return null
@@ -232,7 +244,7 @@ class B2Receiver(
             check()
             if (!current(frame.header.stream, frame.header.epoch)) fail("STALE_EPOCH")
         }
-        return WrittenChunk(frame.header, request, temp)
+        return WrittenChunk(frame.header, request, B2FileRef(temp, 0, frame.header.length.toLong()))
     }
 
     internal fun ack(stream: Int, epoch: Long, entries: List<B2AckEntry>): B2Frame.Ack? = synchronized(epochs) {
@@ -251,14 +263,15 @@ class B2Receiver(
         val j = job(group.first().request.s("jobId"))
         group.forEach { fence(j, it.request) }
         val staged = mutableListOf<Pair<File, File>>()
+        val rows = mutableMapOf<String, JSONObject>()
         val outcomes = group.map { chunk ->
             val oid = chunk.request.o("payload").s("objectId")
-            val row = objectRow(j.s("jobId"), oid)
+            val row = rows.getOrPut(oid) { objectRow(j.s("jobId"), oid) }
             if (receipt(j, row) != null) return@map CommittedChunk(chunk, 2)
             if (terminal(j)) fail("JOB_CANCELLED")
             val descriptor = row.o("descriptor")
             runnable(j, descriptor)
-            staged.add(chunk.temp to files.chunk(scope, j.s("jobId"), oid, chunk.header.index))
+            staged.add(chunk.temp.file to files.chunk(scope, j.s("jobId"), oid, chunk.header.index))
             CommittedChunk(chunk, 1, receiveDirection + ":" + B2Progress.chunk(descriptor, chunk.header.index))
         }
         val budget = stagingLimit(j)
@@ -270,7 +283,7 @@ class B2Receiver(
                 fence(j, chunk.request)
                 val p = chunk.request.o("payload")
                 val oid = p.s("objectId")
-                val row = objectRow(j.s("jobId"), oid)
+                val row = rows.getValue(oid)
                 val receipt = if (disposition == 2) receipt(j, row) else null
                 bind(j, chunk.request, obj("objectId" to oid, "chunkIndex" to p.n("chunkIndex"),
                     "chunkState" to if (disposition == 1) "STAGED" else null,
@@ -308,6 +321,23 @@ class B2Receiver(
         val result = handle(request, frame.bytes).o("result")
         return flows.getValue(frame.header.stream).durable(frame.header, result.s("objectState") == "APPLIED")
     }
+    private suspend fun collectExpiredBookFiles(now: Long, currentId: String) {
+        for ((id, row) in store.list(scope, "job")) {
+            if (id == currentId || row.n("expiresAtMillis") >= now ||
+                description(row).o("selection").a("kinds").values().none { (it as JSONObject).s("kind") in B2Wire.bookKinds }) continue
+            val records = objects(id)
+            if (row.s("state") != "COMPLETE") {
+                row.put("state", "CANCELLED").put("stagingReservation", 0)
+                store.put(scope, "job", id, row)
+            }
+            for (record in records) {
+                val d = record.o("descriptor")
+                files.release(scope, id, d)
+                if (d.s("kind") == B2Wire.BOOK_COMMIT) files.assembly(scope, id, d.s("objectId")).delete()
+            }
+        }
+    }
+
     private suspend fun begin(r: JSONObject, now: Long): JSONObject {
         val p = r.o("payload"); val id = r.s("jobId")
         val b = auth.bindings.find { it.s("jobId") == id } ?: fail("AUTH_REVOKED")
@@ -326,7 +356,10 @@ class B2Receiver(
         if (p.o(if (receiveDirection == "watchToPhone") "watchSnapshot" else "phoneSnapshot").n("toInclusive") != 0L && !business.canCommitRange(p)) fail("BUSINESS_REJECTED")
         val limits = p.o("selection").o("limits")
         if (B2Wire.frameBytes(r) > limits.n("maxFrameBytes")) fail("LIMIT_EXCEEDED")
+        if (old != null && old.s("state") != "COMPLETE" && old.n("expiresAtMillis") < now &&
+            p.o("selection").a("kinds").values().any { (it as JSONObject).s("kind") in B2Wire.bookKinds }) fail("EXPIRED")
         if (old == null) {
+            if (p.o("selection").a("kinds").values().any { (it as JSONObject).s("kind") in B2Wire.bookKinds }) collectExpiredBookFiles(now, id)
             val active = store.all().filter { it.namespace == "job" }.map { B2Json.parse(it.body, false) }.count { !terminal(it) && it.n("expiresAtMillis") >= now }
             if (active >= limits.n("maxActiveJobs")) fail("WINDOW_FULL")
         }
@@ -336,7 +369,10 @@ class B2Receiver(
         if (old != null && old.s("state") !in listOf("PLANNING", "COMPLETE", "CANCELLED")) {
             val reserve = old.optLong("stagingReservation", 0)
             if (p.n("objectCount") > 0 && reserve <= 0) fail("JOURNAL_CORRUPT")
-            if (reserve + 1048576 > files.availableBytes()) fail("STORAGE_PRESSURE")
+            val materialized = files.jobDataBytes(scope, id, objects(id).map { it.o("descriptor") })
+            val remaining = (reserve - materialized).coerceAtLeast(0)
+            if (remaining + otherReservations(id) + limits.n("maxJournalBytes") + 1048576 > files.availableBytes() ||
+                remaining + otherReservations(id) + files.dataBytes() + limits.n("maxJournalBytes") > limits.n("maxStagingBytes")) fail("STORAGE_PRESSURE")
         }
         val sameLease = old != null && old.s("connection") == connection && (leases[id] ?: -1) > monotonic()
         val epoch = if (sameLease) old!!.n("epoch") else (old?.n("epoch") ?: 0) + 1
@@ -396,11 +432,14 @@ class B2Receiver(
         if (all.sumOf { B2Json.utf8(it.toString()).size.toLong() } > lim(j).n("maxManifestBytes")) fail("LIMIT_EXCEEDED")
         val full = index + 1 == counts.size
         if (full) { if (all.size.toLong() != ds.n("objectCount") || B2Digests.objects(all.map { it.s("objectId") }) != ds.s("objectsRoot")) fail("PLAN_CONFLICT"); validateGraph(all)
+            B2BookManifest.validatePlan(all, lim(j).n("maxPackageBytes"))
             business.validatePlan(all)
             // Whole-plan physical peak admission precedes READY and all DATA/apply.
-            val incoming = all.sumOf { it.n("size") * 3 + B2Json.utf8(it.toString()).size + B2ReceiveIndex.cost(it) + 1024 } +
+            val segmentScratch = all.filter { it.s("kind") == B2Wire.BOOK_SEGMENT }.maxOfOrNull { it.n("size") } ?: 0L
+            val incoming = segmentScratch + all.sumOf {
+                it.n("size") * (if (it.s("kind") == B2Wire.BOOK_SEGMENT) 1 else 3) + B2Json.utf8(it.toString()).size + B2ReceiveIndex.cost(it) + 1024 } +
                 business.applicationScratchBytes(all)
-            val other = store.list(scope, "job").filter { it.first != j.s("jobId") && !terminal(it.second) }.sumOf { it.second.optLong("stagingReservation", 0) }
+            val other = otherReservations(j.s("jobId"))
             if (incoming + other + files.dataBytes() + lim(j).n("maxJournalBytes") > lim(j).n("maxStagingBytes") || incoming + other + lim(j).n("maxJournalBytes") + 1048576 > files.availableBytes()) fail("STORAGE_PRESSURE")
             j.put("stagingReservation", incoming)
         }
@@ -421,6 +460,17 @@ class B2Receiver(
         light[j.s("jobId")] = copy(j)
         return result
     }
+    private suspend fun otherReservations(jobId: String): Long =
+        store.list(scope, "job").filter { it.first != jobId && !terminal(it.second) }.sumOf { it.second.optLong("stagingReservation", 0) }
+
+    private suspend fun releaseApplied(j: JSONObject, d: JSONObject) {
+        val id = j.s("jobId")
+        val keep = d.s("kind") == B2Wire.BOOK_SEGMENT && j.s("state") != "COMPLETE" &&
+            store.get(scope, "bookAssembly", key(id, B2Metadata.validate(d).s("bookId"))) == null
+        files.release(scope, id, d, keepObject = keep)
+        if (d.s("kind") == B2Wire.BOOK_COMMIT) files.assembly(scope, id, d.s("objectId")).delete()
+    }
+
     private fun receipt(j: JSONObject, row: JSONObject): JSONObject? {
         if (row.nil("receipt")) return null
         val r = try { row.o("receipt").also { B2Results.receipt(it) } } catch (_: B2Exception) { fail("RECEIPT_CONFLICT") }
@@ -432,12 +482,12 @@ class B2Receiver(
      * intact, never rolls back APPLIED, and is retried on observation or admission. */
     private suspend fun cleanupApplied(j: JSONObject) {
         for (row in objects(j.s("jobId"))) if (receipt(j, row) != null) {
-            files.release(scope, j.s("jobId"), row.o("descriptor"))
+            releaseApplied(j, row.o("descriptor"))
         }
     }
     private suspend fun status(j: JSONObject, row: JSONObject): Pair<String, List<Int>> {
         if (receipt(j, row) != null) {
-            files.release(scope, j.s("jobId"), row.o("descriptor"))
+            releaseApplied(j, row.o("descriptor"))
             return "APPLIED" to emptyList()
         }
         val d = row.o("descriptor"); val missing = files.working(j.s("jobId")) { files.missing(scope, j.s("jobId"), d) }
@@ -524,7 +574,7 @@ class B2Receiver(
         if (j.s("state") == "PLANNING") fail("MANIFEST_INCOMPLETE")
         val p = r.o("payload"); val row = objectRow(j.s("jobId"), p.s("objectId")); val d = row.o("descriptor"); val rc = receipt(j, row)
         if (rc != null) {
-            files.release(scope, j.s("jobId"), d)
+            releaseApplied(j, d)
             return obj("objectId" to d.s("objectId"), "chunkIndex" to p.n("chunkIndex"), "chunkState" to null, "objectState" to "APPLIED", "receipt" to rc)
         }
         if (terminal(j)) fail("JOB_CANCELLED")
@@ -543,7 +593,7 @@ class B2Receiver(
         if (j.s("state") == "PLANNING") fail("MANIFEST_INCOMPLETE")
         val row = objectRow(j.s("jobId"), r.o("payload").s("objectId")); val d = row.o("descriptor")
         receipt(j, row)?.let {
-            files.release(scope, j.s("jobId"), d)
+            releaseApplied(j, d)
             return obj("state" to "APPLIED", "receipt" to it)
         }
         if (terminal(j)) fail("JOB_CANCELLED")
@@ -554,9 +604,33 @@ class B2Receiver(
         // The writer lane is held during local work. Extend the in-use lease before
         // entering the commit; GC/revoke/new begin cannot cross this boundary.
         leases[j.s("jobId")] = monotonic() + B2Wire.LEASE
+        val jobId = j.s("jobId")
+        val isBookCommit = d.s("kind") == B2Wire.BOOK_COMMIT
+        val assembly = if (isBookCommit) files.assembly(scope, jobId, d.s("objectId")) else null
+        val assemblyKey = if (isBookCommit) key(jobId, metadata.s("bookId")) else ""
+        val context = B2ApplyContext(jobId, segment = { oid ->
+            val dep = objectRow(jobId, oid)
+            val segment = dep.o("descriptor")
+            if (receipt(j, dep) == null || segment.s("kind") != B2Wire.BOOK_SEGMENT) fail("DEPENDENCIES_PENDING")
+            B2FileRef(files.composed(scope, jobId, oid), 0, segment.n("size"))
+        }, check = ::check, assembly = assembly, publishAssembly = { temp, segments ->
+            if (assembly == null || segments != metadata.a("segmentObjectIds").strings()) fail("PLAN_CONFLICT")
+            check()
+            files.publishAssembly(temp, assembly)
+            store.transaction {
+                check()
+                store.put(scope, "bookAssembly", assemblyKey, obj("objectId" to d.s("objectId")))
+            }
+            // The durable assembly registration proves these bytes remain recoverable.
+            for (id in segments) releaseApplied(j, objectRow(jobId, id).o("descriptor"))
+        }, assemblyReady = {
+            isBookCommit && store.get(scope, "bookAssembly", assemblyKey)?.s("objectId") == d.s("objectId")
+        })
+        business.prepareFile(context, copy(d), metadata)
+        leases[jobId] = monotonic() + B2Wire.LEASE
         val result = store.transaction {
             fence(j, r)
-            val outcome = business.apply(copy(d), metadata, staged)
+            val outcome = business.applyFile(context, copy(d), metadata, B2FileRef(staged, 0, d.n("size")))
             check(); fault("beforeApplyCommit")
             touch(j, clock())
             val rc = B2Digests.receipt(r, d.s("objectId"), if (receiveDirection == "watchToPhone") auth.phoneDeviceId else auth.watchDeviceId, outcome)
@@ -569,7 +643,12 @@ class B2Receiver(
         synchronized(active) { active.remove(d.s("objectId")) }
         progress(receiveDirection + ":" + B2Progress.applied(d))
         fault("afterApplyCommit")
-        files.release(scope, j.s("jobId"), d)
+        releaseApplied(j, d)
+        if (d.s("kind") == B2Wire.BOOK_COMMIT) {
+            for (id in metadata.a("segmentObjectIds").strings()) {
+                releaseApplied(j, objectRow(j.s("jobId"), id).o("descriptor"))
+            }
+        }
         return result
     }
     private suspend fun complete(j: JSONObject, r: JSONObject): JSONObject {
@@ -589,7 +668,10 @@ class B2Receiver(
     private suspend fun cancel(j: JSONObject, r: JSONObject): JSONObject {
         val result = obj("state" to if (j.s("state") == "COMPLETE") "COMPLETE" else "CANCELLED", "alreadyComplete" to (j.s("state") == "COMPLETE"))
         store.transaction { fence(j, r); j.put("state", result.s("state")); store.put(scope, "job", j.s("jobId"), j); bind(j, r, result) }
-        if (j.s("state") == "CANCELLED") objects(j.s("jobId")).forEach { files.release(scope, j.s("jobId"), it.o("descriptor")) }
+        if (j.s("state") == "CANCELLED") objects(j.s("jobId")).forEach {
+            val d = it.o("descriptor")
+            files.release(scope, j.s("jobId"), d, keepObject = d.s("kind") == B2Wire.BOOK_SEGMENT)
+        }
         return result
     }
     companion object {

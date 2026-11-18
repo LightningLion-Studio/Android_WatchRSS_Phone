@@ -15,8 +15,23 @@ data class BookChapterEntity(val bookId:String,val chapterIndex:Int,val articleI
 data class BookReadingEntity(val bookId:String,val chapterIndex:Int,val stateJson:String)
 data class BookSourceRef(val bookId:String,val sourceUrl:String)
 @Dao interface BookDao {
+    @Query("""SELECT EXISTS(SELECT 1 FROM phone_articles a WHERE lower(trim(a.url)) LIKE 'https://watchrss.local/import-%'
+        AND NOT EXISTS(SELECT 1 FROM imported_book_chapters c WHERE c.articleId=a.articleId))""")
+    suspend fun hasUnregisteredBookArticles(): Boolean
     @Query("SELECT c.bookId,a.rssSourceUrl AS sourceUrl FROM imported_book_chapters c JOIN phone_articles a ON a.articleId=c.articleId WHERE a.rssSourceUrl IS NOT NULL GROUP BY c.bookId,a.rssSourceUrl") suspend fun mappedSources():List<BookSourceRef>
     @Query("SELECT * FROM imported_books ORDER BY bookId") suspend fun all():List<BookEntity>
+    @Query("SELECT * FROM imported_books WHERE bookId > :after ORDER BY bookId LIMIT 1")
+    suspend fun nextBinaryBook(after: String): BookEntity?
+    @Query("SELECT * FROM imported_book_reading WHERE bookId=:id AND chapterIndex > :after ORDER BY chapterIndex LIMIT 100")
+    suspend fun binaryReadingPage(id: String, after: Int): List<BookReadingEntity>
+    @Query("SELECT * FROM imported_book_chapters WHERE bookId=:id AND chapterIndex>:after ORDER BY chapterIndex LIMIT 100")
+    suspend fun binaryChapterPage(id: String, after: Int): List<BookChapterEntity>
+    @Query("SELECT COUNT(*) FROM imported_book_chapters c JOIN phone_articles a ON a.articleId=c.articleId WHERE c.bookId=:id")
+    suspend fun binaryPresentChapters(id: String): Int
+    @Query("SELECT articleId FROM phone_articles WHERE url=:url ORDER BY articleId LIMIT 1")
+    suspend fun binaryArticleAtUrl(url: String): String?
+    @Query("UPDATE phone_articles SET contentText=COALESCE(:text,contentText),contentHtml=COALESCE(:html,contentHtml),contentHash=:hash,syncBodyHash='',syncBodyByteCount=0,syncChunkSize=0,syncChunkHashesJson='',syncMetadataHash='' WHERE articleId=:id")
+    suspend fun repairBinaryChapter(id: String, text: String?, html: String?, hash: String)
     @Query("SELECT * FROM imported_books WHERE bookId=:id") suspend fun get(id:String):BookEntity?
     @Upsert suspend fun put(value:BookEntity)
     @Query("SELECT * FROM imported_book_chapters ORDER BY bookId,chapterIndex") suspend fun chapters():List<BookChapterEntity>
@@ -47,12 +62,16 @@ object BookSync {
     fun chapterHash(index:Int,title:String,text:String)=hash("watchrss/book/chapter/v1",index.toString(),normalized(title),normalized(text))
     fun fingerprint(hashes:List<String>):String { require(hashes.isNotEmpty() && hashes.all(hex::matches));return hash("watchrss/book/fingerprint/v1",hashes.size.toString(),*hashes.toTypedArray()) }
     fun id(fingerprint:String)=hash("watchrss/book/id/v1",fingerprint)
+    internal fun binaryId(fingerprint: String, instance: String?) =
+        if (instance == null) id(fingerprint) else hash("watchrss/book/instance-id/v1", fingerprint, instance)
     fun articleId(bookId:String,index:Int)=hash("watchrss/book/article/v1",bookId,index.toString())
     private fun hash(vararg strings:String)=CloudSnapshotCodec.sha256(CloudProtocolV2.lp(*strings))
     fun canonical(value:JSONObject)=PhoneCloudRecordCodec.canonical(value)
     fun integer(row:JSONObject,key:String):Long { val v=row.get(key);require(v is Int || v is Long);return (v as Number).toLong().also {require(it in 0..9_007_199_254_740_991L)} }
     /** Fixed subcodes only. Never include peer values or parser exception text. */
-    fun validate(value:JSONObject) {
+    fun validate(value: JSONObject) = validate(value, binary = false)
+    internal fun validateBinary(value: JSONObject) = validate(value, binary = true)
+    private fun validate(value:JSONObject, binary: Boolean) {
         fun check(ok:Boolean,reason:String){if(!ok)throw InvalidBookPackageException(reason)}
         fun number(key:String,reason:String):Long {
             val raw=value.opt(key)
@@ -64,11 +83,20 @@ object BookSync {
         val identity=value.opt("bookId")
         check(identity is String && hex.matches(identity),"manifest_book_id_invalid")
         val instance=value.opt("instanceId")
-        if(instance is String && instance.matches(Regex("[0-9a-f]{32}")) &&
+        if(!binary && instance is String && instance.matches(Regex("[0-9a-f]{32}")) &&
             identity==hash("watchrss/book/instance-id/v1",fingerprint as String,instance)) {
             throw InvalidBookPackageException("manifest_instance_identity_unsupported")
         }
-        check(identity==id(fingerprint as String),"manifest_identity_mismatch")
+        if (binary) {
+            check(!value.has("instanceId") || instance is String && instance.matches(Regex("[0-9a-f]{32}")), "manifest_instance_invalid")
+            if (value.has("lifecycle")) {
+                val token = value.optJSONObject("lifecycle") ?: throw InvalidBookPackageException("manifest_lifecycle_invalid")
+                check(token.keys().asSequence().toSet() == setOf("generation", "operationId", "startedAt") &&
+                    integer(token, "generation") > 0 && integer(token, "startedAt") >= 0 &&
+                    (token.opt("operationId") as? String)?.matches(Regex("[0-9a-f]{32}")) == true, "manifest_lifecycle_invalid")
+            }
+        }
+        check(identity==binaryId(fingerprint as String, (instance as? String).takeIf { binary }),"manifest_identity_mismatch")
         val count=number("chapterCount","manifest_chapter_count")
         check(count in 1..100_000,"manifest_chapter_count_range")
         check(value.opt("title") is String,"manifest_title_type")
@@ -92,9 +120,22 @@ object BookSync {
         }
     }
     fun deletions(state:JSONObject):Set<Int> = state.getJSONArray("deletedChapters").let{a->(0 until a.length()).map{a.getInt(it)}.toSet()}
-    fun merge(local:JSONObject?,remote:JSONObject):JSONObject {
-        validate(remote);if(local==null)return JSONObject(remote.toString()).apply{remove("contentAvailable")}
-        validate(local);if(local.getString("bookId")!=remote.getString("bookId") || local.getInt("chapterCount")!=remote.getInt("chapterCount"))throw InvalidBookPackageException("manifest_local_identity_conflict")
+    internal fun compareLifecycle(a: JSONObject, b: JSONObject): Int {
+        val x = a.optJSONObject("lifecycle")
+        val y = b.optJSONObject("lifecycle")
+        val generation = (x?.getLong("generation") ?: 0).compareTo(y?.getLong("generation") ?: 0)
+        return if (generation != 0) generation else x?.optString("operationId").orEmpty().compareTo(y?.optString("operationId").orEmpty())
+    }
+    fun merge(local:JSONObject?,remote:JSONObject):JSONObject = merge(local, remote, binary = false)
+    internal fun merge(local:JSONObject?,remote:JSONObject, binary: Boolean):JSONObject {
+        validate(remote, binary);if(local==null)return JSONObject(remote.toString()).apply{remove("contentAvailable")}
+        if (binary || local.has("instanceId") || local.has("lifecycle")) validateBinary(local) else validate(local)
+        if (local.getString("bookId") != remote.getString("bookId") || local.getInt("chapterCount") != remote.getInt("chapterCount"))
+            throw InvalidBookPackageException("manifest_local_identity_conflict")
+        if (binary || local.has("lifecycle")) {
+            val token = compareLifecycle(local, remote)
+            if (token != 0) return JSONObject((if (token > 0) local else remote).toString()).apply { remove("contentAvailable") }
+        }
         val winner=compareValuesBy(remote,local,{it.getLong("updatedAt")},{it.getString("sourceDeviceId")},{it.getString("title")},{it.optString("sourceUrl")},{it.optString("kind")})>0
         return JSONObject((if(winner)remote else local).toString()).apply {
             remove("contentAvailable");put("deletedChapters",JSONArray((deletions(local)+deletions(remote)).sorted()))

@@ -20,9 +20,16 @@ class B2Files internal constructor(private val root: File, private val deleteCac
     private fun local(vararg parts: String) = File(root, B2Digests.d("wrss.library-binary.v2/local-file", parts.toList()))
     internal fun chunk(scope: String, job: String, oid: String, index: Int) = local("chunk", scope, job, oid, index.toString())
     internal fun composed(scope: String, job: String, oid: String) = local("object", scope, job, oid)
+    internal fun assembly(scope: String, job: String, oid: String) = local("book-assembly", scope, job, oid)
     internal fun frozen(scope: String, snapshot: String, oid: String) = local("source", scope, snapshot, oid)
     private val requests by lazy { try { B2RequestBindings(File(root, "request-bindings")) } catch (_: java.io.IOException) { fail("LOCAL_IO") } }
     fun dataBytes() = root.listFiles()?.filter { it.isFile }?.sumOf { it.length() } ?: 0L
+    internal fun jobDataBytes(scope: String, job: String, descriptors: List<JSONObject>): Long =
+        descriptors.sumOf { d ->
+            val oid = d.s("objectId")
+            composed(scope, job, oid).length() + assembly(scope, job, oid).length() +
+                (0 until d.a("chunkHashes").length()).sumOf { chunk(scope, job, oid, it).length() }
+        }
     fun usedBytes() = dataBytes() + requests.chargedBytes()
     internal fun checkRequest(scope: String, job: String, peer: String, id: String, digest: String) = requests.check(scope, job, peer, id, digest)
     internal fun bindRequest(scope: String, job: String, peer: String, id: String, digest: String, limit: Long) = requests.bind(scope, job, peer, id, digest, limit)
@@ -90,6 +97,23 @@ class B2Files internal constructor(private val root: File, private val deleteCac
             FileChannel.open(root.toPath(), StandardOpenOption.READ).use { it.force(true) }
         } catch (_: java.io.IOException) { fail("LOCAL_IO") } finally { temp.delete() }
     }
+    internal fun publishAssembly(source: File, target: File) {
+        try {
+            if (source != target) java.nio.file.Files.move(source.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            FileChannel.open(root.toPath(), StandardOpenOption.READ).use { it.force(true) }
+        } catch (_: java.io.IOException) { fail("LOCAL_IO") }
+    }
+
+    internal fun adoptSource(source: File, target: File, size: Long, hash: String, budget: Long) {
+        if (dataBytes() + size > budget) fail("STORAGE_PRESSURE")
+        if (!verified(source, size, hash)) fail("SOURCE_CHANGED")
+        try {
+            FileChannel.open(source.toPath(), StandardOpenOption.WRITE).use { it.force(true) }
+            java.nio.file.Files.move(source.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
+            FileChannel.open(root.toPath(), StandardOpenOption.READ).use { it.force(true) }
+        } catch (_: java.io.IOException) { fail("LOCAL_IO") }
+    }
+
     internal fun availableBytes() = root.usableSpace
     internal fun missing(scope: String, job: String, d: JSONObject): List<Int> = d.a("chunkHashes").strings().indices.filter { index ->
         !verified(chunk(scope, job, d.s("objectId"), index), minOf(B2Wire.CHUNK.toLong(), d.n("size") - index * B2Wire.CHUNK.toLong()), d.a("chunkHashes").getString(index))
@@ -101,7 +125,14 @@ class B2Files internal constructor(private val root: File, private val deleteCac
     internal fun finalize(scope: String, job: String, d: JSONObject, budget: Long): File {
         val target = composed(scope, job, d.s("objectId"))
         if (verified(target, d.n("size"), d.s("sha256"))) return target
-        if (missing(scope, job, d).isNotEmpty()) fail("CHUNKS_MISSING")
+        if (d.s("kind") in B2Wire.bookKinds) {
+            val id = d.s("objectId")
+            for (index in 0 until d.a("chunkHashes").length()) {
+                val block = chunk(scope, job, id, index)
+                val expected = minOf(B2Wire.CHUNK.toLong(), d.n("size") - index.toLong() * B2Wire.CHUNK)
+                if (!block.isFile || block.length() != expected) fail("CHUNKS_MISSING")
+            }
+        } else if (missing(scope, job, d).isNotEmpty()) fail("CHUNKS_MISSING")
         if (usedBytes() + d.n("size") > budget) fail("STORAGE_PRESSURE")
         val temp = File.createTempFile("compose-", ".tmp", root)
         try {
@@ -120,8 +151,8 @@ class B2Files internal constructor(private val root: File, private val deleteCac
         } catch (_: java.io.IOException) { fail("LOCAL_IO") } finally { temp.delete() }
     }
 
-    internal fun release(scope: String, job: String, d: JSONObject): Boolean {
-        val paths = d.a("chunkHashes").strings().indices.map { chunk(scope, job, d.s("objectId"), it) } + composed(scope, job, d.s("objectId"))
+    internal fun release(scope: String, job: String, d: JSONObject, keepObject: Boolean = false): Boolean {
+        val paths = d.a("chunkHashes").strings().indices.map { chunk(scope, job, d.s("objectId"), it) } + if (keepObject) emptyList() else listOf(composed(scope, job, d.s("objectId")))
         var released = true
         for (path in paths) {
             try { if (path.exists() && !deleteCache(path)) released = false }
@@ -138,6 +169,7 @@ object B2Metadata {
     fun validate(d: JSONObject): JSONObject {
         val m = B2Json.parse(B2Json.utf8(d.s("metadataUtf8")), false)
         when (d.s("kind")) {
+            in B2Wire.bookKinds -> B2BookManifest.validateObject(d, m)
             "rssSource" -> {
                 B2Json.exact(m, "url", "sourceDeviceId", "title", "description", "siteUrl", "imageUrl", "createdAt", "updatedAt", "sortOrder", "isPinned", "deleted", "deletedAt")
                 if (m.s("url") != d.s("businessId")) fail("OBJECT_CONFLICT")

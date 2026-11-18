@@ -555,7 +555,7 @@ class PhoneBluetoothSyncManager(
                     if (binaryScopeSelected) {
                         binaryAccountGeneration = syncSession?.transport?.generation
                         if (!binaryRoute.isEmpty && B2KindRoute.select(active.response,
-                            binaryRoute.hasBinaryAssets, binaryRoute.hasBinaryLibrary) != binaryRoute) {
+                            binaryRoute.hasBinaryAssets, binaryRoute.hasBinaryLibrary, binaryRoute.hasBinaryBooks) != binaryRoute) {
                             throw B2Exception("CAPABILITY_MISMATCH")
                         }
                     }
@@ -594,17 +594,22 @@ class PhoneBluetoothSyncManager(
                 if (binaryScopeSelected && !binaryRouteFixed) {
                     val db = b2Database()
                     val route = B2KindRoute.select(active.response, includeNoteAssets,
-                        db != null && repository.binaryArticleStorageReady())
+                        db != null && repository.binaryArticleStorageReady(),
+                        db != null && repository.books?.binaryReady() == true && (!skipped("books") || !skipped("bookReading")))
                     if (!route.isEmpty) {
                         if (!canSyncAccount()) throw B2Exception("ACCOUNT_REQUIRED")
                         if (effectiveDevice.remoteDeviceId.isBlank() ||
                             active.response.optString("deviceId") != effectiveDevice.remoteDeviceId) {
                             throw B2Exception("CAPABILITY_MISMATCH")
                         }
+                        val generation = syncSession?.transport?.generation
+                        if (route.hasBinaryBooks && (binaryAccountGeneration == null || binaryAccountGeneration != generation)) {
+                            syncAccount(effectiveDevice, syncSession, false, active)
+                            binaryAccountGeneration = generation
+                        }
                         val (selected, runtime) = prepareBinaryRoute(route, active.response, effectiveDevice) {
                             recovery.confirmedProgress("b2", it)
                         }
-                        val generation = syncSession?.transport?.generation
                         if (!selected.isEmpty && (binaryAccountGeneration == null || binaryAccountGeneration != generation)) {
                             syncAccount(effectiveDevice, syncSession, false, active)
                             binaryAccountGeneration = generation
@@ -646,7 +651,7 @@ class PhoneBluetoothSyncManager(
             }
             recovery.unit("books") {
                 val active = binding()
-                if (active.capabilities.books && repository.books != null && (!skipped("books") || !skipped("bookReading"))) {
+                if (!binaryRoute.hasBinaryBooks && active.capabilities.books && repository.books != null && (!skipped("books") || !skipped("bookReading"))) {
                     reportProgress(report,PhoneBluetoothSyncStage.SYNCING_BOOKS,0)
                     val bookSync = BookBluetoothSync(requireNotNull(repository.books), deviceId, File(appContext.cacheDir, "ble-books")) { request ->
                         val finishingBody=request.optString("phase")=="body" && request.optInt("chunkIndex")+1==request.optInt("chunkCount")
@@ -748,6 +753,7 @@ class PhoneBluetoothSyncManager(
             }
             binaryRuntime?.let { runtime ->
                 val stage = if (binaryRoute.hasBinaryLibrary) PhoneBluetoothSyncStage.TRANSFERRING
+                    else if (binaryRoute.hasBinaryBooks) PhoneBluetoothSyncStage.SYNCING_BOOKS
                     else PhoneBluetoothSyncStage.SYNCING_NOTES
                 reportProgress(report, stage, 0)
                 syncSession?.close()
@@ -1465,16 +1471,16 @@ class PhoneBluetoothSyncManager(
         // Check readiness while the library is still read-only. In particular, v1 alias repair can
         // hydrate both old bodies and must run only once the legacy library route has been chosen.
         val candidate = if (requested.hasBinaryLibrary && repository.binaryLibraryNeedsLegacyPreparation(capabilities.books)) {
-            requested.assetsOnly()
+            requested.withoutLibrary()
         } else requested
-        for (route in listOf(candidate, candidate.assetsOnly()).distinct()) {
+        for (route in listOf(candidate, candidate.withoutLibrary(), candidate.assetsOnly()).distinct()) {
             if (route.isEmpty) break
             val runtime = createBinaryRuntime(database, device, capabilities, route, progress)
             try {
                 runtime.prepare(probe, binaryAssetInventory(route))
                 return route to runtime
             } catch (failure: B2Exception) {
-                if (failure.code != "LIMIT_EXCEEDED") throw failure
+                if (failure.code != "LIMIT_EXCEEDED" || route.hasBinaryBooks && !route.hasBinaryLibrary) throw failure
                 // v14's library cursor covers the whole library. Keep the affected article/source
                 // scope on v1 and retry independent note assets before sending anything on either.
             }
@@ -1495,8 +1501,9 @@ class PhoneBluetoothSyncManager(
         val identity = if (route.hasBinaryLibrary) repository.bluetoothIdentityProjection(capabilities.canonicalRssIds, readOnly = true)
             else BluetoothArticleIdentityProjection(emptyList(), emptyMap(), false)
         val business = B2InheritedKinds(db, repository, identity,
-            B2NoteAssetBusiness(store, scope, assets, authorize), route.receive, capabilities.books, authorize,
-            canonicalIds = capabilities.canonicalRssIds)
+            B2NoteAssetBusiness(store, scope, assets, authorize), route.receive, capabilities.books || route.hasBinaryBooks, authorize,
+            canonicalIds = capabilities.canonicalRssIds,
+            books = if (route.hasBinaryBooks) B2BookBusiness(store, scope, requireNotNull(repository.books), authorize) else null)
         return B2KindSync(store, File(appContext.filesDir, "library-binary-v2"), assets, scope, deviceId,
             device.remoteDeviceId, authorize, progress, route, business)
     }
@@ -1541,7 +1548,7 @@ class PhoneBluetoothSyncManager(
                 }
                 val peer = B2Routing.classify(binding.response, B2Routing.Ready(true, true, true))
                 if (peer != B2Routing.Peer.B2) throw B2Exception("CAPABILITY_MISMATCH")
-                val expected = B2KindRoute.select(binding.response, route.hasBinaryAssets, route.hasBinaryLibrary)
+                val expected = B2KindRoute.select(binding.response, route.hasBinaryAssets, route.hasBinaryLibrary, route.hasBinaryBooks)
                 if (expected != route) throw B2Exception("CAPABILITY_MISMATCH")
                 // B2Session owns cancellation, including its bounded cancel write.
                 transport.validateLibraryOperation = authorize

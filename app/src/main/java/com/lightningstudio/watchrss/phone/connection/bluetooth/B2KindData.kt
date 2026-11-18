@@ -60,11 +60,11 @@ internal fun binaryDescriptor(kind: String, id: String, metadata: JSONObject, ha
     val metadataHash = B2Digests.hash(B2Json.utf8(raw))
     val encoding = when (kind) {
         B2_ARTICLE_BODY -> "article-v14"
-        B2_NOTE_ASSET -> "raw"
+        B2_NOTE_ASSET, B2Wire.BOOK_STATE, B2Wire.BOOK_SEGMENT, B2Wire.BOOK_READING -> "raw"
         else -> "none"
     }
     val contentVersion = when (kind) {
-        B2_NOTE_ASSET -> hashes.sha256
+        B2_NOTE_ASSET, in B2Wire.bookKinds -> hashes.sha256
         B2_ARTICLE_BODY -> "${hashes.sha256}:$metadataHash"
         else -> metadataHash
     }

@@ -433,6 +433,13 @@ class B2Session(private val input: InputStream, private val output: OutputStream
             return answer
         } finally { pending.remove(r.s("requestId")); busy.remove(key) }
     }
+    /** The file/hash lane produces one bounded block ahead of the socket writer. */
+    internal suspend fun queueFile(request: JSONObject, slot: Int, ref: B2FileRef, hash: String): Deferred<Int> {
+        val id = request.s("jobId")
+        val bytes = localWork(id) { ref.readBlock(ByteArray(ref.size.toInt()), hash) { workProgress(id) } }
+        return queueData(request, slot, bytes)
+    }
+
     internal suspend fun queueData(request: JSONObject, slot: Int, bytes: ByteArray): Deferred<Int> {
         checkOpen()
         B2Wire.envelope(request)

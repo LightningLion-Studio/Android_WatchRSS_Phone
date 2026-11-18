@@ -24,6 +24,9 @@ object B2Negotiation {
         val ps = phone.a("kinds").values().map { it as JSONObject }; val ws = watch.a("kinds").values().map { it as JSONObject }
         val ks = ps.filter { p -> ws.any { w -> w.s("kind") == p.s("kind") && if (direction == "phoneToWatch") p.getBoolean("send") && w.getBoolean("receive") else p.getBoolean("receive") && w.getBoolean("send") } }.map { it.s("kind") }.toMutableSet()
         if ("articleMetadata" !in ks) ks.remove("articleBody"); if ("readerMetadata" !in ks) ks.remove("readerResource")
+        if (!B2Wire.bookKinds.all { kind ->
+                listOf(ps, ws).all { rows -> rows.any { it.s("kind") == kind && it.getBoolean("send") && it.getBoolean("receive") } }
+            }) ks.removeAll(B2Wire.bookKinds)
         if (ks.isEmpty()) return null
         val limits = JSONObject(); B2Wire.limitKeys.forEach { limits.put(it, minOf(phone.o("limits").n(it), watch.o("limits").n(it))) }
         if (original != null) {

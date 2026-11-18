@@ -37,7 +37,7 @@ internal class B2ReceivePipeline(
     }
     private val hashing = Channel<Block>(8) { recycle(it.frame.bytes) }
     private val writing = Channel<Block>(8) { recycle(it.frame.bytes) }
-    private val committing = Channel<Written>(8) { it.chunk.temp.delete() }
+    private val committing = Channel<Written>(8) { it.chunk.temp.file.delete() }
     private val credits = linkedSetOf<B2DataHeader>()
     private val working = AtomicInteger()
     private val idle = Channel<Unit>(Channel.CONFLATED)
@@ -134,7 +134,7 @@ internal class B2ReceivePipeline(
                             return@launch
                         }
                     } finally {
-                        written?.temp?.delete()
+                        written?.temp?.file?.delete()
                         if (!recycled) recycle(block.frame.bytes)
                         if (!forwarded) done()
                     }
@@ -180,14 +180,14 @@ internal class B2ReceivePipeline(
                             committed.forEach { it.progressKey?.let(receiver::reportChunkProgress) }
                         }
                     }
-                    group.forEach { it.chunk.temp.delete() }
+                    group.forEach { it.chunk.temp.file.delete() }
                     done(group.size)
                     group.clear()
                 }
             } catch (e: Throwable) { stop(e, emptyList()) }
             finally {
-                carry?.chunk?.temp?.delete()
-                group.forEach { it.chunk.temp.delete() }
+                carry?.chunk?.temp?.file?.delete()
+                group.forEach { it.chunk.temp.file.delete() }
                 committing.cancel()
             }
         }

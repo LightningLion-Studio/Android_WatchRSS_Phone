@@ -53,7 +53,7 @@ object B2Routing {
         if (c.n("version") != 1L) fail("CAPABILITY_MISMATCH")
         val kinds = c.a("kinds").values().map {
             val k = B2Json.exact(it, "kind", "schemaVersion", "send", "receive")
-            if (k.s("kind") !in B2Wire.kinds || k.n("schemaVersion") != 1L) fail("CAPABILITY_MISMATCH")
+            if (k.s("kind") !in B2Wire.inheritedKinds || k.n("schemaVersion") != 1L) fail("CAPABILITY_MISMATCH")
             B2Json.bool(k.get("send")); B2Json.bool(k.get("receive")); k.s("kind")
         }
         if (kinds.isEmpty() || kinds.size > 6) fail("CAPABILITY_MISMATCH")

@@ -16,7 +16,15 @@ object B2Wire {
     const val RETENTION = 86400000L
     val hardLimits = linkedMapOf("maxObjectBytes" to 16777216L, "maxInFlightObjects" to 4L, "maxFrameBytes" to 131084L, "maxManifestPageBytes" to 131084L, "maxManifestPageEntries" to 16L, "maxMetadataBytes" to 16384L, "maxPlanObjects" to 4096L, "maxManifestBytes" to 16777216L, "maxRangesPerPage" to 128L, "maxResultsPerPage" to 16L, "maxStagingBytes" to 1610612736L, "maxJournalBytes" to 67108864L, "maxActiveJobs" to 2L, "maxInFlightChunks" to 8L, "maxInFlightBytes" to 524288L, "maxControlHeaderBytes" to 131072L, "maxPackageBytes" to 536870912L)
     val limitKeys = hardLimits.keys.toList()
-    val kinds = listOf("articleBody", "articleMetadata", "noteAsset", "readerMetadata", "readerResource", "rssSource")
+    const val BOOK_STATE = "bookState"
+    const val BOOK_SEGMENT = "bookPackageSegment"
+    const val BOOK_COMMIT = "bookPackageCommit"
+    const val BOOK_READING = "bookReading"
+    const val BOOK_SEGMENT_BYTES = 16 * 1024 * 1024L
+    const val BOOK_MAX_BYTES = 512 * 1024 * 1024L
+    val bookKinds = setOf(BOOK_STATE, BOOK_SEGMENT, BOOK_COMMIT, BOOK_READING)
+    val inheritedKinds = listOf("articleBody", "articleMetadata", "noteAsset", "readerMetadata", "readerResource", "rssSource")
+    val kinds = inheritedKinds + bookKinds
     val phases = listOf("prepare", "begin", "manifestPage", "missing", "putChunk", "apply", "complete", "cancel")
     internal fun sorted(xs: List<String>) { if (xs.zipWithNext().any { it.first >= it.second }) fail("PLAN_CONFLICT") }
     private fun one(v: String, choices: List<String>) { if (v !in choices) fail() }
@@ -30,14 +38,15 @@ object B2Wire {
     private fun kindRows(o: JSONObject, cap: Boolean) {
         val ks = o.a("kinds").values().map { raw ->
             val k = B2Json.exact(raw, *(if (cap) arrayOf("kind", "schemaVersion", "send", "receive") else arrayOf("kind", "schemaVersion")))
-            one(k.s("kind"), if (cap) kinds + listOf("bookState", "bookPackageSegment", "bookPackageCommit", "bookReading") else kinds); if (k.n("schemaVersion") != 1L) fail("UNSUPPORTED_KIND")
+            one(k.s("kind"), kinds); if (k.n("schemaVersion") != 1L) fail("UNSUPPORTED_KIND")
             if (cap) { B2Json.bool(k.get("send")); B2Json.bool(k.get("receive")) }; k.s("kind")
         }
-        if (ks.isEmpty() || ks.size > (if (cap) 10 else 6)) fail("CAPABILITY_MISMATCH")
+        if (ks.isEmpty() || ks.size > kinds.size) fail("CAPABILITY_MISMATCH")
         sorted(ks)
         if ("articleBody" in ks && "articleMetadata" !in ks || "readerResource" in ks && "readerMetadata" !in ks) fail("CAPABILITY_MISMATCH")
         limits(o.o("limits"))
     }
+    fun s4Limits() = JSONObject(hardLimits as Map<*, *>)
     fun s3Limits() = JSONObject(hardLimits as Map<*, *>).put("maxStagingBytes", 134217728)
     fun s2Limits() = s3Limits().put("maxInFlightChunks", 1).put("maxInFlightBytes", CHUNK)
     fun capability(o: JSONObject) { B2Json.exact(o, "version", "profile", "kinds", "chunkSizes", "limits"); if (o.n("version") != 2L || o.s("profile") != "merge-b2" || o.a("chunkSizes").length() != 1 || B2Json.integer(o.a("chunkSizes").get(0)) != 65536L) fail("CAPABILITY_MISMATCH"); kindRows(o, true) }
@@ -59,8 +68,8 @@ object B2Wire {
         B2Json.text(o.get("businessId"), 2048); B2Json.text(o.get("contentVersion"), 256)
         val size = B2Json.integer(o.get("size"), lim.n("maxObjectBytes")); B2Json.hex(o.get("sha256")); B2Json.hex(o.get("metadataSha256"))
         val hs = o.a("chunkHashes").strings(); if (hs.size.toLong() != (size + CHUNK - 1) / CHUNK) fail("OBJECT_CONFLICT"); hs.forEach { B2Json.hex(it) }
-        val deps = o.a("dependsOn").strings(); if (deps.size > 16 || o.s("objectId") in deps) fail("PLAN_CONFLICT"); sorted(deps); deps.forEach { B2Json.hex(it) }
-        val enc = when (o.s("kind")) { "articleBody" -> "article-v14"; "readerResource", "noteAsset" -> "raw"; else -> "none" }
+        val deps = o.a("dependsOn").strings(); if (deps.size > (if (o.s("kind") == BOOK_COMMIT) 33 else 16) || o.s("objectId") in deps) fail("PLAN_CONFLICT"); sorted(deps); deps.forEach { B2Json.hex(it) }
+        val enc = when (o.s("kind")) { "articleBody" -> "article-v14"; "readerResource", "noteAsset", BOOK_STATE, BOOK_SEGMENT, BOOK_READING -> "raw"; else -> "none" }
         if (o.s("encoding") != enc || enc == "none" && size != 0L) fail("OBJECT_CONFLICT")
         val metadata = B2Json.utf8(o.s("metadataUtf8")); if (metadata.size > lim.n("maxMetadataBytes") || o.n("chunkBytes") != 65536L) fail("LIMIT_EXCEEDED"); B2Json.parse(metadata, false)
         if (B2Digests.hash(metadata) != o.s("metadataSha256") || size == 0L && B2Digests.hash(byteArrayOf()) != o.s("sha256")) fail("HASH_MISMATCH")

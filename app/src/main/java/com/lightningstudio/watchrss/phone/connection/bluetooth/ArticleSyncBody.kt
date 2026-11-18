@@ -590,9 +590,10 @@ object ArticleSyncBody {
         require(cursor.nextNonWhitespace() == -1) { "同步正文JSON包含尾随数据" }
     }
 
-    private class BodyJsonCursor(
+    internal class BodyJsonCursor(
         private val reader: Reader,
-        private val bounded: Boolean = false
+        private val bounded: Boolean = false,
+        private val jsonLine: Boolean = false
     ) {
         private var buffered: Int = NO_BUFFER
 
@@ -615,6 +616,29 @@ object ArticleSyncBody {
                 if (name.length < 12) name.append(char) else long = true
             }
             return if (long) "" else name.toString()
+        }
+
+        fun boundedString(limit: Int): String {
+            expect('"')
+            return buildString {
+                consumeString {
+                    require(length < limit)
+                    append(it)
+                }
+            }.also { com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Json.utf8(it) }
+        }
+
+        fun positiveInteger(): Int {
+            var char = nextNonWhitespace()
+            require(char in '1'.code..'9'.code)
+            var result = 0
+            while (char in '0'.code..'9'.code) {
+                require(result <= 100_000)
+                result = result * 10 + char - '0'.code
+                char = read()
+            }
+            unread(char)
+            return result
         }
 
         fun readNullableString(): String? {
@@ -657,8 +681,14 @@ object ArticleSyncBody {
         fun nextNonWhitespace(): Int {
             while (true) {
                 val char = read()
-                if (char == -1 || !char.toChar().isWhitespace()) return char
+                if (char == -1 || jsonLine && (char == 10 || char == 13) || !char.toChar().isWhitespace()) return char
             }
+        }
+
+        fun finishLine() {
+            var char = read()
+            while (char == ' '.code || char == '\t'.code) char = read()
+            require(char == '\n'.code)
         }
 
         fun unread(char: Int) {
@@ -748,7 +778,8 @@ object ArticleSyncBody {
                 'r' -> '\r'
                 't' -> '\t'
                 'u' -> readUnicodeEscape()
-                else -> error("同步正文JSON转义格式错误：${escaped.toChar()}")
+                else -> if (jsonLine) throw IllegalArgumentException("Invalid package escape")
+                    else error("同步正文JSON转义格式错误：${escaped.toChar()}")
             }
         }
 

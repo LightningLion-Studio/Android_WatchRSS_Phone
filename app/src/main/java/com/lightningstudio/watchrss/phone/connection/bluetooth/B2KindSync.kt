@@ -22,14 +22,25 @@ internal class B2KindSync(private val store: B2Persistence, private val director
         B2Digests.d("wrss.library-binary.v2/asset-attempt", listOf(account, phone, watch))
     } else B2Digests.d("wrss.library-binary.v2/kind-attempt", listOf(account, phone, watch,
         route.send.sorted().joinToString(","), route.receive.sorted().joinToString(",")))
-    private val capability = B2Negotiation.capability(route.send, route.receive, B2Wire.s3Limits().apply {
-        if (route.hasBinaryLibrary) {
+    private val capability = B2Negotiation.capability(route.send, route.receive, (if (route.hasBinaryBooks) B2Wire.s4Limits() else B2Wire.s3Limits()).apply {
+        if (route.hasBinaryBooks) {
+            put("maxManifestBytes", 1536 * 1024)
+            put("maxPlanObjects", 2048)
+        } else if (route.hasBinaryLibrary) {
             put("maxManifestBytes", 1024 * 1024)
             put("maxPlanObjects", 1024)
         }
     })
     private var preparing: () -> Unit = {}
     private fun id() = java.util.UUID.randomUUID().toString().replace("-", "")
+    private suspend fun discardBookSource(attempt: JSONObject) {
+        if (!route.hasBinaryBooks) return
+        val snapshot = attempt.getJSONObject("phoneSnapshot")
+        for (d in snapshots.descriptors(account, snapshot)) {
+            files.frozen(account, snapshot.getString("snapshotId"), d.getString("objectId")).delete()
+        }
+    }
+
     suspend fun resetPlan() = store.exclusive { store.transaction {
         val previous = store.get(account, "attempt", key) ?: return@transaction
         previous.put("state", "RETIRING"); store.put(account, "attempt", key, previous)
@@ -115,10 +126,13 @@ internal class B2KindSync(private val store: B2Persistence, private val director
                 add(binaryDescriptor(B2_NOTE_ASSET, asset.storageKey, metadata, hashes), source)
             }
             business.freeze(route.send, scratch, preparing, ::add)
+            B2BookManifest.validatePlan(descriptors, selection?.getJSONObject("limits")?.getLong("maxPackageBytes") ?: B2Wire.BOOK_MAX_BYTES)
             descriptors.sortBy { it.getString("objectId") }
             validateBinaryRssDependencies(descriptors, preparing)
             checkPlan(selection, descriptors)
-            snapshots.freeze(account, "asset-" + id(), descriptors) { sources.getValue(it.getString("objectId")) }
+            snapshots.freeze(account, "asset-" + id(), descriptors, sourceBudget = if (route.hasBinaryBooks)
+                B2Wire.s4Limits().getLong("maxStagingBytes") - B2Wire.s4Limits().getLong("maxJournalBytes") else 67108864,
+                ownedSources = scratch) { sources.getValue(it.getString("objectId")) }
         } finally {
             scratch.deleteRecursively()
         }
@@ -154,7 +168,9 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             val forward = (0 until oldBindings.length()).map { oldBindings.getJSONObject(it) }.find { it.getString("direction") == "phoneToWatch" }
             val saved = forward?.let { store.get(account, "sourceJob", it.getString("jobId")) }
             if (saved == null || saved.optString("state") == "COMPLETE") {
-                store.exclusive { store.delete(account, "attempt", key) }; throw B2Exception("PLAN_RETIRED")
+                discardBookSource(a)
+                store.exclusive { store.delete(account, "attempt", key) }
+                throw B2Exception("PLAN_RETIRED")
             }
         }
         val session = B2Session(input, output, this, close, authorize = authorize)
@@ -201,6 +217,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
                     client.retire(forward, reason); session.flush()
                 }
                 catch (e: B2Exception) { if (e.code !in setOf("NOT_FOUND", "EXPIRED")) throw e }
+                discardBookSource(a)
                 store.exclusive { store.delete(account, "attempt", key) }
                 throw B2Exception("PLAN_RETIRED")
             }
@@ -230,7 +247,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
                 LibrarySyncStats(sent.count { article(it.getString("kind")) }, articles.size, merged(articles),
                     sent.count { it.getString("kind") == B2_RSS_SOURCE }, sources.size, merged(sources))
             }
-            if (route.hasBinaryLibrary) for (descriptor in sent) {
+            if (route.hasBinaryLibrary || route.hasBinaryBooks) for (descriptor in sent) {
                 files.frozen(account, snapshot.getString("snapshotId"), descriptor.getString("objectId")).delete()
             }
             stats

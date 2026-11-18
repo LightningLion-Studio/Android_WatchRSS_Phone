@@ -273,7 +273,6 @@ class B2Client(
         B2Results.answer(r, result, r.n("epoch"))
         }
     }
-    private suspend fun <T> withHeartbeat(job: String, plan: String, epoch: Long, block: () -> T): T = session.localWork(job, block)
     suspend fun missing(job: String, plan: String, epoch: Long, cursor: JSONObject = obj("afterObjectId" to null, "afterChunkIndex" to null, "limit" to 0)): JSONObject {
         val result = call("missing", job, plan, epoch, cursor, false).o("result")
         if (result.a("items").length().toLong() > cursor.n("limit") || cursor.n("limit") == 0L && (!result.nil("next") || !result.getBoolean("done"))) fail()
@@ -331,8 +330,9 @@ class B2Client(
                 }
             }
             val index = indices.next()
-            val bytes = withHeartbeat(job, plan, epoch) { snapshots.read(account, snapshot, descriptor, index) }
-            queued[session.queueData(chunkRequest(job, plan, epoch, oid, index), slot, bytes)] = index
+            val request = chunkRequest(job, plan, epoch, oid, index)
+            val ref = snapshots.range(account, snapshot, descriptor, index)
+            queued[session.queueFile(request, slot, ref, descriptor.a("chunkHashes").getString(index))] = index
         }
         error?.let { throw it }
         waitBackoff.reset()

@@ -60,7 +60,8 @@ class B2Snapshots(private val store: B2Persistence, private val files: B2Files) 
                 "objectCount" to count, "pageCount" to pages.size, "inventoryBytes" to size))
         }
     }
-    suspend fun freeze(scope: String, snapshotId: String, descriptors: List<JSONObject>, source: (JSONObject) -> File): JSONObject = store.exclusive {
+    suspend fun freeze(scope: String, snapshotId: String, descriptors: List<JSONObject>,
+        sourceBudget: Long = 67108864, ownedSources: File? = null, source: (JSONObject) -> File): JSONObject = store.exclusive {
         if (descriptors.size > MAX_OBJECTS) fail("LIMIT_EXCEEDED")
         val ds = descriptors.map { copy(it).also(B2Wire::descriptor) }.sortedBy { it.s("objectId") }
         B2Receiver.validateGraph(ds)
@@ -69,14 +70,26 @@ class B2Snapshots(private val store: B2Persistence, private val files: B2Files) 
         B2Wire.snapshot(witness)
         val old = store.get(scope, "snapshot", snapshotId)
         if (old != null && old.o("witness").s("manifestDigest") != hash) fail("PLAN_CONFLICT")
-        for (d in ds) {
-            val target = files.frozen(scope, snapshotId, d.s("objectId"))
-            runInterruptible(Dispatchers.IO) { files.working(snapshotId) {
-                if (!files.verified(target, d.n("size"), d.s("sha256"))) files.publish(source(d), target, d.n("size"), d.s("sha256"), 67108864)
-            } }
+        val created = mutableListOf<File>()
+        try {
+            for (d in ds) {
+                val target = files.frozen(scope, snapshotId, d.s("objectId"))
+                runInterruptible(Dispatchers.IO) { files.working(snapshotId) {
+                    if (!files.verified(target, d.n("size"), d.s("sha256"))) {
+                        val origin = source(d)
+                        if (d.s("kind") in B2Wire.bookKinds && origin.parentFile == ownedSources && d.n("size") > 0) {
+                            files.adoptSource(origin, target, d.n("size"), d.s("sha256"), sourceBudget)
+                        } else files.publish(origin, target, d.n("size"), d.s("sha256"), sourceBudget)
+                        created += target
+                    }
+                } }
+            }
+            save(scope, witness, pages, ds.size, size)
+            copy(witness)
+        } catch (failure: Throwable) {
+            created.forEach { it.delete() }
+            throw failure
         }
-        save(scope, witness, pages, ds.size, size)
-        copy(witness)
     }
     /** Compatibility migration for already frozen local journals. Extract one bounded
      * object at a time; each persisted page still passes the unchanged strict parser. */
@@ -121,16 +134,16 @@ class B2Snapshots(private val store: B2Persistence, private val files: B2Files) 
         if (legacy) save(scope, witness, oldPages!!, ds.size, size)
         ds
     }
-    fun read(scope: String, witness: JSONObject, d: JSONObject, index: Int): ByteArray = try {
-        val f = files.frozen(scope, witness.s("snapshotId"), d.s("objectId"))
-        if (!f.isFile || f.length() != d.n("size")) fail("SOURCE_CHANGED")
+    internal fun range(scope: String, witness: JSONObject, d: JSONObject, index: Int): B2FileRef {
+        val file = files.frozen(scope, witness.s("snapshotId"), d.s("objectId"))
+        if (!file.isFile || file.length() != d.n("size")) fail("SOURCE_CHANGED")
         if (index !in 0 until d.a("chunkHashes").length()) fail()
-        val bytes = ByteArray(minOf(65536L, d.n("size") - index * 65536L).toInt())
-        java.nio.channels.FileChannel.open(f.toPath(), java.nio.file.StandardOpenOption.READ).use { channel ->
-            channel.position(index * 65536L); val buffer = java.nio.ByteBuffer.wrap(bytes)
-            while (buffer.hasRemaining()) if (channel.read(buffer) < 0) fail("SOURCE_CHANGED")
-        }
-        if (B2Digests.hash(bytes) != d.a("chunkHashes").getString(index)) fail("SOURCE_CHANGED")
-        bytes
-    } catch (_: java.io.IOException) { fail("LOCAL_IO") }
+        val offset = index * B2Wire.CHUNK.toLong()
+        return B2FileRef(file, offset, minOf(B2Wire.CHUNK.toLong(), d.n("size") - offset))
+    }
+
+    fun read(scope: String, witness: JSONObject, d: JSONObject, index: Int): ByteArray {
+        val ref = range(scope, witness, d, index)
+        return ref.readBlock(ByteArray(ref.size.toInt()), d.a("chunkHashes").getString(index)) {}
+    }
 }

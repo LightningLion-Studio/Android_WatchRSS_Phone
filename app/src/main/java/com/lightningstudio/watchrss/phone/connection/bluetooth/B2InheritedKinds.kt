@@ -16,13 +16,15 @@ internal class B2InheritedKinds(
     override val kinds: Set<String>,
     private val excludeBooks: Boolean,
     private val authorize: () -> Unit,
-    private val canonicalIds: Boolean = false
+    private val canonicalIds: Boolean = false,
+    private val books: B2BookBusiness? = null
 ) : B2BusinessPort {
     private val binary = db.b2ArticleDao()
     @Volatile var applyWork: () -> Unit = {}
 
     suspend fun freeze(sendKinds: Set<String>, scratch: File, work: () -> Unit,
         add: (JSONObject, File) -> Unit) {
+        books?.freeze(scratch, work, add)
         val exclusions = repository.books?.takeIf { excludeBooks }?.bluetoothExclusions()
         val empty = File(scratch, "empty").apply { createNewFile() }
         val emptyHashes = binaryFileHashes(empty)
@@ -74,7 +76,22 @@ internal class B2InheritedKinds(
     override fun validatePlan(objects: List<JSONObject>) = validateBinaryRssDependencies(objects)
 
     override fun applicationScratchBytes(objects: List<JSONObject>): Long =
-        if (objects.any { it.getString("kind") == B2_ARTICLE_BODY }) 32L * 1024 * 1024 else 0L
+        (if (objects.any { it.getString("kind") == B2_ARTICLE_BODY }) 32L * 1024 * 1024 else 0L) +
+            (books?.scratchBytes(objects) ?: 0L)
+
+    override suspend fun prepareFile(context: B2ApplyContext, descriptor: JSONObject, metadata: JSONObject) {
+        if (descriptor.getString("kind") == B2Wire.BOOK_COMMIT) {
+            (books ?: throw B2Exception("UNSUPPORTED_KIND")).prepareCommit(context, metadata, applyWork)
+        }
+    }
+
+    override suspend fun applyFile(context: B2ApplyContext, descriptor: JSONObject, metadata: JSONObject,
+        staged: B2FileRef): String {
+        if (descriptor.getString("kind") in B2Wire.bookKinds) {
+            return (books ?: throw B2Exception("UNSUPPORTED_KIND")).apply(context, descriptor, metadata, staged, applyWork)
+        }
+        return super.applyFile(context, descriptor, metadata, staged)
+    }
 
     override suspend fun apply(descriptor: JSONObject, metadata: JSONObject, staged: File): String = try {
         authorize()

@@ -54,7 +54,8 @@ internal fun binaryFileHashes(file: File, work: () -> Unit = {}): B2FileHashes {
     return B2FileHashes(size, B2Frames.hex(whole.digest()), chunks, legacyChunks)
 }
 
-internal fun binaryDescriptor(kind: String, id: String, metadata: JSONObject, hashes: B2FileHashes): JSONObject {
+internal fun binaryDescriptor(kind: String, id: String, metadata: JSONObject, hashes: B2FileHashes,
+    dependsOn: List<String> = emptyList()): JSONObject {
     val raw = metadata.toString()
     val metadataHash = B2Digests.hash(B2Json.utf8(raw))
     val encoding = when (kind) {
@@ -71,7 +72,7 @@ internal fun binaryDescriptor(kind: String, id: String, metadata: JSONObject, ha
         .put("contentVersion", contentVersion)
         .put("encoding", encoding).put("size", hashes.size).put("chunkBytes", 65536)
         .put("sha256", hashes.sha256).put("chunkHashes", JSONArray(hashes.chunks))
-        .put("metadataUtf8", raw).put("metadataSha256", metadataHash).put("dependsOn", JSONArray())
+        .put("metadataUtf8", raw).put("metadataSha256", metadataHash).put("dependsOn", JSONArray(dependsOn))
     descriptor.put("objectId", B2Digests.objectId(descriptor))
     B2Wire.descriptor(descriptor)
     val parsed = B2Metadata.validate(descriptor)
@@ -115,7 +116,7 @@ internal fun validateBinaryArticle(descriptor: JSONObject, metadata: JSONObject)
     val metadataOnly = body.getBoolean("metadataOnly")
     if ((!metadataOnly && size == 0L) || (size == 0L && hash.isNotEmpty()) ||
         (size > 0L && !hash.matches(Regex("[0-9a-f]{64}")))) reject()
-    if (descriptor.getJSONArray("dependsOn").length() != 0) reject()
+    if (descriptor.getJSONArray("dependsOn").length() > 1) throw B2Exception("OBJECT_CONFLICT")
 }
 
 internal fun validateBinarySource(descriptor: JSONObject, metadata: JSONObject) {
@@ -127,4 +128,63 @@ internal fun validateBinarySource(descriptor: JSONObject, metadata: JSONObject) 
 private fun isSafeLegacyInteger(value: Any?): Boolean {
     val number = (value as? Number)?.toDouble() ?: return false
     return number in -9007199254740991.0..9007199254740991.0 && number == number.toLong().toDouble()
+}
+
+/** The source-store URL rules used by the watch. This key is for matching plan
+ * dependencies only. It does not change the frozen metadata or the stored URL. */
+internal fun binaryRssDependencyKey(value: String): String {
+    val trimmed = value.trim()
+    if (trimmed.isEmpty() || "://" in trimmed || trimmed.startsWith('/') || trimmed.any(Char::isWhitespace)) {
+        return trimmed
+    }
+    val authority = trimmed.takeWhile { it != '/' && it != '?' && it != '#' }
+    val host = authority.substringBefore(':')
+    if (host.equals("localhost", ignoreCase = true) ||
+        '.' in host && !host.startsWith('.') && !host.endsWith('.') &&
+        host.all { it.isLetterOrDigit() || it == '.' || it == '-' }) {
+        return "http://$trimmed"
+    }
+    return trimmed
+}
+
+internal class B2RssDependencies {
+    private val sources = mutableMapOf<String, String>()
+
+    fun addSource(descriptor: JSONObject) {
+        val key = binaryRssDependencyKey(descriptor.getString("businessId"))
+        val id = descriptor.getString("objectId")
+        val previous = sources.put(key, id)
+        if (previous != null && previous != id) throw B2Exception("PLAN_CONFLICT")
+    }
+
+    fun forArticle(metadata: JSONObject): List<String> {
+        val url = metadata.opt("rssSourceUrl")
+        if (url == null || url == JSONObject.NULL) return emptyList()
+        if (url !is String) throw B2Exception("BUSINESS_REJECTED")
+        return listOfNotNull(sources[binaryRssDependencyKey(url)])
+    }
+}
+
+internal fun validateBinaryRssDependencies(objects: List<JSONObject>, work: () -> Unit = {}) {
+    val dependencies = B2RssDependencies()
+    for (descriptor in objects) {
+        if (descriptor.getString("kind") == B2_RSS_SOURCE) {
+            if (descriptor.getJSONArray("dependsOn").length() != 0) throw B2Exception("PLAN_CONFLICT")
+            val metadata = B2Metadata.validate(descriptor)
+            if (metadata.opt("url") != descriptor.getString("businessId")) throw B2Exception("OBJECT_CONFLICT")
+            validateBinarySource(descriptor, metadata)
+            dependencies.addSource(descriptor)
+        }
+        work()
+    }
+    for (descriptor in objects) {
+        val kind = descriptor.getString("kind")
+        if (kind != B2_ARTICLE_BODY && kind != B2_ARTICLE_METADATA) continue
+        val expected = dependencies.forArticle(B2Metadata.validate(descriptor))
+        val declared = descriptor.getJSONArray("dependsOn")
+        if (declared.length() != expected.size || expected.indices.any { declared.getString(it) != expected[it] }) {
+            throw B2Exception("PLAN_CONFLICT")
+        }
+        work()
+    }
 }

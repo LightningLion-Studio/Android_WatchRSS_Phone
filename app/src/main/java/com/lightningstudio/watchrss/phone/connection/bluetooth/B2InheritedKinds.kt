@@ -7,7 +7,6 @@ import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.security.MessageDigest
 
 internal class B2InheritedKinds(
     private val db: PhoneCompanionDatabase,
@@ -27,12 +26,16 @@ internal class B2InheritedKinds(
         val exclusions = repository.books?.takeIf { excludeBooks }?.bluetoothExclusions()
         val empty = File(scratch, "empty").apply { createNewFile() }
         val emptyHashes = binaryFileHashes(empty)
+        val dependencies = B2RssDependencies()
         if (B2_RSS_SOURCE in sendKinds) {
             for (source in repository.getRssSourcesForSync()) {
                 authorize()
                 if (source.url in exclusions?.second.orEmpty() || excludeBooks &&
                     source.url == com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.ROOT_SOURCE_URL) continue
-                add(binaryDescriptor(B2_RSS_SOURCE, source.url, LibrarySyncPayload.binaryRssMetadata(source), emptyHashes), empty)
+                val descriptor = binaryDescriptor(B2_RSS_SOURCE, source.url,
+                    LibrarySyncPayload.binaryRssMetadata(source), emptyHashes)
+                dependencies.addSource(descriptor)
+                add(descriptor, empty)
                 work()
             }
         }
@@ -58,13 +61,17 @@ internal class B2InheritedKinds(
                     it.legacyChunks, ArticleSyncBody.metadataHashFor(wire)) }
                 val metadata = LibrarySyncPayload.binaryArticleMetadata(wire, body, body == null, identity.outgoingAliases(listOf(wire)))
                 val kind = if (body == null) B2_ARTICLE_METADATA else B2_ARTICLE_BODY
-                add(binaryDescriptor(kind, wire.articleId, metadata, hashes ?: emptyHashes), if (body == null) empty else encoded)
+                val descriptor = binaryDescriptor(kind, wire.articleId, metadata, hashes ?: emptyHashes,
+                    dependencies.forArticle(metadata))
+                add(descriptor, if (body == null) empty else encoded)
                 if (body == null) encoded.delete()
                 work()
             }
             after = ids.last()
         }
     }
+
+    override fun validatePlan(objects: List<JSONObject>) = validateBinaryRssDependencies(objects)
 
     override fun applicationScratchBytes(objects: List<JSONObject>): Long =
         if (objects.any { it.getString("kind") == B2_ARTICLE_BODY }) 32L * 1024 * 1024 else 0L

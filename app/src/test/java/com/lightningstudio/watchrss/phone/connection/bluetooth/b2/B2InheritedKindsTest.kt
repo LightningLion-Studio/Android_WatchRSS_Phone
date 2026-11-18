@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Room
 import com.lightningstudio.watchrss.phone.connection.bluetooth.*
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
+import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import kotlinx.coroutines.runBlocking
@@ -132,6 +133,136 @@ class B2InheritedKindsTest {
             root.deleteRecursively()
         }
         Unit
+    }
+
+    @Test fun frozenAndReceivedLinkedArticlesRequireTheirRssReceipt() = runBlocking<Unit> {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val senderDb = Room.inMemoryDatabaseBuilder(context, PhoneCompanionDatabase::class.java).build()
+        val receiverDb = Room.inMemoryDatabaseBuilder(context, PhoneCompanionDatabase::class.java).build()
+        val root = Files.createTempDirectory("b2-rss-links").toFile()
+        val account = B2Digests.account("https://example.invalid", "test-user")
+        val kinds = setOf(B2_ARTICLE_BODY, B2_ARTICLE_METADATA, B2_RSS_SOURCE)
+        fun business(db: PhoneCompanionDatabase, side: String): B2InheritedKinds {
+            val repo = PhoneCompanionRepository(db.phoneSavedItemDao(), db.phoneArticleDao(),
+                db.phoneRssSourceDao(), side, syncChangeLogDao = db.syncChangeLogDao(),
+                articleContentStore = FileArticleContentStore(File(root, "$side-content")))
+            return B2InheritedKinds(db, repo, BluetoothArticleIdentityProjection(emptyList(), emptyMap(), false),
+                B2NoteAssetBusiness(B2RoomStore(db), account, File(root, "notes")) {}, kinds, false, {})
+        }
+        val receiverStore = B2RoomStore(receiverDb)
+        val receiverBusiness = business(receiverDb, "phone")
+        val cap = B2Negotiation.capability(kinds, kinds)
+        val selection = requireNotNull(B2Negotiation.select(cap, cap, "watchToPhone"))
+        val snapshot = obj("snapshotId" to "snap", "manifestDigest" to "d".repeat(64),
+            "fromExclusive" to 0, "toInclusive" to 0)
+        var jobNumber = 0
+        try {
+            val sourceUrl = "http://fixture.invalid:80/feed?a=1"
+            val articleUrl = "  fixture.invalid:80/feed?a=1  "
+            val source = PhoneRssSourceEntity(sourceUrl, "watch", "Linked", "",
+                null, null, 10, 40, 40, true, false, 0)
+            val unrelated = source.copy(url = "http://elsewhere.invalid/feed")
+            senderDb.phoneRssSourceDao().upsert(unrelated)
+            val text = "linked article content\n"
+            val body = LibrarySyncPayload.parseChunkedArticles(JSONArray().put(article("linked-body", 20))).single()
+                .article.copy(rssSourceUrl = articleUrl, contentText = text, favoriteSaved = true,
+                    favoriteChangedAt = 20, favoriteSortOrder = 20)
+            val tombstone = body.copy(articleId = "linked-meta", contentText = "", deleted = true, deletedAt = 30)
+            senderDb.phoneArticleDao().upsert(body)
+            senderDb.phoneArticleDao().upsert(tombstone)
+            for (rss in listOf(source, source.copy(deleted = true, deletedAt = 50, updatedAt = 50, isPinned = false))) {
+                senderDb.phoneRssSourceDao().upsert(rss)
+                val spool = Files.createTempDirectory(root.toPath(), "frozen").toFile()
+                val frozen = mutableListOf<Pair<JSONObject, File>>()
+                business(senderDb, "watch").freeze(kinds, spool, {}) { descriptor, file -> frozen += descriptor to file }
+                val descriptors = frozen.map { it.first }
+                val rssId = descriptors.single { it.s("businessId") == sourceUrl }.s("objectId")
+                val otherId = descriptors.single { it.s("businessId") == unrelated.url }.s("objectId")
+                val articles = descriptors.filter { it.s("kind") in setOf(B2_ARTICLE_BODY, B2_ARTICLE_METADATA) }
+                assertEquals(setOf(B2_ARTICLE_BODY, B2_ARTICLE_METADATA), articles.map { it.s("kind") }.toSet())
+                for (descriptor in articles) {
+                    assertEquals(listOf(rssId), descriptor.a("dependsOn").strings())
+                    assertEquals(B2Digests.objectId(descriptor), descriptor.s("objectId"))
+                }
+                suspend fun expectCode(code: String, block: suspend () -> Unit) {
+                    try {
+                        block()
+                        fail("Expected $code")
+                    } catch (failure: B2Exception) {
+                        assertEquals(code, failure.code)
+                    }
+                }
+                suspend fun tryPlan(objects: List<JSONObject>, expectRejected: Boolean) {
+                    val sorted = objects.sortedBy { it.s("objectId") }
+                    val job = (++jobNumber).toString().padStart(32, '0')
+                    val binding = obj("direction" to "watchToPhone", "jobId" to job,
+                        "intent" to "create", "selection" to selection)
+                    val receiver = B2Receiver(receiverStore, B2Files(File(root, "receive")),
+                        B2Authorization(account, "phone", "watch", snapshot, snapshot, listOf(binding)) { true },
+                        receiverBusiness)
+                    try {
+                        val begin = obj("intent" to "create", "accountScope" to account, "phoneDeviceId" to "phone",
+                            "watchDeviceId" to "watch", "direction" to "watchToPhone", "phoneSnapshot" to snapshot,
+                            "watchSnapshot" to snapshot, "selection" to selection, "selectionDigest" to B2Digests.selection(selection),
+                            "objectCount" to sorted.size, "objectsRoot" to B2Digests.objects(sorted.map { it.s("objectId") }),
+                            "pageObjectCounts" to JSONArray(listOf(1, sorted.size - 1)))
+                        val plan = B2Digests.plan(begin)
+                        val epoch = receiver.handle(B2Wire.request("begin", job, plan, null, begin)).n("epoch")
+                        suspend fun call(phase: String, payload: JSONObject) =
+                            receiver.handle(B2Wire.request(phase, job, plan, epoch, payload)).o("result")
+                        var previous = "0".repeat(64)
+                        suspend fun page(index: Int, entries: List<JSONObject>): String {
+                            val payload = obj("pageIndex" to index, "startIndex" to index, "previousPageDigest" to previous,
+                                "entries" to JSONArray(entries), "pageDigest" to "0".repeat(64))
+                            previous = B2Digests.page(plan, payload)
+                            payload.put("pageDigest", previous)
+                            return call("manifestPage", payload).s("state")
+                        }
+                        assertEquals("PLANNING", page(0, sorted.take(1)))
+                        if (expectRejected) {
+                            expectCode("PLAN_CONFLICT") { page(1, sorted.drop(1)) }
+                            assertEquals("PLANNING", receiverStore.get(account, "job", job)?.s("state"))
+                            return
+                        }
+                        assertEquals("READY", page(1, sorted.drop(1)))
+                        suspend fun apply(d: JSONObject) = call("apply", obj("objectId" to d.s("objectId"))).o("receipt")
+                        for (d in articles) {
+                            expectCode("DEPENDENCIES_PENDING") { apply(d) }
+                        }
+                        val receipts = mutableMapOf<String, JSONObject>()
+                        for ((descriptor, file) in frozen.sortedBy { it.first.s("kind") != B2_RSS_SOURCE }) {
+                            val id = descriptor.s("objectId")
+                            if (descriptor.s("kind") == B2_ARTICLE_BODY) {
+                                val put = B2Wire.request("putChunk", job, plan, epoch, obj("objectId" to id, "chunkIndex" to 0))
+                                receiver.handle(put, file.readBytes())
+                            }
+                            receipts[id] = apply(descriptor)
+                        }
+                        val complete = call("complete", obj("objectCount" to sorted.size, "ackToInclusive" to 0,
+                            "receiptsRoot" to B2Digests.receipts(sorted.map { receipts.getValue(it.s("objectId")) })))
+                        assertEquals("COMPLETE", complete.s("state"))
+                        assertEquals(rss.deleted, receiverDb.phoneRssSourceDao().getByUrl(rss.url)?.deleted)
+                        val row = requireNotNull(receiverDb.phoneArticleDao().getById(body.articleId))
+                        assertEquals(text, FileArticleContentStore(File(root, "phone-content")).loadText(row.contentText))
+                        assertTrue(row.favoriteSaved)
+                    } finally {
+                        receiver.revoke(cancelJobs = true)
+                        receiver.closeIndex()
+                    }
+                }
+                for (d in articles) {
+                    val deps = if (d.s("kind") == B2_ARTICLE_BODY) emptyList() else listOf(otherId)
+                    val invalid = JSONObject(d.toString()).put("dependsOn", JSONArray(deps))
+                    invalid.put("objectId", B2Digests.objectId(invalid))
+                    tryPlan(descriptors.map { if (it === d) invalid else it }, expectRejected = true)
+                }
+                tryPlan(descriptors, expectRejected = false)
+            }
+        } finally {
+            senderDb.close()
+            receiverDb.close()
+            root.deleteRecursively()
+        }
     }
 
     private fun article(id: String, clock: Long, hashes: B2FileHashes? = null): JSONObject =

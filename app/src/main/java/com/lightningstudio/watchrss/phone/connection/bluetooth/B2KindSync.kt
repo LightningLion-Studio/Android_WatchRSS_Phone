@@ -61,26 +61,40 @@ internal class B2KindSync(private val store: B2Persistence, private val director
     private suspend fun freeze(probe: JSONObject, assets: List<NoteAssetInventoryEntry>): JSONObject {
         val selection = B2Negotiation.select(capability, probe.getJSONObject("libraryBinary"), "phoneToWatch")
         val budget = selection?.getJSONObject("limits")?.let(::B2WatchReceiveBudget)
-        store.exclusive { store.get(account, "attempt", key) }
-            ?.takeIf { it.optString("state") in setOf("PREPARED", "RETIRING", "CANCELLED") }?.let { attempt ->
-                if (attempt.getString("state") == "PREPARED") {
-                    val descriptors = snapshots.descriptors(account, attempt.getJSONObject("phoneSnapshot"))
-                    checkFrozenPlan(selection, descriptors)
-                    val bindings = attempt.getJSONArray("bindings")
-                    for (i in 0 until bindings.length()) {
-                        val binding = bindings.getJSONObject(i)
-                        if (binding.getString("direction") == "phoneToWatch") {
-                            // Resumes send the original selection, even if the new probe raised a limit.
-                            val original = binding.getJSONObject("selection")
-                            if (selection == null || B2Digests.selection(original) != B2Digests.selection(selection)) {
-                                checkFrozenPlan(original, descriptors)
-                            }
-                            break
+        val attempt = store.exclusive { store.get(account, "attempt", key) }
+        if (attempt != null && attempt.optString("state") in setOf("PREPARED", "RETIRING", "CANCELLED")) {
+            if (attempt.getString("state") != "PREPARED") return attempt
+            val frozen = snapshots.descriptors(account, attempt.getJSONObject("phoneSnapshot"))
+            val bindings = attempt.getJSONArray("bindings")
+            val needsRefreeze = try {
+                validateBinaryRssDependencies(frozen, preparing)
+                false
+            } catch (failure: B2Exception) {
+                if (failure.code != "PLAN_CONFLICT") throw failure
+                true
+            }
+            if (!needsRefreeze) {
+                checkFrozenPlan(selection, frozen)
+                for (i in 0 until bindings.length()) {
+                    val binding = bindings.getJSONObject(i)
+                    if (binding.getString("direction") == "phoneToWatch") {
+                        // Resumes send the original selection, even if the new probe raised a limit.
+                        val original = binding.getJSONObject("selection")
+                        if (selection == null || B2Digests.selection(original) != B2Digests.selection(selection)) {
+                            checkFrozenPlan(original, frozen)
                         }
+                        break
                     }
                 }
                 return attempt
             }
+            // Adding an edge changes object and plan identities. Use the existing retirement
+            // path for a bound plan. An unused snapshot can be superseded locally.
+            if (bindings.length() > 0) {
+                resetPlan()
+                return attempt.put("state", "RETIRING")
+            }
+        }
         val descriptors = mutableListOf<JSONObject>()
         val sources = mutableMapOf<String, File>()
         fun add(descriptor: JSONObject, source: File) {
@@ -102,6 +116,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             }
             business.freeze(route.send, scratch, preparing, ::add)
             descriptors.sortBy { it.getString("objectId") }
+            validateBinaryRssDependencies(descriptors, preparing)
             checkPlan(selection, descriptors)
             snapshots.freeze(account, "asset-" + id(), descriptors) { sources.getValue(it.getString("objectId")) }
         } finally {

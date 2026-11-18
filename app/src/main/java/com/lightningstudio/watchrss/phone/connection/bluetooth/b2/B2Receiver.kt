@@ -12,6 +12,7 @@ class B2RejectedData(val request: JSONObject, val hash: String, val rejection: S
 interface B2BusinessPort {
     val kinds: Set<String>
     suspend fun apply(descriptor: JSONObject, metadata: JSONObject, staged: File): String
+    fun validatePlan(objects: List<JSONObject>) {}
     fun applicationScratchBytes(objects: List<JSONObject>): Long = 0L
     fun canCommitRange(description: JSONObject): Boolean = false
     suspend fun complete(description: JSONObject, completion: JSONObject) {}
@@ -395,6 +396,7 @@ class B2Receiver(
         if (all.sumOf { B2Json.utf8(it.toString()).size.toLong() } > lim(j).n("maxManifestBytes")) fail("LIMIT_EXCEEDED")
         val full = index + 1 == counts.size
         if (full) { if (all.size.toLong() != ds.n("objectCount") || B2Digests.objects(all.map { it.s("objectId") }) != ds.s("objectsRoot")) fail("PLAN_CONFLICT"); validateGraph(all)
+            business.validatePlan(all)
             // Whole-plan physical peak admission precedes READY and all DATA/apply.
             val incoming = all.sumOf { it.n("size") * 3 + B2Json.utf8(it.toString()).size + B2ReceiveIndex.cost(it) + 1024 } +
                 business.applicationScratchBytes(all)

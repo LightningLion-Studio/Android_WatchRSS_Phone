@@ -31,6 +31,8 @@ internal object BookSyncWarningText {
     fun format(issues:List<BookSyncIssue>):String? = issues.takeIf{it.isNotEmpty()}?.joinToString("；",prefix="$SUMMARY：") { issue ->
         val title=BookSyncIssue.displayTitle(issue.title)?:UNKNOWN_TITLE
         val cause=when(issue.reason) {
+            "book_metadata_limit" -> "书籍状态或阅读记录超出手表的同步大小限制"
+            "book_apply_rejected" -> "手表拒绝了该版本的书籍资料"
             "manifest_fingerprint_invalid"->FINGERPRINT
             "manifest_book_id_invalid"->BOOK_ID
             "manifest_title_type"->TITLE
@@ -51,6 +53,7 @@ internal object BookSyncWarningText {
             else->if(issue.code=="book_package_invalid")PACKAGE else MANIFEST
         }
         val action=when {
+            issue.reason == "book_metadata_limit" -> "请缩短过长的书籍信息后再同步"
             issue.reason=="manifest_instance_identity_unsupported"->INSTANCE_ACTION
             issue.reason=="manifest_requested_body_unavailable"->UNAVAILABLE
             issue.code=="book_package_invalid"->REIMPORT

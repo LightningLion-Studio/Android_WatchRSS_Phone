@@ -766,6 +766,7 @@ class PhoneBluetoothSyncManager(
                     legacyStats.merged + binaryStats.merged, legacyStats.sourcesSent + binaryStats.sourcesSent,
                     legacyStats.sourcesReceived + binaryStats.sourcesReceived, legacyStats.sourcesMerged + binaryStats.sourcesMerged
                 ))
+                bookSyncIssues = (bookSyncIssues + runtime.bookIssues).distinct()
                 locallyApplied = true
                 reportProgress(report, stage, 100)
             }
@@ -1512,7 +1513,11 @@ class PhoneBluetoothSyncManager(
         }
         return B2KindSync(store, File(appContext.filesDir, "library-binary-v2"), assets, scope, deviceId,
             device.remoteDeviceId, authorize, progress, route, business,
-            retentionGeneration = bootCount.takeIf { it >= 0 }?.let { "boot-$it" })
+            retentionGeneration = bootCount.takeIf { it >= 0 }?.let { "boot-$it" },
+            onBookIssue = { issue ->
+                debugLog.appendEvent("sync.book.isolated", fields = mapOf(
+                    "kind" to "book", "bookIdPrefix" to issue.bookIdPrefix, "code" to issue.code))
+            })
     }
 
     private suspend fun syncBinaryKinds(

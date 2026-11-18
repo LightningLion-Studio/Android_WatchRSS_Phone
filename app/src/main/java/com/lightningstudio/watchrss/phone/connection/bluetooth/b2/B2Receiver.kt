@@ -340,7 +340,9 @@ class B2Receiver(
         if (p.o("selection").a("kinds").values().any { (it as JSONObject).s("kind") !in business.kinds }) fail("UNSUPPORTED_KIND")
         if (id !in begun && b.s("intent") != p.s("intent")) fail("JOB_CONFLICT")
         val old = store.get(scope, "job", id)
-        if (old == null && p.s("intent") == "resume") fail("NOT_FOUND")
+        val cancelBeforeBegin = old == null && p.s("intent") == "resume" &&
+            store.get(scope, "cancelIntent", id)?.optBoolean("businessStop") == true
+        if (old == null && p.s("intent") == "resume" && !cancelBeforeBegin) fail("NOT_FOUND")
         if (old != null) {
             if (old.n("expiresAtMillis") < now) fail("EXPIRED")
             if (old.s("planDigest") != r.s("planDigest") || description(old).a("pageObjectCounts").toString() != p.a("pageObjectCounts").toString()) fail("JOB_CONFLICT")
@@ -351,12 +353,13 @@ class B2Receiver(
         if (p.o(if (receiveDirection == "watchToPhone") "watchSnapshot" else "phoneSnapshot").n("toInclusive") != 0L && !business.canCommitRange(p)) fail("BUSINESS_REJECTED")
         val limits = p.o("selection").o("limits")
         if (B2Wire.frameBytes(r) > limits.n("maxFrameBytes")) fail("LIMIT_EXCEEDED")
-        if (old == null) {
+        if (old == null && !cancelBeforeBegin) {
             retention.collect(now, id)
             val active = store.jobs().map { B2Json.parse(it.body, false) }.count { !terminal(it) }
             if (active >= limits.n("maxActiveJobs")) fail("WINDOW_FULL")
         }
-        val reservation = B2Json.utf8(p.toString()).size + 4096L + p.n("objectCount") * 4096L + minOf(limits.n("maxManifestBytes"), p.n("objectCount") * 48000L)
+        val reservation = B2Json.utf8(p.toString()).size + 4096L + if (cancelBeforeBegin) 0L else
+            p.n("objectCount") * 4096L + minOf(limits.n("maxManifestBytes"), p.n("objectCount") * 48000L)
         store.budget(if (old == null) reservation else 0, limits.n("maxJournalBytes"))
         if (p.n("objectCount") == 0L && p.s("objectsRoot") != B2Digests.objects(emptyList())) fail("PLAN_CONFLICT")
         if (old != null && old.s("state") !in listOf("PLANNING", "COMPLETE", "CANCELLED")) {
@@ -371,6 +374,7 @@ class B2Receiver(
         val epoch = if (sameLease) old!!.n("epoch") else (old?.n("epoch") ?: 0) + 1
         if (epoch > B2Json.MAX_SAFE) fail("JOURNAL_CORRUPT")
         val j = old ?: obj("jobId" to id, "bindingVersion" to 2, "planDigest" to r.s("planDigest"), "description" to copy(p), "state" to if (p.n("objectCount") == 0L) "READY" else "PLANNING", "nextManifestPage" to 0, "completion" to null, "reservation" to reservation, "expiresAtMillis" to now + B2Wire.RETENTION)
+        if (cancelBeforeBegin) j.put("state", "CANCELLED")
         if (old == null) {
             // Record ownership separately so a rolled-back begin can retain
             // its native binding and still be collected after the recovery window.
@@ -408,7 +412,7 @@ class B2Receiver(
         }
         begun.add(id)
         cleanupApplied(j)
-        return B2Results.answer(r, obj("disposition" to if (old == null) "CREATED" else "RESUMED", "selectionDigest" to p.s("selectionDigest"), "state" to j.s("state"), "expiresAtMillis" to j.n("expiresAtMillis"), "nextManifestPage" to j.n("nextManifestPage"), "completion" to j.get("completion")), epoch)
+        return B2Results.answer(r, obj("disposition" to if (old == null && !cancelBeforeBegin) "CREATED" else "RESUMED", "selectionDigest" to p.s("selectionDigest"), "state" to j.s("state"), "expiresAtMillis" to j.n("expiresAtMillis"), "nextManifestPage" to j.n("nextManifestPage"), "completion" to j.get("completion")), epoch)
     }
     private suspend fun manifest(j: JSONObject, r: JSONObject): JSONObject {
         val p = r.o("payload"); val ds = description(j); val index = p.n("pageIndex").toInt(); val counts = ds.a("pageObjectCounts").values().map { B2Json.integer(it) }

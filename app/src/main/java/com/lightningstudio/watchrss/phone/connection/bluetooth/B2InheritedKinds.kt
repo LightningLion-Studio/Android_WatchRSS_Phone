@@ -24,8 +24,9 @@ internal class B2InheritedKinds(
     @Volatile var applyWork: () -> Unit = {}
 
     suspend fun freeze(sendKinds: Set<String>, scratch: File, work: () -> Unit,
+        allowBook: (JSONObject) -> Boolean = { true }, warn: (BookSyncIssue) -> Unit = {},
         add: (JSONObject, File) -> Unit) {
-        books?.freeze(scratch, work, add)
+        books?.freeze(scratch, work, allowBook, warn, add)
         val exclusions = repository.books?.takeIf { excludeBooks }?.bluetoothExclusions()
         val empty = File(scratch, "empty").apply { createNewFile() }
         val emptyHashes = binaryFileHashes(empty)

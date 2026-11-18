@@ -158,7 +158,54 @@ class B2BooksRoomTest {
             business.freeze(File(root, "source").apply { mkdirs() }, {}) { descriptor, _ ->
                 exported += descriptor.s("kind")
             }
-            assertEquals(setOf(B2Wire.BOOK_STATE, B2Wire.BOOK_READING), exported)
+            assertTrue("watch metadata business limits must be checked on freeze", exported.isEmpty())
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun outgoingMetadataUsesUtf8LimitsAndSplitsReadingPages() = runBlocking<Unit> {
+        val root = java.nio.file.Files.createTempDirectory("b2-metadata-preflight").toFile()
+        val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()
+        try {
+            val books = ImportedBookStore(db, File(root, "books"), FileArticleContentStore(File(root, "content")), "phone")
+            val store = B2RoomStore(db)
+            store.exclusive { Unit }
+            val business = B2BookBusiness(store, "a".repeat(64), books) {}
+            suspend fun seed(fingerprint: String, title: String, fill: Boolean = false): String {
+                val id = BookSync.id(fingerprint)
+                val state = obj("bookId" to id, "fingerprint" to fingerprint, "title" to title, "chapterCount" to 7,
+                    "deletedChapters" to JSONArray(), "deletionClock" to 0, "deleted" to false, "deletedAt" to 0,
+                    "updatedAt" to 1, "sourceDeviceId" to "phone")
+                if (fill) repeat(5) { state.put("note$it", "x".repeat(220_000)) }
+                db.bookDao().put(com.lightningstudio.watchrss.phone.data.book.BookEntity(id, state.toString()))
+                return id
+            }
+            val exact = "界".repeat(87_381) + "x"
+            val good = seed("a".repeat(64), exact)
+            val stringTooLarge = seed("b".repeat(64), exact + "x")
+            val bodyTooLarge = seed("c".repeat(64), "Valid fields", fill = true)
+            for (chapter in 1..7) {
+                val row = obj("bookId" to good, "chapterIndex" to chapter, "isRead" to false,
+                    "sourceDeviceId" to "phone", "readingProgress" to 0.5, "readingPositionBytes" to 0,
+                    "readingPositionChangedAt" to 1, "readingPositionContentHash" to "")
+                row.put("padding", if (chapter == 3) exact + "x" else exact)
+                db.bookDao().putReading(com.lightningstudio.watchrss.phone.data.book.BookReadingEntity(good, chapter, row.toString()))
+            }
+            val warnings = mutableSetOf<String>()
+            val descriptors = mutableListOf<JSONObject>()
+            val chapters = mutableListOf<List<Int>>()
+            business.freeze(File(root, "source").apply { mkdirs() }, {}, warn = { warnings += it.bookIdPrefix }) { d, file ->
+                descriptors += d
+                assertTrue(file.length() <= 1_048_576)
+                if (d.s("kind") == B2Wire.BOOK_READING)
+                    chapters += JSONArray(file.readText()).values().map { (it as JSONObject).getInt("chapterIndex") }
+            }
+            assertEquals(setOf(good.take(8), stringTooLarge.take(8), bodyTooLarge.take(8)), warnings)
+            assertEquals(listOf(good), descriptors.filter { it.s("kind") == B2Wire.BOOK_STATE }.map { it.s("businessId") })
+            assertEquals(listOf(listOf(1, 2, 4), listOf(5, 6, 7)), chapters)
+            B2BookManifest.validatePlan(descriptors, B2Wire.BOOK_MAX_BYTES)
         } finally {
             db.close()
             root.deleteRecursively()

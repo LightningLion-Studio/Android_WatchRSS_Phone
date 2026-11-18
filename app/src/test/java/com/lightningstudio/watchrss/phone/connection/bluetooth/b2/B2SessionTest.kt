@@ -67,6 +67,40 @@ class B2SessionTest {
         }
         Unit
     }
+    @Test fun onlyCorrelatedApplyBusinessStopCarriesRejectedObjectToTheController() = runBlocking<Unit> {
+        for ((phase, code) in listOf("apply" to "BUSINESS_REJECTED", "apply" to "LOCAL_IO",
+            "missing" to "LIMIT_EXCEEDED")) {
+            val link = java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())
+            val peer = java.net.Socket(link.inetAddress, link.localPort)
+            val transport = link.use { it.accept() }
+            peer.soTimeout = 5000
+            val session = B2Session(transport.getInputStream(), transport.getOutputStream(), this, transport::close)
+            val id = "a".repeat(64)
+            val job = "b".repeat(32)
+            val payload = if (phase == "apply") obj("objectId" to id)
+                else obj("afterObjectId" to null, "afterChunkIndex" to null, "limit" to 1)
+            val request = B2Wire.request(phase, job, "c".repeat(64), 1, payload)
+            try {
+                session.start()
+                val answer = async { runCatching { session.exchange(request) }.exceptionOrNull() }
+                withContext(Dispatchers.IO) {
+                    val raw = (B2Frames.read(peer.getInputStream()) as B2Frame.Control).value
+                    B2Frames.write(peer.getOutputStream(), B2Frame.Control(B2Results.answer(raw, null, 1, code)))
+                }
+                val stopped = withTimeout(5000) { session.awaitTermination() } as B2Exception
+                assertSame(stopped, answer.await())
+                assertEquals(code, stopped.code)
+                if (phase == "apply" && code == "BUSINESS_REJECTED") {
+                    assertEquals(job, (stopped as B2ApplyStop).jobId)
+                    assertEquals(id, stopped.objectId)
+                } else assertFalse(stopped is B2ApplyStop)
+            } finally {
+                session.close()
+                peer.close()
+            }
+        }
+    }
+
     @Test fun readWindowAndHeartbeatWhileDurableGroupIsBlocked() = exerciseBlockedWindow(overflow = false)
 
     @Test fun ninthFullChunkStopsTheConnectionAndRevokesAllUnsettledWork() = exerciseBlockedWindow(overflow = true)

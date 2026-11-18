@@ -23,7 +23,9 @@ internal class B2BookBusiness(
 ) {
     fun importRoot(): File = books.binaryImportDirectory()
 
-    suspend fun freeze(directory: File, work: () -> Unit, add: (JSONObject, File) -> Unit) {
+    suspend fun freeze(directory: File, work: () -> Unit,
+        allow: (JSONObject) -> Boolean = { true }, warn: (BookSyncIssue) -> Unit = {},
+        add: (JSONObject, File) -> Unit) {
         val staging = B2Files(requireNotNull(directory.absoluteFile.parentFile), importRoot())
         val empty = File(directory, "empty").apply { createNewFile() }
         val emptyHashes = binaryFileHashes(empty)
@@ -39,11 +41,25 @@ internal class B2BookBusiness(
         }
         books.freezeBinaryBooks { row, packageFile ->
             authorize()
-            val state = decodeState(row.stateJson)
             val id = row.bookId
-            reserve(B2Json.utf8(row.stateJson).size.toLong())
+            fun tooLarge() = warn(B2BookMetadataLimits.issue(id))
+            val stateBytes = B2BookMetadataLimits.bodyBytes(row.stateJson)
+            if (stateBytes > B2BookMetadataLimits.BODY_BYTES) {
+                tooLarge()
+                return@freezeBinaryBooks
+            }
+            val state = decodeState(row.stateJson)
+            if (!B2BookMetadataLimits.stringsFit(state)) {
+                tooLarge()
+                return@freezeBinaryBooks
+            }
+            reserve(stateBytes.toLong())
             val stateFile = writeObject(directory, row.stateJson)
             val stateObject = binaryDescriptor(BOOK_STATE, id, obj("bookId" to id), binaryFileHashes(stateFile, work))
+            if (!allow(stateObject)) {
+                stateFile.delete()
+                return@freezeBinaryBooks
+            }
             add(stateObject, stateFile)
             val stateId = stateObject.s("objectId")
             if (packageFile != null && !state.getBoolean("deleted")) {
@@ -92,27 +108,51 @@ internal class B2BookBusiness(
             }
             var after = 0
             var page = 0
-            while (true) {
-                val rows = books.binaryReadingPage(id, after)
-                if (rows.isEmpty()) break
-                val bytes = 1L + rows.sumOf { B2Json.utf8(it.stateJson).size.toLong() + 1 }
-                if (bytes > B2Wire.MAX_OBJECT_BYTES) fail("LIMIT_EXCEEDED")
-                reserve(bytes)
+            val reading = mutableListOf<String>()
+            var pageBytes = 2L
+            suspend fun emitPage() {
+                if (reading.isEmpty()) return
+                reserve(pageBytes)
                 val file = File.createTempFile("book-", ".json", directory)
                 file.bufferedWriter().use { output ->
                     output.write("[")
-                    rows.forEachIndexed { index, row ->
+                    reading.forEachIndexed { index, value ->
                         if (index != 0) output.write(",")
-                        output.write(row.stateJson)
+                        output.write(value)
                     }
                     output.write("]")
                 }
                 val meta = obj("bookId" to id, "pageIndex" to page)
-                add(binaryDescriptor(BOOK_READING, "$id:$page", meta, binaryFileHashes(file, work), listOf(stateId)), file)
-                after = rows.last().chapterIndex
-                page++
+                val descriptor = binaryDescriptor(BOOK_READING, "$id:$page", meta,
+                    binaryFileHashes(file, work), listOf(stateId))
+                if (allow(descriptor)) {
+                    add(descriptor, file)
+                    page++
+                } else file.delete()
+                reading.clear()
+                pageBytes = 2
                 work()
             }
+            while (true) {
+                val rows = books.binaryReadingPage(id, after)
+                if (rows.isEmpty()) break
+                for (row in rows) {
+                    val raw = row.stateJson
+                    val bytes = B2BookMetadataLimits.bodyBytes(raw)
+                    if (bytes + 2 > B2BookMetadataLimits.BODY_BYTES ||
+                        !B2BookMetadataLimits.stringsFit(B2Json.parse(raw, false))) {
+                        tooLarge()
+                        continue
+                    }
+                    val separator = if (reading.isEmpty()) 0 else 1
+                    if (reading.size == 100 || pageBytes + separator + bytes > B2BookMetadataLimits.BODY_BYTES) emitPage()
+                    if (reading.isNotEmpty()) pageBytes++
+                    reading += raw
+                    pageBytes += bytes
+                }
+                after = rows.last().chapterIndex
+            }
+            emitPage()
         }
     }
 

@@ -416,7 +416,18 @@ class B2Session(private val input: InputStream, private val output: OutputStream
         }
         val w = pending[id] ?: fail("REQUEST_CONFLICT")
         validateCorrelation(w.request, r)
-        if (!r.getBoolean("success") && r.o("error").s("recovery") in listOf("STOP", "REPLAN")) { abort(B2Exception(r.o("error").s("code"))); return }
+        if (!r.getBoolean("success")) {
+            val error = r.o("error")
+            val recovery = error.s("recovery")
+            if (recovery in listOf("STOP", "REPLAN")) {
+                val code = error.s("code")
+                val failure = if (r.s("phase") == "apply" && recovery == "STOP" && error.s("class") == "BUSINESS")
+                    B2ApplyStop(code, w.request.s("jobId"), w.request.o("payload").s("objectId"))
+                else B2Exception(code)
+                abort(failure)
+                return
+            }
+        }
         if (!w.answer.complete(r)) fail("REQUEST_CONFLICT")
     }
     suspend fun exchange(r: JSONObject): JSONObject {
@@ -428,7 +439,9 @@ class B2Session(private val input: InputStream, private val output: OutputStream
         if (pending.putIfAbsent(r.s("requestId"), w) != null) { busy.remove(key); fail("REQUEST_CONFLICT") }
         try {
             enqueue(B2Frame.Control(r), heartbeat)
-            val answer = w.answer.await(); checkOpen()
+            val answer = w.answer.await()
+            // A peer may close immediately after acknowledging terminal cancellation.
+            if (r.s("phase") != "cancel" || !answer.getBoolean("success") || cause !is EOFException) checkOpen()
             if (!answer.getBoolean("success")) throw B2Exception(answer.o("error").s("code"), answer.o("error").n("retryAfterMillis"))
             return answer
         } finally { pending.remove(r.s("requestId")); busy.remove(key) }

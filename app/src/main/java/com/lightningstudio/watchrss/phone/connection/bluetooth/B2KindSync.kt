@@ -15,8 +15,10 @@ internal class B2KindSync(private val store: B2Persistence, private val director
     private val watch: String, private val authorize: () -> Unit,
     private val progress: (String) -> Unit,
     private val route: B2KindRoute,
-    private val business: B2InheritedKinds) {
-    private val files = B2Files(directory)
+    private val business: B2InheritedKinds, private val retentionGeneration: String? = null) {
+    private val files = B2Files(directory, business.bookImportRoot())
+    private val monotonic = android.os.SystemClock::elapsedRealtime
+    private val retention = B2Retention(store, files, account, monotonic, retentionGeneration, authorize)
     private val snapshots = B2Snapshots(store, files)
     private val key = if (route.isAssetOnly) {
         B2Digests.d("wrss.library-binary.v2/asset-attempt", listOf(account, phone, watch))
@@ -61,7 +63,10 @@ internal class B2KindSync(private val store: B2Persistence, private val director
         B2LocalWork.run { unit ->
             preparing = unit
             files.onProgress = { unit() }
-            try { freeze(probe, assets) } finally { preparing = {} }
+            try {
+                store.exclusive { retention.collect(retention.clock()) }
+                freeze(probe, assets)
+            } finally { preparing = {} }
         }
     } catch (_: java.io.IOException) {
         throw B2Exception("LOCAL_IO")
@@ -113,9 +118,8 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             descriptors += descriptor
             sources[descriptor.getString("objectId")] = source
         }
-        directory.mkdirs()
-        val scratch = java.nio.file.Files.createTempDirectory(directory.toPath(), ".freeze-").toFile()
-        val witness = try {
+        val witness = B2Scratch.open(directory, B2Scratch.FREEZE).use { lease ->
+            val scratch = lease.file
             if (B2_NOTE_ASSET in route.send) for (asset in assets.sortedBy { it.storageKey }) {
                 authorize()
                 val source = File(assetDirectory, asset.storageKey)
@@ -133,8 +137,6 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             snapshots.freeze(account, "asset-" + id(), descriptors, sourceBudget = if (route.hasBinaryBooks)
                 B2Wire.s4Limits().getLong("maxStagingBytes") - B2Wire.s4Limits().getLong("maxJournalBytes") else 67108864,
                 ownedSources = scratch) { sources.getValue(it.getString("objectId")) }
-        } finally {
-            scratch.deleteRecursively()
         }
         return JSONObject().put("state", "PREPARED").put("phoneSnapshot", witness)
             .put("watchSnapshot", JSONObject.NULL).put("bindings", JSONArray()).also { attempt ->
@@ -195,7 +197,9 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             if (!retiring) a.put("bindings", JSONArray(bindings))
             store.exclusive { authorize(); store.put(account, "attempt", key, a) }
             client.confirm(bindings) { auth ->
-                val receiver = B2Receiver(store, files, auth, business, progress = progress)
+                val receiver = B2Receiver(store, files, auth, business,
+                    monotonic = monotonic, progress = progress,
+                    retentionGeneration = retentionGeneration)
                 session.install(receiver) { request ->
                     val apply = request.getString("phase") == "apply"
                     if (apply) business.applyWork = { session.workProgress(request.getString("jobId")) }

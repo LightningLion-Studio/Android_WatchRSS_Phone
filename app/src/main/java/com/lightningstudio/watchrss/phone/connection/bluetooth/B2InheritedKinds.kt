@@ -20,6 +20,7 @@ internal class B2InheritedKinds(
     private val books: B2BookBusiness? = null
 ) : B2BusinessPort {
     private val binary = db.b2ArticleDao()
+    fun bookImportRoot(): File? = repository.books?.binaryImportDirectory()
     @Volatile var applyWork: () -> Unit = {}
 
     suspend fun freeze(sendKinds: Set<String>, scratch: File, work: () -> Unit,

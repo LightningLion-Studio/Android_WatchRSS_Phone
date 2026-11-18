@@ -9,8 +9,11 @@ import java.nio.file.StandardOpenOption
 
 /** Private cache only. The engine's writer lane covers validation, publish and receipt.
  * Never release business-referenced files here: adapters publish their own immutable files. */
-class B2Files internal constructor(private val root: File, private val deleteCache: (File) -> Boolean) {
-    constructor(root: File) : this(root, { it.delete() })
+class B2Files private constructor(private val root: File, private val importRoot: File?,
+    private val deleteCache: (File) -> Boolean) {
+    constructor(root: File) : this(root, null, { it.delete() })
+    internal constructor(root: File, deleteCache: (File) -> Boolean) : this(root, null, deleteCache)
+    internal constructor(root: File, importRoot: File?) : this(root, importRoot, { it.delete() })
     var onProgress: (String) -> Unit = {}
     private val activeJob = ThreadLocal<String>()
     internal fun <T> working(job: String, action: () -> T): T { activeJob.set(job); try { return action() } finally { activeJob.remove() } }
@@ -23,7 +26,15 @@ class B2Files internal constructor(private val root: File, private val deleteCac
     internal fun assembly(scope: String, job: String, oid: String) = local("book-assembly", scope, job, oid)
     internal fun frozen(scope: String, snapshot: String, oid: String) = local("source", scope, snapshot, oid)
     private val requests by lazy { try { B2RequestBindings(File(root, "request-bindings")) } catch (_: java.io.IOException) { fail("LOCAL_IO") } }
-    fun dataBytes() = root.listFiles()?.filter { it.isFile }?.sumOf { it.length() } ?: 0L
+    fun dataBytes() = B2Scratch.measure {
+        (root.listFiles()?.filter { it.isFile }?.sumOf { it.length() } ?: 0L) +
+            B2Scratch.bytes(root, B2Scratch.FREEZE) + B2Scratch.bytes(importRoot, B2Scratch.BOOK_IMPORT)
+    }
+
+    internal fun collectScratch() {
+        B2Scratch.collect(root, B2Scratch.FREEZE)
+        B2Scratch.collect(importRoot, B2Scratch.BOOK_IMPORT)
+    }
     internal fun jobDataBytes(scope: String, job: String, descriptors: List<JSONObject>): Long =
         descriptors.sumOf { d ->
             val oid = d.s("objectId")
@@ -32,7 +43,11 @@ class B2Files internal constructor(private val root: File, private val deleteCac
         }
     fun usedBytes() = dataBytes() + requests.chargedBytes()
     internal fun checkRequest(scope: String, job: String, peer: String, id: String, digest: String) = requests.check(scope, job, peer, id, digest)
-    internal fun bindRequest(scope: String, job: String, peer: String, id: String, digest: String, limit: Long) = requests.bind(scope, job, peer, id, digest, limit)
+    internal fun bindRequest(scope: String, job: String, peer: String, id: String, digest: String, limit: Long,
+        check: () -> Unit = {}) = requests.bind(scope, job, peer, id, digest, limit, check = check)
+    internal fun collectRequests(scope: String, job: String) = requests.collectJob(scope, job)
+    internal fun hasLegacyRequests() = requests.hasLegacy()
+    internal fun collectLegacyRequests() = requests.collectLegacy()
     internal fun durable(file: File, bytes: ByteArray, budget: Long) {
         if (usedBytes() + bytes.size > budget) fail("STORAGE_PRESSURE")
         val temp = File.createTempFile("publish-", ".tmp", root)
@@ -105,11 +120,17 @@ class B2Files internal constructor(private val root: File, private val deleteCac
     }
 
     internal fun adoptSource(source: File, target: File, size: Long, hash: String, budget: Long) {
-        if (dataBytes() + size > budget) fail("STORAGE_PRESSURE")
+        // Moving a file within the freeze tree exchanges one charged path for another.
+        val counted = source.canonicalFile.parentFile?.let {
+            it.name.startsWith(B2Scratch.FREEZE) && it.parentFile == root.canonicalFile
+        } == true
         if (!verified(source, size, hash)) fail("SOURCE_CHANGED")
         try {
             FileChannel.open(source.toPath(), StandardOpenOption.WRITE).use { it.force(true) }
-            java.nio.file.Files.move(source.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
+            B2Scratch.measure {
+                if (dataBytes() + (if (counted) 0 else size) > budget) fail("STORAGE_PRESSURE")
+                java.nio.file.Files.move(source.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
+            }
             FileChannel.open(root.toPath(), StandardOpenOption.READ).use { it.force(true) }
         } catch (_: java.io.IOException) { fail("LOCAL_IO") }
     }

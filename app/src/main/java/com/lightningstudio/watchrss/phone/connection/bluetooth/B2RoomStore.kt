@@ -69,6 +69,57 @@ internal class B2RoomStore(private val db: PhoneCompanionDatabase) : B2Persisten
         }
     }
     override suspend fun all(): List<B2Persistence.Record> = sql.query("SELECT scope,namespace,id,body FROM library_binary_records").use { c -> buildList { while (c.moveToNext()) add(B2Persistence.Record(c.getString(0), c.getString(1), c.getString(2), c.getString(3))) } }
+    override suspend fun jobs() = records("job")
+    override suspend fun requestOwners() = records("nativeOwner")
+
+    private fun records(namespace: String): List<B2Persistence.Record> =
+        sql.query("SELECT scope,id,body FROM library_binary_records WHERE namespace=?", arrayOf(namespace)).use { c ->
+            buildList { while (c.moveToNext()) add(B2Persistence.Record(c.getString(0), namespace, c.getString(1), c.getString(2))) }
+        }
+
+    private suspend fun deleteRecords(namespace: String, scope: String?, matches: (JSONObject) -> Boolean) = durable {
+        require(namespace != "job")
+        val fixedArgs = if (scope == null) listOf(namespace) else listOf(namespace, scope)
+        val where = if (scope == null) "namespace=?" else "namespace=? AND scope=?"
+        var lastScope = ""
+        var lastId = ""
+        var released = 0L
+        while (true) {
+            var scanned = 0
+            val removed = sql.query(
+                "SELECT scope,id,body,length(CAST(body AS BLOB))+512 FROM library_binary_records " +
+                    "WHERE $where AND (scope,id)>(?,?) ORDER BY scope,id LIMIT 128",
+                (fixedArgs + lastScope + lastId).toTypedArray()
+            ).use { c ->
+                buildList {
+                    while (c.moveToNext()) {
+                        scanned++
+                        lastScope = c.getString(0)
+                        lastId = c.getString(1)
+                        if (matches(B2Json.parse(c.getString(2), false))) {
+                            add(lastScope to lastId)
+                            released += c.getLong(3)
+                        }
+                    }
+                }
+            }
+            for ((recordScope, id) in removed) sql.execSQL(
+                "DELETE FROM library_binary_records WHERE scope=? AND namespace=? AND id=?",
+                arrayOf(recordScope, namespace, id)
+            )
+            if (scanned < 128) break
+        }
+        if (released != 0L) {
+            sql.execSQL("UPDATE library_binary_budget SET used=used-? WHERE singleton=1", arrayOf(released))
+        }
+    }
+
+    override suspend fun deleteJobRecords(scope: String, job: String, namespace: String) =
+        deleteRecords(namespace, scope) { it.optString("jobId") == job }
+
+    override suspend fun deleteLegacyRequestRecords() =
+        deleteRecords("request", null) { !it.has("jobId") }
+
     private fun charge(ns: String, value: JSONObject): Long = if (ns == "job") value.getLong("reservation") else B2Json.utf8(value.toString()).size.toLong() + 512
     override suspend fun budget(extra: Long, limit: Long) {
         sql.query("SELECT used,ceiling FROM library_binary_budget WHERE singleton=1").use { c ->

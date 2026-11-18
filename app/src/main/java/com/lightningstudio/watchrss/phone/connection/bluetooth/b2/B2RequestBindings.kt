@@ -21,28 +21,40 @@ internal class B2RequestBindings(private val directory: File) {
         try {
             // Read legacy first. If migration unlinks it before this lookup,
             // the corresponding compact record is already durable.
-            val legacy = readLegacy(File(directory, key))
-            val packed = readPacked(shard(key), key)
+            val legacy = legacyDigest(key)
+            val packed = readPacked(shard(jobDirectory(scope, job), key), key)
             if (legacy != null && legacy != digest || packed != null && packed != digest) fail("REQUEST_CONFLICT")
         } catch (_: java.io.IOException) {
             fail("LOCAL_IO")
         }
     }
 
-    fun bind(scope: String, job: String, peer: String, id: String, digest: String, limit: Long) = writeLocked {
+    fun bind(scope: String, job: String, peer: String, id: String, digest: String, limit: Long,
+        check: () -> Unit = {}) = writeLocked {
+        check()
         migrate()
         val key = key(scope, job, peer, id)
-        val file = shard(key)
+        val owner = jobDirectory(scope, job)
+        val file = shard(owner, key)
         val old = readPacked(file, key)
-        if (old != null && old != digest) fail("REQUEST_CONFLICT")
-        val current = charged()
+        val legacy = legacyDigest(key)
+        if (old != null && old != digest || legacy != null && legacy != digest) fail("REQUEST_CONFLICT")
         val length = file.length()
-        val extra = if (old == null) charge(recordPrefix(length) + RECORD_BYTES) -
-            (if (file.exists()) charge(length) else 0) else 0L
+        val extra = if (old == null && legacy == null) {
+            val ownerCharge = if (owner.exists()) 0 else BLOCK
+            ownerCharge + charge(recordPrefix(length) + RECORD_BYTES) - (if (file.exists()) charge(length) else 0)
+        } else 0L
         val ceiling = minOf(MAX_PARTITION, limit / 2)
-        if (current + extra > ceiling || extra > 0 && directory.usableSpace < extra + BLOCK) fail("STORAGE_PRESSURE")
-        if (old == null) append(file, key, digest)
-        else force(file) // The prior attempt may have failed after writing a complete record.
+        if (charged() + extra > ceiling || extra > 0 && directory.usableSpace < extra + BLOCK) fail("STORAGE_PRESSURE")
+        if (legacy != null) {
+            // The matching old record stays in the legacy partition until its job expires.
+            force(shard(directory, key))
+        } else {
+            if (!owner.isDirectory && !owner.mkdir()) fail("LOCAL_IO")
+            if (old == null) append(file, key, digest)
+            else force(file)
+            syncDirectory(owner)
+        }
         syncDirectory()
     }
 
@@ -51,10 +63,44 @@ internal class B2RequestBindings(private val directory: File) {
         charged()
     }
 
+    fun collectJob(scope: String, job: String) = writeLocked {
+        val owner = jobDirectory(scope, job)
+        if (owner.exists()) {
+            for (file in jobShards(owner)) Files.delete(file.toPath())
+            Files.delete(owner.toPath())
+            syncDirectory()
+        }
+    }
+
+    fun hasLegacy(): Boolean =
+        directory.listFiles()?.any { SHARD.matches(it.name) || LEGACY.matches(it.name) } ?: false
+
+    fun collectLegacy() = writeLocked {
+        for (file in files(directory)) {
+            if (SHARD.matches(file.name) || LEGACY.matches(file.name) || isUnpublished(file)) {
+                requireRegular(file)
+                Files.delete(file.toPath())
+            }
+        }
+        syncDirectory()
+    }
+
     private fun key(scope: String, job: String, peer: String, id: String) =
         B2Digests.d("wrss.library-binary.v2/request-binding-file", listOf(scope, job, peer, id))
 
-    private fun shard(key: String) = File(directory, "pack-v1-" + key.take(2))
+    private fun jobDirectory(scope: String, job: String) = File(directory, "job-v2-" +
+        B2Digests.d("wrss.library-binary.v2/request-binding-job", listOf(scope, job)))
+
+    private fun shard(parent: File, key: String): File {
+        // The legacy format chooses a full byte. New directories keep up to
+        // 64 shards so small jobs and readers share the same fixed budget.
+        val prefix = if (parent == directory) key.take(2)
+            else (key.take(2).toInt(16) and 63).toString(16).padStart(2, '0')
+        return File(parent, "pack-v1-" + prefix)
+    }
+
+    private fun legacyDigest(key: String): String? =
+        readLegacy(File(directory, key)) ?: readPacked(shard(directory, key), key)
 
     private fun readLegacy(file: File): String? {
         return try {
@@ -115,10 +161,10 @@ internal class B2RequestBindings(private val directory: File) {
     private fun migrate() {
         if (migrated) return
         syncDirectory(directory.absoluteFile.parentFile)
-        for (legacy in files()) {
+        for (legacy in files(directory)) {
             if (LEGACY.matches(legacy.name)) {
                 val digest = readLegacy(legacy) ?: fail("JOURNAL_CORRUPT")
-                val file = shard(legacy.name)
+                val file = shard(directory, legacy.name)
                 val existing = readPacked(file, legacy.name)
                 if (existing == null) append(file, legacy.name, digest)
                 else {
@@ -128,7 +174,7 @@ internal class B2RequestBindings(private val directory: File) {
                 // Commit the new directory entry before removing the only old copy.
                 syncDirectory()
                 if (!legacy.delete()) fail("LOCAL_IO")
-            } else if (legacy.name.startsWith("binding-") && legacy.name.endsWith(".tmp")) {
+            } else if (isUnpublished(legacy)) {
                 if (!legacy.delete()) fail("LOCAL_IO")
             }
         }
@@ -136,8 +182,9 @@ internal class B2RequestBindings(private val directory: File) {
         migrated = true
     }
 
-    private fun charged(): Long = files().sumOf { file ->
+    private fun charged(): Long = files(directory).sumOf { file ->
         when {
+            JOB.matches(file.name) -> BLOCK + jobShards(file).sumOf { charge(it.length()) }
             SHARD.matches(file.name) -> {
                 requireRegular(file)
                 charge(file.length())
@@ -150,7 +197,17 @@ internal class B2RequestBindings(private val directory: File) {
         }
     }
 
-    private fun files() = directory.listFiles() ?: fail("LOCAL_IO")
+    private fun files(parent: File) = parent.listFiles() ?: fail("LOCAL_IO")
+
+    private fun jobShards(owner: File): List<File> {
+        if (Files.isSymbolicLink(owner.toPath()) || !owner.isDirectory) fail("JOURNAL_CORRUPT")
+        return files(owner).onEach {
+            if (!SHARD.matches(it.name)) fail("JOURNAL_CORRUPT")
+            requireRegular(it)
+        }.asList()
+    }
+
+    private fun isUnpublished(file: File) = file.name.startsWith("binding-") && file.name.endsWith(".tmp")
 
     private fun requireRegular(file: File) {
         if (Files.isSymbolicLink(file.toPath()) || !file.isFile) fail("JOURNAL_CORRUPT")
@@ -189,6 +246,7 @@ internal class B2RequestBindings(private val directory: File) {
         const val LOCK = "pack.lock"
         val LEGACY = Regex("[0-9a-f]{64}")
         val SHARD = Regex("pack-v1-[0-9a-f]{2}")
+        val JOB = Regex("job-v2-[0-9a-f]{64}")
         val writers = Array(16) { Any() }
     }
 }

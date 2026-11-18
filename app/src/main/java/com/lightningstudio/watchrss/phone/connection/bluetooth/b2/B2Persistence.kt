@@ -14,6 +14,17 @@ interface B2Persistence {
     suspend fun listForJob(scope: String, namespace: String, jobId: String): List<JSONObject> =
         list(scope, namespace).map { it.second }.filter { it.optString("jobId") == jobId }
     suspend fun all(): List<Record>
+    suspend fun jobs(): List<Record> = all().filter { it.namespace == "job" }
+    suspend fun requestOwners(): List<Record> = all().filter { it.namespace == "nativeOwner" }
+    suspend fun deleteJobRecords(scope: String, job: String, namespace: String) {
+        for ((id, row) in list(scope, namespace)) if (row.optString("jobId") == job) delete(scope, namespace, id)
+    }
+    suspend fun deleteLegacyRequestRecords() {
+        for (row in all()) {
+            if (row.namespace == "request" && !B2Json.parse(row.body, false).has("jobId"))
+                delete(row.scope, row.namespace, row.id)
+        }
+    }
     suspend fun put(scope: String, ns: String, id: String, value: JSONObject)
     suspend fun delete(scope: String, ns: String, id: String)
     suspend fun budget(extra: Long, limit: Long = 67108864) {

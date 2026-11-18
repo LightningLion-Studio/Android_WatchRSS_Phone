@@ -51,8 +51,10 @@ class B2Receiver(
     private val monotonic: () -> Long = { System.nanoTime() / 1_000_000 },
     private val fault: (String) -> Unit = {},
     private val receiveDirection: String = "watchToPhone",
-    private val progress: (String) -> Unit = {}
+    private val progress: (String) -> Unit = {},
+    retentionGeneration: String? = null
 ) {
+    private val retention = B2Retention(store, files, auth.accountScope, monotonic, retentionGeneration, ::check)
     private val connection = java.util.UUID.randomUUID().toString()
     @Volatile private var revoked = false
     private val light = java.util.concurrent.ConcurrentHashMap<String, JSONObject>()
@@ -70,6 +72,7 @@ class B2Receiver(
         receiveIndex = null
     }
     internal fun sourceCompleted(job: String) { finishedSources.add(job) }
+    private val retentionDeadlines = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val leases = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val begun = mutableSetOf<String>()
     private val scope get() = auth.accountScope
@@ -93,33 +96,32 @@ class B2Receiver(
     private fun terminal(j: JSONObject) = j.s("state") in listOf("COMPLETE", "CANCELLED")
     private fun description(j: JSONObject) = j.o("description")
     private fun lim(j: JSONObject) = description(j).o("selection").o("limits")
-    private suspend fun clock(): Long {
-        // Logical expiry only advances by proven monotonic elapsed time. A new process
-        // conservatively starts at the last persisted logical instant, never wall time.
-        val old = store.get(scope, "clock", "clock")
-        val now = monotonic()
-        val logical = if (old == null) 0L else old.n("logical") + if (old.s("process") == processGeneration) maxOf(0L, now - old.n("elapsed")) else 0L
-        store.put(scope, "clock", "clock", obj("logical" to logical, "elapsed" to now, "process" to processGeneration))
-        return logical
-    }
     private suspend fun touch(j: JSONObject, now: Long) {
         j.put("expiresAtMillis", maxOf(j.n("expiresAtMillis"), now + B2Wire.RETENTION))
         store.put(scope, "job", j.s("jobId"), j)
-        leases[j.s("jobId")] = monotonic() + B2Wire.LEASE
+        val elapsed = monotonic()
+        leases[j.s("jobId")] = elapsed + B2Wire.LEASE
+        retentionDeadlines[j.s("jobId")] = elapsed + j.n("expiresAtMillis") - now
     }
     private fun fence(j: JSONObject, r: JSONObject) {
         check()
         if (j.s("connection") != connection || !leases.containsKey(j.s("jobId")) || j.n("epoch") != r.n("epoch")) fail("STALE_EPOCH")
-        if (monotonic() >= leases.getValue(j.s("jobId"))) fail("LEASE_EXPIRED")
+        val elapsed = monotonic()
+        if (elapsed > (retentionDeadlines[j.s("jobId")] ?: fail("STALE_EPOCH"))) fail("EXPIRED")
+        if (elapsed >= leases.getValue(j.s("jobId"))) fail("LEASE_EXPIRED")
         if (j.s("planDigest") != r.s("planDigest")) fail("PLAN_CONFLICT")
     }
-    private suspend fun bind(j: JSONObject, r: JSONObject, result: JSONObject? = null): JSONObject? {
-        val id = key(j.s("jobId"), sourcePeer, r.s("requestId"))
+    private fun bindNative(j: JSONObject, r: JSONObject) =
         files.bindRequest(scope, j.s("jobId"), sourcePeer, r.s("requestId"), r.s("requestDigest"), lim(j).n("maxJournalBytes"))
+
+    private suspend fun bind(j: JSONObject, r: JSONObject, result: JSONObject? = null,
+        nativeAlreadyBound: Boolean = false): JSONObject? {
+        val id = key(j.s("jobId"), sourcePeer, r.s("requestId"))
+        if (!nativeAlreadyBound) bindNative(j, r)
         val old = store.get(scope, "request", id)
         if (old != null && old.s("digest") != r.s("requestDigest")) fail("REQUEST_CONFLICT")
-        if (old == null) { store.budget(1024, lim(j).n("maxJournalBytes")); store.put(scope, "request", id, obj("digest" to r.s("requestDigest"), "result" to result)) }
-        else if (result != null) store.put(scope, "request", id, obj("digest" to r.s("requestDigest"), "result" to result))
+        if (old == null) { store.budget(1024, lim(j).n("maxJournalBytes")); store.put(scope, "request", id, obj("jobId" to j.s("jobId"), "digest" to r.s("requestDigest"), "result" to result)) }
+        else if (result != null) store.put(scope, "request", id, obj("jobId" to j.s("jobId"), "digest" to r.s("requestDigest"), "result" to result))
         return old?.takeUnless { it.nil("result") }?.o("result")
     }
     /** Throws typed errors for the dispatcher to encode. Transport I/O remains distinct. */
@@ -127,7 +129,7 @@ class B2Receiver(
         val r = B2Wire.envelope(B2Json.parse(B2Json.utf8(frame.toString()))).also { B2Wire.retainSize(it, B2Wire.frameBytes(frame)) }
         if (r.s("type") != "request" || r.s("phase") == "prepare") fail()
         check()
-        val now = clock()
+        val now = retention.clock()
         if (r.s("phase") == "begin") return@exclusive begin(r, now)
         val j = job(r.s("jobId")); fence(j, r)
         if (B2Wire.frameBytes(r) > lim(j).n("maxFrameBytes") || B2Wire.frameBytes(r) - 12 > lim(j).n("maxControlHeaderBytes")) fail("LIMIT_EXCEEDED")
@@ -173,7 +175,9 @@ class B2Receiver(
         if (r.s("phase") != "missing" || r.o("payload").n("limit") != 0L) fail()
         val j = light[r.s("jobId")] ?: fail("AUTH_REVOKED")
         fence(j, r)
-        files.bindRequest(scope, j.s("jobId"), sourcePeer, r.s("requestId"), r.s("requestDigest"), lim(j).n("maxJournalBytes"))
+        files.bindRequest(scope, j.s("jobId"), sourcePeer, r.s("requestId"), r.s("requestDigest"), lim(j).n("maxJournalBytes")) {
+            fence(j, r)
+        }
         leases[j.s("jobId")] = monotonic() + B2Wire.LEASE
         return B2Results.answer(r, obj("state" to j.s("state"), "nextManifestPage" to j.n("nextManifestPage"),
             "expiresAtMillis" to j.n("expiresAtMillis"), "items" to JSONArray(), "next" to null,
@@ -276,6 +280,12 @@ class B2Receiver(
         }
         val budget = stagingLimit(j)
         if (files.usedBytes() > budget) fail("STORAGE_PRESSURE")
+        // A verified block can be adopted after a crash as soon as its canonical
+        // path is durable. Preserve the request identity before that point.
+        for ((chunk, _) in outcomes) {
+            fence(j, chunk.request)
+            bindNative(j, chunk.request)
+        }
         files.publishChunks(staged) { fence(j, group.first().request) }
         if (staged.isNotEmpty()) fault("afterChunkDurable")
         store.transaction {
@@ -287,10 +297,11 @@ class B2Receiver(
                 val receipt = if (disposition == 2) receipt(j, row) else null
                 bind(j, chunk.request, obj("objectId" to oid, "chunkIndex" to p.n("chunkIndex"),
                     "chunkState" to if (disposition == 1) "STAGED" else null,
-                    "objectState" to if (disposition == 1) "PARTIAL" else "APPLIED", "receipt" to receipt))
+                    "objectState" to if (disposition == 1) "PARTIAL" else "APPLIED", "receipt" to receipt),
+                    nativeAlreadyBound = true)
                 if (disposition == 1) {
                     val hash = row.o("descriptor").a("chunkHashes").getString(chunk.header.index)
-                    store.put(scope, "chunk", key(j.s("jobId"), oid, chunk.header.index.toString()), obj("sha256" to hash))
+                    store.put(scope, "chunk", key(j.s("jobId"), oid, chunk.header.index.toString()), obj("jobId" to j.s("jobId"), "sha256" to hash))
                     if (!row.optBoolean("active", false)) {
                         row.put("active", true)
                         store.put(scope, "object", objectKey(j.s("jobId"), oid), row)
@@ -298,7 +309,7 @@ class B2Receiver(
                 }
             }
             if (staged.isNotEmpty()) j.put("state", "TRANSFERRING")
-            touch(j, clock())
+            touch(j, retention.clock())
             fence(j, group.first().request)
         }
         light[j.s("jobId")] = copy(j)
@@ -321,23 +332,6 @@ class B2Receiver(
         val result = handle(request, frame.bytes).o("result")
         return flows.getValue(frame.header.stream).durable(frame.header, result.s("objectState") == "APPLIED")
     }
-    private suspend fun collectExpiredBookFiles(now: Long, currentId: String) {
-        for ((id, row) in store.list(scope, "job")) {
-            if (id == currentId || row.n("expiresAtMillis") >= now ||
-                description(row).o("selection").a("kinds").values().none { (it as JSONObject).s("kind") in B2Wire.bookKinds }) continue
-            val records = objects(id)
-            if (row.s("state") != "COMPLETE") {
-                row.put("state", "CANCELLED").put("stagingReservation", 0)
-                store.put(scope, "job", id, row)
-            }
-            for (record in records) {
-                val d = record.o("descriptor")
-                files.release(scope, id, d)
-                if (d.s("kind") == B2Wire.BOOK_COMMIT) files.assembly(scope, id, d.s("objectId")).delete()
-            }
-        }
-    }
-
     private suspend fun begin(r: JSONObject, now: Long): JSONObject {
         val p = r.o("payload"); val id = r.s("jobId")
         val b = auth.bindings.find { it.s("jobId") == id } ?: fail("AUTH_REVOKED")
@@ -348,6 +342,7 @@ class B2Receiver(
         val old = store.get(scope, "job", id)
         if (old == null && p.s("intent") == "resume") fail("NOT_FOUND")
         if (old != null) {
+            if (old.n("expiresAtMillis") < now) fail("EXPIRED")
             if (old.s("planDigest") != r.s("planDigest") || description(old).a("pageObjectCounts").toString() != p.a("pageObjectCounts").toString()) fail("JOB_CONFLICT")
             // No eager GC: retained records remain resumable beyond their minimum 24h.
             // This also preserves heartbeats/local work across conservative process clocks.
@@ -356,11 +351,9 @@ class B2Receiver(
         if (p.o(if (receiveDirection == "watchToPhone") "watchSnapshot" else "phoneSnapshot").n("toInclusive") != 0L && !business.canCommitRange(p)) fail("BUSINESS_REJECTED")
         val limits = p.o("selection").o("limits")
         if (B2Wire.frameBytes(r) > limits.n("maxFrameBytes")) fail("LIMIT_EXCEEDED")
-        if (old != null && old.s("state") != "COMPLETE" && old.n("expiresAtMillis") < now &&
-            p.o("selection").a("kinds").values().any { (it as JSONObject).s("kind") in B2Wire.bookKinds }) fail("EXPIRED")
         if (old == null) {
-            if (p.o("selection").a("kinds").values().any { (it as JSONObject).s("kind") in B2Wire.bookKinds }) collectExpiredBookFiles(now, id)
-            val active = store.all().filter { it.namespace == "job" }.map { B2Json.parse(it.body, false) }.count { !terminal(it) && it.n("expiresAtMillis") >= now }
+            retention.collect(now, id)
+            val active = store.jobs().map { B2Json.parse(it.body, false) }.count { !terminal(it) }
             if (active >= limits.n("maxActiveJobs")) fail("WINDOW_FULL")
         }
         val reservation = B2Json.utf8(p.toString()).size + 4096L + p.n("objectCount") * 4096L + minOf(limits.n("maxManifestBytes"), p.n("objectCount") * 48000L)
@@ -377,7 +370,12 @@ class B2Receiver(
         val sameLease = old != null && old.s("connection") == connection && (leases[id] ?: -1) > monotonic()
         val epoch = if (sameLease) old!!.n("epoch") else (old?.n("epoch") ?: 0) + 1
         if (epoch > B2Json.MAX_SAFE) fail("JOURNAL_CORRUPT")
-        val j = old ?: obj("jobId" to id, "planDigest" to r.s("planDigest"), "description" to copy(p), "state" to if (p.n("objectCount") == 0L) "READY" else "PLANNING", "nextManifestPage" to 0, "completion" to null, "reservation" to reservation, "expiresAtMillis" to now + B2Wire.RETENTION)
+        val j = old ?: obj("jobId" to id, "bindingVersion" to 2, "planDigest" to r.s("planDigest"), "description" to copy(p), "state" to if (p.n("objectCount") == 0L) "READY" else "PLANNING", "nextManifestPage" to 0, "completion" to null, "reservation" to reservation, "expiresAtMillis" to now + B2Wire.RETENTION)
+        if (old == null) {
+            // Record ownership separately so a rolled-back begin can retain
+            // its native binding and still be collected after the recovery window.
+            store.put(scope, "nativeOwner", id, obj("expiresAtMillis" to now + B2Wire.RETENTION))
+        }
         store.transaction {
             check(); j.put("connection", connection).put("epoch", epoch)
             bind(j, r); touch(j, now)
@@ -447,7 +445,7 @@ class B2Receiver(
         store.transaction {
             fence(j, r)
             entries.forEach { d -> store.put(scope, "object", objectKey(j.s("jobId"), d.s("objectId")), obj("jobId" to j.s("jobId"), "descriptor" to d, "receipt" to null)) }
-            store.put(scope, "page", key(j.s("jobId"), index.toString()), obj("digest" to p.s("pageDigest"), "result" to result))
+            store.put(scope, "page", key(j.s("jobId"), index.toString()), obj("jobId" to j.s("jobId"), "digest" to p.s("pageDigest"), "result" to result))
             j.put("state", result.s("state")).put("nextManifestPage", index + 1); store.put(scope, "job", j.s("jobId"), j); bind(j, r, result)
         }
         if (full) {
@@ -495,7 +493,7 @@ class B2Receiver(
         d.a("chunkHashes").strings().indices.forEach { i ->
             val k = key(j.s("jobId"), d.s("objectId"), i.toString())
             if (i in missing) store.delete(scope, "chunk", k)
-            else if (store.get(scope, "chunk", k) == null) { store.budget(1024, lim(j).n("maxJournalBytes")); store.put(scope, "chunk", k, obj("sha256" to d.a("chunkHashes").getString(i))) }
+            else if (store.get(scope, "chunk", k) == null) { store.budget(1024, lim(j).n("maxJournalBytes")); store.put(scope, "chunk", k, obj("jobId" to j.s("jobId"), "sha256" to d.a("chunkHashes").getString(i))) }
         }
         if (missing.size == d.a("chunkHashes").length() && row.optBoolean("active", false)) {
             // Lost/corrupt cache bytes hold no active object buffer after revalidation.
@@ -584,7 +582,7 @@ class B2Receiver(
         leases[j.s("jobId")] = monotonic() + B2Wire.LEASE
         val result = obj("objectId" to d.s("objectId"), "chunkIndex" to p.n("chunkIndex"), "chunkState" to "STAGED", "objectState" to "PARTIAL", "receipt" to null)
         store.transaction { fence(j, r); bind(j, r, result)
-            store.put(scope, "chunk", key(j.s("jobId"), d.s("objectId"), p.n("chunkIndex").toString()), obj("sha256" to d.a("chunkHashes").getString(p.n("chunkIndex").toInt())))
+            store.put(scope, "chunk", key(j.s("jobId"), d.s("objectId"), p.n("chunkIndex").toString()), obj("jobId" to j.s("jobId"), "sha256" to d.a("chunkHashes").getString(p.n("chunkIndex").toInt())))
             j.put("state", "TRANSFERRING"); store.put(scope, "job", j.s("jobId"), j) }
         progress(receiveDirection + ":" + B2Progress.chunk(d, p.n("chunkIndex").toInt()))
         return result
@@ -619,7 +617,7 @@ class B2Receiver(
             files.publishAssembly(temp, assembly)
             store.transaction {
                 check()
-                store.put(scope, "bookAssembly", assemblyKey, obj("objectId" to d.s("objectId")))
+                store.put(scope, "bookAssembly", assemblyKey, obj("jobId" to jobId, "objectId" to d.s("objectId")))
             }
             // The durable assembly registration proves these bytes remain recoverable.
             for (id in segments) releaseApplied(j, objectRow(jobId, id).o("descriptor"))
@@ -632,7 +630,7 @@ class B2Receiver(
             fence(j, r)
             val outcome = business.applyFile(context, copy(d), metadata, B2FileRef(staged, 0, d.n("size")))
             check(); fault("beforeApplyCommit")
-            touch(j, clock())
+            touch(j, retention.clock())
             val rc = B2Digests.receipt(r, d.s("objectId"), if (receiveDirection == "watchToPhone") auth.phoneDeviceId else auth.watchDeviceId, outcome)
             row.put("receipt", rc); store.put(scope, "object", objectKey(j.s("jobId"), d.s("objectId")), row)
             if (objects(j.s("jobId")).all { !it.nil("receipt") }) j.put("state", "APPLIED") else j.put("state", "TRANSFERRING")
@@ -661,7 +659,7 @@ class B2Receiver(
         val root = B2Digests.receipts(rs); if (root != p.s("receiptsRoot")) fail("RECEIPT_CONFLICT")
         val c = B2Digests.completion(j.s("jobId"), j.s("planDigest"), ds.n("objectCount"), root, p.n("ackToInclusive"))
         store.transaction {
-            fence(j, r); business.complete(copy(ds), copy(c)); check(); touch(j, clock())
+            fence(j, r); business.complete(copy(ds), copy(c)); check(); touch(j, retention.clock())
             j.put("state", "COMPLETE").put("completion", c); store.put(scope, "job", j.s("jobId"), j); bind(j, r, c)
         }; fault("afterCompleteCommit"); return c
     }
@@ -675,7 +673,6 @@ class B2Receiver(
         return result
     }
     companion object {
-        private val processGeneration = java.util.UUID.randomUUID().toString()
         fun validateGraph(all: List<JSONObject>) {
             val byId = all.associateBy { it.s("objectId") }; if (byId.size != all.size) fail("PLAN_CONFLICT")
             val identities = HashSet<String>()

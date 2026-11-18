@@ -1504,8 +1504,14 @@ class PhoneBluetoothSyncManager(
             B2NoteAssetBusiness(store, scope, assets, authorize), route.receive, capabilities.books || route.hasBinaryBooks, authorize,
             canonicalIds = capabilities.canonicalRssIds,
             books = if (route.hasBinaryBooks) B2BookBusiness(store, scope, requireNotNull(repository.books), authorize) else null)
+        val bootCount = try {
+            android.provider.Settings.Global.getInt(appContext.contentResolver, android.provider.Settings.Global.BOOT_COUNT, -1)
+        } catch (_: SecurityException) {
+            -1
+        }
         return B2KindSync(store, File(appContext.filesDir, "library-binary-v2"), assets, scope, deviceId,
-            device.remoteDeviceId, authorize, progress, route, business)
+            device.remoteDeviceId, authorize, progress, route, business,
+            retentionGeneration = bootCount.takeIf { it >= 0 }?.let { "boot-$it" })
     }
 
     private suspend fun syncBinaryKinds(

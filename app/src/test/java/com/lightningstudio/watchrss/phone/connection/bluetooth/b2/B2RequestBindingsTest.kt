@@ -33,7 +33,8 @@ class B2RequestBindingsTest {
 
         val reader = B2RequestBindings(directory)
         assertTrue(reader.chargedBytes() < 3 * 1024 * 1024)
-        assertTrue(directory.listFiles()!!.size <= 257)
+        val owner = directory.listFiles()!!.single { it.isDirectory }
+        assertTrue(owner.listFiles()!!.size <= 64)
         for (index in listOf(0, 4096, packageChunks - 1, count - 1)) {
             reader.check(scope, job, peer, id(index), digest)
             val conflict = assertThrows(B2Exception::class.java) {
@@ -70,14 +71,37 @@ class B2RequestBindingsTest {
         assertEquals(migratedCharge, reopened.chargedBytes())
     }
 
+    @Test fun collectedJobsReturnTheirSpaceAndKeepOtherOwnersBound() {
+        val directory = root.newFolder()
+        val journal = B2RequestBindings(directory)
+        val retained = id(0)
+        val limit = 2L * 1024 * 1024
+        journal.bind(scope, job, peer, retained, digest, limit)
+        val retainedBytes = journal.chargedBytes()
+        for (round in 1..4) {
+            val expired = id(round)
+            repeat(160) { journal.bind(scope, expired, peer, id(it), digest, limit) }
+            val before = journal.chargedBytes()
+            assertTrue(before > retainedBytes)
+            B2RequestBindings(directory).collectJob(scope, expired)
+            assertEquals(retainedBytes, journal.chargedBytes())
+            journal.check(scope, expired, peer, retained, changed)
+            assertEquals("REQUEST_CONFLICT", assertThrows(B2Exception::class.java) {
+                journal.check(scope, job, peer, retained, changed)
+            }.code)
+        }
+    }
+
     @Test fun interruptedAppendLeavesCommittedPrefixAndChecksumProtectsPublishedRecords() {
         val directory = root.newFolder()
         val journal = B2RequestBindings(directory)
         val first = id(0)
-        val prefix = key(first).take(2)
-        val next = (1..8192).map(::id).first { key(it).startsWith(prefix) }
+        fun shardPrefix(request: String) = key(request).take(2).toInt(16) and 63
+        val prefix = shardPrefix(first)
+        val next = (1..8192).map(::id).first { shardPrefix(it) == prefix }
         journal.bind(scope, job, peer, first, digest, journalLimit)
-        val shard = File(directory, "pack-v1-" + prefix)
+        val owner = directory.listFiles()!!.single { it.isDirectory }
+        val shard = owner.listFiles()!!.single()
         val recordBytes = shard.length()
         shard.appendBytes(byteArrayOf(1, 2, 3))
 

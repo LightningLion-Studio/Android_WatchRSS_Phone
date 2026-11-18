@@ -21,20 +21,20 @@ internal class B2BookBusiness(
     private val books: ImportedBookStore,
     private val authorize: () -> Unit
 ) {
+    fun importRoot(): File = books.binaryImportDirectory()
+
     suspend fun freeze(directory: File, work: () -> Unit, add: (JSONObject, File) -> Unit) {
+        val staging = B2Files(requireNotNull(directory.absoluteFile.parentFile), importRoot())
         val empty = File(directory, "empty").apply { createNewFile() }
         val emptyHashes = binaryFileHashes(empty)
-        var reserved = 0L
         suspend fun reserve(bytes: Long) {
             val active = persistence.exclusive {
                 persistence.list(scope, "job").sumOf { (_, row) ->
                     if (row.s("state") in setOf("COMPLETE", "CANCELLED")) 0 else row.optLong("stagingReservation")
                 }
             }
-            val existing = directory.parentFile?.listFiles()?.sumOf { if (it.isFile) it.length() else 0 } ?: 0L
             val limits = B2Wire.s4Limits()
-            reserved += bytes
-            if (existing + reserved + active + limits.n("maxJournalBytes") > limits.n("maxStagingBytes") ||
+            if (staging.dataBytes() + bytes + active + limits.n("maxJournalBytes") > limits.n("maxStagingBytes") ||
                 bytes + active + limits.n("maxJournalBytes") + 1048576 > directory.usableSpace) fail("STORAGE_PRESSURE")
         }
         books.freezeBinaryBooks { row, packageFile ->
@@ -95,9 +95,18 @@ internal class B2BookBusiness(
             while (true) {
                 val rows = books.binaryReadingPage(id, after)
                 if (rows.isEmpty()) break
-                val json = rows.joinToString(",", "[", "]") { it.stateJson }
-                reserve(B2Json.utf8(json).size.toLong())
-                val file = writeObject(directory, json)
+                val bytes = 1L + rows.sumOf { B2Json.utf8(it.stateJson).size.toLong() + 1 }
+                if (bytes > B2Wire.MAX_OBJECT_BYTES) fail("LIMIT_EXCEEDED")
+                reserve(bytes)
+                val file = File.createTempFile("book-", ".json", directory)
+                file.bufferedWriter().use { output ->
+                    output.write("[")
+                    rows.forEachIndexed { index, row ->
+                        if (index != 0) output.write(",")
+                        output.write(row.stateJson)
+                    }
+                    output.write("]")
+                }
                 val meta = obj("bookId" to id, "pageIndex" to page)
                 add(binaryDescriptor(BOOK_READING, "$id:$page", meta, binaryFileHashes(file, work), listOf(stateId)), file)
                 after = rows.last().chapterIndex
@@ -128,9 +137,9 @@ internal class B2BookBusiness(
         check()
         when (descriptor.s("kind")) {
             BOOK_STATE -> {
-                val state = decodeState(readJson(staged))
+                val state = readJson(staged, true, 100032, check) { it.state() }.also(BookSync::validateBinary)
                 if (state.s("bookId") != id) fail("OBJECT_CONFLICT")
-                val witness = obj("fingerprint" to state.s("fingerprint"), "chapterCount" to state.n("chapterCount"))
+                val witness = obj("jobId" to context.jobId, "fingerprint" to state.s("fingerprint"), "chapterCount" to state.n("chapterCount"))
                 state.optJSONObject("lifecycle")?.let { witness.put("lifecycle", it) }
                 persistence.put(scope, "bookStateWitness", key, witness)
                 val changed = books.merge(state, check, binary = true)
@@ -152,24 +161,18 @@ internal class B2BookBusiness(
                 val hash = metadata.s("packageSha256")
                 val bytes = metadata.n("packageBytes")
                 val assembly = localAssembly(context, metadata)
-                val scratch = java.nio.file.Files.createTempDirectory(books.binaryImportDirectory().toPath(), ".b2-import-").toFile()
-                try {
-                    books.installBinaryPackage(id, fingerprint, hash, bytes, state, assembly, scratch, check)
-                } finally {
-                    scratch.deleteRecursively()
+                B2Scratch.open(importRoot(), B2Scratch.BOOK_IMPORT).use { scratch ->
+                    books.installBinaryPackage(id, fingerprint, hash, bytes, state, assembly, scratch.file, check)
                 }
             }
             BOOK_READING -> {
                 val state = persistence.get(scope, "bookStateWitness", key) ?: fail("DEPENDENCIES_PENDING")
-                val rows = B2Json.parse("{\"rows\":" + readJson(staged) + "}", false).a("rows")
-                if (rows.length() !in 1..100) fail("BUSINESS_REJECTED")
-                val accepted = mutableListOf<JSONObject>()
+                val rows = readJson(staged, false, 32766, check) { it.readings() }
                 var previous = 0L
                 val count = state.n("chapterCount")
                 val bitmap = persistence.get(scope, "bookReadingIndices", key)?.s("bits")?.let { B2Frames.unhex(it, 12500) }
                     ?: ByteArray(12500)
-                for (i in 0 until rows.length()) {
-                    val row = rows.getJSONObject(i)
+                for (row in rows) {
                     BookSync.validateReading(row)
                     val index = row.n("chapterIndex")
                     if (row.s("bookId") != id || index <= previous || index > count) fail("BUSINESS_REJECTED")
@@ -178,10 +181,9 @@ internal class B2BookBusiness(
                     if ((bitmap[bit / 8].toInt() and mask) != 0) fail("OBJECT_CONFLICT")
                     bitmap[bit / 8] = (bitmap[bit / 8].toInt() or mask).toByte()
                     previous = index
-                    accepted += row
                 }
-                persistence.put(scope, "bookReadingIndices", key, obj("bits" to B2Frames.hex(bitmap)))
-                if (books.mergeReadingBatch(accepted, check, binary = true) > 0) "merged" else "retainedLocal"
+                persistence.put(scope, "bookReadingIndices", key, obj("jobId" to context.jobId, "bits" to B2Frames.hex(bitmap)))
+                if (books.mergeReadingBatch(rows, check, binary = true) > 0) "merged" else "retainedLocal"
             }
             else -> fail("UNSUPPORTED_KIND")
         }
@@ -195,43 +197,18 @@ internal class B2BookBusiness(
         fail("BUSINESS_REJECTED")
     }
 
-    private fun readJson(staged: B2FileRef): String {
-        // Whitespace counts towards the wire object limit. It does not consume
-        // the local SQLite row budget. Preserve strings and token boundaries.
+    private fun <T> readJson(staged: B2FileRef, integersOnly: Boolean, maxNodes: Int, work: () -> Unit,
+        read: (B2BookJson) -> T): T {
+        if (staged.size > B2Wire.MAX_OBJECT_BYTES) fail("LIMIT_EXCEEDED")
+        if (staged.file.length() != staged.size) fail("LOCAL_IO")
         val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
-        val json = StringBuilder()
-        var quoted = false
-        var escaped = false
-        var gap = false
-        java.io.InputStreamReader(staged.file.inputStream(), decoder).buffered().use { input ->
-            val buffer = CharArray(8192)
-            while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
-                for (i in 0 until count) {
-                    val c = buffer[i]
-                    if (!quoted && c in " \t\r\n") {
-                        gap = true
-                        continue
-                    }
-                    if (gap && json.isNotEmpty() && json.last() !in "{}[],:" && c !in "{}[],:") {
-                        fail("BUSINESS_REJECTED")
-                    }
-                    gap = false
-                    if (quoted) {
-                        if (escaped) escaped = false
-                        else if (c == '\\') escaped = true
-                        else if (c == '"') quoted = false
-                    } else if (c == '"') quoted = true
-                    if (json.length >= 2 * 1024 * 1024) fail("LIMIT_EXCEEDED")
-                    json.append(c)
-                }
-            }
+        return java.io.InputStreamReader(staged.file.inputStream(), decoder).use {
+            read(B2BookJson(it, integersOnly, maxNodes, work))
         }
-        return json.toString()
     }
 
-    private fun decodeState(json: String): JSONObject = B2Json.parse(json, maxNodes = 100032).also(BookSync::validateBinary)
+    private fun decodeState(json: String): JSONObject =
+        B2BookJson(java.io.StringReader(json), true, 100032) {}.state().also(BookSync::validateBinary)
 
     private fun localAssembly(context: B2ApplyContext, metadata: JSONObject): File =
         context.assembly?.takeIf { it.isFile } ?: books.binaryPackage(metadata.s("bookId"), metadata.s("packageSha256"))

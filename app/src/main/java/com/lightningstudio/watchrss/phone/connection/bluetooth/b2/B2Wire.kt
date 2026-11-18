@@ -14,7 +14,8 @@ object B2Wire {
     const val CHUNK = 65536
     const val LEASE = 30000L
     const val RETENTION = 86400000L
-    val hardLimits = linkedMapOf("maxObjectBytes" to 16777216L, "maxInFlightObjects" to 4L, "maxFrameBytes" to 131084L, "maxManifestPageBytes" to 131084L, "maxManifestPageEntries" to 16L, "maxMetadataBytes" to 16384L, "maxPlanObjects" to 4096L, "maxManifestBytes" to 16777216L, "maxRangesPerPage" to 128L, "maxResultsPerPage" to 16L, "maxStagingBytes" to 1610612736L, "maxJournalBytes" to 67108864L, "maxActiveJobs" to 2L, "maxInFlightChunks" to 8L, "maxInFlightBytes" to 524288L, "maxControlHeaderBytes" to 131072L, "maxPackageBytes" to 536870912L)
+    const val MAX_OBJECT_BYTES = 16L * 1024 * 1024
+    val hardLimits = linkedMapOf("maxObjectBytes" to MAX_OBJECT_BYTES, "maxInFlightObjects" to 4L, "maxFrameBytes" to 131084L, "maxManifestPageBytes" to 131084L, "maxManifestPageEntries" to 16L, "maxMetadataBytes" to 16384L, "maxPlanObjects" to 4096L, "maxManifestBytes" to 16777216L, "maxRangesPerPage" to 128L, "maxResultsPerPage" to 16L, "maxStagingBytes" to 1610612736L, "maxJournalBytes" to 67108864L, "maxActiveJobs" to 2L, "maxInFlightChunks" to 8L, "maxInFlightBytes" to 524288L, "maxControlHeaderBytes" to 131072L, "maxPackageBytes" to 536870912L)
     val limitKeys = hardLimits.keys.toList()
     const val BOOK_STATE = "bookState"
     const val BOOK_SEGMENT = "bookPackageSegment"

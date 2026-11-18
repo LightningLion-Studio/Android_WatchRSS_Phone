@@ -14,16 +14,53 @@ data class BookChapterEntity(val bookId:String,val chapterIndex:Int,val articleI
 @Entity(tableName="imported_book_reading",primaryKeys=["bookId","chapterIndex"])
 data class BookReadingEntity(val bookId:String,val chapterIndex:Int,val stateJson:String)
 data class BookSourceRef(val bookId:String,val sourceUrl:String)
+// Keep ordinary reads in one indexed query. Large values bypass CursorWindow
+// by fetching bounded text slices in the same Room read transaction.
+private const val BOOK_STATE_COLUMNS = "bookId,packageSha256,packageBytes,"
+private const val BOOK_READING_COLUMNS = "bookId,chapterIndex,"
+internal const val SMALL_BOOK_JSON =
+    "CASE WHEN length(CAST(stateJson AS BLOB)) <= 262144 THEN stateJson ELSE '' END AS stateJson"
+internal const val BOOK_JSON_SLICE = 65536
+
+internal suspend fun readBookJson(read: suspend (offset: Int) -> String): String = buildString {
+    var offset = 1
+    while (true) {
+        val slice = read(offset)
+        append(slice)
+        val codePoints = slice.codePointCount(0, slice.length)
+        if (codePoints < BOOK_JSON_SLICE) break
+        offset += codePoints
+    }
+}
+
 @Dao interface BookDao {
+    @Query("SELECT substr(stateJson,:offset,65536) FROM imported_books WHERE bookId=:id")
+    suspend fun bookJsonSlice(id: String, offset: Int): String
+    @Query("SELECT substr(stateJson,:offset,65536) FROM imported_book_reading WHERE bookId=:id AND chapterIndex=:index")
+    suspend fun readingJsonSlice(id: String, index: Int, offset: Int): String
+    private suspend fun completeBook(row: BookEntity) =
+        if (row.stateJson.isNotEmpty()) row else row.copy(stateJson = readBookJson { bookJsonSlice(row.bookId, it) })
+    private suspend fun completeReading(row: BookReadingEntity) =
+        if (row.stateJson.isNotEmpty()) row else row.copy(stateJson = readBookJson { readingJsonSlice(row.bookId, row.chapterIndex, it) })
+
     @Query("""SELECT EXISTS(SELECT 1 FROM phone_articles a WHERE lower(trim(a.url)) LIKE 'https://watchrss.local/import-%'
         AND NOT EXISTS(SELECT 1 FROM imported_book_chapters c WHERE c.articleId=a.articleId))""")
     suspend fun hasUnregisteredBookArticles(): Boolean
     @Query("SELECT c.bookId,a.rssSourceUrl AS sourceUrl FROM imported_book_chapters c JOIN phone_articles a ON a.articleId=c.articleId WHERE a.rssSourceUrl IS NOT NULL GROUP BY c.bookId,a.rssSourceUrl") suspend fun mappedSources():List<BookSourceRef>
-    @Query("SELECT * FROM imported_books ORDER BY bookId") suspend fun all():List<BookEntity>
-    @Query("SELECT * FROM imported_books WHERE bookId > :after ORDER BY bookId LIMIT 1")
-    suspend fun nextBinaryBook(after: String): BookEntity?
-    @Query("SELECT * FROM imported_book_reading WHERE bookId=:id AND chapterIndex > :after ORDER BY chapterIndex LIMIT 100")
-    suspend fun binaryReadingPage(id: String, after: Int): List<BookReadingEntity>
+    @Query("SELECT " + BOOK_STATE_COLUMNS + SMALL_BOOK_JSON + " FROM imported_books ORDER BY bookId")
+    suspend fun allBookHeaders(): List<BookEntity>
+    @Transaction suspend fun all(): List<BookEntity> = allBookHeaders().map { completeBook(it) }
+    @Query("SELECT " + BOOK_STATE_COLUMNS + SMALL_BOOK_JSON + " FROM imported_books WHERE bookId > :after ORDER BY bookId LIMIT 1")
+    suspend fun nextBookHeader(after: String): BookEntity?
+    @Transaction suspend fun nextBinaryBook(after: String): BookEntity? = nextBookHeader(after)?.let { completeBook(it) }
+    @Query("SELECT " + BOOK_READING_COLUMNS + SMALL_BOOK_JSON + " FROM (" +
+        "SELECT *,SUM(length(CAST(stateJson AS BLOB))+1) OVER (ORDER BY chapterIndex) AS pageBytes," +
+        "ROW_NUMBER() OVER (ORDER BY chapterIndex) AS rowIndex FROM (SELECT * FROM imported_book_reading " +
+        "WHERE bookId=:id AND chapterIndex > :after ORDER BY chapterIndex LIMIT 100)) " +
+        "WHERE pageBytes+1 <= 16777216 OR rowIndex=1 ORDER BY chapterIndex")
+    suspend fun binaryReadingHeaders(id: String, after: Int): List<BookReadingEntity>
+    @Transaction suspend fun binaryReadingPage(id: String, after: Int): List<BookReadingEntity> =
+        binaryReadingHeaders(id, after).map { completeReading(it) }
     @Query("SELECT * FROM imported_book_chapters WHERE bookId=:id AND chapterIndex>:after ORDER BY chapterIndex LIMIT 100")
     suspend fun binaryChapterPage(id: String, after: Int): List<BookChapterEntity>
     @Query("SELECT COUNT(*) FROM imported_book_chapters c JOIN phone_articles a ON a.articleId=c.articleId WHERE c.bookId=:id")
@@ -32,7 +69,9 @@ data class BookSourceRef(val bookId:String,val sourceUrl:String)
     suspend fun binaryArticleAtUrl(url: String): String?
     @Query("UPDATE phone_articles SET contentText=COALESCE(:text,contentText),contentHtml=COALESCE(:html,contentHtml),contentHash=:hash,syncBodyHash='',syncBodyByteCount=0,syncChunkSize=0,syncChunkHashesJson='',syncMetadataHash='' WHERE articleId=:id")
     suspend fun repairBinaryChapter(id: String, text: String?, html: String?, hash: String)
-    @Query("SELECT * FROM imported_books WHERE bookId=:id") suspend fun get(id:String):BookEntity?
+    @Query("SELECT " + BOOK_STATE_COLUMNS + SMALL_BOOK_JSON + " FROM imported_books WHERE bookId=:id")
+    suspend fun bookHeader(id: String): BookEntity?
+    @Transaction suspend fun get(id: String): BookEntity? = bookHeader(id)?.let { completeBook(it) }
     @Upsert suspend fun put(value:BookEntity)
     @Query("SELECT * FROM imported_book_chapters ORDER BY bookId,chapterIndex") suspend fun chapters():List<BookChapterEntity>
     @Query("SELECT * FROM imported_book_chapters WHERE bookId=:id ORDER BY chapterIndex") suspend fun chapters(id:String):List<BookChapterEntity>
@@ -41,13 +80,27 @@ data class BookSourceRef(val bookId:String,val sourceUrl:String)
     @Query("SELECT * FROM imported_book_chapters WHERE bookId=:id AND chapterIndex=:index LIMIT 1") suspend fun chapterAt(id:String,index:Int):BookChapterEntity?
     @Query("SELECT DISTINCT a.rssSourceUrl FROM imported_book_chapters c JOIN phone_articles a ON a.articleId=c.articleId WHERE a.rssSourceUrl IS NOT NULL") suspend fun sourceUrls():List<String>
     @Query("SELECT * FROM imported_book_chapters WHERE bookId=:id AND chapterIndex IN (:indices)") suspend fun chapterBatch(id:String,indices:List<Int>):List<BookChapterEntity>
-    @Query("SELECT * FROM imported_book_reading WHERE bookId=:id AND chapterIndex IN (:indices)") suspend fun readingBatch(id:String,indices:List<Int>):List<BookReadingEntity>
+    @Query("SELECT " + BOOK_READING_COLUMNS + SMALL_BOOK_JSON + " FROM imported_book_reading WHERE bookId=:id AND chapterIndex IN (:indices)")
+    suspend fun readingBatchHeaders(id: String, indices: List<Int>): List<BookReadingEntity>
+    @Transaction suspend fun readingBatch(id: String, indices: List<Int>): List<BookReadingEntity> =
+        readingBatchHeaders(id, indices).map { completeReading(it) }
     @Query("SELECT * FROM imported_book_chapters WHERE articleId IN (:ids)") suspend fun chaptersForArticles(ids:List<String>):List<BookChapterEntity>
-    @Query("SELECT r.* FROM imported_book_reading r JOIN imported_book_chapters c ON c.bookId=r.bookId AND c.chapterIndex=r.chapterIndex WHERE c.articleId IN (:ids)") suspend fun readingForArticles(ids:List<String>):List<BookReadingEntity>
+    @Query("SELECT r.bookId,r.chapterIndex," + SMALL_BOOK_JSON + " FROM imported_book_reading r " +
+        "JOIN imported_book_chapters c ON c.bookId=r.bookId AND c.chapterIndex=r.chapterIndex WHERE c.articleId IN (:ids)")
+    suspend fun articleReadingHeaders(ids: List<String>): List<BookReadingEntity>
+    @Transaction suspend fun readingForArticles(ids: List<String>): List<BookReadingEntity> =
+        articleReadingHeaders(ids).map { completeReading(it) }
     @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun putChapters(rows:List<BookChapterEntity>)
-    @Query("SELECT * FROM imported_book_reading WHERE bookId=:id ORDER BY chapterIndex") suspend fun readingForBook(id:String):List<BookReadingEntity>
-    @Query("SELECT * FROM imported_book_reading ORDER BY bookId,chapterIndex") suspend fun reading():List<BookReadingEntity>
-    @Query("SELECT * FROM imported_book_reading WHERE bookId=:id AND chapterIndex=:index") suspend fun reading(id:String,index:Int):BookReadingEntity?
+    @Query("SELECT " + BOOK_READING_COLUMNS + SMALL_BOOK_JSON + " FROM imported_book_reading WHERE bookId=:id ORDER BY chapterIndex")
+    suspend fun bookReadingHeaders(id: String): List<BookReadingEntity>
+    @Transaction suspend fun readingForBook(id: String): List<BookReadingEntity> = bookReadingHeaders(id).map { completeReading(it) }
+    @Query("SELECT " + BOOK_READING_COLUMNS + SMALL_BOOK_JSON + " FROM imported_book_reading ORDER BY bookId,chapterIndex")
+    suspend fun allReadingHeaders(): List<BookReadingEntity>
+    @Transaction suspend fun reading(): List<BookReadingEntity> = allReadingHeaders().map { completeReading(it) }
+    @Query("SELECT " + BOOK_READING_COLUMNS + SMALL_BOOK_JSON + " FROM imported_book_reading WHERE bookId=:id AND chapterIndex=:index")
+    suspend fun readingHeader(id: String, index: Int): BookReadingEntity?
+    @Transaction suspend fun reading(id: String, index: Int): BookReadingEntity? =
+        readingHeader(id, index)?.let { completeReading(it) }
     @Upsert suspend fun putReading(row:BookReadingEntity)
     @Query("DELETE FROM imported_book_reading") suspend fun clearReading()
     @Query("DELETE FROM imported_book_chapters") suspend fun clearChapters()
@@ -66,6 +119,14 @@ object BookSync {
         if (instance == null) id(fingerprint) else hash("watchrss/book/instance-id/v1", fingerprint, instance)
     fun articleId(bookId:String,index:Int)=hash("watchrss/book/article/v1",bookId,index.toString())
     private fun hash(vararg strings:String)=CloudSnapshotCodec.sha256(CloudProtocolV2.lp(*strings))
+    private fun copyObject(value: JSONObject): JSONObject = JSONObject().apply {
+        value.keys().forEach { put(it, copyValue(value.get(it))) }
+    }
+    private fun copyValue(value: Any): Any = when (value) {
+        is JSONObject -> copyObject(value)
+        is JSONArray -> JSONArray().apply { for (i in 0 until value.length()) put(copyValue(value.get(i))) }
+        else -> value
+    }
     fun canonical(value:JSONObject)=PhoneCloudRecordCodec.canonical(value)
     fun integer(row:JSONObject,key:String):Long { val v=row.get(key);require(v is Int || v is Long);return (v as Number).toLong().also {require(it in 0..9_007_199_254_740_991L)} }
     /** Fixed subcodes only. Never include peer values or parser exception text. */
@@ -128,16 +189,16 @@ object BookSync {
     }
     fun merge(local:JSONObject?,remote:JSONObject):JSONObject = merge(local, remote, binary = false)
     internal fun merge(local:JSONObject?,remote:JSONObject, binary: Boolean):JSONObject {
-        validate(remote, binary);if(local==null)return JSONObject(remote.toString()).apply{remove("contentAvailable")}
+        validate(remote, binary);if(local==null)return copyObject(remote).apply{remove("contentAvailable")}
         if (binary || local.has("instanceId") || local.has("lifecycle")) validateBinary(local) else validate(local)
         if (local.getString("bookId") != remote.getString("bookId") || local.getInt("chapterCount") != remote.getInt("chapterCount"))
             throw InvalidBookPackageException("manifest_local_identity_conflict")
         if (binary || local.has("lifecycle")) {
             val token = compareLifecycle(local, remote)
-            if (token != 0) return JSONObject((if (token > 0) local else remote).toString()).apply { remove("contentAvailable") }
+            if (token != 0) return copyObject(if (token > 0) local else remote).apply { remove("contentAvailable") }
         }
         val winner=compareValuesBy(remote,local,{it.getLong("updatedAt")},{it.getString("sourceDeviceId")},{it.getString("title")},{it.optString("sourceUrl")},{it.optString("kind")})>0
-        return JSONObject((if(winner)remote else local).toString()).apply {
+        return copyObject(if(winner)remote else local).apply {
             remove("contentAvailable");put("deletedChapters",JSONArray((deletions(local)+deletions(remote)).sorted()))
             put("deletionClock",maxOf(local.getLong("deletionClock"),remote.getLong("deletionClock")))
             put("deletedAt",maxOf(local.getLong("deletedAt"),remote.getLong("deletedAt")))
@@ -156,7 +217,7 @@ object BookSync {
             if(value.has("${prefix}SourceDeviceId"))require(value.get("${prefix}SourceDeviceId") is String)
         }
     }
-    private fun normalizedReading(value:JSONObject)=JSONObject(value.toString()).apply {
+    private fun normalizedReading(value:JSONObject)=copyObject(value).apply {
         put("readingProgress",kotlin.math.floor(getDouble("readingProgress")*1_000_000.0+0.5)/1_000_000.0)
         for(prefix in listOf("favorite","watchLater"))if(has("${prefix}Saved") && !has("${prefix}SourceDeviceId"))put("${prefix}SourceDeviceId",getString("sourceDeviceId"))
     }
@@ -168,7 +229,7 @@ object BookSync {
         val order=compareValuesBy(remote,local,{it.getLong("readingPositionChangedAt")},{it.getString("sourceDeviceId")},
             {if(it.getBoolean("isRead"))0 else 1},{it.getLong("readingPositionBytes")},{it.getDouble("readingProgress")},{it.getString("readingPositionContentHash")})
         require(local.getString("bookId") == remote.getString("bookId") && local.getInt("chapterIndex") == remote.getInt("chapterIndex"))
-        return JSONObject((if(order>0)remote else local).toString()).apply {
+        return copyObject(if(order>0)remote else local).apply {
             for (prefix in listOf("favorite", "watchLater")) {
                 val field = "${prefix}Saved"
                 val winner = when {

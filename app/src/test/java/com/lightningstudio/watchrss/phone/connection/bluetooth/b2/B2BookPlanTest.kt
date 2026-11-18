@@ -120,15 +120,17 @@ class B2BookPlanTest {
             val selection = B2Negotiation.select(cap, cap, "watchToPhone")!!
             val store = MemoryB2Store()
             val applied = mutableListOf<String>()
+            var elapsed = 0L
             var rejectTransaction = false
             val journal = object : B2Persistence by store {
                 override suspend fun <T> transaction(block: suspend () -> T): T = store.transaction {
                     block().also { if (rejectTransaction) fail("LOCAL_IO") }
                 }
             }
-            fun receiver(intent: String): B2Receiver {
-                val binding = obj("direction" to "watchToPhone", "jobId" to job, "intent" to intent, "selection" to selection)
-                return B2Receiver(journal, B2Files(root), B2Authorization(account, "phone", "watch", snapshot, snapshot, listOf(binding)) { true },
+            val imports = File(root, "book-work").apply { mkdirs() }
+            fun receiver(intent: String, jobId: String = job): B2Receiver {
+                val binding = obj("direction" to "watchToPhone", "jobId" to jobId, "intent" to intent, "selection" to selection)
+                return B2Receiver(journal, B2Files(root, imports), B2Authorization(account, "phone", "watch", snapshot, snapshot, listOf(binding)) { true },
                     object : B2BusinessPort {
                         override val kinds = B2Wire.bookKinds
                         override suspend fun apply(descriptor: JSONObject, metadata: JSONObject, staged: File): String {
@@ -136,7 +138,7 @@ class B2BookPlanTest {
                             applied += descriptor.s("objectId")
                             return "merged"
                         }
-                    })
+                    }, monotonic = { elapsed })
             }
             val begin = obj("intent" to "create", "accountScope" to account, "phoneDeviceId" to "phone", "watchDeviceId" to "watch",
                 "direction" to "watchToPhone", "phoneSnapshot" to snapshot, "watchSnapshot" to snapshot, "selection" to selection,
@@ -211,6 +213,42 @@ class B2BookPlanTest {
             assertEquals("CANCELLED", store.get(account, "job", job)!!.s("state"))
             assertEquals(3, store.listForJob(account, "object", job).count { !it.nil("receipt") })
             resumed.closeIndex()
+
+            val staging = B2Files(root, imports)
+            val seg = parts[0].s("objectId")
+            assertTrue(staging.composed(account, job, seg).isFile)
+            val frozenOrphan = File(root, ".freeze-interrupted/nested/chapter").apply {
+                parentFile!!.mkdirs()
+                writeBytes(ByteArray(32))
+            }
+            val importOrphan = File(imports, ".b2-import-interrupted/text").apply {
+                parentFile!!.mkdirs()
+                writeBytes(ByteArray(64))
+            }
+            elapsed = B2Wire.RETENTION
+            val currentJob = "3".repeat(32)
+            val current = receiver("create", currentJob)
+            val keepBegin = B2Wire.request("begin", currentJob, plan, null, begin)
+            val keepEpoch = current.handle(keepBegin).n("epoch")
+            assertTrue(staging.composed(account, job, seg).isFile)
+            assertNotNull(store.get(account, "job", job))
+            assertFalse(frozenOrphan.exists())
+            assertFalse(importOrphan.exists())
+
+            elapsed += 1
+            val laterJob = "4".repeat(32)
+            receiver("create", laterJob).handle(B2Wire.request("begin", laterJob, plan, null, begin))
+            assertNull(store.get(account, "job", job))
+            assertNull(store.get(account, "nativeOwner", job))
+            assertTrue(store.listForJob(account, "object", job).isEmpty())
+            assertTrue(store.listForJob(account, "request", job).isEmpty())
+            assertFalse(staging.composed(account, job, seg).exists())
+            staging.checkRequest(account, job, "watch", unacked.s("requestId"), "a".repeat(64))
+            val stillBound = runCatching {
+                staging.checkRequest(account, currentJob, "watch", keepBegin.s("requestId"), "a".repeat(64))
+            }.exceptionOrNull() as B2Exception
+            assertEquals("REQUEST_CONFLICT", stillBound.code)
+            assertEquals(1L, keepEpoch)
         } finally {
             root.deleteRecursively()
         }

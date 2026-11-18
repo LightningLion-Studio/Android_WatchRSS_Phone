@@ -477,7 +477,9 @@ class PhoneBluetoothSyncManager(
             emptyMap()
         }
     ): PhoneBluetoothSyncResult = withAccountOperation {
-        syncAllData(device, forceFull, mode, reusableSession, onProgress, resolveDeleteConflicts)
+        withContext(LibraryManifestRetry()) {
+            syncAllData(device, forceFull, mode, reusableSession, onProgress, resolveDeleteConflicts)
+        }
     }
 
     private suspend fun syncAllData(

@@ -12,7 +12,6 @@ import com.lightningstudio.watchrss.phone.account.PhoneInstallationIdentity
 import com.lightningstudio.watchrss.phone.account.LicenseDeviceIdentity
 import com.lightningstudio.watchrss.phone.account.AppAccessCoordinator
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
-import com.lightningstudio.watchrss.phone.connection.guided.PhoneGuidedSessionManager
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudChangeScheduler
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncService
@@ -370,13 +369,6 @@ class PhoneCompanionContainer(context: Context) {
 
     fun stopCloudChangeScheduler() {
         cloudChangeScheduler.stop()
-    }
-
-    val guidedSessionManager: PhoneGuidedSessionManager by lazy {
-        PhoneGuidedSessionManager(
-            context = appContext,
-            repository = repository
-        )
     }
 
     private var bluetoothCloudResumeJob:kotlinx.coroutines.Job?=null

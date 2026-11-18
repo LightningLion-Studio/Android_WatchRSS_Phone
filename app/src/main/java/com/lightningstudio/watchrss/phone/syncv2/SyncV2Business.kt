@@ -160,7 +160,7 @@ internal object SyncV2Business {
             for(f in listOf("deletionClock","deletedAt")) put(f,maxOf(a.getLong(f),b.getLong(f)))
         }
     }
-    fun mergeNote(base: String,local: String,remote: String): JSONObject = when(val result=MarkdownThreeWayMerge.merge(base,local,remote)) {
+    fun mergeNote(base: String,local: String,remote: String): JSONObject = when(val result=MarkdownThreeWayMerge.mergeSyncV2(base,local,remote)) {
         is MarkdownMergeResult.Merged -> JSONObject().put("markdown",result.markdown)
         MarkdownMergeResult.Conflict -> JSONObject().put("conflict",true)
     }

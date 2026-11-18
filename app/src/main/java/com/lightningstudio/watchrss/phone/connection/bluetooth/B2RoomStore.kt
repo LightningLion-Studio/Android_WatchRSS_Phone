@@ -52,6 +52,22 @@ internal class B2RoomStore(private val db: PhoneCompanionDatabase) : B2Persisten
     override suspend fun <T> transaction(block: suspend () -> T): T = durable(block)
     override suspend fun get(scope: String, ns: String, id: String): JSONObject? = sql.query("SELECT body FROM library_binary_records WHERE scope=? AND namespace=? AND id=?", arrayOf(scope, ns, id)).use { if (it.moveToFirst()) B2Json.parse(it.getString(0), false) else null }
     override suspend fun list(scope: String, ns: String): List<Pair<String, JSONObject>> = sql.query("SELECT id,body FROM library_binary_records WHERE scope=? AND namespace=? ORDER BY id", arrayOf(scope, ns)).use { c -> buildList { while (c.moveToNext()) add(c.getString(0) to B2Json.parse(c.getString(1), false)) } }
+    override suspend fun listForJob(scope: String, namespace: String, jobId: String): List<JSONObject> {
+        // Stored job IDs are lower-case hex. Embedded metadata is an escaped
+        // JSON string, so this predicate only matches the record's job member.
+        val record = """"jobId":"$jobId""""
+        return sql.query(
+            "SELECT body FROM library_binary_records WHERE scope=? AND namespace=? AND instr(body,?)>0",
+            arrayOf(scope, namespace, record)
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    val row = B2Json.parse(cursor.getString(0), false)
+                    if (row.optString("jobId") == jobId) add(row)
+                }
+            }
+        }
+    }
     override suspend fun all(): List<B2Persistence.Record> = sql.query("SELECT scope,namespace,id,body FROM library_binary_records").use { c -> buildList { while (c.moveToNext()) add(B2Persistence.Record(c.getString(0), c.getString(1), c.getString(2), c.getString(3))) } }
     private fun charge(ns: String, value: JSONObject): Long = if (ns == "job") value.getLong("reservation") else B2Json.utf8(value.toString()).size.toLong() + 512
     override suspend fun budget(extra: Long, limit: Long) {

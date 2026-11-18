@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 // Full body columns must never share a CursorWindow row. Legacy inline rows can exceed 2 MiB.
-private const val ARTICLE_METADATA_COLUMNS = """articleId, sourceDeviceId, url, title, siteName, excerpt,
+internal const val ARTICLE_METADATA_COLUMNS = """articleId, sourceDeviceId, url, title, siteName, excerpt,
     NULL AS contentHtml, '' AS contentText, imageUrl, contentHash,
     importedAt, updatedAt, independentSaved, independentChangedAt, independentSortOrder,
     rssSourceUrl, rssSourceTitle, favoriteSaved, favoriteChangedAt, favoriteSortOrder,

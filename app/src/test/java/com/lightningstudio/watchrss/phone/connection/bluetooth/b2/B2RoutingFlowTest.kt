@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 
+import com.lightningstudio.watchrss.phone.connection.bluetooth.B2KindRoute
 import com.lightningstudio.watchrss.phone.connection.bluetooth.BluetoothSyncProtocol
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibrarySyncPayload
 import com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload
@@ -39,6 +40,25 @@ class B2RoutingFlowTest {
         }
         val bad = JSONObject(p.toString()); bad.getJSONObject("libraryBinary").put("chunkSizes", JSONArray(listOf(131072)))
         rejected("CAPABILITY_MISMATCH") { B2Routing.classify(bad, ready) }
+    }
+    @Test fun asymmetricKindProbeKeepsTheUnselectedDirectionOnLegacy() {
+        val kindSet = setOf("articleBody", "articleMetadata", "noteAsset", "rssSource")
+        val probe = obj("success" to true, "version" to 14, "action" to "syncLibrary", "phase" to "probe",
+            "libraryPeer" to obj("implementation" to "podjs", "appVersion" to "2.0.3"),
+            "libraryBinary" to B2Negotiation.capability(setOf("noteAsset", "rssSource"), kindSet))
+        val route = B2KindRoute.select(probe, true, true)
+        assertEquals(kindSet, route.send)
+        assertEquals(setOf("noteAsset"), route.receive)
+        assertTrue(route.needsLegacyLibrary)
+        assertTrue(route.receiveLegacyArticles)
+        assertFalse(route.sendLegacyArticles)
+        assertFalse(route.sendLegacySources)
+        probe.put("libraryBinary", B2Negotiation.capability(kindSet, kindSet))
+        assertFalse(B2KindRoute.select(probe, true, true).needsLegacyLibrary)
+        probe.put("libraryBinary", B2Negotiation.capability(setOf("noteAsset"), setOf("noteAsset")))
+        assertTrue(B2KindRoute.select(probe, true, true).isAssetOnly)
+        probe.remove("libraryBinary")
+        assertTrue(B2KindRoute.select(probe, true, true).isEmpty)
     }
     @Test fun disabledPathMatchesPinnedLegacyWireForEveryFixtureAndRequest() {
         val probes = fixture("peer-fixtures.json").getJSONArray("cases")

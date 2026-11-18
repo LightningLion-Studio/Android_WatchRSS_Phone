@@ -58,6 +58,7 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
     abstract fun bookDao():com.lightningstudio.watchrss.phone.data.book.BookDao
     abstract fun phoneSavedItemDao(): PhoneSavedItemDao
     abstract fun phoneArticleDao(): PhoneArticleDao
+    abstract fun b2ArticleDao(): B2ArticleDao
     abstract fun phoneRssSourceDao(): PhoneRssSourceDao
     abstract fun syncChangeLogDao(): SyncChangeLogDao
     abstract fun syncPeerStateDao(): SyncPeerStateDao

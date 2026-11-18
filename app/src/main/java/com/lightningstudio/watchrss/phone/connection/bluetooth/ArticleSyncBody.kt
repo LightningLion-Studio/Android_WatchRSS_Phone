@@ -4,6 +4,9 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedWriter
+import java.io.File
+import java.io.PushbackInputStream
+import java.nio.charset.CodingErrorAction
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -403,17 +406,7 @@ object ArticleSyncBody {
         writer.write('"'.code)
         var runStart = 0
         value.forEachIndexed { index, char ->
-            val escape = when (char) {
-                '\\' -> "\\\\"
-                '"' -> "\\\""
-                '/' -> "\\/"
-                '\b' -> "\\b"
-                '\u000C' -> "\\f"
-                '\n' -> "\\n"
-                '\r' -> "\\r"
-                '\t' -> "\\t"
-                else -> null
-            }
+            val escape = jsonEscape(char)
             if (escape != null || char.code < 0x20) {
                 if (runStart < index) {
                     writer.write(value, runStart, index - runStart)
@@ -434,6 +427,108 @@ object ArticleSyncBody {
         writer.write('"'.code)
     }
 
+    private fun jsonEscape(char: Char): String? = when (char) {
+            '\\' -> "\\\\"
+            '"' -> "\\\""
+            '/' -> "\\/"
+            '\b' -> "\\b"
+            '\u000C' -> "\\f"
+            '\n' -> "\\n"
+            '\r' -> "\\r"
+            '\t' -> "\\t"
+            else -> null
+        }
+
+    private fun writeEscapedJsonChar(writer: Writer, char: Char) {
+        val escaped = jsonEscape(char)
+        when {
+            escaped != null -> writer.write(escaped)
+            char.code >= 0x20 -> writer.write(char.code)
+            else -> {
+                writer.write("\\u00")
+                writer.write(HEX_DIGITS[char.code ushr 4].code)
+                writer.write(HEX_DIGITS[char.code and 0x0f].code)
+            }
+        }
+    }
+
+    internal fun writeFileBody(html: File?, text: File, output: OutputStream, work: () -> Unit = {}) {
+        val gzip = ArticleBodyGzipOutputStream(output, 255)
+        val limited = object : OutputStream() {
+            var written = 0
+            override fun write(value: Int) {
+                count(1)
+                gzip.write(value)
+            }
+            override fun write(bytes: ByteArray, offset: Int, length: Int) {
+                count(length)
+                gzip.write(bytes, offset, length)
+            }
+            private fun count(bytes: Int) {
+                written += bytes
+                if (written > MAX_DECOMPRESSED_TEXT_BYTES) {
+                    throw com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception("LIMIT_EXCEEDED")
+                }
+                work()
+            }
+            override fun close() = gzip.close()
+        }
+        BufferedWriter(OutputStreamWriter(limited, Charsets.UTF_8), JSON_WRITE_BUFFER_CHARS).use { writer ->
+            writer.write("{")
+            if (html != null) {
+                writer.write("\"contentHtml\":")
+                writeFileJsonString(writer, html)
+                writer.write(",")
+            }
+            writer.write("\"contentText\":")
+            writeFileJsonString(writer, text)
+            writer.write("}")
+        }
+    }
+
+    private fun strictReader(input: InputStream): Reader = InputStreamReader(
+        input, Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+    ).buffered()
+
+    private fun writeFileJsonString(writer: Writer, file: File) {
+        writer.write('"'.code)
+        strictReader(file.inputStream()).use { reader ->
+            val buffer = CharArray(JSON_WRITE_BUFFER_CHARS)
+            while (true) {
+                val count = reader.read(buffer)
+                if (count < 0) break
+                for (index in 0 until count) writeEscapedJsonChar(writer, buffer[index])
+            }
+        }
+        writer.write('"'.code)
+    }
+
+    /** Writes decoded fields to separate files. No decoded body string enters the heap. */
+    internal fun decodeFileBody(encoded: File, html: File, text: File, work: () -> Unit = {}): Boolean {
+        PushbackInputStream(encoded.inputStream().buffered(), 2).use { input ->
+            val first = input.read()
+            val second = input.read()
+            require(second >= 0) { "同步正文为空" }
+            input.unread(second)
+            input.unread(first)
+            val stream = if (first == 0x1f && second == 0x8b) GZIPInputStream(input) else input
+            strictReader(LimitedInputStream(stream, MAX_DECOMPRESSED_TEXT_BYTES, work)).use { reader ->
+                var hasHtml = false
+                visitBody(BodyJsonCursor(reader, bounded = true)) { name, cursor ->
+                    val target = if (name == "contentHtml") html else text
+                    val present = target.outputStream().use { output ->
+                        BufferedWriter(OutputStreamWriter(output,
+                            Charsets.UTF_8.newEncoder().onMalformedInput(CodingErrorAction.REPORT))).use {
+                            cursor.copyNullableString(it)
+                        }
+                    }
+                    if (name == "contentHtml") hasHtml = present
+                }
+                return hasHtml
+            }
+        }
+    }
+
     private fun decodeBody(bytes: ByteArray): Pair<String?, String> {
         val input = runCatching<InputStream> {
             GZIPInputStream(ByteArrayInputStream(bytes))
@@ -451,9 +546,16 @@ object ArticleSyncBody {
     }
 
     private fun decodeBodyJson(reader: Reader): Pair<String?, String> {
-        val cursor = BodyJsonCursor(reader)
         var contentHtml: String? = null
         var contentText = ""
+        visitBody(BodyJsonCursor(reader)) { name, cursor ->
+            if (name == "contentHtml") contentHtml = cursor.readNullableString()
+            else contentText = cursor.readNullableString().orEmpty()
+        }
+        return contentHtml to contentText
+    }
+
+    private inline fun visitBody(cursor: BodyJsonCursor, field: (String, BodyJsonCursor) -> Unit) {
         var hasContentHtml = false
         var hasContentText = false
         cursor.expectObjectStart()
@@ -472,12 +574,12 @@ object ArticleSyncBody {
             when (name) {
                 "contentHtml" -> {
                     require(!hasContentHtml) { "同步正文JSON字段重复：contentHtml" }
-                    contentHtml = cursor.readNullableString()
+                    field(name, cursor)
                     hasContentHtml = true
                 }
                 "contentText" -> {
                     require(!hasContentText) { "同步正文JSON字段重复：contentText" }
-                    contentText = cursor.readNullableString().orEmpty()
+                    field(name, cursor)
                     hasContentText = true
                 }
                 else -> cursor.skipValue()
@@ -486,11 +588,11 @@ object ArticleSyncBody {
         }
         require(hasContentText) { "同步正文JSON缺少字段：contentText" }
         require(cursor.nextNonWhitespace() == -1) { "同步正文JSON包含尾随数据" }
-        return contentHtml to contentText
     }
 
     private class BodyJsonCursor(
-        private val reader: Reader
+        private val reader: Reader,
+        private val bounded: Boolean = false
     ) {
         private var buffered: Int = NO_BUFFER
 
@@ -506,7 +608,13 @@ object ArticleSyncBody {
         fun readName(): String {
             val marker = nextNonWhitespace()
             require(marker == '"'.code) { "同步正文JSON字段格式错误" }
-            return readStringBody()
+            if (!bounded) return readStringBody()
+            val name = StringBuilder()
+            var long = false
+            consumeString { char ->
+                if (name.length < 12) name.append(char) else long = true
+            }
+            return if (long) "" else name.toString()
         }
 
         fun readNullableString(): String? {
@@ -520,10 +628,22 @@ object ArticleSyncBody {
             }
         }
 
+        fun copyNullableString(writer: Writer): Boolean = when (nextNonWhitespace()) {
+            '"'.code -> {
+                consumeString { writer.write(it.code) }
+                true
+            }
+            'n'.code -> {
+                expectLiteral("ull")
+                false
+            }
+            else -> throw IllegalArgumentException("同步正文JSON值格式错误")
+        }
+
         fun skipValue(depth: Int = 0) {
             require(depth <= MAX_JSON_NESTING_DEPTH) { "同步正文JSON嵌套过深" }
             when (val marker = nextNonWhitespace()) {
-                '"'.code -> readStringBody()
+                '"'.code -> if (bounded) consumeString {} else { readStringBody(); Unit }
                 '{'.code -> skipObject(depth + 1)
                 '['.code -> skipArray(depth + 1)
                 't'.code -> expectLiteral("rue")
@@ -545,17 +665,20 @@ object ArticleSyncBody {
             buffered = char
         }
 
-        private fun readStringBody(): String {
-            val builder = StringBuilder()
+        private fun readStringBody(): String = buildString {
+            consumeString { append(it) }
+        }
+
+        private inline fun consumeString(consume: (Char) -> Unit) {
             while (true) {
                 val char = read()
                 require(char != -1) { "同步正文JSON字符串未结束" }
                 when (char.toChar()) {
-                    '"' -> return builder.toString()
-                    '\\' -> builder.append(readEscapedChar())
+                    '"' -> return
+                    '\\' -> consume(readEscapedChar())
                     else -> {
                         require(char >= 0x20) { "同步正文JSON字符串包含控制字符" }
-                        builder.append(char.toChar())
+                        consume(char.toChar())
                     }
                 }
             }
@@ -605,6 +728,7 @@ object ArticleSyncBody {
                         unread(char)
                         break
                     }
+                    require(!bounded || length < 128) { "同步正文JSON数字过长" }
                     append(char.toChar())
                 }
             }
@@ -662,7 +786,8 @@ object ArticleSyncBody {
 
     private class LimitedInputStream(
         private val upstream: InputStream,
-        private val maxBytes: Int
+        private val maxBytes: Int,
+        private val work: () -> Unit = {}
     ) : InputStream() {
         private var totalBytes = 0
 
@@ -683,6 +808,7 @@ object ArticleSyncBody {
             if (totalBytes > maxBytes) {
                 throw IllegalArgumentException("解压内容过大")
             }
+            work()
         }
     }
 

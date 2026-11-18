@@ -244,7 +244,7 @@ internal class LibraryRecoveryContext(
     private val checkOwner: () -> Unit,
     private val event: (String, Map<String, Any>) -> Unit,
     private val reconnecting: () -> Unit,
-    private val waitForBluetooth: suspend () -> Unit = {}
+    private val waitBeforeRetry: suspend () -> Unit = {}
 ) : AbstractCoroutineContextElement(Key) {
     companion object Key : CoroutineContext.Key<LibraryRecoveryContext>
     val bodies = LibraryBodyTransferStats()
@@ -353,9 +353,7 @@ internal class LibraryRecoveryContext(
                 }
                 event("library.reconnect.search.failed", mapOf("consecutiveFailures" to policy.consecutiveFailures + 1))
                 policy.searchFailed()
-                if (failure is LibrarySearchFailure && failure.cause is LibraryBluetoothUnavailable) {
-                    waitForBluetooth()
-                }
+                waitBeforeRetry()
                 reportReconnect = true
             }
         }

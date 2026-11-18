@@ -2139,7 +2139,8 @@ class PhoneBluetoothSyncClient(
             val recovery = sdpProbeFailureRecovery(
                 elapsedMs = elapsedMs,
                 timedOut = throwable is TimeoutCancellationException,
-                completedFastFailureRetries = fastFailureRetries
+                completedFastFailureRetries = fastFailureRetries,
+                stageElapsedMs = (throwable as? ProbeTransportException)?.stageElapsedMs
             )
             debugLog.appendEvent(
                 event = "bt.library.probe.direct.failed",
@@ -2147,6 +2148,7 @@ class PhoneBluetoothSyncClient(
                 fields = failureFields(throwable) + mapOf(
                     "attempt" to attempt,
                     "elapsedMs" to elapsedMs,
+                    "stageElapsedMs" to (throwable as? ProbeTransportException)?.stageElapsedMs,
                     "recoveryDelayMs" to recovery.delayMs,
                     "retrySameCandidate" to recovery.retrySameCandidate
                 ),
@@ -2173,6 +2175,7 @@ class PhoneBluetoothSyncClient(
         var cancellationHandle: DisposableHandle? = null
         var transferred: PhoneSyncSession? = null
         var stage = "connect"
+        var stageStartedAt = SystemClock.elapsedRealtime()
         return try {
             val created = probeSocketFactory(device)
             socket = created
@@ -2180,6 +2183,7 @@ class PhoneBluetoothSyncClient(
             currentCoroutineContext().ensureActive()
             connectLogged(created, sessionId, device)
             stage = "read"
+            stageStartedAt = SystemClock.elapsedRealtime()
             val request = BluetoothSyncProtocol.withPersistentSessionRequest(
                 withSyncObjectsProbe(LibrarySyncPayload.buildProbeRequest(deviceId))
             ).apply {
@@ -2230,7 +2234,8 @@ class PhoneBluetoothSyncClient(
             }
         } catch (failure: Throwable) {
             currentCoroutineContext().ensureActive()
-            if (failure is IOException) throw ProbeTransportException(stage, failure)
+            if (failure is java.net.ProtocolException) throw failure
+            if (failure is IOException) throw ProbeTransportException(stage, failure, elapsedSince(stageStartedAt))
             throw failure
         } finally {
             cancellationHandle?.dispose()
@@ -3528,9 +3533,12 @@ class PhoneBluetoothSyncClient(
         internal fun sdpProbeFailureRecovery(
             elapsedMs: Long,
             timedOut: Boolean,
-            completedFastFailureRetries: Int
+            completedFastFailureRetries: Int,
+            stageElapsedMs: Long? = null
         ): SdpProbeFailureRecovery {
-            val fastFailure = !timedOut && elapsedMs < SDP_BUSY_FAST_FAILURE_THRESHOLD_MS
+            // A probe can connect slowly and then see an immediate EOF. Give
+            // the peer one chance to rearm, just as after a fast connect failure.
+            val fastFailure = !timedOut && (stageElapsedMs ?: elapsedMs) < SDP_BUSY_FAST_FAILURE_THRESHOLD_MS
             return SdpProbeFailureRecovery(
                 delayMs = if (timedOut || fastFailure) {
                     SDP_STACK_DRAIN_DELAY_MS

@@ -4,7 +4,6 @@ import android.content.Context
 import androidx.room.Room
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2RoomStore
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2NoteAssetBusiness
-import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryNoProgressLimit
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryRecoveryContext
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibrarySyncMode
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryTransferRecovery
@@ -178,17 +177,17 @@ class B2RoomIntegrationTest {
         val recovery = LibraryRecoveryContext(policy, LibrarySyncMode.MERGE, { true },
             { error("must reopen the binary route") }, {}, {}, { _, _ -> }, {})
         var binaryOpens = 0
-        val failure = runCatching {
-            recovery.handoff("noteAssetsB2", openReady = {
-                binaryOpens++
-                check(binaryOpens == 1) { "must stop at the third empty Ready interval" }
-                policy.observe(4)
-            }, connected = { true }) {
+        val result = recovery.handoff("noteAssetsB2", openReady = {
+            policy.observe(4L + binaryOpens++)
+        }, connected = { true }) {
+            if (binaryOpens == 1) {
                 now += 20_000L
                 throw LibraryTransportFailure(4, EOFException())
             }
-        }.exceptionOrNull()
-        assertTrue(failure is LibraryNoProgressLimit)
-        assertEquals(1, binaryOpens)
+            "COMPLETE"
+        }
+        assertEquals("COMPLETE", result)
+        assertEquals(2, binaryOpens)
+        assertEquals(3, policy.consecutiveNoProgress)
     }
 }

@@ -29,7 +29,11 @@ internal class WatchLibraryClearException(
     cause: Throwable? = null
 ) : IllegalStateException(errorCode, cause)
 
-internal class ProbeTransportException(val stage: String, cause: Throwable) : IOException("probe_$stage", cause)
+internal class ProbeTransportException(
+    val stage: String,
+    cause: Throwable,
+    val stageElapsedMs: Long? = null
+) : IOException("probe_$stage", cause)
 
 internal fun watchLibraryClearFailure(failure: Throwable, phase: WatchLibraryClearPhase): WatchLibraryClearException {
     val chain = generateSequence(failure) { it.cause }.toList()

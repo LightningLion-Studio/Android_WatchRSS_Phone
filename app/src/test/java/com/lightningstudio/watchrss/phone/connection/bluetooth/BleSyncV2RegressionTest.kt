@@ -631,8 +631,30 @@ class BleSyncV2RegressionTest {
         manager.reconnectSession = { _, _ -> opens++; throw IOException("bt socket closed, read return: -1") }
         val first = session(bindingResponse(), ok("syncAccount"), ok("syncLibrary", "cursor"), emptyManifest())
         val failure = runCatching { manager.syncAll(device, reusableSession = first, onProgress = { if (it.stage == PhoneBluetoothSyncStage.RECONNECTING) attempts += it.stage }) }.exceptionOrNull()
-        assertTrue(waits.isEmpty()); assertEquals(List(3) { PhoneBluetoothSyncStage.RECONNECTING }, attempts); assertEquals(3, opens)
+        assertEquals(listOf(8_000L, 8_000L), waits); assertEquals(List(3) { PhoneBluetoothSyncStage.RECONNECTING }, attempts); assertEquals(3, opens)
         assertTrue(failure is LibraryReconnectLimit); assertEquals(0, cloudCalls); assertTrue(transportClosed)
+    }
+
+    @Test fun adapterAndPeerSettlingDoNotExhaustSearchesBeforeResumingTheLibraryStage() = runBlocking<Unit> {
+        val first = session(bindingResponse(), ok("syncAccount"), ok("syncLibrary", "cursor"))
+        val waits = mutableListOf<Long>()
+        var searches = 0
+        manager.reconnectDelay = { waits += it }
+        manager.recoveryProbeDevices = { _, _ ->
+            when (++searches) {
+                1 -> throw LibraryBluetoothUnavailable()
+                2 -> throw IOException("previous peer session still closing")
+            }
+            val replacement = session(bindingResponse(), ok("syncAccount"), ok("syncLibrary", "cursor"),
+                emptyManifest(), emptyComplete(), noteResponse(null),
+                ok("syncLlmTokenUsage").put("records", JSONArray()), finishResponse())
+            PhoneBluetoothWatchProbeBatch(
+                listOf(PhoneBluetoothWatchProbeResult(device, true)), replacement)
+        }
+        manager.syncAll(device, reusableSession = first)
+        assertEquals(listOf(8_000L, 8_000L), waits)
+        assertEquals(3, searches)
+        assertTrue(payloads(1).any { it.optString("action") == "syncLibrary" && it.optString("phase") == "cursor" })
     }
 
     @Test fun explicitPeerRejectionNeverReconnectsEvenWhenMessageMentionsSocketClosed() = runBlocking<Unit> {

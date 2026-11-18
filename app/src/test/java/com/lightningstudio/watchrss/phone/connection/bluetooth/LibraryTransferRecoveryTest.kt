@@ -17,23 +17,31 @@ class LibraryTransferRecoveryTest {
         assertEquals(0,writes)
     }
     @Test fun retryLimitsShowTheirChineseReasonWithoutImplementationClassNames() {
-        for (failure in listOf(LibraryReconnectLimit(), LibraryDisconnectLimit(), LibraryNoProgressLimit())) {
+        for (failure in listOf(LibraryReconnectLimit(), LibraryDisconnectLimit())) {
             assertEquals(failure.message, com.lightningstudio.watchrss.phone.viewmodel.syncFailureMessage(failure, "信息传输中"))
         }
     }
-    @Test fun sixSecondEofLoopStopsAfterThirdReadyWithoutProgress()=runBlocking {
-        var now=0L;var generation=1L;var searches=0;var attempts=0
-        val p=LibraryTransferRecovery{now};p.observe(generation)
-        val c=LibraryRecoveryContext(p,LibrarySyncMode.MERGE,{true},
-            {searches++;generation++;p.observe(generation)},{},{},{_,_->},{})
-        val failure=runCatching { c.unit("articles") {
-            attempts++;now+=6000;throw LibraryTransportFailure(generation,EOFException())
-        }}.exceptionOrNull()
-        assertTrue(failure is LibraryNoProgressLimit)
-        assertEquals("同步多次中断且没有进展，请稍后重试",failure!!.message)
-        assertEquals(3,searches);assertEquals(4,attempts);assertEquals(3,p.consecutiveNoProgress)
-        assertEquals(0,p.consecutiveFailures)
+    @Test fun fourSpacedDisconnectsResumeTheSameUnitEvenWithoutConfirmedProgress() = runBlocking {
+        var now = 0L
+        var generation = 1L
+        var searches = 0
+        var attempts = 0
+        val policy = LibraryTransferRecovery { now }.apply { observe(generation) }
+        val recovery = LibraryRecoveryContext(policy, LibrarySyncMode.MERGE, { true },
+            { searches++; policy.observe(++generation) }, {}, {}, { _, _ -> }, {})
+        val result = recovery.unit("articles") {
+            if (++attempts < 5) {
+                now += 6_000
+                throw LibraryTransportFailure(generation, EOFException())
+            }
+            "resumed"
+        }
+        assertEquals("resumed", result)
+        assertEquals(4, searches)
+        assertEquals(3, policy.consecutiveNoProgress)
+        assertEquals(0, policy.consecutiveFailures)
     }
+
     @Test fun newConfirmedProgressResetsStreakButDuplicateReceiptAndReadyDoNot() {
         var now=0L;val p=LibraryTransferRecovery{now}
         val c=LibraryRecoveryContext(p,LibrarySyncMode.MERGE,{true},{},{},{},{_,_->},{})
@@ -66,6 +74,36 @@ class LibraryTransferRecoveryTest {
         now+=6000;p.disconnected(5);assertEquals(2,p.consecutiveNoProgress)
         p.observe(6);p.ready(true);c.confirmArticleBatch(setOf(article.articleId));assertEquals(0,p.consecutiveNoProgress)
     }
+    @Test fun manifestFirstByteCanWaitBeyondTheOrdinaryIdleDeadlineOnBothRoutes() {
+        for (ip in listOf(false, true)) {
+            val closed = java.util.concurrent.CountDownLatch(1)
+            val source = object : InputStream() {
+                var first = true
+                override fun read(): Int {
+                    if (first) {
+                        first = false
+                        if (closed.await(180, java.util.concurrent.TimeUnit.MILLISECONDS)) throw EOFException()
+                        return 0x12
+                    }
+                    closed.await()
+                    throw EOFException()
+                }
+            }
+            val raw = if (ip) com.lightningstudio.watchrss.phone.connection.ip.IpReadDeadline(
+                source, 60, disconnect = { closed.countDown() }) else source
+            val guard = LibraryIoGuard(1, { true }, { closed.countDown() }, timeoutMs = 60)
+            val input = guard.input(raw, firstByteTimeoutMs = 1_000)
+            fun verify() {
+                assertEquals(0x12, input.read())
+                val failure = runCatching { input.read() }.exceptionOrNull()
+                assertTrue("$failure", (failure as? LibraryTransportFailure)?.cause is SocketTimeoutException)
+            }
+            if (raw is com.lightningstudio.watchrss.phone.connection.ip.IpReadDeadline) {
+                raw.withBudget(1_000, progressMs = 120, read = ::verify)
+            } else verify()
+        }
+    }
+
     @Test fun activeSlowFrameAndWritesCanExceedIdleDeadlineWithoutTimingOut() {
         val frame=JSONObject().put("data","x".repeat(4096));val encoded=ByteArrayOutputStream().also{BluetoothSyncProtocol.writeFrame(it,frame)}.toByteArray()
         var offset=0;var closed=false
@@ -163,17 +201,16 @@ class LibraryTransferRecoveryTest {
             context.confirmedProgress("b2:noteAsset", "receive|image|version|0")
             assertEquals(0, policy.consecutiveNoProgress)
         }
-        val failure = runCatching {
-            context.handoff("noteAssetsB2", openReady = open, connected = { true }) {
-                context.confirmedProgress("b2:noteAsset", "receive|image|version|0")
+        val reopened = context.handoff("noteAssetsB2", openReady = open, connected = { true }) {
+            context.confirmedProgress("b2:noteAsset", "receive|image|version|0")
+            if (opens < 6) {
                 now += 6_000
                 throw LibraryTransportFailure(generation, EOFException())
             }
-        }.exceptionOrNull()
-        assertTrue(failure is LibraryNoProgressLimit)
-        // First binary disconnect preserves the progress from before the replan.
-        // Three subsequent Ready intervals with only replays leave the streak at 3.
-        assertEquals(5, opens)
+            true
+        }
+        assertTrue(reopened)
+        assertEquals(6, opens)
         assertEquals(3, policy.consecutiveNoProgress)
     }
 

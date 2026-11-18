@@ -258,6 +258,13 @@ internal class PhoneSyncSession internal constructor(
         val inputStream: InputStream = io.input(rawInput)
         val outputStream: OutputStream = io.output(rawOutput)
 
+        fun <T> readManifest(initialTimeoutMs: Long, read: (InputStream) -> T): T {
+            val input = io.input(rawInput, firstByteTimeoutMs = initialTimeoutMs)
+            val ip = rawInput as? IpReadDeadline
+            return if (ip == null) read(input)
+            else ip.withBudget(initialTimeoutMs, progressMs = 30_000L) { read(input) }
+        }
+
         // B2 owns its wire deadlines. Tag only physical I/O errors here so local
         // file/database failures cannot enter the library reconnection loop.
         private fun <T> binaryIo(operation: () -> T): T {
@@ -509,7 +516,7 @@ class PhoneBluetoothSyncClient(
         val bluetoothManager = context.getSystemService(BluetoothManager::class.java)
             ?: error("此设备没有蓝牙适配器")
         val adapter = bluetoothManager.adapter ?: error("此设备没有蓝牙适配器")
-        require(adapter.isEnabled) { "蓝牙未开启" }
+        if (!adapter.isEnabled) throw LibraryBluetoothUnavailable()
 
         val bondedDevices = adapter.bondedDevices.orEmpty()
         logAdapterSnapshot(sessionId, adapter, bondedDevices)
@@ -670,7 +677,7 @@ class PhoneBluetoothSyncClient(
         val adapter = context.getSystemService(BluetoothManager::class.java)
             ?.adapter
             ?: error("此设备没有蓝牙适配器")
-        require(adapter.isEnabled) { "蓝牙未开启" }
+        if (!adapter.isEnabled) throw LibraryBluetoothUnavailable()
         val bluetoothDevice = selectBondedWatchDevice(
             devices = adapter.bondedDevices.orEmpty(),
             deviceAddress = device.bluetoothAddress.ifBlank {
@@ -1658,8 +1665,7 @@ class PhoneBluetoothSyncClient(
             val manifestResponse = readManifestFrames(
                 ipSession.inputStream,
                 sessionId,
-                tracker,
-                initialIdleTimeoutMs=if(request.optBoolean("fullSnapshot",true))90_000 else 20_000
+                tracker
             )
             // Every manifest frame was validated before any success ACK or callback.
             val supportsArticleBatches = manifestResponse.optBoolean("supportsArticleBatches", false)
@@ -1830,7 +1836,9 @@ class PhoneBluetoothSyncClient(
             )
         }
         report(PhoneBluetoothSyncStage.TRANSFERRING, 25)
-        val manifestResponse = readManifestFrames(transport.inputStream, sessionId, tracker,initialIdleTimeoutMs=if(request.optBoolean("fullSnapshot",true))90_000 else 20_000)
+        val manifestResponse = transport.readManifest(MANIFEST_PREPARATION_TIMEOUT_MS) {
+            readManifestFramesBody(it, sessionId, tracker)
+        }
         // Every manifest frame was validated before any success ACK or callback.
         val supportsArticleBatches = manifestResponse.optBoolean("supportsArticleBatches", false)
         val articleRequests = buildArticleRequests(manifestResponse, supportsArticleBatches)
@@ -2131,7 +2139,8 @@ class PhoneBluetoothSyncClient(
             val recovery = sdpProbeFailureRecovery(
                 elapsedMs = elapsedMs,
                 timedOut = throwable is TimeoutCancellationException,
-                completedFastFailureRetries = fastFailureRetries
+                completedFastFailureRetries = fastFailureRetries,
+                stageElapsedMs = (throwable as? ProbeTransportException)?.stageElapsedMs
             )
             debugLog.appendEvent(
                 event = "bt.library.probe.direct.failed",
@@ -2139,6 +2148,7 @@ class PhoneBluetoothSyncClient(
                 fields = failureFields(throwable) + mapOf(
                     "attempt" to attempt,
                     "elapsedMs" to elapsedMs,
+                    "stageElapsedMs" to (throwable as? ProbeTransportException)?.stageElapsedMs,
                     "recoveryDelayMs" to recovery.delayMs,
                     "retrySameCandidate" to recovery.retrySameCandidate
                 ),
@@ -2165,6 +2175,7 @@ class PhoneBluetoothSyncClient(
         var cancellationHandle: DisposableHandle? = null
         var transferred: PhoneSyncSession? = null
         var stage = "connect"
+        var stageStartedAt = SystemClock.elapsedRealtime()
         return try {
             val created = probeSocketFactory(device)
             socket = created
@@ -2172,6 +2183,7 @@ class PhoneBluetoothSyncClient(
             currentCoroutineContext().ensureActive()
             connectLogged(created, sessionId, device)
             stage = "read"
+            stageStartedAt = SystemClock.elapsedRealtime()
             val request = BluetoothSyncProtocol.withPersistentSessionRequest(
                 withSyncObjectsProbe(LibrarySyncPayload.buildProbeRequest(deviceId))
             ).apply {
@@ -2222,7 +2234,8 @@ class PhoneBluetoothSyncClient(
             }
         } catch (failure: Throwable) {
             currentCoroutineContext().ensureActive()
-            if (failure is IOException) throw ProbeTransportException(stage, failure)
+            if (failure is java.net.ProtocolException) throw failure
+            if (failure is IOException) throw ProbeTransportException(stage, failure, elapsedSince(stageStartedAt))
             throw failure
         } finally {
             cancellationHandle?.dispose()
@@ -2500,12 +2513,13 @@ class PhoneBluetoothSyncClient(
     private fun readManifestFrames(
         inputStream: InputStream,
         sessionId: String,
-        byteTracker: ByteTransferTracker,
-        initialIdleTimeoutMs:Long=90_000
+        byteTracker: ByteTransferTracker
     ): JSONObject {
         val guarded=inputStream as? IpReadDeadline
         return if(guarded==null)readManifestFramesBody(inputStream,sessionId,byteTracker)
-        else guarded.withBudget(initialIdleTimeoutMs){readManifestFramesBody(inputStream,sessionId,byteTracker)}
+        else guarded.withBudget(MANIFEST_PREPARATION_TIMEOUT_MS, progressMs = 30_000L) {
+            readManifestFramesBody(inputStream, sessionId, byteTracker)
+        }
     }
     private fun readManifestFramesBody(
         inputStream: InputStream,
@@ -3478,6 +3492,9 @@ class PhoneBluetoothSyncClient(
         SystemClock.elapsedRealtime() - startedAt
 
     companion object {
+        // A delta request can force the watch to rebuild a cold, full inventory.
+        // The first byte has a generation deadline; subsequent bytes use the usual idle timeout.
+        private const val MANIFEST_PREPARATION_TIMEOUT_MS = 180_000L
         private const val PREVIEW_MIN_FRAME_INTERVAL_MS = 32L
         private const val TAG = "WatchRSS_BtSyncClient"
         private const val PHASE_COMPLETE = "complete"
@@ -3516,9 +3533,12 @@ class PhoneBluetoothSyncClient(
         internal fun sdpProbeFailureRecovery(
             elapsedMs: Long,
             timedOut: Boolean,
-            completedFastFailureRetries: Int
+            completedFastFailureRetries: Int,
+            stageElapsedMs: Long? = null
         ): SdpProbeFailureRecovery {
-            val fastFailure = !timedOut && elapsedMs < SDP_BUSY_FAST_FAILURE_THRESHOLD_MS
+            // A probe can connect slowly and then see an immediate EOF. Give
+            // the peer one chance to rearm, just as after a fast connect failure.
+            val fastFailure = !timedOut && (stageElapsedMs ?: elapsedMs) < SDP_BUSY_FAST_FAILURE_THRESHOLD_MS
             return SdpProbeFailureRecovery(
                 delayMs = if (timedOut || fastFailure) {
                     SDP_STACK_DRAIN_DELAY_MS

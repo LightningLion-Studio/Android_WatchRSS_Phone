@@ -31,6 +31,25 @@ class SdpProbeFailureRecoveryTest {
     }
 
     @Test
+    fun `immediate probe EOF gets one retry after a slow RFCOMM connect`() {
+        val first = PhoneBluetoothSyncClient.sdpProbeFailureRecovery(
+            elapsedMs = 1_531L,
+            timedOut = false,
+            completedFastFailureRetries = 0,
+            stageElapsedMs = 236L
+        )
+        assertEquals(1_500L, first.delayMs)
+        assertTrue(first.retrySameCandidate)
+        val second = PhoneBluetoothSyncClient.sdpProbeFailureRecovery(
+            elapsedMs = 1_531L,
+            timedOut = false,
+            completedFastFailureRetries = 1,
+            stageElapsedMs = 236L
+        )
+        assertFalse(second.retrySameCandidate)
+    }
+
+    @Test
     fun `local timeout uses the longer stack drain delay`() {
         val recovery = PhoneBluetoothSyncClient.sdpProbeFailureRecovery(
             elapsedMs = 7_000L,

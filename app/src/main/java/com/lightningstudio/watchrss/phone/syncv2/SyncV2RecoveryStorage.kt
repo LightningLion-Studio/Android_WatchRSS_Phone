@@ -69,8 +69,9 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                 listOf("asset/$name" to fileSource(File(files,"notes/assets/$name"),c.getString(1),maxBytes))
             }
             "note"->{
-                val texts=mutableListOf(value.getString("markdown"),value.getString("baseMarkdown"));val conflicts=value.getJSONObject("noteConflicts").getJSONArray("records")
-                for(i in 0 until conflicts.length())for(field in listOf("baseMarkdown","localMarkdown","remoteMarkdown"))texts.add(conflicts.getJSONObject(i).getString(field))
+                val texts=mutableListOf(value.getString("markdown"),value.getString("baseMarkdown"));SyncV2NoteConflicts.declared(value)?.getJSONArray("records")?.let { conflicts ->
+                    for(i in 0 until conflicts.length())for(field in listOf("baseMarkdown","localMarkdown","remoteMarkdown"))texts.add(conflicts.getJSONObject(i).getString(field))
+                }
                 val keys=texts.flatMap{com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.referencedStorageKeys(it)}.toSortedSet()
                 keys.map {name->
                     val hashes=db.query("SELECT sha256 FROM note_assets WHERE storageKey=?",arrayOf(name)).use{c->buildSet{while(c.moveToNext())add(c.getString(0))}}

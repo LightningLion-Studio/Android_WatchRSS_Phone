@@ -396,13 +396,18 @@ internal class SyncV2Projection(
             val meta=open("meta",c[3] as ByteArray);val state=open("candidate-state",c[4] as ByteArray)
             if(state.has("projectionRemoved"))SyncV2Codec.fail("unsupported_feature")
             // Revalidate persisted candidates before reusing a pre-upgrade sealed cache.
-            SyncV2Business.join(c[1] as String,meta,state)
+            val projected=SyncV2Business.join(c[1] as String,meta,state)
+            val undeclared=c[1]=="note" && !projected.has("noteConflicts")
+            // A candidate with no conflict channel can only reuse the authenticated wire row.
+            if(undeclared &&
+                (remote==null || SyncV2Codec.canonical(remote.getJSONObject("meta"))!=SyncV2Codec.canonical(meta) ||
+                    SyncV2Codec.canonical(remote.getJSONObject("state"))!=SyncV2Codec.canonical(state)))SyncV2Codec.fail("merge_unavailable")
             val prior=db.controlQuery("SELECT body FROM syncv2_wire_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())open("wire-candidate",it.getBlob(0))else null}
             val bodyBinding=SyncV2Codec.hash(JSONObject().put("kind",c[1]).put("logicalId",c[2])
                 .put("bodyHash",meta.getJSONObject("payload").opt("contentHash")?:meta.getJSONObject("payload").opt("fingerprint")?:JSONObject.NULL)
                 .put("assetVersion",if(c[1]=="asset")state.getJSONObject("payload").opt("updatedAt")?:JSONObject.NULL else JSONObject.NULL)
                 .put("deleted",state.getJSONObject("payload").optBoolean("deleted",false)))
-            val value=if(prior!=null && prior.getString("sourceHash")==hash && prior.getLong("keyVersion")==keyVersion)prior else if(remote!=null && SyncV2Codec.canonical(remote.getJSONObject("meta"))==SyncV2Codec.canonical(meta) && SyncV2Codec.canonical(remote.getJSONObject("state"))==SyncV2Codec.canonical(state)) {
+            val value=if(!undeclared && prior!=null && prior.getString("sourceHash")==hash && prior.getLong("keyVersion")==keyVersion)prior else if(remote!=null && SyncV2Codec.canonical(remote.getJSONObject("meta"))==SyncV2Codec.canonical(meta) && SyncV2Codec.canonical(remote.getJSONObject("state"))==SyncV2Codec.canonical(state)) {
                 val row=remote.getJSONObject("row")
                 JSONObject().put("sourceHash",hash).put("bodyBinding",bodyBinding).put("keyVersion",keyVersion).put("row",row)
                     .put("meta",SyncV2Codec.b64(currentObjects[row.getString("metaOid")]?:SyncV2Codec.fail("closure_incomplete")))
@@ -1286,8 +1291,11 @@ internal class SyncV2Projection(
         db.execSQL("INSERT OR IGNORE INTO syncv2_identity_map VALUES(?,?,?,?,?,2)",arrayOf(library,identity.repoId,d.kind,id2,entity))
         fault("after-map")
         // Historical importedAt is not proof of first personal-library addition. Preserve it encrypted.
-        val objects=SyncV2Business.split(d.kind,id2,entity,value2,null)
         val installed=db.controlQuery("SELECT body FROM syncv2_p5_bindings WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())accountOpen("binding",it.getBlob(0))else null}
+        val objects=if(d.kind=="note" && !value2.has("noteConflicts") && installed!=null &&
+            SyncV2Codec.canonical(installed.getJSONObject("value"))==SyncV2Codec.canonical(value2))
+            SyncV2Business.PairObjects(installed.getJSONObject("meta"),installed.getJSONObject("state"))
+        else SyncV2Business.project(d.kind,id2,entity,value2,null)
         installed?.optJSONObject("meta")?.optString("addedAtSource")?.takeIf{it in setOf("original","unknown")}?.let{objects.meta.put("addedAtSource",it)}
         val provenance=provenance(d,if(d.kind=="note"&&id2!=id)"" else id)
         val sourceHash=SyncV2Codec.hash(JSONObject().put("meta",objects.meta).put("state",objects.state).put("provenance",provenance))

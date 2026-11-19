@@ -53,8 +53,8 @@ android {
         applicationId = "com.lightningstudio.watchrss.phone"
         minSdk = 30
         targetSdk = 36
-        versionCode = 116
-        versionName = "1.4.0-8"
+        versionCode = 118
+        versionName = "1.4.0-10"
         // P1 is local-only and opt-in. This flag never enables cloud/apply/GC.
         buildConfigField("boolean", "SYNC_V2", providers.gradleProperty("syncV2").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_CONTENT", providers.gradleProperty("syncObjectsV2Content").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
@@ -98,6 +98,10 @@ android {
             "WATCHRSS_OPPO_PUSH_APP_SECRET",
             productionSetting("WATCHRSS_OPPO_PUSH_APP_SECRET").asBuildConfigString()
         )
+
+        for (setting in listOf("WATCHRSS_WECHAT_OPEN_APP_ID", "WATCHRSS_WECHAT_MINI_PROGRAM_ORIGINAL_ID")) {
+            buildConfigField("String", setting, productionSetting(setting).asBuildConfigString())
+        }
 
         testInstrumentationRunner = "com.karumi.shot.ShotTestRunner"
 
@@ -171,6 +175,7 @@ android {
 }
 
 dependencies {
+    implementation("com.tencent.mm.opensdk:wechat-sdk-android:6.8.40")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.lifecycle.runtime.ktx)

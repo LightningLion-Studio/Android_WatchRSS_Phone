@@ -22,6 +22,9 @@ import com.lightningstudio.watchrss.phone.data.reader.ReaderTypographyRole
 import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundPreparationException
 import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundTranscoder
 import android.os.SystemClock
+import com.lightningstudio.watchrss.phone.BuildConfig
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Routing
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
@@ -131,7 +134,9 @@ class PhoneBluetoothSyncManager(
     private val domainScope:()->String={""},
     private val accountDomainWitness:suspend(String)->String?={null},
     private val prepareAccountDomain:suspend(String,String?)->Unit={_,_->},
-    private val acknowledgeAccountDomain:suspend(String,String)->Unit={_,_->}
+    private val acknowledgeAccountDomain:suspend(String,String)->Unit={_,_->},
+    private val b2Database: () -> com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase? = { null },
+    private val b2AccountScope: () -> String = { "" }
 ) {
     private val syncDiagnostics=com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnostics.open(context.applicationContext)
     /** P1 optional local projection copy; null leaves the legacy path byte-for-byte unchanged. */
@@ -237,7 +242,7 @@ class PhoneBluetoothSyncManager(
         }
         val probe=session?.takeIf{it.isPersistent}?.bindingProbe
         val result=if(probe!=null)BluetoothSyncExchange(session.device.name,session.device.address,LibrarySyncPayload.buildProbeRequest(deviceId),probe)
-            else exchange(LibrarySyncPayload.buildProbeRequest(deviceId),sessionId="$sessionId-binding",deviceAddress=address,syncSession=session)
+            else exchange(b2Probe(LibrarySyncPayload.buildProbeRequest(deviceId)),sessionId="$sessionId-binding",deviceAddress=address,syncSession=session)
         requireSuccess(result.response)
         check(currentPhoneUserId()?.takeIf { it.isNotBlank() }==owner) { "手机账号已变化，请重新同步" }
         if(owner!=null && !(allowUnboundClear && result.response.optJSONObject("account")?.opt("bound")==false))requireWatchSyncBinding(result.response,owner)
@@ -543,6 +548,11 @@ class PhoneBluetoothSyncManager(
         var bluetoothOnlyRecovery=false
         var booksApplied = 0
         var bookSyncIssues:List<BookSyncIssue> = emptyList()
+        val binaryMerge = BuildConfig.B2_ENABLED && mode == LibrarySyncMode.MERGE
+        var binaryRoute = B2KindRoute.legacy
+        val binaryRecovery = if (binaryMerge) LibraryTransferRecovery(SystemClock::elapsedRealtime, reconnectDelay) {
+            onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.RECONNECTING, 0, reconnectAttempt = it))
+        } else null
         var locallyApplied = false
         val expectedPeerId = reusableSession?.device?.remoteDeviceId.orEmpty().ifBlank { device.remoteDeviceId }
         val targetDevice = (reusableSession?.device ?: device).copy(remoteDeviceId = expectedPeerId)
@@ -572,7 +582,13 @@ class PhoneBluetoothSyncManager(
         }
         suspend fun binding(): BleSyncBindingSnapshot {
             check(currentPhoneUserId()==owner){"手机账号已变化，请重新同步"}
-            return sharedBinding ?: bindingSnapshot(sessionId, effectiveDevice.address, syncSession).also { sharedBinding = it }
+            return sharedBinding ?: bindingSnapshot(sessionId, effectiveDevice.address, syncSession).also { active ->
+                if (!binaryRoute.isEmpty && B2KindRoute.select(active.response,
+                        binaryRoute.hasBinaryAssets, binaryRoute.hasBinaryLibrary, binaryRoute.hasBinaryBooks) != binaryRoute) {
+                    throw B2Exception("CAPABILITY_MISMATCH")
+                }
+                sharedBinding = active
+            }
         }
         val manifestRetry = currentCoroutineContext()[LibraryManifestRetry]
         val recovery = LibrarySyncRecovery(
@@ -636,9 +652,23 @@ class PhoneBluetoothSyncManager(
                 syncSession?.recoveryGate?.tryAcquire()
                 binding()
             }
+            val binaryRuntime = if (binaryRecovery != null) {
+                val active = accountRecovery { binding() }
+                val route = B2KindRoute.select(active.response, includeNoteAssets = true,
+                    libraryReady = b2Database() != null && repository.binaryArticleStorageReady(),
+                    booksReady = b2Database() != null && repository.books?.binaryReady() == true)
+                if (!route.isEmpty && (effectiveDevice.remoteDeviceId.isBlank() ||
+                        active.response.optString("deviceId") != effectiveDevice.remoteDeviceId)) {
+                    throw B2Exception("CAPABILITY_MISMATCH")
+                }
+                val (selected, runtime) = prepareBinaryRoute(route, active.response, effectiveDevice,
+                    binaryRecovery::confirmedProgress)
+                binaryRoute = selected
+                runtime
+            } else null
             accountRecovery {
             val active=binding()
-            if(repository.bleDomains!=null && DomainFastPath.enabled(active.capabilities,syncSession?.isPersistent==true,forceFull,mode)) {
+            if(binaryRoute.isEmpty && repository.bleDomains!=null && DomainFastPath.enabled(active.capabilities,syncSession?.isPersistent==true,forceFull,mode)) {
                 val peer=active.response.getString("deviceId")
                 val scope=domainScope()
                 if(scope.isNotBlank()) {
@@ -657,7 +687,7 @@ class PhoneBluetoothSyncManager(
             }
             accountRecovery {
                 val active = binding()
-                if (active.capabilities.books && repository.books != null && (!skipped("books") || !skipped("bookReading"))) {
+                if (!binaryRoute.hasBinaryBooks && active.capabilities.books && repository.books != null && (!skipped("books") || !skipped("bookReading"))) {
                     reportProgress(onProgress,PhoneBluetoothSyncStage.SYNCING_BOOKS,0)
                     val bookSync = BookBluetoothSync(requireNotNull(repository.books), deviceId, File(appContext.cacheDir, "ble-books")) { request ->
                         val finishingBody=request.optString("phase")=="body" && request.optInt("chunkIndex")+1==request.optInt("chunkCount")
@@ -693,7 +723,7 @@ class PhoneBluetoothSyncManager(
                 }
             }
             // A retry starts a NEW cursor handshake. Never replay an old manifest/body closure.
-            val libraryResult = if(skipped("library")) PhoneBluetoothSyncResult(effectiveDevice.name,effectiveDevice.address,libraryStats=LibrarySyncStats(0,0,0)) else accountRecovery {
+            var libraryResult = if(!binaryRoute.needsLegacyLibrary || skipped("library")) PhoneBluetoothSyncResult(effectiveDevice.name,effectiveDevice.address,libraryStats=LibrarySyncStats(0,0,0)) else accountRecovery {
                 syncLibrary(deviceAddress = effectiveDevice.address, syncSession = syncSession,
                     forceFull = forceFull || mode != LibrarySyncMode.MERGE, mode = mode,
                     onProgress = onProgress, binding = binding(), syncAuxiliary = false,
@@ -701,6 +731,7 @@ class PhoneBluetoothSyncManager(
                     onLibraryManifest = { libraryDeclarations = it },
                     booksPrepared = true,
                     domainWitness = rootWindow,
+                    binaryRoute = binaryRoute,
                     resolveDeleteConflicts = resolveDeleteConflicts).also {
                         completedDomains.add("library")
                     }
@@ -722,7 +753,8 @@ class PhoneBluetoothSyncManager(
                 noteStats = if(skipped("notes")) NoteSyncStats(0,0,0,0) else accountRecovery {
                     reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_NOTES, 0)
                     syncNotes(effectiveDevice.address, sessionId, syncSession, libraryDeclarations?.let { binding().capabilities.withDeclarations(it) } ?: binding().capabilities,
-                        onLocalApplied = ::recordApplied, legacyVersion=binding().response.optInt("version")).also {
+                        onLocalApplied = ::recordApplied, legacyVersion = binding().response.optInt("version"),
+                        syncAssets = B2_NOTE_ASSET !in binaryRoute.send).also {
                             if (it.appliedOnWatch > 0) recovery.confirmedProgress()
                             completedDomains.add("notes")
                         }
@@ -753,6 +785,24 @@ class PhoneBluetoothSyncManager(
                         debugLog.appendEvent("sync.domains.published",sessionId,fields=mapOf("domains" to proofs.keys.joinToString(",")))
                     } else syncSession?.complete("$sessionId-complete")
                 }
+            }
+            binaryRuntime?.let { runtime ->
+                val stage = if (binaryRoute.hasBinaryLibrary) PhoneBluetoothSyncStage.TRANSFERRING
+                    else if (binaryRoute.hasBinaryBooks) PhoneBluetoothSyncStage.SYNCING_BOOKS
+                    else PhoneBluetoothSyncStage.SYNCING_NOTES
+                reportProgress(onProgress, stage, 0)
+                syncSession?.close()
+                syncSession = null
+                val binaryStats = syncBinaryKinds(effectiveDevice, "$sessionId-b2", requireNotNull(binaryRecovery), binaryRoute, runtime)
+                val legacyStats = requireNotNull(libraryResult.libraryStats)
+                libraryResult = libraryResult.copy(libraryStats = LibrarySyncStats(
+                    legacyStats.sent + binaryStats.sent, legacyStats.received + binaryStats.received,
+                    legacyStats.merged + binaryStats.merged, legacyStats.sourcesSent + binaryStats.sourcesSent,
+                    legacyStats.sourcesReceived + binaryStats.sourcesReceived, legacyStats.sourcesMerged + binaryStats.sourcesMerged
+                ))
+                bookSyncIssues = (bookSyncIssues + runtime.bookIssues).distinct()
+                locallyApplied = true
+                reportProgress(onProgress, stage, 100)
             }
             libraryResult.copy(accountSync = accountSync,
                 tokenUsageSyncWarning = tokenUsageSyncWarning, readerSyncWarning = readerSyncWarning, noteStats = noteStats, bookSyncIssues=bookSyncIssues)
@@ -868,6 +918,7 @@ class PhoneBluetoothSyncManager(
         domainWitness:com.lightningstudio.watchrss.phone.data.ble.BleDomainStore.RootWindow?=null,
         onLocalApplied: (Int) -> Unit = {},
         onLibraryManifest: (JSONObject) -> Unit = {},
+        binaryRoute: B2KindRoute = B2KindRoute.legacy,
         resolveDeleteConflicts: suspend (List<PhoneSyncDeleteConflict>) -> Map<String, PhoneSyncConflictResolution> = {
             emptyMap()
         }
@@ -875,8 +926,12 @@ class PhoneBluetoothSyncManager(
         val enclosing = currentCoroutineContext()[AccountDataSession]?.session
         if (enclosing == null || (syncSession != null && enclosing !== syncSession)) return withAccountDataSession(deviceAddress, syncSession) { active ->
             syncLibrary(active.device.address, active, forceFull, mode, onProgress, null, syncAuxiliary, booksPrepared,
-                domainWitness, onLocalApplied, onLibraryManifest, resolveDeleteConflicts)
+                domainWitness, onLocalApplied, onLibraryManifest, binaryRoute, resolveDeleteConflicts)
         }
+        val splitLibrary = binaryRoute.hasBinaryLibrary
+        val legacySendArticles = binaryRoute.sendLegacyArticles
+        val legacyReceiveArticles = binaryRoute.receiveLegacyArticles
+        val legacySendSources = binaryRoute.sendLegacySources
         val sessionId = BluetoothDebugLog.newSessionId("syncLibrary")
         val activeBinding=bindingSnapshot(sessionId,deviceAddress,syncSession,binding)
         val targetAddress = activeBinding.address
@@ -937,23 +992,37 @@ class PhoneBluetoothSyncManager(
                             "手表端版本不支持单向覆盖，请先升级手表端"
                         }
                     }
-                    val preparedWindow = repository.prepareLibrarySyncWindow(
-                        peerDeviceId = peerDeviceId,
-                        peerAppliedLocalSeq = if (forceFull || identityChanged) 0L else remoteCursor.lastRemoteSeqApplied,
-                        excludeRegisteredBooks=activeBinding.capabilities.books
-                    )
-                    val localWindow = if (forceFull || identityChanged || mode != LibrarySyncMode.MERGE) {
-                        preparedWindow.copy(
-                            articleManifest = preparedWindow.fullArticleManifest,
-                            rssSources = repository.getRssSourcesForSync(),
-                            fullSnapshot = true,
-                            fromSeqExclusive = 0L,
-                            fallbackReason = if (mode == LibrarySyncMode.MERGE) "forcedFull" else mode.protocolValue
+                    val window = if (splitLibrary) {
+                        PhoneLibrarySyncWindow(
+                            articleManifest = if (legacySendArticles) repository.getArticleManifestsForSync()
+                                .filterNot { it.articleId in bookChapterIds }.map(identityProjection::manifest) else emptyList(),
+                            fullArticleManifest = emptyList(),
+                            rssSources = if (legacySendSources) repository.getRssSourcesForSync().filterNot {
+                                it.url in bookSources || activeBinding.capabilities.books &&
+                                    it.url == com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.ROOT_SOURCE_URL
+                            } else emptyList(),
+                            fromSeqExclusive = 0L, toSeqInclusive = 0L, peerAckedSeq = 0L,
+                            fullSnapshot = false, fallbackReason = "binarySubset"
                         )
-                    } else preparedWindow
-                    val window=localWindow.copy(articleManifest=localWindow.articleManifest.filterNot{it.articleId in bookChapterIds}.map(identityProjection::manifest),
-                        fullArticleManifest=localWindow.fullArticleManifest.filterNot{it.articleId in bookChapterIds}.map(identityProjection::manifest),
-                        rssSources=localWindow.rssSources.filterNot{it.url in bookSources || (activeBinding.capabilities.books && it.url==com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.ROOT_SOURCE_URL)})
+                    } else {
+                        val preparedWindow = repository.prepareLibrarySyncWindow(
+                            peerDeviceId = peerDeviceId,
+                            peerAppliedLocalSeq = if (forceFull || identityChanged) 0L else remoteCursor.lastRemoteSeqApplied,
+                            excludeRegisteredBooks=activeBinding.capabilities.books
+                        )
+                        val localWindow = if (forceFull || identityChanged || mode != LibrarySyncMode.MERGE) {
+                            preparedWindow.copy(
+                                articleManifest = preparedWindow.fullArticleManifest,
+                                rssSources = repository.getRssSourcesForSync(),
+                                fullSnapshot = true,
+                                fromSeqExclusive = 0L,
+                                fallbackReason = if (mode == LibrarySyncMode.MERGE) "forcedFull" else mode.protocolValue
+                            )
+                        } else preparedWindow
+                        localWindow.copy(articleManifest=localWindow.articleManifest.filterNot{it.articleId in bookChapterIds}.map(identityProjection::manifest),
+                            fullArticleManifest=localWindow.fullArticleManifest.filterNot{it.articleId in bookChapterIds}.map(identityProjection::manifest),
+                            rssSources=localWindow.rssSources.filterNot{it.url in bookSources || (activeBinding.capabilities.books && it.url==com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.ROOT_SOURCE_URL)})
+                    }
                     window.also {
                         syncWindow = window
                         debugLog.appendEvent(
@@ -988,24 +1057,26 @@ class PhoneBluetoothSyncManager(
                             ),
                             cursor = LibrarySyncCursor(
                                 localMaxSeq = localCursor.localMaxSeq,
-                                lastRemoteSeqApplied = localCursor.lastRemoteSeqApplied,
-                                lastLocalSeqAckedByPeer = localCursor.lastLocalSeqAckedByPeer
+                                lastRemoteSeqApplied = if (splitLibrary) 0L else localCursor.lastRemoteSeqApplied,
+                                lastLocalSeqAckedByPeer = if (splitLibrary) 0L else localCursor.lastLocalSeqAckedByPeer
                             ),
                             compactDefaults = compactManifest
                         ).apply {
-                            put("forceFull", forceFull || mode != LibrarySyncMode.MERGE)
+                            put("forceFull", splitLibrary || forceFull || mode != LibrarySyncMode.MERGE)
                             put("libraryMode", mode.protocolValue)
                         }
                     }
                 },
                 buildArticleRequests = { manifestResponse, supportsArticleBatches ->
                     requireSuccess(manifestResponse)
+                    if (splitLibrary && LibrarySyncPayload.parseChangeSequence(manifestResponse) !=
+                        LibraryChangeSequence(0L, 0L, false, "binarySubset")) throw B2Exception("CAPABILITY_MISMATCH")
                     val remoteProtocolVersion = manifestResponse.optInt("version", 0)
                     require(remoteProtocolVersion >= LibrarySyncPayload.MIN_SUPPORTED_WATCH_PROTOCOL_VERSION) {
                         "手表资料库同步协议为 v$remoteProtocolVersion，至少需要 v${LibrarySyncPayload.MIN_SUPPORTED_WATCH_PROTOCOL_VERSION}；请先升级手表端"
                     }
                     val window = syncWindow ?: error("同步窗口尚未准备")
-                    val remoteManifest = LibrarySyncPayload.parseArticleManifest(manifestResponse)
+                    val remoteManifest = if (legacyReceiveArticles) LibrarySyncPayload.parseArticleManifest(manifestResponse) else emptyList()
                     if(canonicalIds && remoteManifest.isNotEmpty()) {
                         val migrations=repository.acceptBluetoothAliases(remoteManifest)
                         // Only proven migrations amend the projection; no second whole-database read.
@@ -1016,7 +1087,7 @@ class PhoneBluetoothSyncManager(
                         manifestResponse.optInt("version") > LibrarySyncPayload.LEGACY_PROTOCOL_VERSION
                     val supportsMetadataOnlyArticles = LibrarySyncPayload.supportsMetadataOnlyArticles(manifestResponse)
                     reportProgress(onProgress, PhoneBluetoothSyncStage.TRANSFERRING, 28)
-                    val deleteConflicts = if (mode == LibrarySyncMode.MERGE) {
+                    val deleteConflicts = if (legacySendArticles && legacyReceiveArticles && mode == LibrarySyncMode.MERGE) {
                         repository.findDeleteConflicts(remoteManifest.map(identityProjection::localManifest))
                     } else {
                         emptyList()
@@ -1032,14 +1103,14 @@ class PhoneBluetoothSyncManager(
                     )
                     conflictMergeResolutions = conflictPlan.mergeResolutions
                     if (supportsChunkedBodies) {
-                        val watchRequests = LibrarySyncPayload.parseBodyRequests(manifestResponse)
+                        val watchRequests = if (legacySendArticles) LibrarySyncPayload.parseBodyRequests(manifestResponse) else emptyList()
                         // The sync window was captured before the remote manifest round trip. Refresh
                         // the relevant local rows so a body deleted in the meantime cannot be treated
                         // as reusable and incorrectly turn a full-body request into metadata-only.
                         val remoteIds=remoteManifest.map { identityProjection.local(it.articleId) }
                         val currentLocalManifest = (if(activeBinding.capabilities.books && canonicalIds)repository.bluetoothManifestsForRequests(remoteIds,domainWitness)
                             else repository.getArticleManifestsForSync(remoteIds)).map(identityProjection::manifest)
-                        val phoneRequests = if (mode == LibrarySyncMode.PHONE_TO_WATCH_REPLACE) {
+                        val phoneRequests = if (!legacyReceiveArticles || mode == LibrarySyncMode.PHONE_TO_WATCH_REPLACE) {
                             emptyList()
                         } else mergeBodyRequests(
                             defaultRequests = LibrarySyncPayload.buildBodyRequestsForRemoteArticles(
@@ -1079,6 +1150,7 @@ class PhoneBluetoothSyncManager(
                             articleAliases = identityProjection.outgoingAliases(sentArticles)
                         )
                     }
+                    if (splitLibrary) throw B2Exception("CAPABILITY_MISMATCH")
                     if (conflictPlan.forcedRemoteRequests.isNotEmpty()) {
                         error("手表端版本不支持本次删除冲突处理，请更新手表端后重试")
                     }
@@ -1121,7 +1193,7 @@ class PhoneBluetoothSyncManager(
                     if ((exchange.response.optJSONObject("stats")?.optInt("applied") ?: 0) > 0) {
                         currentCoroutineContext()[LibrarySyncRecovery]?.confirmedProgress()
                     }
-                    recordLegacyProjection?.invoke(activePeerDeviceId.ifBlank{exchange.deviceAddress},exchange.manifestResponse.optInt("version"),"library:$sessionId:$remoteSeqApplied",JSONObject().put("manifest",exchange.manifestResponse).put("response",exchange.response))
+                    if (!splitLibrary) recordLegacyProjection?.invoke(activePeerDeviceId.ifBlank{exchange.deviceAddress},exchange.manifestResponse.optInt("version"),"library:$sessionId:$remoteSeqApplied",JSONObject().put("manifest",exchange.manifestResponse).put("response",exchange.response))
                     val chunkedResponse = exchange.response.optInt("version") > LibrarySyncPayload.LEGACY_PROTOCOL_VERSION &&
                         exchange.response.optJSONArray("articles") != null &&
                         (exchange.response.optJSONArray("articles")?.let { array ->
@@ -1130,7 +1202,7 @@ class PhoneBluetoothSyncManager(
                             }
                         } == true)
                     val phoneIsTarget = mode != LibrarySyncMode.PHONE_TO_WATCH_REPLACE
-                    val received = if (!phoneIsTarget) {
+                    val received = if (!legacyReceiveArticles || !phoneIsTarget) {
                         receivedArticles = 0
                         0
                     } else if (chunkedResponse) {
@@ -1229,18 +1301,20 @@ class PhoneBluetoothSyncManager(
             onLibraryManifest(exchange.manifestResponse)
             val window = syncWindow ?: error("同步窗口尚未准备")
             // Only a successful library response ACK may publish peer cursors/echo proof.
-            repository.rememberBluetoothReceipts(activePeerDeviceId,remoteFullManifest.map(identityProjection::localManifest))
-            repository.markLibrarySyncSuccess(
-                peerDeviceId = activePeerDeviceId.ifBlank {
-                    exchange.deviceAddress.ifBlank { exchange.deviceName }
-                },
-                localSeqToInclusive = if (mode == LibrarySyncMode.WATCH_TO_PHONE_REPLACE) 0L else window.toSeqInclusive,
-                remoteSeqToInclusive = if (mode == LibrarySyncMode.PHONE_TO_WATCH_REPLACE) 0L else remoteSeqApplied,
-                remoteProtocolVersion = exchange.manifestResponse.optInt("version"),
-                fullSnapshot = window.fullSnapshot,
-                canonicalIds = canonicalIds,
-                projectionDefinition = window.projectionDefinition
-            )
+            if (!splitLibrary) {
+                repository.rememberBluetoothReceipts(activePeerDeviceId,remoteFullManifest.map(identityProjection::localManifest))
+                repository.markLibrarySyncSuccess(
+                    peerDeviceId = activePeerDeviceId.ifBlank {
+                        exchange.deviceAddress.ifBlank { exchange.deviceName }
+                    },
+                    localSeqToInclusive = if (mode == LibrarySyncMode.WATCH_TO_PHONE_REPLACE) 0L else window.toSeqInclusive,
+                    remoteSeqToInclusive = if (mode == LibrarySyncMode.PHONE_TO_WATCH_REPLACE) 0L else remoteSeqApplied,
+                    remoteProtocolVersion = exchange.manifestResponse.optInt("version"),
+                    fullSnapshot = window.fullSnapshot,
+                    canonicalIds = canonicalIds,
+                    projectionDefinition = window.projectionDefinition
+                )
+            }
             debugLog.appendEvent(
                 event = "sync.library.complete",
                 sessionId = sessionId,
@@ -1337,18 +1411,19 @@ class PhoneBluetoothSyncManager(
         syncSession: PhoneSyncSession? = null,
         capabilities: BleSyncCapabilities = BleSyncCapabilities(),
         onLocalApplied: (Int) -> Unit = {},
-        legacyVersion:Int=14
+        legacyVersion:Int=14,
+        syncAssets: Boolean = true
     ): NoteSyncStats = withContext(Dispatchers.IO) {
         val enclosing = currentCoroutineContext()[AccountDataSession]?.session
         if (enclosing == null || (syncSession != null && enclosing !== syncSession)) return@withContext withAccountDataSession(deviceAddress, syncSession) { active ->
-            syncNotes(active.device.address, parentSessionId, active, capabilities, onLocalApplied, legacyVersion)
+            syncNotes(active.device.address, parentSessionId, active, capabilities, onLocalApplied, legacyVersion, syncAssets)
         }
         val sessionId="$parentSessionId-notes"
         val localNotes=noteRepository.allNotes()
-        val localAssets=noteAssetInventory(localNotes)
+        val localAssets = if (syncAssets) noteAssetInventory(localNotes) else emptyList()
         var remoteAssets=emptyMap<String,NoteAssetInventoryEntry>()
         val changed=if(capabilities.noteManifest) {
-            val inventory=exchange(NoteSyncPayload.inventory(deviceId,localNotes,localAssets.takeIf { capabilities.noteAssets }),
+            val inventory=exchange(NoteSyncPayload.inventory(deviceId,localNotes,localAssets.takeIf { capabilities.noteAssets && syncAssets }),
                 sessionId="$sessionId-manifest",deviceAddress=deviceAddress,syncSession=syncSession).response
             requireSuccess(inventory)
             require(inventory.optString("action")==NoteSyncPayload.ACTION_SYNC_NOTES && inventory.optString("phase")=="manifest") { "手表笔记清单响应无效" }
@@ -1356,7 +1431,7 @@ class PhoneBluetoothSyncManager(
             NoteSyncPayload.differingNotes(localNotes,inventory.getJSONArray("noteManifest"))
         } else localNotes
         val request=if(capabilities.noteManifest)NoteSyncPayload.delta(deviceId,localNotes,changed)
-            else NoteSyncPayload.manifest(deviceId,localNotes).apply { if(capabilities.noteAssets)put("assetManifest",org.json.JSONArray().apply { localAssets.forEach { put(it.json()) } }) }
+            else NoteSyncPayload.manifest(deviceId,localNotes).apply { if(capabilities.noteAssets && syncAssets)put("assetManifest",org.json.JSONArray().apply { localAssets.forEach { put(it.json()) } }) }
         val response=exchange(request,sessionId=sessionId,deviceAddress=deviceAddress,syncSession=syncSession).response
         requireSuccess(response)
         require(response.optString("action")==NoteSyncPayload.ACTION_SYNC_NOTES) { "手表不支持备忘录同步，请升级手表端" }
@@ -1372,10 +1447,166 @@ class PhoneBluetoothSyncManager(
             if(previous!=noteRepository.note(note.noteId))applied++
         }
         onLocalApplied(applied)
-        syncNoteAssets(localAssets,remoteAssets,deviceAddress,sessionId,syncSession)
+        if (syncAssets) syncNoteAssets(localAssets,remoteAssets,deviceAddress,sessionId,syncSession)
         NoteSyncStats(changed.size,incoming.size,response.optInt("applied"),conflicts,applied).also { stats ->
             debugLog.appendEvent("sync.notes.complete",sessionId,fields=mapOf("sent" to stats.sent,"received" to stats.received,
                 "appliedOnWatch" to stats.appliedOnWatch,"appliedOnPhone" to applied,"assetChunksSkipped" to localAssets.count { remoteAssets[it.storageKey]==it }))
+        }
+    }
+
+    private suspend fun binaryAssetInventory(route: B2KindRoute): List<NoteAssetInventoryEntry> {
+        if (B2_NOTE_ASSET !in route.send) return emptyList()
+        return try {
+            noteAssetInventory(noteRepository.allNotes())
+        } catch (_: java.io.IOException) {
+            throw B2Exception("LOCAL_IO")
+        }
+    }
+
+    private fun binaryAuthorization(): Pair<String, () -> Unit> {
+        val owner = currentPhoneUserId() ?: throw B2Exception("ACCOUNT_REQUIRED")
+        val scope = b2AccountScope().takeIf { it.isNotBlank() } ?: throw B2Exception("ACCOUNT_REQUIRED")
+        return scope to {
+            if (currentPhoneUserId() != owner || b2AccountScope() != scope || !canSyncAccount()) {
+                throw B2Exception("AUTH_REVOKED")
+            }
+        }
+    }
+
+    internal suspend fun prepareBinaryRoute(
+        requested: B2KindRoute,
+        probe: JSONObject,
+        device: PhoneBluetoothWatchDevice,
+        progress: (String) -> Unit = {}
+    ): Pair<B2KindRoute, B2KindSync?> {
+        if (requested.isEmpty) return B2KindRoute.legacy to null
+        val database = b2Database() ?: throw B2Exception("LOCAL_IO")
+        val capabilities = BleSyncCapabilities.read(probe)
+        // Check readiness while the library is still read-only. In particular, v1 alias repair can
+        // hydrate both old bodies and must run only once the legacy library route has been chosen.
+        val candidate = if (requested.hasBinaryLibrary && repository.binaryLibraryNeedsLegacyPreparation(capabilities.books)) {
+            requested.withoutLibrary()
+        } else requested
+        for (route in listOf(candidate, candidate.withoutLibrary(), candidate.assetsOnly()).distinct()) {
+            if (route.isEmpty) break
+            val runtime = createBinaryRuntime(database, device, capabilities, route, progress)
+            try {
+                runtime.prepare(probe, binaryAssetInventory(route))
+                return route to runtime
+            } catch (failure: B2Exception) {
+                if (failure.code != "LIMIT_EXCEEDED" || route.hasBinaryBooks && !route.hasBinaryLibrary) throw failure
+                // v14's library cursor covers the whole library. Keep the affected article/source
+                // scope on v1 and retry independent note assets before sending anything on either.
+            }
+        }
+        return B2KindRoute.legacy to null
+    }
+
+    private suspend fun createBinaryRuntime(
+        db: com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase,
+        device: PhoneBluetoothWatchDevice,
+        capabilities: BleSyncCapabilities,
+        route: B2KindRoute,
+        progress: (String) -> Unit
+    ): B2KindSync {
+        val (scope, authorize) = binaryAuthorization()
+        val assets = File(appContext.filesDir, "notes/assets")
+        val store = B2RoomStore(db)
+        val identity = if (route.hasBinaryLibrary) repository.bluetoothIdentityProjection(capabilities.canonicalRssIds, readOnly = true)
+            else BluetoothArticleIdentityProjection(emptyList(), emptyMap(), false)
+        val business = B2InheritedKinds(db, repository, identity,
+            B2NoteAssetBusiness(store, scope, assets, authorize), route.receive, capabilities.books || route.hasBinaryBooks, authorize,
+            canonicalIds = capabilities.canonicalRssIds,
+            books = if (route.hasBinaryBooks) B2BookBusiness(store, scope, requireNotNull(repository.books), authorize) else null)
+        val bootCount = try {
+            android.provider.Settings.Global.getInt(appContext.contentResolver, android.provider.Settings.Global.BOOT_COUNT, -1)
+        } catch (_: SecurityException) {
+            -1
+        }
+        return B2KindSync(store, File(appContext.filesDir, "library-binary-v2"), assets, scope, deviceId,
+            device.remoteDeviceId, authorize, progress, route, business,
+            retentionGeneration = bootCount.takeIf { it >= 0 }?.let { "boot-$it" },
+            onBookIssue = { issue ->
+                debugLog.appendEvent("sync.book.isolated", fields = mapOf(
+                    "kind" to "book", "bookIdPrefix" to issue.bookIdPrefix, "code" to issue.code))
+            })
+    }
+
+    private suspend fun syncBinaryKinds(
+        device: PhoneBluetoothWatchDevice,
+        parent: String,
+        recovery: LibraryTransferRecovery,
+        route: B2KindRoute,
+        runtime: B2KindSync
+    ): LibrarySyncStats {
+        val (_, authorize) = binaryAuthorization()
+        var session: PhoneSyncSession? = null
+        var probe: JSONObject? = null
+
+        suspend fun openReady() {
+            authorize()
+            session?.close()
+            val opened = try {
+                val open = reconnectSession
+                (if (open != null) open(device, "$parent-open")
+                else client.openPersistentSession(device, deviceId, "$parent-open", allowIpUpgrade = false))
+                    ?: throw LibraryBinaryOpenFailure()
+            } catch (failure: TimeoutCancellationException) {
+                currentCoroutineContext().ensureActive()
+                throw LibraryBinaryOpenFailure(failure)
+            } catch (failure: IOException) {
+                if (failure is LibraryBinaryOpenFailure || failure is LibraryBluetoothUnavailable ||
+                    failure is java.net.ProtocolException || failure is java.nio.file.FileSystemException) throw failure
+                throw LibraryBinaryOpenFailure(failure)
+            }
+            session = opened
+            try {
+                if (opened.device.remoteDeviceId != device.remoteDeviceId) throw B2Exception("CAPABILITY_MISMATCH")
+                val transport = requireNotNull(opened.transport)
+                if (!opened.isPersistent || opened.legacyFallback || transport.owner.startsWith("ip:")) {
+                    throw B2Exception("CAPABILITY_MISMATCH")
+                }
+                opened.recoveryGate.tryAcquire()
+                transport.classifyBinaryIo = true
+                recovery.observe(transport.generation)
+                val binding = bindingSnapshot(parent, opened.device.address, opened)
+                if (B2Routing.classify(binding.response, B2Routing.Ready(true, true, true)) != B2Routing.Peer.B2 ||
+                    B2KindRoute.select(binding.response, route.hasBinaryAssets, route.hasBinaryLibrary, route.hasBinaryBooks) != route) {
+                    throw B2Exception("CAPABILITY_MISMATCH")
+                }
+                syncAccount(opened.device, opened, false, binding)
+                authorize()
+                if (opened.transport !== transport || transport.isClosed) {
+                    throw LibraryTransportFailure(transport.generation, java.io.EOFException("B2 account connection closed"))
+                }
+                probe = binding.response
+            } catch (failure: Throwable) {
+                opened.close()
+                throw failure
+            }
+        }
+
+        try {
+            while (true) {
+                try {
+                    return recovery.handoff(::openReady) {
+                        val active = requireNotNull(session)
+                        val transport = requireNotNull(active.transport)
+                        val inventory = binaryAssetInventory(route)
+                        active.client.withBinaryTransport(active, transport.generation) { input, output, close ->
+                            runtime.run(input, output, requireNotNull(probe), inventory, close)
+                        }
+                    }
+                } catch (failure: B2Exception) {
+                    if (failure.code !in setOf("NOT_FOUND", "EXPIRED", "SOURCE_CHANGED", "PLAN_RETIRED", "SEQUENCE_EXHAUSTED")) {
+                        throw failure
+                    }
+                    session?.close()
+                    if (failure.code !in setOf("PLAN_RETIRED", "SEQUENCE_EXHAUSTED")) runtime.resetPlan()
+                }
+            }
+        } finally {
+            session?.close()
         }
     }
 
@@ -1961,6 +2192,7 @@ class PhoneBluetoothSyncManager(
             exchange(request, timeoutMs, sessionId, active.device.address, active)
         }
         val activeSession = syncSession ?: currentCoroutineContext()[AccountDataSession]?.session
+        val binaryTransport = activeSession?.transport?.takeIf { it.classifyBinaryIo }
         return try {
             withTimeout(timeoutMs) {
                 withContext(Dispatchers.IO) {
@@ -1972,6 +2204,11 @@ class PhoneBluetoothSyncManager(
                 }
             }
         } catch (exception: TimeoutCancellationException) {
+            if (binaryTransport != null) {
+                currentCoroutineContext().ensureActive()
+                throw LibraryTransportFailure(binaryTransport.generation,
+                    java.net.SocketTimeoutException("B2 account exchange timed out").apply { initCause(exception) })
+            }
             debugLog.appendEvent(
                 event = "sync.exchange.timeout",
                 sessionId = sessionId,

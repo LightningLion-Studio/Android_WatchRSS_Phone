@@ -43,6 +43,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.Closeable
+import java.io.EOFException
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -228,13 +229,50 @@ internal class PhoneSyncSession internal constructor(
         internal set
 
     internal class Transport(
-        val inputStream: InputStream,
-        val outputStream: OutputStream,
+        inputStream: InputStream,
+        outputStream: OutputStream,
         val owner: String,
         val closeOnLegacyFallback: Boolean,
         private val closeTransport: () -> Unit
     ) : Closeable {
+        private val rawInput = inputStream
+        private val rawOutput = outputStream
+        var classifyBinaryIo = false
+        val inputStream: InputStream get() = if (classifyBinaryIo) binaryInputStream() else rawInput
+        val outputStream: OutputStream get() = if (classifyBinaryIo) binaryOutputStream() else rawOutput
+        val generation: Long = nextGeneration.incrementAndGet()
         @Volatile private var closed = false
+
+        private fun <T> binaryIo(operation: () -> T): T = try {
+            operation()
+        } catch (failure: IOException) {
+            if (failure is java.net.ProtocolException) throw failure
+            throw LibraryTransportFailure(generation, failure)
+        }
+
+        internal fun binaryInputStream(): InputStream = object : InputStream() {
+            override fun read(): Int = binaryIo {
+                rawInput.read().also { if (it < 0) throw EOFException("B2 connection closed") }
+            }
+
+            override fun read(bytes: ByteArray, offset: Int, length: Int): Int = binaryIo {
+                rawInput.read(bytes, offset, length).also {
+                    if (length > 0 && it < 0) throw EOFException("B2 connection closed")
+                }
+            }
+        }
+
+        internal fun binaryOutputStream(): OutputStream = object : OutputStream() {
+            override fun write(value: Int) = binaryIo { rawOutput.write(value) }
+            override fun write(bytes: ByteArray, offset: Int, length: Int) =
+                binaryIo { rawOutput.write(bytes, offset, length) }
+            override fun flush() = binaryIo { rawOutput.flush() }
+        }
+
+        companion object {
+            private val nextGeneration = java.util.concurrent.atomic.AtomicLong()
+        }
+
 
         val isClosed: Boolean
             get() = closed
@@ -330,14 +368,24 @@ internal class PhoneSyncSession internal constructor(
     }
 
     @Synchronized
+    internal fun detachCancellation() {
+        cancellationBindings.forEach { it.dispose() }
+        cancellationBindings.clear()
+    }
+
+    @Synchronized
     override fun close() {
         if (closed) return
         closed = true
-        cancellationBindings.forEach { it.dispose() }
-        cancellationBindings.clear()
+        detachCancellation()
         try { transport?.close() } finally { transport = null }
     }
 }
+
+internal fun b2Probe(request: JSONObject): JSONObject =
+    com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Routing.probe(
+        request, com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED
+    )
 
 class PhoneBluetoothSyncClient(
     private val context: Context,
@@ -348,7 +396,8 @@ class PhoneBluetoothSyncClient(
     private val capabilitiesByAddress = mutableMapOf<String, PhoneWatchCapabilities>()
     private val connectionMutex = Mutex()
 
-    private fun withSyncObjectsProbe(request:JSONObject):JSONObject {
+    private fun withSyncObjectsProbe(original:JSONObject):JSONObject {
+        val request = b2Probe(original)
         if(!com.lightningstudio.watchrss.phone.BuildConfig.SYNC_OBJECTS_V2_LOCAL_OBJECTS)return request
         val capability=syncObjectsCapability?.invoke()?:return request
         if(capability.opt("supportsSyncObjectsV2")!=true)return request
@@ -372,6 +421,29 @@ class PhoneBluetoothSyncClient(
             }
         }
     }
+    /** Explicit B2 handoff. The same raw streams retain trailing switch bytes.
+     * This connection is closed after B2; it never returns to the legacy exchange loop. */
+    internal suspend fun <T> withBinaryTransport(session: PhoneSyncSession, generation: Long,
+        block: suspend (InputStream, OutputStream, () -> Unit) -> T): T = withContext(Dispatchers.IO) {
+        check(com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED)
+        connectionMutex.withLock {
+            val transport = session.transport
+                ?: throw LibraryTransportFailure(generation, EOFException("B2 connection closed"))
+            if (transport.isClosed) throw LibraryTransportFailure(transport.generation, EOFException("B2 connection closed"))
+            check(transport.generation == generation && session.isPersistent && !session.legacyFallback &&
+                !transport.owner.startsWith("ip:"))
+            session.detachCancellation()
+            try {
+                currentCoroutineContext().ensureActive()
+                block(transport.binaryInputStream(), transport.binaryOutputStream(), session::close)
+            } catch (failure: com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2NetworkTimeout) {
+                throw LibraryTransportFailure(transport.generation, failure)
+            } finally {
+                session.close()
+            }
+        }
+    }
+
     internal var probeSocketFactory: (BluetoothDevice) -> BluetoothSocket = {
         it.createRfcommSocketToServiceRecord(BluetoothSyncProtocol.SERVICE_UUID)
     }

@@ -1,0 +1,99 @@
+{
+  "format": "lb2-fixed-vectors-r3",
+  "capability": {
+    "version": 2,
+    "profile": "merge-b2",
+    "kinds": [
+      {
+        "kind": "rssSource",
+        "schemaVersion": 1,
+        "send": true,
+        "receive": true
+      }
+    ],
+    "chunkSizes": [
+      65536
+    ],
+    "limits": {
+      "maxObjectBytes": 16777216,
+      "maxInFlightObjects": 4,
+      "maxFrameBytes": 131084,
+      "maxManifestPageBytes": 131084,
+      "maxManifestPageEntries": 16,
+      "maxMetadataBytes": 16384,
+      "maxPlanObjects": 4096,
+      "maxManifestBytes": 16777216,
+      "maxRangesPerPage": 128,
+      "maxResultsPerPage": 16,
+      "maxStagingBytes": 134217728,
+      "maxJournalBytes": 67108864,
+      "maxActiveJobs": 2,
+      "maxInFlightChunks": 8,
+      "maxInFlightBytes": 524288,
+      "maxControlHeaderBytes": 131072,
+      "maxPackageBytes": 536870912
+    }
+  },
+  "capabilityDigest": "125cd2a2ca73200d4ca0896dac256789f66817e36971f62ceffa655cd372e1d3",
+  "selectionDigest": "3f9670e6d22769b6c8eced4ff0be93a403179f792ef630e9dd602c15383d8088",
+  "limitsOrder": [
+    "maxObjectBytes",
+    "maxInFlightObjects",
+    "maxFrameBytes",
+    "maxManifestPageBytes",
+    "maxManifestPageEntries",
+    "maxMetadataBytes",
+    "maxPlanObjects",
+    "maxManifestBytes",
+    "maxRangesPerPage",
+    "maxResultsPerPage",
+    "maxStagingBytes",
+    "maxJournalBytes",
+    "maxActiveJobs",
+    "maxInFlightChunks",
+    "maxInFlightBytes",
+    "maxControlHeaderBytes",
+    "maxPackageBytes"
+  ],
+  "sourceProjectionSha256": "97afd43fe8f031446a6d0c57ad747e585c485b6ee329fb83746bc73f121b70a9",
+  "dataHex": "0000005f4c4256320200000000000050000000010000000000000000000000010000000000000001000000000000000300112233445566778899aabbccddeeffeb5136ead643582076f1010ed1e24830cb0408ea8ecf9489aff14967fa5a58da616263",
+  "ackHex": "0000003c4c4256320300000000000030000000010000000000000000000000010000000000000001000000010000000000000000000000010100000000000000",
+  "requestDigest": "eb5136ead643582076f1010ed1e24830cb0408ea8ecf9489aff14967fa5a58da",
+  "peerFixturesSha256": "798a778c3a9879cb7b785201a81ef075bcb14fed3308fab523cfaed284f78a70",
+  "s2Capability": {
+    "version": 2,
+    "profile": "merge-b2",
+    "kinds": [
+      {
+        "kind": "rssSource",
+        "schemaVersion": 1,
+        "send": true,
+        "receive": true
+      }
+    ],
+    "chunkSizes": [
+      65536
+    ],
+    "limits": {
+      "maxObjectBytes": 16777216,
+      "maxInFlightObjects": 4,
+      "maxFrameBytes": 131084,
+      "maxManifestPageBytes": 131084,
+      "maxManifestPageEntries": 16,
+      "maxMetadataBytes": 16384,
+      "maxPlanObjects": 4096,
+      "maxManifestBytes": 16777216,
+      "maxRangesPerPage": 128,
+      "maxResultsPerPage": 16,
+      "maxStagingBytes": 134217728,
+      "maxJournalBytes": 67108864,
+      "maxActiveJobs": 2,
+      "maxInFlightChunks": 1,
+      "maxInFlightBytes": 65536,
+      "maxControlHeaderBytes": 131072,
+      "maxPackageBytes": 536870912
+    }
+  },
+  "s2CapabilityDigest": "0c1eb2358c10202c551616763a75842daee9dc534d2f9577231145a4e04856b5",
+  "s2SelectionDigest": "8922ff25aba59530a18a7fe143c94c8c3c8ffd0e6466d60746af8098a44403dc"
+}

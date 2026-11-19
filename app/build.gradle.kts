@@ -56,6 +56,8 @@ android {
         versionCode = 119
         versionName = "1.4.0-11"
         // P1 is local-only and opt-in. This flag never enables cloud/apply/GC.
+        // Local opt-in. Release and debug default to the legacy protocol.
+        buildConfigField("boolean", "B2_ENABLED", providers.gradleProperty("b2Enabled").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("boolean", "SYNC_V2", providers.gradleProperty("syncV2").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_CONTENT", providers.gradleProperty("syncObjectsV2Content").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_CLOUD_INDEX", providers.gradleProperty("syncObjectsV2CloudIndex").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")

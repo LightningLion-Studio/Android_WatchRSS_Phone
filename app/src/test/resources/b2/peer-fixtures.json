@@ -1,0 +1,1320 @@
+{
+  "format": "lb2-peer-fixtures-r3",
+  "provenance": "Synthetic source-derived projections; not released APK captures. Ready is local state, not wire.",
+  "fingerprintKeys": [
+    "supportsManifestBatches",
+    "supportsReaderPresets",
+    "supportsReaderAssets",
+    "supportsResourceChunkAck",
+    "supportsReaderPresetPreview",
+    "supportsPersistentSession",
+    "supportsTransferByteProgress"
+  ],
+  "sourcePins": [
+    {
+      "repo": "PodJS_WatchRSS",
+      "tag": "v2.0.0-2",
+      "commit": "3668dbb56692856d24b05f3ca1e3e33f3ece008e",
+      "files": [
+        {
+          "path": "src/sync/protocol.ts",
+          "sha256": "2310d60b8fe94d7b0c39d70bceeda3717f92c0949c6c336148708827a1e29238"
+        },
+        {
+          "path": "src/sync/session.ts",
+          "sha256": "69a0074217a5e4969617d11fa4d08f953cd8852ba7e0cf03b291fe4aacd87470"
+        },
+        {
+          "path": "src/sync/application-actions.ts",
+          "sha256": "9415f78e6876195deb005ff4219d466ab467904936a1448635a3dadf6ca267c2"
+        }
+      ]
+    },
+    {
+      "repo": "PodJS_WatchRSS",
+      "tag": "v2.0.1-1",
+      "commit": "782485f478e1aba4e5ea05400955f2cbe3f5a1ff",
+      "files": [
+        {
+          "path": "src/sync/protocol.ts",
+          "sha256": "2310d60b8fe94d7b0c39d70bceeda3717f92c0949c6c336148708827a1e29238"
+        },
+        {
+          "path": "src/sync/session.ts",
+          "sha256": "69a0074217a5e4969617d11fa4d08f953cd8852ba7e0cf03b291fe4aacd87470"
+        },
+        {
+          "path": "src/sync/application-actions.ts",
+          "sha256": "9415f78e6876195deb005ff4219d466ab467904936a1448635a3dadf6ca267c2"
+        }
+      ]
+    },
+    {
+      "repo": "PodJS_WatchRSS",
+      "tag": "v2.0.1-2",
+      "commit": "c93c0706b16a09d0d468fe8e9ea972ec60092ea2",
+      "files": [
+        {
+          "path": "src/sync/protocol.ts",
+          "sha256": "2310d60b8fe94d7b0c39d70bceeda3717f92c0949c6c336148708827a1e29238"
+        },
+        {
+          "path": "src/sync/session.ts",
+          "sha256": "69a0074217a5e4969617d11fa4d08f953cd8852ba7e0cf03b291fe4aacd87470"
+        },
+        {
+          "path": "src/sync/application-actions.ts",
+          "sha256": "9415f78e6876195deb005ff4219d466ab467904936a1448635a3dadf6ca267c2"
+        }
+      ]
+    },
+    {
+      "repo": "Android_WatchRSS",
+      "tag": "v1.3.3-5",
+      "commit": "bb2c8e7b288d8572032bc20bbf07897cc8badcc9",
+      "files": [
+        {
+          "path": "app/src/main/java/com/lightningstudio/watchrss/phoneconnection/bluetooth/LibrarySyncPayload.kt",
+          "sha256": "053511453ce67cdcaf93054ac1b74ee1178b62d4b48b7bf43e20fd69068720a6"
+        },
+        {
+          "path": "app/src/main/java/com/lightningstudio/watchrss/phoneconnection/bluetooth/WatchBluetoothSyncServer.kt",
+          "sha256": "0b6275001ee06702baafe134c5e579a57aa4ebef241e0c4a3cd8c7270e4f7720"
+        }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "name": "compose-source",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "supportsAccountDataSpaces": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "COMPOSE_V14"
+    },
+    {
+      "name": "podjs-source-v2.0.0-2",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "PODJS_V1"
+    },
+    {
+      "name": "podjs-source-v2.0.1-1",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "PODJS_V1"
+    },
+    {
+      "name": "podjs-source-v2.0.1-2",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "PODJS_V1"
+    },
+    {
+      "name": "new-b2",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "libraryPeer": {
+          "implementation": "podjs",
+          "appVersion": "2.1.0-1"
+        },
+        "libraryBinary": {
+          "version": 2,
+          "profile": "merge-b2",
+          "kinds": [
+            {
+              "kind": "rssSource",
+              "schemaVersion": 1,
+              "send": true,
+              "receive": true
+            }
+          ],
+          "chunkSizes": [
+            65536
+          ],
+          "limits": {
+            "maxObjectBytes": 16777216,
+            "maxInFlightObjects": 4,
+            "maxFrameBytes": 131084,
+            "maxManifestPageBytes": 131084,
+            "maxManifestPageEntries": 16,
+            "maxMetadataBytes": 16384,
+            "maxPlanObjects": 4096,
+            "maxManifestBytes": 16777216,
+            "maxRangesPerPage": 128,
+            "maxResultsPerPage": 16,
+            "maxStagingBytes": 134217728,
+            "maxJournalBytes": 67108864,
+            "maxActiveJobs": 2,
+            "maxInFlightChunks": 8,
+            "maxInFlightBytes": 524288,
+            "maxControlHeaderBytes": 131072,
+            "maxPackageBytes": 536870912
+          }
+        }
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "B2"
+    },
+    {
+      "name": "compose-dynamic",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "other-synthetic",
+        "sentAt": 987654,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "supportsAccountDataSpaces": true,
+        "account": {
+          "synthetic": true
+        },
+        "accountMatchesRequest": false,
+        "watchCapabilities": {
+          "dynamic": []
+        },
+        "ipUpgradeAccepted": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "COMPOSE_V14"
+    },
+    {
+      "name": "compose-known-extension",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "supportsAccountDataSpaces": true,
+        "supportsAutomaticAccountSync": true,
+        "supportsTokenUsageCursor": false
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "COMPOSE_V14"
+    },
+    {
+      "name": "ready-identityVerified-pending",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "supportsAccountDataSpaces": true
+      },
+      "ready": {
+        "identityVerified": false,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "WAIT_READY"
+    },
+    {
+      "name": "ready-accountConfirmed-pending",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "supportsAccountDataSpaces": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": false,
+        "legacyAcksDrained": true
+      },
+      "expected": "WAIT_READY"
+    },
+    {
+      "name": "ready-legacyAcksDrained-pending",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "supportsAccountDataSpaces": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": false
+      },
+      "expected": "WAIT_READY"
+    },
+    {
+      "name": "new-ready-pending",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "libraryPeer": {
+          "implementation": "podjs",
+          "appVersion": "2.1.0-1"
+        },
+        "libraryBinary": {
+          "version": 2,
+          "profile": "merge-b2",
+          "kinds": [
+            {
+              "kind": "rssSource",
+              "schemaVersion": 1,
+              "send": true,
+              "receive": true
+            }
+          ],
+          "chunkSizes": [
+            65536
+          ],
+          "limits": {
+            "maxObjectBytes": 16777216,
+            "maxInFlightObjects": 4,
+            "maxFrameBytes": 131084,
+            "maxManifestPageBytes": 131084,
+            "maxManifestPageEntries": 16,
+            "maxMetadataBytes": 16384,
+            "maxPlanObjects": 4096,
+            "maxManifestBytes": 16777216,
+            "maxRangesPerPage": 128,
+            "maxResultsPerPage": 16,
+            "maxStagingBytes": 134217728,
+            "maxJournalBytes": 67108864,
+            "maxActiveJobs": 2,
+            "maxInFlightChunks": 8,
+            "maxInFlightBytes": 524288,
+            "maxControlHeaderBytes": 131072,
+            "maxPackageBytes": 536870912
+          }
+        }
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": false,
+        "legacyAcksDrained": true
+      },
+      "expected": "WAIT_READY"
+    },
+    {
+      "name": "old-explicit-b2-conflict",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "libraryPeer": {
+          "implementation": "podjs",
+          "appVersion": "2.0.1-2"
+        },
+        "libraryBinary": {
+          "version": 2,
+          "profile": "merge-b2",
+          "kinds": [
+            {
+              "kind": "rssSource",
+              "schemaVersion": 1,
+              "send": true,
+              "receive": true
+            }
+          ],
+          "chunkSizes": [
+            65536
+          ],
+          "limits": {
+            "maxObjectBytes": 16777216,
+            "maxInFlightObjects": 4,
+            "maxFrameBytes": 131084,
+            "maxManifestPageBytes": 131084,
+            "maxManifestPageEntries": 16,
+            "maxMetadataBytes": 16384,
+            "maxPlanObjects": 4096,
+            "maxManifestBytes": 16777216,
+            "maxRangesPerPage": 128,
+            "maxResultsPerPage": 16,
+            "maxStagingBytes": 134217728,
+            "maxJournalBytes": 67108864,
+            "maxActiveJobs": 2,
+            "maxInFlightChunks": 8,
+            "maxInFlightBytes": 524288,
+            "maxControlHeaderBytes": 131072,
+            "maxPackageBytes": 536870912
+          }
+        },
+        "supportsAccountDataSpaces": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "CAPABILITY_MISMATCH"
+    },
+    {
+      "name": "new-compose-conflict",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "libraryPeer": {
+          "implementation": "podjs",
+          "appVersion": "2.1.0-1"
+        },
+        "libraryBinary": {
+          "version": 2,
+          "profile": "merge-b2",
+          "kinds": [
+            {
+              "kind": "rssSource",
+              "schemaVersion": 1,
+              "send": true,
+              "receive": true
+            }
+          ],
+          "chunkSizes": [
+            65536
+          ],
+          "limits": {
+            "maxObjectBytes": 16777216,
+            "maxInFlightObjects": 4,
+            "maxFrameBytes": 131084,
+            "maxManifestPageBytes": 131084,
+            "maxManifestPageEntries": 16,
+            "maxMetadataBytes": 16384,
+            "maxPlanObjects": 4096,
+            "maxManifestBytes": 16777216,
+            "maxRangesPerPage": 128,
+            "maxResultsPerPage": 16,
+            "maxStagingBytes": 134217728,
+            "maxJournalBytes": 67108864,
+            "maxActiveJobs": 2,
+            "maxInFlightChunks": 8,
+            "maxInFlightBytes": 524288,
+            "maxControlHeaderBytes": 131072,
+            "maxPackageBytes": 536870912
+          }
+        },
+        "supportsAccountDataSpaces": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "CAPABILITY_MISMATCH"
+    },
+    {
+      "name": "new-compose-false-conflict",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "libraryPeer": {
+          "implementation": "podjs",
+          "appVersion": "2.1.0-1"
+        },
+        "libraryBinary": {
+          "version": 2,
+          "profile": "merge-b2",
+          "kinds": [
+            {
+              "kind": "rssSource",
+              "schemaVersion": 1,
+              "send": true,
+              "receive": true
+            }
+          ],
+          "chunkSizes": [
+            65536
+          ],
+          "limits": {
+            "maxObjectBytes": 16777216,
+            "maxInFlightObjects": 4,
+            "maxFrameBytes": 131084,
+            "maxManifestPageBytes": 131084,
+            "maxManifestPageEntries": 16,
+            "maxMetadataBytes": 16384,
+            "maxPlanObjects": 4096,
+            "maxManifestBytes": 16777216,
+            "maxRangesPerPage": 128,
+            "maxResultsPerPage": 16,
+            "maxStagingBytes": 134217728,
+            "maxJournalBytes": 67108864,
+            "maxActiveJobs": 2,
+            "maxInFlightChunks": 8,
+            "maxInFlightBytes": 524288,
+            "maxControlHeaderBytes": 131072,
+            "maxPackageBytes": 536870912
+          }
+        },
+        "supportsAccountDataSpaces": false
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "CAPABILITY_MISMATCH"
+    },
+    {
+      "name": "malformed-identity",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "supportsAccountDataSpaces": true,
+        "libraryPeer": "podjs"
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "CAPABILITY_MISMATCH"
+    },
+    {
+      "name": "missing-b2",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "libraryPeer": {
+          "implementation": "podjs",
+          "appVersion": "2.1.0-1"
+        }
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "PODJS_V1"
+    },
+    {
+      "name": "bad-b2-singleton",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "libraryPeer": {
+          "implementation": "podjs",
+          "appVersion": "2.1.0-1"
+        },
+        "libraryBinary": {
+          "version": 2,
+          "profile": "merge-b2",
+          "kinds": [
+            {
+              "kind": "rssSource",
+              "schemaVersion": 1,
+              "send": true,
+              "receive": true
+            }
+          ],
+          "chunkSizes": [
+            65536,
+            131072
+          ],
+          "limits": {
+            "maxObjectBytes": 16777216,
+            "maxInFlightObjects": 4,
+            "maxFrameBytes": 131084,
+            "maxManifestPageBytes": 131084,
+            "maxManifestPageEntries": 16,
+            "maxMetadataBytes": 16384,
+            "maxPlanObjects": 4096,
+            "maxManifestBytes": 16777216,
+            "maxRangesPerPage": 128,
+            "maxResultsPerPage": 16,
+            "maxStagingBytes": 134217728,
+            "maxJournalBytes": 67108864,
+            "maxActiveJobs": 2,
+            "maxInFlightChunks": 8,
+            "maxInFlightBytes": 524288,
+            "maxControlHeaderBytes": 131072,
+            "maxPackageBytes": 536870912
+          }
+        }
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "CAPABILITY_MISMATCH"
+    },
+    {
+      "name": "new-unknown-implementation",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "libraryPeer": {
+          "implementation": "other",
+          "appVersion": "2.1.0-1"
+        },
+        "libraryBinary": {
+          "version": 2,
+          "profile": "merge-b2",
+          "kinds": [
+            {
+              "kind": "rssSource",
+              "schemaVersion": 1,
+              "send": true,
+              "receive": true
+            }
+          ],
+          "chunkSizes": [
+            65536
+          ],
+          "limits": {
+            "maxObjectBytes": 16777216,
+            "maxInFlightObjects": 4,
+            "maxFrameBytes": 131084,
+            "maxManifestPageBytes": 131084,
+            "maxManifestPageEntries": 16,
+            "maxMetadataBytes": 16384,
+            "maxPlanObjects": 4096,
+            "maxManifestBytes": 16777216,
+            "maxRangesPerPage": 128,
+            "maxResultsPerPage": 16,
+            "maxStagingBytes": 134217728,
+            "maxJournalBytes": 67108864,
+            "maxActiveJobs": 2,
+            "maxInFlightChunks": 8,
+            "maxInFlightBytes": 524288,
+            "maxControlHeaderBytes": 131072,
+            "maxPackageBytes": 536870912
+          }
+        }
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "PEER_IMPLEMENTATION_UNKNOWN"
+    },
+    {
+      "name": "orphan-b2",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "supportsAccountDataSpaces": true,
+        "libraryBinary": {
+          "version": 2,
+          "profile": "merge-b2",
+          "kinds": [
+            {
+              "kind": "rssSource",
+              "schemaVersion": 1,
+              "send": true,
+              "receive": true
+            }
+          ],
+          "chunkSizes": [
+            65536
+          ],
+          "limits": {
+            "maxObjectBytes": 16777216,
+            "maxInFlightObjects": 4,
+            "maxFrameBytes": 131084,
+            "maxManifestPageBytes": 131084,
+            "maxManifestPageEntries": 16,
+            "maxMetadataBytes": 16384,
+            "maxPlanObjects": 4096,
+            "maxManifestBytes": 16777216,
+            "maxRangesPerPage": 128,
+            "maxResultsPerPage": 16,
+            "maxStagingBytes": 134217728,
+            "maxJournalBytes": 67108864,
+            "maxActiveJobs": 2,
+            "maxInFlightChunks": 8,
+            "maxInFlightBytes": 524288,
+            "maxControlHeaderBytes": 131072,
+            "maxPackageBytes": 536870912
+          }
+        }
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "PEER_IMPLEMENTATION_UNKNOWN"
+    },
+    {
+      "name": "unknown-no-capabilities",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "PEER_IMPLEMENTATION_UNKNOWN"
+    },
+    {
+      "name": "compose-missing-bit",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "supportsAccountDataSpaces": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "PEER_IMPLEMENTATION_UNKNOWN"
+    },
+    {
+      "name": "compose-false-bit",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": false,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "supportsAccountDataSpaces": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "PEER_IMPLEMENTATION_UNKNOWN"
+    },
+    {
+      "name": "unknown-extension",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "supportsAccountDataSpaces": true,
+        "newMystery": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "PEER_IMPLEMENTATION_UNKNOWN"
+    },
+    {
+      "name": "string-boolean",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "supportsAccountDataSpaces": "true"
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "CAPABILITY_MISMATCH"
+    },
+    {
+      "name": "unknown-extension-type",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "supportsAccountDataSpaces": true,
+        "supportsTokenUsageCursor": "true"
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "CAPABILITY_MISMATCH"
+    },
+    {
+      "name": "pod-runtime-disabled",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": false,
+        "supportsReaderAssets": false,
+        "supportsResourceChunkAck": false,
+        "supportsReaderPresetPreview": false,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "PODJS_V1"
+    },
+    {
+      "name": "bad-pod-fixed-bit",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": false,
+        "supportsTransferByteProgress": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "PEER_IMPLEMENTATION_UNKNOWN"
+    },
+    {
+      "name": "bad-pod-runtime-tuple",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": false,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "PEER_IMPLEMENTATION_UNKNOWN"
+    },
+    {
+      "name": "probe-failed",
+      "probe": {
+        "success": false,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "supportsAccountDataSpaces": true
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "CAPABILITY_MISMATCH"
+    },
+    {
+      "name": "identity-old-before-ready",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "libraryPeer": {
+          "implementation": "podjs",
+          "appVersion": "2.0.0-2"
+        }
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": false,
+        "legacyAcksDrained": true
+      },
+      "expected": "WAIT_READY"
+    },
+    {
+      "name": "s2-window1-ready",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "libraryPeer": {
+          "implementation": "podjs",
+          "appVersion": "2.1.0-1"
+        },
+        "libraryBinary": {
+          "version": 2,
+          "profile": "merge-b2",
+          "kinds": [
+            {
+              "kind": "rssSource",
+              "schemaVersion": 1,
+              "send": true,
+              "receive": true
+            }
+          ],
+          "chunkSizes": [
+            65536
+          ],
+          "limits": {
+            "maxObjectBytes": 16777216,
+            "maxInFlightObjects": 4,
+            "maxFrameBytes": 131084,
+            "maxManifestPageBytes": 131084,
+            "maxManifestPageEntries": 16,
+            "maxMetadataBytes": 16384,
+            "maxPlanObjects": 4096,
+            "maxManifestBytes": 16777216,
+            "maxRangesPerPage": 128,
+            "maxResultsPerPage": 16,
+            "maxStagingBytes": 134217728,
+            "maxJournalBytes": 67108864,
+            "maxActiveJobs": 2,
+            "maxInFlightChunks": 1,
+            "maxInFlightBytes": 65536,
+            "maxControlHeaderBytes": 131072,
+            "maxPackageBytes": 536870912
+          }
+        }
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "B2"
+    },
+    {
+      "name": "s2-window1-wrong-byte-cap",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "libraryPeer": {
+          "implementation": "podjs",
+          "appVersion": "2.1.0-1"
+        },
+        "libraryBinary": {
+          "version": 2,
+          "profile": "merge-b2",
+          "kinds": [
+            {
+              "kind": "rssSource",
+              "schemaVersion": 1,
+              "send": true,
+              "receive": true
+            }
+          ],
+          "chunkSizes": [
+            65536
+          ],
+          "limits": {
+            "maxObjectBytes": 16777216,
+            "maxInFlightObjects": 4,
+            "maxFrameBytes": 131084,
+            "maxManifestPageBytes": 131084,
+            "maxManifestPageEntries": 16,
+            "maxMetadataBytes": 16384,
+            "maxPlanObjects": 4096,
+            "maxManifestBytes": 16777216,
+            "maxRangesPerPage": 128,
+            "maxResultsPerPage": 16,
+            "maxStagingBytes": 134217728,
+            "maxJournalBytes": 67108864,
+            "maxActiveJobs": 2,
+            "maxInFlightChunks": 1,
+            "maxInFlightBytes": 524288,
+            "maxControlHeaderBytes": 131072,
+            "maxPackageBytes": 536870912
+          }
+        }
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "CAPABILITY_MISMATCH"
+    },
+    {
+      "name": "explicit-old-v1",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "libraryPeer": {
+          "implementation": "podjs",
+          "appVersion": "2.0.1-2"
+        }
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": true
+      },
+      "expected": "PODJS_V1"
+    },
+    {
+      "name": "missing-b2-ready-pending",
+      "probe": {
+        "success": true,
+        "version": 14,
+        "action": "syncLibrary",
+        "phase": "probe",
+        "deviceId": "synthetic-watch",
+        "sentAt": 123,
+        "supportsManifestBatches": true,
+        "supportsReaderPresets": true,
+        "supportsReaderAssets": true,
+        "supportsResourceChunkAck": true,
+        "supportsReaderPresetPreview": true,
+        "supportsPersistentSession": true,
+        "supportsTransferByteProgress": true,
+        "libraryPeer": {
+          "implementation": "podjs",
+          "appVersion": "2.1.0-1"
+        }
+      },
+      "ready": {
+        "identityVerified": true,
+        "accountConfirmed": true,
+        "legacyAcksDrained": false
+      },
+      "expected": "WAIT_READY"
+    }
+  ]
+}

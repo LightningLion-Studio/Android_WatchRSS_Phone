@@ -3,6 +3,9 @@ package com.lightningstudio.watchrss.phone.data.book
 import androidx.room.withTransaction
 import com.lightningstudio.watchrss.phone.data.db.*
 import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
+import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Frames
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec
 import kotlinx.coroutines.Dispatchers
@@ -153,22 +156,43 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         ensureRegistered()
         return (dao.all().map{JSONObject(it.stateJson).optString("sourceUrl")}+dao.sourceUrls()).filter{it.isNotBlank()}.toHashSet()
     }
-    suspend fun availableBooks():List<Pair<JSONObject,File>> {ensureRegistered();return dao.all().filter{available(it)&&!JSONObject(it.stateJson).getBoolean("deleted")}.map{JSONObject(it.stateJson) to file(it.bookId)}}
-    private fun available(row:BookEntity)=row.packageSha256.isNotBlank()&&file(row.bookId).isFile&&file(row.bookId).length()==row.packageBytes
-    suspend fun packageFile(id:String):File?=dao.get(id)?.takeIf(::available)?.let{file(id)}
+    internal suspend fun binaryReady(): Boolean =
+        contentStore is FileArticleContentStore && !dao.hasUnregisteredBookArticles()
+
+    internal suspend fun freezeBinaryBooks(visit: suspend (BookEntity, File?) -> Unit) {
+        captureLocalChanges()
+        db.withTransaction {
+            if (!binaryReady()) throw B2Exception("SOURCE_CHANGED")
+            var after = ""
+            while (true) {
+                val row = dao.nextBinaryBook(after) ?: break
+                after = row.bookId
+                visit(row, packageFor(row).takeIf { available(row) })
+            }
+        }
+    }
+    internal suspend fun binaryReadingPage(id: String, after: Int) = dao.binaryReadingPage(id, after)
+    internal suspend fun binaryState(id: String) = dao.get(id)?.stateJson?.let(::JSONObject)
+
+    suspend fun availableBooks():List<Pair<JSONObject,File>> {ensureRegistered();return dao.all().filter{available(it)&&!JSONObject(it.stateJson).getBoolean("deleted")}.map{JSONObject(it.stateJson) to packageFor(it)}}
+    internal fun binaryPackage(id: String, hash: String): File = File(directory, "b2-$id-$hash.jsonl")
+    private fun packageFor(row: BookEntity): File =
+        binaryPackage(row.bookId, row.packageSha256).takeIf { it.isFile } ?: file(row.bookId)
+    private fun available(row:BookEntity)=row.packageSha256.isNotBlank()&&packageFor(row).let { it.isFile && it.length()==row.packageBytes }
+    suspend fun packageFile(id:String):File?=dao.get(id)?.takeIf(::available)?.let(::packageFor)
     suspend fun packageHash(id:String)=requireNotNull(dao.get(id)).packageSha256
-    suspend fun merge(remote:JSONObject,checkOwner:()->Unit={},forceProjection:Boolean=false):Int=db.withTransaction {
+    suspend fun merge(remote:JSONObject,checkOwner:()->Unit={},forceProjection:Boolean=false,binary:Boolean=false):Int=db.withTransaction {
         checkOwner()
         val id=remote.getString("bookId");var previous=dao.get(id)
-        val before=previous?.let{JSONObject(it.stateJson).also(BookSync::validate)}
-        var state=validateBookPackage{BookSync.merge(before,remote)};var json=BookSync.canonical(state)
+        val before=previous?.let{JSONObject(it.stateJson).also(if (binary) BookSync::validateBinary else BookSync::validate)}
+        var state=validateBookPackage{BookSync.merge(before,remote,binary)};var json=BookSync.canonical(state)
         if(previous?.stateJson==json && !forceProjection)return@withTransaction 0
         readingJournal.initialize()
-        captureDirtyReading()
+        captureDirtyReading(collect = !binary)
         // Dirty capture can add a local deletion. Rebase before writing remote metadata.
         previous=dao.get(id)
-        val captured=previous?.let{JSONObject(it.stateJson).also(BookSync::validate)}
-        state=validateBookPackage{BookSync.merge(captured,remote)};json=BookSync.canonical(state)
+        val captured=previous?.let{JSONObject(it.stateJson).also(if (binary) BookSync::validateBinary else BookSync::validate)}
+        state=validateBookPackage{BookSync.merge(captured,remote,binary)};json=BookSync.canonical(state)
         var changed=0
         if(previous?.stateJson!=json){
             val before=previous?.stateJson?.let(::JSONObject)
@@ -178,7 +202,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             diagnostic("book-merge:id=${id.take(8)}:fields=${fields.sorted().joinToString(",")}")
             dao.put(previous?.copy(stateJson=json)?:BookEntity(id,json));changed++
         }
-        changed+applyDeletions(state)
+        changed + if (binary) applyBinaryDeletions(state, checkOwner) else applyDeletions(state)
     }
     private suspend fun applyDeletions(state:JSONObject):Int {
         var changed=0;val deleted=BookSync.deletions(state);val all=state.getBoolean("deleted")
@@ -200,6 +224,76 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         }
         val sourceUrl=state.optString("sourceUrl")
         val source=db.phoneRssSourceDao().getByUrl(sourceUrl) ?: dao.chapters(state.getString("bookId")).firstOrNull()?.let{articles.getById(it.articleId)?.rssSourceUrl}?.let{db.phoneRssSourceDao().getByUrl(it)}
+        if(source!=null && source.url!=ImportedContentIds.ROOT_SOURCE_URL) {
+            val next=if(state.getLong("updatedAt")>source.updatedAt)source.copy(title=state.getString("title"),updatedAt=state.getLong("updatedAt"),sourceDeviceId=state.getString("sourceDeviceId"))else source
+            val deletedSource=if(all)next.copy(deleted=true,deletedAt=maxOf(source.deletedAt,state.getLong("deletedAt")))else next
+            if(source!=deletedSource){db.phoneRssSourceDao().upsert(deletedSource);changed++}
+        }
+        return changed
+    }
+    /** Old clients may replay live chapter rows after the permanent book deletion. */
+    private suspend fun applyBinaryDeletions(state: JSONObject, work: () -> Unit): Int {
+        val id = state.getString("bookId")
+        val all = state.getBoolean("deleted")
+        val clock = maxOf(state.getLong("deletionClock"), state.getLong("deletedAt"))
+        var changed = 0
+
+        suspend fun clearReading(rows: List<BookReadingEntity>) {
+            for (reading in rows) {
+                val value = JSONObject(reading.stateJson)
+                for (prefix in listOf("favorite", "watchLater")) {
+                    if (value.has("${prefix}Saved")) value.put("${prefix}Saved", false)
+                }
+                if (readingJournal.record(value)) changed++
+            }
+        }
+
+        suspend fun markChapters(mappings: List<BookChapterEntity>) {
+            val metadata = articles.bookMetadata(mappings.map { it.articleId }).associateBy { it.articleId }
+            for (mapping in mappings) {
+                val meta = metadata[mapping.articleId] ?: continue
+                if (!meta.deleted || meta.deletedAt < clock) {
+                    val row = meta
+                    val next = row.copy(deleted = true, deletedAt = maxOf(row.deletedAt, clock),
+                        favoriteSaved = false, watchLaterSaved = false, independentSaved = false)
+                    db.b2ArticleDao().updateBinaryArticleKeepingBody(next.copy(syncMetadataHash = ""))
+                    db.bookReadingDao().cleanProjection(next.articleId)
+                    logArticle(next)
+                    changed++
+                }
+            }
+        }
+
+        if (all) {
+            var cursor = 0
+            while (true) {
+                val page = dao.binaryReadingPage(id, cursor)
+                if (page.isEmpty()) break
+                clearReading(page)
+                cursor = page.last().chapterIndex
+                work()
+            }
+            cursor = 0
+            while (true) {
+                val page = dao.binaryChapterPage(id, cursor)
+                if (page.isEmpty()) break
+                markChapters(page)
+                cursor = page.last().chapterIndex
+                work()
+            }
+        } else {
+            val deleted = state.getJSONArray("deletedChapters")
+            for (offset in 0 until deleted.length() step 100) {
+                val indices = (offset until minOf(deleted.length(), offset + 100)).map(deleted::getInt)
+                clearReading(dao.readingBatch(id, indices))
+                markChapters(dao.chapterBatch(id, indices))
+                work()
+            }
+        }
+        val sourceUrl=state.optString("sourceUrl")
+        val source = db.phoneRssSourceDao().getByUrl(sourceUrl) ?: dao.binaryChapterPage(id, 0).firstOrNull()
+            ?.let { articles.getBodyMetadataById(it.articleId)?.rssSourceUrl }
+            ?.let { db.phoneRssSourceDao().getByUrl(it) }
         if(source!=null && source.url!=ImportedContentIds.ROOT_SOURCE_URL) {
             val next=if(state.getLong("updatedAt")>source.updatedAt)source.copy(title=state.getString("title"),updatedAt=state.getLong("updatedAt"),sourceDeviceId=state.getString("sourceDeviceId"))else source
             val deletedSource=if(all)next.copy(deleted=true,deletedAt=maxOf(source.deletedAt,state.getLong("deletedAt")))else next
@@ -245,13 +339,13 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             if(source!=null && source.url!=ImportedContentIds.ROOT_SOURCE_URL && source.updatedAt>state.getLong("updatedAt"))state.put("title",source.title).put("updatedAt",source.updatedAt).put("sourceDeviceId",source.sourceDeviceId)
             state.put("deletedChapters",JSONArray(deleted.sorted())).put("deletionClock",clock)
             if(source?.deleted==true)state.put("deleted",true).put("deletedAt",maxOf(clock,state.getLong("deletedAt")))
-            if(BookSync.canonical(state)!=book.stateJson)merge(state)
+            if(BookSync.canonical(state)!=book.stateJson)merge(state, binary = state.has("instanceId") || state.has("lifecycle"))
         }
         if(changedSources)db.bookReadingDao().putRegistration(requireNotNull(db.bookReadingDao().registration()).copy(sourceStateJson=sourceState))
         diagnostic("capture:items=${changedRows.size}:ms=${(System.nanoTime()-started)/1_000_000}")
     }
     /** The transaction is the dirty revision witness: local writers cannot race projection cleanup. */
-    private suspend fun captureDirtyReading():List<Pair<BookChapterEntity,PhoneArticleEntity>> {
+    private suspend fun captureDirtyReading(collect: Boolean = true):List<Pair<BookChapterEntity,PhoneArticleEntity>> {
         val changed=mutableListOf<Pair<BookChapterEntity,PhoneArticleEntity>>()
         while(true) {
             val dirty=db.bookReadingDao().dirty();if(dirty.isEmpty())break
@@ -262,7 +356,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             for(item in dirty) {
                 val mapping=mappings[item.articleId];val row=rows[item.articleId]
                 if(mapping!=null && row!=null) {
-                    changed+=mapping to row
+                    if (collect) changed+=mapping to row
                     if(row.deleted)dao.get(mapping.bookId)?.let { book ->
                         val state=JSONObject(book.stateJson)
                         val next=JSONObject(state.toString()).put("deletedChapters",JSONArray((BookSync.deletions(state)+mapping.chapterIndex).sorted()))
@@ -309,12 +403,14 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         readingJournal.initialize();readingJournal.acknowledge(peer,local,remote,root)
     }
     suspend fun mergeReading(remote:JSONObject,checkOwner:()->Unit={}):Int=mergeReadingBatch(listOf(remote),checkOwner)
-    suspend fun mergeReadingBatch(values:List<JSONObject>,checkOwner:()->Unit={}):Int=db.withTransaction {
+    suspend fun mergeReadingBatch(values:List<JSONObject>,checkOwner:()->Unit={},binary:Boolean=false):Int=db.withTransaction {
         require(values.size<=100)
         checkOwner();values.forEach(BookSync::validateReading)
-        readingJournal.initialize();captureDirtyReading()
+        readingJournal.initialize();captureDirtyReading(collect = !binary)
         var changed=0
-        val books=dao.all().associateBy{it.bookId}
+        val books = if (binary) values.map { it.getString("bookId") }.distinct().mapNotNull { dao.get(it) }.associateBy { it.bookId }
+            else dao.all().associateBy{it.bookId}
+        val states = books.mapValues { JSONObject(it.value.stateJson) }
         val mappings=mutableMapOf<Pair<String,Int>,BookChapterEntity>()
         val previous=mutableMapOf<Pair<String,Int>,JSONObject>()
         for((id,batch) in values.groupBy{it.getString("bookId")}) {
@@ -325,11 +421,20 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         val metadata=articles.bookMetadata(mappings.values.map{it.articleId}).associateBy{it.articleId}.toMutableMap()
         for(remote in values) {
             checkOwner();val id=remote.getString("bookId");val index=remote.getInt("chapterIndex")
-            books[id]?.let{require(index<=JSONObject(it.stateJson).getInt("chapterCount"))}
+            val state = states[id]
+            if (state != null) require(index <= state.getInt("chapterCount"))
             val merged=BookSync.mergeReading(previous[id to index],remote)
-            books[id]?.let { book ->
-                val state=JSONObject(book.stateJson)
-                if(state.getBoolean("deleted") || index in BookSync.deletions(state))
+            if (state != null) {
+                val deleted = state.getJSONArray("deletedChapters")
+                var lo = 0
+                var hi = deleted.length()
+                while (lo < hi) {
+                    val mid = (lo + hi) / 2
+                    if (deleted.getInt(mid) < index) lo = mid + 1 else hi = mid
+                }
+                val chapterDeleted = if (binary) lo < deleted.length() && deleted.getInt(lo) == index
+                    else index in BookSync.deletions(state)
+                if(state.getBoolean("deleted") || chapterDeleted)
                     for(prefix in listOf("favorite","watchLater"))if(merged.has("${prefix}Saved"))merged.put("${prefix}Saved",false)
             }
             previous[id to index]=merged
@@ -352,6 +457,91 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         }
         changed
     }
+    /** Called by the B2 FULL writer transaction, including the package APPLIED receipt. */
+    internal suspend fun installBinaryPackage(id: String, fingerprint: String, hash: String, bytes: Long,
+        sourceState: JSONObject, combined: File, scratch: File, check: () -> Unit): String {
+        val content = contentStore as? FileArticleContentStore ?: throw B2Exception("LOCAL_IO")
+        val current = dao.get(id) ?: throw B2Exception("DEPENDENCIES_PENDING")
+        val state = JSONObject(current.stateJson)
+        val retired = state.getBoolean("deleted") || BookSync.compareLifecycle(state, sourceState) > 0
+        val present = available(current) && dao.binaryPresentChapters(id) == state.getInt("chapterCount")
+        val retain = retired || present
+        val deleted = java.util.BitSet(state.getInt("chapterCount") + 1)
+        val tombstones = state.getJSONArray("deletedChapters")
+        for (i in 0 until tombstones.length()) deleted.set(tombstones.getInt(i))
+        val verified = BinaryBookPackage.read(combined, scratch, check, start = { header ->
+            require(header.count == state.getInt("chapterCount") && header.instance == state.opt("instanceId"))
+            require(BookSync.binaryId(fingerprint, header.instance) == id)
+        }) { header, index, chapter ->
+            if (!retain) {
+                val mapped = dao.chapterAt(id, index)?.articleId
+                val candidate = if (mapped != null || header.instance != null) mapped else dao.binaryArticleAtUrl(chapter.url)
+                val admissible = candidate?.takeIf { existing ->
+                    val owner = dao.chapterByArticle(existing)
+                    owner == null || owner.bookId == id && owner.chapterIndex == index
+                }
+                val articleId = admissible ?: BookSync.articleId(id, index)
+                installBinaryChapter(content, state, header, chapter, articleId, deleted[index])
+                dao.putChapters(listOf(BookChapterEntity(id, index, articleId)))
+                val reading = dao.reading(id, index)
+                if (reading != null) mergeReadingBatch(listOf(JSONObject(reading.stateJson)), check, binary = true)
+            }
+        }
+        if (verified != fingerprint || state.getString("fingerprint") != fingerprint) throw B2Exception("HASH_MISMATCH")
+        if (retain) return if (!retired && current.packageSha256 == hash && current.packageBytes == bytes)
+            "alreadyPresent" else "retainedLocal"
+        check()
+        val target = binaryPackage(id, hash)
+        if (combined != target) {
+            Files.move(combined.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            for (parent in setOf(combined.parentFile, directory)) {
+                java.nio.channels.FileChannel.open(parent.toPath(), java.nio.file.StandardOpenOption.READ).use { it.force(true) }
+            }
+        }
+        dao.put(current.copy(packageSha256 = hash, packageBytes = bytes))
+        return "merged"
+    }
+
+    private suspend fun installBinaryChapter(content: FileArticleContentStore, state: JSONObject,
+        header: BinaryBookPackage.Header, chapter: BinaryBookPackage.Chapter, id: String, deleted: Boolean) {
+        val previous = articles.getBodyMetadataById(id)
+        fun present(prefix: ByteArray?): Boolean {
+            val value = prefix?.toString(Charsets.UTF_8).orEmpty()
+            return value.isNotBlank() && (!content.isMarker(value) || content.openTextFile(value)?.length()?.let { it > 0 } == true)
+        }
+        val text = if (previous == null || !present(articles.getContentTextChunk(id, 1, 512)))
+            content.publishTextFile("$id-text", chapter.text) else null
+        val html = chapter.html?.takeIf { previous == null || !present(articles.getContentHtmlChunk(id, 1, 512)) }
+            ?.let { content.publishTextFile("$id-html", it) }
+        val goneAt = if (deleted) maxOf(state.getLong("deletedAt"), state.getLong("deletionClock")) else 0L
+        if (previous != null) {
+            val next = previous.copy(deleted = previous.deleted || deleted, deletedAt = maxOf(previous.deletedAt, goneAt),
+                favoriteSaved = previous.favoriteSaved && !deleted, watchLaterSaved = previous.watchLaterSaved && !deleted,
+                independentSaved = previous.independentSaved && !deleted)
+            if (next != previous) db.b2ArticleDao().updateBinaryArticleKeepingBody(next.copy(syncMetadataHash = ""))
+            if (text != null || html != null) dao.repairBinaryChapter(id, text, html, chapter.contentHash)
+            if (next != previous || text != null || html != null) logArticle(next)
+        } else {
+            val single = ImportedContentIds.isImportedTextArticleUrl(chapter.url)
+            val source = if (single) ImportedContentIds.ROOT_SOURCE_URL else header.source
+            val title = if (single) ImportedContentIds.ROOT_SOURCE_TITLE else header.title
+            val device = state.getString("sourceDeviceId")
+            writeArticle(PhoneArticleEntity(id, device, chapter.url, chapter.title, header.title, "", html,
+                requireNotNull(text), null, chapter.contentHash, 1, 1, false, 0, 0, source, title, false, 0, 0,
+                false, 0, 0, deleted, goneAt))
+            if (db.phoneRssSourceDao().getByUrl(source) == null) {
+                db.phoneRssSourceDao().upsert(PhoneRssSourceEntity(source, device, title, "", null, null,
+                    1, state.getLong("updatedAt"), 1, false, false, 0))
+            }
+        }
+        db.bookReadingDao().cleanProjection(id)
+    }
+
+    internal fun binaryImportDirectory(): File {
+        if (!directory.isDirectory && !directory.mkdirs()) throw B2Exception("LOCAL_IO")
+        return directory
+    }
+
     /** Validate the entire package before any row becomes visible, then atomically publish file+mapping. */
     suspend fun receivePackage(id:String,input:File,checkOwner:()->Unit={}):Int=withContext(Dispatchers.IO) {
         checkOwner()

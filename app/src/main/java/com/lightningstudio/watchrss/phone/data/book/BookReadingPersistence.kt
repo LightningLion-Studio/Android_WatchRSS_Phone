@@ -26,9 +26,15 @@ data class BookCaptureMetaEntity(@PrimaryKey val id:Int=1,val registrationRevisi
     @Query("SELECT * FROM book_reading_versions WHERE bookId=:id AND chapterIndex=:index") suspend fun version(id:String,index:Int):BookReadingVersionEntity?
     @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun putVersion(row:BookReadingVersionEntity)
     @Insert suspend fun append(row:BookReadingJournalEntity)
-    @Query("""SELECT * FROM book_reading_journal WHERE seq IN
-        (SELECT MAX(seq) FROM book_reading_journal WHERE seq>:from AND seq<=:to GROUP BY bookId,chapterIndex) ORDER BY seq""")
-    suspend fun entries(from:Long,to:Long):List<BookReadingJournalEntity>
+    @Query("SELECT seq,bookId,chapterIndex," + SMALL_BOOK_JSON + " FROM book_reading_journal WHERE seq IN " +
+        "(SELECT MAX(seq) FROM book_reading_journal WHERE seq>:from AND seq<=:to GROUP BY bookId,chapterIndex) ORDER BY seq")
+    suspend fun entryHeaders(from: Long, to: Long): List<BookReadingJournalEntity>
+    @Query("SELECT substr(stateJson,:offset,65536) FROM book_reading_journal WHERE seq=:seq")
+    suspend fun entryJsonSlice(seq: Long, offset: Int): String
+    @Transaction suspend fun entries(from: Long, to: Long): List<BookReadingJournalEntity> =
+        entryHeaders(from, to).map { row ->
+            if (row.stateJson.isNotEmpty()) row else row.copy(stateJson = readBookJson { entryJsonSlice(row.seq, it) })
+        }
     @Query("SELECT * FROM book_reading_versions WHERE bookId=:id ORDER BY chapterIndex") suspend fun leaves(id:String):List<BookReadingVersionEntity>
     @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun putRoot(row:BookReadingRootEntity)
     @Query("SELECT * FROM book_reading_roots ORDER BY bookId") suspend fun roots():List<BookReadingRootEntity>

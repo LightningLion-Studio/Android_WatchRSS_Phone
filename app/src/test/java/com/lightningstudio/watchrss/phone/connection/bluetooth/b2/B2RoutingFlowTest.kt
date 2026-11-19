@@ -60,6 +60,30 @@ class B2RoutingFlowTest {
         probe.remove("libraryBinary")
         assertTrue(B2KindRoute.select(probe, true, true).isEmpty)
     }
+    @Test fun bookKindsFitTheWatchSelectionWithoutDroppingLegacyLibrary() {
+        val articles = setOf("articleBody", "articleMetadata")
+        val libraryAndAssets = articles + setOf("rssSource", "noteAsset")
+        val all = B2Wire.bookKinds + libraryAndAssets
+        val probe = obj("success" to true, "version" to 14, "action" to "syncLibrary", "phase" to "probe",
+            "libraryPeer" to obj("implementation" to "podjs", "appVersion" to "2.0.3"),
+            "libraryBinary" to B2Negotiation.capability(all, all))
+
+        val route = B2KindRoute.select(probe, includeNoteAssets = true, libraryReady = true, booksReady = true)
+        assertEquals(B2Wire.bookKinds + "noteAsset", route.send)
+        assertEquals(route.send, route.receive)
+        assertTrue(route.hasBinaryBooks)
+        assertTrue(route.sendLegacyArticles)
+        assertTrue(route.receiveLegacyArticles)
+        assertTrue(route.sendLegacySources)
+        assertEquals(route, B2KindRoute.select(probe, route.hasBinaryAssets, route.hasBinaryLibrary, route.hasBinaryBooks))
+
+        val six = B2Wire.bookKinds + articles
+        probe.put("libraryBinary", B2Negotiation.capability(six, six))
+        val fitting = B2KindRoute.select(probe, includeNoteAssets = true, libraryReady = true, booksReady = true)
+        assertEquals(six, fitting.send)
+        assertEquals(six, fitting.receive)
+    }
+
     @Test fun disabledPathMatchesPinnedLegacyWireForEveryFixtureAndRequest() {
         val probes = fixture("peer-fixtures.json").getJSONArray("cases")
         val requests = listOf(LibrarySyncPayload.buildProbeRequest("phone-fixed"),

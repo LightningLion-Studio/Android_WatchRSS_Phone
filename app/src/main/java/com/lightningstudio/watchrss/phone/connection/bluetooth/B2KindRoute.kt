@@ -23,6 +23,8 @@ internal data class B2KindRoute(val send: Set<String>, val receive: Set<String>)
     fun assetsOnly() = B2KindRoute(send.intersect(asset), receive.intersect(asset))
 
     companion object {
+        // The S4 watch accepts up to six kinds in each prepare selection.
+        private const val MAX_SELECTION_KINDS = 6
         private val library = setOf(B2_ARTICLE_BODY, B2_ARTICLE_METADATA, B2_RSS_SOURCE)
         private val asset = setOf(B2_NOTE_ASSET)
         val legacy = B2KindRoute(emptySet(), emptySet())
@@ -47,8 +49,13 @@ internal data class B2KindRoute(val send: Set<String>, val receive: Set<String>)
             val receive = if (books) incoming else incoming - B2Wire.bookKinds
             // v14 always returns its source inventory. Keep that direction on v14
             // whenever a legacy library exchange is still required.
-            return B2KindRoute(send, if (send.containsAll(library) && receive.containsAll(library)) receive
+            val route = B2KindRoute(send, if (send.containsAll(library) && receive.containsAll(library)) receive
                 else receive - B2_RSS_SOURCE)
+            // Keep the four book kinds together. Route articles and RSS over the
+            // complete legacy library exchange if the combined selection will not fit.
+            return if (route.send.size > MAX_SELECTION_KINDS || route.receive.size > MAX_SELECTION_KINDS) {
+                route.withoutLibrary()
+            } else route
         }
     }
 }

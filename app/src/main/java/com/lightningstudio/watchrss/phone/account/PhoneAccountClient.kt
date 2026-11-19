@@ -665,6 +665,40 @@ class PhoneAccountClient(
             ).use { it.jsonBody().optBoolean("released") }
         }
 
+    private val handoffHttpClient by lazy {
+        httpClient.newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .retryOnConnectionFailure(false)
+            .build()
+    }
+
+    internal suspend fun createWeChatHandoff(session: PhoneAccountSession): WeChatHandoff =
+        withContext(Dispatchers.IO) {
+            try {
+                requireConfigured()
+                val request = Request.Builder()
+                    // The public gateway forwards the backend's functions/v1 alias.
+                    .url(environment.backendBaseUrl + "/functions/v1/app/wechat-handoff")
+                    .header("apikey", environment.supabaseAnonKey)
+                    .header("authorization", "Bearer ${session.accessToken}")
+                    .header("Cache-Control", "no-store")
+                    .withWatchRssAppVersionHeader()
+                    .post("""{"purpose":"purchase"}""".toRequestBody(JSON_MEDIA_TYPE))
+                    .build()
+                handoffHttpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) throw WeChatHandoffUnavailable()
+                    val body = response.peekBody(4_097).bytes()
+                    if (body.size > 4_096) throw WeChatHandoffUnavailable()
+                    parseWeChatHandoff(body.toString(Charsets.UTF_8))
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                throw WeChatHandoffUnavailable()
+            }
+        }
+
     suspend fun createPaymentOrder(session: PhoneAccountSession, idempotencyKey: String): AppPaymentOrder = withContext(Dispatchers.IO) {
         post(
             path = "/functions/v1/payments/xunhupay/orders",

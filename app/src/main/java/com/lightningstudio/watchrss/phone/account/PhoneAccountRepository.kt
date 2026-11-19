@@ -237,6 +237,17 @@ class PhoneAccountRepository(
     suspend fun releaseAppAccess(current: AppAuthorization): Boolean =
         accountClient.releaseAppAccess(requireSession(), current)
 
+    internal suspend fun createWeChatHandoff(expectedUserId: String): WeChatHandoff {
+        val owner = requireSession()
+        if (owner.userId != expectedUserId) throw WeChatHandoffUnavailable()
+        val handoff = accountClient.createWeChatHandoff(owner)
+        val current = requireSession()
+        if (current.userId != owner.userId || current.accessToken != owner.accessToken) {
+            throw WeChatHandoffUnavailable()
+        }
+        return handoff
+    }
+
     suspend fun createPaymentOrder(idempotencyKey: String): AppPaymentOrder =
         accountClient.createPaymentOrder(requireSession(), idempotencyKey)
 

@@ -133,6 +133,9 @@ import java.time.format.DateTimeFormatter
 class AccountActivity : ComponentActivity() {
     private var screenStartedAt: Long = 0L
 
+    private var awaitingWeChatReturn = false
+    private val cloudPurchaseReturnRevision = mutableStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val container = (application as PhoneCompanionApplication).container
@@ -158,6 +161,8 @@ class AccountActivity : ComponentActivity() {
                     usageTelemetry = container.usageTelemetry,
                     onBack = ::finish,
                     returnWhenCloudReady = returnWhenCloudReady,
+                    onCloudPurchaseAttempted = { awaitingWeChatReturn = true },
+                    cloudPurchaseReturnRevision = cloudPurchaseReturnRevision.value,
                     onLoginComplete = {
                         if (finishAfterLogin) {
                             lifecycleScope.launch {
@@ -179,6 +184,10 @@ class AccountActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (awaitingWeChatReturn) {
+            awaitingWeChatReturn = false
+            cloudPurchaseReturnRevision.value++
+        }
         screenStartedAt = SystemClock.elapsedRealtime()
         (application as PhoneCompanionApplication).container.usageTelemetry.recordScreenOpen("phone_account")
     }
@@ -262,7 +271,9 @@ internal fun AccountScreen(
     leadingPane: (@Composable () -> Unit)? = null,
     initialSection: AccountSection = AccountSection.ROOT,
     /** Opened from watch pairing for the cloud key: go straight back once the key exists, and Back returns there too. */
-    returnWhenCloudReady: Boolean = false
+    returnWhenCloudReady: Boolean = false,
+    onCloudPurchaseAttempted: () -> Unit = {},
+    cloudPurchaseReturnRevision: Int = 0
 ) {
     val session by accountRepository.session.collectAsState()
     val context = LocalContext.current
@@ -337,6 +348,7 @@ internal fun AccountScreen(
     var paymentOrders by remember(session?.userId) { mutableStateOf<List<AppPaymentOrder>>(emptyList()) }
     var paymentOrdersLoading by remember(session?.userId) { mutableStateOf(session != null) }
     var showPaymentAgreement by remember { mutableStateOf(false) }
+    var showCloudPurchaseHelp by remember(session?.userId) { mutableStateOf(false) }
     var pendingRefundOrder by remember { mutableStateOf<AppPaymentOrder?>(null) }
     var refundVerificationToken by remember { mutableStateOf<String?>(null) }
     var deleteVerificationToken by remember { mutableStateOf<String?>(null) }
@@ -962,7 +974,7 @@ internal fun AccountScreen(
                     member = cloudSyncState.member,
                     hasLocalKey = cloudSyncService.hasLocalAccountKey()
                 ),
-                enabled = !busy && appAccessState is AppAccessState.Authorized,
+                enabled = !busy && session != null && accountRepository.hasUsableSession,
                 onClick = onCloudSyncClick
             )
             val pairingContext = LocalContext.current
@@ -1686,6 +1698,10 @@ internal fun AccountScreen(
         )
     }
 
+    if (showCloudPurchaseHelp) {
+        WeChatPurchaseFallbackDialog(onDismiss = { showCloudPurchaseHelp = false })
+    }
+
     if (showPaymentAgreement) {
         PaidServiceAgreementDialog(
             onOpenAgreement = {
@@ -1943,7 +1959,7 @@ internal fun AccountScreen(
                     backEnabled = paneTransition == null
                 ) {
                     val activeSession = session
-                    if (activeSession == null) {
+                    if (activeSession == null || !accountRepository.hasUsableSession) {
                         Text("登录后可管理云同步。")
                     } else if (showCloudInventory) {
                         com.lightningstudio.watchrss.phone.cloud.CloudInventoryPanel(
@@ -1954,6 +1970,26 @@ internal fun AccountScreen(
                         CloudAccountPanel(
                             service = cloudSyncService,
                             onOpenInventory = { showCloudInventory = true },
+                            purchaseReturnRevision = cloudPurchaseReturnRevision,
+                            onPurchase = {
+                                if (!busy) {
+                                    busy = true
+                                    runAction {
+                                        try {
+                                            val fallback = context.openPurchaseInWeChat(
+                                                accountRepository,
+                                                activeSession.userId
+                                            )
+                                            if (accountRepository.session.value?.userId == activeSession.userId) {
+                                                onCloudPurchaseAttempted()
+                                                showCloudPurchaseHelp = fallback != null
+                                            }
+                                        } finally {
+                                            busy = false
+                                        }
+                                    }
+                                }
+                            },
                             userId = activeSession.userId,
                             busy = busy,
                             runAction = runAction,

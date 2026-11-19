@@ -100,6 +100,10 @@ android {
             productionSetting("WATCHRSS_OPPO_PUSH_APP_SECRET").asBuildConfigString()
         )
 
+        for (setting in listOf("WATCHRSS_WECHAT_OPEN_APP_ID", "WATCHRSS_WECHAT_MINI_PROGRAM_ORIGINAL_ID")) {
+            buildConfigField("String", setting, productionSetting(setting).asBuildConfigString())
+        }
+
         testInstrumentationRunner = "com.karumi.shot.ShotTestRunner"
 
         vectorDrawables {
@@ -172,6 +176,7 @@ android {
 }
 
 dependencies {
+    implementation("com.tencent.mm.opensdk:wechat-sdk-android:6.8.40")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.lifecycle.runtime.ktx)

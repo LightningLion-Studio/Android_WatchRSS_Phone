@@ -46,7 +46,9 @@ fun CloudAccountPanel(
     onBusyChange: (Boolean) -> Unit,
     onMessage: (String) -> Unit,
     onError: (String) -> Unit,
-    onOpenInventory: () -> Unit
+    onOpenInventory: () -> Unit,
+    purchaseReturnRevision: Int,
+    onPurchase: () -> Unit
 ) {
     val syncState by service.state.collectAsState()
     var retentionDays by remember(userId) { mutableStateOf(service.settings.retentionDays) }
@@ -89,7 +91,7 @@ fun CloudAccountPanel(
         }
     }
 
-    LaunchedEffect(userId) { refresh() }
+    LaunchedEffect(userId, purchaseReturnRevision) { refresh() }
 
     if (showReregisterConfirmation && registrationConflict) {
         AlertDialog(
@@ -123,6 +125,9 @@ fun CloudAccountPanel(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SyncV2Section(service)
         Text("云空间", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        OutlinedButton(onClick = onPurchase, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+            Text("购买云同步会员")
+        }
         val keyWarning by service.keyWarning.collectAsState()
         val needsReapproval by service.needsReapproval.collectAsState()
         if (registrationConflict) {

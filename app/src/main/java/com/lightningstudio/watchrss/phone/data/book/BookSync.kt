@@ -190,12 +190,21 @@ object BookSync {
     fun merge(local:JSONObject?,remote:JSONObject):JSONObject = merge(local, remote, binary = false)
     internal fun merge(local:JSONObject?,remote:JSONObject, binary: Boolean):JSONObject {
         validate(remote, binary);if(local==null)return copyObject(remote).apply{remove("contentAvailable")}
-        if (binary || local.has("instanceId") || local.has("lifecycle")) validateBinary(local) else validate(local)
+        validate(local, binary)
         if (local.getString("bookId") != remote.getString("bookId") || local.getInt("chapterCount") != remote.getInt("chapterCount"))
             throw InvalidBookPackageException("manifest_local_identity_conflict")
-        if (binary || local.has("lifecycle")) {
+        if (binary) {
             val token = compareLifecycle(local, remote)
-            if (token != 0) return copyObject(if (token > 0) local else remote).apply { remove("contentAvailable") }
+            if (token != 0) {
+                val current = if (token > 0) local else remote
+                val other = if (token > 0) remote else local
+                // A later legacy deletion can arrive over either protocol. Keep the lifecycle
+                // when importing it into B2 so replaying that generation cannot revive the book.
+                if (other.has("lifecycle") || other.has("instanceId") || !other.getBoolean("deleted") ||
+                    other.getLong("updatedAt") <= current.getLong("updatedAt")) {
+                    return copyObject(current).apply { remove("contentAvailable") }
+                }
+            }
         }
         val winner=compareValuesBy(remote,local,{it.getLong("updatedAt")},{it.getString("sourceDeviceId")},{it.getString("title")},{it.optString("sourceUrl")},{it.optString("kind")})>0
         return copyObject(if(winner)remote else local).apply {
@@ -203,6 +212,10 @@ object BookSync {
             put("deletionClock",maxOf(local.getLong("deletionClock"),remote.getLong("deletionClock")))
             put("deletedAt",maxOf(local.getLong("deletedAt"),remote.getLong("deletedAt")))
             put("deleted",local.getBoolean("deleted")||remote.getBoolean("deleted"))
+            if (binary && !has("lifecycle")) {
+                val lifecycle = local.optJSONObject("lifecycle") ?: remote.optJSONObject("lifecycle")
+                if (lifecycle != null) put("lifecycle", copyObject(lifecycle))
+            }
         }
     }
     fun validateReading(value:JSONObject) {

@@ -55,4 +55,52 @@ class BookManifestValidationTest {
         val error=assertThrows(InvalidBookPackageException::class.java){BookSync.merge(local,remote)}
         assertEquals("manifest_local_identity_conflict",error.reason);assertEquals(before,local.toString())
     }
+
+    private fun lifecycle(generation: Int) = JSONObject()
+        .put("generation", generation).put("operationId", "b".repeat(32)).put("startedAt", generation)
+
+    private fun tombstone(updatedAt: Int) = state().put("deleted", true)
+        .put("updatedAt", updatedAt).put("deletedAt", updatedAt).put("deletionClock", updatedAt)
+
+    @Test fun v1MergeAppliesNewerLegacyTombstoneWithExactReleaseLineState() {
+        val local = state().put("lifecycle", lifecycle(1))
+        val remote = tombstone(2)
+
+        assertEquals(BookSync.canonical(remote), BookSync.canonical(BookSync.merge(local, remote)))
+    }
+
+    @Test fun b2MergeImportsNewerLegacyTombstoneAndFencesOldLifecycleReplay() {
+        val local = state().put("lifecycle", lifecycle(1))
+        val remote = tombstone(2)
+        val merged = BookSync.merge(local, remote, binary = true)
+        val expected = BookSync.canonical(tombstone(2).put("lifecycle", lifecycle(1)))
+
+        assertEquals(expected, BookSync.canonical(merged))
+        assertEquals(expected, BookSync.canonical(BookSync.merge(remote, local, binary = true)))
+        assertEquals(expected, BookSync.canonical(BookSync.merge(merged, local, binary = true)))
+
+        val laterGeneration = state().put("lifecycle", lifecycle(2)).put("updatedAt", 3)
+        assertEquals(BookSync.canonical(laterGeneration),
+            BookSync.canonical(BookSync.merge(merged, laterGeneration, binary = true)))
+    }
+
+    @Test fun b2LifecycleRejectsStaleLegacyAndExplicitOlderGenerationTombstones() {
+        val local = state().put("lifecycle", lifecycle(2)).put("updatedAt", 3)
+        val expected = BookSync.canonical(local)
+        val staleLegacy = tombstone(2)
+        val oldGeneration = tombstone(4).put("lifecycle", lifecycle(1))
+
+        assertEquals(expected, BookSync.canonical(BookSync.merge(local, staleLegacy, binary = true)))
+        assertEquals(expected, BookSync.canonical(BookSync.merge(local, oldGeneration, binary = true)))
+    }
+
+    @Test fun b2OnlyInstanceRequiresItsLifecycleForDeletion() {
+        val instance = "a".repeat(32)
+        val local = state().put("lifecycle", lifecycle(1)).put("instanceId", instance)
+        val id = BookSync.binaryId(local.getString("fingerprint"), instance)
+        local.put("bookId", id)
+        val remote = tombstone(2).put("instanceId", instance).put("bookId", id)
+
+        assertEquals(BookSync.canonical(local), BookSync.canonical(BookSync.merge(local, remote, binary = true)))
+    }
 }

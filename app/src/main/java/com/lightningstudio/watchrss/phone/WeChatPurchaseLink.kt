@@ -72,7 +72,7 @@ private object DiscardWeChatLogs : ILog {
 internal fun WeChatPurchaseFallbackDialog(onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        text = { Text("请打开微信，搜索小程序「腕上RSS」，登录后购买云同步会员。") },
+        text = { Text("请打开微信，搜索小程序「腕上RSS」，登录后购买云同步权限。") },
         confirmButton = { TextButton(onClick = onDismiss) { Text("知道了") } }
     )
 }

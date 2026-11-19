@@ -99,7 +99,9 @@ class HotfixR2IndependentTest {
         now+=6000;p.disconnected(3)
         drop(4);drop(5);p.observe(6);p.ready(true);c.confirmedProgress("receiveChunk","a|v|1|hash2")
         val a=article();LibrarySyncPayload.buildChunkedArticleRequestFrames("phone",listOf(a),listOf(ArticleBodyRequest(a.articleId,entry(a).bodyHash,emptyList())),emptyList(),true).forEach(c::sentArticleFrame)
-        now+=6000;p.disconnected(6);assertEquals(3,p.consecutiveNoProgress)
+        now += 6000
+        assertTrue(runCatching { p.disconnected(6) }.exceptionOrNull() is LibraryNoProgressLimit)
+        assertEquals(3, p.consecutiveNoProgress)
     }
     @Test fun sustainedOneKiBWritesRefreshIdleDeadlineAfterEachCompletedChunk() {
         val count=AtomicInteger();val closed=AtomicBoolean();val calls=AtomicInteger()
@@ -138,7 +140,9 @@ class HotfixR2IndependentTest {
         now+=6000;p.disconnected(3);drop(4);drop(5);p.observe(6);p.ready(true)
         c.confirmPeerChunks(listOf(remote),emptyList());c.confirmArticleBatch(setOf(a.articleId))
         assertEquals(2,p.consecutiveNoProgress)
-        now+=6000;p.disconnected(6);assertEquals(3,p.consecutiveNoProgress)
+        now += 6000
+        assertTrue(runCatching { p.disconnected(6) }.exceptionOrNull() is LibraryNoProgressLimit)
+        assertEquals(3, p.consecutiveNoProgress)
     }
 
     @Test fun rawWriteActivityExtendsBulkAndFlushButRealSilenceStillExpires() {

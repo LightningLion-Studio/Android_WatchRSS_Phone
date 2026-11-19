@@ -545,6 +545,7 @@ class PhoneBluetoothSyncManager(
                 policy.observe(transport.generation)
             }
         }
+        val manifestRetry = currentCoroutineContext()[LibraryManifestRetry]
         val recovery = LibraryRecoveryContext(policy, mode,
             connected = { syncSession?.transport?.isClosed == false },
             reconnect = { connect() },
@@ -564,7 +565,8 @@ class PhoneBluetoothSyncManager(
             }, checkOwner = ::checkOwner,
             event = { name, fields -> debugLog.appendEvent(name, sessionId, fields) },
             reconnecting = { report(lastProgress.copy(stage = PhoneBluetoothSyncStage.RECONNECTING, bytesPerSecond = 0)) },
-            waitBeforeRetry = { reconnectDelay(LIBRARY_RECONNECT_RETRY_DELAY_MS) })
+            waitBeforeRetry = { reconnectDelay(LIBRARY_RECONNECT_RETRY_DELAY_MS) },
+            onProgressConfirmed = { manifestRetry?.confirmedProgress() })
         val checkpoints = PhoneArticleReceiveCheckpoint(File(appContext.cacheDir, "library-receive/$sessionId"),
             owner.orEmpty(), device.remoteDeviceId.ifBlank { device.bluetoothAddress.ifBlank { device.address } },
             localArticle = { id -> recovery.localArticle(id) },

@@ -66,6 +66,7 @@ class MainDomainRecoveryProgressTest {
             }.sync(syncReading = false)
         } } }.exceptionOrNull()
         if (failure == null) assertEquals(5, completed.size)
+        if (repeatCompletedBook && failure is LibraryNoProgressLimit) assertEquals(1, completed.size)
         return failure to reconnects
     }
     @Test fun newCompletedBooksKeepFourReadyIntervalsAlive() = runBlocking<Unit> {
@@ -73,10 +74,10 @@ class MainDomainRecoveryProgressTest {
         assertNull("new peer-confirmed books must reset the no-progress budget: $failure", failure)
         assertEquals(4, reconnects)
     }
-    @Test fun duplicateCompletedBookReceiptsCanBeRetriedUntilThePeerAdvances() = runBlocking<Unit> {
+    @Test fun duplicateCompletedBookReceiptsCannotRenewTheRecoveryBudget() = runBlocking<Unit> {
         val (failure, reconnects) = upload(true)
-        assertNull(failure)
-        assertEquals(7, reconnects)
+        assertTrue(failure is LibraryNoProgressLimit)
+        assertEquals(3, reconnects)
     }
     @Test fun newlyAppliedBookMetadataKeepsFourReadyIntervalsAlive() = runBlocking<Unit> {
         seed(1)
@@ -134,10 +135,10 @@ class MainDomainRecoveryProgressTest {
         assertNull("peer-confirmed new book metadata must reset the budget: $failure",failure)
         assertEquals(5,attempt)
     }
-    @Test fun stalePeerMetadataDoesNotPreventReconnection() = runBlocking<Unit> {
+    @Test fun stalePeerMetadataCannotRenewTheRecoveryBudget() = runBlocking<Unit> {
         val (failure,attempt)=metadataUpload(false)
-        assertNull(failure)
-        assertEquals(5,attempt)
+        assertTrue(failure is LibraryNoProgressLimit)
+        assertEquals(4,attempt)
     }
 
 }

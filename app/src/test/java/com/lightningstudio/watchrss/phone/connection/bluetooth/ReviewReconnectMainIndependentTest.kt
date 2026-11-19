@@ -114,10 +114,10 @@ class ReviewReconnectMainIndependentTest {
         assertEquals(4, reconnects)
         assertEquals(6, notes.allNotes().size)
     }
-    @Test fun duplicateNoteDeltasResumeWithoutDuplicatingRows() = runBlocking<Unit> {
+    @Test fun duplicateNoteDeltasStopWithoutDuplicatingRows() = runBlocking<Unit> {
         val failure = notesAcrossReconnects(false)
-        assertNull(failure)
-        assertEquals(4, reconnects)
+        assertTrue(failure is LibraryNoProgressLimit)
+        assertEquals(3, reconnects)
         assertEquals(2, notes.allNotes().size)
     }
     private suspend fun usageAcrossReconnects(duplicate: Boolean): Throwable? {
@@ -138,8 +138,8 @@ class ReviewReconnectMainIndependentTest {
     @Test fun replayedUsageRowsWithAdvancingCursorMustNotCountAsNewBusinessChanges() = runBlocking<Unit> {
         val failure = usageAcrossReconnects(true)
         assertEquals(1, tokens.observeRecent().first().size)
-        assertNull(failure)
-        assertEquals(4, reconnects)
+        assertTrue(failure is LibraryNoProgressLimit)
+        assertEquals(3, reconnects)
     }
     @Test fun newUsageRowsAcrossFourReadyIntervalsMustRemainLive() = runBlocking<Unit> {
         assertNull(usageAcrossReconnects(false))

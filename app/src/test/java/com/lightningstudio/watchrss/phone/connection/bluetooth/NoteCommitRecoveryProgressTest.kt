@@ -76,7 +76,8 @@ class NoteCommitRecoveryProgressTest {
             assertEquals(0, replay.changedNotes + replay.addedConflicts)
             recovery.appliedProgress("notes", replay.changedNotes + replay.addedConflicts)
             now += 6000
-            policy.disconnected(generation)
+            val failure = runCatching { policy.disconnected(generation) }.exceptionOrNull()
+            if (generation == 7L) assertTrue(failure is LibraryNoProgressLimit) else assertNull(failure)
         }
         assertEquals(4, notes.observeConflicts().first().size)
         assertEquals(3, policy.consecutiveNoProgress)

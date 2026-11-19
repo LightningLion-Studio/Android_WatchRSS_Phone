@@ -17,11 +17,11 @@ class LibraryTransferRecoveryTest {
         assertEquals(0,writes)
     }
     @Test fun retryLimitsShowTheirChineseReasonWithoutImplementationClassNames() {
-        for (failure in listOf(LibraryReconnectLimit(), LibraryDisconnectLimit())) {
+        for (failure in listOf(LibraryReconnectLimit(), LibraryDisconnectLimit(), LibraryNoProgressLimit(), RepeatedLibraryManifestFailure(EOFException()))) {
             assertEquals(failure.message, com.lightningstudio.watchrss.phone.viewmodel.syncFailureMessage(failure, "信息传输中"))
         }
     }
-    @Test fun fourSpacedDisconnectsResumeTheSameUnitEvenWithoutConfirmedProgress() = runBlocking {
+    @Test fun thirdReconnectedIntervalWithoutProgressStopsBeforeSearchingAgain() = runBlocking {
         var now = 0L
         var generation = 1L
         var searches = 0
@@ -29,15 +29,16 @@ class LibraryTransferRecoveryTest {
         val policy = LibraryTransferRecovery { now }.apply { observe(generation) }
         val recovery = LibraryRecoveryContext(policy, LibrarySyncMode.MERGE, { true },
             { searches++; policy.observe(++generation) }, {}, {}, { _, _ -> }, {})
-        val result = recovery.unit("articles") {
-            if (++attempts < 5) {
+        val failure = runCatching {
+            recovery.unit("articles") {
+                attempts++
                 now += 6_000
                 throw LibraryTransportFailure(generation, EOFException())
             }
-            "resumed"
-        }
-        assertEquals("resumed", result)
-        assertEquals(4, searches)
+        }.exceptionOrNull()
+        assertTrue(failure is LibraryNoProgressLimit)
+        assertEquals(4, attempts)
+        assertEquals(3, searches)
         assertEquals(3, policy.consecutiveNoProgress)
         assertEquals(0, policy.consecutiveFailures)
     }
@@ -201,16 +202,15 @@ class LibraryTransferRecoveryTest {
             context.confirmedProgress("b2:noteAsset", "receive|image|version|0")
             assertEquals(0, policy.consecutiveNoProgress)
         }
-        val reopened = context.handoff("noteAssetsB2", openReady = open, connected = { true }) {
-            context.confirmedProgress("b2:noteAsset", "receive|image|version|0")
-            if (opens < 6) {
+        val failure = runCatching {
+            context.handoff("noteAssetsB2", openReady = open, connected = { true }) {
+                context.confirmedProgress("b2:noteAsset", "receive|image|version|0")
                 now += 6_000
                 throw LibraryTransportFailure(generation, EOFException())
             }
-            true
-        }
-        assertTrue(reopened)
-        assertEquals(6, opens)
+        }.exceptionOrNull()
+        assertTrue(failure is LibraryNoProgressLimit)
+        assertEquals(5, opens)
         assertEquals(3, policy.consecutiveNoProgress)
     }
 

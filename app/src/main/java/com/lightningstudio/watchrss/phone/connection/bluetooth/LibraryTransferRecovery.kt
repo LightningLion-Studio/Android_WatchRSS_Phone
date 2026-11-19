@@ -33,20 +33,16 @@ internal class LibraryTransferRecovery(private val now: () -> Long) {
     var generation: Long = -1; private set
     private var lastDisconnectedGeneration: Long? = null
     private val times = ArrayDeque<Long>()
-    var consecutiveNoProgress = 0; private set
-    private var monitoringReady = false
-    private var progressSinceReady = false
+    private val progress = LibraryReconnectProgress()
+    val consecutiveNoProgress: Int get() = progress.consecutive
 
     fun clockMillis(): Long = now()
     fun observe(value: Long) { generation = value }
     fun ready(reconnected: Boolean = false) {
         consecutiveFailures = 0
-        if (reconnected) { monitoringReady = true; progressSinceReady = false }
+        if (reconnected) progress.ready()
     }
-    fun confirmedProgress() {
-        progressSinceReady = true
-        consecutiveNoProgress = 0
-    }
+    fun confirmedProgress() = progress.confirmed()
     fun searchFailed() {
         consecutiveFailures += 1
         if (consecutiveFailures >= 3) throw LibraryReconnectLimit()
@@ -58,11 +54,7 @@ internal class LibraryTransferRecovery(private val now: () -> Long) {
         while (times.isNotEmpty() && at - times.first() > 10_000L) times.removeFirst()
         times.addLast(at)
         if (times.size >= 3) throw LibraryDisconnectLimit()
-        if (monitoringReady) {
-            monitoringReady = false
-            consecutiveNoProgress = if (progressSinceReady) 0 else consecutiveNoProgress + 1
-
-        }
+        progress.disconnected()
     }
 }
 
@@ -244,7 +236,8 @@ internal class LibraryRecoveryContext(
     private val checkOwner: () -> Unit,
     private val event: (String, Map<String, Any>) -> Unit,
     private val reconnecting: () -> Unit,
-    private val waitBeforeRetry: suspend () -> Unit = {}
+    private val waitBeforeRetry: suspend () -> Unit = {},
+    private val onProgressConfirmed: () -> Unit = {}
 ) : AbstractCoroutineContextElement(Key) {
     companion object Key : CoroutineContext.Key<LibraryRecoveryContext>
     val bodies = LibraryBodyTransferStats()
@@ -268,6 +261,7 @@ internal class LibraryRecoveryContext(
     fun confirmedProgress(kind: String, identity: String) {
         if (confirmed.add("$kind|$identity")) {
             policy.confirmedProgress()
+            onProgressConfirmed()
             event("library.progress.confirmed", mapOf("kind" to kind, "confirmedUnits" to confirmed.size))
         }
     }

@@ -163,7 +163,7 @@ object TipCatalog {
         TipDefinition(
             id = TipIds.CLOUD_E2EE,
             title = "端到端加密",
-            message = "云备份采用端到端加密；24 个恢复词请离线抄写妥善保管。",
+            message = "云备份采用端到端加密；请妥善保存 24 个恢复词。",
             priority = 8,
             rule = TipRules.eventNever(TipEvents.CLOUD_ENCRYPTION_ENABLED),
             displayFrequency = TipDisplayFrequency.ALWAYS,

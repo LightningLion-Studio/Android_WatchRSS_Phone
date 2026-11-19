@@ -143,7 +143,7 @@ private fun WatchPairingScreen(viewModel: WatchPairingViewModel, onClose: () -> 
                 is WatchPairingState.NeedsKey -> {
                     Lead(if (current.existingCloud) "这台手机还没有云密钥" else "先开通云同步")
                     Muted(if (current.existingCloud) "用 24 个恢复词恢复，或请已登录的设备批准这台手机。完成后会自动继续扫码。"
-                        else "开通时请抄下 24 个恢复词。完成后会自动继续扫码，手表绑定后即可云同步。")
+                        else "开通时请妥善保存 24 个恢复词。完成后会自动继续扫码，手表绑定后即可云同步。")
                     Button(onClick = onOpenCloudSync, modifier = Modifier.fillMaxWidth()) { Text("前往云同步") }
                 }
                 is WatchPairingState.Scanning -> when (current.permission) {

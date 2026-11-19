@@ -53,8 +53,8 @@ android {
         applicationId = "com.lightningstudio.watchrss.phone"
         minSdk = 30
         targetSdk = 36
-        versionCode = 118
-        versionName = "1.4.0-10"
+        versionCode = 119
+        versionName = "1.4.0-11"
         // P1 is local-only and opt-in. This flag never enables cloud/apply/GC.
         buildConfigField("boolean", "SYNC_V2", providers.gradleProperty("syncV2").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_CONTENT", providers.gradleProperty("syncObjectsV2Content").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")

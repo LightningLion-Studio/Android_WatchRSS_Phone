@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.AlarmManager
 import android.app.PendingIntent
 import android.Manifest
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -18,6 +19,7 @@ import coil.ImageLoaderFactory
 import coil.decode.ImageDecoderDecoder
 import coil.decode.VideoFrameDecoder
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncWorker
+import com.lightningstudio.watchrss.phone.cloud.RecoveryWordClipboard
 import com.lightningstudio.watchrss.phone.connection.ble.WatchBleBandwidthServer
 import com.lightningstudio.watchrss.phone.connection.ip.WatchIpSyncService
 import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
@@ -39,6 +41,10 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
     private var lastForegroundSyncAt = 0L
     @Volatile private var resumedActivity: Activity? = null
     private var resumedAtMillis = 0L
+    private val recoveryClipboard = lazy {
+        RecoveryWordClipboard(getSystemService(ClipboardManager::class.java))
+    }
+    internal val recoveryWordClipboard by recoveryClipboard
     private val accountInitialization = CompletableDeferred<Unit>()
     private val consentServicesStarted = AtomicBoolean(false)
     private val ipSyncService: WatchIpSyncService by lazy {
@@ -68,6 +74,9 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
         super.onCreate()
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
+                if (recoveryClipboard.isInitialized()) {
+                    recoveryWordClipboard.observeWindow(activity.window.decorView)
+                }
                 runCatching { startService(android.content.Intent(this@PhoneCompanionApplication,com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnosticService::class.java)) }
                 resumedActivity = activity
                 resumedAtMillis = SystemClock.elapsedRealtime()

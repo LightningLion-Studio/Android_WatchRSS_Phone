@@ -1,12 +1,12 @@
 package com.lightningstudio.watchrss.phone.cloud
 
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material3.AlertDialog
@@ -30,8 +30,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
 import kotlinx.coroutines.CancellationException
 import com.lightningstudio.watchrss.phone.tips.TipIds
@@ -274,11 +277,12 @@ fun CloudAccountPanel(
                             modifier = Modifier.padding(16.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Text("请离线抄写这 24 个恢复词", fontWeight = FontWeight.SemiBold)
-                            Text("服务器无法替你找回。所有设备丢失后，只能依靠它恢复。")
-                            SelectionContainer {
-                                Text(setup!!.words.joinToString(" "))
-                            }
+                            val application = LocalContext.current.applicationContext as PhoneCompanionApplication
+                            RecoveryWordsDisplay(
+                                words = setup!!.words,
+                                clipboard = application.recoveryWordClipboard,
+                                enabled = !busy && !activationInFlight
+                            )
                             RecoveryInputPrivacy {
                                 OutlinedTextField(
                                     keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
@@ -802,4 +806,21 @@ private fun formatBytes(bytes: Long): String = when {
     bytes >= 1024L * 1024L * 1024L -> "%.2f GiB".format(bytes / 1073741824.0)
     bytes >= 1024L * 1024L -> "%.1f MiB".format(bytes / 1048576.0)
     else -> "${bytes / 1024L} KiB"
+}
+
+@Composable
+internal fun RecoveryWordsDisplay(words: List<String>, clipboard: RecoveryWordClipboard, enabled: Boolean) {
+    val context = LocalContext.current
+    val window = LocalView.current.rootView
+    Text("请妥善保存这 24 个恢复词", fontWeight = FontWeight.SemiBold)
+    Text("服务器无法替你找回。所有设备丢失后，只能依靠它恢复。")
+    Text(words.joinToString(" "))
+    OutlinedButton(
+        onClick = {
+            clipboard.copy(words, window)
+            Toast.makeText(context, "已复制，请保存到安全的地方", Toast.LENGTH_SHORT).show()
+        },
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth()
+    ) { Text("复制恢复词") }
 }

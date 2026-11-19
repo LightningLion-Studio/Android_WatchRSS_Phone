@@ -56,6 +56,14 @@ class TipCatalogTest {
     }
 
     @Test
+    fun `cloud backup tip asks users to save the recovery words`() {
+        assertEquals(
+            "云备份采用端到端加密；请妥善保存 24 个恢复词。",
+            TipCatalog.byId(TipIds.CLOUD_E2EE)?.message
+        )
+    }
+
+    @Test
     fun `unknown id resolves to null`() {
         assertNull(TipCatalog.byId("__never_exists__"))
     }

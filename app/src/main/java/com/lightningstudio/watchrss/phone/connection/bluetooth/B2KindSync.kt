@@ -12,7 +12,7 @@ import java.io.OutputStream
 /** Connects selected business ports to the persistent B2 session. */
 internal class B2KindSync(private val store: B2Persistence, private val directory: File,
     private val assetDirectory: File, private val account: String, private val phone: String,
-    private val watch: String, private val authorize: () -> Unit,
+    private val watch: String, val authorize: () -> Unit,
     private val progress: (String) -> Unit,
     private val route: B2KindRoute,
     private val business: B2InheritedKinds, private val retentionGeneration: String? = null,

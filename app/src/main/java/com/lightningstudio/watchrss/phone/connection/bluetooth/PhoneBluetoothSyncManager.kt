@@ -1539,7 +1539,7 @@ class PhoneBluetoothSyncManager(
         route: B2KindRoute,
         runtime: B2KindSync
     ): LibrarySyncStats {
-        val (_, authorize) = binaryAuthorization()
+        val authorize = runtime.authorize
         var session: PhoneSyncSession? = null
         var probe: JSONObject? = null
 
@@ -1567,7 +1567,7 @@ class PhoneBluetoothSyncManager(
                     throw B2Exception("CAPABILITY_MISMATCH")
                 }
                 opened.recoveryGate.tryAcquire()
-                transport.classifyBinaryIo = true
+                transport.binaryAuthorization = authorize
                 recovery.observe(transport.generation)
                 val binding = bindingSnapshot(parent, opened.device.address, opened)
                 if (B2Routing.classify(binding.response, B2Routing.Ready(true, true, true)) != B2Routing.Peer.B2 ||
@@ -2192,7 +2192,7 @@ class PhoneBluetoothSyncManager(
             exchange(request, timeoutMs, sessionId, active.device.address, active)
         }
         val activeSession = syncSession ?: currentCoroutineContext()[AccountDataSession]?.session
-        val binaryTransport = activeSession?.transport?.takeIf { it.classifyBinaryIo }
+        val binaryTransport = activeSession?.transport?.takeIf { it.binaryAuthorization != null }
         return try {
             withTimeout(timeoutMs) {
                 withContext(Dispatchers.IO) {

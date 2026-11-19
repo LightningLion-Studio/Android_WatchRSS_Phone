@@ -237,36 +237,40 @@ internal class PhoneSyncSession internal constructor(
     ) : Closeable {
         private val rawInput = inputStream
         private val rawOutput = outputStream
-        var classifyBinaryIo = false
-        val inputStream: InputStream get() = if (classifyBinaryIo) binaryInputStream() else rawInput
-        val outputStream: OutputStream get() = if (classifyBinaryIo) binaryOutputStream() else rawOutput
+        @Volatile var binaryAuthorization: (() -> Unit)? = null
+        val inputStream: InputStream get() = binaryAuthorization?.let(::binaryInputStream) ?: rawInput
+        val outputStream: OutputStream get() = binaryAuthorization?.let(::binaryOutputStream) ?: rawOutput
         val generation: Long = nextGeneration.incrementAndGet()
         @Volatile private var closed = false
 
-        private fun <T> binaryIo(operation: () -> T): T = try {
-            operation()
-        } catch (failure: IOException) {
-            if (failure is java.net.ProtocolException) throw failure
-            throw LibraryTransportFailure(generation, failure)
+        private fun <T> binaryIo(authorize: () -> Unit, operation: () -> T): T {
+            // A revocation is an account failure, not a recoverable socket failure.
+            authorize()
+            return try {
+                operation()
+            } catch (failure: IOException) {
+                if (failure is java.net.ProtocolException) throw failure
+                throw LibraryTransportFailure(generation, failure)
+            }
         }
 
-        internal fun binaryInputStream(): InputStream = object : InputStream() {
-            override fun read(): Int = binaryIo {
+        private fun binaryInputStream(authorize: () -> Unit): InputStream = object : InputStream() {
+            override fun read(): Int = binaryIo(authorize) {
                 rawInput.read().also { if (it < 0) throw EOFException("B2 connection closed") }
             }
 
-            override fun read(bytes: ByteArray, offset: Int, length: Int): Int = binaryIo {
+            override fun read(bytes: ByteArray, offset: Int, length: Int): Int = binaryIo(authorize) {
                 rawInput.read(bytes, offset, length).also {
                     if (length > 0 && it < 0) throw EOFException("B2 connection closed")
                 }
             }
         }
 
-        internal fun binaryOutputStream(): OutputStream = object : OutputStream() {
-            override fun write(value: Int) = binaryIo { rawOutput.write(value) }
+        private fun binaryOutputStream(authorize: () -> Unit): OutputStream = object : OutputStream() {
+            override fun write(value: Int) = binaryIo(authorize) { rawOutput.write(value) }
             override fun write(bytes: ByteArray, offset: Int, length: Int) =
-                binaryIo { rawOutput.write(bytes, offset, length) }
-            override fun flush() = binaryIo { rawOutput.flush() }
+                binaryIo(authorize) { rawOutput.write(bytes, offset, length) }
+            override fun flush() = binaryIo(authorize) { rawOutput.flush() }
         }
 
         companion object {
@@ -430,12 +434,12 @@ class PhoneBluetoothSyncClient(
             val transport = session.transport
                 ?: throw LibraryTransportFailure(generation, EOFException("B2 connection closed"))
             if (transport.isClosed) throw LibraryTransportFailure(transport.generation, EOFException("B2 connection closed"))
-            check(transport.generation == generation && session.isPersistent && !session.legacyFallback &&
+            check(transport.binaryAuthorization != null && transport.generation == generation && session.isPersistent && !session.legacyFallback &&
                 !transport.owner.startsWith("ip:"))
             session.detachCancellation()
             try {
                 currentCoroutineContext().ensureActive()
-                block(transport.binaryInputStream(), transport.binaryOutputStream(), session::close)
+                block(transport.inputStream, transport.outputStream, session::close)
             } catch (failure: com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2NetworkTimeout) {
                 throw LibraryTransportFailure(transport.generation, failure)
             } finally {

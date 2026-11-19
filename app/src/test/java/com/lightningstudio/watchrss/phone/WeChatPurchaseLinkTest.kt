@@ -39,7 +39,7 @@ class WeChatPurchaseLinkTest {
             }
         }
 
-        compose.onNodeWithText("请打开微信，搜索小程序「腕上RSS」，登录后购买云同步权限。").assertExists()
+        compose.onNodeWithText("请打开微信，搜索小程序「腕上RSS」，登录后购买云同步会员。").assertExists()
         assertTrue(compose.onAllNodesWithText("打开支付链接").fetchSemanticsNodes().isEmpty())
         compose.onNodeWithText("知道了").performClick()
         assertEquals(1, dismissed)

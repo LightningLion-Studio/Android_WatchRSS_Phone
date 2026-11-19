@@ -1,10 +1,13 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import java.io.IOException
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 
 /** One retry budget for the entire user operation, including failed reconnects. */
 internal class BluetoothSyncRecovery(
@@ -48,14 +51,28 @@ internal class LibrarySyncRecovery(
     private val onInterrupted: (Throwable) -> Unit,
     private val onSearch: (Int) -> Unit,
     private val onSearchFailed: (Int) -> Unit = {},
-    private val onReady: () -> Unit
-) {
+    private val onReady: () -> Unit,
+    private val onProgressConfirmed: () -> Unit = {}
+) : AbstractCoroutineContextElement(Key) {
+    companion object Key : CoroutineContext.Key<LibrarySyncRecovery>
+
     private val disconnectTimes = ArrayDeque<Long>()
+    private val progress = LibraryReconnectProgress()
+    private val confirmed = mutableSetOf<Pair<String, String>>()
+
+    fun confirmedProgress() {
+        progress.confirmed()
+        onProgressConfirmed()
+    }
+
+    fun confirmedProgress(kind: String, identity: String) {
+        if (confirmed.add(kind to identity)) confirmedProgress()
+    }
 
     suspend fun <T> run(operation: suspend () -> T): T {
         while (true) {
             try {
-                return operation()
+                return withContext(this) { operation() }
             } catch (failure: Exception) {
                 currentCoroutineContext().ensureActive()
                 if (!isRetryableBluetoothDisconnect(failure)) throw failure
@@ -66,8 +83,10 @@ internal class LibrarySyncRecovery(
                 }
                 disconnectTimes.addLast(at)
                 if (disconnectTimes.size >= 3) throw LibraryDisconnectLimit(failure)
+                progress.disconnected(failure)
             }
             search()
+            progress.ready()
         }
     }
 

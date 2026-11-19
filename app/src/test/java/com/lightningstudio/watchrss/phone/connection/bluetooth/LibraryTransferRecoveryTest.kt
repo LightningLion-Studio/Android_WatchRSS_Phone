@@ -28,7 +28,7 @@ class LibraryTransferRecoveryTest {
     }
 
     @Test
-    fun spacedDropsAndPreviouslyFailedSearchesDoNotExhaustTheOperation() = runBlocking {
+    fun newConfirmedProgressResetsTheStreakDespitePreviouslyFailedSearches() = runBlocking {
         var clock = 0L
         var units = 0
         var unavailable = true
@@ -41,6 +41,7 @@ class LibraryTransferRecoveryTest {
         )
         val result = recovery.run {
             if (units++ < 4) {
+                if (units == 3) recovery.confirmedProgress("receiveBookChunk", "book|hash|0")
                 clock += 6_000L
                 throw IOException("link lost")
             }
@@ -49,6 +50,29 @@ class LibraryTransferRecoveryTest {
         assertEquals("resumed", result)
         assertEquals(List(4) { 8_000L }, waits)
         assertEquals(List(4) { listOf(1, 2) }.flatten(), searches)
+    }
+
+    @Test
+    fun thirdReconnectedIntervalWithOnlyReplayedReceiptsStops() = runBlocking {
+        var clock = 0L
+        var attempts = 0
+        var searches = 0
+        val recovery = LibrarySyncRecovery(
+            now = { clock }, pause = { error("no pause expected") },
+            reconnect = { searches++ }, onInterrupted = {}, onSearch = {}, onReady = {}
+        )
+        val failure = runCatching {
+            recovery.run {
+                attempts++
+                recovery.confirmedProgress("sendBookChunk", "book|hash|0")
+                clock += 6_000L
+                throw IOException("link lost")
+            }
+        }.exceptionOrNull()
+        assertTrue(failure is LibraryNoProgressLimit)
+        assertEquals(4, attempts)
+        assertEquals(3, searches)
+        assertEquals(failure?.message, com.lightningstudio.watchrss.phone.viewmodel.syncFailureMessage(failure!!, "信息传输中"))
     }
 
     @Test

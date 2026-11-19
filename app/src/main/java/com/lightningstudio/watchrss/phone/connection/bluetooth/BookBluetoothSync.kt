@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth
 
+import kotlinx.coroutines.currentCoroutineContext
 import com.lightningstudio.watchrss.phone.data.book.*
 import com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec
 import org.json.*
@@ -86,10 +87,13 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
                 reject(id,"book_manifest_invalid",when {state==null->"manifest_requested_unknown_book";state.getBoolean("deleted")->"manifest_requested_deleted_book";else->"manifest_requested_body_unavailable"});continue
             }
             val file=requireNotNull(store.packageFile(id));val count=((file.length()+CHUNK-1)/CHUNK).toInt()
+            val packageHash = store.packageHash(id)
             RandomAccessFile(file,"r").use {input->repeat(count){index->val bytes=ByteArray(minOf(CHUNK.toLong(),file.length()-input.filePointer).toInt());input.readFully(bytes)
-                val ack=send(request("body").put("bookId",id).put("fingerprint",state.getString("fingerprint")).put("packageSha256",store.packageHash(id))
+                val ack=send(request("body").put("bookId",id).put("fingerprint",state.getString("fingerprint")).put("packageSha256",packageHash)
                     .put("byteCount",file.length()).put("chunkIndex",index).put("chunkCount",count).put("dataBase64",Base64.getEncoder().encodeToString(bytes)))
-                require(ack.getString("phase")=="body"&&ack.getBoolean("received"));if(index==count-1)require(ack.getBoolean("complete"))
+                require(ack.getString("phase")=="body"&&ack.getBoolean("received"))
+                if(index==count-1)require(ack.getBoolean("complete"))
+                currentCoroutineContext()[LibrarySyncRecovery]?.confirmedProgress("sendBookChunk", "$id|$packageHash|$index")
             }}
         }
         staging.mkdirs()

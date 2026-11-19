@@ -10,8 +10,33 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import org.json.JSONObject
 
+internal open class LibraryNoProgressLimit(
+    message: String = "连续 3 次重连后同步均无进展，请稍后重试。",
+    cause: Throwable? = null
+) : IllegalArgumentException(message, cause)
+
 internal class RepeatedLibraryManifestFailure(cause: Throwable) :
-    IllegalArgumentException("资料库清单连续 3 次传输失败且无进展，请稍后重试。", cause)
+    LibraryNoProgressLimit("资料库清单连续 3 次传输失败且无进展，请稍后重试。", cause)
+
+/** Counts only failed intervals after reconnecting, and only once per Ready. */
+internal class LibraryReconnectProgress {
+    var consecutive = 0
+        private set
+    private var awaitingProgress = false
+
+    fun ready() { awaitingProgress = true }
+
+    fun confirmed() {
+        awaitingProgress = false
+        consecutive = 0
+    }
+
+    fun disconnected(cause: Throwable? = null) {
+        if (!awaitingProgress) return
+        awaitingProgress = false
+        if (++consecutive >= 3) throw LibraryNoProgressLimit(cause = cause)
+    }
+}
 
 /** Counts an identical failed wire boundary across physical reconnects, within one sync. */
 internal class LibraryManifestRetry : AbstractCoroutineContextElement(Key) {
@@ -20,6 +45,11 @@ internal class LibraryManifestRetry : AbstractCoroutineContextElement(Key) {
     internal data class Boundary(val request: String, val incoming: Boolean, val index: Int)
     private var failedBoundary: Boundary? = null
     private var failures = 0
+
+    fun confirmedProgress() {
+        failedBoundary = null
+        failures = 0
+    }
 
     fun begin(frames: List<JSONObject>): Attempt {
         val digest = MessageDigest.getInstance("SHA-256")
@@ -49,10 +79,7 @@ internal class LibraryManifestRetry : AbstractCoroutineContextElement(Key) {
             if (++failures >= 3) throw RepeatedLibraryManifestFailure(error)
         }
 
-        fun complete() {
-            failedBoundary = null
-            failures = 0
-        }
+        fun complete() = confirmedProgress()
     }
 }
 

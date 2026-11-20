@@ -107,7 +107,6 @@ import com.lightningstudio.watchrss.phone.account.TotpEnrollment
 import com.lightningstudio.watchrss.phone.account.TotpFactor
 import com.lightningstudio.watchrss.phone.account.accountLoginErrorMessage
 import com.lightningstudio.watchrss.phone.account.accountSecurityErrorMessage
-import com.lightningstudio.watchrss.phone.account.WeChatHandoff
 import com.lightningstudio.watchrss.phone.cloud.CloudAccountPanel
 import com.lightningstudio.watchrss.phone.tips.TipEvents
 import com.lightningstudio.watchrss.phone.tips.TipIds
@@ -134,9 +133,6 @@ import java.time.format.DateTimeFormatter
 class AccountActivity : ComponentActivity() {
     private var screenStartedAt: Long = 0L
 
-    private var awaitingWeChatReturn = false
-    private val cloudPurchaseReturnRevision = mutableStateOf(0)
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val container = (application as PhoneCompanionApplication).container
@@ -162,8 +158,6 @@ class AccountActivity : ComponentActivity() {
                     usageTelemetry = container.usageTelemetry,
                     onBack = ::finish,
                     returnWhenCloudReady = returnWhenCloudReady,
-                    onCloudPurchaseAttempted = { awaitingWeChatReturn = true },
-                    cloudPurchaseReturnRevision = cloudPurchaseReturnRevision.value,
                     onLoginComplete = {
                         if (finishAfterLogin) {
                             lifecycleScope.launch {
@@ -185,10 +179,6 @@ class AccountActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (awaitingWeChatReturn) {
-            awaitingWeChatReturn = false
-            cloudPurchaseReturnRevision.value++
-        }
         screenStartedAt = SystemClock.elapsedRealtime()
         (application as PhoneCompanionApplication).container.usageTelemetry.recordScreenOpen("phone_account")
     }
@@ -273,19 +263,21 @@ internal fun AccountScreen(
     initialSection: AccountSection = AccountSection.ROOT,
     /** Opened from watch pairing for the cloud key: go straight back once the key exists, and Back returns there too. */
     returnWhenCloudReady: Boolean = false,
-    onCloudPurchaseAttempted: () -> Unit = {},
-    cloudPurchaseReturnRevision: Int = 0
+    accessCoordinatorOverride: com.lightningstudio.watchrss.phone.account.AppAccessCoordinator? = null,
+    isAccountPageActive: () -> Boolean = { true }
 ) {
     val session by accountRepository.session.collectAsState()
     val context = LocalContext.current
     val tipManager = LocalTipManager.current
-    val accessCoordinator = (context.applicationContext as PhoneCompanionApplication).container.appAccessCoordinator
+    val accessCoordinator = accessCoordinatorOverride ?: (context.applicationContext as PhoneCompanionApplication).container.appAccessCoordinator
     val appAccessState by accessCoordinator.state.collectAsState()
     val cloudSyncState by cloudSyncService.state.collectAsState()
     val coroutineScope = rememberCoroutineScope()
     var page by rememberSaveable(session?.userId) {
         mutableStateOf(if (initialSection == AccountSection.CLOUD_SYNC && session != null) AccountPage.CLOUD_SYNC else AccountPage.ROOT)
     }
+    var showCloudInventory by remember(session?.userId) { mutableStateOf(false) }
+    val purchaseLauncher = rememberWeChatPurchaseLauncher()
     val sectionRequester = remember { BringIntoViewRequester() }
     var sectionReady by remember(session?.userId, initialSection) { mutableStateOf(false) }
     val sectionAnchor = Modifier.bringIntoViewRequester(sectionRequester)
@@ -356,20 +348,25 @@ internal fun AccountScreen(
     var accountDeletionResult by remember { mutableStateOf<AccountDeletionResult?>(null) }
     val canManageTotp = session != null
 
-    fun openCloudMembership(expectedUserId: String?) {
-        if (busy) return
-        busy = true
-        runAction {
-            try {
-                val requestHandoff: (suspend () -> WeChatHandoff)? = expectedUserId?.let { userId ->
-                    suspend { accountRepository.createWeChatHandoff(userId) }
-                }
-                showCloudPurchaseHelp = !context.openPurchaseInWeChat(requestHandoff)
-                onCloudPurchaseAttempted()
-            } finally {
-                busy = false
-            }
-        }
+    fun openCloudMembership(source: AccountPage, authenticated: Boolean) {
+        val launcher = purchaseLauncher ?: return
+        if (busy || launcher.busy || showCloudPurchaseHelp) return
+        val snapshot = accountRepository.captureWeChatPurchaseSession(session, authenticated) ?: return
+        launcher.launch(
+            isPageActive = { isAccountPageActive() && page == source && !showCloudInventory },
+            withCurrentSession = { action -> accountRepository.withCurrentWeChatPurchaseSession(snapshot, action) },
+            requestHandoff = if (authenticated) {
+                suspend { accountRepository.createWeChatHandoff(snapshot) }
+            } else {
+                null
+            },
+            onNoHandler = { showCloudPurchaseHelp = true }
+        )
+    }
+
+    fun closeAccount() {
+        purchaseLauncher?.cancelPending()
+        onBack()
     }
 
     LaunchedEffect(session?.userId) {
@@ -1058,10 +1055,9 @@ internal fun AccountScreen(
         }
     }
 
-    var showCloudInventory by remember(session?.userId) { mutableStateOf(false) }
-
     fun openCloudSync() {
         if (page == AccountPage.CLOUD_SYNC || paneTransition != null) return
+        purchaseLauncher?.cancelPending()
         page = AccountPage.CLOUD_SYNC
         if (leadingPane != null) {
             completePaneTransition(AccountPaneTransition.OPENING_CLOUD)
@@ -1069,9 +1065,10 @@ internal fun AccountScreen(
     }
 
     fun leaveCloudSync() {
-        if (returnWhenCloudReady) { onBack(); return }
+        if (returnWhenCloudReady) { closeAccount(); return }
         if (page != AccountPage.CLOUD_SYNC || paneTransition != null) return
         if (showCloudInventory) { showCloudInventory = false; return }
+        purchaseLauncher?.cancelPending()
         page = AccountPage.ROOT
         if (leadingPane != null) {
             completePaneTransition(AccountPaneTransition.CLOSING_CLOUD)
@@ -1081,7 +1078,7 @@ internal fun AccountScreen(
     if (returnWhenCloudReady) {
         LaunchedEffect(session?.userId) {
             while (session != null) {
-                if (cloudSyncService.hasLocalAccountKey()) { onBack(); break }
+                if (cloudSyncService.hasLocalAccountKey()) { closeAccount(); break }
                 delay(800)
             }
         }
@@ -1089,7 +1086,7 @@ internal fun AccountScreen(
 
     BackHandler(enabled = true) {
         if (paneTransition != null) return@BackHandler
-        if (page == AccountPage.CLOUD_SYNC) leaveCloudSync() else onBack()
+        if (page == AccountPage.CLOUD_SYNC) leaveCloudSync() else closeAccount()
     }
 
     if (showAddMethodDialog) {
@@ -1885,7 +1882,7 @@ internal fun AccountScreen(
 
     AdaptiveWindowScope(modifier = Modifier.fillMaxSize()) { windowInfo ->
         val rootPane: @Composable () -> Unit = {
-            AccountPageScaffold(title = "账号", onBack = onBack) {
+            AccountPageScaffold(title = "账号", onBack = ::closeAccount) {
                 AccountIdentityPanel(summary = session?.phoneMasked ?: "未登录")
                 val accessSummary = when (val access = appAccessState) {
                     is AppAccessState.Authorized -> access.summary
@@ -1963,8 +1960,10 @@ internal fun AccountScreen(
                     }
                 }
                 accountControls(::openCloudSync)
-                if (!accountRepository.hasUsableSession) {
-                    CloudMembershipPurchaseButton(enabled = !busy) { openCloudMembership(null) }
+                if (page == AccountPage.ROOT && !accountRepository.hasUsableSession) {
+                    CloudMembershipPurchaseButton(enabled = !busy && purchaseLauncher?.busy == false) {
+                        openCloudMembership(AccountPage.ROOT, authenticated = false)
+                    }
                 }
                 if (page == AccountPage.ROOT) {
                     AccountFeedback(message = message, error = error)
@@ -1982,7 +1981,9 @@ internal fun AccountScreen(
                     if (activeSession == null || !accountRepository.hasUsableSession) {
                         Text("登录后可管理云同步。")
                         if (!showCloudInventory) {
-                            CloudMembershipPurchaseButton(enabled = !busy) { openCloudMembership(null) }
+                            CloudMembershipPurchaseButton(enabled = !busy && purchaseLauncher?.busy == false) {
+                                openCloudMembership(AccountPage.CLOUD_SYNC, authenticated = false)
+                            }
                         }
                     } else if (showCloudInventory) {
                         com.lightningstudio.watchrss.phone.cloud.CloudInventoryPanel(
@@ -1992,9 +1993,13 @@ internal fun AccountScreen(
                     } else {
                         CloudAccountPanel(
                             service = cloudSyncService,
-                            onOpenInventory = { showCloudInventory = true },
-                            purchaseReturnRevision = cloudPurchaseReturnRevision,
-                            onPurchase = { openCloudMembership(activeSession.userId) },
+                            onOpenInventory = {
+                                purchaseLauncher?.cancelPending()
+                                showCloudInventory = true
+                            },
+                            purchaseReturnRevision = purchaseLauncher?.returnRevision ?: 0,
+                            purchaseEnabled = purchaseLauncher?.busy == false,
+                            onPurchase = { openCloudMembership(AccountPage.CLOUD_SYNC, authenticated = true) },
                             userId = activeSession.userId,
                             busy = busy,
                             runAction = runAction,

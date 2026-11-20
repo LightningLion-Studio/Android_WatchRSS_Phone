@@ -1,6 +1,12 @@
 package com.lightningstudio.watchrss.phone.account
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -193,22 +199,32 @@ class PhoneAccountRepository(
         }
     }
 
-    suspend fun logout() {
-        val current = session.value
-        current?.let { runCatching { onReleaseCloudAuthorization(it) } }
-        if (current != null && !current.isExpired) {
-            val queued = runCatching { sessionStore.queueRevocation(current) }.isSuccess
-            val revoked = runCatching { accountClient.logout(current) }.isSuccess
-            check(revoked || queued) { "无法安全退出，请检查网络后重试" }
-            if (revoked) {
-                if (queued) {
-                    sessionStore.clearPendingRevocation()
-                }
-            } else {
-                sessionStore.schedulePendingRevocation()
-            }
+    internal suspend fun <T> withPurchasesBlockedForLogout(action: suspend (PhoneAccountSession?) -> T): T {
+        val current = sessionStore.beginLogout()
+        return try {
+            action(current)
+        } finally {
+            sessionStore.finishLogout()
         }
-        try { current?.let(onClearCloudState) } finally { sessionStore.clear() }
+    }
+
+    suspend fun logout() {
+        withPurchasesBlockedForLogout { current ->
+            current?.let { runCatching { onReleaseCloudAuthorization(it) } }
+            if (current != null && !current.isExpired) {
+                val queued = runCatching { sessionStore.queueRevocation(current) }.isSuccess
+                val revoked = runCatching { accountClient.logout(current) }.isSuccess
+                check(revoked || queued) { "无法安全退出，请检查网络后重试" }
+                if (revoked) {
+                    if (queued) {
+                        sessionStore.clearPendingRevocation()
+                    }
+                } else {
+                    sessionStore.schedulePendingRevocation()
+                }
+            }
+            try { current?.let(onClearCloudState) } finally { sessionStore.clear() }
+        }
     }
 
     suspend fun consumeActivationProof(expectedProof: String) {
@@ -237,21 +253,32 @@ class PhoneAccountRepository(
     suspend fun releaseAppAccess(current: AppAuthorization): Boolean =
         accountClient.releaseAppAccess(requireSession(), current)
 
-    internal suspend fun createWeChatHandoff(expectedUserId: String): WeChatHandoff {
-        val owner = session.value
-        if (owner == null || owner.userId != expectedUserId || owner.userId.isBlank() ||
-            owner.accessToken.isBlank() || !hasUsableSession
-        ) {
-            throw WeChatHandoffUnavailable()
+    internal fun captureWeChatPurchaseSession(expected: PhoneAccountSession?, authenticated: Boolean) =
+        sessionStore.capturePurchaseSession(expected, authenticated)
+
+    internal fun <T> withCurrentWeChatPurchaseSession(
+        snapshot: EncryptedAccountSessionStore.PurchaseSession,
+        action: () -> T
+    ): T? = sessionStore.withCurrentPurchaseSession(snapshot, action)
+
+    internal suspend fun createWeChatHandoff(
+        snapshot: EncryptedAccountSessionStore.PurchaseSession
+    ): WeChatHandoff = coroutineScope {
+        val owner = sessionStore.withCurrentPurchaseSession(snapshot) {
+            snapshot.session?.takeIf { snapshot.authenticated }
+        } ?: throw CancellationException("Purchase session changed")
+        val sessionWatcher = launch(start = CoroutineStart.UNDISPATCHED) {
+            sessionStore.awaitPurchaseSessionChange(snapshot)
+            this@coroutineScope.cancel(CancellationException("Purchase session changed"))
         }
-        val handoff = accountClient.createWeChatHandoff(owner)
-        val current = session.value
-        if (current == null || current.userId != owner.userId ||
-            current.accessToken != owner.accessToken || !hasUsableSession
-        ) {
-            throw WeChatHandoffUnavailable()
+        try {
+            ensureActive()
+            val handoff = accountClient.createWeChatHandoff(owner)
+            sessionStore.withCurrentPurchaseSession(snapshot) { handoff }
+                ?: throw CancellationException("Purchase session changed")
+        } finally {
+            sessionWatcher.cancel()
         }
-        return handoff
     }
 
     suspend fun createPaymentOrder(idempotencyKey: String): AppPaymentOrder =

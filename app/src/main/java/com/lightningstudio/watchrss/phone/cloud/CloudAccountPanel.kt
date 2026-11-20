@@ -52,6 +52,7 @@ fun CloudAccountPanel(
     onError: (String) -> Unit,
     onOpenInventory: () -> Unit,
     purchaseReturnRevision: Int,
+    purchaseEnabled: Boolean,
     onPurchase: () -> Unit
 ) {
     val syncState by service.state.collectAsState()
@@ -129,7 +130,7 @@ fun CloudAccountPanel(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SyncV2Section(service)
         Text("云空间", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        CloudMembershipPurchaseButton(enabled = !busy, onClick = onPurchase)
+        CloudMembershipPurchaseButton(enabled = !busy && purchaseEnabled, onClick = onPurchase)
         val keyWarning by service.keyWarning.collectAsState()
         val needsReapproval by service.needsReapproval.collectAsState()
         if (registrationConflict) {

@@ -8,6 +8,7 @@ import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -26,25 +27,87 @@ class EncryptedAccountSessionStore(
     private val _session = MutableStateFlow<PhoneAccountSession?>(null)
     val session: StateFlow<PhoneAccountSession?> = _session
 
+    // Session publication, logout entry and the final purchase dispatch share this lock.
+    // Preference transactions and handoff HTTP calls run outside it.
+    private val purchaseSessionLock = Any()
+    private val purchaseGeneration = MutableStateFlow(0L)
+    private var logoutsInProgress = 0
+
+    internal class PurchaseSession(
+        val session: PhoneAccountSession?,
+        val generation: Long,
+        val authenticated: Boolean
+    )
+
+    internal fun beginLogout(): PhoneAccountSession? = synchronized(purchaseSessionLock) {
+        logoutsInProgress++
+        purchaseGeneration.value++
+        _session.value
+    }
+
+    internal fun finishLogout() {
+        synchronized(purchaseSessionLock) { logoutsInProgress-- }
+    }
+
+    internal fun capturePurchaseSession(
+        expected: PhoneAccountSession?,
+        authenticated: Boolean
+    ): PurchaseSession? = synchronized(purchaseSessionLock) {
+        val current = _session.value
+        if (logoutsInProgress > 0 || !current.hasSamePurchaseCredentials(expected) ||
+            current.isUsableForPurchase() != authenticated
+        ) return@synchronized null
+        PurchaseSession(current, purchaseGeneration.value, authenticated)
+    }
+
+    internal fun <T> withCurrentPurchaseSession(snapshot: PurchaseSession, action: () -> T): T? =
+        synchronized(purchaseSessionLock) {
+            val current = _session.value
+            if (logoutsInProgress > 0 || purchaseGeneration.value != snapshot.generation ||
+                !current.hasSamePurchaseCredentials(snapshot.session) ||
+                current.isUsableForPurchase() != snapshot.authenticated
+            ) return@synchronized null
+            action()
+        }
+
+    internal suspend fun awaitPurchaseSessionChange(snapshot: PurchaseSession) {
+        purchaseGeneration.first { it != snapshot.generation }
+    }
+
+    private fun publishSession(next: PhoneAccountSession?) = synchronized(purchaseSessionLock) {
+        val previous = _session.value
+        if (!previous.hasSamePurchaseCredentials(next) || previous?.expiresAtMillis != next?.expiresAtMillis) {
+            purchaseGeneration.value++
+        }
+        _session.value = next
+    }
+
+    private fun PhoneAccountSession?.hasSamePurchaseCredentials(other: PhoneAccountSession?) =
+        this?.userId == other?.userId && this?.accessToken == other?.accessToken
+
+    private fun PhoneAccountSession?.isUsableForPurchase() =
+        this != null && !isExpired && userId.isNotBlank() && accessToken.isNotBlank()
+
     suspend fun load(): PhoneAccountSession? = withContext(Dispatchers.IO) {
         withPrefs { prefs ->
             prefs.getString(KEY_SESSION, null)
                 ?.let(::decodeSession)
-        }.also { _session.value = it }
+                .also(::publishSession)
+        }
     }
 
     suspend fun save(session: PhoneAccountSession) = withContext(Dispatchers.IO) {
         withPrefs { prefs ->
             prefs.edit().putString(KEY_SESSION, encodeSession(session)).apply()
+            publishSession(session)
         }
-        _session.value = session
     }
 
     suspend fun clear() = withContext(Dispatchers.IO) {
         withPrefs { prefs ->
             prefs.edit().apply {remove(KEY_SESSION);prefs.all.keys.filter{it.startsWith("ble_grant:")}.forEach{remove(it)}}.apply()
+            publishSession(null)
         }
-        _session.value = null
     }
 
     internal suspend fun bluetoothGrant(key:String):JSONObject?=withContext(Dispatchers.IO) {

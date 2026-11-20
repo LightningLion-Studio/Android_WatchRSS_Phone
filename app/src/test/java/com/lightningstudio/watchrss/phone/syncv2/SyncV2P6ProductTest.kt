@@ -675,6 +675,7 @@ class SyncV2P6ProductTest {
         val preferences=com.lightningstudio.watchrss.phone.testing.MemoryPreferences()
         val settings=com.lightningstudio.watchrss.phone.cloud.PhoneCloudStateStore(preferences)
         var announced=true;var failAuthentication=false;var unsupported=false;var legacyCalls=0;var bootstraps=0
+        var bootstrapTimesOut = false
         private val env=com.lightningstudio.watchrss.phone.account.AccountEnvironment(backendBaseUrl=h.server.http.url("/").toString(),supabaseAnonKey="synthetic-api")
         private val session=com.lightningstudio.watchrss.phone.account.PhoneAccountSession(user,"***","synthetic-account","synthetic-refresh",Long.MAX_VALUE)
         private val store=com.lightningstudio.watchrss.phone.account.EncryptedAccountSessionStore(c).also {store->
@@ -687,6 +688,7 @@ class SyncV2P6ProductTest {
         private val reader=com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository(c,h.room,h.room.readerPresetDao(),h.id,scope)
         private val client=com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient(env,http=okhttp3.OkHttpClient.Builder().addInterceptor{chain->
             val request=chain.request();val bootstrap=request.url.encodedPath.endsWith("/bootstrap")
+            if (bootstrap && bootstrapTimesOut) throw java.net.SocketTimeoutException("fixture timeout")
             val status=if(bootstrap){bootstraps++;if(failAuthentication)401 else if(unsupported)426 else 200}else{legacyCalls++;426}
             val body=if(status==200)JSONObject().put("libraryEpoch",epoch).put("contentGeneration",generation).put("contentEmpty",false)
                 .put("member",JSONObject().put("active",true).put("writable",true).put("readable",true).put("quotaBytes",1000000).put("usedBytes",0).put("reservedBytes",0))
@@ -744,7 +746,7 @@ class SyncV2P6ProductTest {
                 assertEquals(1, server.publishes)
             } }
             Host(server, "clean").use { clean -> ServiceEntry(clean).use { entry ->
-                runBlocking { entry.service.restoreCurrentLibrary() }
+                assertTrue(runBlocking { entry.service.restoreCurrentLibrary() }.completed)
                 assertEquals("cloud copy", clean.text())
                 assertEquals("当前云端资料库已恢复", entry.service.state.value.message)
                 assertEquals(0, entry.legacyCalls)
@@ -752,7 +754,9 @@ class SyncV2P6ProductTest {
             } }
             Host(server, "nonempty").use { nonempty -> ServiceEntry(nonempty).use { entry ->
                 nonempty.note("local edit")
-                runBlocking { entry.service.restoreCurrentLibrary() }
+                val result = runBlocking { entry.service.restoreCurrentLibrary() }
+                assertFalse(result.completed)
+                assertEquals("pending_choice", result.outcome?.errorCode)
                 val port = requireNotNull(nonempty.product.uiPort.value)
                 assertEquals("awaiting_choice", port.state.value.phase)
                 assertEquals("请查看并选择保留哪一份", entry.service.state.value.message)
@@ -828,6 +832,69 @@ class SyncV2P6ProductTest {
             assertEquals(0,entry.legacyCalls);assertEquals("local",h.text())
             assertFalse(entry.service.formatStatus.value.upgradeRequired)
         }}}
+    }
+
+    @Test fun manualRoundReportsMissingAnnouncementAndRecoversInTheSameEpoch() {
+        Server().use { server -> Host(server, "manual-announcement").use { host -> ServiceEntry(host).use { entry ->
+            host.note("retained")
+            entry.announced = false
+            val attempt = entry.sync(true)
+            assertFalse(attempt.completed)
+            val blocked = entry.service.state.value
+            assertEquals(blocked, attempt.outcome)
+            assertEquals("not_announced", blocked.errorCode)
+            assertEquals("BLOCKED", blocked.phase.name)
+            assertEquals(0L, blocked.lastCompletedAt)
+            assertEquals(0, server.http.requestCount)
+            assertEquals("retained", host.text())
+
+            entry.announced = true
+            assertTrue(entry.sync(true).completed)
+            assertEquals("COMPLETE", entry.service.state.value.phase.name)
+            assertNull(entry.service.state.value.errorCode)
+            assertEquals(1, server.publishes)
+            assertEquals(0, entry.legacyCalls)
+        } } }
+    }
+
+    @Test fun manualRoundReportsClosedReadGateAndRecoversWithoutLegacyRequests() {
+        Server().use { server -> Host(server, "manual-read-gate").use { host -> ServiceEntry(host).use { entry ->
+            host.note("retained")
+            server.readGate = false
+            val attempt = entry.sync(true)
+            assertFalse(attempt.completed)
+            val blocked = entry.service.state.value
+            assertEquals(blocked, attempt.outcome)
+            assertEquals("feature_disabled", blocked.errorCode)
+            assertEquals("BLOCKED", blocked.phase.name)
+            assertEquals(0L, blocked.lastCompletedAt)
+            assertEquals(0, server.publishes)
+            assertEquals("retained", host.text())
+
+            server.readGate = true
+            assertTrue(entry.sync(true).completed)
+            assertEquals("COMPLETE", entry.service.state.value.phase.name)
+            assertNull(entry.service.state.value.errorCode)
+            assertEquals(1, server.publishes)
+            assertEquals(0, entry.legacyCalls)
+        } } }
+    }
+
+    @Test fun manualRoundReportsBootstrapTimeoutWithoutMarkingCompletion() {
+        Server().use { server -> Host(server, "manual-timeout").use { host -> ServiceEntry(host).use { entry ->
+            host.note("retained")
+            entry.bootstrapTimesOut = true
+            assertTrue(runCatching { entry.sync(true) }.isFailure)
+            val state = entry.service.state.value
+            assertEquals("ERROR", state.phase.name)
+            assertEquals("sync_timeout", state.errorCode)
+            assertEquals(0L, state.lastCompletedAt)
+            assertEquals("retained", host.text())
+            assertEquals(0, entry.legacyCalls)
+            entry.bootstrapTimesOut = false
+            assertTrue(entry.sync(true).completed)
+            assertNull(entry.service.state.value.errorCode)
+        } } }
     }
 
     @Test fun formalEntryRequiresAuthenticatedBootstrapAndOnlyServerUnsupportedBuildShowsUpgrade() {

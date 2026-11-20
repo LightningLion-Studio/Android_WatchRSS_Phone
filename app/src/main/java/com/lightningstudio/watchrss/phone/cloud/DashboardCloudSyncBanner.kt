@@ -60,7 +60,8 @@ fun DashboardCloudSyncBanner() {
     val presentation = if (ownerConflict) CloudDashboardPresentation("暂停上传", "本机资料属于另一个账号，选择处理方式后继续同步", "选择处理方式")
         else cloudDashboardPresentation(session != null, hasKey, paused, state.phase, member,
             upgradeRequired = state.errorCode == "cloud_format_upgrade_required",
-            recordsConsentRequired = state.errorCode == "cloud_records_consent_required")
+            recordsConsentRequired = state.errorCode == "cloud_records_consent_required",
+            syncMessage = state.message, syncReason = state.errorCode)
     val used = member?.usedBytes?.coerceAtLeast(0)
     CloudSyncStatusCard(
         status = presentation.status,
@@ -68,6 +69,7 @@ fun DashboardCloudSyncBanner() {
             actionFailed -> "设置未保存，请稍后重试"
             paused && state.phase in cloudActivePhases -> "当前传输完成后暂停，资料仍保留在本机与云端"
             paused -> "已停止后续自动同步，继续后立即检查更新"
+            state.phase == CloudSyncPhase.BLOCKED || state.phase == CloudSyncPhase.ERROR -> presentation.detail
             quotaFailed -> "云空间状态暂未更新，请稍后重试"
             presentation.detail == null && state.pendingSnapshotUntil > System.currentTimeMillis() -> "资料变化已记下，稍后合并成一次备份"
             presentation.detail == null && recordError != null -> recordError
@@ -83,7 +85,11 @@ fun DashboardCloudSyncBanner() {
         onAction = {
             if (ownerConflict) showOwnerChoice = true
             else if (presentation.actionLabel == null && quotaFailed) refreshKey++
-            else if (presentation.actionLabel == "重试同步") container.setCloudSyncPaused(false)
+            else if (presentation.actionLabel == "重试同步") scope.launch {
+                try { service.syncNow() }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { /* The service publishes the failure. */ }
+            }
             else context.startActivity(AccountActivity.createIntent(context,
                 section = if (presentation.actionLabel in setOf("验证设备身份", "登录账号")) AccountSection.ROOT else AccountSection.CLOUD_SYNC))
         },
@@ -113,8 +119,13 @@ internal data class CloudDashboardPresentation(val status: String, val detail: S
 
 internal fun cloudDashboardPresentation(loggedIn: Boolean, hasKey: Boolean, paused: Boolean,
     phase: CloudSyncPhase, member: CloudMemberState?, upgradeRequired: Boolean = false,
-    recordsConsentRequired: Boolean = false): CloudDashboardPresentation = when {
+    recordsConsentRequired: Boolean = false,
+    syncMessage: String = "",
+    syncReason: String? = null): CloudDashboardPresentation = when {
     !loggedIn -> CloudDashboardPresentation("未登录", "登录后查看云同步与云空间", "登录账号")
+    !paused && phase == CloudSyncPhase.BLOCKED -> CloudDashboardPresentation("云同步暂不可用", syncMessage, "重试同步")
+    !paused && phase == CloudSyncPhase.ERROR && member == null && syncReason == "sync_timeout" ->
+        CloudDashboardPresentation("同步未完成", syncMessage, "重试同步")
     member == null -> CloudDashboardPresentation("正在获取状态", "正在读取云空间额度")
     !member.readable -> CloudDashboardPresentation("云空间暂不可用", "请刷新状态或重新登录", "登录账号")
     !hasKey -> CloudDashboardPresentation("此手机尚未授权", "验证身份，安全恢复云端资料", "授权此手机")
@@ -122,10 +133,13 @@ internal fun cloudDashboardPresentation(loggedIn: Boolean, hasKey: Boolean, paus
     upgradeRequired -> CloudDashboardPresentation("需要升级", "升级到最新版本后继续同步，本机修改已保留")
     paused -> CloudDashboardPresentation(if (phase in cloudActivePhases) "正在暂停" else "同步暂停", null)
     recordsConsentRequired -> CloudDashboardPresentation("云端状态同步未启用", "确认启用后可与手表同步个人状态", "启用云端状态同步")
-    phase == CloudSyncPhase.ERROR -> CloudDashboardPresentation("同步未完成", "请检查网络后重试", "重试同步")
+    phase == CloudSyncPhase.ERROR -> CloudDashboardPresentation("同步未完成",
+        syncMessage.takeIf { syncReason != null && it.isNotBlank() } ?: "请检查网络后重试", "重试同步")
     phase in cloudActivePhases -> CloudDashboardPresentation("正在同步", null)
     phase == CloudSyncPhase.WAITING_FOR_WIFI -> CloudDashboardPresentation("等待同步", "连接 Wi-Fi 后继续，正文遵循同步网络设置")
     phase == CloudSyncPhase.COMPLETE -> CloudDashboardPresentation("同步完成", null)
+    phase == CloudSyncPhase.IDLE && syncReason in setOf("pending_choice", "pending_action", "pending_bodies") ->
+        CloudDashboardPresentation("同步未完成", syncMessage)
     else -> CloudDashboardPresentation("等待同步", "即将检查本机与云端更新")
 }
 

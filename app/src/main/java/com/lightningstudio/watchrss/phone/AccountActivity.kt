@@ -1136,6 +1136,9 @@ internal fun AccountScreen(
         }
     }
 
+    val cloudPaneError = rememberCloudPaneError(session?.userId, cloudSyncState.lastCompletedAt)
+    var cloudPaneMessage by remember(session?.userId) { mutableStateOf<String?>(null) }
+
     fun openCloudSync() {
         if (page == AccountPage.CLOUD_SYNC || paneTransition != null) return
         purchaseLauncher?.cancelPending()
@@ -2086,20 +2089,27 @@ internal fun AccountScreen(
                             runAction = runAction,
                             onBusyChange = { busy = it },
                             onMessage = {
-                                message = it
-                                error = null
-                                if (it == "加密云备份已启用") {
-                                    tipManager?.recordEvent(TipEvents.CLOUD_ENCRYPTION_ENABLED)
+                                if (accountRepository.session.value?.userId == activeSession.userId) {
+                                    cloudPaneMessage = it
+                                    cloudPaneError.value = null
+                                    if (it == "加密云备份已启用") {
+                                        tipManager?.recordEvent(TipEvents.CLOUD_ENCRYPTION_ENABLED)
+                                    }
                                 }
                             },
                             onError = {
-                                error = it
-                                message = null
+                                if (accountRepository.session.value?.userId == activeSession.userId) {
+                                    cloudPaneError.value = it
+                                    cloudPaneMessage = null
+                                }
                             }
                         )
                     }
                     if (page == AccountPage.CLOUD_SYNC) {
-                        AccountFeedback(message = message, error = accountError)
+                        AccountFeedback(
+                            message = cloudPaneMessage.takeUnless { !showCloudInventory && it == cloudSyncState.message },
+                            error = cloudPaneError.value
+                        )
                     }
                 }
             }
@@ -2270,6 +2280,10 @@ private fun CloudSyncEntryCard(
         }
     }
 }
+
+@Composable
+internal fun rememberCloudPaneError(userId: String?, lastCompletedAt: Long) =
+    remember(userId, lastCompletedAt) { mutableStateOf<String?>(null) }
 
 @Composable
 private fun AccountFeedback(message: String?, error: String?) {

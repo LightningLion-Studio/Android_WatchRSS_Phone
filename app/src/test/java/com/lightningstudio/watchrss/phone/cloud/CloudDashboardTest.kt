@@ -1,9 +1,30 @@
 package com.lightningstudio.watchrss.phone.cloud
 
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Test
 
 class CloudDashboardTest {
+    @Test fun legacyRecordFailureAndTimeoutEndLoading() = runTest {
+        assertEquals(LegacyCloudRecordStatus.UNAVAILABLE,
+            readLegacyCloudRecordStatus { throw CloudHttpException(426, "fixture") })
+        assertEquals(LegacyCloudRecordStatus.UNAVAILABLE, readLegacyCloudRecordStatus { awaitCancellation() })
+        assertEquals(LegacyCloudRecordStatus.DISABLED, readLegacyCloudRecordStatus { false })
+        assertEquals(LegacyCloudRecordStatus.ENABLED, readLegacyCloudRecordStatus { true })
+    }
+
+    @Test fun blockedCloudShowsItsReasonEvenBeforeQuotaLoads() {
+        for (reason in listOf("not_announced", "feature_disabled")) {
+            val message = SyncV2View.errorText(reason)
+            val value = cloudDashboardPresentation(true, true, false, CloudSyncPhase.BLOCKED, null,
+                syncMessage = message, syncReason = reason)
+            assertEquals("云同步暂不可用", value.status)
+            assertEquals(message, value.detail)
+            assertEquals("重试同步", value.actionLabel)
+        }
+    }
+
     @Test fun recordsConsentOffersSetupInsteadOfNetworkRetry() {
         val value = cloudDashboardPresentation(true, true, false, CloudSyncPhase.ERROR, member,
             recordsConsentRequired = true)

@@ -38,6 +38,7 @@ import com.lightningstudio.watchrss.phone.CloudMembershipPurchaseButton
 import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import com.lightningstudio.watchrss.phone.tips.TipIds
 import com.lightningstudio.watchrss.phone.tips.ui.tipAnchor
 
@@ -66,6 +67,7 @@ fun CloudAccountPanel(
     var estimate by remember { mutableStateOf<CloudTransferEstimate?>(null) }
     var showHistory by remember(userId) { mutableStateOf(false) }
     var snapshotHeads by remember(userId) { mutableStateOf<List<CloudSnapshotHead>>(emptyList()) }
+    var memberLoading by remember(userId) { mutableStateOf(true) }
     var historyLoading by remember(userId) { mutableStateOf(false) }
     var restorePreview by remember { mutableStateOf<CloudSnapshotRestorePreview?>(null) }
     var overwriteConfirm by remember { mutableStateOf<CloudSnapshotRestorePreview?>(null) }
@@ -77,23 +79,27 @@ fun CloudAccountPanel(
     val registrationConflict by service.deviceRegistrationConflict.collectAsState()
     var showReregisterConfirmation by remember(userId) { mutableStateOf(false) }
     var activationInFlight by remember(userId) { mutableStateOf(false) }
-    var recordSyncEnabled by remember(userId) { mutableStateOf<Boolean?>(null) }
+    var recordStatus by remember(userId) { mutableStateOf<LegacyCloudRecordStatus?>(null) }
     var recordConsentEpoch by remember(userId) { mutableStateOf<String?>(null) }
 
     fun refresh() {
         runAction {
+            memberLoading = true
             historyLoading = showHistory
             try {
-                runCatching {
-                    val member = service.loadMembership()
-                    bootstrap = if (member.readable) service.loadBootstrap() else null
-                    snapshotHeads = if (!usesSyncV2 && showHistory && member.readable) {
-                        service.listSnapshotHistory()
-                    } else {
-                        emptyList()
-                    }
-                }.onFailure { onError(it.message ?: "会员状态读取失败") }
+                val member = service.loadMembership()
+                bootstrap = if (member.readable) service.loadBootstrap() else null
+                snapshotHeads = if (!usesSyncV2 && showHistory && member.readable) {
+                    service.listSnapshotHistory()
+                } else {
+                    emptyList()
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                onError(error.message ?: "会员状态读取失败")
             } finally {
+                memberLoading = false
                 historyLoading = false
             }
         }
@@ -101,12 +107,11 @@ fun CloudAccountPanel(
 
     LaunchedEffect(userId, purchaseReturnRevision) { refresh() }
     val localCloudKey = service.hasLocalAccountKey()
-    LaunchedEffect(userId, bootstrap?.libraryEpoch, localCloudKey) {
-        recordSyncEnabled = null
+    LaunchedEffect(userId, bootstrap, localCloudKey, usesSyncV2) {
+        recordStatus = null
         if (!usesSyncV2 && bootstrap != null && localCloudKey) {
-            try { recordSyncEnabled = service.cloudRecordSyncEnabled(userId) }
-            catch (error: CancellationException) { throw error }
-            catch (error: Exception) { onError(error.message ?: "云端状态同步读取失败") }
+            recordStatus = LegacyCloudRecordStatus.LOADING
+            recordStatus = readLegacyCloudRecordStatus { service.cloudRecordSyncEnabled(userId) }
         }
     }
 
@@ -121,7 +126,7 @@ fun CloudAccountPanel(
                     onBusyChange(true)
                     try {
                         if (service.enableCloudRecordSync(true, userId, epoch)) {
-                            recordSyncEnabled = true
+                            recordStatus = LegacyCloudRecordStatus.ENABLED
                             onMessage("云端状态同步已启用，请点立即同步")
                         }
                     } catch (error: CancellationException) { throw error }
@@ -173,7 +178,10 @@ fun CloudAccountPanel(
         }
         keyWarning?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
         if (member == null) {
-            Text("正在读取会员状态…")
+            Text(if (memberLoading) "正在读取会员状态…" else "暂时无法读取会员状态。")
+            if (usesSyncV2 && syncState.phase == CloudSyncPhase.ERROR) {
+                Text(syncState.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
         } else if (!member.readable) {
             Text("暂时无法读取云空间，请刷新状态或重新登录。")
             Text(
@@ -378,15 +386,17 @@ fun CloudAccountPanel(
                     fontWeight = FontWeight.SemiBold
                 )
                 if (!usesSyncV2) {
-                    when (recordSyncEnabled) {
-                        false -> {
+                    when (recordStatus) {
+                        LegacyCloudRecordStatus.DISABLED -> {
                             Text("云端状态同步尚未启用。启用后可与手表同步个人状态。")
                             OutlinedButton(enabled = !busy, onClick = {
                                 recordConsentEpoch = bootstrap?.libraryEpoch
                             }) { Text("启用云端状态同步") }
                         }
-                        true -> Text("✓ 云端状态同步已启用", color = MaterialTheme.colorScheme.primary)
-                        null -> Text("正在读取云端状态同步…")
+                        LegacyCloudRecordStatus.ENABLED -> Text("✓ 云端状态同步已启用", color = MaterialTheme.colorScheme.primary)
+                        LegacyCloudRecordStatus.LOADING -> Text("正在读取云端状态同步…")
+                        LegacyCloudRecordStatus.UNAVAILABLE -> Text("暂时无法读取云端状态同步。")
+                        null -> Unit
                     }
                     Text("快照保留", fontWeight = FontWeight.Medium)
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -456,7 +466,15 @@ fun CloudAccountPanel(
                 }
 
                 if (usesSyncV2) {
-                    SyncV2AccountActions(service, busy, runAction, onBusyChange, onError)
+                    SyncV2AccountActions(
+                        busy = busy,
+                        runAction = runAction,
+                        onBusyChange = onBusyChange,
+                        onSync = { service.syncNow(manual = true) },
+                        onRestore = { service.restoreCurrentLibrary() },
+                        onCompleted = onMessage,
+                        onFailure = { onError(service.state.value.message.ifBlank { "云端操作未完成，请稍后重试" }) }
+                    )
                 } else {
                     Button(
                         onClick = {
@@ -695,13 +713,18 @@ fun CloudAccountPanel(
                     estimate = null
                     runAction {
                         onBusyChange(true)
-                        runCatching { service.syncNow(manual = true) }
-                            .onSuccess {
+                        try {
+                            if (service.syncNow(manual = true).completed) {
                                 bootstrap = service.loadBootstrap()
                                 onMessage("云同步完成")
                             }
-                            .onFailure { onError(it.message ?: "云同步失败") }
-                        onBusyChange(false)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Exception) {
+                            onError(error.message ?: "云同步失败")
+                        } finally {
+                            onBusyChange(false)
+                        }
                     }
                 }) { Text("继续同步") }
             },
@@ -833,3 +856,18 @@ internal fun RecoveryWordsDisplay(words: List<String>, clipboard: RecoveryWordCl
         modifier = Modifier.fillMaxWidth()
     ) { Text("复制恢复词") }
 }
+
+internal enum class LegacyCloudRecordStatus { LOADING, ENABLED, DISABLED, UNAVAILABLE }
+
+internal suspend fun readLegacyCloudRecordStatus(readEnabled: suspend () -> Boolean): LegacyCloudRecordStatus =
+    try {
+        when (withTimeoutOrNull(45_000L) { readEnabled() }) {
+            true -> LegacyCloudRecordStatus.ENABLED
+            false -> LegacyCloudRecordStatus.DISABLED
+            null -> LegacyCloudRecordStatus.UNAVAILABLE
+        }
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        LegacyCloudRecordStatus.UNAVAILABLE
+    }

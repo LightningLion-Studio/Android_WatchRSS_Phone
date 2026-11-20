@@ -592,6 +592,10 @@ class PhoneCloudClient(
         val requestHttp = http.newBuilder().followRedirects(false).followSslRedirects(false).apply {
             if(migrationDeadline!=null)callTimeout(migrationDeadline.budget.remainingMillis(),TimeUnit.MILLISECONDS)
             else if(firstRequest.url.encodedPath.startsWith("/functions/v1/cloud/format-migrations"))callTimeout(30_000,TimeUnit.MILLISECONDS)
+            else if (firstRequest.url.encodedPath == "/functions/v1/cloud/bootstrap" ||
+                (firstRequest.method == "GET" && firstRequest.url.encodedPath == "/functions/v1/cloud/records")) {
+                callTimeout(30, TimeUnit.SECONDS)
+            }
             if (uploadAttempt != null) {
                 // OkHttp otherwise replays a 408 before our refresh/integrity-aware
                 // retry loop can observe it, doubling slow body attempts invisibly.

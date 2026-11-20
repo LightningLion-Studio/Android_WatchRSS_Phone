@@ -367,11 +367,13 @@ private enum class SyncV2AccountAction(val label: String, val description: Strin
 
 @Composable
 internal fun SyncV2AccountActions(
-    service: PhoneCloudSyncService,
     busy: Boolean,
     runAction: (suspend () -> Unit) -> Unit,
     onBusyChange: (Boolean) -> Unit,
-    onError: (String) -> Unit
+    onSync: suspend () -> PhoneCloudSyncResult,
+    onRestore: suspend () -> PhoneCloudSyncResult,
+    onCompleted: (String) -> Unit,
+    onFailure: () -> Unit
 ) {
     var pending by remember { mutableStateOf<SyncV2AccountAction?>(null) }
     Button(onClick = { pending = SyncV2AccountAction.SYNC }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
@@ -386,14 +388,15 @@ internal fun SyncV2AccountActions(
             onBusyChange(true)
             runAction {
                 try {
-                    when (action) {
-                        SyncV2AccountAction.SYNC -> service.syncNow(manual = true)
-                        SyncV2AccountAction.RESTORE -> service.restoreCurrentLibrary()
+                    val result = when (action) {
+                        SyncV2AccountAction.SYNC -> onSync()
+                        SyncV2AccountAction.RESTORE -> onRestore()
                     }
+                    if (result.completed) onCompleted(result.outcome?.message.orEmpty())
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
-                    onError(service.state.value.message.ifBlank { "云端操作未完成，请稍后重试" })
+                    onFailure()
                 } finally {
                     onBusyChange(false)
                 }

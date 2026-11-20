@@ -43,6 +43,8 @@ internal object SyncV2View {
         "window_expired", "temporarily_unavailable" -> "网络或云端暂时不可用，请稍后重试。"
         "quota_exceeded" -> "云空间已满。"
         "current_library_missing" -> "云端还没有可恢复的 Sync v2 资料库。"
+        "not_announced" -> "云端尚未提供 Sync v2 服务，请稍后重试。本机资料已保留。"
+        "sync_timeout", "budget_paused" -> "同步本轮超时，请重试。本机资料已保留。"
         "note_unopenable" -> "这条笔记太大，本机无法打开。"
         "feature_disabled" -> "云端暂不支持此操作。"
         "body_channel_write_disabled" -> "云端正文写入未开放。本机正文已保留，资料信息仍可同步。"

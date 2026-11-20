@@ -2,6 +2,8 @@ package com.lightningstudio.watchrss.phone.cloud
 
 import com.lightningstudio.watchrss.phone.pairing.*
 import com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness
+import com.lightningstudio.watchrss.phone.syncv2.SyncV2CloudError
+import com.lightningstudio.watchrss.phone.syncv2.SyncV2PhoneProduct
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.async
@@ -27,12 +29,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.security.SecureRandom
 import org.json.JSONObject
 import org.json.JSONArray
 
 enum class CloudSyncPhase {
     IDLE,
+    BLOCKED,
     PAUSED,
     CHECKING,
     NEEDS_RECOVERY,
@@ -60,8 +64,11 @@ data class PhoneCloudSyncResult(
     val downloadedBytes: Long,
     val snapshotsApplied: Int,
     val snapshotUploaded: Boolean,
-    val pendingArticleStates: Int
-)
+    val pendingArticleStates: Int,
+    val outcome: PhoneCloudSyncState? = null
+) {
+    val completed: Boolean get() = outcome?.phase == CloudSyncPhase.COMPLETE
+}
 
 data class CloudTransferEstimate(
     val uploadBytes: Long,
@@ -140,7 +147,7 @@ class PhoneCloudSyncService(
     val pairingBackendBaseUrl: String get() = client.backendBaseUrl
     private var trustedBootstrap: CloudBootstrap? = null
     private val syncV2Product by lazy {
-        com.lightningstudio.watchrss.phone.syncv2.SyncV2PhoneProduct(appContext,{requireNotNull(syncV2Database).invoke()},keyManager,
+        SyncV2PhoneProduct(appContext,{requireNotNull(syncV2Database).invoke()},keyManager,
             current={
                 val session=accountRepository.session.value
                 val bootstrap=trustedBootstrap
@@ -1194,7 +1201,7 @@ class PhoneCloudSyncService(
             var legacyAttemptScope: String? = null
             try {
                 if(!manual && bluetoothFence.active)return@run PhoneCloudSyncResult(0,0,0,false,0)
-                val legacyResult=retryDiscardedCloudTransfer(rebuild = { failure ->
+                val roundResult=retryDiscardedCloudTransfer(rebuild = { failure ->
                     val session = requireSession()
                     if (failure.status == 409) clearContentSyncState(session)
                     // A current-generation expired plan keeps authenticated immutable bytes for
@@ -1220,30 +1227,16 @@ class PhoneCloudSyncService(
 
                     val admission = if (product == null) settings.admitCycle() else null
                     update(CloudSyncPhase.CHECKING, "正在检查云端")
-                    val bootstrap = validatedBootstrap(session, requireV2Announcement = product != null)
-                    if (product == null) {
+                    if (product != null) {
+                        syncV2Pass(session, product, manual, restoreCurrent)
+                        empty
+                    } else {
+                        val bootstrap = validatedBootstrap(session)
                         legacyAttemptScope = scope
                         client.inContentGeneration(session) { syncOnePass(manual, retryingTransfer, bootstrap, admission) }
-                    } else {
-                        val ready = if (bootstrap.syncV2 != null) prepareCloudSyncKeys(session, bootstrap) else bootstrap
-                        val result = product.sync(ready.syncV2, manual, restoreCurrent)
-                        if (result.enabled) {
-                            settings.formatUpgradeRequiredVersion = 0
-                            _formatStatus.value = _formatStatus.value.copy(upgradeRequired = false)
-                        }
-                        when {
-                            !result.enabled -> update(CloudSyncPhase.IDLE, "Sync v2 服务暂不可用，本机资料已保留", ready.member)
-                            result.awaitingChoice -> update(CloudSyncPhase.IDLE, "请查看并选择保留哪一份", ready.member)
-                            result.pendingAction -> update(CloudSyncPhase.IDLE, "等待云端确认已有操作", ready.member)
-                            result.pendingBodies -> update(CloudSyncPhase.IDLE, "部分正文待同步", ready.member)
-                            else -> update(CloudSyncPhase.COMPLETE,
-                                if (restoreCurrent) "当前云端资料库已恢复" else "云同步完成",
-                                ready.member, completedAt = System.currentTimeMillis())
-                        }
-                        empty
                     }
                 })
-                legacyResult
+                roundResult.copy(outcome = _state.value)
             } catch (error: Exception) {
                 if (error is CancellationException) {
                     update(if (paused.value) CloudSyncPhase.PAUSED else CloudSyncPhase.IDLE, "等待继续同步")
@@ -1263,12 +1256,15 @@ class PhoneCloudSyncService(
                     invalidateEpoch(requireSession(),"device_session_authorization")
                     update(CloudSyncPhase.NEEDS_RECOVERY, "设备身份需要重新验证")
                 } else if (_state.value.phase !in setOf(CloudSyncPhase.NEEDS_RECOVERY,CloudSyncPhase.ERROR)) {
-                    val message = when {
-                        error is com.lightningstudio.watchrss.phone.syncv2.SyncV2CloudError -> SyncV2View.errorText(error.code)
-                        error.message == "device_alias_recovery_required" -> SyncV2View.errorText("device_alias_recovery_required")
-                        else -> error.message ?: "云同步失败"
+                    val code = when {
+                        error is SyncV2CloudError -> error.code
+                        error is java.net.SocketTimeoutException ||
+                            (error is java.io.InterruptedIOException && error.message == "timeout") -> "sync_timeout"
+                        error.message == "device_alias_recovery_required" -> "device_alias_recovery_required"
+                        else -> null
                     }
-                    update(CloudSyncPhase.ERROR, message)
+                    update(CloudSyncPhase.ERROR, code?.let(SyncV2View::errorText) ?: error.message ?: "云同步失败",
+                        errorCode = code)
                 }
                 if (isLegacySyncFence(error)) legacyAttemptScope?.let { legacyFenceScope = it }
                 if(serverRequiresCloudClientUpgrade(error)) {
@@ -1278,6 +1274,41 @@ class PhoneCloudSyncService(
                 }
                 throw error
             } finally { bluetoothFence.finished(automaticJob) }
+        }
+    }
+
+    private suspend fun syncV2Pass(
+        session: PhoneAccountSession,
+        product: SyncV2PhoneProduct,
+        manual: Boolean,
+        restoreCurrent: Boolean
+    ) {
+        val round = withTimeoutOrNull(SYNC_V2_ROUND_TIMEOUT_MS) {
+            val bootstrap = validatedBootstrap(session, requireV2Announcement = true)
+            val ready = if (bootstrap.syncV2 != null) prepareCloudSyncKeys(session, bootstrap) else bootstrap
+            product.sync(ready.syncV2, manual, restoreCurrent) to ready.member
+        }
+        if (round == null) {
+            update(CloudSyncPhase.ERROR, SyncV2View.errorText("sync_timeout"), errorCode = "sync_timeout")
+            return
+        }
+        val (result, member) = round
+        if (!result.enabled) {
+            val code = result.reason ?: "feature_disabled"
+            val message = if (code == "feature_disabled") "当前云端权限未开放，暂时无法同步。本机资料已保留。"
+                else SyncV2View.errorText(code)
+            update(CloudSyncPhase.BLOCKED, message, member, errorCode = code)
+            return
+        }
+        settings.formatUpgradeRequiredVersion = 0
+        _formatStatus.value = _formatStatus.value.copy(upgradeRequired = false)
+        when {
+            result.awaitingChoice -> update(CloudSyncPhase.IDLE, "请查看并选择保留哪一份", member, errorCode = "pending_choice")
+            result.pendingAction -> update(CloudSyncPhase.IDLE, "等待云端确认已有操作", member, errorCode = "pending_action")
+            result.pendingBodies -> update(CloudSyncPhase.IDLE, "部分正文待同步", member, errorCode = "pending_bodies")
+            else -> update(CloudSyncPhase.COMPLETE,
+                if (restoreCurrent) "当前云端资料库已恢复" else "云同步完成", member,
+                completedAt = maxOf(System.currentTimeMillis(), _state.value.lastCompletedAt + 1))
         }
     }
 
@@ -2274,7 +2305,8 @@ class PhoneCloudSyncService(
         member: CloudMemberState? = _state.value.member,
         uploadedBytes: Long = _state.value.uploadedBytes,
         downloadedBytes: Long = _state.value.downloadedBytes,
-        completedAt: Long = _state.value.lastCompletedAt
+        completedAt: Long = _state.value.lastCompletedAt,
+        errorCode: String? = null
     ) {
         _state.value = PhoneCloudSyncState(
             phase = phase,
@@ -2282,7 +2314,8 @@ class PhoneCloudSyncService(
             member = member,
             uploadedBytes = uploadedBytes,
             downloadedBytes = downloadedBytes,
-            lastCompletedAt = completedAt
+            lastCompletedAt = completedAt,
+            errorCode = errorCode
         )
     }
 
@@ -2307,6 +2340,7 @@ class PhoneCloudSyncService(
     )
 
     private companion object {
+        private const val SYNC_V2_ROUND_TIMEOUT_MS = 330_000L
         private const val PRIVATE_LIBRARY_OBJECT = "private-library.wrss"
         private const val RSS_STATE_OBJECT = "rss-state.json"
         private const val NOTES_STATE_OBJECT = "notes-state.json"

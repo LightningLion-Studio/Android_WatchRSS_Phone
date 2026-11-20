@@ -22,8 +22,12 @@ class PhoneCloudSyncWorker(
         val container = (applicationContext as PhoneCompanionApplication).container
         if (!container.accountRepository.hasUsableSession || !container.appAccessCoordinator.isAuthorized) return Result.success()
         return runCatching {
-            container.cloudSyncService.syncNow()
-            Result.success()
+            val outcome = container.cloudSyncService.syncNow().outcome
+            if (outcome?.phase == CloudSyncPhase.BLOCKED || outcome?.errorCode == "sync_timeout") {
+                if (runAttemptCount < 3) Result.retry() else Result.failure()
+            } else {
+                Result.success()
+            }
         }.getOrElse { error ->
             if (error is CancellationException) throw error
             if (runAttemptCount < 3 && error !is IllegalArgumentException && !(error is CloudHttpException && error.status == 426)) {

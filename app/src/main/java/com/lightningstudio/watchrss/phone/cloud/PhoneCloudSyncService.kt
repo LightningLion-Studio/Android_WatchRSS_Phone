@@ -1053,7 +1053,7 @@ class PhoneCloudSyncService(
     /** Foreground reads bypass the bulk-sync lock. Bulk transfers yield between chunks. */
     suspend fun loadArticleForReading(articleId: String): com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity? =
         withContext(Dispatchers.IO) {
-            val article = repository.getArticle(articleId) ?: return@withContext null
+            val article = repository.getArticleForReading(articleId) ?: return@withContext null
             val legacyFlatEpub = article.url.contains("/import-epub/") && article.contentHtml.isNullOrBlank() &&
                 article.contentText.isNotBlank() && !article.contentText.contains('\n') && article.contentText.length > 280 &&
                 !com.lightningstudio.watchrss.phone.data.local.isArticleContentMarker(article.contentText)

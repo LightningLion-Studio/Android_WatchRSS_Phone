@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
+import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -20,6 +21,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
     init {if(quotaBytes !in 1L..64L*1024*1024)SyncV2Codec.fail("invalid_schema")}
     private val db get()=projection.accountDatabase
     private val scope get()=projection.scope
+    private val bookDirectory = File(files, "imported_books")
     data class Bundle(val copy:JSONObject,val pin:JSONObject,val objects:Map<String,ByteArray>)
     private interface Source {val size:Long;fun read(offset:Long,n:Int):ByteArray}
     private fun byteSource(bytes:ByteArray)=object:Source {override val size=bytes.size.toLong();override fun read(offset:Long,n:Int)=bytes.copyOfRange(offset.toInt(),offset.toInt()+n)}
@@ -57,11 +59,12 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                 val bytes=SyncV2Codec.utf8(SyncV2Codec.canonical(JSONObject().put("contentText",text("contentText",lengths.first)).put("contentHtml",lengths.second?.let{text("contentHtml",it)}?:JSONObject.NULL)))
                 listOf("article" to byteSource(bytes))
             }
-            "book"->db.query("SELECT packageSha256,packageBytes FROM imported_books WHERE bookId=?",arrayOf(id)).use{c->
-                if(!c.moveToFirst() || c.getString(0).isEmpty())SyncV2Codec.fail("closure_incomplete")
-                val f=File(File(files,"imported_books"),"$id.jsonl")
-                if(f.length()!=c.getLong(1))SyncV2Codec.fail("closure_incomplete")
-                listOf("book" to fileSource(f,c.getString(0),maxBytes))
+            "book" -> {
+                val revision = BookPackageFiles.revision(db, id) ?: SyncV2Codec.fail("closure_incomplete")
+                if (maxBytes != null && revision.bytes > maxBytes) SyncV2Codec.fail("quota_exceeded")
+                val original = BookPackageFiles.resolve(bookDirectory, id, revision) { sourceReads?.file(it) }
+                    ?: SyncV2Codec.fail("closure_incomplete")
+                listOf("book" to fileSource(original, maxBytes = maxBytes))
             }
             "asset"->db.query("SELECT storageKey,sha256 FROM note_assets WHERE storageKey=?",arrayOf(id)).use{c->
                 if(!c.moveToFirst())SyncV2Codec.fail("closure_incomplete")
@@ -87,7 +90,9 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
         val m=record.getJSONObject("meta");val id=m.getString("logicalId")
         return when(m.getString("kind")) {
             "article"->db.query("SELECT length(CAST(contentText AS BLOB))+COALESCE(length(CAST(contentHtml AS BLOB)),0) FROM phone_articles WHERE articleId=?",arrayOf(id)).use{it.moveToFirst() && it.getLong(0)>0}
-            "book"->File(files,"imported_books/$id.jsonl").isFile
+            "book" -> BookPackageFiles.revision(db, id)?.let { revision ->
+                BookPackageFiles.resolve(bookDirectory, id, revision) { sourceReads?.file(it) } != null
+            } ?: false
             "asset"->db.query("SELECT storageKey FROM note_assets WHERE storageKey=?",arrayOf(id)).use{c->c.moveToFirst() && com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.isSafeStorageKey(c.getString(0)) && File(files,"notes/assets/${c.getString(0)}").isFile}
             else->false
         }

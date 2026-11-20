@@ -7,9 +7,12 @@ import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Frames
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Scratch
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -38,7 +41,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
     private fun diagnostic(message:String){runCatching{onDiagnostic(message)}}
     private class IncompleteOriginal(message:String):IllegalArgumentException(message)
     val migrationWarnings=linkedSetOf<String>()
-    private fun file(id:String)=File(directory,"$id.jsonl")
+    private fun file(id: String) = BookPackageFiles.legacy(directory, id)
     // Failed registration/verification is not a change to the immutable package domain.
     private fun temporary(prefix:String):File {
         val staging=File(directory.absoluteFile.parentFile,".${directory.name}-staging").apply { mkdirs() }
@@ -168,7 +171,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             while (true) {
                 val row = dao.nextBinaryBook(after) ?: break
                 after = row.bookId
-                visit(row, availablePackage(row, binary = true))
+                visit(row, availablePackage(row))
             }
         }
     }
@@ -182,14 +185,16 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             JSONObject(row.stateJson).takeUnless { it.getBoolean("deleted") }?.let { it to file }
         }
     }
-    internal fun binaryPackage(id: String, hash: String): File = File(directory, "b2-$id-$hash.jsonl")
-    private fun availablePackage(row: BookEntity, binary: Boolean = BuildConfig.B2_ENABLED): File? {
-        if (row.packageSha256.isBlank()) return null
-        fun matches(file: File) = file.isFile && file.length() == row.packageBytes
-        if (binary) binaryPackage(row.bookId, row.packageSha256).takeIf(::matches)?.let { return it }
-        return file(row.bookId).takeIf(::matches)
+    internal fun binaryPackage(id: String, hash: String): File = BookPackageFiles.binary(directory, id, hash)
+    private suspend fun availablePackage(row: BookEntity): File? = withContext(Dispatchers.IO) {
+        val revision = BookPackageFiles.Revision(row.packageSha256, row.packageBytes)
+        BookPackageFiles.resolve(directory, row.bookId, revision) { ensureActive() }
     }
-    suspend fun packageFile(id: String): File? = dao.get(id)?.let { availablePackage(it) }
+
+    internal suspend fun packageForSync(id: String): Pair<File, String>? = dao.get(id)?.let { row ->
+        availablePackage(row)?.let { it to row.packageSha256 }
+    }
+    suspend fun packageFile(id: String): File? = packageForSync(id)?.first
     suspend fun packageHash(id:String)=requireNotNull(dao.get(id)).packageSha256
     suspend fun merge(remote:JSONObject,checkOwner:()->Unit={},forceProjection:Boolean=false,binary:Boolean=false):Int=db.withTransaction {
         checkOwner()
@@ -487,7 +492,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         val current = dao.get(id) ?: throw B2Exception("DEPENDENCIES_PENDING")
         val state = JSONObject(current.stateJson)
         val retired = state.getBoolean("deleted") || BookSync.compareLifecycle(state, sourceState) > 0
-        val present = availablePackage(current, binary = true) != null && dao.binaryPresentChapters(id) == state.getInt("chapterCount")
+        val present = availablePackage(current) != null && dao.binaryPresentChapters(id) == state.getInt("chapterCount")
         val retain = retired || present
         val deleted = java.util.BitSet(state.getInt("chapterCount") + 1)
         val tombstones = state.getJSONArray("deletedChapters")
@@ -525,16 +530,68 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         return "merged"
     }
 
+    /** Repair derived reader text from the current verified original before cloud fallback. */
+    internal suspend fun restoreChapterBodyForReading(articleId: String): Boolean = withContext(Dispatchers.IO) {
+        val content = contentStore as? FileArticleContentStore ?: return@withContext false
+        val mapping = dao.chapterByArticle(articleId) ?: return@withContext false
+        val article = articles.getBodyMetadataById(articleId) ?: return@withContext false
+        if (article.deleted || chapterBodyPresent(content, articles.getContentTextChunk(articleId, 1, 512)))
+            return@withContext false
+        val row = dao.get(mapping.bookId) ?: return@withContext false
+        val state = JSONObject(row.stateJson)
+        if (state.getBoolean("deleted") || mapping.chapterIndex in BookSync.deletions(state)) return@withContext false
+        val original = availablePackage(row) ?: return@withContext false
+        val modified = original.lastModified()
+        val check = { ensureActive() }
+        var text: String? = null
+        var html: String? = null
+        var hash = ""
+        val fingerprint = try {
+            B2Scratch.open(directory, B2Scratch.BOOK_IMPORT).use { scratch ->
+                BinaryBookPackage.read(original, scratch.file, check, start = { header ->
+                    require(header.count == state.getInt("chapterCount") && header.instance == state.opt("instanceId"))
+                }) { _, index, chapter ->
+                    if (index == mapping.chapterIndex) {
+                        require(chapter.url == article.url)
+                        text = content.publishTextFile("$articleId-text", chapter.text)
+                        html = chapter.html?.let { content.publishTextFile("$articleId-html", it) }
+                        hash = chapter.contentHash
+                    }
+                }
+            }
+        } catch (_: IOException) {
+            return@withContext false
+        } catch (_: IllegalArgumentException) {
+            return@withContext false
+        }
+        if (text == null || fingerprint != state.getString("fingerprint")) return@withContext false
+        db.withTransaction {
+            // Hashing and parsing are outside the writer transaction. Recheck the book,
+            // chapter, and cached body to avoid undoing a concurrent update or deletion.
+            if (dao.chapterByArticle(articleId) != mapping || dao.get(mapping.bookId) != row ||
+                original.length() != row.packageBytes || original.lastModified() != modified) return@withTransaction false
+            val current = articles.getBodyMetadataById(articleId) ?: return@withTransaction false
+            if (current.deleted || current.url != article.url || chapterBodyPresent(content, articles.getContentTextChunk(articleId, 1, 512)))
+                return@withTransaction false
+            if (chapterBodyPresent(content, articles.getContentHtmlChunk(articleId, 1, 512))) html = null
+            check()
+            dao.repairBinaryChapter(articleId, text, html, hash)
+            db.bookReadingDao().cleanProjection(articleId)
+            true
+        }
+    }
+
+    private fun chapterBodyPresent(content: FileArticleContentStore, prefix: ByteArray?): Boolean {
+        val value = prefix?.toString(Charsets.UTF_8).orEmpty()
+        return value.isNotBlank() && (!content.isMarker(value) || content.openTextFile(value)?.length()?.let { it > 0 } == true)
+    }
+
     private suspend fun installBinaryChapter(content: FileArticleContentStore, state: JSONObject,
         header: BinaryBookPackage.Header, chapter: BinaryBookPackage.Chapter, id: String, deleted: Boolean) {
         val previous = articles.getBodyMetadataById(id)
-        fun present(prefix: ByteArray?): Boolean {
-            val value = prefix?.toString(Charsets.UTF_8).orEmpty()
-            return value.isNotBlank() && (!content.isMarker(value) || content.openTextFile(value)?.length()?.let { it > 0 } == true)
-        }
-        val text = if (previous == null || !present(articles.getContentTextChunk(id, 1, 512)))
+        val text = if (previous == null || !chapterBodyPresent(content, articles.getContentTextChunk(id, 1, 512)))
             content.publishTextFile("$id-text", chapter.text) else null
-        val html = chapter.html?.takeIf { previous == null || !present(articles.getContentHtmlChunk(id, 1, 512)) }
+        val html = chapter.html?.takeIf { previous == null || !chapterBodyPresent(content, articles.getContentHtmlChunk(id, 1, 512)) }
             ?.let { content.publishTextFile("$id-html", it) }
         val goneAt = if (deleted) maxOf(state.getLong("deletedAt"), state.getLong("deletionClock")) else 0L
         if (previous != null) {

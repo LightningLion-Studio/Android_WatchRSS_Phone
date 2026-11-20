@@ -1,11 +1,11 @@
 package com.lightningstudio.watchrss.phone.diagnostics
 
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.security.MessageDigest
 import android.database.Cursor
 
 interface DiagnosticQuery {fun query(sql:String,args:Array<String> = emptyArray()):Cursor}
@@ -13,6 +13,8 @@ interface DiagnosticQuery {fun query(sql:String,args:Array<String> = emptyArray(
 /** Read existing materialization only. Never invoke book registration, cloud or repair. */
 class LibraryDiagnostics(private val db:DiagnosticQuery,private val directory:File,private val content:ArticleContentStore,private val rejections:Map<String,String> = emptyMap()) {
     constructor(db:SupportSQLiteDatabase,directory:File,content:ArticleContentStore,rejections:Map<String,String> = emptyMap()):this(object:DiagnosticQuery {override fun query(sql:String,args:Array<String>)=db.query(sql,args)},directory,content,rejections)
+    private class HashBudgetExceeded : RuntimeException()
+
     private fun count(sql:String)=db.query(sql).use{if(it.moveToFirst())it.getLong(0)else 0L}
     private val single="(lower(a.url) LIKE 'https://watchrss.local/import-content/txt/%' OR (lower(a.url) GLOB 'watchrss://import/online-v1/*' AND length(a.url)=92 AND substr(lower(a.url),29) NOT GLOB '*[^a-f0-9]*'))"
     private val groups="SELECT min(a.articleId) first_id,count(*) chapters FROM phone_articles a WHERE a.deleted=0 AND (lower(a.url) LIKE 'https://watchrss.local/import-content%' OR lower(a.url) LIKE 'https://watchrss.local/import-epub%' OR lower(a.url) LIKE 'https://watchrss.local/import-txt-novel%' OR $single) AND NOT EXISTS(SELECT 1 FROM imported_book_chapters c WHERE c.articleId=a.articleId) GROUP BY CASE WHEN $single THEN a.url ELSE COALESCE(a.rssSourceUrl,CASE WHEN instr(a.url,'/chapter/')>0 THEN substr(a.url,1,instr(a.url,'/chapter/')-1) ELSE a.url END) END"
@@ -36,11 +38,23 @@ class LibraryDiagnostics(private val db:DiagnosticQuery,private val directory:Fi
             try {
                 if(state==null||DiagnosticFields.id(id)==null)reason="metadata_invalid"
                 else {
-                    val file=File(directory,"$id.jsonl")
-                    reason=when { !file.isFile->"package_missing";file.length()!=bytes->"package_hash_mismatch";bytes>hashBudget->"hash_budget_exceeded";else->{
-                        val hash=MessageDigest.getInstance("SHA-256");file.inputStream().buffered().use{input->val buffer=ByteArray(65536);while(true){active();val n=input.read(buffer);if(n<0)break;hashBudget-=n;hash.update(buffer,0,n)}}
-                        if(hash.digest().joinToString(""){"%02x".format(it)}==sha)"none" else "package_hash_mismatch"
-                    }}
+                    val revision = BookPackageFiles.Revision(sha, bytes)
+                    val candidates = BookPackageFiles.candidates(directory, id, revision).filter { it.isFile }
+                    reason = when {
+                        candidates.isEmpty() -> "package_missing"
+                        candidates.none { it.length() == bytes } -> "package_hash_mismatch"
+                        bytes > hashBudget -> "hash_budget_exceeded"
+                        else -> try {
+                            val original = BookPackageFiles.resolve(directory, id, revision) { read ->
+                                active()
+                                hashBudget -= read
+                                if (hashBudget < 0) throw HashBudgetExceeded()
+                            }
+                            if (original == null) "package_hash_mismatch" else "none"
+                        } catch (_: HashBudgetExceeded) {
+                            "hash_budget_exceeded"
+                        }
+                    }
                     active();readable=chapterReadable(id)
                     if(reason=="none"&&!readable)reason="body_missing"
                 }

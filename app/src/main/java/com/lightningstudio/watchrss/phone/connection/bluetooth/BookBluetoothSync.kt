@@ -86,8 +86,8 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
             if(state==null || state.getBoolean("deleted") || !state.getBoolean("contentAvailable")){
                 reject(id,"book_manifest_invalid",when {state==null->"manifest_requested_unknown_book";state.getBoolean("deleted")->"manifest_requested_deleted_book";else->"manifest_requested_body_unavailable"});continue
             }
-            val file=requireNotNull(store.packageFile(id));val count=((file.length()+CHUNK-1)/CHUNK).toInt()
-            val packageHash = store.packageHash(id)
+            val (file, packageHash) = requireNotNull(store.packageForSync(id))
+            val count = ((file.length() + CHUNK - 1) / CHUNK).toInt()
             RandomAccessFile(file,"r").use {input->repeat(count){index->val bytes=ByteArray(minOf(CHUNK.toLong(),file.length()-input.filePointer).toInt());input.readFully(bytes)
                 val ack=send(request("body").put("bookId",id).put("fingerprint",state.getString("fingerprint")).put("packageSha256",packageHash)
                     .put("byteCount",file.length()).put("chunkIndex",index).put("chunkCount",count).put("dataBase64",Base64.getEncoder().encodeToString(bytes)))

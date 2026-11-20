@@ -299,6 +299,12 @@ class PhoneCompanionRepository(
             }
         }
 
+    internal suspend fun getArticleForReading(articleId: String): PhoneArticleEntity? = withContext(Dispatchers.IO) {
+        val article = getArticle(articleId) ?: return@withContext null
+        if (!article.deleted && books?.restoreChapterBodyForReading(articleId) == true) getArticle(articleId)
+        else article
+    }
+
     suspend fun compactCloudExcerpts(checkOwner: () -> Unit): Int = withContext(Dispatchers.IO) {
         var changed = 0
         for (row in articleDao.longCloudExcerpts()) {

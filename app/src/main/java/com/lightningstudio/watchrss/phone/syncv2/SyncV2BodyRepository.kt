@@ -1,20 +1,40 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.book.BookSync
 import org.json.JSONObject
+import java.io.DataInputStream
 import java.io.File
 
 /** Original bytes are the offline queue. Downloaded SHA values never change business clocks. */
 internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private val files:File,private val beforeInstall:(File)->Unit={}) {
-    fun file(kind:String,id:String):File {
-        SyncV2BodyCodec.name(kind,id)
-        return File(files,if(kind=="asset")"notes/assets/$id"else"imported_books/$id.jsonl")
+    private val bookDirectory = File(files, "imported_books")
+
+    /** Destination for a verified cloud download. Local reads use the current package revision. */
+    fun file(kind: String, id: String): File {
+        SyncV2BodyCodec.name(kind, id)
+        return if (kind == "asset") File(files, "notes/assets/$id") else BookPackageFiles.legacy(bookDirectory, id)
     }
-    fun read(kind:String,id:String):ByteArray? {
-        val f=file(kind,id);if(!f.isFile)return null
-        if(f.length()>SyncV2BodyCodec.limit(kind))SyncV2Codec.fail("object_too_large")
-        return f.readBytes().also{if(it.size>SyncV2BodyCodec.limit(kind))SyncV2Codec.fail("object_too_large")}
+
+    fun read(kind: String, id: String): ByteArray? {
+        val target = file(kind, id)
+        val limit = SyncV2BodyCodec.limit(kind)
+        if (kind == "book") {
+            val revision = BookPackageFiles.revision(db, id) ?: return null
+            if (revision.bytes > limit) SyncV2Codec.fail("object_too_large")
+            val original = BookPackageFiles.resolve(bookDirectory, id, revision) ?: return null
+            val raw = ByteArray(revision.bytes.toInt())
+            DataInputStream(original.inputStream()).use { input ->
+                input.readFully(raw)
+                if (input.read() != -1 || SyncV2BodyCodec.hash(raw) != revision.sha256)
+                    SyncV2Codec.fail("body_revision_changed")
+            }
+            return raw
+        }
+        if (!target.isFile) return null
+        if (target.length() > limit) SyncV2Codec.fail("object_too_large")
+        return target.readBytes().also { if (it.size > limit) SyncV2Codec.fail("object_too_large") }
     }
     /** Discover referenced originals omitted by older private-UUID metadata. Absence never deletes. */
     fun refreshReferences(now:Long,checkOwner:()->Unit):List<String> {

@@ -2,7 +2,10 @@ package com.lightningstudio.watchrss.phone.syncv2
 
 import android.content.Context
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
+import com.lightningstudio.watchrss.phone.data.book.BookEntity
 import com.lightningstudio.watchrss.phone.data.book.BookSync
+import com.lightningstudio.watchrss.phone.data.book.ImportedBookStore
+import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -120,6 +123,66 @@ class SyncV2BodyChannelTest {
             assertEquals("private-uuid",f.sql.query("SELECT assetId FROM note_assets WHERE storageKey='migrated.png'").use{it.moveToFirst();it.getString(0)})
         }
     }
+    @Test fun bookConsumersUseTheCurrentDigestAcrossBothLocalPaths() = runBlocking<Unit> {
+        SyncV2P5Fixture().use { f ->
+            val (value, raw) = book()
+            value.put("title", "Book").put("kind", "txt").put("updatedAt", 1)
+                .put("sourceUrl", "https://watchrss.local/import-txt-novel/test")
+                .put("sourceDeviceId", "fixture").put("deletedAt", 0)
+                .put("deletionClock", 0).put("deletedChapters", JSONArray())
+            val id = value.getString("bookId")
+            val hash = SyncV2BodyCodec.hash(raw)
+            f.room.bookDao().put(BookEntity(id, BookSync.canonical(value), hash, raw.size.toLong()))
+            val directory = File(f.root, "imported_books").apply { mkdirs() }
+            val books = ImportedBookStore(f.room, directory, null, "fixture")
+            val cloud = SyncV2BodyRepository(f.sql, f.root)
+            val recovery = SyncV2RecoveryStorage(f.projection, f.identity, f.root)
+            val state = SyncV2Business.split("book", id, f.identity.entity("book", id), value, null)
+            val record = JSONObject().put("value", value).put("meta", state.meta).put("state", state.state)
+            val legacy = File(directory, "$id.jsonl")
+            val binary = File(directory, "b2-$id-$hash.jsonl")
+            val old = raw.toString(Charsets.UTF_8).replace("\"title\":\"Book\"", "\"title\":\"Past\"").toByteArray()
+            assertEquals(raw.size, old.size)
+            assertFalse(raw.contentEquals(old))
+            val short = raw.copyOf(raw.size - 1)
+            val results = linkedMapOf<String, List<Boolean>>()
+            suspend fun sample(label: String, v1: ByteArray?, b2: ByteArray?) {
+                if (v1 == null) legacy.delete() else legacy.writeBytes(v1)
+                if (b2 == null) binary.delete() else binary.writeBytes(b2)
+                val announced = books.manifests().single().getBoolean("contentAvailable")
+                val original = books.packageFile(id)?.readBytes()
+                val cloudBytes = cloud.read("book", id)
+                results[label] = listOf(announced, original?.contentEquals(raw) == true,
+                    cloudBytes?.contentEquals(raw) == true, recovery.contentReady(record), recovery.hasOriginalSource(record),
+                    original == null, cloudBytes == null)
+            }
+            sample("v1 only", raw, null)
+            sample("B2 only", null, raw)
+            sample("both valid", raw, raw)
+            sample("old v1, current B2", old, raw)
+            sample("valid v1, short B2", raw, short)
+            sample("valid v1, same-length corrupt B2", raw, old)
+            sample("same-length corrupt v1, short B2", old, short)
+            val ready = listOf(true, true, true, true, true, false, false)
+            val unavailable = listOf(false, false, false, false, false, true, true)
+            println("book read matrix: $results")
+            assertEquals(results.keys.associateWith { if (it.startsWith("same-length corrupt v1")) unavailable else ready }, results)
+
+            legacy.delete()
+            binary.writeBytes(raw)
+            val entity = f.identity.entity("book", id)
+            val base = JSONObject().put("accountOid", f.initial).put("generation", "0")
+            val copy = recovery.prepare(listOf(record), emptyList(), base, setOf(entity), "1", f.initial, f.f.now)
+            val blob = copy.objects.entries.single { it.key.startsWith("blob:") }
+            val recoveryKey = f.projection.recoveryKey()
+            try {
+                assertArrayEquals(raw, SyncV2Envelope.open(f.identity, recoveryKey, blob.key, blob.value))
+            } finally {
+                recoveryKey.fill(0)
+            }
+        }
+    }
+
     @Test fun verifiedBookInstallsOriginalAndChaptersWithoutChangingCurrentBookOrReadingState() {
         SyncV2P5Fixture().use{f->val (value,raw)=book();val id=value.getString("bookId");val repo=SyncV2BodyRepository(f.sql,f.root)
             SyncV2PhoneApply(f.sql).upsert("imported_books",listOf("bookId"),JSONObject().put("bookId",id).put("stateJson",value.toString()))

@@ -16,6 +16,7 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
 import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
+import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -87,7 +88,7 @@ class B2BooksRoomTest {
         }
     }
 
-    @Test fun disabledPackageLookupUsesOnlyLegacyFileEvenWithMatchingLengthSidecar() = runBlocking<Unit> {
+    @Test fun validLegacyOriginalRemainsAvailableWithTruncatedOrIdenticalSidecar() = runBlocking<Unit> {
         assumeFalse(BuildConfig.B2_ENABLED)
         val root = java.nio.file.Files.createTempDirectory("v1-book-package").toFile()
         val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()
@@ -193,9 +194,23 @@ class B2BooksRoomTest {
             } }
             val article = db.phoneArticleDao().getById(BookSync.articleId(id, 1))!!
             assertEquals(BookSync.normalized(text), content.loadText(article.contentText))
-            assertEquals(hashes.sha256, binaryFileHashes(books.binaryPackage(id, hashes.sha256)).sha256)
-            if (!BuildConfig.B2_ENABLED) assertNull(books.packageFile(id))
+            val binary = books.binaryPackage(id, hashes.sha256)
+            assertEquals(hashes.sha256, binaryFileHashes(binary).sha256)
+            assertEquals(binary, books.packageFile(id))
             assertEquals("APPLIED", dbStore.get(scope, "testReceipt", job)!!.s("status"))
+
+            val reader = PhoneCompanionRepository(db.phoneSavedItemDao(), db.phoneArticleDao(), db.phoneRssSourceDao(),
+                "phone", articleContentStore = content, books = books)
+            db.phoneArticleDao().upsert(article.copy(contentText = "", favoriteSaved = true, readingPositionBytes = 1))
+            assertTrue(content.openTextFile(article.contentText)!!.delete())
+            val originalBytes = binary.readBytes()
+            binary.writeBytes(originalBytes.copyOf(originalBytes.size - 1))
+            assertEquals("", reader.getArticleForReading(article.articleId)!!.contentText)
+            binary.writeBytes(originalBytes)
+            val restored = reader.getArticleForReading(article.articleId)!!
+            assertEquals(BookSync.normalized(text), restored.contentText)
+            assertTrue(restored.favoriteSaved)
+            assertEquals(1L, restored.readingPositionBytes)
             val exported = mutableListOf<JSONObject>()
             business.freeze(File(root, "source").apply { mkdirs() }, {}) { descriptor, _ -> exported += descriptor }
             assertEquals(setOf("bookState", "bookPackageSegment", "bookPackageCommit"), exported.map { it.s("kind") }.toSet())

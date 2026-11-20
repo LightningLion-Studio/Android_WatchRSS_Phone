@@ -58,8 +58,7 @@ fun DashboardCloudSyncBanner() {
     }
     val hasKey = session != null && service.hasLocalAccountKey()
     val roundTimedOut = session != null && state.phase == CloudSyncPhase.ERROR && state.errorCode == "sync_timeout"
-    val showOwnerResolution = ownerConflict && !roundTimedOut
-    val presentation = if (showOwnerResolution) CloudDashboardPresentation("暂停上传", "本机资料属于另一个账号，选择处理方式后继续同步", "选择处理方式")
+    val presentation = if (ownerConflict && !roundTimedOut) CloudDashboardPresentation("暂停上传", "本机资料属于另一个账号，选择处理方式后继续同步", "选择处理方式")
         else cloudDashboardPresentation(session != null, hasKey, paused, state.phase, member,
             upgradeRequired = state.errorCode == "cloud_format_upgrade_required",
             recordsConsentRequired = state.errorCode == "cloud_records_consent_required",
@@ -83,21 +82,32 @@ fun DashboardCloudSyncBanner() {
                 if (it.reservedBytes > 0) " · 上传预留 ${cloudQuotaBytes(it.reservedBytes)}" else ""
         },
         paused = paused,
-        canPause = session != null && hasKey && member?.readable == true,
-        actionLabel = presentation.actionLabel ?: if (quotaFailed) "重新获取" else null,
+        canPause = !ownerConflict && session != null && hasKey && member?.readable == true,
+        actionLabel = if (ownerConflict) "选择处理方式"
+            else presentation.actionLabel ?: if (quotaFailed) "重新获取" else null,
         onAction = {
-            if (showOwnerResolution) showOwnerChoice = true
-            else if (presentation.actionLabel == null && quotaFailed) refreshKey++
-            else if (presentation.actionLabel == "重试同步") scope.launch {
-                try { service.syncNow() }
-                catch (cancelled: CancellationException) { throw cancelled }
-                catch (_: Exception) { /* The service publishes the failure. */ }
-            }
-            else context.startActivity(AccountActivity.createIntent(context,
-                section = if (presentation.actionLabel in setOf("验证设备身份", "登录账号")) AccountSection.ROOT else AccountSection.CLOUD_SYNC))
+            runCloudDashboardAction(
+                ownerConflict = ownerConflict || service.libraryOwnerConflict(),
+                actionLabel = presentation.actionLabel, quotaFailed = quotaFailed,
+                chooseOwner = { showOwnerChoice = true },
+                refreshQuota = { refreshKey++ },
+                retrySync = {
+                    scope.launch {
+                        try { service.syncNow() }
+                        catch (cancelled: CancellationException) { throw cancelled }
+                        catch (_: Exception) { /* The service publishes the failure. */ }
+                    }
+                },
+                openAccount = {
+                    context.startActivity(AccountActivity.createIntent(context,
+                        section = if (presentation.actionLabel in setOf("验证设备身份", "登录账号")) AccountSection.ROOT
+                        else AccountSection.CLOUD_SYNC))
+                }
+            )
         },
         onTogglePause = {
-            actionFailed = runCatching { container.setCloudSyncPaused(!paused) }.isFailure
+            if (ownerConflict || service.libraryOwnerConflict()) showOwnerChoice = true
+            else actionFailed = runCatching { container.setCloudSyncPaused(!paused) }.isFailure
         },
         // The whole card opens cloud sync management; its buttons keep their own actions.
         onOpen = { context.startActivity(AccountActivity.createIntent(context, section = AccountSection.CLOUD_SYNC)) }
@@ -113,6 +123,23 @@ fun DashboardCloudSyncBanner() {
         },
         onDismiss = { showOwnerChoice = false }
     )
+}
+
+internal fun runCloudDashboardAction(
+    ownerConflict: Boolean,
+    actionLabel: String?,
+    quotaFailed: Boolean,
+    chooseOwner: () -> Unit,
+    refreshQuota: () -> Unit,
+    retrySync: () -> Unit,
+    openAccount: () -> Unit
+) {
+    when {
+        ownerConflict -> chooseOwner()
+        actionLabel == null && quotaFailed -> refreshQuota()
+        actionLabel == "重试同步" -> retrySync()
+        else -> openAccount()
+    }
 }
 
 internal val cloudActivePhases = setOf(CloudSyncPhase.CHECKING, CloudSyncPhase.DOWNLOADING,

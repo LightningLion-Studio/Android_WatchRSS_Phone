@@ -4,6 +4,7 @@ import android.content.Context
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
+import com.lightningstudio.watchrss.phone.data.local.ARTICLE_CONTENT_MARKER_PREFIX
 import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.local.hasReadableArticleBody
@@ -20,6 +21,25 @@ import org.json.JSONObject
 import java.io.File
 import java.io.InterruptedIOException
 import java.util.concurrent.atomic.AtomicLong
+
+private const val MAX_ARTICLE_MARKER_BYTES = 256
+
+// The SQL probe must keep the same blank-text semantics as Kotlin's reader.
+private val articleBodyWhitespace = buildString {
+    for (character in Char.MIN_VALUE..Char.MAX_VALUE) {
+        if (character.isWhitespace()) append(character)
+    }
+}
+
+// Return a file marker or a representative value for blank/nonblank inline content.
+private fun articleBodyAvailabilitySql(column: String): String = """
+    CASE
+        WHEN substr($column, 1, ${ARTICLE_CONTENT_MARKER_PREFIX.length}) = '$ARTICLE_CONTENT_MARKER_PREFIX'
+             AND length(CAST($column AS BLOB)) <= $MAX_ARTICLE_MARKER_BYTES THEN $column
+        WHEN length(CAST(ltrim($column, ?1) AS BLOB)) > 0 THEN '1'
+        ELSE ''
+    END
+""".trimIndent()
 
 /** Host account values come from the currently authenticated v1 client on every request. */
 internal class SyncV2PhoneProduct(private val context:Context,private val database:()->PhoneCompanionDatabase,
@@ -270,9 +290,11 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         fun hasMissingImportedArticleBody(store: ArticleContentStore): Boolean = life.guard {
             val db = projection.accountDatabase
             val missing = db.controlQuery(
-                """SELECT articleId, url, contentText, contentHtml FROM phone_articles
+                """SELECT articleId, url, ${articleBodyAvailabilitySql("contentText")}, ${articleBodyAvailabilitySql("contentHtml")}
+                    FROM phone_articles
                     WHERE deleted=0 AND independentSaved=1
-                    AND (url LIKE '%watchrss.local/import%' OR url LIKE '%watchrss://import/%')"""
+                    AND (url LIKE '%watchrss.local/import%' OR url LIKE '%watchrss://import/%')""",
+                arrayOf(articleBodyWhitespace)
             ).use { rows ->
                 buildList {
                     while (rows.moveToNext()) {

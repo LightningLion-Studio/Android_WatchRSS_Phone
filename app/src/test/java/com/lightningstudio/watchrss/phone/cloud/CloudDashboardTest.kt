@@ -36,6 +36,21 @@ class CloudDashboardTest {
         }
     }
 
+    @Test fun fix3OwnerConflictTakesPriorityOverTimeoutRetry() {
+        val timeout = SyncV2View.errorText("sync_timeout")
+        val presentation = cloudDashboardPresentation(true, true, false, CloudSyncPhase.ERROR, member,
+            syncMessage = timeout, syncReason = "sync_timeout")
+        var syncs = 0
+        var choices = 0
+        runCloudDashboardAction(
+            ownerConflict = true, actionLabel = presentation.actionLabel,
+            quotaFailed = false, chooseOwner = { choices++ }, refreshQuota = { fail("unexpected quota refresh") },
+            retrySync = { syncs++ }, openAccount = { fail("unexpected navigation") }
+        )
+        assertEquals(0, syncs)
+        assertEquals(1, choices)
+    }
+
     @Test fun recordsConsentOffersSetupInsteadOfNetworkRetry() {
         val value = cloudDashboardPresentation(true, true, false, CloudSyncPhase.ERROR, member,
             recordsConsentRequired = true)

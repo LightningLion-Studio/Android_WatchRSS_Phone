@@ -1028,7 +1028,7 @@ class SyncV2P6ProductTest {
                 val files = FileArticleContentStore(reader.context)
                 val marker = files.markerFor(id)
                 assertNull(files.textChunkHandle(marker))
-                fun cacheBody(text: String, installFile: Boolean = false) = runBlocking {
+                fun cacheBody(text: String, installFile: Boolean = false, html: String? = null) = runBlocking {
                     reader.product.action(requireNotNull(reader.product.uiPort.value)) { runtime ->
                         val projection = runtime.projection
                         projection.accountWriter(projection.state().version) { state ->
@@ -1040,12 +1040,12 @@ class SyncV2P6ProductTest {
                                 // Install as a cache file, without recording a new local import.
                                 ConditionalBodyFile.install(file, "private cloud body".toByteArray())
                             }
-                            db.execSQL("UPDATE phone_articles SET contentText=? WHERE articleId=?", arrayOf(text, id))
+                            db.execSQL("UPDATE phone_articles SET contentText=?, contentHtml=? WHERE articleId=?", arrayOf(text, html, id))
                             state.body.put("businessStamp", SyncV2BusinessWitness.read(db).encoded())
                         }
                     }
                 }
-                for (body in listOf(marker, " \t\n")) {
+                for (body in listOf(marker, " \t\n\u00a0\u2003\u3000")) {
                     cacheBody(body)
                     val restore = runBlocking { entry.service.restoreCurrentLibrary() }.outcome
                     val read = runCatching { runBlocking { entry.service.loadArticleForReading(id) } }
@@ -1063,6 +1063,12 @@ class SyncV2P6ProductTest {
                 val restored = runBlocking { entry.service.restoreCurrentLibrary() }
                 assertTrue(restored.outcome.toString(), restored.completed)
                 assertEquals(marker, runBlocking { entry.service.loadArticleForReading(id) }?.contentText)
+                val largeInline = "x".repeat(17 * 1024 * 1024)
+                for ((text, html) in listOf(largeInline to null, "" to largeInline)) {
+                    cacheBody(text, html = html)
+                    val large = runBlocking { entry.service.restoreCurrentLibrary() }
+                    assertTrue(large.outcome.toString(), large.completed)
+                }
             } }
         }
     }

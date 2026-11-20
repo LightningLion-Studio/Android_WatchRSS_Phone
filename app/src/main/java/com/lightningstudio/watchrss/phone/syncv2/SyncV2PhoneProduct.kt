@@ -182,7 +182,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             })
             val articles=signer?.let{SyncV2ArticlePublisher(projection,identity,ring,it,contentClient,content,worker,context.filesDir,life::check,clock)}
             val bodies=signer?.let{SyncV2BodyChannel(projection,identity,ring,it,control,SyncV2BodyRepository(projection.accountDatabase,context.filesDir),
-                File(context.filesDir,"syncv2/$path/bodies"),life,approved,signals)}
+                File(context.filesDir,"syncv2/$path/bodies"),life,approved,signals,{time.now()?:System.currentTimeMillis()})}
             val result=Runtime(account.copy(bearer="",apiKey="",deviceAuthorization=null),life,ring,identity,vault,projection,cloud,actions,control,articles,bodies,time,contentEnabled,serviceAnnouncement)
             life.guard {
                 val port=SyncV2PhoneUiPort(this,result)

@@ -32,8 +32,8 @@ class SyncV2BodyLifecycleTest {
    var current=true;var bodyReads=0;val previous=f.f.route
    f.f.route={r->if(r.requestUrl!!.encodedPath.startsWith("/functions/v1/cloud/bodies/v1/")){bodyReads++;current=false;val h=r.requestUrl!!.pathSegments.last();val bytes=prepared.objects.getValue(h);val at=r.requestUrl!!.queryParameter("offset")!!.toInt();MockResponse().setBody(Buffer().write(bytes.copyOfRange(at,minOf(at+65536,bytes.size)))).setHeader("x-watchrss-body-total-bytes",bytes.size).setHeader("x-watchrss-body-offset",at)}else previous!!.invoke(r)}
    val repo=SyncV2BodyRepository(f.sql,File(f.root,"receiving"));val ack=f.ackCalls;val before=f.projection.state().revision
-   keys(f).use{ring->val channel=SyncV2BodyChannel(f.projection,f.identity,ring,f.f.signer,client,repo,File(f.root,"cache"),SyncV2Lifetime{current},{true},{SyncV2TransportSignals(wifi=true,internet=true)})
-    val err=runCatching{channel.receive(entry,anchor,prepared.descriptor,File(f.root,"cache"),true)}.exceptionOrNull();assertEquals("authentication_required",err?.message);assertEquals(1,bodyReads);assertFalse(repo.file("asset",id).exists());assertEquals(ack,f.ackCalls);assertEquals(before,f.projection.state().revision)
+   keys(f).use{ring->val channel=SyncV2BodyChannel(f.projection,f.identity,ring,f.f.signer,client,repo,File(f.root,"cache"),SyncV2Lifetime{current},{true},{SyncV2TransportSignals(wifi=true,internet=true)},{f.f.now})
+    val err=runCatching{channel.receive(entry,anchor,prepared.descriptor,File(f.root,"cache"))}.exceptionOrNull();assertEquals("authentication_required",err?.message);assertEquals(1,bodyReads);assertFalse(repo.file("asset",id).exists());assertEquals(ack,f.ackCalls);assertEquals(before,f.projection.state().revision)
    }
   }
  }

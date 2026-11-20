@@ -81,10 +81,14 @@ internal object SyncV2BodyCodec {
         return Prepared(descriptor,objects)
     }
     fun limit(kind:String)=if(kind=="asset")5*1024*1024 else 64*1024*1024
-    fun open(d:JSONObject,scope:JSONObject,binding:Binding,publicKey:String,key:(Long)->ByteArray,read:(String,Int)->ByteArray):ByteArray {
+    fun verifyDescriptor(d:JSONObject,scope:JSONObject,binding:Binding,publicKey:String):JSONObject {
         val b=validate(d,scope)
         if(b.getString("entityKey")!=binding.entityKey || b.getString("bodyRevision")!=binding.bodyRevision)SyncV2Codec.fail("body_revision_changed")
         if(!SyncV2Identity.verifySignature(publicKey,SyncV2Codec.lp(SyncV2Codec.utf8(DOMAIN),SyncV2Codec.utf8(SyncV2Codec.canonical(b))),d.getString("signature")))SyncV2Codec.fail("signature_invalid")
+        return b
+    }
+    fun open(d:JSONObject,scope:JSONObject,binding:Binding,publicKey:String,key:(Long)->ByteArray,read:(String,Int)->ByteArray):ByteArray {
+        val b=verifyDescriptor(d,scope,binding,publicKey)
         fun checked(h:String,n:Int)=read(h,n).also{if(it.size!=n || hash(it)!=h)SyncV2Codec.fail("hash_mismatch")}
         val root=key(b.getLong("keyVersion")).copyOf();if(root.size!=32)SyncV2Codec.fail("key_unavailable")
         try {

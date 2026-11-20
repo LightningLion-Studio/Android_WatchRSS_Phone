@@ -152,6 +152,7 @@ class SyncV2BodyChannelTest {
                 val announced = books.manifests().single().getBoolean("contentAvailable")
                 val original = books.packageFile(id)?.readBytes()
                 val cloudBytes = cloud.read("book", id)
+                assertEquals(cloudBytes != null, cloud.original("book", id, value) != null)
                 results[label] = listOf(announced, original?.contentEquals(raw) == true,
                     cloudBytes?.contentEquals(raw) == true, recovery.contentReady(record), recovery.hasOriginalSource(record),
                     original == null, cloudBytes == null)
@@ -170,6 +171,13 @@ class SyncV2BodyChannelTest {
 
             legacy.delete()
             binary.writeBytes(raw)
+            val life = JSONObject().put("generation", 1).put("operationId", "ab".repeat(16)).put("startedAt", 7)
+            val lifecycleValue = JSONObject(value.toString()).put("lifecycle", life)
+            val oldRow = f.room.bookDao().get(id)!!
+            f.room.bookDao().put(oldRow.copy(stateJson = BookSync.canonical(lifecycleValue)))
+            assertNotNull(cloud.original("book", id, lifecycleValue))
+            expect("body_revision_changed") { cloud.original("book", id, value) }
+            f.room.bookDao().put(oldRow)
             val entity = f.identity.entity("book", id)
             val base = JSONObject().put("accountOid", f.initial).put("generation", "0")
             val copy = recovery.prepare(listOf(record), emptyList(), base, setOf(entity), "1", f.initial, f.f.now)

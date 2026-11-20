@@ -263,7 +263,7 @@ internal class SyncV2Projection(
             if(SyncV2Codec.canonical(row)!=SyncV2Codec.canonical(captured))SyncV2Codec.fail("body_revision_changed")
             if(row.getBoolean("deleted"))SyncV2Codec.fail("body_revision_changed")
             if(row.opt("bodyRevision")!=revision) {
-                row.put("bodyRevision",revision).put("promiseId",SyncV2Codec.hex(SyncV2Codec.random(16))).put("recipeOid",JSONObject.NULL)
+                row.put("bodyRevision",revision).put("promiseId",if(independent)revision else SyncV2Codec.hex(SyncV2Codec.random(16))).put("recipeOid",JSONObject.NULL)
                     .put("opaqueContentId",JSONObject.NULL).put("contentBytes",JSONObject.NULL).put("rowSequence",SyncV2Codec.next(row.getString("rowSequence")))
             }
             if(independent)value.put("bodyChannelRevision",revision)

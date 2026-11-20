@@ -21,14 +21,33 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         return SyncV2BodyCodec.Binding(kind,id,r.getString("entityKey"),r.getString("bodyRevision"))
     }
     private fun value(entry:JSONObject)=SyncV2Business.join(entry.getJSONObject("meta").getString("kind"),entry.getJSONObject("meta"),entry.getJSONObject("state"))
+    private fun captureWindow(anchor: JSONObject): Long {
+        val window = client.checkpoint(now()).getJSONObject("body")
+        if (SyncV2Codec.canonical(window.getJSONObject("account")) != SyncV2Codec.canonical(anchor)) {
+            SyncV2Codec.fail("choice_stale")
+        }
+        return window.getLong("expiresAtMillis").also { checkWindow(anchor, it) }
+    }
+
+    private fun checkWindow(anchor: JSONObject, expires: Long, st: SyncV2Projection.State = projection.state()) {
+        life.check()
+        if (now() >= expires) SyncV2Codec.fail("window_expired")
+        val account = st.body.optJSONObject("account") ?: SyncV2Codec.fail("choice_stale")
+        val metadata = st.body.optJSONObject("metadataAccount") ?: SyncV2Codec.fail("choice_stale")
+        if (!st.body.isNull("pendingChoice") || !st.body.isNull("pendingPublish") ||
+            SyncV2Codec.canonical(anchor(account)) != SyncV2Codec.canonical(anchor) ||
+            SyncV2Codec.canonical(anchor(metadata)) != SyncV2Codec.canonical(anchor)) SyncV2Codec.fail("choice_stale")
+    }
+
     /** Current accepted signed head -> Merkle path -> AEAD meta/state -> identity. */
-    private fun current(entry:JSONObject,anchor:JSONObject,captured:SyncV2Projection.State?=null) {
-        life.check();val st=captured?:projection.state();val account=st.body.optJSONObject("account")?:SyncV2Codec.fail("choice_stale")
-        if(SyncV2Codec.canonical(anchor(account))!=SyncV2Codec.canonical(anchor) || st.body.optJSONObject("metadataAccount")?.getString("oid")!=account.getString("oid"))SyncV2Codec.fail("choice_stale")
+    private fun current(entry: JSONObject, anchor: JSONObject, expires: Long, st: SyncV2Projection.State = projection.state()) {
+        checkWindow(anchor, expires, st)
+        val account = st.body.getJSONObject("account")
         val header=projection.accountCatalog.header(account.getString("oid"))?.getJSONObject("header")
             ?:SyncV2Wire.parse(projection.accountObject(account.getString("oid")),262144,true)
         val body=authors(st.body).header(header)
-        if(SyncV2Codec.oid("commit",body)!=account.getString("oid") || body.getString("treeRoot")!=st.body.getString("metadataTreeRoot"))SyncV2Codec.fail("hash_mismatch")
+        if (SyncV2Codec.oid("commit",body)!=account.getString("oid") || body.getString("treeRoot")!=st.body.getString("metadataTreeRoot") ||
+            body.getString("rollbackGeneration") != account.getString("generation")) SyncV2Codec.fail("hash_mismatch")
         val b=binding(entry);val row=SyncV2Index.find(identity.scope,body.getString("treeRoot"),b.entityKey,projection::accountObject)?:SyncV2Codec.fail("body_revision_changed")
         if(row.getBoolean("deleted") || SyncV2Codec.canonical(row)!=SyncV2Codec.canonical(entry.getJSONObject("row")))SyncV2Codec.fail("body_revision_changed")
         for((field,type)in listOf("metaOid" to "meta","stateOid" to "state")) {
@@ -40,7 +59,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
             val decoded=try{SyncV2Wire.parse(plain,262144,true)}finally{plain.fill(0)}
             if(SyncV2Codec.canonical(decoded)!=SyncV2Codec.canonical(entry.getJSONObject(type)))SyncV2Codec.fail("hash_mismatch")
         }
-        value(entry)
+        if (SyncV2Business.logicalId(b.kind, value(entry)) != b.logicalId) SyncV2Codec.fail("identity_conflict")
     }
     private fun anchor(account:JSONObject)=JSONObject().put("commitOid",account.getString("oid")).put("revision",account.getString("revision")).put("rollbackGeneration",account.getString("generation"))
     private fun candidates():List<Pair<String,String>> = projection.accountDatabase.controlQuery("SELECT kind,logical_id FROM syncv2_candidates WHERE scope=? AND kind IN ('asset','book') ORDER BY entity_key",arrayOf(projection.scope)).use{c->buildList{while(c.moveToNext())add(c.getString(0) to c.getString(1))}}
@@ -49,12 +68,12 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
     fun needsPublication():Boolean {
         for((kind,id)in candidates())try {
             val c=projection.candidate(kind,id)?:continue;val v=SyncV2Business.join(kind,c.first,c.second);if(v.optBoolean("deleted"))continue
-            val raw=repository.read(kind,id)?:continue;repository.validate(kind,id,v,raw)
+            val original=repository.original(kind,id,v)?:continue
             val entity=identity.entity(kind,id);val remote=projection.cloudRows(setOf(entity)).firstOrNull()?:return true
             val r=remote.getJSONObject("row");if(!r.isNull("recipeOid"))continue
             // A changed remote business binding requires the existing account-choice flow.
             if(SyncV2Codec.canonical(remote.getJSONObject("meta"))!=SyncV2Codec.canonical(c.first) || SyncV2Codec.canonical(remote.getJSONObject("state"))!=SyncV2Codec.canonical(c.second))continue
-            if(r.optString("bodyRevision")!=SyncV2BodyCodec.revision(kind,entity,SyncV2BodyCodec.hash(raw)))return true
+            if(r.optString("bodyRevision")!=SyncV2BodyCodec.revision(kind,entity,original.sha256))return true
         } catch(e:Exception){life.check()}
         return false
     }
@@ -63,8 +82,8 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         for((kind,id)in candidates())try {
             life.check();val c=projection.candidate(kind,id)?:continue;val v=SyncV2Business.join(kind,c.first,c.second);if(v.optBoolean("deleted"))continue
             val entity=identity.entity(kind,id);val row=projection.wireContentRow(entity)?:continue;if(!row.isNull("recipeOid"))continue
-            val raw=repository.read(kind,id)?:continue;repository.validate(kind,id,v,raw)
-            projection.bindArticleRevision(row,SyncV2BodyCodec.revision(kind,entity,SyncV2BodyCodec.hash(raw)),independent=true)
+            val original=repository.original(kind,id,v)?:continue
+            projection.bindArticleRevision(row,SyncV2BodyCodec.revision(kind,entity,original.sha256),independent=true)
         } catch(e:Exception){life.check()}
     }
     fun sync(manual:Boolean=false):Result {
@@ -74,15 +93,17 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         if(globalRetry.isFile) {val r=SyncV2Wire.parse(globalRetry.readBytes(),4096,true)
             if(SyncV2Wire.uint(r,"until")>now())return Result(1,listOf(r.getString("code")))}
         val anchor=anchor(account);var after="";var pending=0;val errors=linkedSetOf<String>()
+        var windowExpiry: Long? = null
         while(true) {
             val page=projection.cloudRowsPage(after,16);if(page.isEmpty())break
             for(entry in page) {val m=entry.getJSONObject("meta");val row=entry.getJSONObject("row")
-                if(m.getString("kind") !in setOf("book","asset") || row.getBoolean("deleted") || !row.isNull("recipeOid"))continue
+                if(m.getString("kind") !in setOf("book","asset") || row.getBoolean("deleted") || !row.isNull("recipeOid") || row.isNull("bodyRevision"))continue
                 val b=binding(entry);val dir=File(root,"${b.entityKey}/${b.bodyRevision}")
                 try {
                     val retry=File(dir,"retry.json");if(retry.isFile){val r=SyncV2Wire.parse(retry.readBytes(),4096,true);if(r.getLong("until")>now())throw SyncV2CloudError(r.getString("code"),true,r.getLong("until")-now())}
                     val route=signals();if(route.internet!=true || !manual&&route.wifi!=true)SyncV2Codec.fail("network_unavailable")
-                    syncEntry(entry,anchor,dir)
+                    val expires = windowExpiry ?: captureWindow(anchor).also { windowExpiry = it }
+                    syncEntry(entry,anchor,expires,dir)
                 }catch(e:Exception) {
                     life.check();pending++;val code=code(e);errors.add(code)
                     val delay=(e as? SyncV2CloudError)?.retryAfterMillis
@@ -98,47 +119,117 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         }
         return Result(pending,errors.toList())
     }
-    private fun syncEntry(entry:JSONObject,anchor:JSONObject,dir:File) {
-        current(entry,anchor);val b=binding(entry);val v=value(entry);val local=repository.read(b.kind,b.logicalId)
-        if(local!=null){repository.validate(b.kind,b.logicalId,v,local);if(SyncV2BodyCodec.revision(b.kind,b.entityKey,SyncV2BodyCodec.hash(local))!=b.bodyRevision)SyncV2Codec.fail("body_revision_changed")}
-        var cursor="";var last:Exception?=null
-        do {val page=http.list(b.entityKey,b.bodyRevision,cursor);val carriers=page.getJSONArray("carriers")
-            for(i in 0 until carriers.length())try {
-                receive(entry,anchor,carriers.getJSONObject(i).getJSONObject("descriptor"),dir,true);return
-            }catch(e:Exception){life.check();if(code(e) in setOf("choice_stale","authentication_required","device_revoked"))throw e;last=e}
-            cursor=if(page.isNull("nextAfter"))""else page.getString("nextAfter")
-        }while(cursor.isNotEmpty())
-        if(local==null)throw last?:IllegalStateException("body_channel_pending")
-        current(entry,anchor)
-        val pending=File(dir,"pending.json");val version=keys.newestVersion
-        var d=if(pending.isFile)SyncV2Wire.parse(pending.readBytes(),262144,true)else null
-        d?.let{val body=SyncV2BodyCodec.validate(it,identity.scope);if(SyncV2Codec.canonical(body.getJSONObject("anchor"))!=SyncV2Codec.canonical(anchor) || body.getLong("keyVersion")!=version || body.getString("authorDeviceId")!=signer.deviceId)d=null}
-        if(d==null) {
-            val prepared=SyncV2BodyCodec.prepare(identity.scope,anchor,b,keys.read(version),version,signer,local)
-            for((hash,raw)in prepared.objects)SyncV2BodyHttp.atomic(File(dir,hash),raw)
-            d=prepared.descriptor;SyncV2BodyHttp.atomic(pending,SyncV2Codec.utf8(SyncV2Codec.canonical(d)))
+    private fun matchingOriginal(binding: SyncV2BodyCodec.Binding, selected: JSONObject): SyncV2BodyRepository.Original? {
+        val original = repository.original(binding.kind, binding.logicalId, selected) ?: return null
+        if (SyncV2BodyCodec.revision(binding.kind, binding.entityKey, original.sha256) != binding.bodyRevision) {
+            SyncV2Codec.fail("body_revision_changed")
+        }
+        return original
+    }
+
+    private fun carrierPublicKey(descriptor: JSONObject): String {
+        val author = SyncV2BodyCodec.validate(descriptor, identity.scope).getString("authorDeviceId")
+        return authors().publicKey(author)
+    }
+
+    private fun syncEntry(entry: JSONObject, anchor: JSONObject, expires: Long, dir: File) {
+        current(entry, anchor, expires)
+        val b = binding(entry)
+        val selected = value(entry)
+        var local = matchingOriginal(b, selected)
+        var cursor = ""
+        var last: Exception? = null
+        do {
+            checkWindow(anchor, expires)
+            val page = http.list(b.entityKey, b.bodyRevision, cursor)
+            checkWindow(anchor, expires)
+            // The v1 receiver may have committed while the ready list was in flight.
+            if (local == null) local = matchingOriginal(b, selected)
+            val carriers = page.getJSONArray("carriers")
+            for (i in 0 until carriers.length()) {
+                val descriptor = carriers.getJSONObject(i).getJSONObject("descriptor")
+                try {
+                    if (local != null) {
+                        // List and signature only confirm cloud availability, independent of local demand.
+                        val signed = SyncV2BodyCodec.verifyDescriptor(descriptor, identity.scope, b, carrierPublicKey(descriptor))
+                        keys.read(signed.getLong("keyVersion"))
+                    } else {
+                        receive(entry, anchor, descriptor, dir, expires)
+                    }
+                } catch (e: Exception) {
+                    life.check()
+                    if (code(e) in setOf("choice_stale", "window_expired", "authentication_required", "device_revoked")) throw e
+                    last = e
+                    continue
+                }
+                if (local != null) {
+                    if (!local.matches(matchingOriginal(b, selected))) SyncV2Codec.fail("body_revision_changed")
+                    current(entry, anchor, expires)
+                }
+                return
+            }
+            cursor = if (page.isNull("nextAfter")) "" else page.getString("nextAfter")
+        } while (cursor.isNotEmpty())
+
+        // An invalid listed candidate does not authorize a competing publication.
+        last?.let { throw it }
+        val source = local ?: SyncV2Codec.fail("body_channel_pending")
+        current(entry, anchor, expires)
+        authors().publicKey(signer.deviceId, signer.keyId)
+        val pending = File(dir, "pending.json")
+        val version = keys.newestVersion
+        var descriptor = if (pending.isFile) SyncV2Wire.parse(pending.readBytes(), 262144, true) else null
+        descriptor?.let {
+            val body = SyncV2BodyCodec.validate(it, identity.scope)
+            if (SyncV2Codec.canonical(body.getJSONObject("anchor")) != SyncV2Codec.canonical(anchor) ||
+                body.getLong("keyVersion") != version || body.getString("authorDeviceId") != signer.deviceId) descriptor = null
+        }
+        if (descriptor == null) {
+            val prepared = SyncV2BodyCodec.prepare(identity.scope, anchor, b, keys.read(version), version, signer, source.raw)
+            for ((hash, raw) in prepared.objects) SyncV2BodyHttp.atomic(File(dir, hash), raw)
+            descriptor = prepared.descriptor
+            SyncV2BodyHttp.atomic(pending, SyncV2Codec.utf8(SyncV2Codec.canonical(descriptor)))
         }
         // Authenticate restart state and the complete local ciphertext closure before reserve.
-        SyncV2BodyCodec.open(d!!,identity.scope,b,signer.publicHex,keys::read){h,_->File(dir,h).readBytes()}
-        current(entry,anchor);if(repository.read(b.kind,b.logicalId)?.let{SyncV2BodyCodec.hash(it)}!=SyncV2BodyCodec.hash(local))SyncV2Codec.fail("body_revision_changed")
-        http.upload(d!!,dir)
+        val upload = requireNotNull(descriptor)
+        SyncV2BodyCodec.open(upload, identity.scope, b, signer.publicHex, keys::read) { hash, _ -> File(dir, hash).readBytes() }
+        if (!source.matches(matchingOriginal(b, selected))) SyncV2Codec.fail("body_revision_changed")
+        current(entry, anchor, expires)
+        http.upload(upload, dir) { checkWindow(anchor, expires) }
+        current(entry, anchor, expires)
     }
-    internal fun receive(entry:JSONObject,anchor:JSONObject,d:JSONObject,dir:File,install:Boolean) {
-        current(entry,anchor);val b=binding(entry);val author=SyncV2BodyCodec.validate(d,identity.scope).getString("authorDeviceId")
-        val raw=SyncV2BodyCodec.open(d,identity.scope,b,authors().publicKey(author),keys::read){h,n->http.download(d.getJSONObject("body").getString("carrierId"),h,n,dir)}
-        repository.validate(b.kind,b.logicalId,value(entry),raw)
-        current(entry,anchor)
-        if(install)life.guard {
-            val st=projection.state();projection.accountWriter(st.version){state->
-                current(entry,anchor,state);repository.install(b.kind,b.logicalId,raw)
+
+    internal fun receive(entry: JSONObject, anchor: JSONObject, descriptor: JSONObject, dir: File,
+        expires: Long = captureWindow(anchor)) {
+        current(entry, anchor, expires)
+        val b = binding(entry)
+        val raw = SyncV2BodyCodec.open(descriptor, identity.scope, b, carrierPublicKey(descriptor), keys::read) { hash, size ->
+            http.download(descriptor.getJSONObject("body").getString("carrierId"), hash, size, dir) { checkWindow(anchor, expires) }
+        }
+        val selected = value(entry)
+        repository.validate(b.kind, b.logicalId, selected, raw)
+        val committedDuringDownload = matchingOriginal(b, selected) != null
+        current(entry, anchor, expires)
+        if (committedDuringDownload) return
+        life.guard {
+            val st = projection.state()
+            projection.accountWriter(st.version) { state ->
+                current(entry, anchor, expires, state)
+                repository.install(b.kind, b.logicalId, raw)
                 // Only cache columns changed inside this writer. Hydration is not a local business edit.
-                state.body.put("businessStamp",SyncV2BusinessWitness.read(projection.accountDatabase).encoded())
+                state.body.put("businessStamp", SyncV2BusinessWitness.read(projection.accountDatabase).encoded())
             }
         }
     }
+
     fun status(kind:String,id:String):JSONObject {
-        val raw=runCatching{repository.read(kind,id)}.getOrNull();val entry=runCatching{projection.cloudRows(setOf(identity.entity(kind,id))).firstOrNull()}.getOrNull()
-        val ready=raw!=null&&entry!=null&&!entry.getJSONObject("row").getBoolean("deleted")&&runCatching{repository.validate(kind,id,value(entry),raw);SyncV2BodyCodec.revision(kind,identity.entity(kind,id),SyncV2BodyCodec.hash(raw))==entry.getJSONObject("row").optString("bodyRevision")}.getOrDefault(false)
+        val ready = runCatching {
+            val st = projection.state()
+            val a = st.body.optJSONObject("account") ?: return@runCatching false
+            val entry = projection.cloudRows(setOf(identity.entity(kind,id))).singleOrNull() ?: return@runCatching false
+            current(entry, anchor(a), Long.MAX_VALUE, st)
+            matchingOriginal(binding(entry), value(entry)) != null
+        }.getOrDefault(false)
         return JSONObject().put("placeholder",!ready).put("reason",if(ready)JSONObject.NULL else"body_not_synced").put("keepLocalBody",true)
     }
     companion object {fun code(e:Exception)=(e as? SyncV2CloudError)?.code?:e.message?.takeIf{Regex("[a-z][a-z0-9_]{0,63}").matches(it)}?:"body_channel_pending"}

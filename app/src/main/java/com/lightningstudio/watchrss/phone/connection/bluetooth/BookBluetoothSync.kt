@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import com.lightningstudio.watchrss.phone.data.book.*
 import com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec
 import org.json.*
@@ -114,7 +115,9 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
                     }.also {data->digest.update(data);out.write(data);index++}
                 }while(index<count)}
                 validateBookPackage {require(tmp.length()==expectedSize&&digest.digest().joinToString(""){"%02x".format(it)}==expectedSha)}
-                store.receivePackage(id,tmp).let{applied+=it;recordApplied(it)}
+                val owner = currentCoroutineContext()
+                val revision = BookPackageFiles.Revision(expectedSha, expectedSize)
+                store.receiveVerifiedPackage(id, tmp, revision) { owner.ensureActive() }.let { applied += it; recordApplied(it) }
             } catch(e:InvalidBookPackageException) {reject(id,"book_package_invalid",e.reason)}
             finally {tmp.delete()}
         }

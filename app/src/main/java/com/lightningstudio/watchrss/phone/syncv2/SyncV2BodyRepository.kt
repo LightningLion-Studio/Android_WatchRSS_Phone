@@ -6,6 +6,9 @@ import com.lightningstudio.watchrss.phone.data.book.BookSync
 import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.File
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.attribute.BasicFileAttributes
 
 /** Original bytes are the offline queue. Downloaded SHA values never change business clocks. */
 internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private val files:File,private val beforeInstall:(File)->Unit={}) {
@@ -36,6 +39,116 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         if (target.length() > limit) SyncV2Codec.fail("object_too_large")
         return target.readBytes().also { if (it.size > limit) SyncV2Codec.fail("object_too_large") }
     }
+    internal sealed interface Reference
+    private data class BookReference(val revision: BookPackageFiles.Revision, val identity: String) : Reference
+    private data class AssetReference(val owners: Set<String>, val revisions: Set<BookPackageFiles.Revision>) : Reference
+
+    internal class Original(val raw: ByteArray, val sha256: String, private val reference: Reference) {
+        fun matches(other: Original?): Boolean =
+            other != null && reference == other.reference && sha256 == other.sha256 && raw.size == other.raw.size
+    }
+
+    private fun bookIdentity(value: JSONObject): String = SyncV2Codec.canonical(org.json.JSONArray().apply {
+        for (field in listOf("bookId", "instanceId", "fingerprint", "chapterCount", "lifecycle")) {
+            put(value.opt(field) ?: JSONObject.NULL)
+        }
+    })
+
+    private fun bookReference(id: String, selected: JSONObject): BookReference? =
+        db.controlQuery(
+            """SELECT packageSha256,packageBytes,json_array(
+                json_extract(stateJson,'$.bookId'),json_extract(stateJson,'$.instanceId'),json_extract(stateJson,'$.fingerprint'),
+                json_extract(stateJson,'$.chapterCount'),json_extract(stateJson,'$.lifecycle'))
+                FROM imported_books WHERE bookId=? AND json_extract(stateJson,'$.deleted')=0""",
+            arrayOf(id)
+        ).use { row ->
+            if (!row.moveToFirst()) return@use null
+            val current = SyncV2Codec.canonical(org.json.JSONArray(row.getString(2)))
+            if (current != bookIdentity(selected)) SyncV2Codec.fail("body_revision_changed")
+            BookReference(BookPackageFiles.Revision(row.getString(0), row.getLong(1)), current)
+        }
+
+    private fun assetReference(id: String): AssetReference? {
+        val owners = buildSet {
+            val needle = "assets/$id"
+            db.controlQuery("""
+                SELECT noteId,markdown,baseMarkdown FROM notes WHERE deleted=0
+                    AND (instr(markdown,?)>0 OR instr(baseMarkdown,?)>0)
+            """, arrayOf(needle, needle)).use { row ->
+                while (row.moveToNext()) if ((1..2).any { id in assetKeys(row.getString(it)) }) add("note:" + row.getString(0))
+            }
+            db.controlQuery("""
+                SELECT conflictId,baseMarkdown,localMarkdown,remoteMarkdown FROM note_conflicts
+                    WHERE instr(baseMarkdown,?)>0 OR instr(localMarkdown,?)>0 OR instr(remoteMarkdown,?)>0
+            """, arrayOf(needle, needle, needle)).use { row ->
+                while (row.moveToNext()) if ((1..3).any { id in assetKeys(row.getString(it)) }) add("conflict:" + row.getString(0))
+            }
+        }
+        if (owners.isEmpty()) return null
+        val revisions = db.controlQuery("SELECT sha256,byteCount,deleted FROM note_assets WHERE storageKey=?", arrayOf(id)).use { row ->
+            var registered = false
+            var live = false
+            val found = buildSet {
+                while (row.moveToNext()) {
+                    registered = true
+                    if (row.getInt(2) != 0) continue
+                    live = true
+                    val hash = row.getString(0)
+                    if (rawSha.matches(hash)) add(BookPackageFiles.Revision(hash, row.getLong(1)))
+                }
+            }
+            if (registered && !live) return null
+            found
+        }
+        return AssetReference(owners, revisions)
+    }
+
+    private fun stableRead(file: File, limit: Int): ByteArray? {
+        return try {
+            val path = file.toPath()
+            val before = Files.readAttributes(path, BasicFileAttributes::class.java)
+            if (!before.isRegularFile) return null
+            if (before.size() > limit) SyncV2Codec.fail("object_too_large")
+            val raw = ByteArray(before.size().toInt())
+            DataInputStream(file.inputStream()).use { input ->
+                input.readFully(raw)
+                if (input.read() != -1) return null
+            }
+            val after = Files.readAttributes(path, BasicFileAttributes::class.java)
+            raw.takeIf { after.isRegularFile && after.size() == before.size() &&
+                after.lastModifiedTime() == before.lastModifiedTime() && after.fileKey() == before.fileKey() }
+        } catch (_: IOException) {
+            null
+        }
+    }
+
+    /** The reference is the committed local business selection; the digest always comes from readable bytes. */
+    fun original(kind: String, id: String, selected: JSONObject): Original? {
+        val target = file(kind, id)
+        fun reference(): Reference? =
+            if (kind == "book") bookReference(id, selected) else assetReference(id)
+
+        val before = reference() ?: return null
+        val limit = SyncV2BodyCodec.limit(kind)
+        val source = if (before is BookReference) {
+            if (before.revision.bytes > limit) SyncV2Codec.fail("object_too_large")
+            BookPackageFiles.resolve(bookDirectory, id, before.revision) ?: return null
+        } else {
+            if (target.canonicalFile.parentFile != target.parentFile!!.canonicalFile) return null
+            target
+        }
+        val raw = stableRead(source, limit) ?: return null
+        val hash = SyncV2BodyCodec.hash(raw)
+        val actual = BookPackageFiles.Revision(hash, raw.size.toLong())
+        when (before) {
+            is BookReference -> if (before.revision != actual) return null
+            is AssetReference -> if (before.revisions.isNotEmpty() && before.revisions != setOf(actual)) return null
+        }
+        validate(kind, id, selected, raw)
+        if (reference() != before) SyncV2Codec.fail("body_revision_changed")
+        return Original(raw, hash, before)
+    }
+
     /** Discover referenced originals omitted by older private-UUID metadata. Absence never deletes. */
     fun refreshReferences(now:Long,checkOwner:()->Unit):List<String> {
         val errors=linkedSetOf<String>()
@@ -138,6 +251,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         }
     }
     companion object {
+        private val rawSha = Regex("[0-9a-f]{64}")
         private fun bookUrl(url:String)=Regex("(?i)^https://watchrss\\.local/(?:import-txt-novel(?:/|$)|import-epub(?:/|$)|import-content/txt/)").containsMatchIn(url) ||
             Regex("(?i)watchrss://import/online-v1/[0-9a-f]{64}").matches(url) || Regex("watchrss://import/instance-v1/[a-f0-9]{32}(?:/|$)").find(url)?.range?.first==0
         /** Same literal link/image/HTML mapping as PodJS notes/cloud-assets.ts. */

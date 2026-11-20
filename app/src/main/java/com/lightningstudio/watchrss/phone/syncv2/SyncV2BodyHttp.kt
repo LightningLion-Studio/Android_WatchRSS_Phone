@@ -23,9 +23,10 @@ internal class SyncV2BodyHttp(private val client:SyncV2CloudClient,private val c
         if(!v.isNull("nextAfter")&&(v.getString("nextAfter")!=previous || previous==after))SyncV2Codec.fail("invalid_schema")
         return v
     }
-    fun upload(descriptor:JSONObject,directory:File) {
+    fun upload(descriptor:JSONObject,directory:File,beforeTransfer:()->Unit={}) {
         val b=SyncV2BodyCodec.validate(descriptor,scope);val id=b.getString("carrierId")
         val expected=SyncV2BodyCodec.objects(b).associate{it.getString("sha256") to it.getInt("sizeBytes")}
+        beforeTransfer()
         val r=json("POST","reserve",descriptor);SyncV2Codec.exact(r,setOf("version","purpose","scope","carrierId","state","expiresAtMillis","objects"))
         if(r.getString("carrierId")!=id || r.getString("state") !in setOf("reserved","ready"))SyncV2Codec.fail("invalid_schema")
         SyncV2Wire.uint(r,"expiresAtMillis");if(r.getString("state")=="ready")return
@@ -35,22 +36,23 @@ internal class SyncV2BodyHttp(private val client:SyncV2CloudClient,private val c
             if(!seen.add(hash)||SyncV2Wire.uint(o,"sizeBytes")!=size.toLong())SyncV2Codec.fail("closure_incomplete")
             val raw=File(directory,hash).readBytes();if(raw.size!=size||SyncV2BodyCodec.hash(raw)!=hash)SyncV2Codec.fail("hash_mismatch")
             var at=SyncV2Wire.uint(o,"offset",size.toLong()).toInt()
-            while(at<size) {check();val part=raw.copyOfRange(at,minOf(size,at+65536));val s=scope
+            while(at<size) {check();beforeTransfer();val part=raw.copyOfRange(at,minOf(size,at+65536));val s=scope
                 client.bodyBytes("PUT","carriers/$id/objects/$hash/parts/$at",part,mapOf("x-watchrss-sync-part-sha256" to SyncV2BodyCodec.hash(part),
                     "x-watchrss-sync-repo-id" to s.getString("repoId"),"x-watchrss-sync-library-epoch" to s.getString("libraryEpoch"),"x-watchrss-sync-content-generation" to s.getString("contentGeneration")))
                 at+=part.size
             }
         }
+        beforeTransfer()
         val done=json("POST","carriers/$id/complete",JSONObject().put("scope",scope));SyncV2Codec.exact(done,setOf("version","purpose","scope","carrierId","state"))
         if(done.getString("carrierId")!=id || done.getString("state")!="ready")SyncV2Codec.fail("closure_incomplete")
     }
-    fun download(id:String,hash:String,size:Int,directory:File):ByteArray {
+    fun download(id:String,hash:String,size:Int,directory:File,beforeTransfer:()->Unit={}):ByteArray {
         SyncV2Codec.unhex(id,16);SyncV2Codec.unhex(hash,32);if(size !in 1..16777216)SyncV2Codec.fail("invalid_schema")
         directory.mkdirs();val target=File(directory,hash);val partial=File(directory,"$hash.part")
         if(target.isFile && target.length()==size.toLong())target.readBytes().let{if(SyncV2BodyCodec.hash(it)==hash){removeCompletedPart(partial);return it}}
         if(partial.length()>size)atomic(partial,byteArrayOf())
         var at=partial.length().toInt()
-        while(at<size) {check();val (bytes,headers)=client.bodyBytes("GET","carriers/$id/objects/$hash",query=mapOf("offset" to at.toString()),raw=true)
+        while(at<size) {check();beforeTransfer();val (bytes,headers)=client.bodyBytes("GET","carriers/$id/objects/$hash",query=mapOf("offset" to at.toString()),raw=true)
             fun header(k:String)=headers.entries.firstOrNull{it.key.equals(k,true)}?.value
             if(header("x-watchrss-body-total-bytes")!=size.toString() || header("x-watchrss-body-offset")!=at.toString() || bytes.size!=minOf(65536,size-at))SyncV2Codec.fail("invalid_range")
             FileOutputStream(partial,true).use{it.write(bytes);it.fd.sync()};at+=bytes.size

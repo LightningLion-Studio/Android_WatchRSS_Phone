@@ -28,6 +28,18 @@ class SyncV2BodyReviewVectorsTest {
         val raw=(JSONObject().put("format","watchrss-book").put("version",1).put("title","Review").put("chapterCount",1).put("sourceUrl","https://watchrss.local/import-txt-novel/review").put("kind","txt").toString()+"\n"+JSONObject().put("chapterIndex",1).put("title","Ch").put("contentText",text).put("contentHtml",JSONObject.NULL).put("url","https://watchrss.local/import-txt-novel/review/chapter/1").toString()+"\n").toByteArray()
         return JSONObject().put("bookId",id).put("fingerprint",fp).put("chapterCount",1).put("deleted",false) to raw
     }
+    @Test fun d1BookAndAssetRevisionMatchSharedContract() {
+        val entity = "ab".repeat(32)
+        val book = "book\n".toByteArray()
+        val image = byteArrayOf(0, 127, -128, -1)
+        val bookSha = SyncV2BodyCodec.hash(book)
+        val imageSha = SyncV2BodyCodec.hash(image)
+        assertEquals("3c4dbff9eeda9410a0b9eb423472981db8997d666388b4cd2424700c3974d64b", bookSha)
+        assertEquals("89273d2f70b93285bb7ddb4bcee86a5347ca7159352e3cbdd20c23e9d1e507d3", imageSha)
+        assertEquals("cef3283dd3fe09a140ca6c55c1d59c29", SyncV2BodyCodec.revision("book", entity, bookSha))
+        assertEquals("32bc4651766c6ea75898f871cbd42d20", SyncV2BodyCodec.revision("asset", entity, imageSha))
+    }
+
     @Test fun independentThreeKindCrossLanguageAndBoundaryVectors() {
         val watchSource = File(System.getenv("WATCHRSS_PODJS_BODY_SOURCE")
             ?: "/home/wilf/data/OPPO_Develop/PodJS_WatchRSS.wt-notes").absoluteFile

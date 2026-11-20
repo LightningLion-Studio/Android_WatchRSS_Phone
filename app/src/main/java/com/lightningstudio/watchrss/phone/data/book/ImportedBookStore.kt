@@ -622,8 +622,15 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         return directory
     }
 
-    /** Validate the entire package before any row becomes visible, then atomically publish file+mapping. */
-    suspend fun receivePackage(id:String,input:File,checkOwner:()->Unit={}):Int=withContext(Dispatchers.IO) {
+    /** Validate the package before publishing its original reference and chapter mappings. */
+    suspend fun receivePackage(id: String, input: File, checkOwner: () -> Unit = {}): Int =
+        receivePackage(id, input, null, checkOwner)
+
+    internal suspend fun receiveVerifiedPackage(id: String, input: File, revision: BookPackageFiles.Revision,
+        checkOwner: () -> Unit): Int = receivePackage(id, input, revision, checkOwner)
+
+    private suspend fun receivePackage(id: String, input: File, expected: BookPackageFiles.Revision?,
+        checkOwner: () -> Unit): Int = withContext(Dispatchers.IO) {
         checkOwner()
         var header:JSONObject?=null;val hashes=mutableListOf<String>()
         val fingerprint=validateBookPackage {
@@ -657,8 +664,20 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         }
         val h=requireNotNull(header);val state=existing?.let{JSONObject(it.stateJson)}?:JSONObject().put("bookId",id).put("fingerprint",fingerprint).put("title",h.getString("title")).put("chapterCount",hashes.size).put("sourceUrl",h.getString("sourceUrl")).put("kind",h.getString("kind")).put("deletedChapters",JSONArray()).put("deletionClock",0).put("deleted",false).put("deletedAt",0).put("updatedAt",0).put("sourceDeviceId",deviceId)
         require(ImportedContentIds.isImportedContentUrl(h.getString("sourceUrl")))
-        val tmp=temporary("received-");input.copyTo(tmp,true)
-        val packageHash=sha(tmp);val bytes=tmp.length();directory.mkdirs();try{com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)){com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.installPrivateBook(file(id),tmp)}}finally{tmp.delete()}
+        val tmp = temporary("received-")
+        val original = try {
+            input.copyTo(tmp, true)
+            val revision = BookPackageFiles.Revision(sha(tmp), tmp.length())
+            if (expected != null && expected != revision) throw InvalidBookPackageException("package_digest_changed")
+            directory.mkdirs()
+            com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)) {
+                com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile
+                    .installPrivateBook(file(id), tmp, revision.sha256, checkOwner)
+            }
+            revision
+        } finally {
+            tmp.delete()
+        }
         var changed=0
         db.withTransaction {
             checkOwner()
@@ -679,7 +698,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
                 val next=repaired?.copy(deleted=previous!!.deleted||tombstone,deletedAt=maxOf(previous.deletedAt,if(tombstone)maxOf(merged.getLong("deletedAt"),merged.getLong("deletionClock"))else 0))?:PhoneArticleEntity(articleId,merged.getString("sourceDeviceId"),c.getString("url"),c.getString("title"),h.getString("title"),"",if(c.isNull("contentHtml"))null else c.getString("contentHtml"),c.getString("contentText"),null,CloudSnapshotCodec.sha256(c.getString("contentText").toByteArray()),1,1,false,0,0,if(ImportedContentIds.isImportedTextArticleUrl(c.getString("url")))ImportedContentIds.ROOT_SOURCE_URL else h.getString("sourceUrl"),if(ImportedContentIds.isImportedTextArticleUrl(c.getString("url")))ImportedContentIds.ROOT_SOURCE_TITLE else h.getString("title"),false,0,0,false,0,0,tombstone,if(tombstone)maxOf(merged.getLong("deletedAt"),merged.getLong("deletionClock"))else 0)
                 if(next!=previous){writeArticle(next);changed++};dao.putChapters(listOf(BookChapterEntity(id,index,articleId)))
             }}
-            val next=BookEntity(id,BookSync.canonical(merged),packageHash,bytes);if(current!=next){dao.put(next);changed++}
+            val next=BookEntity(id,BookSync.canonical(merged),original.sha256,original.bytes);if(current!=next){dao.put(next);changed++}
             val singleText=ImportedContentIds.isImportedTextArticleUrl(h.getString("sourceUrl"))
             val source=if(singleText)ImportedContentIds.ROOT_SOURCE_URL else h.getString("sourceUrl")
             if(db.phoneRssSourceDao().getByUrl(source)==null)db.phoneRssSourceDao().upsert(PhoneRssSourceEntity(source,merged.getString("sourceDeviceId"),if(singleText)ImportedContentIds.ROOT_SOURCE_TITLE else merged.getString("title"),"",null,null,1,merged.getLong("updatedAt"),1,false,!singleText&&merged.getBoolean("deleted"),if(singleText)0 else merged.getLong("deletedAt")))

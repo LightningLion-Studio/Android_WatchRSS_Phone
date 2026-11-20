@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.account
 
 import org.json.JSONObject
+import java.util.Base64
 
 internal const val WECHAT_HANDOFF_TIMEOUT_MILLIS = 3_000L
 
@@ -22,6 +23,8 @@ internal fun parseWeChatHandoff(body: String): WeChatHandoff {
             else -> throw WeChatHandoffUnavailable()
         }
         require(tokenFormat.matches(token) && expiry > 0)
+        val decoded = Base64.getUrlDecoder().decode(token)
+        require(decoded.size == 32 && Base64.getUrlEncoder().withoutPadding().encodeToString(decoded) == token)
         return WeChatHandoff(token, expiry)
     } catch (_: Exception) {
         // Parser errors can contain part of the response.

@@ -2,11 +2,29 @@ package com.lightningstudio.watchrss.phone.account
 
 import android.app.Application
 import android.content.Context
+import androidx.activity.ComponentActivity
 import androidx.test.core.app.ApplicationProvider
+import com.lightningstudio.watchrss.phone.WeChatPurchaseResult
+import com.lightningstudio.watchrss.phone.openPurchaseInWeChat
+import com.lightningstudio.watchrss.phone.purchaseTestAppAccessStore
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import okhttp3.Call
 import okhttp3.EventListener
 import okhttp3.OkHttpClient
@@ -19,10 +37,13 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.util.ReflectionHelpers
 import java.util.concurrent.CountDownLatch
@@ -121,37 +142,220 @@ class WeChatHandoffHttpTest {
         }
     }
 
+    private fun sessionStore() = EncryptedAccountSessionStore(context).also {
+        ReflectionHelpers.setField(it, "prefsRef", context.getSharedPreferences("handoff-session", Context.MODE_PRIVATE))
+    }
+
+    private fun repository(server: MockWebServer, store: EncryptedAccountSessionStore) = PhoneAccountRepository(
+        environment(server), store, PhoneInstallationIdentity(context), client(server), "phone"
+    )
+
     @Test
-    fun checksTheAccountBeforeIssuingAndWhenTheResponseReturns() = runBlocking {
+    fun missingOrMismatchedSessionDoesNotIssue() = runBlocking {
         MockWebServer().use { server ->
-            val releaseResponse = CountDownLatch(1)
-            server.dispatcher = object : Dispatcher() {
-                override fun dispatch(request: RecordedRequest): MockResponse {
-                    if (!releaseResponse.await(2, TimeUnit.SECONDS)) return MockResponse().setResponseCode(503)
-                    return issued()
+            val store = sessionStore()
+            val repository = repository(server, store)
+            assertNull(repository.captureWeChatPurchaseSession(session, authenticated = true))
+            store.save(session)
+            assertNull(repository.captureWeChatPurchaseSession(session.copy(userId = "another-owner"), authenticated = true))
+            assertNull(repository.captureWeChatPurchaseSession(session.copy(accessToken = "new-bearer"), authenticated = true))
+            assertEquals(0, server.requestCount)
+        }
+    }
+
+    @Test
+    fun accountChangeDuringIssuanceCancelsThePurchase() = runBlocking {
+        assertSessionChangeCancelsPurchase(session.copy(userId = "another-owner"))
+    }
+
+    @Test
+    fun sameAccountTokenChangeDuringIssuanceCancelsThePurchase() = runBlocking {
+        assertSessionChangeCancelsPurchase(session.copy(accessToken = "new-bearer"))
+    }
+
+    private suspend fun assertSessionChangeCancelsPurchase(replacement: PhoneAccountSession) =
+        coroutineScope {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+                val store = sessionStore()
+                store.save(session)
+                val repository = repository(server, store)
+                val purchase = requireNotNull(repository.captureWeChatPurchaseSession(session, authenticated = true))
+                val controller = Robolectric.buildActivity(ComponentActivity::class.java).setup()
+                val activity = controller.get()
+                val result = async(start = CoroutineStart.UNDISPATCHED) {
+                    activity.openPurchaseInWeChat(
+                        withCurrentSession = { action -> repository.withCurrentWeChatPurchaseSession(purchase, action) }
+                    ) { repository.createWeChatHandoff(purchase) }
+                }
+                try {
+                    assertNotNull(server.takeRequest(2, TimeUnit.SECONDS))
+                    store.save(replacement)
+                    result.join()
+                    assertTrue(result.isCancelled)
+                    assertNull(shadowOf(activity).nextStartedActivity)
+                    assertEquals(1, server.requestCount)
+                } finally {
+                    result.cancelAndJoin()
+                    controller.pause().stop().destroy()
                 }
             }
-            val store = EncryptedAccountSessionStore(context)
-            ReflectionHelpers.setField(store, "prefsRef", context.getSharedPreferences("handoff-session", Context.MODE_PRIVATE))
-            val repository = PhoneAccountRepository(
-                environment(server), store, PhoneInstallationIdentity(context), client(server), "phone"
-            )
-            expectUnavailable { repository.createWeChatHandoff(session.userId) }
-            store.save(session)
-            expectUnavailable { repository.createWeChatHandoff("another-owner") }
-            assertEquals(0, server.requestCount)
+        }
 
-            val result = async(start = CoroutineStart.UNDISPATCHED) {
-                expectUnavailable { repository.createWeChatHandoff(session.userId) }
-            }
+    @Test
+    fun accountChangeAfterIssuanceValidationBlocksTheIntent() = runBlocking {
+        assertChangeAfterIssuanceBlocksIntent(restoreOriginal = false)
+    }
+
+    @Test
+    fun switchingAwayAndBackAfterIssuanceStillBlocksTheIntent() = runBlocking {
+        assertChangeAfterIssuanceBlocksIntent(restoreOriginal = true)
+    }
+
+    private suspend fun assertChangeAfterIssuanceBlocksIntent(restoreOriginal: Boolean) {
+        MockWebServer().use { server ->
+            server.enqueue(issued())
+            val store = sessionStore()
+            store.save(session)
+            val repository = repository(server, store)
+            val purchase = requireNotNull(repository.captureWeChatPurchaseSession(session, authenticated = true))
+            val controller = Robolectric.buildActivity(ComponentActivity::class.java).setup()
+            val activity = controller.get()
             try {
-                assertNotNull(server.takeRequest(2, TimeUnit.SECONDS))
-                store.save(session.copy(userId = "another-owner", accessToken = "fixture-other-bearer"))
+                val result = activity.openPurchaseInWeChat(
+                    withCurrentSession = { action -> repository.withCurrentWeChatPurchaseSession(purchase, action) }
+                ) {
+                    val handoff = repository.createWeChatHandoff(purchase)
+                    store.save(session.copy(userId = "another-owner", accessToken = "another-bearer"))
+                    if (restoreOriginal) store.save(session)
+                    handoff
+                }
+
+                assertEquals(WeChatPurchaseResult.CANCELLED, result)
+                assertNull(shadowOf(activity).nextStartedActivity)
+                assertEquals(1, server.requestCount)
             } finally {
-                releaseResponse.countDown()
+                controller.pause().stop().destroy()
             }
-            result.await()
-            assertEquals(1, server.requestCount)
+        }
+    }
+
+    @Test
+    fun logoutEntryInvalidatesThePurchaseBeforeWaitingForTheAccessCoordinator() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(204))
+            val store = sessionStore()
+            store.save(session)
+            val repository = repository(server, store)
+            val purchase = requireNotNull(repository.captureWeChatPurchaseSession(session, authenticated = true))
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val coordinator = AppAccessCoordinator(
+                context, repository, LicenseDeviceIdentity(context), scope, purchaseTestAppAccessStore(context)
+            )
+            val coordinatorLock = ReflectionHelpers.getField<Mutex>(coordinator, "operationMutex")
+            coordinatorLock.lock()
+            val logout = async(start = CoroutineStart.UNDISPATCHED) { coordinator.logout() }
+            try {
+                assertFalse(logout.isCompleted)
+                assertEquals(session, store.session.value)
+                assertNull(repository.captureWeChatPurchaseSession(session, authenticated = true))
+                assertNull(repository.withCurrentWeChatPurchaseSession(purchase) { true })
+                assertEquals(0, server.requestCount)
+            } finally {
+                coordinatorLock.unlock()
+                logout.await()
+                scope.cancel()
+            }
+            assertNull(store.session.value)
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun logoutBeforeCloudReleaseAndWhileRevocationIsPendingBlocksIntentAndTimeoutFallback() = runBlocking {
+        MockWebServer().use { server ->
+            val returnRevocation = CountDownLatch(1)
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    if (request.path == "/functions/v1/account/logout") {
+                        check(returnRevocation.await(5, TimeUnit.SECONDS))
+                        return MockResponse().setResponseCode(204)
+                    }
+                    return MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
+                }
+            }
+            val store = sessionStore()
+            store.save(session)
+            val repository = repository(server, store)
+            val releaseStarted = CompletableDeferred<Unit>()
+            val finishRelease = CompletableDeferred<Unit>()
+            repository.onReleaseCloudAuthorization = {
+                releaseStarted.complete(Unit)
+                finishRelease.await()
+            }
+            val controller = Robolectric.buildActivity(ComponentActivity::class.java).setup()
+            val activity = controller.get()
+            val purchase = requireNotNull(repository.captureWeChatPurchaseSession(session, authenticated = true))
+            val scheduler = TestCoroutineScheduler()
+            val scope = CoroutineScope(StandardTestDispatcher(scheduler))
+
+            // Hold two issuers in virtual time to exercise the final guard even if cancellation
+            // and the timeout happen in the opposite order from the HTTP watcher.
+            fun pendingTimeout() = scope.async {
+                activity.openPurchaseInWeChat(
+                    withCurrentSession = { action -> repository.withCurrentWeChatPurchaseSession(purchase, action) }
+                ) { awaitCancellation() }
+            }
+            val timeoutDuringLogout = pendingTimeout()
+            scheduler.runCurrent()
+            scheduler.advanceTimeBy(1)
+            val timeoutAfterLogout = pendingTimeout()
+            scheduler.runCurrent()
+
+            val issuing = async(start = CoroutineStart.UNDISPATCHED) {
+                activity.openPurchaseInWeChat(
+                    withCurrentSession = { action -> repository.withCurrentWeChatPurchaseSession(purchase, action) }
+                ) { repository.createWeChatHandoff(purchase) }
+            }
+            var logout: Deferred<Unit>? = null
+            try {
+                assertEquals("/functions/v1/app/wechat-handoff/issue", server.takeRequest(2, TimeUnit.SECONDS)?.path)
+                logout = async(start = CoroutineStart.UNDISPATCHED) { repository.logout() }
+                withTimeout(2_000) { releaseStarted.await() }
+                issuing.join()
+                assertTrue(issuing.isCancelled)
+                assertEquals(session, store.session.value)
+                assertNull(repository.captureWeChatPurchaseSession(session, authenticated = true))
+                assertNull(shadowOf(activity).nextStartedActivity)
+
+                finishRelease.complete(Unit)
+                val revocation = withContext(Dispatchers.IO) { server.takeRequest(2, TimeUnit.SECONDS) }
+                assertEquals("/functions/v1/account/logout", revocation?.path)
+                assertNull(repository.captureWeChatPurchaseSession(session, authenticated = true))
+                assertEquals(session, store.session.value)
+                scheduler.advanceTimeBy(2_999)
+                scheduler.runCurrent()
+                assertEquals(WeChatPurchaseResult.CANCELLED, timeoutDuringLogout.await())
+                assertFalse(timeoutAfterLogout.isCompleted)
+                assertNull(shadowOf(activity).nextStartedActivity)
+
+                returnRevocation.countDown()
+                logout.await()
+                assertNull(store.session.value)
+                scheduler.advanceTimeBy(1)
+                scheduler.runCurrent()
+                assertEquals(WeChatPurchaseResult.CANCELLED, timeoutAfterLogout.await())
+                assertNull(shadowOf(activity).nextStartedActivity)
+            } finally {
+                finishRelease.complete(Unit)
+                returnRevocation.countDown()
+                issuing.cancelAndJoin()
+                logout?.cancelAndJoin()
+                timeoutDuringLogout.cancel()
+                timeoutAfterLogout.cancel()
+                scheduler.runCurrent()
+                controller.pause().stop().destroy()
+            }
         }
     }
 }

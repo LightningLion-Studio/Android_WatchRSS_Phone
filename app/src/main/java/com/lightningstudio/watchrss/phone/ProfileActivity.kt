@@ -142,7 +142,8 @@ class ProfileActivity : ComponentActivity() {
                             runAction = { action ->
                                 lifecycleScope.launch { action() }
                             },
-                            leadingPane = leadingPane
+                            leadingPane = leadingPane,
+                            isAccountPageActive = { selectedDetail == ProfileDetailPage.ACCOUNT }
                         )
                     },
                     settingsContent = { leadingPane, onClose ->
@@ -165,7 +166,8 @@ class ProfileActivity : ComponentActivity() {
                                 createPasskey = passkeyCoordinator::createPasskey,
                                 runAction = { action ->
                                     lifecycleScope.launch { action() }
-                                }
+                                },
+                                isAccountPageActive = { selectedDetail == ProfileDetailPage.ACCOUNT }
                             )
                             ProfileDetailPage.SETTINGS -> ReaderSettingsHost(
                                 repository = container.readerPresetRepository,

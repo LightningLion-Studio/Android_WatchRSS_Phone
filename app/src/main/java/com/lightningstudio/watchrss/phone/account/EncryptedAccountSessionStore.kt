@@ -8,6 +8,7 @@ import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.withLock
@@ -31,20 +32,13 @@ class EncryptedAccountSessionStore(
     private val _reauthenticationOwner = MutableStateFlow<String?>(null)
     val reauthenticationOwner: StateFlow<String?> = _reauthenticationOwner
 
-    private val b2AuthorizationLock = Any()
+    // Session publication, B2 revocation, logout entry and purchase dispatch share this lock.
+    // Preference transactions and handoff HTTP calls run outside it.
+    private val sessionLock = Any()
     @Volatile internal var b2AccountFence = B2AccountFence()
         private set
 
-    private fun publishSession(next: PhoneAccountSession?): Unit = synchronized(b2AuthorizationLock) {
-        val previous = _session.value
-        val changed = previous?.userId != next?.userId || previous?.accessToken != next?.accessToken ||
-            previous?.authenticationPaused != next?.authenticationPaused || previous?.expiresAtMillis != next?.expiresAtMillis
-        if (changed) b2AccountFence.revoke()
-        _session.value = next
-        if (changed) b2AccountFence = B2AccountFence()
-    }
-
-    internal fun revokeB2Authorization(owner: String? = null): Unit = synchronized(b2AuthorizationLock) {
+    internal fun revokeB2Authorization(owner: String? = null): Unit = synchronized(sessionLock) {
         if (owner == null || _session.value?.userId == owner) {
             b2AccountFence.revoke()
             b2AccountFence = B2AccountFence()
@@ -56,26 +50,90 @@ class EncryptedAccountSessionStore(
             val current = _session.value ?: return@withPrefs
             // Pause is separate from the server's expiry; logout still revokes a server-valid token.
             check(prefs.edit().putString("reauthentication_owner", current.userId).commit())
-            _reauthenticationOwner.value = current.userId
-            publishSession(current.copy(authenticationPaused = true))
+            publishSession(current.copy(authenticationPaused = true), current.userId)
         }
     }
 
     suspend fun finishReauthentication() = withContext(Dispatchers.IO) {
         withPrefs {
             check(it.edit().remove("reauthentication_owner").commit())
-            _reauthenticationOwner.value = null
-            publishSession(_session.value?.copy(authenticationPaused = false))
+            publishSession(_session.value?.copy(authenticationPaused = false), null)
         }
     }
 
+    private val purchaseGeneration = MutableStateFlow(0L)
+    private var logoutsInProgress = 0
+
+    internal class PurchaseSession(
+        val session: PhoneAccountSession?,
+        val generation: Long,
+        val authenticated: Boolean
+    )
+
+    internal fun beginLogout(): PhoneAccountSession? = synchronized(sessionLock) {
+        logoutsInProgress++
+        purchaseGeneration.value++
+        _session.value
+    }
+
+    internal fun finishLogout() {
+        synchronized(sessionLock) { logoutsInProgress-- }
+    }
+
+    internal fun capturePurchaseSession(
+        expected: PhoneAccountSession?,
+        authenticated: Boolean
+    ): PurchaseSession? = synchronized(sessionLock) {
+        val current = _session.value
+        if (logoutsInProgress > 0 || !current.hasSamePurchaseCredentials(expected) ||
+            current.isUsableForPurchase() != authenticated
+        ) return@synchronized null
+        PurchaseSession(current, purchaseGeneration.value, authenticated)
+    }
+
+    internal fun <T> withCurrentPurchaseSession(snapshot: PurchaseSession, action: () -> T): T? =
+        synchronized(sessionLock) {
+            val current = _session.value
+            if (logoutsInProgress > 0 || purchaseGeneration.value != snapshot.generation ||
+                !current.hasSamePurchaseCredentials(snapshot.session) ||
+                current.isUsableForPurchase() != snapshot.authenticated
+            ) return@synchronized null
+            action()
+        }
+
+    internal suspend fun awaitPurchaseSessionChange(snapshot: PurchaseSession) {
+        purchaseGeneration.first { it != snapshot.generation }
+    }
+
+    private fun publishSession(
+        next: PhoneAccountSession?,
+        reauthenticationOwner: String? = _reauthenticationOwner.value
+    ) = synchronized(sessionLock) {
+        val previous = _session.value
+        val changed = !previous.hasSamePurchaseCredentials(next) || previous?.expiresAtMillis != next?.expiresAtMillis ||
+            previous?.authenticationPaused != next?.authenticationPaused
+        if (changed) {
+            b2AccountFence.revoke()
+            purchaseGeneration.value++
+        }
+        _session.value = next
+        if (changed) b2AccountFence = B2AccountFence()
+        _reauthenticationOwner.value = reauthenticationOwner
+    }
+
+    private fun PhoneAccountSession?.hasSamePurchaseCredentials(other: PhoneAccountSession?) =
+        this?.userId == other?.userId && this?.accessToken == other?.accessToken
+
+    private fun PhoneAccountSession?.isUsableForPurchase() =
+        this != null && isUsableForAuthentication && userId.isNotBlank() && accessToken.isNotBlank()
+
     suspend fun load(): PhoneAccountSession? = withContext(Dispatchers.IO) {
         withPrefs { prefs ->
-            _reauthenticationOwner.value = prefs.getString("reauthentication_owner", null)
+            val owner = prefs.getString("reauthentication_owner", null)
             prefs.getString(KEY_SESSION, null)
                 ?.let(::decodeSession)
-                ?.copy(authenticationPaused = _reauthenticationOwner.value != null)
-                .also(::publishSession)
+                ?.copy(authenticationPaused = owner != null)
+                .also { publishSession(it, owner) }
         }
     }
 
@@ -89,8 +147,7 @@ class EncryptedAccountSessionStore(
     suspend fun clear() = withContext(Dispatchers.IO) {
         withPrefs { prefs ->
             prefs.edit().apply {remove(KEY_SESSION);remove("reauthentication_owner");prefs.all.keys.filter{it.startsWith("ble_grant:")}.forEach{remove(it)}}.apply()
-            publishSession(null)
-            _reauthenticationOwner.value = null
+            publishSession(null, null)
         }
     }
 

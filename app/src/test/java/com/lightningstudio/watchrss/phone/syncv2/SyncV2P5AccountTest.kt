@@ -94,7 +94,16 @@ class SyncV2P5AccountTest {
     @Test fun disabledGateKeepsPreparedActionQueueAndLocalEdits()=SyncV2P5Fixture().use{w->
         w.pending();val a=w.actions{if(it=="action-staged")throw java.io.IOException("pause")};runCatching{a.choose(a.preview(),"cloud")}
         val before=w.projection.state().body.toString();code("feature_disabled"){w.actions(enabled=false).resume()};assertEquals(before,w.projection.state().body.toString())
-        w.flags=false;code("feature_disabled"){w.actions().resume()};assertEquals(before,w.projection.state().body.toString());assertEquals("offline\nline\n",w.text())
+        w.indexWrite=false;code("feature_disabled"){w.actions().resume()};assertEquals(before,w.projection.state().body.toString());assertEquals("offline\nline\n",w.text())
+    }
+    @Test fun cloudAndLocalChoicesDoNotRequireHistoryRestore() {
+        for (kind in listOf("cloud", "local")) SyncV2P5Fixture().use { fixture ->
+            fixture.flags = false
+            fixture.pending()
+            val actions = fixture.actions()
+            assertTrue(actions.choose(actions.preview(), kind).getBoolean("localCommitted"))
+            assertEquals(0, fixture.historyCalls)
+        }
     }
     @Test fun recoveryQuotaFailureKeepsActivePendingAndEdits()=SyncV2P5Fixture().use{w->
         w.pending();val a=w.actions(quota=1);code("quota_exceeded"){a.choose(a.preview(),"cloud")};assertEquals("offline\nline\n",w.text());assertEquals("awaiting-user",w.projection.status());assertEquals(0,a.recoveryCopies().length())

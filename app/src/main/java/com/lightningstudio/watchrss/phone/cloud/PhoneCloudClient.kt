@@ -55,6 +55,7 @@ class PhoneCloudClient(
     internal suspend fun <T> inContentGeneration(session: PhoneAccountSession, operation: suspend () -> T): T =
         kotlinx.coroutines.withContext(CloudContentGenerationFence(scopeId(session), knownContentGeneration(session))) { operation() }
     internal var checkSession: (PhoneAccountSession) -> Unit = {}
+    internal var blockLegacyBusiness: () -> Boolean = { false }
     internal var onDeviceKeyConflict: (PhoneAccountSession) -> Unit = {}
     internal var onEpochMismatch: (PhoneAccountSession) -> Unit = {}
     internal var onBootstrap: suspend (PhoneAccountSession, CloudBootstrap) -> Unit = { _, _ -> }
@@ -548,6 +549,9 @@ class PhoneCloudClient(
         val fence = kotlinx.coroutines.currentCoroutineContext()[CloudContentGenerationFence]
         val expectedGeneration = if (fence?.scope == scopeId(session)) fence.generation else knownContentGeneration(session)
         val initial=builder.build()
+        if (blockLegacyBusiness() && isLegacyCloudBusinessPath(initial.url.encodedPath)) {
+            error("此云端操作当前不可用")
+        }
         val admissionPath=initial.method!="GET" && (initial.url.encodedPath in setOf("/functions/v1/cloud/records","/functions/v1/cloud/snapshots/reserve","/functions/v1/cloud/snapshots/complete") || initial.url.encodedPath.startsWith("/functions/v1/cloud/uploads/"))
         val requiresR48=initial.tag(CloudR48WriteRequired::class.java)?.value==true
         val admission=admissionPath && allowR48Writes() && CloudFormatWritePolicy(true,false).canWrite(formatCapabilities(session))
@@ -791,3 +795,10 @@ internal fun readMigrationBody(input:java.io.InputStream,maximumBytes:Long):Byte
 internal data class CloudR48WriteRequired(val value:Boolean)
 internal fun CloudSnapshotManifest.requiresR48Write():Boolean = objects.any{it.entryRef!=null || it.objectKeyEnvelope!=null} ||
     rawDocument?.json()?.optJSONObject("features")?.optJSONArray("incompat")?.let { a ->(0 until a.length()).any{a.getString(it)==CloudPrivateOverlay.FEATURE} }==true
+
+/** Current Sync v2 clients must not touch retired v1 business data or reset the legacy library. */
+internal fun isLegacyCloudBusinessPath(path: String): Boolean {
+    val route = path.substringAfter("/functions/v1/cloud/", "")
+    return route in setOf("records", "sync/exchange", "chunks/missing", "library/reset") ||
+        route.startsWith("records/") || route.startsWith("snapshots/") || route.startsWith("uploads/")
+}

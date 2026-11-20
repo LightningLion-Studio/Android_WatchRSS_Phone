@@ -24,7 +24,7 @@ internal class SyncV2P5Fixture:AutoCloseable {
     val headers=linkedMapOf<String,JSONObject>();val refs=linkedMapOf<String,JSONObject>()
     val results=mutableMapOf<String,JSONObject>();val requests=mutableListOf<String>()
     var current=JSONObject();var deviceOid:String?=null;var deviceRevision="0"
-    var selectedLocalRevision:String?=null;var choiceCalls=0;var publishCalls=0;var ackCalls=0;var historyCalls=0;var flags=true;var drop=false;var ackFailure=false
+    var selectedLocalRevision:String?=null;var choiceCalls=0;var publishCalls=0;var ackCalls=0;var historyCalls=0;var flags=true;var indexWrite=true;var drop=false;var ackFailure=false
     var onConfirm:(()->Unit)?=null;var afterCloudConfirmation:((JSONObject)->Unit)?=null;var historyExpired=false;var snapshotExpired=false
     private val totals=mutableMapOf<String,Int>()
     var target:String;val initial:String
@@ -43,7 +43,7 @@ internal class SyncV2P5Fixture:AutoCloseable {
             when {
                 route=="capabilities"->f.response(f.dto().put("minVersion",2).put("maxVersion",2).put("maxPartBytes",65536).put("historyDays",7).put("features",if(noteSegmentsAnnounced)JSONArray().put(SyncV2NoteSegments.feature)else JSONArray())
                     .put("receiptKeyId",f.bootstrap.get("receiptKeyId")).put("receiptSigningPublicKey",f.bootstrap.get("receiptSigningPublicKey"))
-                    .put("flags",JSONObject().put("read",true).put("indexWrite",true).put("contentWrite",true).put("historyRestore",flags)))
+                    .put("flags",JSONObject().put("read",true).put("indexWrite",indexWrite).put("contentWrite",true).put("historyRestore",flags)))
                 route=="negotiate" || route=="account"->f.response(window())
                 route=="checkpoint"->f.response(f.signer.signed("wrss.sync.v2/checkpoint-sign",window().apply{remove("version")}.put("checkpointId","33".repeat(16)).put("issuedAtMillis",f.now).put("historyFloorMillis",0)).put("version",2).put("scope",identity.scope))
                 route=="devices/signing-keys"->f.response(f.dto().put("bindings",JSONArray().put(binding())).put("revocationRevision","0"))

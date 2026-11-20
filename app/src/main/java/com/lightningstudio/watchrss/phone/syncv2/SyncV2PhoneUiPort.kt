@@ -10,7 +10,7 @@ import org.json.JSONObject
 internal class SyncV2PhoneUiPort(private val product:SyncV2PhoneProduct,private val runtime:SyncV2PhoneProduct.Runtime) {
     private val _state=MutableStateFlow(SyncV2UiState())
     val state:StateFlow<SyncV2UiState> = _state
-    private fun gates()=SyncV2UiState.Gates(BuildConfig.SYNC_OBJECTS_V2_HISTORY_RESTORE,BuildConfig.SYNC_OBJECTS_V2_HISTORY_RESTORE,runtime.client.noteSegmentsRead())
+    private fun gates()=SyncV2UiState.Gates(BuildConfig.SYNC_OBJECTS_V2_HISTORY_RESTORE,true,runtime.client.noteSegmentsRead())
     private fun gate(which:String) {
         val g=gates()
         if(!(when(which){"history"->g.historyRestore;"choice"->g.choiceApply;else->g.historyRestore||g.choiceApply||g.noteSegments}))SyncV2Codec.fail("feature_disabled")
@@ -22,7 +22,6 @@ internal class SyncV2PhoneUiPort(private val product:SyncV2PhoneProduct,private 
     }
     internal fun refresh() {
         runtime.life.check();val gates=gates();val own=runtime.signingDeviceId()
-        if(!gates.historyRestore && !gates.choiceApply && !gates.noteSegments){_state.value=SyncV2UiState(enabled=runtime.bodyResult.errors.isNotEmpty(),phase=if(runtime.bodyResult.errors.isEmpty())"idle"else"error",ownDeviceId=own,errorCode=runtime.bodyResult.errors.firstOrNull());return}
         val projection=runtime.projection;val body=projection.state().body
         val pending=runtime.actions.pendingChoice()
         val choice=pending?.let {

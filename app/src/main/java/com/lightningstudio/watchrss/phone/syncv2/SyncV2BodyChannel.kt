@@ -90,7 +90,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
             projection.bindArticleRevision(row,revision,independent=true)
         } catch(e:Exception){life.check()}
     }
-    fun sync(manual:Boolean=false):Result {
+    fun sync(manual:Boolean=false, downloadOnly:Boolean=false):Result {
         life.check();val st=projection.state();val account=st.body.optJSONObject("account")?:return Result(0,emptyList())
         if(!st.body.isNull("pendingChoice") || !st.body.isNull("pendingPublish"))return Result(0,emptyList())
         val globalRetry=File(root,"retry.json")
@@ -107,7 +107,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
                     val retry=File(dir,"retry.json");if(retry.isFile){val r=SyncV2Wire.parse(retry.readBytes(),4096,true);if(r.getLong("until")>now())throw SyncV2CloudError(r.getString("code"),true,r.getLong("until")-now())}
                     val route=signals();if(route.internet!=true || !manual&&route.wifi!=true)SyncV2Codec.fail("network_unavailable")
                     val expires = windowExpiry ?: captureWindow(anchor).also { windowExpiry = it }
-                    syncEntry(entry,anchor,expires,dir)
+                    syncEntry(entry,anchor,expires,dir,downloadOnly)
                 }catch(e:Exception) {
                     life.check();pending++;val code=code(e);errors.add(code)
                     val delay=(e as? SyncV2CloudError)?.retryAfterMillis
@@ -137,7 +137,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         return authors().publicKey(author)
     }
 
-    private fun syncEntry(entry: JSONObject, anchor: JSONObject, expires: Long, dir: File) {
+    private fun syncEntry(entry: JSONObject, anchor: JSONObject, expires: Long, dir: File, downloadOnly: Boolean) {
         current(entry, anchor, expires)
         val b = binding(entry)
         val selected = value(entry)
@@ -180,6 +180,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         // An invalid listed candidate does not authorize a competing publication.
         last?.let { throw it }
         val source = local ?: SyncV2Codec.fail("body_channel_pending")
+        if (downloadOnly) return
         current(entry, anchor, expires)
         authors().publicKey(signer.deviceId, signer.keyId)
         val pending = File(dir, "pending.json")

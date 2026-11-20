@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledTonalButton
@@ -90,7 +91,10 @@ internal fun SyncV2Section(service: PhoneCloudSyncService) {
     }
 
     when (target) {
-        SyncV2View.Target.CHOICE -> ChoiceDialog(live, state) { target = null }
+        SyncV2View.Target.CHOICE -> ChoiceDialog(live, state, onClose = { target = null }, onApplied = {
+            target = null
+            launchAction(alive, { service.restoreCurrentLibrary() }) { }
+        })
         SyncV2View.Target.UNOPENABLE -> UnopenableDialog(state) { target = null }
         SyncV2View.Target.RECOVERY -> RecoveryDialog(live, state) { target = null }
         SyncV2View.Target.HISTORY -> HistoryDialog(live, state) { target = null }
@@ -152,7 +156,7 @@ private fun closeQuietly(port: SyncV2PhoneUiPort, preview: SyncV2PhoneUiPort.Cho
 }
 
 @Composable
-private fun ChoiceDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose: () -> Unit) {
+private fun ChoiceDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose: () -> Unit, onApplied: () -> Unit) {
     val alive = rememberAlive()
     var preview by remember { mutableStateOf<SyncV2PhoneUiPort.ChoicePreview?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -181,7 +185,7 @@ private fun ChoiceDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose:
             catch (e: CancellationException) { throw e } catch (e: Throwable) { closeQuietly(port, p); throw e }
         }) { result ->
             busy = false
-            result.onSuccess { onClose() }.onFailure { e ->
+            result.onSuccess { onApplied() }.onFailure { e ->
                 val code = codeOf(e)
                 error = SyncV2View.errorText(code)
                 if (code == "choice_stale") reload++
@@ -354,4 +358,46 @@ internal fun SyncV2UnopenableNoteDialog(onDismiss: () -> Unit) {
         text = { Text("这条笔记太大，本机无法打开。请在小程序查看，内容已原样保留在云端。") },
         confirmButton = { TextButton(onClick = onDismiss) { Text("知道了") } }
     )
+}
+
+private enum class SyncV2AccountAction(val label: String, val description: String) {
+    SYNC("立即同步", "同步两边的资料。本次同步可使用当前网络。"),
+    RESTORE("恢复当前云端资料库", "恢复当前云端资料。本机有未同步修改时，先比较两边，再由你选择。")
+}
+
+@Composable
+internal fun SyncV2AccountActions(
+    service: PhoneCloudSyncService,
+    busy: Boolean,
+    runAction: (suspend () -> Unit) -> Unit,
+    onBusyChange: (Boolean) -> Unit,
+    onError: (String) -> Unit
+) {
+    var pending by remember { mutableStateOf<SyncV2AccountAction?>(null) }
+    Button(onClick = { pending = SyncV2AccountAction.SYNC }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+        Text(SyncV2AccountAction.SYNC.label)
+    }
+    OutlinedButton(onClick = { pending = SyncV2AccountAction.RESTORE }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+        Text(SyncV2AccountAction.RESTORE.label)
+    }
+    pending?.let { action ->
+        ConfirmDialog(action.label, action.description, "继续", onConfirm = {
+            pending = null
+            onBusyChange(true)
+            runAction {
+                try {
+                    when (action) {
+                        SyncV2AccountAction.SYNC -> service.syncNow(manual = true)
+                        SyncV2AccountAction.RESTORE -> service.restoreCurrentLibrary()
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    onError(service.state.value.message.ifBlank { "云端操作未完成，请稍后重试" })
+                } finally {
+                    onBusyChange(false)
+                }
+            }
+        }, onDismiss = { pending = null })
+    }
 }

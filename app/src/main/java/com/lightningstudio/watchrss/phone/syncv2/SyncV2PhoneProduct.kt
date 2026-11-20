@@ -29,7 +29,13 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         fun owner()=listOf(userId,backendBaseUrl,legacyDeviceId,epoch,generation)
         val accountId get()=userId.replace("-","").lowercase()
     }
-    data class Result(val enabled:Boolean,val reason:String?=null)
+    data class Result(
+        val enabled: Boolean,
+        val reason: String? = null,
+        val awaitingChoice: Boolean = false,
+        val pendingAction: Boolean = false,
+        val pendingBodies: Boolean = false
+    )
     private val mutex=Mutex()
     private val generation=AtomicLong()
     @Volatile private var opening:SyncV2Lifetime?=null
@@ -60,7 +66,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             live.projection.receiveLegacy(SyncV2Projection.LegacyInput(peer,version,cursor,JSONObject().put("legacy-frame",payload.toString())),null,false)
         }}.onFailure{_uiPort.value?.failed(it)}
     }
-    suspend fun sync(syncV2:JSONObject?,manual:Boolean=false):Result=withContext(Dispatchers.IO) {
+    suspend fun sync(syncV2:JSONObject?,manual:Boolean=false,restoreCurrent:Boolean=false):Result=withContext(Dispatchers.IO) {
         if(!enabled() || syncV2==null) {
             release()
             return@withContext Result(false,if(!enabled())"feature_disabled"else"not_announced")
@@ -75,10 +81,22 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             if(runtime?.serviceAnnouncement?.let{it!=SyncV2Codec.canonical(syncV2)}==true) {
                 val error=SyncV2CloudError("service_key_changed");_uiPort.value?.failed(error);throw error
             }
-            val live=runtime?:open(account,syncV2)
+            val live=runtime?:open(account,syncV2,allowCreate=!restoreCurrent)
             live.life.check()
             live.life.guard {live.keys.refreshAuthenticated(keys,account.userId){verifyKeys(account,it)}}
-            try {live.round(manual);_uiPort.value?.refresh();Result(true)}catch(e:Throwable) {
+            try {
+                live.round(manual, restoreCurrent)
+                _uiPort.value?.refresh()
+                val state = live.projection.state().body
+                Result(
+                    enabled = true,
+                    awaitingChoice = !state.isNull("pendingChoice"),
+                    pendingAction = !state.isNull("pendingAccountAction") ||
+                        !state.isNull("pendingAppliedAck") ||
+                        (restoreCurrent && !state.isNull("pendingPublish")),
+                    pendingBodies = live.bodyResult.pending > 0 || live.bodyResult.errors.isNotEmpty()
+                )
+            } catch(e:Throwable) {
                 _uiPort.value?.failed(e)
                 throw e
             }
@@ -89,7 +107,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             Result(false,"feature_disabled")
         }
     }
-    private fun open(account:Account,syncV2:JSONObject):Runtime {
+    private fun open(account:Account,syncV2:JSONObject,allowCreate:Boolean):Runtime {
         val gen=generation.get()
         val owner=account.owner();val serviceAnnouncement=SyncV2Codec.canonical(syncV2)
         val life=SyncV2Lifetime {generation.get()==gen && enabled() && announcement?.let{SyncV2Codec.canonical(it)}==serviceAnnouncement && current()?.owner()==owner}
@@ -111,10 +129,11 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             var discovery=client(JSONObject().put("repoId","00".repeat(16)).put("libraryEpoch","1").put("contentGeneration","1"),"00".repeat(16))
             var descriptor:JSONObject?=null
             val initRejected=pending?.optBoolean("initRejected")==true
-            if(pending==null || initRejected) {
+            if(pending==null || initRejected || !allowCreate) {
                 discovery.capabilities()
                 descriptor=try{discovery.descriptor().takeUnless{it.isNull("descriptor")}}catch(e:SyncV2CloudError){if(e.code!="object_missing")throw e;null}
             }
+            if(!allowCreate && descriptor==null)throw SyncV2CloudError("current_library_missing")
             if(initRejected && descriptor==null)SyncV2Codec.fail("object_missing")
             if(descriptor==null) {
                 if(pending==null && store.read("pin")!=null)SyncV2Codec.fail("identity_conflict")
@@ -217,7 +236,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 b.optString("deviceId")==id && b.optString("publicKey")==SyncV2Codec.b64(SyncV2Codec.unhex(signer.publicHex,65))
             }}
         }
-        fun round(manual:Boolean=false) {
+        fun round(manual:Boolean=false,restoreCurrent:Boolean=false) {
             life.check()
             val started=android.os.SystemClock.elapsedRealtime()
             fun remaining():Long=(290000L-(android.os.SystemClock.elapsedRealtime()-started)).also{if(it<=0)SyncV2Codec.fail("budget_paused")}
@@ -227,17 +246,36 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 SyncV2Codec.fail("signing_state_unavailable")
             }
             // Reconcile the original signed attempt before any new-account or new-source guard.
-            cloud.resumePublish()
-            cloud.readCurrent()
+            if (!restoreCurrent) cloud.resumePublish()
+            val current = cloud.readCurrent()
+            if (restoreCurrent && current == "empty-account") {
+                throw SyncV2CloudError("current_library_missing")
+            }
             if(signingDeviceId()==null)actions.prepareSigning()
             actions.refresh(budgetMillis=remaining())
             val referenceErrors=if(contentEnabled)life.guard{bodies?.refreshReferences()?:emptyList()}else emptyList()
             val progress=projection.runWindow(budgetMillis=remaining())
             if(progress.paused)SyncV2Codec.fail("budget_paused")
             var st=projection.state()
-            if(!st.body.isNull("pendingAccountAction")){actions.resume();st=projection.state()}
-            if(!st.body.isNull("pendingChoice"))return@withinBudget
-            val localDirty=st.revision!=st.body.optString("acknowledgedLocalRevision","0") || st.body.isNull("activeGeneration")
+            if(!st.body.isNull("pendingAccountAction")){
+                if (restoreCurrent) return@withinBudget
+                actions.resume();st=projection.state()
+            }
+            if (!st.body.isNull("pendingChoice") || (restoreCurrent && !st.body.isNull("pendingPublish"))) return@withinBudget
+            val unacknowledged = st.revision != st.body.optString("acknowledgedLocalRevision", "0")
+            if (restoreCurrent) {
+                if (unacknowledged || st.body.optBoolean("unknownEditBase")) {
+                    projection.requestConcurrentChoice()
+                } else {
+                    actions.flushAppliedAck()
+                    val result = bodies?.sync(manual, downloadOnly = true) ?: SyncV2BodyChannel.Result(0, emptyList())
+                    bodyResult = SyncV2BodyChannel.Result(result.pending + referenceErrors.size,
+                        (referenceErrors + result.errors).distinct())
+                    if (projection.state().body.isNull("pendingAppliedAck")) lastSyncedAt = time.now()
+                }
+                return@withinBudget
+            }
+            val localDirty=unacknowledged || st.body.isNull("activeGeneration")
             val dirty=localDirty || (contentEnabled && bodies?.needsPublication()==true)
             if(dirty) {
                 val publicationRevision=st.revision

@@ -55,6 +55,7 @@ fun CloudAccountPanel(
     purchaseEnabled: Boolean,
     onPurchase: () -> Unit
 ) {
+    val usesSyncV2 = service.usesSyncV2
     val syncState by service.state.collectAsState()
     var retentionDays by remember(userId) { mutableStateOf(service.settings.retentionDays) }
     var networkPolicy by remember(userId) { mutableStateOf(service.settings.networkPolicy) }
@@ -86,7 +87,7 @@ fun CloudAccountPanel(
                 runCatching {
                     val member = service.loadMembership()
                     bootstrap = if (member.readable) service.loadBootstrap() else null
-                    snapshotHeads = if (showHistory && member.readable) {
+                    snapshotHeads = if (!usesSyncV2 && showHistory && member.readable) {
                         service.listSnapshotHistory()
                     } else {
                         emptyList()
@@ -102,14 +103,14 @@ fun CloudAccountPanel(
     val localCloudKey = service.hasLocalAccountKey()
     LaunchedEffect(userId, bootstrap?.libraryEpoch, localCloudKey) {
         recordSyncEnabled = null
-        if (bootstrap != null && localCloudKey) {
+        if (!usesSyncV2 && bootstrap != null && localCloudKey) {
             try { recordSyncEnabled = service.cloudRecordSyncEnabled(userId) }
             catch (error: CancellationException) { throw error }
             catch (error: Exception) { onError(error.message ?: "云端状态同步读取失败") }
         }
     }
 
-    recordConsentEpoch?.let { epoch ->
+    recordConsentEpoch?.takeUnless { usesSyncV2 }?.let { epoch ->
         AlertDialog(
             onDismissRequest = { recordConsentEpoch = null },
             title = { Text("启用云端状态同步？") },
@@ -191,63 +192,64 @@ fun CloudAccountPanel(
                 style = MaterialTheme.typography.bodySmall
             )
 
-            OutlinedButton(
-                onClick = { showHistory = !showHistory; if (showHistory) refresh() },
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth()
-            ) { Text(if (showHistory) "收起历史快照" else "历史快照 · 恢复与删除") }
-            if (showHistory) {
-                Text("历史快照", fontWeight = FontWeight.Medium)
-                Text(
-                    "覆盖恢复会先创建本地安全备份。大小包含共享数据，删除后实际释放空间可能更少。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                if (historyLoading && snapshotHeads.isEmpty()) {
-                    Text("正在读取历史快照…", style = MaterialTheme.typography.bodySmall)
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                } else if (snapshotHeads.isEmpty()) {
-                    Text("暂无可恢复的历史快照")
-                }
-                snapshotHeads.forEach { head ->
-                    Card(modifier = Modifier.fillMaxWidth()) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text(
-                                "${bootstrap?.devices?.find { it.deviceId == head.sourceDeviceId }?.displayName?.takeIf { it.isNotBlank() } ?: "设备 ${head.sourceDeviceId.take(8)}"} · 快照 #${head.deviceSequence}",
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                "${head.completedAt?.let { java.time.Instant.parse(it).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")) }.orEmpty()} · ${formatBytes(head.totalSizeBytes)}",
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedButton(
-                                    onClick = {
-                                        runAction {
-                                            onBusyChange(true)
-                                            runCatching { service.inspectSnapshot(head.id) }
-                                                .onSuccess { restorePreview = it }
-                                                .onFailure {
-                                                    onError(it.message ?: "无法读取快照预览")
-                                                }
-                                            onBusyChange(false)
-                                        }
-                                    },
-                                    enabled = !busy && service.hasLocalAccountKey()
-                                ) { Text("切换 / 恢复") }
-                                TextButton(
-                                    onClick = { deleteCandidate = head },
-                                    enabled = !busy
-                                ) { Text("删除") }
+            if (!usesSyncV2) {
+                OutlinedButton(
+                    onClick = { showHistory = !showHistory; if (showHistory) refresh() },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(if (showHistory) "收起历史快照" else "历史快照 · 恢复与删除") }
+                if (showHistory) {
+                    Text("历史快照", fontWeight = FontWeight.Medium)
+                    Text(
+                        "覆盖恢复会先创建本地安全备份。大小包含共享数据，删除后实际释放空间可能更少。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (historyLoading && snapshotHeads.isEmpty()) {
+                        Text("正在读取历史快照…", style = MaterialTheme.typography.bodySmall)
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    } else if (snapshotHeads.isEmpty()) {
+                        Text("暂无可恢复的历史快照")
+                    }
+                    snapshotHeads.forEach { head ->
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    "${bootstrap?.devices?.find { it.deviceId == head.sourceDeviceId }?.displayName?.takeIf { it.isNotBlank() } ?: "设备 ${head.sourceDeviceId.take(8)}"} · 快照 #${head.deviceSequence}",
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    "${head.completedAt?.let { java.time.Instant.parse(it).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")) }.orEmpty()} · ${formatBytes(head.totalSizeBytes)}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            runAction {
+                                                onBusyChange(true)
+                                                runCatching { service.inspectSnapshot(head.id) }
+                                                    .onSuccess { restorePreview = it }
+                                                    .onFailure {
+                                                        onError(it.message ?: "无法读取快照预览")
+                                                    }
+                                                onBusyChange(false)
+                                            }
+                                        },
+                                        enabled = !busy && service.hasLocalAccountKey()
+                                    ) { Text("切换 / 恢复") }
+                                    TextButton(
+                                        onClick = { deleteCandidate = head },
+                                        enabled = !busy
+                                    ) { Text("删除") }
+                                }
                             }
                         }
                     }
                 }
             }
-
 
             val recoveryEnvelopeExists =
                 bootstrap?.keyEnvelopes?.any { it.recipientType == "recovery" } == true
@@ -375,94 +377,101 @@ fun CloudAccountPanel(
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.SemiBold
                 )
-                when (recordSyncEnabled) {
-                    false -> {
-                        Text("云端状态同步尚未启用。启用后可与手表同步个人状态。")
-                        OutlinedButton(enabled = !busy, onClick = {
-                            recordConsentEpoch = bootstrap?.libraryEpoch
-                        }) { Text("启用云端状态同步") }
+                if (!usesSyncV2) {
+                    when (recordSyncEnabled) {
+                        false -> {
+                            Text("云端状态同步尚未启用。启用后可与手表同步个人状态。")
+                            OutlinedButton(enabled = !busy, onClick = {
+                                recordConsentEpoch = bootstrap?.libraryEpoch
+                            }) { Text("启用云端状态同步") }
+                        }
+                        true -> Text("✓ 云端状态同步已启用", color = MaterialTheme.colorScheme.primary)
+                        null -> Text("正在读取云端状态同步…")
                     }
-                    true -> Text("✓ 云端状态同步已启用", color = MaterialTheme.colorScheme.primary)
-                    null -> Text("正在读取云端状态同步…")
-                }
-                Text("快照保留", fontWeight = FontWeight.Medium)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(7 to "7天", 30 to "30天", 90 to "90天", 0 to "永久").forEach { (days, label) ->
-                        val selected = retentionDays == days.takeIf { it > 0 }
-                        if (selected) {
-                            Button(onClick = {}, enabled = !busy) { Text(label) }
-                        } else {
-                            OutlinedButton(
-                                onClick = {
-                                    service.settings.retentionDays = days.takeIf { it > 0 }
-                                    retentionDays = service.settings.retentionDays
-                                },
-                                enabled = !busy
-                            ) { Text(label) }
+                    Text("快照保留", fontWeight = FontWeight.Medium)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(7 to "7天", 30 to "30天", 90 to "90天", 0 to "永久").forEach { (days, label) ->
+                            val selected = retentionDays == days.takeIf { it > 0 }
+                            if (selected) {
+                                Button(onClick = {}, enabled = !busy) { Text(label) }
+                            } else {
+                                OutlinedButton(
+                                    onClick = {
+                                        service.settings.retentionDays = days.takeIf { it > 0 }
+                                        retentionDays = service.settings.retentionDays
+                                    },
+                                    enabled = !busy
+                                ) { Text(label) }
+                            }
                         }
                     }
-                }
-                Text("网络策略", fontWeight = FontWeight.Medium)
-                CloudNetworkPolicy.entries.forEach { policy ->
-                    val label = when (policy) {
-                        CloudNetworkPolicy.WIFI_BODIES_ANY_STATE -> "Wi‑Fi传正文，任意网络同步小状态"
-                        CloudNetworkPolicy.WIFI_AND_CHARGING -> "仅Wi‑Fi且充电"
-                        CloudNetworkPolicy.ANY_NETWORK -> "任何网络"
+                    Text("网络策略", fontWeight = FontWeight.Medium)
+                    CloudNetworkPolicy.entries.forEach { policy ->
+                        val label = when (policy) {
+                            CloudNetworkPolicy.WIFI_BODIES_ANY_STATE -> "Wi‑Fi传正文，任意网络同步小状态"
+                            CloudNetworkPolicy.WIFI_AND_CHARGING -> "仅Wi‑Fi且充电"
+                            CloudNetworkPolicy.ANY_NETWORK -> "任何网络"
+                        }
+                        OutlinedButton(
+                            onClick = { service.settings.networkPolicy = policy; networkPolicy = policy },
+                            enabled = !busy,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(if (networkPolicy == policy) "✓ $label" else label)
+                        }
                     }
                     OutlinedButton(
-                        onClick = { service.settings.networkPolicy = policy; networkPolicy = policy },
+                        onClick = onOpenInventory,
                         enabled = !busy,
                         modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(if (networkPolicy == policy) "✓ $label" else label)
+                    ) { Text("频道云库存 ›") }
+                    RecoveryInputPrivacy {
+                        OutlinedTextField(
+                            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
+                            value = recoveryInput,
+                            onValueChange = { recoveryInput = it },
+                            label = { Text("轮换密钥前输入原24词恢复密钥") },
+                            minLines = 2,
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
-                }
-                OutlinedButton(
-                    onClick = onOpenInventory,
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("频道云库存 ›") }
-                RecoveryInputPrivacy {
-                    OutlinedTextField(
-                        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
-                        value = recoveryInput,
-                        onValueChange = { recoveryInput = it },
-                        label = { Text("轮换密钥前输入原24词恢复密钥") },
-                        minLines = 2,
+                    OutlinedButton(
+                        onClick = {
+                            runAction {
+                                onBusyChange(true)
+                                runCatching {
+                                    service.rotateAccountKey(RecoveryWords.parse(recoveryInput))
+                                }.onSuccess { version ->
+                                    recoveryInput = ""
+                                    onMessage("账号密钥已轮换到第${version}版，原24词恢复密钥继续有效")
+                                    try { service.syncNow(manual = true) }
+                                    catch (_: Exception) { onMessage("密钥已轮换，后续同步暂未完成，请稍后重试同步") }
+                                }.onFailure { onError(it.message ?: "密钥轮换失败") }
+                                onBusyChange(false)
+                            }
+                        },
+                        enabled = !busy && RecoveryWords.parse(recoveryInput).size == 24,
                         modifier = Modifier.fillMaxWidth()
-                    )
+                    ) { Text("轮换账号加密密钥") }
                 }
-                OutlinedButton(
-                    onClick = {
-                        runAction {
-                            onBusyChange(true)
-                            runCatching {
-                                service.rotateAccountKey(RecoveryWords.parse(recoveryInput))
-                            }.onSuccess { version ->
-                                recoveryInput = ""
-                                onMessage("账号密钥已轮换到第${version}版，原24词恢复密钥继续有效")
-                                try { service.syncNow(manual = true) }
-                                catch (_: Exception) { onMessage("密钥已轮换，后续同步暂未完成，请稍后重试同步") }
-                            }.onFailure { onError(it.message ?: "密钥轮换失败") }
-                            onBusyChange(false)
-                        }
-                    },
-                    enabled = !busy && RecoveryWords.parse(recoveryInput).size == 24,
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("轮换账号加密密钥") }
-                Button(
-                    onClick = {
-                        runAction {
-                            onBusyChange(true)
-                            runCatching { service.estimateManualSync() }
-                                .onSuccess { estimate = it }
-                                .onFailure { onError(it.message ?: "无法估算同步流量") }
-                            onBusyChange(false)
-                        }
-                    },
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("立即同步") }
+
+                if (usesSyncV2) {
+                    SyncV2AccountActions(service, busy, runAction, onBusyChange, onError)
+                } else {
+                    Button(
+                        onClick = {
+                            runAction {
+                                onBusyChange(true)
+                                runCatching { service.estimateManualSync() }
+                                    .onSuccess { estimate = it }
+                                    .onFailure { onError(it.message ?: "无法估算同步流量") }
+                                onBusyChange(false)
+                            }
+                        },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("立即同步") }
+                }
                 Text(
                     syncState.message.ifBlank { "等待同步" },
                     style = MaterialTheme.typography.bodySmall,
@@ -529,7 +538,7 @@ fun CloudAccountPanel(
                     }
                 }
             }
-            if (recoveryEnvelopeExists) {
+            if (!usesSyncV2 && recoveryEnvelopeExists) {
                 OutlinedButton(
                     onClick = { showResetWarning = true },
                     enabled = !busy,
@@ -545,7 +554,7 @@ fun CloudAccountPanel(
         }
     }
 
-    if (showResetWarning) {
+    if (!usesSyncV2 && showResetWarning) {
         AlertDialog(
             onDismissRequest = { if (!busy) showResetWarning = false },
             title = { Text("无法恢复旧云端库？") },
@@ -577,7 +586,7 @@ fun CloudAccountPanel(
         )
     }
 
-    if (showResetConfirmation) {
+    if (!usesSyncV2 && showResetConfirmation) {
         AlertDialog(
             onDismissRequest = {
                 if (!busy) {
@@ -671,7 +680,7 @@ fun CloudAccountPanel(
         )
     }
 
-    estimate?.let { pending ->
+    estimate?.takeUnless { usesSyncV2 }?.let { pending ->
         AlertDialog(
             onDismissRequest = { estimate = null },
             title = { Text("确认立即同步") },
@@ -702,7 +711,7 @@ fun CloudAccountPanel(
         )
     }
 
-    restorePreview?.let { preview ->
+    restorePreview?.takeUnless { usesSyncV2 }?.let { preview ->
         AlertDialog(
             onDismissRequest = { restorePreview = null },
             title = { Text("恢复预览") },
@@ -747,7 +756,7 @@ fun CloudAccountPanel(
         )
     }
 
-    overwriteConfirm?.let { preview ->
+    overwriteConfirm?.takeUnless { usesSyncV2 }?.let { preview ->
         AlertDialog(
             onDismissRequest = { overwriteConfirm = null },
             title = { Text("再次确认覆盖恢复") },
@@ -775,7 +784,7 @@ fun CloudAccountPanel(
         )
     }
 
-    deleteCandidate?.let { head ->
+    deleteCandidate?.takeUnless { usesSyncV2 }?.let { head ->
         AlertDialog(
             onDismissRequest = { deleteCandidate = null },
             title = { Text("删除云快照？") },

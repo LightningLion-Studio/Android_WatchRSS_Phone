@@ -42,6 +42,7 @@ internal object SyncV2View {
         "merge_unavailable" -> "这次修改无法自动合并。"
         "window_expired", "temporarily_unavailable" -> "网络或云端暂时不可用，请稍后重试。"
         "quota_exceeded" -> "云空间已满。"
+        "current_library_missing" -> "云端还没有可恢复的 Sync v2 资料库。"
         "note_unopenable" -> "这条笔记太大，本机无法打开。"
         "feature_disabled" -> "云端暂不支持此操作。"
         "body_channel_write_disabled" -> "云端正文写入未开放。本机正文已保留，资料信息仍可同步。"

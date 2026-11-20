@@ -125,6 +125,15 @@ class SyncV2P6ProductTest {
                             val result=dto(s).put("account",JSONObject(account.toString())).put("device",JSONObject().put("commitOid",oid).put("revision",device.get("refRevision"))).put("serverRevision",account.get("revision"));results[id]=result
                             if(dropPublish){dropPublish=false;return MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)}
                             return response(result)}
+                        route=="choices/cloud" -> {
+                            val selection = body()
+                            if (selection.getString("expectedAccountRevision") != account.getString("revision") ||
+                                selection.getString("expectedRollbackGeneration") != account.getString("rollbackGeneration")
+                            ) return error("choice_stale")
+                            return response(dto(s).put("choiceId", selection.getString("choiceId"))
+                                .put("account", account).put("confirmedAccount", account)
+                                .put("auditRevision", account.getString("revision")))
+                        }
                         route=="acks/applied"->{acks++;return response(dto(s).put("accepted",true).put("serverRevision",account.get("revision")))}
                         route=="demand"->return response(dto(s).put("serverNowMillis",now).put("demands",JSONArray()))
                     }
@@ -207,11 +216,32 @@ class SyncV2P6ProductTest {
                 val file=File(h.context.filesDir,"notes/assets/old.png");file.parentFile!!.mkdirs();file.writeBytes(raw)
                 full(h)
                 val runtime=SyncV2PhoneProduct::class.java.getDeclaredField("runtime").also{it.isAccessible=true}.get(h.product) as SyncV2PhoneProduct.Runtime
-                assertEquals(2,server.publishes);assertTrue(runtime.projection.state().body.isNull("pendingChoice"))
-                val entity=runtime.identity.entity("asset","old.png");val row=runtime.projection.cloudRows(setOf(entity)).single().getJSONObject("row")
-                assertEquals(SyncV2BodyCodec.revision("asset",entity,SyncV2BodyCodec.hash(raw)),row.getString("bodyRevision"));assertTrue(row.isNull("recipeOid"))
-                assertEquals(listOf("body_channel_write_disabled"),runtime.bodyResult.errors);assertArrayEquals(raw,file.readBytes())
-                assertEquals(1,h.room.openHelper.writableDatabase.query("SELECT createdAt FROM note_assets WHERE storageKey='old.png'").use{it.moveToFirst();it.getInt(0)})
+                val entity = runtime.identity.entity("asset", "old.png")
+                val digest = SyncV2BodyCodec.hash(raw)
+                val originalRevision = SyncV2BodyCodec.revision("asset", entity, digest)
+                val placeholder = runtime.projection.cloudRows(setOf(entity)).single().getJSONObject("row")
+                assertEquals(1, server.publishes)
+                assertNotEquals(originalRevision, placeholder.getString("bodyRevision"))
+                assertTrue(placeholder.isNull("recipeOid"))
+                assertArrayEquals(raw, file.readBytes())
+
+                // D1 requires a committed local digest before replacing a different cloud revision.
+                val db = h.room.openHelper.writableDatabase
+                db.execSQL("UPDATE note_assets SET sha256=?, byteCount=? WHERE storageKey=?",
+                    arrayOf(digest, raw.size, "old.png"))
+                full(h)
+
+                assertEquals(2, server.publishes)
+                assertTrue(runtime.projection.state().body.isNull("pendingChoice"))
+                val row = runtime.projection.cloudRows(setOf(entity)).single().getJSONObject("row")
+                assertEquals(originalRevision, row.getString("bodyRevision"))
+                assertTrue(row.isNull("recipeOid"))
+                assertEquals(listOf("body_channel_write_disabled"), runtime.bodyResult.errors)
+                assertArrayEquals(raw, file.readBytes())
+                assertEquals(1, db.query("SELECT createdAt FROM note_assets WHERE storageKey='old.png'").use {
+                    it.moveToFirst()
+                    it.getInt(0)
+                })
             }
         }
     }
@@ -219,7 +249,9 @@ class SyncV2P6ProductTest {
         Server().use {server->Host(server,"a",false).use{h->
             val before=server.http.requestCount
             val beforeStorage=SyncV2Codec.hex(SyncV2Codec.sha(h.prefs.all.toString().toByteArray()))
-            assertFalse(h.product.sync(server.announcement).enabled);assertFalse(com.lightningstudio.watchrss.phone.BuildConfig.SYNC_V2)
+            val disabled = h.product.sync(server.announcement)
+            assertFalse(disabled.enabled)
+            assertEquals("feature_disabled", disabled.reason)
             assertNull(h.product.uiPort.value);h.enabled=true
             assertEquals("not_announced",h.product.sync(null).reason);assertEquals(before,server.http.requestCount)
             assertFalse(File(h.root,"phone.db").exists())
@@ -581,14 +613,15 @@ class SyncV2P6ProductTest {
         }}
     }
 
-    @Test fun reviewClosedUiGatesRejectRecoveryWithoutWritesOrRequests() {
+    @Test fun historyRemainsClosedIndependentlyOfCurrentLibraryChoice() {
         Server().use {server->Host(server,"a").use {h->
             h.note();h.sync()
             val port=h.product.uiPort.value!!
             val runtime=SyncV2PhoneProduct::class.java.getDeclaredField("runtime").also{it.isAccessible=true}.get(h.product) as SyncV2PhoneProduct.Runtime
             val revision=runtime.projection.state().revision
             val requests=server.http.requestCount
-            assertEquals("feature_disabled",runCatching{runBlocking{port.restoreRecovery("aa".repeat(16))}}.exceptionOrNull()?.message)
+            assertTrue(port.state.value.gates.choiceApply)
+            assertFalse(port.state.value.gates.historyRestore)
             assertEquals("feature_disabled",runCatching{runBlocking{port.history()}}.exceptionOrNull()?.message)
             assertEquals(revision,runtime.projection.state().revision)
             assertEquals(requests,server.http.requestCount);assertEquals("local",h.text())
@@ -690,6 +723,76 @@ class SyncV2P6ProductTest {
             assertEquals("body_channel_write_disabled",h.product.uiPort.value!!.state.value.errorCode)
         }}}
     }
+    @Test fun currentRestoreDoesNotCreateOrPublishAnEmptyCloudLibrary() {
+        Server().use { server -> Host(server, "empty-restore").use { host -> ServiceEntry(host).use { entry ->
+            host.note()
+            val error = runCatching { runBlocking { entry.service.restoreCurrentLibrary() } }.exceptionOrNull()
+            assertEquals("current_library_missing", (error as? SyncV2CloudError)?.code)
+            assertEquals("云端还没有可恢复的 Sync v2 资料库。", entry.service.state.value.message)
+            assertEquals(0, server.inits)
+            assertEquals(0, server.publishes)
+            assertEquals(0, entry.legacyCalls)
+            assertEquals("local", host.text())
+        } } }
+    }
+
+    @Test fun currentRestoreAppliesOnAnEmptyPhoneAndOffersChoiceOnANonemptyPhone() {
+        Server().use { server ->
+            Host(server, "author").use { writer -> ServiceEntry(writer).use { entry ->
+                writer.note("cloud copy")
+                entry.sync(true)
+                assertEquals(1, server.publishes)
+            } }
+            Host(server, "clean").use { clean -> ServiceEntry(clean).use { entry ->
+                runBlocking { entry.service.restoreCurrentLibrary() }
+                assertEquals("cloud copy", clean.text())
+                assertEquals("当前云端资料库已恢复", entry.service.state.value.message)
+                assertEquals(0, entry.legacyCalls)
+                assertEquals(1, server.publishes)
+            } }
+            Host(server, "nonempty").use { nonempty -> ServiceEntry(nonempty).use { entry ->
+                nonempty.note("local edit")
+                runBlocking { entry.service.restoreCurrentLibrary() }
+                val port = requireNotNull(nonempty.product.uiPort.value)
+                assertEquals("awaiting_choice", port.state.value.phase)
+                assertEquals("请查看并选择保留哪一份", entry.service.state.value.message)
+                val preview = runBlocking { port.openChoice() }
+                assertTrue(preview.local.isNotEmpty())
+                assertTrue(preview.cloud.isNotEmpty())
+                assertFalse(port.state.value.gates.historyRestore)
+                assertEquals("local edit", nonempty.text())
+                assertEquals(1, server.publishes)
+                runBlocking { port.chooseCloud(preview) }
+                assertEquals("cloud copy", nonempty.text())
+                assertNull(port.state.value.choice)
+                assertTrue(port.state.value.recoveryCopies.isNotEmpty())
+                assertEquals(0, entry.legacyCalls)
+                assertEquals(1, server.publishes)
+            } }
+        }
+    }
+
+    @Test fun obsoleteAccountPanelActionsCannotReachLegacyHttpWhenV2IsEnabled() {
+        Server().use { server -> Host(server, "legacy-fence").use { host -> ServiceEntry(host).use { entry ->
+            entry.sync(true)
+            val service = entry.service
+            runBlocking {
+                for (action in listOf<suspend () -> Any>(
+                    { service.listSnapshotHistory() },
+                    { service.estimateManualSync() },
+                    { service.inspectSnapshot("legacy") },
+                    { service.restoreSnapshot("legacy") },
+                    { service.deleteSnapshot("legacy") },
+                    { service.cloudRecordSyncEnabled(user) },
+                    { service.resetCloudLibrary("legacy") },
+                )) {
+                    assertEquals("此云端操作当前不可用", runCatching { action() }.exceptionOrNull()?.message)
+                }
+            }
+            assertEquals(0, entry.legacyCalls)
+        } } }
+    }
+
     @Test fun formalEntryClosedProductRetainsLegacyFenceAndLocalLibrary() {
         Server().use{server->Host(server,"closed",localSwitch=false).use{h->ServiceEntry(h).use{entry->
             h.note()

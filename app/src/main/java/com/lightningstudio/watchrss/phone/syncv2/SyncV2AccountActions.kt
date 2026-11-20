@@ -476,8 +476,15 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         }catch(e:Throwable){reservations.forEach{it.close()};objects.close();throw e}
     }
     private data class Context(val window:JSONObject,val authors:SyncV2Authors,val own:String?,val ownRevision:String,val sequence:String)
-    private fun context(capture:ChoiceCapture):Context {
-        val caps=client.capabilities();if(caps.getJSONObject("flags").opt("historyRestore")!=true || caps.getJSONObject("flags").opt("indexWrite")!=true)throw SyncV2CloudError("feature_disabled",true,1000)
+    private fun requireActionCapabilities(kind: String) {
+        val flags = client.capabilities().getJSONObject("flags")
+        if (flags.opt("read") != true || flags.opt("indexWrite") != true ||
+            (kind == "rollback" && flags.opt("historyRestore") != true)
+        ) throw SyncV2CloudError("feature_disabled", true, 1000)
+    }
+
+    private fun context(capture:ChoiceCapture, kind: String):Context {
+        requireActionCapabilities(kind)
         val window=client.negotiate();if(window.getLong("expiresAtMillis")<=now())SyncV2Codec.fail("window_expired")
         if(!same(account(window.getJSONObject("account")),JSONObject().put("oid",capture.accountOid).put("revision",capture.accountRevision).put("generation",capture.generation)))SyncV2Codec.fail("choice_stale")
         val authors=client.authors(identity,approved);val saved=projection.state().body.optJSONArray("signingBindings")?:JSONArray()
@@ -509,7 +516,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             for(input in plan.input){val result=SyncV2Planner.canMerge(input);if(!result.getBoolean("canMerge"))SyncV2Codec.fail("choice_stale")}
         }
         fileGuard(plan.files){}
-        val context=context(c);val local=rows(plan.local);val remote=rows(plan.cloud)
+        val context=context(c, choice);val local=rows(plan.local);val remote=rows(plan.cloud)
         // R3: every choice (cloud/local/merge) carries isolated rows back verbatim under their
         // original metaOid/stateOid; a same-entity local candidate never re-seals or replaces one.
         val isolatedRemote=remote.filterRows{it.has(SyncV2NoteWiring.ISOLATED_KEY)}
@@ -569,7 +576,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     }
     fun rollback(capture:ChoiceCapture,targetOid:String):JSONObject {
         gate();syncFiles();complete();projection.accountCheck(projection.state(),capture,false);SyncV2Codec.next(capture.stateVersion);SyncV2Codec.commitOid(targetOid)
-        val fileToken=fileCapture();val context=context(capture)
+        val fileToken=fileCapture();val context=context(capture, "rollback")
         val requestId=id();val prepared=client.prepareHistory(JSONObject().put("requestId",requestId).put("targetCommitOid",targetOid).put("expectedAccountRevision",capture.accountRevision).put("expectedRollbackGeneration",capture.generation))
         if(prepared.getLong("expiresAtMillis")<=now())SyncV2Codec.fail("snapshot_expired")
         val envelope=header(targetOid);val verified=projection.verifyCloud(SyncV2ControlClosure(identity,context.authors,contentKey,noteSegmentsReadGate()),envelope,{client.raw(it,context.window.getString("windowId"))},{p->client.reference(p,context.window.getString("windowId")).let{copy(it).apply{remove("version")}}})
@@ -833,8 +840,9 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         if(action.getString("actorDeviceId")!=signer.deviceId || client.deviceId!=signer.deviceId)SyncV2Codec.fail("authentication_required")
         checkActionCurrent(action)
         SyncV2Codec.next(st.version)
-        val caps=client.capabilities();if(caps.getJSONObject("flags").opt("historyRestore")!=true)throw SyncV2CloudError("feature_disabled",true,1000)
-        val request=action.getJSONObject("request");val id=action.getString("id");val objects=stagedObjects(id);val kind=action.getString("kind")
+        val kind=action.getString("kind")
+        requireActionCapabilities(kind)
+        val request=action.getJSONObject("request");val id=action.getString("id");val objects=stagedObjects(id)
         val response=try {
             if(kind=="cloud"){markPublicationAttempted(action);client.chooseCloud(request)}else {
                 val known=client.requestResult(id)

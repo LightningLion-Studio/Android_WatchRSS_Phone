@@ -680,31 +680,43 @@ class PhoneCloudSyncService(
     }
 
     /** True while the local private library belongs to another account; uploads stay blocked until resolved. */
-    fun libraryOwnerConflict(): Boolean {
-        val userId = accountRepository.session.value?.userId ?: return false
-        return settings.ownerUserId.let { it != null && it != userId }
-    }
+    fun libraryOwnerConflict(): Boolean =
+        accountRepository.session.value?.userId?.let(::libraryOwnerConflict) ?: false
+
+    private fun libraryOwnerConflict(userId: String): Boolean =
+        settings.ownerUserId.let { it != null && it != userId }
 
     /** Nothing local to lose: adopt the signed-in account without asking. Returns true when no choice remains. */
-    suspend fun resolveLibraryOwnerIfEmpty(): Boolean {
+    suspend fun resolveLibraryOwnerIfEmpty(
+        expectedUserId: String? = accountRepository.session.value?.userId
+    ): Boolean {
         if (!libraryOwnerConflict()) return true
         if (repository.hasLibraryContent() || noteRepository.hasAny()) return false
-        resolveLibraryOwner(merge = false)
+        resolveLibraryOwner(merge = false, expectedUserId = expectedUserId)
         return !libraryOwnerConflict()
     }
 
     /** Explicit user action only; the clear callback must remove the entire local private library. */
-    suspend fun resolveLibraryOwner(merge: Boolean) = syncMutex.withLock {
-        val session = requireSession()
+    suspend fun resolveLibraryOwner(
+        merge: Boolean,
+        expectedUserId: String? = accountRepository.session.value?.userId
+    ) = syncMutex.withLock {
+        val session = requireSession(expectedUserId)
         if (!merge) { repository.clearLibrary(); noteRepository.clearForAccountSwitch() }
-        checkApprovalOwner(session); settings.ownerUserId = session.userId
+        synchronized(syncStateLock) {
+            checkApprovalOwner(session)
+            settings.ownerUserId = session.userId
+        }
     }
 
     private val pauseGate = CloudSyncPauseGate(settings.syncPaused) { settings.syncPaused = it }
     val paused: StateFlow<Boolean> = pauseGate.state
 
     /** Finish the current snapshot atomically; no subsequent snapshot/transfer starts. */
-    fun setSyncPaused(value: Boolean) {
+    fun setSyncPaused(value: Boolean, expectedUserId: String): Unit = synchronized(syncStateLock) {
+        check(accountRepository.session.value?.userId == expectedUserId &&
+            !accountRepository.cloudSessionChanging
+        ) { ACCOUNT_CHANGED }
         pauseGate.setPaused(value)
         if (!syncMutex.isLocked) {
             update(if (value) CloudSyncPhase.PAUSED else CloudSyncPhase.IDLE,
@@ -1307,12 +1319,17 @@ class PhoneCloudSyncService(
                 }, attempt = {
                     checkApprovalOwner(session)
                     val empty = PhoneCloudSyncResult(0, 0, 0, false, 0)
+                    val product = if (usesSyncV2) syncV2Product else null
+                    if (product != null && libraryOwnerConflict(session.userId)) {
+                        update(CloudSyncPhase.BLOCKED, "本机资料属于其他账号，请先清空本机资料或明确确认合并",
+                            errorCode = "library_owner_conflict")
+                        return@retryDiscardedCloudTransfer empty
+                    }
                     if (paused.value) {
                         update(CloudSyncPhase.PAUSED, "已暂停同步")
                         return@retryDiscardedCloudTransfer empty
                     }
                     require(networkGate.isConnected()) { "当前没有可用网络" }
-                    val product = if (usesSyncV2) syncV2Product else null
                     val scope = client.scopeId(session)
                     if (product == null && legacyFenceScope == scope) {
                         update(CloudSyncPhase.IDLE, "旧同步通道已关闭，本机资料已保留")

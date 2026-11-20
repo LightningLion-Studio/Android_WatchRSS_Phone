@@ -22,6 +22,7 @@ fun DashboardCloudSyncBanner() {
     val container = (context.applicationContext as? PhoneCompanionApplication)?.container ?: return
     val service = container.cloudSyncService
     val session by container.accountRepository.session.collectAsState()
+    val userId = session?.userId
     val state by service.state.collectAsState()
     val paused by service.paused.collectAsState()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -29,18 +30,20 @@ fun DashboardCloudSyncBanner() {
     var member by remember(session?.userId) { mutableStateOf<CloudMemberState?>(null) }
     var quotaFailed by remember(session?.userId) { mutableStateOf(false) }
     var refreshKey by remember { mutableIntStateOf(0) }
-    var actionFailed by remember { mutableStateOf(false) }
+    var actionFailed by remember(userId) { mutableStateOf(false) }
     val recordError by service.recordError.collectAsState()
     var ownerConflict by remember(session?.userId, state.phase) { mutableStateOf(service.libraryOwnerConflict()) }
-    var showOwnerChoice by remember { mutableStateOf(false) }
+    var showOwnerChoice by remember(userId) { mutableStateOf(false) }
     // Ask once per account as soon as the conflict appears; an empty phone needs no question at all.
     var ownerPrompted by rememberSaveable(session?.userId) { mutableStateOf(false) }
-    LaunchedEffect(session?.userId, ownerConflict) {
-        if (!ownerConflict) return@LaunchedEffect
-        runCatching { service.resolveLibraryOwnerIfEmpty() }
+    LaunchedEffect(userId, ownerConflict) {
+        if (!ownerConflict || userId == null) return@LaunchedEffect
+        runCatching { service.resolveLibraryOwnerIfEmpty(expectedUserId = userId) }
+        if (container.accountRepository.session.value?.userId != userId) return@LaunchedEffect
         ownerConflict = service.libraryOwnerConflict()
-        if (!ownerConflict) container.setCloudSyncPaused(false)
-        else if (!ownerPrompted) { ownerPrompted = true; showOwnerChoice = true }
+        if (!ownerConflict) {
+            actionFailed = runCatching { container.setCloudSyncPaused(false, expectedUserId = userId) }.isFailure
+        } else if (!ownerPrompted) { ownerPrompted = true; showOwnerChoice = true }
     }
     val scope = rememberCoroutineScope()
     LaunchedEffect(session?.userId, lifecycle, refreshKey) {
@@ -92,8 +95,8 @@ fun DashboardCloudSyncBanner() {
                 chooseOwner = { showOwnerChoice = true },
                 refreshQuota = { refreshKey++ },
                 retrySync = {
-                    scope.launch {
-                        try { service.syncNow() }
+                    if (userId != null) scope.launch {
+                        try { service.syncNow(expectedUserId = userId) }
                         catch (cancelled: CancellationException) { throw cancelled }
                         catch (_: Exception) { /* The service publishes the failure. */ }
                     }
@@ -107,18 +110,22 @@ fun DashboardCloudSyncBanner() {
         },
         onTogglePause = {
             if (ownerConflict || service.libraryOwnerConflict()) showOwnerChoice = true
-            else actionFailed = runCatching { container.setCloudSyncPaused(!paused) }.isFailure
+            else if (userId != null) {
+                actionFailed = runCatching { container.setCloudSyncPaused(!paused, expectedUserId = userId) }.isFailure
+            }
         },
         // The whole card opens cloud sync management; its buttons keep their own actions.
         onOpen = { context.startActivity(AccountActivity.createIntent(context, section = AccountSection.CLOUD_SYNC)) }
     )
-    if (showOwnerChoice) LibraryOwnerDialog(
+    if (showOwnerChoice && userId != null) LibraryOwnerDialog(
         onChoose = { merge ->
             showOwnerChoice = false
             scope.launch {
-                actionFailed = runCatching { service.resolveLibraryOwner(merge) }.isFailure
-                ownerConflict = service.libraryOwnerConflict()
-                if (!ownerConflict) container.setCloudSyncPaused(false)
+                actionFailed = runCatching {
+                    service.resolveLibraryOwner(merge, expectedUserId = userId)
+                    ownerConflict = service.libraryOwnerConflict()
+                    if (!ownerConflict) container.setCloudSyncPaused(false, expectedUserId = userId)
+                }.isFailure
             }
         },
         onDismiss = { showOwnerChoice = false }

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import androidx.room.Room
+import com.lightningstudio.watchrss.phone.PhoneCompanionContainer
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
 import com.lightningstudio.watchrss.phone.account.LoginProgress
@@ -17,6 +18,14 @@ import com.lightningstudio.watchrss.phone.data.local.articleContentMarkerFileNam
 import com.lightningstudio.watchrss.phone.testing.MemoryPreferences
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -764,16 +773,24 @@ class SyncV2P6ProductTest {
         }
         fun sync(manual:Boolean)=runBlocking{service.syncNow(manual)}
         fun prepareRevoke() = client.useEpoch(session, epoch)
-        suspend fun switchAccount(openProduct: Boolean = false) {
+        suspend fun switchAccount(): String {
             val next = session.copy(userId = nextOwner, accessToken = "other-session")
             account.saveCompletedLogin(LoginProgress("test-login", 1, listOf("otp"), true, next))
             assertEquals(next.userId, account.session.value?.userId)
-            if (openProduct) {
-                h.manager.saveAccountKey(next.userId, 1, h.server.wrap, true)
-                h.account = h.account!!.copy(userId = next.userId)
-                service.syncNow(manual = true)
-            }
+            h.manager.saveAccountKey(next.userId, 1, h.server.wrap, true)
+            h.account = h.account!!.copy(userId = next.userId)
+            return next.userId
         }
+
+        fun containerWithCloudQueue(queue: CoroutineScope): PhoneCompanionContainer =
+            PhoneCompanionContainer(c).also { container ->
+                val type = PhoneCompanionContainer::class.java
+                type.getDeclaredField("accountRepository\$delegate").apply { isAccessible = true }
+                    .set(container, lazy { account })
+                type.getDeclaredField("cloudSyncService\$delegate").apply { isAccessible = true }
+                    .set(container, lazy { service })
+                type.getDeclaredField("appScope").apply { isAccessible = true }.set(container, queue)
+            }
         override fun close(){scope.coroutineContext[kotlinx.coroutines.Job]?.cancel();service.javaClass.getDeclaredField("recordStore").apply{isAccessible=true}.get(service).let{(it as com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordStore).close()}}
     }
     @Test fun formalEntrySelectsAuthenticatedV2BeforeLegacyAndForwardsManualBodyConsent() {
@@ -1116,7 +1133,10 @@ class SyncV2P6ProductTest {
             val revoke = async(Dispatchers.IO) { runCatching { entry.service.revokeDevice("old-device") } }
             try {
                 assertTrue(revokeEntered.await(5, TimeUnit.SECONDS))
-                entry.switchAccount(openProduct = true)
+                entry.switchAccount()
+                // These fixtures exercise B after the user confirms ownership.
+                entry.service.resolveLibraryOwner(merge = true)
+                entry.service.syncNow(manual = true)
                 val port = requireNotNull(host.product.uiPort.value)
                 val state = entry.service.state.value
                 assertEquals(CloudSyncPhase.COMPLETE, state.phase)
@@ -1305,11 +1325,73 @@ class SyncV2P6ProductTest {
                 assertEquals("账号已切换，请重新操作", restore.await().exceptionOrNull()?.message)
                 assertEquals(bootstraps, entry.bootstraps)
                 assertEquals(PhoneCloudSyncState(), entry.service.state.value)
+                // These fixtures exercise B after the user confirms ownership.
+                entry.service.resolveLibraryOwner(merge = true)
                 assertEquals("not_announced", entry.service.syncNow(manual = true).outcome?.errorCode)
                 assertEquals(bootstraps + 1, entry.bootstraps)
             } finally {
                 unlock.complete(Unit)
                 blocker.await()
+            }
+        } } }
+    }
+
+    @Test fun fix4DashboardActionsQueuedBeforeSwitchCannotPublishThePreviousLibrary() = runBlocking {
+        Server().use { server -> Host(server, "dashboard-switch").use { host -> ServiceEntry(host).use { entry ->
+            val articleOwner = entry.session.userId
+            host.note("private library of A")
+            assertEquals(articleOwner, entry.settings.ownerUserId)
+            assertFalse(entry.service.libraryOwnerConflict())
+            entry.service.setSyncPaused(true, expectedUserId = articleOwner)
+
+            Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { dispatcher ->
+                val actions = CoroutineScope(SupervisorJob() + dispatcher)
+                val startActions = CountDownLatch(1)
+                actions.launch { check(startActions.await(10, TimeUnit.SECONDS)) }
+                try {
+                    val container = entry.containerWithCloudQueue(actions)
+                    // Both clicks are pending. Drain resume before retry so the automatic
+                    // single-flight fast path cannot hide either account check.
+                    val retry = actions.async(start = CoroutineStart.LAZY) {
+                        runCatching { entry.service.syncNow(expectedUserId = articleOwner) }
+                    }
+                    container.setCloudSyncPaused(false, expectedUserId = articleOwner)
+                    val queued = actions.coroutineContext[Job]!!.children.filter { it != retry }.toList()
+                    assertEquals(2, queued.size)
+
+                    val nextOwner = entry.switchAccount()
+                    assertTrue(entry.service.hasLocalAccountKey())
+                    assertTrue(entry.service.libraryOwnerConflict())
+                    assertEquals("0", server.account.getString("revision"))
+                    assertEquals(0, entry.bootstraps)
+                    val staleToggle = runCatching {
+                        container.setCloudSyncPaused(true, expectedUserId = articleOwner)
+                    }
+                    assertEquals("账号已切换，请重新操作", staleToggle.exceptionOrNull()?.message)
+                    assertFalse(entry.service.paused.value)
+                    startActions.countDown()
+                    val retryResult = withTimeout(10_000) {
+                        queued.joinAll()
+                        retry.await()
+                    }
+                    val stateAfterClicks = entry.service.state.value
+                    val direct = entry.service.syncNow(manual = true, expectedUserId = nextOwner).outcome
+
+                    assertEquals("账号已切换，请重新操作", retryResult.exceptionOrNull()?.message)
+                    assertEquals("Queued resume must reject A; direct result=${direct?.phase}; publishes=${server.publishes}",
+                        PhoneCloudSyncState(), stateAfterClicks)
+                    assertEquals(CloudSyncPhase.BLOCKED, direct?.phase)
+                    assertEquals("library_owner_conflict", direct?.errorCode)
+                    assertEquals(articleOwner, entry.settings.ownerUserId)
+                    assertEquals("private library of A", host.text())
+                    assertEquals(0, entry.bootstraps)
+                    assertEquals(0, server.http.requestCount)
+                    assertEquals(0, server.publishes)
+                    assertEquals("0", server.account.getString("revision"))
+                } finally {
+                    startActions.countDown()
+                    actions.cancel()
+                }
             }
         } } }
     }

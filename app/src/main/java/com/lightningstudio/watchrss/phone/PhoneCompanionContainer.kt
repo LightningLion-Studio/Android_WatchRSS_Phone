@@ -373,10 +373,10 @@ class PhoneCompanionContainer(context: Context) {
         )
     }
 
-    fun setCloudSyncPaused(paused: Boolean) {
-        cloudSyncService.setSyncPaused(paused)
+    fun setCloudSyncPaused(paused: Boolean, expectedUserId: String) {
+        cloudSyncService.setSyncPaused(paused, expectedUserId = expectedUserId)
         if (!paused && accountRepository.hasUsableSession) {
-            appScope.launch { runCatching { cloudSyncService.syncNow() } }
+            appScope.launch { runCatching { cloudSyncService.syncNow(expectedUserId = expectedUserId) } }
         }
     }
 

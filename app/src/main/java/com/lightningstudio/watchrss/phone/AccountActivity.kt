@@ -68,6 +68,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -2055,7 +2056,13 @@ internal fun AccountScreen(
             }
         }
         val cloudPane: @Composable () -> Unit = {
-            androidx.compose.runtime.key(showCloudInventory) {
+            androidx.compose.runtime.key(showCloudInventory, session?.userId) {
+                val paneAlive = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
+                DisposableEffect(paneAlive) { onDispose { paneAlive.set(false) } }
+                fun acceptsCloudFeedback(owner: String): Boolean =
+                    paneAlive.get() && page == AccountPage.CLOUD_SYNC && !showCloudInventory &&
+                        accountRepository.session.value?.userId == owner
+
                 AccountPageScaffold(
                     title = if (showCloudInventory) "频道云库存" else "云同步",
                     onBack = ::leaveCloudSync,
@@ -2085,11 +2092,12 @@ internal fun AccountScreen(
                             purchaseEnabled = purchaseLauncher?.busy == false,
                             onPurchase = { openCloudMembership(AccountPage.CLOUD_SYNC, authenticated = true) },
                             userId = activeSession.userId,
+                            refreshActive = page == AccountPage.CLOUD_SYNC,
                             busy = busy,
                             runAction = runAction,
                             onBusyChange = { busy = it },
                             onMessage = {
-                                if (accountRepository.session.value?.userId == activeSession.userId) {
+                                if (acceptsCloudFeedback(activeSession.userId)) {
                                     cloudPaneMessage = it
                                     cloudPaneError.value = null
                                     if (it == "加密云备份已启用") {
@@ -2098,7 +2106,7 @@ internal fun AccountScreen(
                                 }
                             },
                             onError = {
-                                if (accountRepository.session.value?.userId == activeSession.userId) {
+                                if (acceptsCloudFeedback(activeSession.userId)) {
                                     cloudPaneError.value = it
                                     cloudPaneMessage = null
                                 }

@@ -23,7 +23,7 @@ class PhoneCloudSyncWorker(
         if (!container.accountRepository.hasUsableSession || !container.appAccessCoordinator.isAuthorized) return Result.success()
         return runCatching {
             val outcome = container.cloudSyncService.syncNow().outcome
-            if (outcome?.phase == CloudSyncPhase.BLOCKED || outcome?.errorCode == "sync_timeout") {
+            if (outcome?.phase == CloudSyncPhase.BLOCKED || outcome?.errorCode in setOf("sync_timeout", "budget_paused")) {
                 if (runAttemptCount < 3) Result.retry() else Result.failure()
             } else {
                 Result.success()

@@ -3,7 +3,10 @@ package com.lightningstudio.watchrss.phone.account
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import com.lightningstudio.watchrss.phone.network.CloudHttpDeadline
+import com.lightningstudio.watchrss.phone.network.executeBufferedCloudResponse
 import com.lightningstudio.watchrss.phone.network.withWatchRssAppVersionHeader
+import kotlinx.coroutines.currentCoroutineContext
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl
@@ -359,7 +362,7 @@ class PhoneAccountClient(
         }
     }
 
-    private fun post(path: String, body: JSONObject, bearerToken: String?): okhttp3.Response {
+    private suspend fun post(path: String, body: JSONObject, bearerToken: String?): okhttp3.Response {
         val request = Request.Builder()
             .url(environment.backendBaseUrl + path)
             .addHeader("apikey", environment.supabaseAnonKey)
@@ -371,7 +374,7 @@ class PhoneAccountClient(
             }
             .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
-        return execute(request)
+        return executeWithCloudDeadline(request)
     }
 
     private suspend fun verifyLoginCode(
@@ -401,7 +404,7 @@ class PhoneAccountClient(
         return execute(request)
     }
 
-    private fun get(path: String, bearerToken: String?): okhttp3.Response {
+    private suspend fun get(path: String, bearerToken: String?): okhttp3.Response {
         val request = Request.Builder()
             .url(environment.backendBaseUrl + path)
             .addHeader("apikey", environment.supabaseAnonKey)
@@ -412,7 +415,7 @@ class PhoneAccountClient(
             }
             .get()
             .build()
-        return execute(request)
+        return executeWithCloudDeadline(request)
     }
 
     private fun patch(
@@ -463,13 +466,22 @@ class PhoneAccountClient(
         return execute(request)
     }
 
-    private fun execute(request: Request): okhttp3.Response {
+    private fun execute(request: Request): okhttp3.Response = execute(request, Call::execute)
+
+    private suspend fun executeWithCloudDeadline(request: Request): okhttp3.Response {
+        val deadline = currentCoroutineContext()[CloudHttpDeadline]
+        return execute(request) { call ->
+            if (deadline != null) call.executeBufferedCloudResponse() else call.execute()
+        }
+    }
+
+    private inline fun execute(request: Request, send: (Call) -> okhttp3.Response): okhttp3.Response {
         val owner = request.header("authorization")?.removePrefix("Bearer ")?.let(authenticatedOwner)
         val versionedRequest = request.newBuilder()
             .withWatchRssAppVersionHeader()
             .build()
         return try {
-            val response = httpClient.newCall(versionedRequest).execute().withAccountResponseStatus()
+            val response = send(httpClient.newCall(versionedRequest)).withAccountResponseStatus()
             try {
                 if (owner != null && response.code in setOf(401, 403)) {
                     onAuthenticatedFailure(owner, PhoneAccountHttpException(response.code, ""))
@@ -589,7 +601,7 @@ class PhoneAccountClient(
         claimAppAccessAtPath(session, idempotencyKey, "/functions/v1/account/app-access/trial")
     }
 
-    private fun claimAppAccessAtPath(
+    private suspend fun claimAppAccessAtPath(
         session: PhoneAccountSession,
         idempotencyKey: String,
         path: String
@@ -799,14 +811,14 @@ class PhoneAccountClient(
         }
     }
 
-    private fun postWithDeviceToken(path: String, body: JSONObject, bearerToken: String, deviceToken: String): okhttp3.Response {
+    private suspend fun postWithDeviceToken(path: String, body: JSONObject, bearerToken: String, deviceToken: String): okhttp3.Response {
         val request = Request.Builder().url(environment.backendBaseUrl + path)
             .addHeader("apikey", environment.supabaseAnonKey)
             .addHeader("content-type", JSON_MEDIA_TYPE.toString())
             .addHeader("authorization", "Bearer $bearerToken")
             .addHeader("x-watchrss-device-authorization", "Bearer $deviceToken")
             .post(body.toString().toRequestBody(JSON_MEDIA_TYPE)).build()
-        return execute(request)
+        return executeWithCloudDeadline(request)
     }
 
     private fun parseAuthorization(json: JSONObject) = AppAuthorization(
@@ -817,7 +829,7 @@ class PhoneAccountClient(
         serverTimeMillis = json.getLong("serverTime")
     )
 
-    private fun possessionProof(
+    private suspend fun possessionProof(
         purpose: String,
         requestHash: String,
         bearerToken: String? = null,

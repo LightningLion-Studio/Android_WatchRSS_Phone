@@ -5,7 +5,11 @@ import com.lightningstudio.watchrss.phone.account.PhoneAccountSession
 import com.lightningstudio.watchrss.phone.data.importer.ImportedRssItem
 import com.lightningstudio.watchrss.phone.data.importer.ImportedRssSource
 import com.lightningstudio.watchrss.phone.network.withWatchRssAppVersionHeader
+import com.lightningstudio.watchrss.phone.network.CloudHttpDeadline
+import com.lightningstudio.watchrss.phone.network.executeBufferedCloudResponse
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -588,12 +592,17 @@ class PhoneCloudClient(
             .build()
         val firstRequest = buildRequest(null)
         val migrationDeadline=kotlinx.coroutines.currentCoroutineContext()[CloudMigrationDeadline]
+        val bootstrapOrRecords = firstRequest.url.encodedPath == "/functions/v1/cloud/bootstrap" ||
+            (firstRequest.method == "GET" && firstRequest.url.encodedPath == "/functions/v1/cloud/records")
+        val cancellableResponse = currentCoroutineContext()[CloudHttpDeadline] != null ||
+            bootstrapOrRecords || firstRequest.url.encodedPath == "/functions/v1/account/entitlement" ||
+            (firstRequest.url.encodedPath == "/functions/v1/cloud/snapshots/heads" &&
+                firstRequest.url.queryParameter("history") == "true")
         // Reserve/complete may verify hundreds of stored immutable blocks.
         val requestHttp = http.newBuilder().followRedirects(false).followSslRedirects(false).apply {
             if(migrationDeadline!=null)callTimeout(migrationDeadline.budget.remainingMillis(),TimeUnit.MILLISECONDS)
             else if(firstRequest.url.encodedPath.startsWith("/functions/v1/cloud/format-migrations"))callTimeout(30_000,TimeUnit.MILLISECONDS)
-            else if (firstRequest.url.encodedPath == "/functions/v1/cloud/bootstrap" ||
-                (firstRequest.method == "GET" && firstRequest.url.encodedPath == "/functions/v1/cloud/records")) {
+            else if (bootstrapOrRecords) {
                 callTimeout(30, TimeUnit.SECONDS)
             }
             if (uploadAttempt != null) {
@@ -616,7 +625,8 @@ class PhoneCloudClient(
                 if (rejectedToken != null && (token.isNullOrBlank() || token == rejectedToken)) {
                     throw CloudDeviceSessionRefreshException()
                 }
-                timedCall(buildRequest(token)).execute()
+                val call = timedCall(buildRequest(token))
+                if (cancellableResponse) call.executeBufferedCloudResponse() else call.execute()
             }
             return deviceSessionRequest?.invoke(session.userId, send) ?: send(deviceAccessToken())
         }
@@ -626,6 +636,7 @@ class PhoneCloudClient(
                 runCatching { JSONObject(response.peekBody(4096).string()).optString("error") }.getOrDefault("")
             )) {
             response.close()
+            currentCoroutineContext().ensureActive()
             if (refreshDeviceSession(rejected, session.userId)) {
                 response = attempt(rejected)
             } else {

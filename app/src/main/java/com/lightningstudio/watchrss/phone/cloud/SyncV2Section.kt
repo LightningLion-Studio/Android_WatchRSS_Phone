@@ -54,7 +54,7 @@ private fun codeOf(error: Throwable): String =
  * disabled and this renders nothing, so the page is unchanged.
  */
 @Composable
-internal fun SyncV2Section(service: PhoneCloudSyncService) {
+internal fun SyncV2Section(service: PhoneCloudSyncService, userId: String) {
     val port by service.syncV2UiPort.collectAsState()
     val live = port ?: return
     val state by live.state.collectAsState()
@@ -93,7 +93,7 @@ internal fun SyncV2Section(service: PhoneCloudSyncService) {
     when (target) {
         SyncV2View.Target.CHOICE -> ChoiceDialog(live, state, onClose = { target = null }, onApplied = {
             target = null
-            launchAction(alive, { service.restoreCurrentLibrary() }) { }
+            launchAction(alive, { service.restoreCurrentLibrary(expectedUserId = userId) }) { }
         })
         SyncV2View.Target.UNOPENABLE -> UnopenableDialog(state) { target = null }
         SyncV2View.Target.RECOVERY -> RecoveryDialog(live, state) { target = null }
@@ -373,7 +373,7 @@ internal fun SyncV2AccountActions(
     onSync: suspend () -> PhoneCloudSyncResult,
     onRestore: suspend () -> PhoneCloudSyncResult,
     onCompleted: (String) -> Unit,
-    onFailure: () -> Unit
+    onFailure: (Exception) -> Unit
 ) {
     var pending by remember { mutableStateOf<SyncV2AccountAction?>(null) }
     Button(onClick = { pending = SyncV2AccountAction.SYNC }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
@@ -396,7 +396,7 @@ internal fun SyncV2AccountActions(
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
-                    onFailure()
+                    onFailure(error)
                 } finally {
                     onBusyChange(false)
                 }

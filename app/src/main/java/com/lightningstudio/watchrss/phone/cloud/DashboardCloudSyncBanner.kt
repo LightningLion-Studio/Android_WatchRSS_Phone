@@ -138,7 +138,7 @@ internal fun cloudDashboardPresentation(loggedIn: Boolean, hasKey: Boolean, paus
     phase in cloudActivePhases -> CloudDashboardPresentation("正在同步", null)
     phase == CloudSyncPhase.WAITING_FOR_WIFI -> CloudDashboardPresentation("等待同步", "连接 Wi-Fi 后继续，正文遵循同步网络设置")
     phase == CloudSyncPhase.COMPLETE -> CloudDashboardPresentation("同步完成", null)
-    phase == CloudSyncPhase.IDLE && syncReason in setOf("pending_choice", "pending_action", "pending_bodies") ->
+    phase == CloudSyncPhase.IDLE && syncReason in setOf("pending_choice", "pending_action", "pending_bodies", "budget_paused") ->
         CloudDashboardPresentation("同步未完成", syncMessage)
     else -> CloudDashboardPresentation("等待同步", "即将检查本机与云端更新")
 }

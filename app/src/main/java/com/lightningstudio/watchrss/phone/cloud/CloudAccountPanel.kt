@@ -27,6 +27,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -37,7 +38,14 @@ import androidx.compose.ui.unit.dp
 import com.lightningstudio.watchrss.phone.CloudMembershipPurchaseButton
 import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
+import com.lightningstudio.watchrss.phone.network.CloudHttpDeadline
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import com.lightningstudio.watchrss.phone.tips.TipIds
 import com.lightningstudio.watchrss.phone.tips.ui.tipAnchor
@@ -54,7 +62,8 @@ fun CloudAccountPanel(
     onOpenInventory: () -> Unit,
     purchaseReturnRevision: Int,
     purchaseEnabled: Boolean,
-    onPurchase: () -> Unit
+    onPurchase: () -> Unit,
+    refreshActive: Boolean = true
 ) {
     val usesSyncV2 = service.usesSyncV2
     val syncState by service.state.collectAsState()
@@ -82,34 +91,47 @@ fun CloudAccountPanel(
     var recordStatus by remember(userId) { mutableStateOf<LegacyCloudRecordStatus?>(null) }
     var recordConsentEpoch by remember(userId) { mutableStateOf<String?>(null) }
 
+    val refreshRequests = rememberCloudPaneRefresh(userId, refreshActive)
+    var refreshError by remember(userId, syncState.lastCompletedAt) { mutableStateOf<String?>(null) }
+
     fun refresh() {
-        runAction {
-            memberLoading = true
-            historyLoading = showHistory
-            try {
-                val member = service.loadMembership()
-                bootstrap = if (member.readable) service.loadBootstrap() else null
-                snapshotHeads = if (!usesSyncV2 && showHistory && member.readable) {
-                    service.listSnapshotHistory()
-                } else {
-                    emptyList()
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                onError(error.message ?: "会员状态读取失败")
-            } finally {
-                memberLoading = false
-                historyLoading = false
+        if (!refreshActive) return
+        memberLoading = true
+        historyLoading = showHistory
+        refreshRequests.replace(load = {
+            val member = service.loadMembership(userId)
+            val loadedBootstrap = if (member.readable) service.loadBootstrap(userId) else null
+            val loadedHistory = if (!usesSyncV2 && showHistory && member.readable) {
+                service.listSnapshotHistory(userId)
+            } else {
+                emptyList()
             }
-        }
+            loadedBootstrap to loadedHistory
+        }, complete = { result ->
+            result.onSuccess { (loadedBootstrap, loadedHistory) ->
+                bootstrap = loadedBootstrap
+                snapshotHeads = loadedHistory
+            }
+            refreshError = result.exceptionOrNull()?.let { it.message ?: "会员状态读取失败" }
+            memberLoading = false
+            historyLoading = false
+        })
     }
 
-    LaunchedEffect(userId, purchaseReturnRevision) { refresh() }
+    fun stopRefresh() {
+        refreshRequests.cancel()
+        refreshError = null
+        memberLoading = false
+        historyLoading = false
+    }
+
+    LaunchedEffect(userId, purchaseReturnRevision, refreshActive) {
+        if (refreshActive) refresh() else stopRefresh()
+    }
     val localCloudKey = service.hasLocalAccountKey()
-    LaunchedEffect(userId, bootstrap, localCloudKey, usesSyncV2) {
+    LaunchedEffect(userId, bootstrap, localCloudKey, usesSyncV2, refreshActive) {
         recordStatus = null
-        if (!usesSyncV2 && bootstrap != null && localCloudKey) {
+        if (refreshActive && !usesSyncV2 && bootstrap != null && localCloudKey) {
             recordStatus = LegacyCloudRecordStatus.LOADING
             recordStatus = readLegacyCloudRecordStatus { service.cloudRecordSyncEnabled(userId) }
         }
@@ -168,7 +190,11 @@ fun CloudAccountPanel(
 
     val member = syncState.member
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SyncV2Section(service)
+        SyncV2Section(service, userId)
+        CloudSyncBlockedNotice(usesSyncV2, syncState)
+        refreshError?.let {
+            Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+        }
         Text("云空间", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         CloudMembershipPurchaseButton(enabled = !busy && purchaseEnabled, onClick = onPurchase)
         val keyWarning by service.keyWarning.collectAsState()
@@ -454,7 +480,7 @@ fun CloudAccountPanel(
                                 }.onSuccess { version ->
                                     recoveryInput = ""
                                     onMessage("账号密钥已轮换到第${version}版，原24词恢复密钥继续有效")
-                                    try { service.syncNow(manual = true) }
+                                    try { service.syncNow(manual = true, expectedUserId = userId) }
                                     catch (_: Exception) { onMessage("密钥已轮换，后续同步暂未完成，请稍后重试同步") }
                                 }.onFailure { onError(it.message ?: "密钥轮换失败") }
                                 onBusyChange(false)
@@ -469,11 +495,19 @@ fun CloudAccountPanel(
                     SyncV2AccountActions(
                         busy = busy,
                         runAction = runAction,
-                        onBusyChange = onBusyChange,
-                        onSync = { service.syncNow(manual = true) },
-                        onRestore = { service.restoreCurrentLibrary() },
+                        onBusyChange = { running ->
+                            if (running) stopRefresh()
+                            onBusyChange(running)
+                        },
+                        onSync = { service.syncNow(manual = true, expectedUserId = userId) },
+                        onRestore = { service.restoreCurrentLibrary(expectedUserId = userId) },
                         onCompleted = onMessage,
-                        onFailure = { onError(service.state.value.message.ifBlank { "云端操作未完成，请稍后重试" }) }
+                        onFailure = { error ->
+                            val current = service.state.value
+                            onError(current.message.takeIf { current.phase == CloudSyncPhase.ERROR ||
+                                current.phase == CloudSyncPhase.NEEDS_RECOVERY }
+                                ?: error.message ?: "云端操作未完成，请稍后重试")
+                        }
                     )
                 } else {
                     Button(
@@ -490,15 +524,17 @@ fun CloudAccountPanel(
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("立即同步") }
                 }
-                Text(
-                    syncState.message.ifBlank { "等待同步" },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (syncState.phase == CloudSyncPhase.ERROR) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    }
-                )
+                if (!usesSyncV2 || syncState.phase != CloudSyncPhase.BLOCKED) {
+                    Text(
+                        syncState.message.ifBlank { "等待同步" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (syncState.phase == CloudSyncPhase.ERROR) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    )
+                }
 
 
                 Row(
@@ -711,11 +747,12 @@ fun CloudAccountPanel(
             confirmButton = {
                 TextButton(onClick = {
                     estimate = null
+                    stopRefresh()
                     runAction {
                         onBusyChange(true)
                         try {
-                            if (service.syncNow(manual = true).completed) {
-                                bootstrap = service.loadBootstrap()
+                            if (service.syncNow(manual = true, expectedUserId = userId).completed) {
+                                bootstrap = service.loadBootstrap(userId)
                                 onMessage("云同步完成")
                             }
                         } catch (error: CancellationException) {
@@ -859,9 +896,13 @@ internal fun RecoveryWordsDisplay(words: List<String>, clipboard: RecoveryWordCl
 
 internal enum class LegacyCloudRecordStatus { LOADING, ENABLED, DISABLED, UNAVAILABLE }
 
-internal suspend fun readLegacyCloudRecordStatus(readEnabled: suspend () -> Boolean): LegacyCloudRecordStatus =
+internal suspend fun readLegacyCloudRecordStatus(
+    timeoutMillis: Long = 45_000L,
+    readEnabled: suspend () -> Boolean
+): LegacyCloudRecordStatus =
     try {
-        when (withTimeoutOrNull(45_000L) { readEnabled() }) {
+        val deadline = CloudHttpDeadline.after(timeoutMillis)
+        when (withTimeoutOrNull(timeoutMillis) { withContext(deadline) { readEnabled() } }) {
             true -> LegacyCloudRecordStatus.ENABLED
             false -> LegacyCloudRecordStatus.DISABLED
             null -> LegacyCloudRecordStatus.UNAVAILABLE
@@ -871,3 +912,46 @@ internal suspend fun readLegacyCloudRecordStatus(readEnabled: suspend () -> Bool
     } catch (_: Exception) {
         LegacyCloudRecordStatus.UNAVAILABLE
     }
+
+@Composable
+internal fun rememberCloudPaneRefresh(userId: String, active: Boolean): CloudPaneRefresh {
+    val scope = rememberCoroutineScope()
+    val refresh = remember(userId, active, scope) { CloudPaneRefresh(scope) }
+    DisposableEffect(refresh) { onDispose { refresh.cancel() } }
+    return refresh
+}
+
+internal class CloudPaneRefresh(private val scope: CoroutineScope) {
+    private var job: Job? = null
+
+    fun <T> replace(load: suspend () -> T, complete: (Result<T>) -> Unit) {
+        cancel()
+        job = scope.launch {
+            val result = try {
+                Result.success(load())
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Result.failure(error)
+            }
+            currentCoroutineContext().ensureActive()
+            complete(result)
+        }
+    }
+
+    fun cancel() {
+        job?.cancel()
+        job = null
+    }
+}
+
+@Composable
+internal fun CloudSyncBlockedNotice(usesSyncV2: Boolean, state: PhoneCloudSyncState) {
+    if (usesSyncV2 && state.phase == CloudSyncPhase.BLOCKED) {
+        Text(
+            state.message.ifBlank { SyncV2View.errorText(state.errorCode ?: "feature_disabled") },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}

@@ -1,6 +1,8 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
 import com.lightningstudio.watchrss.phone.BuildConfig
+import com.lightningstudio.watchrss.phone.network.CloudCallCancellation
+import com.lightningstudio.watchrss.phone.network.limitToDeadline
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -88,40 +90,45 @@ internal class SyncV2CloudClient(
         val request = builder.method(method, body?.toRequestBody((if(raw || method=="PUT")"application/octet-stream" else "application/json").toMediaType())).build()
         val call=http.newCall(request)
         executionDeadline.get()?.let { deadline ->
-            val remaining=deadline-System.nanoTime()
-            if(remaining<=0)SyncV2Codec.fail("budget_paused")
-            call.timeout().timeout(minOf(TimeUnit.SECONDS.toNanos(30),remaining),TimeUnit.NANOSECONDS)
+            val now = System.nanoTime()
+            if (deadline - now <= 0) SyncV2Codec.fail("budget_paused")
+            call.limitToDeadline(minOf(deadline, now + TimeUnit.SECONDS.toNanos(30)))
         }
         calls.add(call)
         try {
-        active()
-        call.execute().use { response ->
-            if (response.code in setOf(401, 403)) onAuthenticationResponse(s.userId, response.code, "")
-            if(response.code in 300..399)SyncV2Codec.fail("isolated_backend_required")
-            val limit = if(raw && response.isSuccessful) 266264 else 1048576
-            val data = response.body?.byteStream()?.use { input ->
-                val out=java.io.ByteArrayOutputStream();val block=ByteArray(8192)
-                while(true) { val n=input.read(block);if(n<0)break;if(out.size()+n>limit)SyncV2Codec.fail("object_too_large");out.write(block,0,n) };out.toByteArray()
-            } ?: SyncV2Codec.fail("invalid_encoding")
-            active() // An auth refresh may keep ownership; account/old epoch changes invalidate this round.
-            if (!response.isSuccessful) {
-                onAuthenticationResponse(s.userId, response.code, String(data, Charsets.UTF_8))
-                val error = SyncV2Wire.parse(data).getJSONObject("error")
-                SyncV2Codec.exact(error,setOf("code","retryable","retryAfterMillis","details"))
-                val code=SyncV2Wire.string(error,"code")
-                if(!Regex("[a-z][a-z0-9_]{0,63}").matches(code) || error.get("retryable") !is Boolean)SyncV2Codec.fail("invalid_schema")
-                val delay=if(error.isNull("retryAfterMillis"))null else SyncV2Wire.uint(error,"retryAfterMillis",60000)
-                throw SyncV2CloudError(code,error.getBoolean("retryable"),delay?:if(bodyChannel && response.code in setOf(429,507))60000L else null,JSONObject(error.getJSONObject("details").toString()))
+            active()
+            return execute(call) { response ->
+                if (response.code in setOf(401, 403)) onAuthenticationResponse(s.userId, response.code, "")
+                if(response.code in 300..399)SyncV2Codec.fail("isolated_backend_required")
+                val limit = if(raw && response.isSuccessful) 266264 else 1048576
+                val data = response.body?.byteStream()?.use { input ->
+                    val out=java.io.ByteArrayOutputStream();val block=ByteArray(8192)
+                    while(true) { val n=input.read(block);if(n<0)break;if(out.size()+n>limit)SyncV2Codec.fail("object_too_large");out.write(block,0,n) };out.toByteArray()
+                } ?: SyncV2Codec.fail("invalid_encoding")
+                active() // An auth refresh may keep ownership; account/old epoch changes invalidate this round.
+                if (!response.isSuccessful) {
+                    onAuthenticationResponse(s.userId, response.code, String(data, Charsets.UTF_8))
+                    val error = SyncV2Wire.parse(data).getJSONObject("error")
+                    SyncV2Codec.exact(error,setOf("code","retryable","retryAfterMillis","details"))
+                    val code=SyncV2Wire.string(error,"code")
+                    if(!Regex("[a-z][a-z0-9_]{0,63}").matches(code) || error.get("retryable") !is Boolean)SyncV2Codec.fail("invalid_schema")
+                    val delay=if(error.isNull("retryAfterMillis"))null else SyncV2Wire.uint(error,"retryAfterMillis",60000)
+                    throw SyncV2CloudError(code,error.getBoolean("retryable"),delay?:if(bodyChannel && response.code in setOf(429,507))60000L else null,JSONObject(error.getJSONObject("details").toString()))
+                }
+                if(raw && !bodyChannel) {
+                    if(response.code != if(headers.containsKey("Range"))206 else 200)SyncV2Codec.fail("invalid_range")
+                    if(response.header("ETag")?.removeSurrounding("\"") != path.removePrefix("objects/"))SyncV2Codec.fail("hash_mismatch")
+                    if(response.header("Content-Length")?.toLongOrNull()!=data.size.toLong())SyncV2Codec.fail("invalid_encoding")
+                }
+                data to response.headers.toMultimap().mapValues { it.value.singleOrNull() ?: "" }
             }
-            if(raw && !bodyChannel) {
-                if(response.code != if(headers.containsKey("Range"))206 else 200)SyncV2Codec.fail("invalid_range")
-                if(response.header("ETag")?.removeSurrounding("\"") != path.removePrefix("objects/"))SyncV2Codec.fail("hash_mismatch")
-                if(response.header("Content-Length")?.toLongOrNull()!=data.size.toLong())SyncV2Codec.fail("invalid_encoding")
-            }
-            return data to response.headers.toMultimap().mapValues { it.value.singleOrNull() ?: "" }
-        }
         } finally {calls.remove(call)}
     }
+    private fun <T> execute(call: okhttp3.Call, read: (okhttp3.Response) -> T): T {
+        val round = roundCancellation.get()
+        return if (round != null) round.execute(call, read) else call.execute().use(read)
+    }
+
     /** Same authenticated origin, ownership fence, cancellation and deadline; separate byte namespace. */
     internal fun bodyBytes(method:String,path:String,body:ByteArray?=null,headers:Map<String,String> = emptyMap(),query:Map<String,String> = emptyMap(),raw:Boolean=false)=
         bytes(method,path,body,headers,query,raw,bodyChannel=true)
@@ -299,6 +306,18 @@ internal class SyncV2CloudClient(
         return raw
     }
     companion object {
+        // The synchronous protocol stays on one IO thread for the duration of the round.
+        private val roundCancellation = ThreadLocal<CloudCallCancellation>()
+
+        suspend fun <T> runCancellable(work: () -> T): T = CloudCallCancellation.run { cancellation ->
+            roundCancellation.set(cancellation)
+            try {
+                work().also { cancellation.checkActive() }
+            } finally {
+                roundCancellation.remove()
+            }
+        }
+
         fun window(v:JSONObject) {
             SyncV2Codec.unhex(SyncV2Wire.string(v,"windowId"),16);SyncV2Wire.uint(v,"expiresAtMillis")
             for(k in listOf("serverRevision","historyFloorRevision"))SyncV2Codec.d64(SyncV2Wire.string(v,k))

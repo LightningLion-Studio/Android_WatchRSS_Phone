@@ -4,6 +4,8 @@ import android.content.Context
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
+import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -13,6 +15,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONObject
 import java.io.File
+import java.io.InterruptedIOException
 import java.util.concurrent.atomic.AtomicLong
 
 /** Host account values come from the currently authenticated v1 client on every request. */
@@ -66,45 +69,64 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             live.projection.receiveLegacy(SyncV2Projection.LegacyInput(peer,version,cursor,JSONObject().put("legacy-frame",payload.toString())),null,false)
         }}.onFailure{_uiPort.value?.failed(it)}
     }
-    suspend fun sync(syncV2:JSONObject?,manual:Boolean=false,restoreCurrent:Boolean=false):Result=withContext(Dispatchers.IO) {
+    suspend fun sync(
+        syncV2: JSONObject?,
+        manual: Boolean = false,
+        restoreCurrent: Boolean = false,
+        expectedUserId: String? = null
+    ): Result = withContext(Dispatchers.IO) {
         if(!enabled() || syncV2==null) {
             release()
             return@withContext Result(false,if(!enabled())"feature_disabled"else"not_announced")
         }
-        announcement=JSONObject(syncV2.toString())
-        try { mutex.withLock {
-            val account=current()?:SyncV2Codec.fail("authentication_required")
-            val old=runtime
-            if(old!=null && old.account.owner()!=account.owner()) {
-                release();announcement=JSONObject(syncV2.toString())
+        try {
+            mutex.withLock {
+                SyncV2CloudClient.runCancellable {
+                    syncLocked(syncV2, manual, restoreCurrent, expectedUserId)
+                }
             }
-            if(runtime?.serviceAnnouncement?.let{it!=SyncV2Codec.canonical(syncV2)}==true) {
-                val error=SyncV2CloudError("service_key_changed");_uiPort.value?.failed(error);throw error
-            }
-            val live=runtime?:open(account,syncV2,allowCreate=!restoreCurrent)
-            live.life.check()
-            live.life.guard {live.keys.refreshAuthenticated(keys,account.userId){verifyKeys(account,it)}}
-            try {
-                live.round(manual, restoreCurrent)
-                _uiPort.value?.refresh()
-                val state = live.projection.state().body
-                Result(
-                    enabled = true,
-                    awaitingChoice = !state.isNull("pendingChoice"),
-                    pendingAction = !state.isNull("pendingAccountAction") ||
-                        !state.isNull("pendingAppliedAck") ||
-                        (restoreCurrent && !state.isNull("pendingPublish")),
-                    pendingBodies = live.bodyResult.pending > 0 || live.bodyResult.errors.isNotEmpty()
-                )
-            } catch(e:Throwable) {
-                _uiPort.value?.failed(e)
-                throw e
-            }
-        }} catch(error:SyncV2CloudError) {
+        } catch(error:SyncV2CloudError) {
             // A closed v2 gate pauses this round without entering the retired legacy lane.
             if(error.code!="feature_disabled")throw error
             _uiPort.value?.disabled()
             Result(false,"feature_disabled")
+        }
+    }
+
+    private fun syncLocked(
+        syncV2: JSONObject, manual: Boolean, restoreCurrent: Boolean, expectedUserId: String?
+    ): Result {
+        val account=current()?:SyncV2Codec.fail("authentication_required")
+        if (expectedUserId != null && account.userId != expectedUserId) {
+            SyncV2Codec.fail("authentication_required")
+        }
+        val old=runtime
+        if(old!=null && old.account.owner()!=account.owner()) {
+            release()
+        }
+        announcement = JSONObject(syncV2.toString())
+        if(runtime?.serviceAnnouncement?.let{it!=SyncV2Codec.canonical(syncV2)}==true) {
+            val error=SyncV2CloudError("service_key_changed");_uiPort.value?.failed(error);throw error
+        }
+        val live=runtime?:open(account,syncV2,allowCreate=!restoreCurrent)
+        live.life.check()
+        live.life.guard {live.keys.refreshAuthenticated(keys,account.userId){verifyKeys(account,it)}}
+        return try {
+            live.round(manual, restoreCurrent)
+            _uiPort.value?.refresh()
+            val state = live.projection.state().body
+            Result(
+                enabled = true,
+                awaitingChoice = !state.isNull("pendingChoice"),
+                pendingAction = !state.isNull("pendingAccountAction") ||
+                    !state.isNull("pendingAppliedAck") ||
+                    (restoreCurrent && !state.isNull("pendingPublish")),
+                pendingBodies = live.bodyResult.pending > 0 || live.bodyResult.errors.isNotEmpty() ||
+                    live.hasMissingImportedArticleBody()
+            )
+        } catch(e:Throwable) {
+            if (e !is CancellationException) _uiPort.value?.failed(e)
+            throw e
         }
     }
     private fun open(account:Account,syncV2:JSONObject,allowCreate:Boolean):Runtime {
@@ -220,7 +242,12 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             val live=runtime?:SyncV2Codec.fail("authentication_required")
             if(_uiPort.value!==port)SyncV2Codec.fail("authentication_required")
             live.life.check()
-            try {run(live).also{port.refresh()}}catch(e:Throwable){port.failed(e);throw e}
+            try {
+                SyncV2CloudClient.runCancellable { run(live).also { port.refresh() } }
+            } catch (error: Throwable) {
+                if (error !is CancellationException) port.failed(error)
+                throw error
+            }
         }
     }
     internal class Runtime(val account:Account,val life:SyncV2Lifetime,val keys:SyncV2ContentKeys,val identity:SyncV2Identity,
@@ -236,10 +263,45 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 b.optString("deviceId")==id && b.optString("publicKey")==SyncV2Codec.b64(SyncV2Codec.unhex(signer.publicHex,65))
             }}
         }
+        // Article recipes can be published, but the phone has no article recipe receiver yet.
+        fun hasMissingImportedArticleBody(): Boolean = life.guard {
+            val db = projection.accountDatabase
+            val missing = db.controlQuery(
+                """SELECT articleId, url FROM phone_articles WHERE deleted=0 AND independentSaved=1
+                    AND contentText='' AND COALESCE(contentHtml,'')=''"""
+            ).use { rows ->
+                buildList {
+                    while (rows.moveToNext()) {
+                        if (ImportedContentIds.isImportedContentUrl(rows.getString(1))) add(rows.getString(0))
+                    }
+                }
+            }
+            missing.any { id ->
+                db.controlQuery("SELECT 1 FROM syncv2_cloud_rows WHERE scope=? AND entity_key=?",
+                    arrayOf(projection.scope, identity.entity("article", id))).use { it.moveToFirst() }
+            }
+        }
+
         fun round(manual:Boolean=false,restoreCurrent:Boolean=false) {
             life.check()
             val started=android.os.SystemClock.elapsedRealtime()
-            fun remaining():Long=(290000L-(android.os.SystemClock.elapsedRealtime()-started)).also{if(it<=0)SyncV2Codec.fail("budget_paused")}
+            fun remainingMillis() = 290_000L - (android.os.SystemClock.elapsedRealtime() - started)
+            fun remaining(): Long = remainingMillis().also {
+                if (it <= 0) throw SyncV2CloudError("sync_timeout")
+            }
+            try {
+                roundWithinBudget(manual, restoreCurrent, ::remaining)
+                remaining()
+            } catch (error: Exception) {
+                if (error !is CancellationException && remainingMillis() <= 0 &&
+                    (error.message == "budget_paused" || error is InterruptedIOException)) {
+                    throw SyncV2CloudError("sync_timeout")
+                }
+                throw error
+            }
+        }
+
+        private fun roundWithinBudget(manual: Boolean, restoreCurrent: Boolean, remaining: () -> Long) {
             client.withinBudget(remaining()) {
             if(vault.signerOrNull()==null) {
                 actions.refresh(budgetMillis=remaining())

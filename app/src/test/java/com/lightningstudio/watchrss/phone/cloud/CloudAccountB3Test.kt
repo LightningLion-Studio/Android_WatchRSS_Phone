@@ -3,16 +3,23 @@ package com.lightningstudio.watchrss.phone.cloud
 import android.app.Application
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.Text
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.lightningstudio.watchrss.phone.rememberCloudPaneError
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -89,4 +96,103 @@ class CloudAccountB3Test {
         compose.runOnIdle { onError("本轮错误") }
         compose.onNodeWithText("本轮错误").assertExists()
     }
+    @Test
+    fun fix1OnlyLatestSameAccountRefreshCanUpdateFeedback() {
+        val first = CompletableDeferred<Unit>()
+        val second = CompletableDeferred<Unit>()
+        val firstStarted = AtomicBoolean()
+        val secondStarted = AtomicBoolean()
+        val firstFinished = AtomicBoolean()
+        val secondFinished = AtomicBoolean()
+        lateinit var refresh: CloudPaneRefresh
+        var feedback by mutableStateOf("载入中")
+        compose.setContent {
+            refresh = rememberCloudPaneRefresh("account", true)
+            Text(feedback)
+        }
+        fun show(result: Result<String>) {
+            feedback = result.getOrElse { it.message.orEmpty() }
+        }
+        compose.runOnIdle {
+            refresh.replace(load = {
+                withContext(NonCancellable) {
+                    firstStarted.set(true)
+                    first.await()
+                    firstFinished.set(true)
+                    throw IllegalStateException("过期错误")
+                }
+            }, complete = ::show)
+        }
+        compose.waitUntil { firstStarted.get() }
+        compose.runOnIdle { refresh.replace(load = { "新刷新成功" }, complete = ::show) }
+        compose.onNodeWithText("新刷新成功").assertExists()
+        first.complete(Unit)
+        compose.waitUntil { firstFinished.get() }
+        compose.onNodeWithText("新刷新成功").assertExists()
+        compose.onNodeWithText("过期错误").assertDoesNotExist()
+
+        compose.runOnIdle {
+            refresh.replace(load = {
+                withContext(NonCancellable) {
+                    secondStarted.set(true)
+                    second.await()
+                    secondFinished.set(true)
+                    "过期成功"
+                }
+            }, complete = ::show)
+        }
+        compose.waitUntil { secondStarted.get() }
+        compose.runOnIdle { refresh.replace(load = { error("新刷新错误") }, complete = ::show) }
+        compose.onNodeWithText("新刷新错误").assertExists()
+        second.complete(Unit)
+        compose.waitUntil { secondFinished.get() }
+        compose.onNodeWithText("新刷新错误").assertExists()
+        compose.onNodeWithText("过期成功").assertDoesNotExist()
+    }
+
+    @Test
+    fun fix1OpeningInventoryCancelsDetailRefresh() {
+        var inventory by mutableStateOf(false)
+        val started = AtomicBoolean()
+        val cancelled = AtomicBoolean()
+        compose.setContent {
+            if (inventory) {
+                Text("频道云库存")
+            } else {
+                val refresh = rememberCloudPaneRefresh("account", true)
+                LaunchedEffect(refresh) {
+                    refresh.replace(load = {
+                        started.set(true)
+                        try {
+                            awaitCancellation()
+                        } finally {
+                            cancelled.set(true)
+                        }
+                    }, complete = { error("The detail page is gone") })
+                }
+            }
+        }
+        compose.waitUntil { started.get() }
+        compose.runOnIdle { inventory = true }
+        compose.onNodeWithText("频道云库存").assertExists()
+        compose.waitUntil { cancelled.get() }
+    }
+
+    @Test
+    fun fix1BlockedReasonsRenderWithoutMembershipOrLocalKey() {
+        var state by mutableStateOf(PhoneCloudSyncState(
+            CloudSyncPhase.BLOCKED, errorCode = "not_announced"
+        ))
+        compose.setContent {
+            WatchRssPhoneTheme { CloudSyncBlockedNotice(true, state) }
+        }
+        compose.onNodeWithText(SyncV2View.errorText("not_announced")).assertExists()
+        compose.runOnIdle {
+            state = state.copy(errorCode = "feature_disabled",
+                member = CloudMemberState(plan = "free", active = false, readable = false, writable = false, quotaBytes = 0,
+                    usedBytes = 0, reservedBytes = 0, retentionDays = null, readOnlyAt = null, deleteAfter = null))
+        }
+        compose.onNodeWithText(SyncV2View.errorText("feature_disabled")).assertExists()
+    }
+
 }

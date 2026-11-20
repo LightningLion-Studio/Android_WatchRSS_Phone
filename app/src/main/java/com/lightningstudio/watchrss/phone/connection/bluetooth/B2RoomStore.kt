@@ -71,6 +71,12 @@ internal class B2RoomStore(private val db: PhoneCompanionDatabase) : B2Persisten
     override suspend fun all(): List<B2Persistence.Record> = sql.query("SELECT scope,namespace,id,body FROM library_binary_records").use { c -> buildList { while (c.moveToNext()) add(B2Persistence.Record(c.getString(0), c.getString(1), c.getString(2), c.getString(3))) } }
     override suspend fun jobs() = records("job")
     override suspend fun requestOwners() = records("nativeOwner")
+    override suspend fun applyRejections(): List<B2Persistence.Record> =
+        sql.query("SELECT scope,namespace,id,body FROM library_binary_records WHERE namespace GLOB ?",
+            arrayOf(B2Retention.REJECTION_PREFIX + "*")).use { c ->
+            buildList { while (c.moveToNext()) add(B2Persistence.Record(c.getString(0), c.getString(1), c.getString(2), c.getString(3))) }
+        }
+
 
     private fun records(namespace: String): List<B2Persistence.Record> =
         sql.query("SELECT scope,id,body FROM library_binary_records WHERE namespace=?", arrayOf(namespace)).use { c ->

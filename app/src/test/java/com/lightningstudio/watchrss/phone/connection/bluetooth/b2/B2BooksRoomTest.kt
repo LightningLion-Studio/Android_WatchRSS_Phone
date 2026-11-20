@@ -1,19 +1,26 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 
 import androidx.room.Room
+import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2BookBusiness
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2KindRoute
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2RoomStore
 import com.lightningstudio.watchrss.phone.connection.bluetooth.binaryDescriptor
 import com.lightningstudio.watchrss.phone.connection.bluetooth.binaryFileHashes
+import com.lightningstudio.watchrss.phone.data.book.BookChapterEntity
+import com.lightningstudio.watchrss.phone.data.book.BookEntity
 import com.lightningstudio.watchrss.phone.data.book.BookSync
 import com.lightningstudio.watchrss.phone.data.book.ImportedBookStore
+import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
+import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
+import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
+import org.junit.Assume.assumeFalse
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -24,6 +31,62 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], manifest = Config.NONE, application = android.app.Application::class)
 class B2BooksRoomTest {
+    @Test fun v1CaptureAcceptsLegacyLifecycleFieldsWithB2Disabled() = runBlocking<Unit> {
+        assumeFalse(BuildConfig.B2_ENABLED)
+        val root = java.nio.file.Files.createTempDirectory("v1-book-capture").toFile()
+        val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()
+        try {
+            val content = FileArticleContentStore(File(root, "content"))
+            val books = ImportedBookStore(db, File(root, "books"), content, "phone")
+            for (complete in listOf(false, true)) {
+                val fingerprint = (if (complete) "d" else "e").repeat(64)
+                val id = BookSync.id(fingerprint)
+                val articleId = BookSync.articleId(id, 1)
+                val source = "https://watchrss.local/import-txt-novel/$id"
+                val lifecycle = obj("generation" to 1)
+                if (complete) lifecycle.put("operationId", "b".repeat(32)).put("startedAt", 1)
+                val state = obj("bookId" to id, "fingerprint" to fingerprint, "title" to "Review fixture",
+                    "sourceUrl" to source, "sourceDeviceId" to "fixture-watch", "chapterCount" to 2,
+                    "deletedChapters" to JSONArray(), "deleted" to false, "deletionClock" to 0, "deletedAt" to 0,
+                    "updatedAt" to 1, "lifecycle" to lifecycle)
+                db.bookDao().put(BookEntity(id, BookSync.canonical(state)))
+                db.bookDao().putChapters(listOf(BookChapterEntity(id, 1, articleId)))
+                val text = "甲".repeat(50_001)
+                db.phoneArticleDao().upsert(PhoneArticleEntity(
+                    articleId = articleId, sourceDeviceId = "fixture-watch", url = ImportedContentIds.txtArticleUrl(id),
+                    title = "chapter", siteName = "", excerpt = "", contentHtml = null, contentText = text,
+                    imageUrl = null, contentHash = "", importedAt = 1, updatedAt = 1,
+                    independentSaved = true, independentChangedAt = 1, independentSortOrder = 1,
+                    rssSourceUrl = source, rssSourceTitle = null, favoriteSaved = false, favoriteChangedAt = 0,
+                    favoriteSortOrder = 0, watchLaterSaved = false, watchLaterChangedAt = 0, watchLaterSortOrder = 0,
+                    deleted = false, deletedAt = 0
+                ))
+                db.phoneRssSourceDao().upsert(PhoneRssSourceEntity(
+                    source, "fixture-watch", "Review fixture", "", null, null, 1, 2, 0, false, true, 2
+                ))
+
+                books.ensureRegistered()
+
+                val captured = books.binaryState(id)!!
+                assertTrue(captured.getBoolean("deleted"))
+                assertEquals(2, captured.getInt("deletionClock"))
+                assertEquals(lifecycle.toString(), captured.getJSONObject("lifecycle").toString())
+                val chapter = db.phoneArticleDao().getById(articleId)!!
+                assertTrue(chapter.deleted)
+                assertFalse(chapter.independentSaved)
+                // The legacy projection externalizes inline text when it updates the row.
+                assertTrue(content.isMarker(chapter.contentText))
+                assertEquals(text, content.loadText(chapter.contentText))
+            }
+            assertFalse(db.openHelper.readableDatabase.query(
+                "SELECT 1 FROM sqlite_master WHERE name='library_binary_records'"
+            ).use { it.moveToFirst() })
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
     @Test fun bookPublicationAndReceiptRollbackTogether() = runBlocking<Unit> {
         val root = java.nio.file.Files.createTempDirectory("book-b2-room").toFile()
         val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()

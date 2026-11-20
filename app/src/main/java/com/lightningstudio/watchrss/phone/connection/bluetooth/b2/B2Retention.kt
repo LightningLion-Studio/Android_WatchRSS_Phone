@@ -52,6 +52,25 @@ internal class B2Retention(
                 store.delete(owner, "nativeOwner", id)
             }
         }
+        val legacyDeadlines = mutableMapOf<String, Long>()
+        for ((owner, namespace, id, body) in store.applyRejections()) {
+            val row = B2Json.parse(body, false)
+            val elapsed = time(owner)
+            val expires = if (row.has("expiresAtMillis")) row.n("expiresAtMillis") else
+                legacyDeadlines[owner] ?: legacyRejectionExpiry(owner, elapsed).also {
+                    legacyDeadlines[owner] = it
+                }
+            if (expires < elapsed) {
+                check()
+                store.delete(owner, namespace, id)
+            }
+        }
+        for ((owner, expires) in legacyDeadlines) {
+            if (expires < time(owner)) {
+                check()
+                store.delete(owner, "gc", "legacyApplyRejections")
+            }
+        }
         val migration = store.get(GLOBAL, "gc", "legacyBindings")
         if (migration != null || files.hasLegacyRequests()) {
             val elapsed = time(GLOBAL)
@@ -67,6 +86,15 @@ internal class B2Retention(
                 }
             }
         }
+    }
+
+    private suspend fun legacyRejectionExpiry(owner: String, elapsed: Long): Long {
+        store.get(owner, "gc", "legacyApplyRejections")?.let { return it.n("expiresAtMillis") }
+        // Old rows have no trustworthy creation time. Give them one recovery interval.
+        check()
+        val expires = elapsed + B2Wire.RETENTION
+        store.put(owner, "gc", "legacyApplyRejections", obj("expiresAtMillis" to expires))
+        return expires
     }
 
     private suspend fun collectJob(owner: String, row: JSONObject) {
@@ -104,9 +132,10 @@ internal class B2Retention(
         }
     }
 
-    private companion object {
-        const val GLOBAL = "b2-binding-journal"
-        val JOB_RECORDS = listOf("object", "request", "page", "chunk", "bookAssembly", "bookStateWitness", "bookReadingIndices")
-        val processGeneration: String = java.util.UUID.randomUUID().toString()
+    companion object {
+        const val REJECTION_PREFIX = "applyRejection:"
+        private const val GLOBAL = "b2-binding-journal"
+        private val JOB_RECORDS = listOf("object", "request", "page", "chunk", "bookAssembly", "bookStateWitness", "bookReadingIndices")
+        private val processGeneration: String = java.util.UUID.randomUUID().toString()
     }
 }

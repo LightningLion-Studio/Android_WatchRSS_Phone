@@ -53,6 +53,31 @@ class SameAccountReauthenticationTest {
         repo.onReleaseCloudAuthorization={session->assertFalse(session.authenticationPaused);releases++}
         repo.onClearCloudState={session->clears++;keys.clearAccountKeys(session.userId);syncState.edit().clear().commit()}
     }
+    @Test fun binaryFenceClosesOnPauseAndStaysRevokedAfterSameOwnerLogin() = runBlocking<Unit> {
+        seed()
+        val originalFence = repo.b2AccountFence
+        var closes = 0
+        originalFence.onRevoke { closes++ }.use {
+            store.save(old.copy(phoneMasked = "updated"))
+            assertSame(originalFence, repo.b2AccountFence)
+            assertEquals(0, closes)
+            repo.beginSameAccountReauthentication()
+            assertEquals(1, closes)
+            repo.saveCompletedLogin(LoginProgress("login", 1, listOf("sms"), true, old))
+            assertNotSame(originalFence, repo.b2AccountFence)
+            repo.b2AccountFence.check()
+            assertEquals("AUTH_REVOKED",
+                assertThrows(com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception::class.java) {
+                    originalFence.check()
+                }.code)
+        }
+        val replacement = repo.b2AccountFence
+        replacement.onRevoke { closes++ }.use {
+            repo.recordAuthenticationResponse("owner", 401, """{"error":"invalid_token"}""")
+            assertEquals(2, closes)
+        }
+    }
+
     @Test fun sameAccountReauthenticationPreservesRealKeyStoreAndSyncStateAcrossReopen()=runBlocking<Unit>{
         seed();val before=syncState.all.toMap()
         repo.beginSameAccountReauthentication()

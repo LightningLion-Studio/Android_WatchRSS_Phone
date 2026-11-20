@@ -31,13 +31,33 @@ class EncryptedAccountSessionStore(
     private val _reauthenticationOwner = MutableStateFlow<String?>(null)
     val reauthenticationOwner: StateFlow<String?> = _reauthenticationOwner
 
+    private val b2AuthorizationLock = Any()
+    @Volatile internal var b2AccountFence = B2AccountFence()
+        private set
+
+    private fun publishSession(next: PhoneAccountSession?): Unit = synchronized(b2AuthorizationLock) {
+        val previous = _session.value
+        val changed = previous?.userId != next?.userId || previous?.accessToken != next?.accessToken ||
+            previous?.authenticationPaused != next?.authenticationPaused || previous?.expiresAtMillis != next?.expiresAtMillis
+        if (changed) b2AccountFence.revoke()
+        _session.value = next
+        if (changed) b2AccountFence = B2AccountFence()
+    }
+
+    internal fun revokeB2Authorization(owner: String? = null): Unit = synchronized(b2AuthorizationLock) {
+        if (owner == null || _session.value?.userId == owner) {
+            b2AccountFence.revoke()
+            b2AccountFence = B2AccountFence()
+        }
+    }
+
     suspend fun beginSameAccountReauthentication() = withContext(Dispatchers.IO) {
         withPrefs { prefs ->
             val current = _session.value ?: return@withPrefs
             // Pause is separate from the server's expiry; logout still revokes a server-valid token.
             check(prefs.edit().putString("reauthentication_owner", current.userId).commit())
             _reauthenticationOwner.value = current.userId
-            _session.value = current.copy(authenticationPaused = true)
+            publishSession(current.copy(authenticationPaused = true))
         }
     }
 
@@ -45,7 +65,7 @@ class EncryptedAccountSessionStore(
         withPrefs {
             check(it.edit().remove("reauthentication_owner").commit())
             _reauthenticationOwner.value = null
-            _session.value = _session.value?.copy(authenticationPaused = false)
+            publishSession(_session.value?.copy(authenticationPaused = false))
         }
     }
 
@@ -55,21 +75,21 @@ class EncryptedAccountSessionStore(
             prefs.getString(KEY_SESSION, null)
                 ?.let(::decodeSession)
                 ?.copy(authenticationPaused = _reauthenticationOwner.value != null)
-                .also { _session.value = it }
+                .also(::publishSession)
         }
     }
 
     suspend fun save(session: PhoneAccountSession) = withContext(Dispatchers.IO) {
         withPrefs { prefs ->
             prefs.edit().putString(KEY_SESSION, encodeSession(session)).apply()
-            _session.value = session.copy(authenticationPaused = _reauthenticationOwner.value != null)
+            publishSession(session.copy(authenticationPaused = _reauthenticationOwner.value != null))
         }
     }
 
     suspend fun clear() = withContext(Dispatchers.IO) {
         withPrefs { prefs ->
             prefs.edit().apply {remove(KEY_SESSION);remove("reauthentication_owner");prefs.all.keys.filter{it.startsWith("ble_grant:")}.forEach{remove(it)}}.apply()
-            _session.value = null
+            publishSession(null)
             _reauthenticationOwner.value = null
         }
     }
@@ -142,19 +162,23 @@ class EncryptedAccountSessionStore(
         it.getBoolean("ble_auth_rejected:$scope", false)
     }
 
-    internal fun rejectOfflineAuthorization(scope: String, owner: String, origin: String) = withPrefs { prefs ->
-        val edit = prefs.edit().putBoolean("ble_auth_rejected:$scope", true)
-            .putLong("ble_auth_version:$scope", prefs.getLong("ble_auth_version:$scope", 0L) + 1)
-        for ((key, raw) in prefs.all) {
-            if (!key.startsWith("ble_grant:") || raw !is String) continue
-            val account = runCatching { JSONObject(raw).optJSONObject("account") }.getOrNull() ?: continue
-            if (account.optString("userId") == owner && account.optString("backendBaseUrl") == origin) {
-                val grantKey = key.removePrefix("ble_grant:")
-                edit.remove(key).remove("$key:peer")
-                    .putLong("ble_grant_version:$grantKey", grantVersion(prefs, grantKey) + 1)
+    internal fun rejectOfflineAuthorization(scope: String, owner: String, origin: String) {
+        // Closing the dedicated socket must not wait for preference I/O.
+        revokeB2Authorization(owner)
+        withPrefs { prefs ->
+            val edit = prefs.edit().putBoolean("ble_auth_rejected:$scope", true)
+                .putLong("ble_auth_version:$scope", prefs.getLong("ble_auth_version:$scope", 0L) + 1)
+            for ((key, raw) in prefs.all) {
+                if (!key.startsWith("ble_grant:") || raw !is String) continue
+                val account = runCatching { JSONObject(raw).optJSONObject("account") }.getOrNull() ?: continue
+                if (account.optString("userId") == owner && account.optString("backendBaseUrl") == origin) {
+                    val grantKey = key.removePrefix("ble_grant:")
+                    edit.remove(key).remove("$key:peer")
+                        .putLong("ble_grant_version:$grantKey", grantVersion(prefs, grantKey) + 1)
+                }
             }
+            check(edit.commit()) { "离线授权失效状态保存失败" }
         }
-        check(edit.commit()) { "离线授权失效状态保存失败" }
     }
 
     internal fun confirmOnlineAuthorization(scope: String, version: Long) = withPrefs { prefs ->
@@ -228,6 +252,7 @@ class EncryptedAccountSessionStore(
     }
 
     private fun resetSecureStorageLocked() {
+        revokeB2Authorization()
         prefsRef = null
         runCatching { appContext.deleteSharedPreferences(prefsName) }
         runCatching {

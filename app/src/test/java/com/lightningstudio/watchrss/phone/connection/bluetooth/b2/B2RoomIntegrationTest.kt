@@ -22,6 +22,46 @@ import java.io.EOFException
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], manifest = Config.NONE, application = android.app.Application::class)
 class B2RoomIntegrationTest {
+    @Test fun rejectionRetentionReclaimsExpiredRowsAndKeepsLegacyRowsForOneWindow() = runBlocking<Unit> {
+        val root = java.nio.file.Files.createTempDirectory("b2-apply-rejection-gc").toFile()
+        val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()
+        try {
+            val store = B2RoomStore(db)
+            val peer = "applyRejection:peer"
+            var elapsed = 1L
+            val retention = B2Retention(store, B2Files(root), "owner", { elapsed }, "boot") {}
+            store.exclusive {
+                retention.clock()
+                retention.clock("other-owner")
+                store.put("owner", peer, "expired", obj("expiresAtMillis" to 1L))
+                store.put("owner", peer, "live", obj("expiresAtMillis" to B2Wire.RETENTION + 2L))
+                store.put("other-owner", peer, "own-clock", obj("expiresAtMillis" to 2L))
+                store.put("other-owner", peer, "legacy", obj("code" to "APPLY_REJECTED"))
+                store.put("owner", "otherNamespace", "expired", obj("expiresAtMillis" to 1L))
+
+                elapsed += 2
+                val now = retention.clock()
+                retention.collect(now)
+                assertNull(store.get("owner", peer, "expired"))
+                assertNotNull(store.get("owner", peer, "live"))
+                assertNotNull(store.get("other-owner", peer, "own-clock"))
+                assertNotNull(store.get("other-owner", peer, "legacy"))
+                assertNotNull(store.get("owner", "otherNamespace", "expired"))
+
+                elapsed += B2Wire.RETENTION
+                retention.collect(retention.clock())
+                assertNotNull(store.get("other-owner", peer, "legacy"))
+                elapsed++
+                retention.collect(retention.clock())
+                assertTrue(store.applyRejections().isEmpty())
+                assertNotNull(store.get("owner", "otherNamespace", "expired"))
+            }
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
     @Test fun dormantStoreCreatesNoTablesAndEnabledLedgerRollsBackAtomically() = runBlocking {
         val context = RuntimeEnvironment.getApplication() as Context
         val db = Room.inMemoryDatabaseBuilder(context, PhoneCompanionDatabase::class.java).allowMainThreadQueries().build()

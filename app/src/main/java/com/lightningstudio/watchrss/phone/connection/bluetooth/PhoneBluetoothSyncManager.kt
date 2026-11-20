@@ -23,6 +23,7 @@ import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundPreparation
 import com.lightningstudio.watchrss.phone.data.reader.WatchBackgroundTranscoder
 import android.os.SystemClock
 import com.lightningstudio.watchrss.phone.BuildConfig
+import com.lightningstudio.watchrss.phone.account.B2AccountFence
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Routing
 import kotlinx.coroutines.CancellationException
@@ -139,6 +140,7 @@ class PhoneBluetoothSyncManager(
     private val b2AccountScope: () -> String = { "" }
 ) {
     private val syncDiagnostics=com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnostics.open(context.applicationContext)
+    internal var b2AccountFence: () -> B2AccountFence? = { null }
     /** P1 optional local projection copy; null leaves the legacy path byte-for-byte unchanged. */
     internal var recordLegacyProjection:((peer:String,version:Int,cursor:String,payload:JSONObject)->Unit)?=null
     private val appContext = context.applicationContext
@@ -1463,10 +1465,11 @@ class PhoneBluetoothSyncManager(
         }
     }
 
-    private fun binaryAuthorization(): Pair<String, () -> Unit> {
+    private fun binaryAuthorization(fence: B2AccountFence?): Pair<String, () -> Unit> {
         val owner = currentPhoneUserId() ?: throw B2Exception("ACCOUNT_REQUIRED")
         val scope = b2AccountScope().takeIf { it.isNotBlank() } ?: throw B2Exception("ACCOUNT_REQUIRED")
         return scope to {
+            fence?.check()
             if (currentPhoneUserId() != owner || b2AccountScope() != scope || !canSyncAccount()) {
                 throw B2Exception("AUTH_REVOKED")
             }
@@ -1509,7 +1512,9 @@ class PhoneBluetoothSyncManager(
         route: B2KindRoute,
         progress: (String) -> Unit
     ): B2KindSync {
-        val (scope, authorize) = binaryAuthorization()
+        val fence = b2AccountFence()
+        val (scope, authorize) = binaryAuthorization(fence)
+        authorize()
         val assets = File(appContext.filesDir, "notes/assets")
         val store = B2RoomStore(db)
         val identity = if (route.hasBinaryLibrary) repository.bluetoothIdentityProjection(capabilities.canonicalRssIds, readOnly = true)
@@ -1526,6 +1531,7 @@ class PhoneBluetoothSyncManager(
         return B2KindSync(store, File(appContext.filesDir, "library-binary-v2"), assets, scope, deviceId,
             device.remoteDeviceId, authorize, progress, route, business,
             retentionGeneration = bootCount.takeIf { it >= 0 }?.let { "boot-$it" },
+            accountFence = fence,
             onBookIssue = { issue ->
                 debugLog.appendEvent("sync.book.isolated", fields = mapOf(
                     "kind" to "book", "bookIdPrefix" to issue.bookIdPrefix, "code" to issue.code))
@@ -1542,10 +1548,20 @@ class PhoneBluetoothSyncManager(
         val authorize = runtime.authorize
         var session: PhoneSyncSession? = null
         var probe: JSONObject? = null
+        var revocation: java.io.Closeable? = null
+
+        fun closeSession() {
+            try {
+                session?.close()
+            } finally {
+                revocation?.close()
+                revocation = null
+            }
+        }
 
         suspend fun openReady() {
             authorize()
-            session?.close()
+            closeSession()
             val opened = try {
                 val open = reconnectSession
                 (if (open != null) open(device, "$parent-open")
@@ -1567,7 +1583,8 @@ class PhoneBluetoothSyncManager(
                     throw B2Exception("CAPABILITY_MISMATCH")
                 }
                 opened.recoveryGate.tryAcquire()
-                transport.binaryAuthorization = authorize
+                revocation = transport.bindBinaryAuthorization(authorize, runtime.accountFence)
+                authorize()
                 recovery.observe(transport.generation)
                 val binding = bindingSnapshot(parent, opened.device.address, opened)
                 if (B2Routing.classify(binding.response, B2Routing.Ready(true, true, true)) != B2Routing.Peer.B2 ||
@@ -1581,7 +1598,8 @@ class PhoneBluetoothSyncManager(
                 }
                 probe = binding.response
             } catch (failure: Throwable) {
-                opened.close()
+                closeSession()
+                authorize()
                 throw failure
             }
         }
@@ -1601,12 +1619,12 @@ class PhoneBluetoothSyncManager(
                     if (failure.code !in setOf("NOT_FOUND", "EXPIRED", "SOURCE_CHANGED", "PLAN_RETIRED", "SEQUENCE_EXHAUSTED")) {
                         throw failure
                     }
-                    session?.close()
+                    closeSession()
                     if (failure.code !in setOf("PLAN_RETIRED", "SEQUENCE_EXHAUSTED")) runtime.resetPlan()
                 }
             }
         } finally {
-            session?.close()
+            closeSession()
         }
     }
 

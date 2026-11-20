@@ -339,7 +339,11 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             if(source!=null && source.url!=ImportedContentIds.ROOT_SOURCE_URL && source.updatedAt>state.getLong("updatedAt"))state.put("title",source.title).put("updatedAt",source.updatedAt).put("sourceDeviceId",source.sourceDeviceId)
             state.put("deletedChapters",JSONArray(deleted.sorted())).put("deletionClock",clock)
             if(source?.deleted==true)state.put("deleted",true).put("deletedAt",maxOf(clock,state.getLong("deletedAt")))
-            if(BookSync.canonical(state)!=book.stateJson)merge(state, binary = state.has("instanceId") || state.has("lifecycle"))
+            if (BookSync.canonical(state) != book.stateJson) {
+                val binary = BookSync.usesBinaryCapture(state)
+                // B2-only instances have no v1 identity on a build with B2 disabled.
+                if (binary || book.bookId == BookSync.id(state.getString("fingerprint"))) merge(state, binary = binary)
+            }
         }
         if(changedSources)db.bookReadingDao().putRegistration(requireNotNull(db.bookReadingDao().registration()).copy(sourceStateJson=sourceState))
         diagnostic("capture:items=${changedRows.size}:ms=${(System.nanoTime()-started)/1_000_000}")

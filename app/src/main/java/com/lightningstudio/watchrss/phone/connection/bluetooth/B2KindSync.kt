@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth
 
+import com.lightningstudio.watchrss.phone.account.B2AccountFence
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.selects.select
@@ -16,7 +17,9 @@ internal class B2KindSync(private val store: B2Persistence, private val director
     private val progress: (String) -> Unit,
     private val route: B2KindRoute,
     private val business: B2InheritedKinds, private val retentionGeneration: String? = null,
-    private val onBookIssue: (BookSyncIssue) -> Unit = {}) {
+    private val onBookIssue: (BookSyncIssue) -> Unit = {},
+    val accountFence: B2AccountFence? = null
+) {
     private val files = B2Files(directory, business.bookImportRoot())
     private val monotonic = android.os.SystemClock::elapsedRealtime
     private val retention = B2Retention(store, files, account, monotonic, retentionGeneration, authorize)
@@ -34,7 +37,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             put("maxPlanObjects", 1024)
         }
     })
-    private val rejectionNamespace = "applyRejection:" + B2Digests.hash(B2Json.utf8(watch))
+    private val rejectionNamespace = B2Retention.REJECTION_PREFIX + B2Digests.hash(B2Json.utf8(watch))
     private val warnings = linkedSetOf<BookSyncIssue>()
     val bookIssues: List<BookSyncIssue> get() = warnings.toList()
 
@@ -65,7 +68,8 @@ internal class B2KindSync(private val store: B2Persistence, private val director
                 authorize()
                 if (rejected != null) {
                     store.put(account, rejectionNamespace, rejectionKey(rejected),
-                        obj("objectId" to rejected.s("objectId"), "sha256" to rejected.s("sha256"), "code" to error))
+                        obj("objectId" to rejected.s("objectId"), "sha256" to rejected.s("sha256"), "code" to error,
+                            "expiresAtMillis" to (retention.clock() + B2Wire.RETENTION)))
                 }
                 for (binding in bindings) {
                     val job = binding.s("jobId")

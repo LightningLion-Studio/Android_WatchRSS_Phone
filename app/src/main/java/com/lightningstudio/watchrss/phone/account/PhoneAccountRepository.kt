@@ -36,6 +36,7 @@ class PhoneAccountRepository(
     }
 
     val reauthenticationOwner: StateFlow<String?> = sessionStore.reauthenticationOwner
+    internal val b2AccountFence: B2AccountFence get() = sessionStore.b2AccountFence
 
     suspend fun beginSameAccountReauthentication() = sessionStore.beginSameAccountReauthentication()
 
@@ -216,6 +217,7 @@ class PhoneAccountRepository(
 
     suspend fun logout() {
         val current = session.value
+        sessionStore.revokeB2Authorization()
         // Explicit logout is revocation, not a new authenticated product operation.
         current?.let { runCatching { onReleaseCloudAuthorization(it.copy(authenticationPaused = false)) } }
         if (current != null && !current.isExpired) {
@@ -292,6 +294,7 @@ class PhoneAccountRepository(
 
     suspend fun deleteAccount(verificationToken: String): AccountDeletionResult {
         val result = accountClient.deleteAccount(requireSession(), verificationToken)
+        sessionStore.revokeB2Authorization()
         session.value?.let(onClearCloudState)
         sessionStore.clear()
         return result

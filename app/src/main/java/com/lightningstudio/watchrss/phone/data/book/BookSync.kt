@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.data.book
 
 import androidx.room.*
+import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.cloud.CloudProtocolV2
 import com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordCodec
@@ -180,6 +181,18 @@ object BookSync {
             previous=n
         }
     }
+    internal fun usesBinaryCapture(state: JSONObject): Boolean {
+        if (!BuildConfig.B2_ENABLED || (!state.has("instanceId") && !state.has("lifecycle"))) return false
+        // A legacy identity can carry extra fields that only v1 can read.
+        if (state.getString("bookId") != id(state.getString("fingerprint"))) return true
+        return try {
+            validateBookPackage { validateBinary(state) }
+            true
+        } catch (_: InvalidBookPackageException) {
+            false
+        }
+    }
+
     fun deletions(state:JSONObject):Set<Int> = state.getJSONArray("deletedChapters").let{a->(0 until a.length()).map{a.getInt(it)}.toSet()}
     internal fun compareLifecycle(a: JSONObject, b: JSONObject): Int {
         val x = a.optJSONObject("lifecycle")
@@ -198,10 +211,15 @@ object BookSync {
             if (token != 0) {
                 val current = if (token > 0) local else remote
                 val other = if (token > 0) remote else local
-                // A later legacy deletion can arrive over either protocol. Keep the lifecycle
-                // when importing it into B2 so replaying that generation cannot revive the book.
-                if (other.has("lifecycle") || other.has("instanceId") || !other.getBoolean("deleted") ||
-                    other.getLong("updatedAt") <= current.getLong("updatedAt")) {
+                // Compare the deletion witness with the generation's start, since a title
+                // update can advance updatedAt and v1 can drop the lifecycle from a tombstone.
+                val deletion = maxOf(
+                    if (other.getBoolean("deleted")) other.getLong("deletedAt") else 0,
+                    if (other.getBoolean("deleted") || other.getJSONArray("deletedChapters").length() > 0)
+                        other.getLong("deletionClock") else 0
+                )
+                if (other.has("lifecycle") || other.has("instanceId") ||
+                    deletion <= current.getJSONObject("lifecycle").getLong("startedAt")) {
                     return copyObject(current).apply { remove("contentAvailable") }
                 }
             }

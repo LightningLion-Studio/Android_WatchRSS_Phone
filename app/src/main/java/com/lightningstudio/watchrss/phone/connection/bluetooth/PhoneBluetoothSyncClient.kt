@@ -42,6 +42,8 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
+import com.lightningstudio.watchrss.phone.account.B2AccountFence
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception
 import java.io.Closeable
 import java.io.EOFException
 import java.io.IOException
@@ -242,13 +244,45 @@ internal class PhoneSyncSession internal constructor(
         val outputStream: OutputStream get() = binaryAuthorization?.let(::binaryOutputStream) ?: rawOutput
         val generation: Long = nextGeneration.incrementAndGet()
         @Volatile private var closed = false
+        @Volatile private var binaryRevoked = false
+        @Volatile private var binaryAccountFence: B2AccountFence? = null
+
+        fun bindBinaryAuthorization(authorize: () -> Unit, fence: B2AccountFence?): Closeable? {
+            binaryAccountFence = fence
+            binaryAuthorization = authorize
+            return fence?.onRevoke(::revokeBinaryAuthorization)
+        }
+
+        fun checkBinaryRevocation() {
+            binaryAccountFence?.check()
+            if (binaryRevoked) throw B2Exception("AUTH_REVOKED")
+        }
+
+        @Synchronized
+        fun revokeBinaryAuthorization() {
+            binaryRevoked = true
+            close()
+        }
 
         private fun <T> binaryIo(authorize: () -> Unit, operation: () -> T): T {
-            // A revocation is an account failure, not a recoverable socket failure.
-            authorize()
+            checkBinaryRevocation()
+            try {
+                authorize()
+            } catch (failure: B2Exception) {
+                if (failure.code == "AUTH_REVOKED") revokeBinaryAuthorization()
+                throw failure
+            }
+            // Admission and revocation share a monitor. An admitted operation runs
+            // on the RFCOMM socket so close can interrupt it, even before it enters
+            // the socket. Holding the monitor through blocking I/O would defeat close.
+            synchronized(this) {
+                checkBinaryRevocation()
+                if (closed) throw LibraryTransportFailure(generation, EOFException("B2 connection closed"))
+            }
             return try {
-                operation()
+                operation().also { checkBinaryRevocation() }
             } catch (failure: IOException) {
+                checkBinaryRevocation()
                 if (failure is java.net.ProtocolException) throw failure
                 throw LibraryTransportFailure(generation, failure)
             }
@@ -433,6 +467,7 @@ class PhoneBluetoothSyncClient(
         connectionMutex.withLock {
             val transport = session.transport
                 ?: throw LibraryTransportFailure(generation, EOFException("B2 connection closed"))
+            transport.checkBinaryRevocation()
             if (transport.isClosed) throw LibraryTransportFailure(transport.generation, EOFException("B2 connection closed"))
             check(transport.binaryAuthorization != null && transport.generation == generation && session.isPersistent && !session.legacyFallback &&
                 !transport.owner.startsWith("ip:"))
@@ -441,6 +476,7 @@ class PhoneBluetoothSyncClient(
                 currentCoroutineContext().ensureActive()
                 block(transport.inputStream, transport.outputStream, session::close)
             } catch (failure: com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2NetworkTimeout) {
+                transport.checkBinaryRevocation()
                 throw LibraryTransportFailure(transport.generation, failure)
             } finally {
                 session.close()

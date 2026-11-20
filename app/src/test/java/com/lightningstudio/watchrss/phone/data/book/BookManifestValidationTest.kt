@@ -94,6 +94,35 @@ class BookManifestValidationTest {
         assertEquals(expected, BookSync.canonical(BookSync.merge(local, oldGeneration, binary = true)))
     }
 
+    @Test fun legacyChapterTombstoneSurvivesBothRoutesAndTitleReplay() {
+        val local = state().put("lifecycle", lifecycle(1))
+        val legacy = state().put("updatedAt", 2).put("deletionClock", 2)
+            .put("deletedChapters", JSONArray().put(1))
+        val edit = state().put("lifecycle", lifecycle(1)).put("updatedAt", 3).put("title", "edited")
+        for (binary in listOf(false, true)) {
+            val deleted = BookSync.merge(local, legacy, binary)
+            val replayed = BookSync.merge(deleted, edit, binary = true)
+            assertEquals(setOf(1), BookSync.deletions(replayed))
+            assertEquals(2, replayed.getInt("deletionClock"))
+            assertEquals("edited", replayed.getString("title"))
+        }
+        val next = state().put("lifecycle", lifecycle(2)).put("updatedAt", 3)
+        assertEquals(emptySet<Int>(), BookSync.deletions(BookSync.merge(legacy, next, binary = true)))
+    }
+
+    @Test fun legacyWholeBookDeletionSurvivesCrossRouteReplay() {
+        val local = state().put("lifecycle", lifecycle(1))
+        val legacy = tombstone(2)
+        val edit = state().put("lifecycle", lifecycle(1)).put("updatedAt", 3).put("title", "edited")
+        val fromV1 = BookSync.merge(local, legacy)
+        val fromB2 = BookSync.merge(local, legacy, binary = true)
+        assertEquals(
+            BookSync.canonical(BookSync.merge(fromB2, edit, binary = true)),
+            BookSync.canonical(BookSync.merge(fromV1, edit, binary = true))
+        )
+        assertEquals(true, BookSync.merge(edit, fromV1, binary = true).getBoolean("deleted"))
+    }
+
     @Test fun b2OnlyInstanceRequiresItsLifecycleForDeletion() {
         val instance = "a".repeat(32)
         val local = state().put("lifecycle", lifecycle(1)).put("instanceId", instance)

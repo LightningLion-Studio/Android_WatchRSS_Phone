@@ -275,6 +275,7 @@ class B2Session(private val input: InputStream, private val output: OutputStream
             try {
                 while (isActive) {
                     delay(100)
+                    authorize()
                     val now = clock()
                     if (readingSince != 0L && (now - readingSince >= 60000 || now - lastRead >= 30000)) throw B2NetworkTimeout("B2 partial frame deadline")
                     if (writingSince != 0L && (now - writingSince >= 60000 || now - lastWrite >= 30000)) throw B2NetworkTimeout("B2 write deadline")

@@ -735,10 +735,17 @@ class SyncV2P6ProductTest {
             server.closedBodyChannel=true;h.wifi=false;h.note("![a](assets/entry.png)")
             val file=File(h.context.filesDir,"notes/assets/entry.png");file.parentFile!!.mkdirs();file.writeText("retained entry original")
             entry.settings.formatUpgradeRequiredVersion=com.lightningstudio.watchrss.phone.BuildConfig.VERSION_CODE
-            fun complete(manual:Boolean){repeat(4){val error=runCatching{entry.sync(manual)}.exceptionOrNull();if(error==null)return;assertEquals("budget_paused",error.message)};fail("entry scan did not resume")}
-            complete(false);assertEquals(1,server.publishes);assertEquals(0,entry.legacyCalls);assertEquals(0,server.bodyRequests)
+            fun finishProjection(manual: Boolean) {
+                repeat(4) {
+                    val outcome = requireNotNull(entry.sync(manual).outcome)
+                    if (outcome.errorCode != "budget_paused") return
+                    assertEquals(CloudSyncPhase.IDLE, outcome.phase)
+                }
+                fail("entry scan did not resume")
+            }
+            finishProjection(false);assertEquals(1,server.publishes);assertEquals(0,entry.legacyCalls);assertEquals(0,server.bodyRequests)
             assertEquals(0,entry.settings.formatUpgradeRequiredVersion);assertFalse(entry.service.formatStatus.value.upgradeRequired)
-            complete(true);assertTrue(server.bodyRequests>0);assertEquals(0,entry.legacyCalls);assertEquals("retained entry original",file.readText())
+            finishProjection(true);assertTrue(server.bodyRequests>0);assertEquals(0,entry.legacyCalls);assertEquals("retained entry original",file.readText())
             assertEquals("body_channel_write_disabled",h.product.uiPort.value!!.state.value.errorCode)
         }}}
     }

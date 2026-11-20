@@ -77,6 +77,18 @@ class BookSyncRegressionTest {
             for(j in hashes.indices)assertEquals(c.getJSONArray("articleIds").getString(j),BookSync.articleId(c.getString("bookId"),j+1))
         }
     }
+    @Test fun legacyManifestAndReadingRoundTripUnknownNumbersLikeV1() = runBlocking<Unit> {
+        val persisted = fixture().seed()
+        val manifest = copy(persisted).put("updatedAt", persisted.getLong("updatedAt") + 1)
+            .put("extra", JSONArray().put(JSONObject().put("negativeZero", -0.0)))
+        val expected = BookSync.canonical(copy(manifest))
+        assertEquals(expected, BookSync.canonical(BookSync.merge(null, manifest)))
+        assertEquals(expected, BookSync.canonical(BookSync.merge(persisted, manifest)))
+        assertEquals(expected, BookSync.canonical(BookSync.merge(manifest, persisted)))
+
+        val reading = reading(persisted.getString("bookId")).put("negativeZero", -0.0)
+        assertEquals(BookSync.canonical(copy(reading)), BookSync.canonical(BookSync.mergeReading(null, reading)))
+    }
     @Test fun deletionUnionAndWholeTombstoneAreCommutativeAssociativeIdempotent()=runBlocking<Unit> {
         val state=fixture().seed()
         val a=copy(state).put("deletedChapters",JSONArray(listOf(1))).put("deletionClock",20)

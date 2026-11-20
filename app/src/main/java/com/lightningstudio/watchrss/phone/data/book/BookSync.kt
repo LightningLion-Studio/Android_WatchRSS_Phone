@@ -128,6 +128,9 @@ object BookSync {
         is JSONArray -> JSONArray().apply { for (i in 0 until value.length()) put(copyValue(value.get(i))) }
         else -> value
     }
+    private fun copyManifest(value: JSONObject, binary: Boolean): JSONObject =
+        if (binary) copyObject(value) else JSONObject(value.toString())
+
     fun canonical(value:JSONObject)=PhoneCloudRecordCodec.canonical(value)
     fun integer(row:JSONObject,key:String):Long { val v=row.get(key);require(v is Int || v is Long);return (v as Number).toLong().also {require(it in 0..9_007_199_254_740_991L)} }
     /** Fixed subcodes only. Never include peer values or parser exception text. */
@@ -202,7 +205,7 @@ object BookSync {
     }
     fun merge(local:JSONObject?,remote:JSONObject):JSONObject = merge(local, remote, binary = false)
     internal fun merge(local:JSONObject?,remote:JSONObject, binary: Boolean):JSONObject {
-        validate(remote, binary);if(local==null)return copyObject(remote).apply{remove("contentAvailable")}
+        validate(remote, binary);if(local==null)return copyManifest(remote, binary).apply{remove("contentAvailable")}
         validate(local, binary)
         if (local.getString("bookId") != remote.getString("bookId") || local.getInt("chapterCount") != remote.getInt("chapterCount"))
             throw InvalidBookPackageException("manifest_local_identity_conflict")
@@ -220,7 +223,7 @@ object BookSync {
             }
         }
         val winner=compareValuesBy(right,left,{it.getLong("updatedAt")},{it.getString("sourceDeviceId")},{it.getString("title")},{it.optString("sourceUrl")},{it.optString("kind")})>0
-        return copyObject(if(winner)right else left).apply {
+        return copyManifest(if(winner) right else left, binary).apply {
             remove("contentAvailable");put("deletedChapters",JSONArray((deletions(left)+deletions(right)).sorted()))
             put("deletionClock",maxOf(left.getLong("deletionClock"),right.getLong("deletionClock")))
             put("deletedAt",maxOf(left.getLong("deletedAt"),right.getLong("deletedAt")))
@@ -262,7 +265,7 @@ object BookSync {
             if(value.has("${prefix}SourceDeviceId"))require(value.get("${prefix}SourceDeviceId") is String)
         }
     }
-    private fun normalizedReading(value:JSONObject)=copyObject(value).apply {
+    private fun normalizedReading(value:JSONObject)=JSONObject(value.toString()).apply {
         put("readingProgress",kotlin.math.floor(getDouble("readingProgress")*1_000_000.0+0.5)/1_000_000.0)
         for(prefix in listOf("favorite","watchLater"))if(has("${prefix}Saved") && !has("${prefix}SourceDeviceId"))put("${prefix}SourceDeviceId",getString("sourceDeviceId"))
     }
@@ -274,7 +277,7 @@ object BookSync {
         val order=compareValuesBy(remote,local,{it.getLong("readingPositionChangedAt")},{it.getString("sourceDeviceId")},
             {if(it.getBoolean("isRead"))0 else 1},{it.getLong("readingPositionBytes")},{it.getDouble("readingProgress")},{it.getString("readingPositionContentHash")})
         require(local.getString("bookId") == remote.getString("bookId") && local.getInt("chapterIndex") == remote.getInt("chapterIndex"))
-        return copyObject(if(order>0)remote else local).apply {
+        return JSONObject((if(order>0)remote else local).toString()).apply {
             for (prefix in listOf("favorite", "watchLater")) {
                 val field = "${prefix}Saved"
                 val winner = when {

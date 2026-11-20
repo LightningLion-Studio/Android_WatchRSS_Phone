@@ -21,7 +21,8 @@ class CloudV2ClientAndStorageTest {
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(409).message("test")
                 .body("{\"error\":\"library_epoch_mismatch\"}".toResponseBody("application/json".toMediaType())).build()
         }.build())
-        c.useEpoch(session,"epoch-a");c.currentDeviceId="phone";c.onEpochMismatch={mismatch++}
+        c.useEpoch(session,"epoch-a");c.currentDeviceId="phone";val handleMismatch = c.onEpochMismatch
+        c.onEpochMismatch = { owner, generation -> handleMismatch(owner, generation); mismatch++ }
         try{c.revokeDevice(session,"other");fail("mismatch swallowed")}catch(e:CloudHttpException){assertEquals(409,e.status)}
         assertEquals(1,mismatch);assertEquals(1,calls)
         try{c.epoch(session);fail("stale epoch retained")}catch(_:IllegalStateException){}

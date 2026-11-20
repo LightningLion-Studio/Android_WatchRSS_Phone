@@ -144,14 +144,17 @@ class PhoneCloudSyncService(
     private var legacyFenceScope: String? = null
     private val _state = MutableStateFlow(PhoneCloudSyncState())
     val state: StateFlow<PhoneCloudSyncState> = _state
-    private val syncStateLock = Any()
+    private val syncStateLock = accountRepository.cloudSessionLock
     @Volatile private var accountGeneration = 0L
     private val operationGeneration = ThreadLocal<Long>()
+    private val releasingCloudAuthorization = ThreadLocal<Boolean>()
 
     private fun updateSyncState(change: (PhoneCloudSyncState) -> PhoneCloudSyncState) {
         synchronized(syncStateLock) {
             val generation = operationGeneration.get()
-            if (generation == null || generation == accountGeneration) _state.value = change(_state.value)
+            if (!accountRepository.cloudSessionChanging && (generation == null || generation == accountGeneration)) {
+                _state.value = change(_state.value)
+            }
         }
     }
 
@@ -166,7 +169,7 @@ class PhoneCloudSyncService(
                 val session=accountRepository.session.value
                 val bootstrap=trustedBootstrap
                 val generation= session?.let{client.knownContentGeneration(it)}
-                if(session==null || !session.isUsableForAuthentication || bootstrap==null || generation==null)null
+                if(session==null || accountRepository.cloudSessionChanging || !session.isUsableForAuthentication || bootstrap==null || generation==null)null
                 else client.syncV2Account(session,bootstrap.libraryEpoch,generation)
             },
             verifyKeys={account,keys->val bootstrap=trustedBootstrap?:error("authentication_required")
@@ -363,17 +366,41 @@ class PhoneCloudSyncService(
         client.checkSession = ::checkApprovalOwner
         client.currentDeviceId = deviceId
         keyManager.bindBackend(client.backendBaseUrl)
-        accountRepository.session.value?.let { bindScope(it); settings.claimLegacyOwner(it.userId) }
+        synchronized(syncStateLock) {
+            // The container can create this service for the first time during account cleanup.
+            if (!accountRepository.cloudSessionChanging) {
+                accountRepository.session.value?.let {
+                    bindScope(it)
+                    settings.claimLegacyOwner(it.userId)
+                }
+            }
+        }
         accountRepository.onReleaseCloudAuthorization = ::releaseCloudAuthorization
         accountRepository.onClearCloudState = ::discardSessionCloudState
-        client.onDeviceKeyConflict = { session -> checkApprovalOwner(session); _deviceRegistrationConflict.value = true }
-        client.onEpochMismatch = { session -> invalidateEpoch(session,"server_epoch_mismatch") }
+        client.onDeviceKeyConflict = { session ->
+            synchronized(syncStateLock) {
+                checkApprovalOwner(session)
+                _deviceRegistrationConflict.value = true
+            }
+        }
+        client.epochRequestGeneration = { operationGeneration.get() ?: accountGeneration }
+        client.onEpochMismatch = { session, generation ->
+            synchronized(syncStateLock) {
+                if (!accountRepository.cloudSessionChanging && generation == accountGeneration &&
+                    accountRepository.session.value?.userId == session.userId
+                ) {
+                    invalidateEpoch(session, "server_epoch_mismatch")
+                }
+            }
+        }
         client.onBootstrap = { session, bootstrap -> observeBootstrap(session, bootstrap) }
         client.onContentMetadata = { session, metadata ->
-            bindScope(session)
-            if (settings.observeContentGeneration(metadata.generation, metadata.empty) { clearContentSyncState(session) }) {
-                traceSync("content-rebuild:metadata")
-                updateSyncState { it.copy(pendingSnapshotUntil = 0) }
+            synchronized(syncStateLock) {
+                bindScope(session)
+                if (settings.observeContentGeneration(metadata.generation, metadata.empty) { clearContentSyncState(session) }) {
+                    traceSync("content-rebuild:metadata")
+                    updateSyncState { it.copy(pendingSnapshotUntil = 0) }
+                }
             }
         }
         client.onRecordMetadata = { session, json ->
@@ -384,25 +411,32 @@ class PhoneCloudSyncService(
             }
         }
     }
-    internal suspend fun releaseCloudAuthorization(session: PhoneAccountSession) {
-        syncV2Product.release()
-        releaseCloudDevice(
-        revokeRemote = {
-            val bootstrap = runCatching { client.bootstrap(session) }.getOrNull()
-            val expectedEpoch = bootstrap?.libraryEpoch ?: client.knownEpoch(session)
-            if (expectedEpoch != null) {
-                runCatching { client.revokeDevice(session, deviceId, expectedEpoch) }
-                legacyDeviceId?.takeIf { it != deviceId }?.let { legacy ->
-                    val remote = bootstrap?.devices?.firstOrNull { it.deviceId == legacy }
-                    if (remote != null && runCatching { remote.publicKeySpki.base64Bytes().contentEquals(keyManager.devicePublicKeySpki(session.userId, legacy).base64Bytes()) }.getOrDefault(false))
-                        runCatching { client.revokeDevice(session, legacy, expectedEpoch) }
+    internal suspend fun releaseCloudAuthorization(session: PhoneAccountSession) =
+        withContext(releasingCloudAuthorization.asContextElement(true)) {
+            syncV2Product.release()
+            releaseCloudDevice(
+                revokeRemote = {
+                    val bootstrap = runCatching { client.bootstrap(session) }.getOrNull()
+                    val expectedEpoch = bootstrap?.libraryEpoch ?: client.knownEpoch(session)
+                    if (expectedEpoch != null) {
+                        runCatching { client.revokeDevice(session, deviceId, expectedEpoch) }
+                        legacyDeviceId?.takeIf { it != deviceId }?.let { legacy ->
+                            val remote = bootstrap?.devices?.firstOrNull { it.deviceId == legacy }
+                            val owned = remote != null && runCatching {
+                                remote.publicKeySpki.base64Bytes().contentEquals(
+                                    keyManager.devicePublicKeySpki(session.userId, legacy).base64Bytes()
+                                )
+                            }.getOrDefault(false)
+                            if (owned) runCatching { client.revokeDevice(session, legacy, expectedEpoch) }
+                        }
+                    }
+                },
+                clearDevicePrivateKey = {
+                    keyManager.clearDeviceKey(session.userId, deviceId)
+                    legacyDeviceId?.takeIf { it != deviceId }?.let { keyManager.clearDeviceKey(session.userId, it) }
                 }
-            }
-        }, clearDevicePrivateKey = {
-            keyManager.clearDeviceKey(session.userId, deviceId)
-            legacyDeviceId?.takeIf { it != deviceId }?.let { keyManager.clearDeviceKey(session.userId, it) }
-        })
-    }
+            )
+        }
     /** R45 clears synchronization bookkeeping, never local data, login or key trust. */
     private fun clearContentSyncState(session: PhoneAccountSession) {
         checkApprovalOwner(session)
@@ -416,11 +450,16 @@ class PhoneCloudSyncService(
         synchronized(readingManifests) { readingManifests.clear() }
         synchronized(ownPublicationManifests) { ownPublicationManifests.clear() }
     }
-    internal fun discardSessionCloudState(session: PhoneAccountSession) = clearCloudScope(session)
+    internal fun discardSessionCloudState(session: PhoneAccountSession) = synchronized(syncStateLock) {
+        clearCloudScope(session)
+    }
     private fun bindScope(session: PhoneAccountSession) {
-        checkApprovalOwner(session); settings.bindScope(client.backendBaseUrl, session.userId)
-        _formatStatus.value=recordStore.formatStatus(client.scopeId(session))
-        settings.contentGeneration?.let { client.useContentGeneration(session, it) }
+        synchronized(syncStateLock) {
+            checkApprovalOwner(session)
+            settings.bindScope(client.backendBaseUrl, session.userId)
+            _formatStatus.value = recordStore.formatStatus(client.scopeId(session))
+            settings.contentGeneration?.let { client.useContentGeneration(session, it) }
+        }
     }
     private fun clearCloudScope(session: PhoneAccountSession, reason: String = "account_release") {
         traceSync("cloud-scope-clear:$reason")
@@ -450,8 +489,11 @@ class PhoneCloudSyncService(
         if (approvalsDelegate.isInitialized()) approvals.clear()
     }
     private fun invalidateEpoch(session: PhoneAccountSession, reason: String = "epoch_invalidated") {
-        clearCloudScope(session,reason)
-        update(CloudSyncPhase.NEEDS_RECOVERY, "云资料库已重置或密钥失效，请恢复或重新批准")
+        synchronized(syncStateLock) {
+            checkApprovalOwner(session)
+            clearCloudScope(session, reason)
+            update(CloudSyncPhase.NEEDS_RECOVERY, "云资料库已重置或密钥失效，请恢复或重新批准")
+        }
     }
     private fun localKeys(session: PhoneAccountSession): Map<Int, ByteArray> = keyManager.keyVersions(session.userId)
         .associateWith { requireNotNull(keyManager.getAccountKey(session.userId, it)) }
@@ -461,7 +503,7 @@ class PhoneCloudSyncService(
         val keys = localKeys(session)
         try { verifyKeys(session, bootstrap, keys) } finally { keys.values.forEach { it.fill(0) } }
     }
-    private fun observeBootstrap(session: PhoneAccountSession, bootstrap: CloudBootstrap) {
+    private fun observeBootstrap(session: PhoneAccountSession, bootstrap: CloudBootstrap) = synchronized(syncStateLock) {
         bindScope(session)
         require(bootstrap.libraryEpoch.isNotBlank()) { "云服务需要升级到同步协议 v2" }
         val changed = settings.observeEpoch(bootstrap.libraryEpoch) { invalidateEpoch(session,"observed_epoch_change") }
@@ -973,7 +1015,9 @@ class PhoneCloudSyncService(
     }
     private fun checkApprovalOwner(session: PhoneAccountSession) {
         check((operationGeneration.get()?.let { it == accountGeneration } != false) &&
-            accountRepository.session.value?.userId == session.userId) { ACCOUNT_CHANGED }
+            accountRepository.session.value?.userId == session.userId &&
+            (!accountRepository.cloudSessionChanging || releasingCloudAuthorization.get() == true)
+        ) { ACCOUNT_CHANGED }
     }
     suspend fun requestDeviceApproval(expectedEpoch: String? = null, expectedUserId: String? = null): CloudBootstrap {
         val session = requireSession(expectedUserId); val bootstrap = client.bootstrap(session)
@@ -1058,17 +1102,24 @@ class PhoneCloudSyncService(
     }
     suspend fun resumeKeyDistribution() { val session = requireSession(); distributeMissing(session, validatedBootstrap(session)) }
 
-    suspend fun revokeDevice(deviceId: String) {
-        require(deviceId != this.deviceId) { "不能在当前设备上撤销自己" }
-        client.revokeDevice(requireSession(), deviceId)
-    }
+    suspend fun revokeDevice(deviceId: String) =
+        withContext(operationGeneration.asContextElement(accountGeneration)) {
+            require(deviceId != this@PhoneCloudSyncService.deviceId) { "不能在当前设备上撤销自己" }
+            client.revokeDevice(requireSession(), deviceId)
+        }
 
     suspend fun reregisterCurrentDevice() = approvalMutex.withLock {
         check(_deviceRegistrationConflict.value) { "本机无需重新登记" }
         val session = requireSession(); val expectedEpoch = client.epoch(session)
         reregisterCloudDevice(
             revokeRemote = { client.revokeDevice(session, deviceId, expectedEpoch); checkCloudEpoch(session, expectedEpoch) },
-            replaceIdentity = { keyManager.clearDeviceKey(session.userId, deviceId); clearCloudScope(session,"device_reregistration") },
+            replaceIdentity = {
+                synchronized(syncStateLock) {
+                    checkCloudEpoch(session, expectedEpoch)
+                    keyManager.clearDeviceKey(session.userId, deviceId)
+                    clearCloudScope(session, "device_reregistration")
+                }
+            },
             registerReplacement = {
                 val bootstrap = client.bootstrap(session)
                 checkCloudEpoch(session, expectedEpoch)
@@ -1095,12 +1146,14 @@ class PhoneCloudSyncService(
                 article.contentText.isNotBlank() && !article.contentText.contains('\n') && article.contentText.length > 280 &&
                 !com.lightningstudio.watchrss.phone.data.local.isArticleContentMarker(article.contentText)
             if (com.lightningstudio.watchrss.phone.BuildConfig.DEBUG) android.util.Log.d("WatchRssBody", "open textChars=${article.contentText.length} html=${!article.contentHtml.isNullOrBlank()} legacyFlat=$legacyFlatEpub deleted=${article.deleted}")
-            if ((!legacyFlatEpub && (article.contentText.isNotBlank() || !article.contentHtml.isNullOrBlank())) || article.deleted) return@withContext article
-            if (!com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.isImportedContentUrl(article.url)) return@withContext article
+            if (article.deleted || !com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.isImportedContentUrl(article.url)) {
+                return@withContext article
+            }
+            if (!legacyFlatEpub && repository.hasReadableImportedArticleBody(articleId)) return@withContext article
             if (usesSyncV2) {
                 restoreCurrentLibrary()
                 val restored = repository.getArticle(articleId) ?: throw MissingCloudBodyException()
-                if (!restored.deleted && restored.contentText.isBlank() && restored.contentHtml.isNullOrBlank()) {
+                if (!restored.deleted && !repository.hasReadableImportedArticleBody(articleId)) {
                     throw MissingCloudBodyException()
                 }
                 return@withContext restored
@@ -1116,7 +1169,11 @@ class PhoneCloudSyncService(
                     if (!legacyFlatEpub) throw error
                 }
                 checkApprovalOwner(session)
-                repository.getArticle(articleId)
+                repository.getArticle(articleId)?.also { restored ->
+                    if (!legacyFlatEpub && !restored.deleted && !repository.hasReadableImportedArticleBody(articleId)) {
+                        throw MissingCloudBodyException()
+                    }
+                }
             }
         }
 
@@ -1276,7 +1333,7 @@ class PhoneCloudSyncService(
                 checkApprovalOwner(session)
                 roundResult.copy(outcome = _state.value)
             } catch (error: Exception) {
-                if (operationGeneration.get() != accountGeneration ||
+                if (operationGeneration.get() != accountGeneration || accountRepository.cloudSessionChanging ||
                     accountRepository.session.value?.userId != session.userId) throw error
                 if (error is CancellationException) {
                     update(if (paused.value) CloudSyncPhase.PAUSED else CloudSyncPhase.IDLE, "等待继续同步")
@@ -2360,7 +2417,10 @@ class PhoneCloudSyncService(
         check(expectedUserId == null || session?.userId == expectedUserId) { ACCOUNT_CHANGED }
         return (session ?: error("请先登录腕上RSS账号")).also {
             check(it.isUsableForAuthentication) { "请先完成账号重新认证" }
-            bindScope(it); settings.claimLegacyOwner(it.userId)
+            synchronized(syncStateLock) {
+                bindScope(it)
+                settings.claimLegacyOwner(it.userId)
+            }
         }
     }
 

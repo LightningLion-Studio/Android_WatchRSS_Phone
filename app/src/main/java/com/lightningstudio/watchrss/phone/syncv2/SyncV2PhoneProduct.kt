@@ -4,6 +4,9 @@ import android.content.Context
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
+import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
+import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
+import com.lightningstudio.watchrss.phone.data.local.hasReadableArticleBody
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -122,7 +125,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                     !state.isNull("pendingAppliedAck") ||
                     (restoreCurrent && !state.isNull("pendingPublish")),
                 pendingBodies = live.bodyResult.pending > 0 || live.bodyResult.errors.isNotEmpty() ||
-                    live.hasMissingImportedArticleBody()
+                    live.hasMissingImportedArticleBody(FileArticleContentStore(context))
             )
         } catch(e:Throwable) {
             if (e !is CancellationException) _uiPort.value?.failed(e)
@@ -264,15 +267,19 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             }}
         }
         // Article recipes can be published, but the phone has no article recipe receiver yet.
-        fun hasMissingImportedArticleBody(): Boolean = life.guard {
+        fun hasMissingImportedArticleBody(store: ArticleContentStore): Boolean = life.guard {
             val db = projection.accountDatabase
             val missing = db.controlQuery(
-                """SELECT articleId, url FROM phone_articles WHERE deleted=0 AND independentSaved=1
-                    AND contentText='' AND COALESCE(contentHtml,'')=''"""
+                """SELECT articleId, url, contentText, contentHtml FROM phone_articles
+                    WHERE deleted=0 AND independentSaved=1
+                    AND (url LIKE '%watchrss.local/import%' OR url LIKE '%watchrss://import/%')"""
             ).use { rows ->
                 buildList {
                     while (rows.moveToNext()) {
-                        if (ImportedContentIds.isImportedContentUrl(rows.getString(1))) add(rows.getString(0))
+                        val url = rows.getString(1)
+                        if (ImportedContentIds.isImportedContentUrl(url) &&
+                            !hasReadableArticleBody(url, rows.getString(2), rows.getString(3), store)
+                        ) add(rows.getString(0))
                     }
                 }
             }

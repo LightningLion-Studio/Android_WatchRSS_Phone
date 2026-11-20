@@ -139,6 +139,7 @@ import com.lightningstudio.watchrss.phone.data.ai.PhoneAiSummaryResult
 import com.lightningstudio.watchrss.phone.data.importer.WebArticleImporter
 import com.lightningstudio.watchrss.phone.data.local.ARTICLE_TEXT_CHUNK_BYTES
 import com.lightningstudio.watchrss.phone.data.local.isArticleContentMarker
+import com.lightningstudio.watchrss.phone.cloud.MissingCloudBodyException
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.repo.PhoneImportedTextReader
 import com.lightningstudio.watchrss.phone.data.reader.ReaderTypographyRole
@@ -192,6 +193,36 @@ import org.jsoup.nodes.TextNode
 import org.jsoup.select.NodeTraversor
 import org.jsoup.select.NodeVisitor
 
+internal data class ArticleReaderBody(
+    val article: PhoneArticleEntity?,
+    val importedTextReader: PhoneImportedTextReader?
+)
+
+private fun PhoneArticleEntity.needsImportedTextReader(): Boolean =
+    !deleted && ImportedContentIds.isImportedTextArticleUrl(url) && isArticleContentMarker(contentText)
+
+internal suspend fun loadArticleReaderBody(
+    articleId: String,
+    loadArticle: suspend (String) -> PhoneArticleEntity?,
+    loadTextReader: suspend (String) -> PhoneImportedTextReader?
+): ArticleReaderBody {
+    val article = loadArticle(articleId)
+    val reader = if (article?.needsImportedTextReader() == true) {
+        loadTextReader(articleId)?.takeIf { it.marker == article.contentText }
+            ?: throw MissingCloudBodyException()
+    } else null
+    return ArticleReaderBody(article, reader)
+}
+
+@Composable
+internal fun ArticleReaderBodyUnavailable(modifier: Modifier, onRetry: () -> Unit, onBack: () -> Unit) {
+    Column(modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("正文暂未加载完成，请重试。")
+        androidx.compose.material3.TextButton(onClick = onRetry) { Text("重试") }
+        androidx.compose.material3.TextButton(onClick = onBack) { Text("返回") }
+    }
+}
+
 class ArticleReaderActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -208,33 +239,26 @@ class ArticleReaderActivity : ComponentActivity() {
                         repository.observeArticle(articleId)
                     }.collectAsState(initial = null)
                     var bodyRetry by remember(articleId) { mutableStateOf(0) }
-                    val bodyReady by produceState<Result<Unit>?>(null, articleId, bodyRetry) {
+                    val bodyReady by produceState<Result<ArticleReaderBody>?>(null, articleId, bodyRetry) {
                         value = null
                         value = try {
-                            (application as PhoneCompanionApplication).container.cloudSyncService.loadArticleForReading(articleId)
-                            Result.success(Unit)
+                            val service = (application as PhoneCompanionApplication).container.cloudSyncService
+                            Result.success(loadArticleReaderBody(
+                                articleId, service::loadArticleForReading, repository::getImportedTextReader
+                            ))
                         } catch (error: CancellationException) { throw error }
                         catch (error: Exception) { Result.failure(error) }
-                    }
-                    val importedTextReader by produceState<PhoneImportedTextReader?>(
-                        initialValue = null,
-                        articleId, bodyReady
-                    ) {
-                        value = repository.getImportedTextReader(articleId)
                     }
                     TipOverlayHost(
                         tipManager = (application as PhoneCompanionApplication).container.tipManager
                     ) {
                     if (bodyReady?.isFailure == true) {
-                        Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Text("正文暂未加载完成，请重试。")
-                            androidx.compose.material3.TextButton(onClick = { bodyRetry++ }) { Text("重试") }
-                            androidx.compose.material3.TextButton(onClick = { finish() }) { Text("返回") }
-                        }
+                        ArticleReaderBodyUnavailable(Modifier, onRetry = { bodyRetry++ }, onBack = { finish() })
                     } else ArticleReaderScreen(
                         contentReady = bodyReady?.isSuccess == true,
                         article = article,
-                        importedTextReader = importedTextReader,
+                        importedTextReader = bodyReady?.getOrNull()?.importedTextReader,
+                        onRetryBody = { bodyRetry++ },
                         invalidArticleId = articleId.isBlank(),
                         onLoadImportedTextChunk = repository::loadImportedTextChunk,
                         onSaveReadingProgress = { progress ->
@@ -281,6 +305,7 @@ internal fun ArticleReaderScreen(
     onBack: () -> Unit,
     onOpenImportedArticle: (String) -> Unit,
     onOpenOriginal: (String) -> Unit,
+    onRetryBody: () -> Unit,
     embedded: Boolean = false,
     embeddedFullscreen: Boolean = false,
     onOpenFullscreen: (() -> Unit)? = null,
@@ -333,11 +358,12 @@ internal fun ArticleReaderScreen(
         return
     }
 
-    val hasFileBackedImportedText = ImportedContentIds.isImportedTextArticleUrl(safeArticle.url) &&
-        isArticleContentMarker(safeArticle.contentText)
-    val waitingForImportedTextReader = hasFileBackedImportedText && importedTextReader == null
+    if (contentReady && safeArticle.needsImportedTextReader() && importedTextReader?.marker != safeArticle.contentText) {
+        ArticleReaderBodyUnavailable(Modifier, onRetry = onRetryBody, onBack = onBack)
+        return
+    }
     val useImportedTextChunks = importedTextReader != null
-    val shouldBuildContentNodes = contentReady && !useImportedTextChunks && !waitingForImportedTextReader
+    val shouldBuildContentNodes = contentReady && !useImportedTextChunks
     val contentNodesKey = ArticleContentNodesKey(
         articleId = safeArticle.articleId,
         contentHash = safeArticle.contentHash,
@@ -701,7 +727,6 @@ internal fun ArticleReaderScreen(
             val progress = pendingRestoreProgress ?: return@LaunchedEffect
             if (topBarHeight == 0.dp) return@LaunchedEffect
             if (!contentReady) return@LaunchedEffect
-            if (waitingForImportedTextReader) return@LaunchedEffect
             if (!useImportedTextChunks && !contentNodesReady) return@LaunchedEffect
             importedTextReader?.let { reader ->
                 if (reader.chunkCount <= 0 || reader.byteLength <= 0L) {
@@ -981,19 +1006,6 @@ internal fun ArticleReaderScreen(
                                     RestoreLoadingOverlay()
                                 }
                             }
-                        }
-                    }
-                    waitingForImportedTextReader -> {
-                        AdaptiveContentFrame(
-                            windowInfo = windowInfo,
-                            mediumMaxWidth = 720.dp,
-                            expandedMaxWidth = 760.dp
-                        ) {
-                            ReaderContentLoadingPlaceholder(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(readerContentPadding)
-                            )
                         }
                     }
                     !contentNodesReady -> {

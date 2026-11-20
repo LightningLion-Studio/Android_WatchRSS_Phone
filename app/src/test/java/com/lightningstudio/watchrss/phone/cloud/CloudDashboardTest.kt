@@ -25,6 +25,17 @@ class CloudDashboardTest {
         }
     }
 
+    @Test fun fix2SyncTimeoutStaysVisibleWithUnreadableQuotaOrWithoutAKey() {
+        val message = SyncV2View.errorText("sync_timeout")
+        for ((hasKey, quota) in listOf(true to member.copy(readable = false), false to member)) {
+            val value = cloudDashboardPresentation(true, hasKey, false, CloudSyncPhase.ERROR, quota,
+                syncMessage = message, syncReason = "sync_timeout")
+            assertEquals("同步未完成", value.status)
+            assertEquals(message, value.detail)
+            assertEquals("重试同步", value.actionLabel)
+        }
+    }
+
     @Test fun recordsConsentOffersSetupInsteadOfNetworkRetry() {
         val value = cloudDashboardPresentation(true, true, false, CloudSyncPhase.ERROR, member,
             recordsConsentRequired = true)

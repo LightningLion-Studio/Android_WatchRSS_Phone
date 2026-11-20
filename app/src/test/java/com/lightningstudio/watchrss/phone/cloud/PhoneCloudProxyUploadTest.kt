@@ -45,7 +45,8 @@ class PhoneCloudProxyUploadTest {
     }
     @Test fun resetDuringPutInvalidatesEpochAndNeverRetriesOldCiphertext()=runBlocking {
         var calls=0;var invalidated=0
-        val c=client{calls++;409 to JSONObject().put("error","library_epoch_mismatch")};c.onEpochMismatch={invalidated++}
+        val c=client{calls++;409 to JSONObject().put("error","library_epoch_mismatch")};val handleMismatch = c.onEpochMismatch
+        c.onEpochMismatch = { owner, generation -> handleMismatch(owner, generation); invalidated++ }
         try{c.uploadCiphertext(session,target(),bytes,"epoch");fail("reset ignored")}catch(e:CloudHttpException){assertEquals(409,e.status)}
         assertEquals(1,calls);assertEquals(1,invalidated);assertNull(c.knownEpoch(session))
     }

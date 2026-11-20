@@ -7,6 +7,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import com.lightningstudio.watchrss.phone.connection.bluetooth.AuthorizedBluetoothRequest
 import org.json.JSONArray
 import org.json.JSONObject
@@ -21,6 +23,32 @@ class PhoneAccountRepository(
     internal var onReleaseCloudAuthorization: suspend (PhoneAccountSession) -> Unit = {}
     internal var onClearCloudState: (PhoneAccountSession) -> Unit = {}
     val session: StateFlow<PhoneAccountSession?> = sessionStore.session
+    private val sessionChanges = Mutex()
+    // The old session stays published while secure storage suspends.
+    internal val cloudSessionLock = Any()
+    @Volatile private var departingCloudOwner: String? = null
+
+    internal val cloudSessionChanging: Boolean
+        get() = departingCloudOwner?.let { it == session.value?.userId } == true
+
+    private suspend fun <T> retireCloudSession(owner: PhoneAccountSession?, change: suspend () -> T): T {
+        if (owner == null) return change()
+        return withPurchasesBlockedForLogout {
+            synchronized(cloudSessionLock) { departingCloudOwner = owner.userId }
+            try {
+                change()
+            } finally {
+                synchronized(cloudSessionLock) { departingCloudOwner = null }
+            }
+        }
+    }
+
+    private suspend fun clearSession(owner: PhoneAccountSession) = sessionChanges.withLock {
+        if (session.value?.userId != owner.userId) return@withLock
+        retireCloudSession(owner) {
+            try { onClearCloudState(owner) } finally { sessionStore.clear() }
+        }
+    }
 
     init {
         accountClient.authenticatedOwner = { token -> session.value?.takeIf { it.accessToken == token }?.userId }
@@ -122,8 +150,7 @@ class PhoneAccountRepository(
         } finally {
             // The backend revokes all opaque sessions before attempting the
             // upstream credential update, including on an upstream failure.
-            session.value?.let(onClearCloudState)
-            sessionStore.clear()
+            clearSession(current)
         }
     }
 
@@ -151,12 +178,13 @@ class PhoneAccountRepository(
         enabled: Boolean,
         verificationToken: String? = null
     ): AccountSecurityStatus {
+        val current = requireSession()
         val status = accountClient.setTwoFactorEnabled(
-            requireSession(),
+            current,
             enabled,
             verificationToken
         )
-        if (enabled) { session.value?.let(onClearCloudState); sessionStore.clear() }
+        if (enabled) clearSession(current)
         return status
     }
 
@@ -213,11 +241,15 @@ class PhoneAccountRepository(
     }
 
     internal suspend fun saveCompletedLogin(progress: LoginProgress) {
-        progress.session?.let { next ->
-            session.value?.takeIf { it.userId != next.userId }?.let(onClearCloudState)
-            sessionStore.clearBluetoothGrants()
-            sessionStore.save(next)
-            sessionStore.finishReauthentication()
+        val next = progress.session ?: return
+        sessionChanges.withLock {
+            val previous = session.value?.takeIf { it.userId != next.userId }
+            retireCloudSession(previous) {
+                previous?.let(onClearCloudState)
+                sessionStore.clearBluetoothGrants()
+                sessionStore.save(next)
+                sessionStore.finishReauthentication()
+            }
         }
     }
 
@@ -230,25 +262,32 @@ class PhoneAccountRepository(
         }
     }
 
-    suspend fun logout() {
-        withPurchasesBlockedForLogout { current ->
-            sessionStore.revokeB2Authorization()
-            // Explicit logout is revocation, not a new authenticated product operation.
-            current?.let { runCatching { onReleaseCloudAuthorization(it.copy(authenticationPaused = false)) } }
-            if (current != null && !current.isExpired) {
-                val queued = runCatching { sessionStore.queueRevocation(current) }.isSuccess
-                val revoked = runCatching { accountClient.logout(current) }.isSuccess
-                check(revoked || queued) { "无法安全退出，请检查网络后重试" }
-                if (revoked) {
-                    if (queued) {
-                        sessionStore.clearPendingRevocation()
-                    }
-                } else {
-                    sessionStore.schedulePendingRevocation()
-                }
+    suspend fun logout() = withPurchasesBlockedForLogout {
+        sessionChanges.withLock {
+            val current = session.value
+            retireCloudSession(current) {
+                logoutSession(current)
             }
-            try { current?.let(onClearCloudState) } finally { sessionStore.clear() }
         }
+    }
+
+    private suspend fun logoutSession(current: PhoneAccountSession?) {
+        sessionStore.revokeB2Authorization()
+        // Explicit logout is revocation, not a new authenticated product operation.
+        current?.let { runCatching { onReleaseCloudAuthorization(it.copy(authenticationPaused = false)) } }
+        if (current != null && !current.isExpired) {
+            val queued = runCatching { sessionStore.queueRevocation(current) }.isSuccess
+            val revoked = runCatching { accountClient.logout(current) }.isSuccess
+            check(revoked || queued) { "无法安全退出，请检查网络后重试" }
+            if (revoked) {
+                if (queued) {
+                    sessionStore.clearPendingRevocation()
+                }
+            } else {
+                sessionStore.schedulePendingRevocation()
+            }
+        }
+        try { current?.let(onClearCloudState) } finally { sessionStore.clear() }
     }
 
     suspend fun consumeActivationProof(expectedProof: String) {
@@ -326,10 +365,10 @@ class PhoneAccountRepository(
     )
 
     suspend fun deleteAccount(verificationToken: String): AccountDeletionResult {
-        val result = accountClient.deleteAccount(requireSession(), verificationToken)
-        sessionStore.revokeB2Authorization()
-        session.value?.let(onClearCloudState)
-        sessionStore.clear()
+        val current = requireSession()
+        val result = accountClient.deleteAccount(current, verificationToken)
+        sessionStore.revokeB2Authorization(current.userId)
+        clearSession(current)
         return result
     }
 

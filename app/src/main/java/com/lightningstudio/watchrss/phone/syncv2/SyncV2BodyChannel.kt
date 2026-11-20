@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
+import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 import java.io.File
 
@@ -74,7 +75,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
             // A changed remote business binding requires the existing account-choice flow.
             if(SyncV2Codec.canonical(remote.getJSONObject("meta"))!=SyncV2Codec.canonical(c.first) || SyncV2Codec.canonical(remote.getJSONObject("state"))!=SyncV2Codec.canonical(c.second))continue
             if(original.hasRegisteredDigest && r.optString("bodyRevision")!=SyncV2BodyCodec.revision(kind,entity,original.sha256))return true
-        } catch(e:Exception){life.check()}
+        } catch(e:Exception){if(e is CancellationException)throw e;life.check()}
         return false
     }
     /** Before account publication, bind actual original bytes without creating P3 recipes. */
@@ -88,7 +89,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
                 .firstOrNull()?.getJSONObject("row")
             if (previous != null && !previous.isNull("bodyRevision") && previous.getString("bodyRevision") != revision) continue
             projection.bindArticleRevision(row,revision,independent=true)
-        } catch(e:Exception){life.check()}
+        } catch(e:Exception){if(e is CancellationException)throw e;life.check()}
     }
     fun sync(manual:Boolean=false, downloadOnly:Boolean=false):Result {
         life.check();val st=projection.state();val account=st.body.optJSONObject("account")?:return Result(0,emptyList())
@@ -109,6 +110,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
                     val expires = windowExpiry ?: captureWindow(anchor).also { windowExpiry = it }
                     syncEntry(entry,anchor,expires,dir,downloadOnly)
                 }catch(e:Exception) {
+                    if (e is CancellationException) throw e
                     life.check();pending++;val code=code(e);errors.add(code)
                     val delay=(e as? SyncV2CloudError)?.retryAfterMillis
                     if(delay!=null&&delay>0) {
@@ -163,6 +165,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
                         receive(entry, anchor, descriptor, dir, expires, requireNotNull(repair))
                     }
                 } catch (e: Exception) {
+                    if (e is CancellationException) throw e
                     life.check()
                     if (code(e) in setOf("choice_stale", "window_expired", "authentication_required", "device_revoked")) throw e
                     last = e
@@ -250,7 +253,10 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
             val entry = projection.cloudRows(setOf(identity.entity(kind,id))).singleOrNull() ?: return@runCatching false
             current(entry, anchor(a), Long.MAX_VALUE, st)
             matchingOriginal(binding(entry), value(entry)) != null
-        }.getOrDefault(false)
+        }.getOrElse {
+            if (it is CancellationException) throw it
+            false
+        }
         return JSONObject().put("placeholder",!ready).put("reason",if(ready)JSONObject.NULL else"body_not_synced").put("keepLocalBody",true)
     }
     companion object {fun code(e:Exception)=(e as? SyncV2CloudError)?.code?:e.message?.takeIf{Regex("[a-z][a-z0-9_]{0,63}").matches(it)}?:"body_channel_pending"}

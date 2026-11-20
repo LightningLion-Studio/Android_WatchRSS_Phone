@@ -57,7 +57,9 @@ fun DashboardCloudSyncBanner() {
         }
     }
     val hasKey = session != null && service.hasLocalAccountKey()
-    val presentation = if (ownerConflict) CloudDashboardPresentation("暂停上传", "本机资料属于另一个账号，选择处理方式后继续同步", "选择处理方式")
+    val roundTimedOut = session != null && state.phase == CloudSyncPhase.ERROR && state.errorCode == "sync_timeout"
+    val showOwnerResolution = ownerConflict && !roundTimedOut
+    val presentation = if (showOwnerResolution) CloudDashboardPresentation("暂停上传", "本机资料属于另一个账号，选择处理方式后继续同步", "选择处理方式")
         else cloudDashboardPresentation(session != null, hasKey, paused, state.phase, member,
             upgradeRequired = state.errorCode == "cloud_format_upgrade_required",
             recordsConsentRequired = state.errorCode == "cloud_records_consent_required",
@@ -66,6 +68,7 @@ fun DashboardCloudSyncBanner() {
     CloudSyncStatusCard(
         status = presentation.status,
         detail = when {
+            roundTimedOut -> presentation.detail
             actionFailed -> "设置未保存，请稍后重试"
             paused && state.phase in cloudActivePhases -> "当前传输完成后暂停，资料仍保留在本机与云端"
             paused -> "已停止后续自动同步，继续后立即检查更新"
@@ -83,7 +86,7 @@ fun DashboardCloudSyncBanner() {
         canPause = session != null && hasKey && member?.readable == true,
         actionLabel = presentation.actionLabel ?: if (quotaFailed) "重新获取" else null,
         onAction = {
-            if (ownerConflict) showOwnerChoice = true
+            if (showOwnerResolution) showOwnerChoice = true
             else if (presentation.actionLabel == null && quotaFailed) refreshKey++
             else if (presentation.actionLabel == "重试同步") scope.launch {
                 try { service.syncNow() }
@@ -124,8 +127,9 @@ internal fun cloudDashboardPresentation(loggedIn: Boolean, hasKey: Boolean, paus
     syncReason: String? = null): CloudDashboardPresentation = when {
     !loggedIn -> CloudDashboardPresentation("未登录", "登录后查看云同步与云空间", "登录账号")
     !paused && phase == CloudSyncPhase.BLOCKED -> CloudDashboardPresentation("云同步暂不可用", syncMessage, "重试同步")
-    !paused && phase == CloudSyncPhase.ERROR && member == null && syncReason == "sync_timeout" ->
-        CloudDashboardPresentation("同步未完成", syncMessage, "重试同步")
+    phase == CloudSyncPhase.ERROR && syncReason == "sync_timeout" ->
+        CloudDashboardPresentation("同步未完成", syncMessage.ifBlank { SyncV2View.errorText(syncReason) },
+            if (paused) null else "重试同步")
     member == null -> CloudDashboardPresentation("正在获取状态", "正在读取云空间额度")
     !member.readable -> CloudDashboardPresentation("云空间暂不可用", "请刷新状态或重新登录", "登录账号")
     !hasKey -> CloudDashboardPresentation("此手机尚未授权", "验证身份，安全恢复云端资料", "授权此手机")

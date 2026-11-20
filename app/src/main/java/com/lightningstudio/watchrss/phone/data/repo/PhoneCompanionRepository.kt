@@ -2,6 +2,7 @@ package com.lightningstudio.watchrss.phone.data.repo
 
 import com.lightningstudio.watchrss.phone.data.book.BodyAuthority
 import com.lightningstudio.watchrss.phone.data.local.isArticleContentMarker
+import com.lightningstudio.watchrss.phone.data.local.hasReadableArticleBody
 import com.lightningstudio.watchrss.phone.cloud.compactCloudExcerpt
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2FileHashes
 import com.lightningstudio.watchrss.phone.connection.bluetooth.binaryFileHashes
@@ -424,13 +425,20 @@ class PhoneCompanionRepository(
         store.prune(retainedMarkers)
     }
 
+    internal suspend fun hasReadableImportedArticleBody(articleId: String): Boolean =
+        withContext(Dispatchers.IO) {
+            val row = articleDao.getById(articleId) ?: return@withContext false
+            hasReadableArticleBody(row.url, row.contentText, row.contentHtml, articleContentStore)
+        }
+
     suspend fun getImportedTextReader(articleId: String): PhoneImportedTextReader? =
         withContext(Dispatchers.IO) {
             val store = articleContentStore ?: return@withContext null
             val article = articleDao.getById(articleId) ?: return@withContext null
             if (!article.isFileBackedImportedText(store)) return@withContext null
             val marker = article.contentText.takeIf(store::isMarker) ?: return@withContext null
-            val handle = store.textChunkHandle(marker, ARTICLE_TEXT_CHUNK_BYTES) ?: return@withContext null
+            val handle = store.textChunkHandle(marker, ARTICLE_TEXT_CHUNK_BYTES)
+                ?.takeIf { it.byteLength > 0 } ?: return@withContext null
             PhoneImportedTextReader(
                 marker = handle.marker,
                 byteLength = handle.byteLength,

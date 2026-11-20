@@ -189,9 +189,10 @@ fun CloudAccountPanel(
     }
 
     val member = syncState.member
+    val roundTimedOut = usesSyncV2 && syncState.phase == CloudSyncPhase.ERROR && syncState.errorCode == "sync_timeout"
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        CloudSyncRoundNotice(usesSyncV2, syncState)
         SyncV2Section(service, userId)
-        CloudSyncBlockedNotice(usesSyncV2, syncState)
         refreshError?.let {
             Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
         }
@@ -205,7 +206,7 @@ fun CloudAccountPanel(
         keyWarning?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
         if (member == null) {
             Text(if (memberLoading) "正在读取会员状态…" else "暂时无法读取会员状态。")
-            if (usesSyncV2 && syncState.phase == CloudSyncPhase.ERROR) {
+            if (usesSyncV2 && syncState.phase == CloudSyncPhase.ERROR && !roundTimedOut) {
                 Text(syncState.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
         } else if (!member.readable) {
@@ -524,7 +525,7 @@ fun CloudAccountPanel(
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("立即同步") }
                 }
-                if (!usesSyncV2 || syncState.phase != CloudSyncPhase.BLOCKED) {
+                if (!usesSyncV2 || (syncState.phase != CloudSyncPhase.BLOCKED && !roundTimedOut)) {
                     Text(
                         syncState.message.ifBlank { "等待同步" },
                         style = MaterialTheme.typography.bodySmall,
@@ -942,16 +943,5 @@ internal class CloudPaneRefresh(private val scope: CoroutineScope) {
     fun cancel() {
         job?.cancel()
         job = null
-    }
-}
-
-@Composable
-internal fun CloudSyncBlockedNotice(usesSyncV2: Boolean, state: PhoneCloudSyncState) {
-    if (usesSyncV2 && state.phase == CloudSyncPhase.BLOCKED) {
-        Text(
-            state.message.ifBlank { SyncV2View.errorText(state.errorCode ?: "feature_disabled") },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
     }
 }

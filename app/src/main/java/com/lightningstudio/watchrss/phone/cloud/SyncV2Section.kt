@@ -45,6 +45,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
+@Composable
+internal fun CloudSyncRoundNotice(usesSyncV2: Boolean, state: PhoneCloudSyncState) {
+    if (!usesSyncV2) return
+    val timedOut = state.phase == CloudSyncPhase.ERROR && state.errorCode == "sync_timeout"
+    if (timedOut || state.phase == CloudSyncPhase.BLOCKED) {
+        Text(
+            state.message.ifBlank { SyncV2View.errorText(state.errorCode ?: "feature_disabled") },
+            style = MaterialTheme.typography.bodySmall,
+            color = if (timedOut) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
 private fun codeOf(error: Throwable): String =
     (error as? SyncV2CloudError)?.code ?: error.message?.takeIf { Regex("[a-z][a-z0-9_]{0,63}").matches(it) } ?: "temporarily_unavailable"
 

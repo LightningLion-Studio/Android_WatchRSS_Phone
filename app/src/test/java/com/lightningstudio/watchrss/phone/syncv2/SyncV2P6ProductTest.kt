@@ -2,13 +2,20 @@ package com.lightningstudio.watchrss.phone.syncv2
 
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.SharedPreferences
 import androidx.room.Room
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
 import com.lightningstudio.watchrss.phone.account.LoginProgress
 import com.lightningstudio.watchrss.phone.cloud.CloudSyncPhase
 import com.lightningstudio.watchrss.phone.cloud.CloudSyncSingleFlight
+import com.lightningstudio.watchrss.phone.cloud.MissingCloudBodyException
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncState
+import com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile
+import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
+import com.lightningstudio.watchrss.phone.data.local.articleContentMarkerFileName
+import com.lightningstudio.watchrss.phone.testing.MemoryPreferences
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -56,6 +63,7 @@ class SyncV2P6ProductTest {
         var negotiateStepMillis=0L;var timeOffsetMillis=0L;var expiredNegotiate=false;var checkpoints=0
         var account=JSONObject().put("commitOid",JSONObject.NULL).put("revision","0").put("rollbackGeneration","0")
         var closedBodyChannel=false;var bodyRequests=0
+        var blockBodyList = false
         var publishes=0;var acks=0;var inits=0;var queries=0;var dropPublish=false;var failQuery=false
         var block:String?=null;val entered=CountDownLatch(1);val unblock=CountDownLatch(1)
         var concurrentWinner:SyncV2RepoBootstrap.Candidate?=null
@@ -74,6 +82,11 @@ class SyncV2P6ProductTest {
                     assertEquals("Bearer synthetic-device",r.getHeader("x-watchrss-device-authorization"))
                     if(closedBodyChannel && r.requestUrl!!.encodedPath.startsWith("/functions/v1/cloud/bodies/v1/")) {
                         bodyRequests++
+                        if (r.method == "GET" && blockBodyList) {
+                            blockBodyList = false
+                            entered.countDown()
+                            assertTrue(unblock.await(10, TimeUnit.SECONDS))
+                        }
                         if(r.method!="GET")return error("body_channel_write_disabled").setResponseCode(503)
                         return response(JSONObject().put("version",1).put("purpose",SyncV2BodyCodec.PURPOSE).put("scope",scope()).put("carriers",JSONArray()).put("nextAfter",JSONObject.NULL))
                     }
@@ -178,7 +191,8 @@ class SyncV2P6ProductTest {
         var account:SyncV2PhoneProduct.Account?=SyncV2PhoneProduct.Account(user,server.http.url("/").toString(),id,"old-epoch","old-generation","synthetic-account","synthetic-api","Bearer synthetic-device")
         var enabled=localSwitch
         var wifi=true
-        val product=SyncV2PhoneProduct(context,{room},manager,{account},{_,values->assertTrue(java.security.MessageDigest.isEqual(server.wrap,values.getValue(1)))},{true},{enabled},signals={SyncV2TransportSignals(wifi=wifi,internet=true)},contentEnabled=bodyChannel)
+        var transportSignals = { SyncV2TransportSignals(wifi=wifi,internet=true) }
+        val product=SyncV2PhoneProduct(context,{room},manager,{account},{_,values->assertTrue(java.security.MessageDigest.isEqual(server.wrap,values.getValue(1)))},{true},{enabled},signals={transportSignals()},contentEnabled=bodyChannel)
         fun note(text:String="local"){val v=SyncV2P5Fixture().use{it.note(markdown=text)};SyncV2PhoneApply(room.openHelper.writableDatabase).upsert("notes",listOf("noteId"),v)}
         fun text()=room.openHelper.writableDatabase.query("SELECT markdown FROM notes WHERE noteId='note'").use{if(it.moveToFirst())it.getString(0)else null}
         fun sync()=runBlocking{product.sync(server.announcement)}
@@ -678,7 +692,11 @@ class SyncV2P6ProductTest {
             }finally{identity.close()}
         }}
     }
-    private inner class ServiceEntry(val h:Host, roundTimeoutMillis: Long? = null):AutoCloseable {
+    private inner class ServiceEntry(
+        val h: Host,
+        roundTimeoutMillis: Long? = null,
+        sessionPreferences: SharedPreferences = MemoryPreferences()
+    ):AutoCloseable {
         private val c=h.context
         private val epoch="11111111-1111-4111-8111-111111111111"
         private val generation="22222222-2222-4222-8222-222222222222"
@@ -687,25 +705,47 @@ class SyncV2P6ProductTest {
         val settings=com.lightningstudio.watchrss.phone.cloud.PhoneCloudStateStore(preferences)
         var announced=true;var failAuthentication=false;var unsupported=false;var legacyCalls=0;var bootstraps=0
         var bootstrapTimesOut = false
+        var memberReadable = true
+        var onBootstrapRequest: (() -> Unit)? = null
+        var onRevokeRequest: (() -> Unit)? = null
+        private val nextOwner = "34343434-3434-3434-3434-343434343434"
+        private fun memberJson() = JSONObject().put("active", true).put("writable", true)
+            .put("readable", memberReadable).put("quotaBytes", 1000000)
+            .put("usedBytes", 0).put("reservedBytes", 0)
         private val env=com.lightningstudio.watchrss.phone.account.AccountEnvironment(backendBaseUrl=h.server.http.url("/").toString(),supabaseAnonKey="synthetic-api")
         val session=com.lightningstudio.watchrss.phone.account.PhoneAccountSession(user,"***","synthetic-account","synthetic-refresh",Long.MAX_VALUE)
         private val store=com.lightningstudio.watchrss.phone.account.EncryptedAccountSessionStore(c).also {store->
-            store.javaClass.getDeclaredField("prefsRef").apply{isAccessible=true}.set(store,com.lightningstudio.watchrss.phone.testing.MemoryPreferences())
+            store.javaClass.getDeclaredField("prefsRef").apply{isAccessible=true}.set(store,sessionPreferences)
         }
         private val account=com.lightningstudio.watchrss.phone.account.PhoneAccountRepository(env,store,com.lightningstudio.watchrss.phone.account.PhoneInstallationIdentity(c),
             com.lightningstudio.watchrss.phone.account.PhoneAccountClient(env,com.lightningstudio.watchrss.phone.account.LicenseDeviceIdentity(c)),h.id)
         private val repo=com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository(h.room.phoneSavedItemDao(),h.room.phoneArticleDao(),h.room.phoneRssSourceDao(),h.id,
-            syncChangeLogDao=h.room.syncChangeLogDao(),syncPeerStateDao=h.room.syncPeerStateDao(),appMetaDao=h.room.appMetaDao())
+            syncChangeLogDao=h.room.syncChangeLogDao(),syncPeerStateDao=h.room.syncPeerStateDao(),appMetaDao=h.room.appMetaDao(),
+            articleContentStore=FileArticleContentStore(c))
         private val reader=com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository(c,h.room,h.room.readerPresetDao(),h.id,scope)
         private val client=com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient(env,http=okhttp3.OkHttpClient.Builder().addInterceptor{chain->
-            val request=chain.request();val bootstrap=request.url.encodedPath.endsWith("/bootstrap")
+            val request=chain.request()
+            val path = request.url.encodedPath
+            val bootstrap = path.endsWith("/bootstrap")
+            val owner = if (request.header("Authorization") == "Bearer other-session") nextOwner else user
+            val (status, body) = when {
+                path.endsWith("/entitlement") -> 200 to memberJson()
+                path.endsWith("/revoke") && onRevokeRequest != null -> {
+                    onRevokeRequest?.invoke()
+                    409 to JSONObject().put("error", "library_epoch_mismatch")
+                }
+                else -> {
+            if (bootstrap) onBootstrapRequest?.invoke()
             if (bootstrap && bootstrapTimesOut) throw java.net.SocketTimeoutException("fixture timeout")
             val status=if(bootstrap){bootstraps++;if(failAuthentication)401 else if(unsupported)426 else 200}else{legacyCalls++;426}
             val body=if(status==200)JSONObject().put("libraryEpoch",epoch).put("contentGeneration",generation).put("contentEmpty",false)
-                .put("member",JSONObject().put("active",true).put("writable",true).put("readable",true).put("quotaBytes",1000000).put("usedBytes",0).put("reservedBytes",0))
-                .put("keyVersionFloor",0).put("keyCommitments",JSONArray().put(JSONObject().put("keyVersion",1).put("commitment",com.lightningstudio.watchrss.phone.cloud.CloudProtocolV2.commitment(h.server.wrap,user,epoch,1))))
+                .put("member",memberJson())
+                .put("keyVersionFloor",0).put("keyCommitments",JSONArray().put(JSONObject().put("keyVersion",1).put("commitment",com.lightningstudio.watchrss.phone.cloud.CloudProtocolV2.commitment(h.server.wrap,owner,epoch,1))))
                 .put("keyEnvelopes",JSONArray()).put("devices",JSONArray()).also{if(announced)it.put("syncV2",h.server.announcement)}
                 else JSONObject().put("error",if(unsupported)"client_upgrade_required"else if(failAuthentication)"invalid_token"else JSONObject().put("code","upgrade_required").put("details",JSONObject().put("requiredFeatures",JSONArray().put("sync-objects.v2"))))
+                    status to body
+                }
+            }
             okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1).code(status).message("synthetic")
                 .body(body.toString().toResponseBody("application/json".toMediaType())).build()
         }.build())
@@ -723,10 +763,16 @@ class SyncV2P6ProductTest {
             service.javaClass.getDeclaredField("syncV2Product\$delegate").apply{isAccessible=true}.set(service,lazy{h.product})
         }
         fun sync(manual:Boolean)=runBlocking{service.syncNow(manual)}
-        suspend fun switchAccount() {
-            val next = session.copy(userId = "34343434-3434-3434-3434-343434343434", accessToken = "other-session")
+        fun prepareRevoke() = client.useEpoch(session, epoch)
+        suspend fun switchAccount(openProduct: Boolean = false) {
+            val next = session.copy(userId = nextOwner, accessToken = "other-session")
             account.saveCompletedLogin(LoginProgress("test-login", 1, listOf("otp"), true, next))
             assertEquals(next.userId, account.session.value?.userId)
+            if (openProduct) {
+                h.manager.saveAccountKey(next.userId, 1, h.server.wrap, true)
+                h.account = h.account!!.copy(userId = next.userId)
+                service.syncNow(manual = true)
+            }
         }
         override fun close(){scope.coroutineContext[kotlinx.coroutines.Job]?.cancel();service.javaClass.getDeclaredField("recordStore").apply{isAccessible=true}.get(service).let{(it as com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordStore).close()}}
     }
@@ -958,6 +1004,216 @@ class SyncV2P6ProductTest {
         }
     }
 
+    @Test fun fix2MissingImportedTextFileDoesNotCompleteRestoreOrOpenReader() {
+        Server().use { server ->
+            val id = "missing-imported-text"
+            Host(server, "import-writer").use { writer -> ServiceEntry(writer).use { entry ->
+                val records = javaClass.getResourceAsStream("/syncv2-business-schema.json")!!
+                    .bufferedReader().use { JSONObject(it.readText()).getJSONArray("records") }
+                val article = (0 until records.length()).map(records::getJSONObject)
+                    .single { it.getString("kind") == "article" }.getJSONObject("value")
+                    .put("articleId", id)
+                    .put("url", "https://watchrss.local/import-content/txt/missing")
+                    .put("independentSaved", true).put("contentText", "private cloud body")
+                SyncV2PhoneApply(writer.room.openHelper.writableDatabase)
+                    .upsert("phone_articles", listOf("articleId"), article)
+                assertTrue(entry.sync(true).completed)
+            } }
+            Host(server, "import-receiver").use { reader -> ServiceEntry(reader).use { entry ->
+                val articles = reader.room.phoneArticleDao()
+                val initial = runBlocking { entry.service.restoreCurrentLibrary() }
+                assertEquals("pending_bodies", initial.outcome?.errorCode)
+                val row = runBlocking { requireNotNull(articles.getById(id)) }
+                assertTrue(row.contentHash.isNotBlank())
+                val files = FileArticleContentStore(reader.context)
+                val marker = files.markerFor(id)
+                assertNull(files.textChunkHandle(marker))
+                fun cacheBody(text: String, installFile: Boolean = false) = runBlocking {
+                    reader.product.action(requireNotNull(reader.product.uiPort.value)) { runtime ->
+                        val projection = runtime.projection
+                        projection.accountWriter(projection.state().version) { state ->
+                            val db = projection.accountDatabase
+                            if (installFile) {
+                                val file = File(reader.context.filesDir,
+                                    "imported_text/" + requireNotNull(articleContentMarkerFileName(text)))
+                                file.parentFile!!.mkdirs()
+                                // Install as a cache file, without recording a new local import.
+                                ConditionalBodyFile.install(file, "private cloud body".toByteArray())
+                            }
+                            db.execSQL("UPDATE phone_articles SET contentText=? WHERE articleId=?", arrayOf(text, id))
+                            state.body.put("businessStamp", SyncV2BusinessWitness.read(db).encoded())
+                        }
+                    }
+                }
+                for (body in listOf(marker, " \t\n")) {
+                    cacheBody(body)
+                    val restore = runBlocking { entry.service.restoreCurrentLibrary() }.outcome
+                    val read = runCatching { runBlocking { entry.service.loadArticleForReading(id) } }
+                    val local = runBlocking { requireNotNull(articles.getById(id)) }
+                    assertEquals(row.contentHash, local.contentHash)
+                    assertEquals(body, local.contentText)
+                    assertEquals(CloudSyncPhase.IDLE, restore?.phase)
+                    assertEquals("pending_bodies", restore?.errorCode)
+                    assertTrue(read.exceptionOrNull() is MissingCloudBodyException)
+                    val sync = entry.sync(true).outcome
+                    assertEquals(CloudSyncPhase.IDLE, sync?.phase)
+                    assertEquals("pending_bodies", sync?.errorCode)
+                }
+                cacheBody(marker, installFile = true)
+                val restored = runBlocking { entry.service.restoreCurrentLibrary() }
+                assertTrue(restored.outcome.toString(), restored.completed)
+                assertEquals(marker, runBlocking { entry.service.loadArticleForReading(id) }?.contentText)
+            } }
+        }
+    }
+
+    @Test fun fix2MembershipCannotRepopulateStateWhileLoginPublishesAnotherAccount() = runBlocking {
+        val clearing = CountDownLatch(1)
+        val resume = CountDownLatch(1)
+        val backing = MemoryPreferences()
+        val prefs = object : SharedPreferences by backing {
+            override fun edit(): SharedPreferences.Editor {
+                val editor = backing.edit()
+                return object : SharedPreferences.Editor by editor {
+                    override fun commit(): Boolean {
+                        clearing.countDown()
+                        assertTrue(resume.await(10, TimeUnit.SECONDS))
+                        return editor.commit()
+                    }
+                }
+            }
+        }
+        Server().use { server -> Host(server, "switch-window").use { host ->
+            ServiceEntry(host, sessionPreferences = prefs).use { entry ->
+                val switch = async(Dispatchers.IO) { entry.switchAccount() }
+                try {
+                    assertTrue(clearing.await(5, TimeUnit.SECONDS))
+                    runCatching { entry.service.refreshDashboardMembership() }
+                } finally {
+                    resume.countDown()
+                    switch.await()
+                }
+                assertEquals(PhoneCloudSyncState(), entry.service.state.value)
+            }
+        } }
+    }
+
+    @Test fun fix2LateDeviceRevokeEpochMismatchLeavesTheNewAccountIntact() = runBlocking {
+        Server().use { server -> Host(server, "late-revoke").use { host -> ServiceEntry(host).use { entry ->
+            val revokeEntered = CountDownLatch(1)
+            val revokeReply = CountDownLatch(1)
+            entry.prepareRevoke()
+            entry.onRevokeRequest = {
+                revokeEntered.countDown()
+                assertTrue(revokeReply.await(10, TimeUnit.SECONDS))
+            }
+            val revoke = async(Dispatchers.IO) { runCatching { entry.service.revokeDevice("old-device") } }
+            try {
+                assertTrue(revokeEntered.await(5, TimeUnit.SECONDS))
+                entry.switchAccount(openProduct = true)
+                val port = requireNotNull(host.product.uiPort.value)
+                val state = entry.service.state.value
+                assertEquals(CloudSyncPhase.COMPLETE, state.phase)
+                val epoch = requireNotNull(entry.settings.libraryEpoch)
+                revokeReply.countDown()
+                assertNotNull(revoke.await().exceptionOrNull())
+                assertEquals(state, entry.service.state.value)
+                assertEquals(epoch, entry.settings.libraryEpoch)
+                assertTrue(host.manager.hasAccountKey(host.account!!.userId))
+                assertSame(port, host.product.uiPort.value)
+            } finally {
+                revokeReply.countDown()
+            }
+        } } }
+    }
+
+    @Test fun fix2CancelledBodyChannelDoesNotScanTheNextEntry() {
+        Server().use { server -> Host(server, "cancel-bodies").use { host ->
+            server.closedBodyChannel = true
+            host.note("![one](assets/one.png) ![two](assets/two.png)")
+            for (name in listOf("one", "two")) {
+                File(host.context.filesDir, "notes/assets/$name.png").apply {
+                    parentFile!!.mkdirs()
+                    writeText(name)
+                }
+            }
+            repeat(4) {
+                if (server.publishes == 0) {
+                    try { host.sync() } catch (error: IllegalStateException) {
+                        if (error.message != "budget_paused") throw error
+                    }
+                }
+            }
+            assertEquals(1, server.publishes)
+            var scanned = 0
+            val cancelled = CancellationException("cancelled during body scan")
+            host.transportSignals = {
+                scanned++
+                throw cancelled
+            }
+            val result = runCatching {
+                runBlocking {
+                    host.product.action(requireNotNull(host.product.uiPort.value)) {
+                        requireNotNull(it.bodies).sync(manual = true)
+                    }
+                }
+            }
+            assertEquals(1, scanned)
+            val failure = result.exceptionOrNull()
+            assertTrue(failure is CancellationException)
+            assertEquals(cancelled.message, failure?.message)
+        } }
+    }
+
+    @Test fun fix2DeadlineDuringBodyTransferReportsSyncTimeout() = runBlocking {
+        Server().use { server -> Host(server, "body-deadline").use { host ->
+            server.closedBodyChannel = true
+            host.note("![one](assets/one.png) ![two](assets/two.png)")
+            for (name in listOf("one", "two")) {
+                File(host.context.filesDir, "notes/assets/$name.png").apply {
+                    parentFile!!.mkdirs()
+                    writeText(name)
+                }
+            }
+            ServiceEntry(host, roundTimeoutMillis = 3_000).use { entry ->
+                repeat(3) {
+                    if (server.publishes == 0) entry.service.syncNow(manual = true)
+                }
+                assertEquals(1, server.publishes)
+                val before = server.bodyRequests
+                server.blockBodyList = true
+                val round = async(Dispatchers.IO) { entry.service.syncNow(manual = true) }
+                try {
+                    assertTrue(server.entered.await(5, TimeUnit.SECONDS))
+                    val outcome = withTimeout(4_500) { round.await().outcome }
+                    assertEquals(CloudSyncPhase.ERROR, outcome?.phase)
+                    assertEquals("sync_timeout", outcome?.errorCode)
+                    assertEquals(before + 1, server.bodyRequests)
+                } finally {
+                    server.unblock.countDown()
+                }
+            }
+        } }
+    }
+
+    @Test fun fix2DeadlineDuringKeyPreparationRetainsReadableMembership() = runBlocking {
+        Server().use { server -> Host(server, "key-deadline").use { host ->
+            host.manager.clearAccountKeys(user)
+            ServiceEntry(host, roundTimeoutMillis = 1_200).use { entry ->
+                var calls = 0
+                entry.onBootstrapRequest = {
+                    if (++calls == 2) Thread.sleep(2_500)
+                }
+                val outcome = entry.service.syncNow(manual = true).outcome
+                assertEquals(CloudSyncPhase.ERROR, outcome?.phase)
+                assertEquals("sync_timeout", outcome?.errorCode)
+                assertTrue(outcome?.member?.readable == true)
+                assertFalse(entry.service.hasLocalAccountKey())
+                assertEquals(0, server.http.requestCount)
+            }
+        } }
+    }
+
     @Test fun fix1ProductCancellationStopsInFlightControlRequest() = runBlocking {
         Server().use { server -> Host(server, "timeout-control").use { host ->
             server.block = "capabilities"
@@ -1055,6 +1311,7 @@ class SyncV2P6ProductTest {
     @Test fun fix1RoundDeadlineStopsDiscoveryAndRecordsSyncTimeout() = runBlocking {
         Server().use { server -> Host(server, "outer-deadline").use { host ->
             ServiceEntry(host, roundTimeoutMillis = 1_200L).use { entry ->
+                entry.memberReadable = false
                 server.block = "capabilities"
                 val result = async(Dispatchers.IO) { entry.service.syncNow(manual = true) }
                 try {
@@ -1063,6 +1320,7 @@ class SyncV2P6ProductTest {
                     assertEquals(CloudSyncPhase.ERROR, outcome?.phase)
                     assertEquals("sync_timeout", outcome?.errorCode)
                     assertEquals(0L, outcome?.lastCompletedAt)
+                    assertFalse(requireNotNull(outcome?.member).readable)
                     assertEquals(1, server.http.requestCount)
                     assertEquals(0, server.publishes)
                 } finally {

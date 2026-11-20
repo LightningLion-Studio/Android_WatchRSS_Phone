@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.data.local
 
 import android.content.Context
+import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
@@ -102,7 +103,13 @@ class FileArticleContentStore internal constructor(
     override fun textChunkHandle(marker: String, chunkBytes: Int): StoredTextChunkHandle? {
         if (chunkBytes <= 0) return null
         val file = fileFor(marker)?.takeIf { it.isFile } ?: return null
-        val byteLength = file.length()
+        val byteLength = try {
+            RandomAccessFile(file, "r").use { it.length() }
+        } catch (_: java.io.IOException) {
+            return null
+        } catch (_: SecurityException) {
+            return null
+        }
         return StoredTextChunkHandle(
             marker = marker,
             byteLength = byteLength,
@@ -205,6 +212,23 @@ class FileArticleContentStore internal constructor(
 
 fun isArticleContentMarker(value: String?): Boolean {
     return articleContentMarkerFileName(value) != null
+}
+
+internal fun hasReadableArticleBody(
+    url: String,
+    text: String,
+    html: String?,
+    store: ArticleContentStore?
+): Boolean {
+    fun readable(value: String?): Boolean = when {
+        value.isNullOrBlank() -> false
+        isArticleContentMarker(value) -> store?.textChunkHandle(value)?.let { it.byteLength > 0 } == true
+        else -> true
+    }
+
+    // The TXT reader uses this file directly even when the row also has HTML.
+    if (ImportedContentIds.isImportedTextArticleUrl(url) && isArticleContentMarker(text)) return readable(text)
+    return readable(text) || readable(html)
 }
 
 internal fun articleContentMarkerFileName(value: String?): String? {

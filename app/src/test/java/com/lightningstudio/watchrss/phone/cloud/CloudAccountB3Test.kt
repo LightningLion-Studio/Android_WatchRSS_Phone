@@ -12,6 +12,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import com.lightningstudio.watchrss.phone.ArticleReaderScreen
+import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.rememberCloudPaneError
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.CompletableDeferred
@@ -179,12 +181,57 @@ class CloudAccountB3Test {
     }
 
     @Test
+    fun fix2MissingImportedTextReaderOffersRetry() {
+        var retries = 0
+        val article = PhoneArticleEntity(
+            articleId = "missing-text", sourceDeviceId = "phone",
+            url = "https://watchrss.local/import-content/txt/missing-text",
+            title = "导入文章", siteName = "", excerpt = "", contentHtml = null,
+            contentText = "watchrss-local-text:missing-text.txt", imageUrl = null, contentHash = "fixture",
+            importedAt = 1, updatedAt = 1, independentSaved = true, independentChangedAt = 1,
+            independentSortOrder = 1, rssSourceUrl = null, rssSourceTitle = null,
+            favoriteSaved = false, favoriteChangedAt = 0, favoriteSortOrder = 0,
+            watchLaterSaved = false, watchLaterChangedAt = 0, watchLaterSortOrder = 0,
+            deleted = false, deletedAt = 0
+        )
+        compose.setContent {
+            WatchRssPhoneTheme {
+                ArticleReaderScreen(
+                    article = article, importedTextReader = null, invalidArticleId = false,
+                    onLoadImportedTextChunk = { _, _ -> error("No file handle") },
+                    onSaveReadingProgress = {}, onBack = {}, onOpenImportedArticle = {}, onOpenOriginal = {},
+                    onRetryBody = { retries++ }
+                )
+            }
+        }
+        compose.onNodeWithText("正文暂未加载完成，请重试。").assertExists()
+        compose.onNodeWithText("重试").performClick()
+        compose.runOnIdle { assertEquals(1, retries) }
+    }
+
+    @Test
+    fun fix2SyncTimeoutRendersOutsideQuotaAndAuthorization() {
+        var state by mutableStateOf(PhoneCloudSyncState(
+            phase = CloudSyncPhase.ERROR,
+            errorCode = "sync_timeout",
+            message = SyncV2View.errorText("sync_timeout"),
+            member = CloudMemberState("free", false, false, false, 0, 0, 0, null, null, null)
+        ))
+        compose.setContent {
+            WatchRssPhoneTheme { CloudSyncRoundNotice(true, state) }
+        }
+        compose.onNodeWithText(SyncV2View.errorText("sync_timeout")).assertExists()
+        compose.runOnIdle { state = state.copy(member = state.member?.copy(readable = true)) }
+        compose.onNodeWithText(SyncV2View.errorText("sync_timeout")).assertExists()
+    }
+
+    @Test
     fun fix1BlockedReasonsRenderWithoutMembershipOrLocalKey() {
         var state by mutableStateOf(PhoneCloudSyncState(
             CloudSyncPhase.BLOCKED, errorCode = "not_announced"
         ))
         compose.setContent {
-            WatchRssPhoneTheme { CloudSyncBlockedNotice(true, state) }
+            WatchRssPhoneTheme { CloudSyncRoundNotice(true, state) }
         }
         compose.onNodeWithText(SyncV2View.errorText("not_announced")).assertExists()
         compose.runOnIdle {

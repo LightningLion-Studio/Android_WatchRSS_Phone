@@ -61,7 +61,8 @@ class PhoneCloudClient(
     internal var checkSession: (PhoneAccountSession) -> Unit = {}
     internal var blockLegacyBusiness: () -> Boolean = { false }
     internal var onDeviceKeyConflict: (PhoneAccountSession) -> Unit = {}
-    internal var onEpochMismatch: (PhoneAccountSession) -> Unit = {}
+    internal var epochRequestGeneration: () -> Long = { 0L }
+    internal var onEpochMismatch: (PhoneAccountSession, Long) -> Unit = { session, _ -> forgetEpoch(session) }
     internal var onBootstrap: suspend (PhoneAccountSession, CloudBootstrap) -> Unit = { _, _ -> }
     internal var onRecordMetadata: suspend (PhoneAccountSession, JSONObject) -> Unit = { _, _ -> }
     fun scopeId(session: PhoneAccountSession): String = CloudSnapshotCodec.sha256("$backendBaseUrl\n${session.userId}".toByteArray())
@@ -546,6 +547,7 @@ class PhoneCloudClient(
         expectedEpoch: String? = null,
         uploadAttempt: CloudUploadAttempt? = null
     ): okhttp3.Response = withContext(Dispatchers.IO) {
+        val requestGeneration = epochRequestGeneration()
         checkSession(session)
         require(environment.backendBaseUrl.isNotBlank()) { "云服务地址未配置" }
         require(session.isUsableForAuthentication) { "登录已过期，请重新登录" }
@@ -660,8 +662,7 @@ class PhoneCloudClient(
         response.also {
             if (it.code == 409 && runCatching { JSONObject(it.peekBody(4096).string()).optString("error") }.getOrDefault("") == "device_key_conflict") onDeviceKeyConflict(session)
             if (it.code == 409 && runCatching { JSONObject(it.peekBody(4096).string()).optString("error") }.getOrDefault("") == "library_epoch_mismatch") {
-                onEpochMismatch(session)
-                epochs.remove(scopeId(session))
+                onEpochMismatch(session, requestGeneration)
             }
             if (!it.isSuccessful) it.throwHttp()
         }

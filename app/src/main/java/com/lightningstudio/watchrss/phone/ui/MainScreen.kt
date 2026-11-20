@@ -140,7 +140,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.lightningstudio.watchrss.phone.ArticleContentNodesKey
 import com.lightningstudio.watchrss.phone.ArticleContentNodesSnapshot
+import com.lightningstudio.watchrss.phone.ArticleReaderBody
+import com.lightningstudio.watchrss.phone.ArticleReaderBodyUnavailable
 import com.lightningstudio.watchrss.phone.ArticleReaderScreen
+import com.lightningstudio.watchrss.phone.loadArticleReaderBody
 import com.lightningstudio.watchrss.phone.PlatformWebViewScreen
 import com.lightningstudio.watchrss.phone.cloud.DashboardCloudSyncBanner
 import com.lightningstudio.watchrss.phone.cloud.CloudRssInventoryMode
@@ -440,34 +443,27 @@ fun MainScreen(
         readerOpenProgress >= 1f
     val inlineReaderContentReady = inlineReaderOpenSettled
     val inlineReaderLoadArticleId = selectedReaderArticleId
-    var readerBodyError by remember(selectedReaderArticleId) { mutableStateOf<String?>(null) }
+    var readerBodyFailed by remember(selectedReaderArticleId) { mutableStateOf(false) }
     var readerBodyRetry by remember(selectedReaderArticleId) { mutableStateOf(0) }
-    val hydratedSelectedReaderArticle by produceState<PhoneArticleEntity?>(
+    val hydratedReaderBody by produceState<ArticleReaderBody?>(
         initialValue = null,
         inlineReaderLoadArticleId, readerBodyRetry
     ) {
         val articleId = inlineReaderLoadArticleId
         value = null
-        readerBodyError = null
+        readerBodyFailed = false
         if (articleId != null) {
-            try { value = onLoadArticleForInlineReader(articleId) }
-            catch (error: CancellationException) { throw error }
-            catch (error: Exception) { readerBodyError = "正文暂未加载完成，请重试。" }
+            try {
+                value = loadArticleReaderBody(
+                    articleId, onLoadArticleForInlineReader, onLoadImportedTextReaderForInlineReader
+                )
+            } catch (error: CancellationException) { throw error }
+            catch (_: Exception) { readerBodyFailed = true }
         }
     }
-    val selectedReaderArticle = hydratedSelectedReaderArticle
+    val hydratedSelectedReaderArticle = hydratedReaderBody?.article
         ?.takeIf { it.articleId == selectedReaderArticleId }
-        ?: selectedReaderArticleListItem
-    val selectedImportedTextReader by produceState<PhoneImportedTextReader?>(
-        initialValue = null,
-        inlineReaderLoadArticleId, hydratedSelectedReaderArticle?.contentText
-    ) {
-        val articleId = inlineReaderLoadArticleId
-        value = null
-        if (articleId != null) {
-            value = runCatching { onLoadImportedTextReaderForInlineReader(articleId) }.getOrNull()
-        }
-    }
+    val selectedReaderArticle = hydratedSelectedReaderArticle ?: selectedReaderArticleListItem
     LaunchedEffect(selectedContentChannelKey) {
         selectedContentChannelKey?.let { key ->
             lastContentChannelKey = key
@@ -1073,7 +1069,7 @@ fun MainScreen(
                     onOpenImportedArticle = input.onOpenImportedArticle,
                     onOpenOriginal = input.onOpenOriginal,
                     listState = input.listState,
-                    bodyError = readerBodyError,
+                    bodyFailed = readerBodyFailed,
                     onRetryBody = { readerBodyRetry++ },
                     contentReady = input.contentReady,
                     contentNodesCache = input.contentNodesCache,
@@ -1094,7 +1090,7 @@ fun MainScreen(
                         article = article,
                         readerArticle = hydratedSelectedReaderArticle
                             ?.takeIf { inlineReaderContentReady && it.articleId == article.articleId },
-                        importedTextReader = selectedImportedTextReader,
+                        importedTextReader = hydratedReaderBody?.importedTextReader,
                         onLoadImportedTextChunk = onLoadImportedTextChunkForInlineReader,
                         onSaveReadingProgress = { progress ->
                             onSaveArticleReadingProgress(article.articleId, progress)
@@ -2554,7 +2550,7 @@ private fun InlineArticleReaderPane(
     onOpenOriginal: (String) -> Unit,
     listState: LazyListState,
     contentReady: Boolean,
-    bodyError: String?,
+    bodyFailed: Boolean,
     onRetryBody: () -> Unit,
     contentNodesCache: MutableMap<ArticleContentNodesKey, ArticleContentNodesSnapshot>,
     positionAlreadyRestored: Boolean,
@@ -2564,12 +2560,10 @@ private fun InlineArticleReaderPane(
     showFullscreenControl: Boolean,
     onToggleFullscreen: () -> Unit
 ) {
-    if (bodyError != null) {
-        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(bodyError)
-            TextButton(onClick = onRetryBody) { Text("重试") }
-            TextButton(onClick = onBack) { Text("返回") }
-        }
+    if (bodyFailed) {
+        ArticleReaderBodyUnavailable(
+            Modifier.background(MaterialTheme.colorScheme.background).statusBarsPadding(), onRetryBody, onBack
+        )
         return
     }
     val fullscreenControl = if (showFullscreenControl) onToggleFullscreen else null
@@ -2601,6 +2595,7 @@ private fun InlineArticleReaderPane(
         onBack = onBack,
         onOpenImportedArticle = onOpenImportedArticle,
         onOpenOriginal = onOpenOriginal,
+        onRetryBody = onRetryBody,
         embedded = true,
         embeddedFullscreen = fullscreen,
         onOpenFullscreen = fullscreenControl,

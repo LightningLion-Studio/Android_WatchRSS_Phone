@@ -123,6 +123,25 @@ class BookManifestValidationTest {
         assertEquals(true, BookSync.merge(edit, fromV1, binary = true).getBoolean("deleted"))
     }
 
+    @Test fun legacyWholeAndChapterTombstonesHaveIndependentGenerationBoundaries() {
+        val current = state().put("lifecycle", lifecycle(2).put("startedAt", 10)).put("updatedAt", 10)
+        val legacy = tombstone(2).put("updatedAt", 12).put("deletionClock", 12)
+            .put("deletedChapters", JSONArray().put(1))
+        val chapterOnly = BookSync.merge(current, legacy, binary = true)
+        assertFalse(chapterOnly.getBoolean("deleted"))
+        assertEquals(0L, chapterOnly.getLong("deletedAt"))
+        assertEquals(setOf(1), BookSync.deletions(chapterOnly))
+        assertEquals(12L, chapterOnly.getLong("deletionClock"))
+        assertEquals(BookSync.canonical(chapterOnly),
+            BookSync.canonical(BookSync.merge(legacy, current, binary = true)))
+
+        val wholeOnly = BookSync.merge(current, legacy.put("deletedAt", 12).put("deletionClock", 10), binary = true)
+        assertTrue(wholeOnly.getBoolean("deleted"))
+        assertEquals(12L, wholeOnly.getLong("deletedAt"))
+        assertTrue(BookSync.deletions(wholeOnly).isEmpty())
+        assertEquals(0L, wholeOnly.getLong("deletionClock"))
+    }
+
     @Test fun b2OnlyInstanceRequiresItsLifecycleForDeletion() {
         val instance = "a".repeat(32)
         val local = state().put("lifecycle", lifecycle(1)).put("instanceId", instance)

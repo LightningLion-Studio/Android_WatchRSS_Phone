@@ -40,6 +40,7 @@ class B2Authorization(
     internal val phoneSnapshot = copy(phoneSnapshot)
     internal val watchSnapshot = copy(watchSnapshot)
     internal val bindings = bindings.map(::copy)
+    internal var accountCommitFence: B2CommitFence? = null
     internal fun check() { if (!current()) fail("AUTH_REVOKED") }
 }
 
@@ -56,7 +57,7 @@ class B2Receiver(
 ) {
     private val retention = B2Retention(store, files, auth.accountScope, monotonic, retentionGeneration, ::check)
     private val connection = java.util.UUID.randomUUID().toString()
-    @Volatile private var revoked = false
+    private val commitFence = B2CommitFence(auth.accountCommitFence)
     private val light = java.util.concurrent.ConcurrentHashMap<String, JSONObject>()
     private val firstEpoch = java.util.concurrent.ConcurrentHashMap<Int, Long>()
     private val streamJobs = java.util.concurrent.ConcurrentHashMap<Int, String>()
@@ -66,7 +67,7 @@ class B2Receiver(
     private val flows = mapOf(1 to B2Flow(1), 2 to B2Flow(2))
     private val epochs = Any()
     private val active = mutableSetOf<String>()
-    fun fenceNow() { revoked = true }
+    fun fenceNow() = commitFence.revoke()
     internal fun closeIndex() = synchronized(epochs) {
         receiveIndex?.close()
         receiveIndex = null
@@ -76,15 +77,27 @@ class B2Receiver(
     private val leases = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val begun = mutableSetOf<String>()
     private val scope get() = auth.accountScope
-    private fun check() { if (revoked) fail("AUTH_REVOKED"); auth.check() }
-    suspend fun revoke(cancelJobs: Boolean = false) = store.exclusive {
-        revoked = true; leases.clear()
-        if (cancelJobs) for (b in auth.bindings) {
-            val j = store.get(scope, "job", b.s("jobId")) ?: continue
-            // A late old-controller cancellation cannot cancel a newer connection.
-            if (j.s("connection") != connection || terminal(j)) continue
-            store.transaction { j.put("state", "CANCELLED"); store.put(scope, "job", j.s("jobId"), j) }
-            objects(j.s("jobId")).forEach { files.release(scope, j.s("jobId"), it.o("descriptor"), keepObject = it.o("descriptor").s("kind") == B2Wire.BOOK_SEGMENT) }
+    private fun check() { commitFence.check(); auth.check() }
+
+    private suspend fun <T> receiveTransaction(block: suspend () -> T): T = store.transaction {
+        check()
+        val result = block()
+        auth.check()
+        commitFence.admitCommit()
+        result
+    }
+
+    suspend fun revoke(cancelJobs: Boolean = false) {
+        fenceNow()
+        store.exclusive {
+            leases.clear()
+            if (cancelJobs) for (b in auth.bindings) {
+                val j = store.get(scope, "job", b.s("jobId")) ?: continue
+                // A late old-controller cancellation cannot cancel a newer connection.
+                if (j.s("connection") != connection || terminal(j)) continue
+                store.transaction { j.put("state", "CANCELLED"); store.put(scope, "job", j.s("jobId"), j) }
+                objects(j.s("jobId")).forEach { files.release(scope, j.s("jobId"), it.o("descriptor"), keepObject = it.o("descriptor").s("kind") == B2Wire.BOOK_SEGMENT) }
+            }
         }
     }
     private val sourcePeer get() = if (receiveDirection == "watchToPhone") auth.watchDeviceId else auth.phoneDeviceId
@@ -128,8 +141,7 @@ class B2Receiver(
     suspend fun handle(frame: JSONObject, data: ByteArray? = null): JSONObject = try { store.exclusive {
         val r = B2Wire.envelope(B2Json.parse(B2Json.utf8(frame.toString()))).also { B2Wire.retainSize(it, B2Wire.frameBytes(frame)) }
         if (r.s("type") != "request" || r.s("phase") == "prepare") fail()
-        check()
-        val now = retention.clock()
+        val now = receiveTransaction { retention.clock() }
         if (r.s("phase") == "begin") return@exclusive begin(r, now)
         val j = job(r.s("jobId")); fence(j, r)
         if (B2Wire.frameBytes(r) > lim(j).n("maxFrameBytes") || B2Wire.frameBytes(r) - 12 > lim(j).n("maxControlHeaderBytes")) fail("LIMIT_EXCEEDED")
@@ -139,8 +151,11 @@ class B2Receiver(
         if (j.s("state") == "PLANNING" && r.s("phase") in listOf("putChunk", "apply")) fail("MANIFEST_INCOMPLETE")
         // Wire payload validation always precedes deduplication. put additionally checks bytes.
         if (r.s("phase") == "putChunk") validateChunk(j, r.o("payload"), data ?: fail())
-        val previous = bind(j, r)
-        touch(j, now)
+        val previous = receiveTransaction {
+            val bound = bind(j, r)
+            touch(j, now)
+            bound
+        }
         val result = when (r.s("phase")) {
             "missing" -> missing(j, r.o("payload")) // Queries return current verified observations.
             "putChunk" -> put(j, r, data ?: fail())
@@ -231,7 +246,7 @@ class B2Receiver(
     }
 
     internal fun current(stream: Int, epoch: Long): Boolean =
-        !revoked && streamJobs[stream]?.let { light[it]?.n("epoch") } == epoch
+        !commitFence.isRevoked && streamJobs[stream]?.let { light[it]?.n("epoch") } == epoch
 
     internal fun streamFor(job: String): Int = streamJobs.entries.firstOrNull { it.value == job }?.key ?: fail("AUTH_REVOKED")
 
@@ -288,7 +303,7 @@ class B2Receiver(
         }
         files.publishChunks(staged) { fence(j, group.first().request) }
         if (staged.isNotEmpty()) fault("afterChunkDurable")
-        store.transaction {
+        receiveTransaction {
             for ((chunk, disposition) in outcomes) {
                 fence(j, chunk.request)
                 val p = chunk.request.o("payload")
@@ -378,9 +393,11 @@ class B2Receiver(
         if (old == null) {
             // Record ownership separately so a rolled-back begin can retain
             // its native binding and still be collected after the recovery window.
-            store.put(scope, "nativeOwner", id, obj("expiresAtMillis" to now + B2Wire.RETENTION))
+            receiveTransaction {
+                store.put(scope, "nativeOwner", id, obj("expiresAtMillis" to now + B2Wire.RETENTION))
+            }
         }
-        store.transaction {
+        receiveTransaction {
             check(); j.put("connection", connection).put("epoch", epoch)
             bind(j, r); touch(j, now)
         }
@@ -403,7 +420,7 @@ class B2Receiver(
                         .forEach { active.add(it.o("descriptor").s("objectId")) }
                 }
             }
-            if (revoked) {
+            if (commitFence.isRevoked) {
                 resumedIndex?.close()
                 fail("AUTH_REVOKED")
             }
@@ -446,7 +463,7 @@ class B2Receiver(
             j.put("stagingReservation", incoming)
         }
         val result = obj("pageIndex" to index, "pageDigest" to p.s("pageDigest"), "nextManifestPage" to index + 1, "manifestVerified" to full, "state" to if (full) "READY" else "PLANNING")
-        store.transaction {
+        receiveTransaction {
             fence(j, r)
             entries.forEach { d -> store.put(scope, "object", objectKey(j.s("jobId"), d.s("objectId")), obj("jobId" to j.s("jobId"), "descriptor" to d, "receipt" to null)) }
             store.put(scope, "page", key(j.s("jobId"), index.toString()), obj("jobId" to j.s("jobId"), "digest" to p.s("pageDigest"), "result" to result))
@@ -455,7 +472,7 @@ class B2Receiver(
         if (full) {
             val index = files.receiveIndex(j.s("jobId"), all)
             synchronized(epochs) {
-                if (revoked) { index.close(); fail("AUTH_REVOKED") }
+                if (commitFence.isRevoked) { index.close(); fail("AUTH_REVOKED") }
                 receiveIndex = index
             }
         }
@@ -494,16 +511,23 @@ class B2Receiver(
         }
         val d = row.o("descriptor"); val missing = files.working(j.s("jobId")) { files.missing(scope, j.s("jobId"), d) }
         // Adopt durable orphan files after a crash; discard stale block availability.
-        d.a("chunkHashes").strings().indices.forEach { i ->
-            val k = key(j.s("jobId"), d.s("objectId"), i.toString())
-            if (i in missing) store.delete(scope, "chunk", k)
-            else if (store.get(scope, "chunk", k) == null) { store.budget(1024, lim(j).n("maxJournalBytes")); store.put(scope, "chunk", k, obj("jobId" to j.s("jobId"), "sha256" to d.a("chunkHashes").getString(i))) }
+        val inactive = missing.size == d.a("chunkHashes").length() && row.optBoolean("active", false)
+        receiveTransaction {
+            d.a("chunkHashes").strings().indices.forEach { i ->
+                val k = key(j.s("jobId"), d.s("objectId"), i.toString())
+                if (i in missing) store.delete(scope, "chunk", k)
+                else if (store.get(scope, "chunk", k) == null) {
+                    store.budget(1024, lim(j).n("maxJournalBytes"))
+                    store.put(scope, "chunk", k, obj("jobId" to j.s("jobId"), "sha256" to d.a("chunkHashes").getString(i)))
+                }
+            }
+            if (inactive) {
+                // Lost/corrupt cache bytes hold no active object buffer after revalidation.
+                row.put("active", false)
+                store.put(scope, "object", objectKey(j.s("jobId"), d.s("objectId")), row)
+            }
         }
-        if (missing.size == d.a("chunkHashes").length() && row.optBoolean("active", false)) {
-            // Lost/corrupt cache bytes hold no active object buffer after revalidation.
-            row.put("active", false); store.put(scope, "object", objectKey(j.s("jobId"), d.s("objectId")), row)
-            synchronized(active) { active.remove(d.s("objectId")) }
-        }
+        if (inactive) synchronized(active) { active.remove(d.s("objectId")) }
         val staged = missing.isEmpty() && files.verified(files.composed(scope, j.s("jobId"), d.s("objectId")), d.n("size"), d.s("sha256"))
         return (if (staged) "STAGED" else if (missing.size < d.a("chunkHashes").length()) "PARTIAL" else "PENDING") to missing
     }
@@ -558,7 +582,10 @@ class B2Receiver(
                 if (oid !in active && active.size >= cap) fail("WINDOW_FULL")
                 active.add(oid)
             }
-            row.put("active", true); store.put(scope, "object", objectKey(j.s("jobId"), d.s("objectId")), row)
+            receiveTransaction {
+                row.put("active", true)
+                store.put(scope, "object", objectKey(j.s("jobId"), d.s("objectId")), row)
+            }
         }
     }
     private suspend fun stagingLimit(j: JSONObject): Long {
@@ -585,7 +612,7 @@ class B2Receiver(
         files.working(j.s("jobId")) { files.stage(scope, j.s("jobId"), d, p.n("chunkIndex").toInt(), bytes, budget) }; fault("afterChunkDurable")
         leases[j.s("jobId")] = monotonic() + B2Wire.LEASE
         val result = obj("objectId" to d.s("objectId"), "chunkIndex" to p.n("chunkIndex"), "chunkState" to "STAGED", "objectState" to "PARTIAL", "receipt" to null)
-        store.transaction { fence(j, r); bind(j, r, result)
+        receiveTransaction { fence(j, r); bind(j, r, result)
             store.put(scope, "chunk", key(j.s("jobId"), d.s("objectId"), p.n("chunkIndex").toString()), obj("jobId" to j.s("jobId"), "sha256" to d.a("chunkHashes").getString(p.n("chunkIndex").toInt())))
             j.put("state", "TRANSFERRING"); store.put(scope, "job", j.s("jobId"), j) }
         progress(receiveDirection + ":" + B2Progress.chunk(d, p.n("chunkIndex").toInt()))
@@ -603,8 +630,8 @@ class B2Receiver(
         val metadata = B2Metadata.validate(d)
         val budget = stagingLimit(j)
         val staged = files.working(j.s("jobId")) { files.finalize(scope, j.s("jobId"), d, budget) }; fault("afterObjectDurable")
-        // The writer lane is held during local work. Extend the in-use lease before
-        // entering the commit; GC/revoke/new begin cannot cross this boundary.
+        // The writer lane keeps GC and new epochs out during local work.
+        // Extend the in-use lease. Revocation can still fence commit admission.
         leases[j.s("jobId")] = monotonic() + B2Wire.LEASE
         val jobId = j.s("jobId")
         val isBookCommit = d.s("kind") == B2Wire.BOOK_COMMIT
@@ -619,7 +646,7 @@ class B2Receiver(
             if (assembly == null || segments != metadata.a("segmentObjectIds").strings()) fail("PLAN_CONFLICT")
             check()
             files.publishAssembly(temp, assembly)
-            store.transaction {
+            receiveTransaction {
                 check()
                 store.put(scope, "bookAssembly", assemblyKey, obj("jobId" to jobId, "objectId" to d.s("objectId")))
             }
@@ -630,10 +657,11 @@ class B2Receiver(
         })
         business.prepareFile(context, copy(d), metadata)
         leases[jobId] = monotonic() + B2Wire.LEASE
-        val result = store.transaction {
+        val result = receiveTransaction {
             fence(j, r)
             val outcome = business.applyFile(context, copy(d), metadata, B2FileRef(staged, 0, d.n("size")))
-            check(); fault("beforeApplyCommit")
+            fault("beforeApplyCommit")
+            check()
             touch(j, retention.clock())
             val rc = B2Digests.receipt(r, d.s("objectId"), if (receiveDirection == "watchToPhone") auth.phoneDeviceId else auth.watchDeviceId, outcome)
             row.put("receipt", rc); store.put(scope, "object", objectKey(j.s("jobId"), d.s("objectId")), row)
@@ -662,14 +690,14 @@ class B2Receiver(
         val rs = objects(j.s("jobId")).map { receipt(j, it) ?: fail("CHUNKS_MISSING") }
         val root = B2Digests.receipts(rs); if (root != p.s("receiptsRoot")) fail("RECEIPT_CONFLICT")
         val c = B2Digests.completion(j.s("jobId"), j.s("planDigest"), ds.n("objectCount"), root, p.n("ackToInclusive"))
-        store.transaction {
+        receiveTransaction {
             fence(j, r); business.complete(copy(ds), copy(c)); check(); touch(j, retention.clock())
             j.put("state", "COMPLETE").put("completion", c); store.put(scope, "job", j.s("jobId"), j); bind(j, r, c)
         }; fault("afterCompleteCommit"); return c
     }
     private suspend fun cancel(j: JSONObject, r: JSONObject): JSONObject {
         val result = obj("state" to if (j.s("state") == "COMPLETE") "COMPLETE" else "CANCELLED", "alreadyComplete" to (j.s("state") == "COMPLETE"))
-        store.transaction { fence(j, r); j.put("state", result.s("state")); store.put(scope, "job", j.s("jobId"), j); bind(j, r, result) }
+        receiveTransaction { fence(j, r); j.put("state", result.s("state")); store.put(scope, "job", j.s("jobId"), j); bind(j, r, result) }
         if (j.s("state") == "CANCELLED") objects(j.s("jobId")).forEach {
             val d = it.o("descriptor")
             files.release(scope, j.s("jobId"), d, keepObject = d.s("kind") == B2Wire.BOOK_SEGMENT)

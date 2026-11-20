@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.data.book
 
 import androidx.room.withTransaction
+import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.data.db.*
 import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
@@ -73,7 +74,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             }
             diagnostic("registration:unmapped=${rows.size}:ms=${(System.nanoTime()-started)/1_000_000}")
         }
-        for(book in dao.all().filter { !available(it) && !JSONObject(it.stateJson).getBoolean("deleted") })try {
+        for(book in dao.all().filter { availablePackage(it) == null && !JSONObject(it.stateJson).getBoolean("deleted") })try {
             val mappings=dao.chapters(book.bookId);val state=JSONObject(book.stateJson)
             if(mappings.size!=state.getInt("chapterCount"))continue
             val original=mappings.map {requireNotNull(articles.getById(it.articleId))}
@@ -118,7 +119,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
                 db.withTransaction {dao.put(BookEntity(id,BookSync.canonical(state),sha(file(id)),file(id).length()));dao.putChapters(metadata.mapIndexed {i,row->BookChapterEntity(id,i+1,row.articleId)})}
             } else {
                 // Same immutable sequence imported under a new filename: one identity, merge deletion state.
-                if(!available(existing)){directory.mkdirs();com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)){com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.installPrivateBook(file(id),temporary)};dao.put(existing.copy(packageSha256=sha(file(id)),packageBytes=file(id).length()))}
+                if(availablePackage(existing) == null){directory.mkdirs();com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)){com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.installPrivateBook(file(id),temporary)};dao.put(existing.copy(packageSha256=sha(file(id)),packageBytes=file(id).length()))}
                 merge(state)
                 val mappings=dao.chapters(id)
                 if(mappings.isEmpty())dao.putChapters(metadata.mapIndexed{i,row->BookChapterEntity(id,i+1,row.articleId)})
@@ -134,7 +135,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             }
         } finally {temporary.delete()}
     }
-    suspend fun manifests():List<JSONObject> {ensureRegistered();return dao.all().map{JSONObject(it.stateJson).put("contentAvailable",available(it))}}
+    suspend fun manifests():List<JSONObject> {ensureRegistered();return dao.all().map{JSONObject(it.stateJson).put("contentAvailable", availablePackage(it) != null)}}
     suspend fun states():List<JSONObject> {ensureRegistered();return dao.all().map{JSONObject(it.stateJson)}}
     /** Caller has already captured the R46 dirty journal for this window. Do not prepare it twice. */
     internal suspend fun bluetoothExclusions():Pair<Set<String>,Set<String>> =
@@ -151,7 +152,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
     }
     suspend fun canonicalArticle(row:PhoneArticleEntity)=if(!isBookChapter(row))row else bookForArticle(row.articleId,row.url)?.let{row.copy(articleId=it.articleId)}?:row
     private fun interacted(row:PhoneArticleEntity)=row.readingPositionChangedAt>0||row.isRead||row.readingProgress>0||row.favoriteSaved||row.favoriteChangedAt>0||row.watchLaterSaved||row.watchLaterChangedAt>0
-    suspend fun missingBookIds():Set<String> {ensureRegistered();return dao.all().filter{!JSONObject(it.stateJson).getBoolean("deleted")&&!available(it)}.mapTo(hashSetOf()){it.bookId}}
+    suspend fun missingBookIds():Set<String> {ensureRegistered();return dao.all().filter{!JSONObject(it.stateJson).getBoolean("deleted")&&availablePackage(it) == null}.mapTo(hashSetOf()){it.bookId}}
     suspend fun sourceUrls():Set<String> {
         ensureRegistered()
         return (dao.all().map{JSONObject(it.stateJson).optString("sourceUrl")}+dao.sourceUrls()).filter{it.isNotBlank()}.toHashSet()
@@ -167,19 +168,28 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             while (true) {
                 val row = dao.nextBinaryBook(after) ?: break
                 after = row.bookId
-                visit(row, packageFor(row).takeIf { available(row) })
+                visit(row, availablePackage(row, binary = true))
             }
         }
     }
     internal suspend fun binaryReadingPage(id: String, after: Int) = dao.binaryReadingPage(id, after)
     internal suspend fun binaryState(id: String) = dao.get(id)?.stateJson?.let(::JSONObject)
 
-    suspend fun availableBooks():List<Pair<JSONObject,File>> {ensureRegistered();return dao.all().filter{available(it)&&!JSONObject(it.stateJson).getBoolean("deleted")}.map{JSONObject(it.stateJson) to packageFor(it)}}
+    suspend fun availableBooks(): List<Pair<JSONObject, File>> {
+        ensureRegistered()
+        return dao.all().mapNotNull { row ->
+            val file = availablePackage(row) ?: return@mapNotNull null
+            JSONObject(row.stateJson).takeUnless { it.getBoolean("deleted") }?.let { it to file }
+        }
+    }
     internal fun binaryPackage(id: String, hash: String): File = File(directory, "b2-$id-$hash.jsonl")
-    private fun packageFor(row: BookEntity): File =
-        binaryPackage(row.bookId, row.packageSha256).takeIf { it.isFile } ?: file(row.bookId)
-    private fun available(row:BookEntity)=row.packageSha256.isNotBlank()&&packageFor(row).let { it.isFile && it.length()==row.packageBytes }
-    suspend fun packageFile(id:String):File?=dao.get(id)?.takeIf(::available)?.let(::packageFor)
+    private fun availablePackage(row: BookEntity, binary: Boolean = BuildConfig.B2_ENABLED): File? {
+        if (row.packageSha256.isBlank()) return null
+        fun matches(file: File) = file.isFile && file.length() == row.packageBytes
+        if (binary) binaryPackage(row.bookId, row.packageSha256).takeIf(::matches)?.let { return it }
+        return file(row.bookId).takeIf(::matches)
+    }
+    suspend fun packageFile(id: String): File? = dao.get(id)?.let { availablePackage(it) }
     suspend fun packageHash(id:String)=requireNotNull(dao.get(id)).packageSha256
     suspend fun merge(remote:JSONObject,checkOwner:()->Unit={},forceProjection:Boolean=false,binary:Boolean=false):Int=db.withTransaction {
         checkOwner()
@@ -335,10 +345,19 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             val source=sources[state.optString("sourceUrl")] ?: rows.firstNotNullOfOrNull{sources[it.second.rssSourceUrl]}
                 ?: aliases[book.bookId]?.firstNotNullOfOrNull{sources[it.sourceUrl]}
             val deleted=BookSync.deletions(state)+rows.filter{it.second.deleted}.map{it.first.chapterIndex}
-            val clock=maxOf(state.getLong("deletionClock"),rows.maxOfOrNull{it.second.deletedAt}?:0L,source?.deletedAt?:0L)
+            val clock = if (BuildConfig.B2_ENABLED) {
+                maxOf(state.getLong("deletionClock"), rows.maxOfOrNull { (_, row) ->
+                    if (row.deleted) row.deletedAt else 0L
+                } ?: 0L)
+            } else {
+                maxOf(state.getLong("deletionClock"), rows.maxOfOrNull { it.second.deletedAt } ?: 0L, source?.deletedAt ?: 0L)
+            }
             if(source!=null && source.url!=ImportedContentIds.ROOT_SOURCE_URL && source.updatedAt>state.getLong("updatedAt"))state.put("title",source.title).put("updatedAt",source.updatedAt).put("sourceDeviceId",source.sourceDeviceId)
             state.put("deletedChapters",JSONArray(deleted.sorted())).put("deletionClock",clock)
-            if(source?.deleted==true)state.put("deleted",true).put("deletedAt",maxOf(clock,state.getLong("deletedAt")))
+            if (source?.deleted == true) {
+                val wholeClock = if (BuildConfig.B2_ENABLED) source.deletedAt else clock
+                state.put("deleted", true).put("deletedAt", maxOf(wholeClock, state.getLong("deletedAt")))
+            }
             if (BookSync.canonical(state) != book.stateJson) {
                 val binary = BookSync.usesBinaryCapture(state)
                 // B2-only instances have no v1 identity on a build with B2 disabled.
@@ -468,7 +487,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         val current = dao.get(id) ?: throw B2Exception("DEPENDENCIES_PENDING")
         val state = JSONObject(current.stateJson)
         val retired = state.getBoolean("deleted") || BookSync.compareLifecycle(state, sourceState) > 0
-        val present = available(current) && dao.binaryPresentChapters(id) == state.getInt("chapterCount")
+        val present = availablePackage(current, binary = true) != null && dao.binaryPresentChapters(id) == state.getInt("chapterCount")
         val retain = retired || present
         val deleted = java.util.BitSet(state.getInt("chapterCount") + 1)
         val tombstones = state.getJSONArray("deletedChapters")
@@ -575,7 +594,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         }
         val existing=dao.get(id);if(existing!=null)validateBookPackage {require(JSONObject(existing.stateJson).getString("fingerprint")==fingerprint && JSONObject(existing.stateJson).getInt("chapterCount")==hashes.size)}
         checkOwner()
-        if(existing!=null && available(existing)) {
+        if(existing!=null && availablePackage(existing) != null) {
             val mappings=dao.chapters(id);val present=articles.getAllIds().toHashSet()
             if(mappings.size==hashes.size && mappings.all{it.articleId in present})return@withContext merge(JSONObject(existing.stateJson),checkOwner,forceProjection=true)
         }

@@ -206,36 +206,50 @@ object BookSync {
         validate(local, binary)
         if (local.getString("bookId") != remote.getString("bookId") || local.getInt("chapterCount") != remote.getInt("chapterCount"))
             throw InvalidBookPackageException("manifest_local_identity_conflict")
+        var left: JSONObject = local
+        var right: JSONObject = remote
         if (binary) {
-            val token = compareLifecycle(local, remote)
+            val token = compareLifecycle(left, right)
             if (token != 0) {
-                val current = if (token > 0) local else remote
-                val other = if (token > 0) remote else local
-                // Compare the deletion witness with the generation's start, since a title
-                // update can advance updatedAt and v1 can drop the lifecycle from a tombstone.
-                val deletion = maxOf(
-                    if (other.getBoolean("deleted")) other.getLong("deletedAt") else 0,
-                    if (other.getBoolean("deleted") || other.getJSONArray("deletedChapters").length() > 0)
-                        other.getLong("deletionClock") else 0
-                )
-                if (other.has("lifecycle") || other.has("instanceId") ||
-                    deletion <= current.getJSONObject("lifecycle").getLong("startedAt")) {
-                    return copyObject(current).apply { remove("contentAvailable") }
-                }
+                val current = if (token > 0) left else right
+                val other = if (token > 0) right else left
+                val startedAt = current.getJSONObject("lifecycle").getLong("startedAt")
+                val eligible = legacyTombstonesAfter(other, startedAt)
+                    ?: return copyObject(current).apply { remove("contentAvailable") }
+                if (token > 0) right = eligible else left = eligible
             }
         }
-        val winner=compareValuesBy(remote,local,{it.getLong("updatedAt")},{it.getString("sourceDeviceId")},{it.getString("title")},{it.optString("sourceUrl")},{it.optString("kind")})>0
-        return copyObject(if(winner)remote else local).apply {
-            remove("contentAvailable");put("deletedChapters",JSONArray((deletions(local)+deletions(remote)).sorted()))
-            put("deletionClock",maxOf(local.getLong("deletionClock"),remote.getLong("deletionClock")))
-            put("deletedAt",maxOf(local.getLong("deletedAt"),remote.getLong("deletedAt")))
-            put("deleted",local.getBoolean("deleted")||remote.getBoolean("deleted"))
+        val winner=compareValuesBy(right,left,{it.getLong("updatedAt")},{it.getString("sourceDeviceId")},{it.getString("title")},{it.optString("sourceUrl")},{it.optString("kind")})>0
+        return copyObject(if(winner)right else left).apply {
+            remove("contentAvailable");put("deletedChapters",JSONArray((deletions(left)+deletions(right)).sorted()))
+            put("deletionClock",maxOf(left.getLong("deletionClock"),right.getLong("deletionClock")))
+            put("deletedAt",maxOf(left.getLong("deletedAt"),right.getLong("deletedAt")))
+            put("deleted",left.getBoolean("deleted")||right.getBoolean("deleted"))
             if (binary && !has("lifecycle")) {
                 val lifecycle = local.optJSONObject("lifecycle") ?: remote.optJSONObject("lifecycle")
                 if (lifecycle != null) put("lifecycle", copyObject(lifecycle))
             }
         }
     }
+    private fun legacyTombstonesAfter(state: JSONObject, startedAt: Long): JSONObject? {
+        if (state.has("lifecycle") || state.has("instanceId")) return null
+        val deletedAt = state.getLong("deletedAt")
+        val chapterClock = state.getLong("deletionClock")
+        val hasChapters = state.getJSONArray("deletedChapters").length() > 0
+        val whole = state.getBoolean("deleted") && deletedAt > startedAt
+        val chapters = hasChapters && chapterClock > startedAt
+        if (!whole && !chapters) return null
+        return copyObject(state).apply {
+            put("deleted", whole)
+            put("deletedAt", if (whole) deletedAt else 0L)
+            if (!chapters) {
+                put("deletedChapters", JSONArray())
+                // v1 whole-only tombstones can mirror deletedAt in deletionClock.
+                put("deletionClock", if (whole && !hasChapters) minOf(chapterClock, deletedAt) else 0L)
+            }
+        }
+    }
+
     fun validateReading(value:JSONObject) {
         require(value.getString("bookId").matches(hex));require(integer(value,"chapterIndex") in 1..100_000)
         require(value.get("isRead") is Boolean && value.get("sourceDeviceId") is String)

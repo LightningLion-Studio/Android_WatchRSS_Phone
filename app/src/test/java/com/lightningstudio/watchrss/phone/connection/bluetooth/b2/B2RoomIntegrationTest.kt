@@ -2,12 +2,17 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 
 import android.content.Context
 import androidx.room.Room
+import com.lightningstudio.watchrss.phone.account.B2AccountFence
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2RoomStore
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2NoteAssetBusiness
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryTransferRecovery
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryTransportFailure
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.junit.Assert.*
 import org.junit.Assert.fail as assertionFailed
@@ -22,6 +27,64 @@ import java.io.EOFException
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], manifest = Config.NONE, application = android.app.Application::class)
 class B2RoomIntegrationTest {
+    @Test fun accountRevocationBeforeAdmissionRollsBackBusinessAndReceipt() =
+        exerciseRevocationOrder(commitFirst = false)
+
+    @Test fun admittedTransactionCanFinishAfterRevocationWithoutAcknowledgingIt() =
+        exerciseRevocationOrder(commitFirst = true)
+
+    private fun exerciseRevocationOrder(commitFirst: Boolean) = runBlocking<Unit> {
+        val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java)
+            .allowMainThreadQueries().build()
+        val rig = ReceiverRig()
+        val account = B2AccountFence()
+        val admitted = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        try {
+            val store = B2RoomStore(db)
+            var pauseCommit = false
+            val pausedStore = object : B2Persistence by store {
+                override suspend fun <T> transaction(block: suspend () -> T): T = store.transaction {
+                    val result = block()
+                    if (pauseCommit) {
+                        pauseCommit = false
+                        admitted.complete(Unit)
+                        finish.await()
+                    }
+                    result
+                }
+            }
+            val auth = B2Authorization(rig.account, "phone", "watch", rig.snapshot, rig.snapshot, listOf(rig.binding)) {
+                true
+            }.apply { accountCommitFence = account.commitFence }
+            val business = B2NoteAssetBusiness(store, rig.account, File(rig.root, "business-assets"), account::check)
+            val receiver = B2Receiver(pausedStore, rig.files, auth, business, fault = {
+                if (it == "beforeApplyCommit") {
+                    if (commitFirst) pauseCommit = true else account.revoke()
+                }
+            })
+            val epoch = rig.begin(receiver)
+            rig.manifest(receiver, epoch)
+            rig.put(receiver, epoch)
+            val applied = async(Dispatchers.IO) { runCatching { rig.apply(receiver, epoch) } }
+            try {
+                if (commitFirst) {
+                    withTimeout(5_000) { admitted.await() }
+                    account.revoke()
+                }
+            } finally {
+                finish.complete(Unit)
+            }
+            val failure = withTimeout(5_000) { applied.await() }.exceptionOrNull() as B2Exception
+            assertEquals("AUTH_REVOKED", failure.code)
+            assertEquals(commitFirst, store.get(rig.account, "assetReference", "picture.png") != null)
+            assertEquals(commitFirst, !store.list(rig.account, "object").single().second.nil("receipt"))
+        } finally {
+            db.close()
+            rig.root.deleteRecursively()
+        }
+    }
+
     @Test fun rejectionRetentionReclaimsExpiredRowsAndKeepsLegacyRowsForOneWindow() = runBlocking<Unit> {
         val root = java.nio.file.Files.createTempDirectory("b2-apply-rejection-gc").toFile()
         val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()

@@ -87,6 +87,33 @@ class B2BooksRoomTest {
         }
     }
 
+    @Test fun disabledPackageLookupUsesOnlyLegacyFileEvenWithMatchingLengthSidecar() = runBlocking<Unit> {
+        assumeFalse(BuildConfig.B2_ENABLED)
+        val root = java.nio.file.Files.createTempDirectory("v1-book-package").toFile()
+        val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()
+        try {
+            val books = ImportedBookStore(db, root, null, "phone")
+            val fingerprint = "d".repeat(64)
+            val id = BookSync.id(fingerprint)
+            val state = obj("bookId" to id, "fingerprint" to fingerprint, "title" to "fixture",
+                "sourceDeviceId" to "watch", "chapterCount" to 1, "deletedChapters" to JSONArray(),
+                "deleted" to false, "deletionClock" to 0, "deletedAt" to 0, "updatedAt" to 1)
+            val legacy = File(root, "$id.jsonl").apply { writeText("legacy package fixture") }
+            val hash = binaryFileHashes(legacy).sha256
+            db.bookDao().put(BookEntity(id, BookSync.canonical(state), hash, legacy.length()))
+            val sidecar = books.binaryPackage(id, hash).apply { writeText("truncated") }
+            assertEquals(legacy, books.packageFile(id))
+            sidecar.writeBytes(legacy.readBytes())
+            assertEquals(legacy, books.packageFile(id))
+            assertTrue(books.manifests().single().getBoolean("contentAvailable"))
+            assertFalse(id in books.missingBookIds())
+            assertEquals(legacy, books.availableBooks().single().second)
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
     @Test fun bookPublicationAndReceiptRollbackTogether() = runBlocking<Unit> {
         val root = java.nio.file.Files.createTempDirectory("book-b2-room").toFile()
         val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()
@@ -166,7 +193,8 @@ class B2BooksRoomTest {
             } }
             val article = db.phoneArticleDao().getById(BookSync.articleId(id, 1))!!
             assertEquals(BookSync.normalized(text), content.loadText(article.contentText))
-            assertEquals(hashes.sha256, binaryFileHashes(books.packageFile(id)!!).sha256)
+            assertEquals(hashes.sha256, binaryFileHashes(books.binaryPackage(id, hashes.sha256)).sha256)
+            if (!BuildConfig.B2_ENABLED) assertNull(books.packageFile(id))
             assertEquals("APPLIED", dbStore.get(scope, "testReceipt", job)!!.s("status"))
             val exported = mutableListOf<JSONObject>()
             business.freeze(File(root, "source").apply { mkdirs() }, {}) { descriptor, _ -> exported += descriptor }

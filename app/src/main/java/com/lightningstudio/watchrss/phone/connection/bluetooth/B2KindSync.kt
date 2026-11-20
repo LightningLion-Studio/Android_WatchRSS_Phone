@@ -313,6 +313,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             store.exclusive { authorize(); store.put(account, "attempt", key, a) }
             try {
                 client.confirm(bindings) { auth ->
+                    auth.accountCommitFence = accountFence?.commitFence
                     val receiver = B2Receiver(store, files, auth, business,
                         monotonic = monotonic, progress = progress,
                         retentionGeneration = retentionGeneration)

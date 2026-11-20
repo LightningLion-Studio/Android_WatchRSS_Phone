@@ -6,6 +6,7 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Wire.BOOK_RE
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Wire.BOOK_SEGMENT
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Wire.BOOK_SEGMENT_BYTES
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Wire.BOOK_STATE
+import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.book.BookSync
 import com.lightningstudio.watchrss.phone.data.book.ImportedBookStore
 import org.json.JSONArray
@@ -39,7 +40,7 @@ internal class B2BookBusiness(
             if (staging.dataBytes() + bytes + active + limits.n("maxJournalBytes") > limits.n("maxStagingBytes") ||
                 bytes + active + limits.n("maxJournalBytes") + 1048576 > directory.usableSpace) fail("STORAGE_PRESSURE")
         }
-        books.freezeBinaryBooks { row, packageFile ->
+        books.freezeBinaryBooks({ authorize(); work() }) { row, packageFile ->
             authorize()
             val id = row.bookId
             fun tooLarge() = warn(B2BookMetadataLimits.issue(id))
@@ -198,11 +199,9 @@ internal class B2BookBusiness(
                 val state = persistence.get(scope, "bookStateWitness", key) ?: fail("DEPENDENCIES_PENDING")
                 val fingerprint = metadata.s("fingerprint")
                 if (state.s("fingerprint") != fingerprint) fail("OBJECT_CONFLICT")
-                val hash = metadata.s("packageSha256")
-                val bytes = metadata.n("packageBytes")
-                val assembly = localAssembly(context, metadata)
+                val prepared = context.preparedBook ?: fail("JOURNAL_CORRUPT")
                 B2Scratch.open(importRoot(), B2Scratch.BOOK_IMPORT).use { scratch ->
-                    books.installBinaryPackage(id, fingerprint, hash, bytes, state, assembly, scratch.file, check)
+                    books.installBinaryPackage(id, fingerprint, state, prepared, scratch.file, check)
                 }
             }
             BOOK_READING -> {
@@ -250,52 +249,48 @@ internal class B2BookBusiness(
     private fun decodeState(json: String): JSONObject =
         B2BookJson(java.io.StringReader(json), true, 100032) {}.state().also(BookSync::validateBinary)
 
-    private fun localAssembly(context: B2ApplyContext, metadata: JSONObject): File =
-        context.assembly?.takeIf { it.isFile } ?: books.binaryPackage(metadata.s("bookId"), metadata.s("packageSha256"))
-            .takeIf { it.isFile } ?: fail("JOURNAL_CORRUPT")
+    private suspend fun localAssembly(
+        context: B2ApplyContext, id: String, revision: BookPackageFiles.Revision, check: () -> Unit
+    ): BookPackageFiles.Original {
+        val assembly = requireNotNull(context.assembly)
+        return BookPackageFiles.verify(assembly, revision) { check() }
+            ?: books.resolvePackage(id, revision, check)
+            ?: fail(if (assembly.isFile) "HASH_MISMATCH" else "JOURNAL_CORRUPT")
+    }
 
     suspend fun prepareCommit(context: B2ApplyContext, metadata: JSONObject, work: () -> Unit) {
         val check = { context.check(); authorize(); work() }
         val original = requireNotNull(context.assembly)
+        val id = metadata.s("bookId")
+        val revision = BookPackageFiles.Revision(metadata.s("packageSha256"), metadata.n("packageBytes"))
         val segments = metadata.a("segmentObjectIds").strings()
+        context.preparedBook = null
         try {
-            if (context.assemblyReady()) {
-                val path = localAssembly(context, metadata)
-                if (path.length() != metadata.n("packageBytes") || hashFile(path, check) != metadata.s("packageSha256")) fail("HASH_MISMATCH")
-                if (path == original) context.publishAssembly(original, segments)
-                return
-            }
-            if (original.isFile) {
-                if (original.length() == metadata.n("packageBytes") && hashFile(original, check) == metadata.s("packageSha256")) {
-                    context.publishAssembly(original, segments)
-                    return
+            val assembly = if (context.assemblyReady()) {
+                localAssembly(context, id, revision, check).also {
+                    if (it.file == original) context.publishAssembly(original, segments)
                 }
-                if (!original.delete()) fail("LOCAL_IO")
+            } else {
+                val staged = BookPackageFiles.verify(original, revision) { check() }
+                if (staged != null) {
+                    context.publishAssembly(original, segments)
+                    staged
+                } else {
+                    if (original.isFile && !original.delete()) fail("LOCAL_IO")
+                    val temp = File.createTempFile("assemble-", ".part", original.parentFile)
+                    try {
+                        combine(context, metadata, temp, check)
+                        context.publishAssembly(temp, segments)
+                    } finally {
+                        temp.delete()
+                    }
+                    BookPackageFiles.verify(original, revision) { check() } ?: fail("HASH_MISMATCH")
+                }
             }
-            val temp = File.createTempFile("assemble-", ".part", original.parentFile)
-            try {
-                combine(context, metadata, temp, check)
-                context.publishAssembly(temp, segments)
-            } finally {
-                temp.delete()
-            }
+            context.preparedBook = books.prepareBinaryPackage(id, assembly, check)
         } catch (_: IOException) {
             fail("LOCAL_IO")
         }
-    }
-
-    private fun hashFile(file: File, check: () -> Unit): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        val buffer = ByteArray(B2Wire.CHUNK)
-        file.inputStream().use { input ->
-            while (true) {
-                val n = input.read(buffer)
-                if (n < 0) break
-                digest.update(buffer, 0, n)
-                check()
-            }
-        }
-        return B2Frames.hex(digest.digest())
     }
 
     private suspend fun combine(context: B2ApplyContext, metadata: JSONObject, target: File, check: () -> Unit) {

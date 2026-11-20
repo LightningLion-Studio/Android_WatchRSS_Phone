@@ -122,7 +122,8 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             val existing=dao.get(id)
             if(existing==null) {
                 directory.mkdirs();com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)){com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.installPrivateBook(file(id),temporary)}
-                db.withTransaction {dao.put(BookEntity(id,BookSync.canonical(state),sha(file(id)),file(id).length()));dao.putChapters(metadata.mapIndexed {i,row->BookChapterEntity(id,i+1,row.articleId)})}
+                val installed = BookEntity(id, BookSync.canonical(state), sha(file(id)), file(id).length())
+                db.withTransaction {dao.put(installed);dao.putChapters(metadata.mapIndexed {i,row->BookChapterEntity(id,i+1,row.articleId)})}
             } else {
                 // Same immutable sequence imported under a new filename: one identity, merge deletion state.
                 if(availablePackage(existing) == null){directory.mkdirs();com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)){com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.installPrivateBook(file(id),temporary)};dao.put(existing.copy(packageSha256=sha(file(id)),packageBytes=file(id).length()))}
@@ -166,16 +167,23 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
     internal suspend fun binaryReady(): Boolean =
         contentStore is FileArticleContentStore && !dao.hasUnregisteredBookArticles()
 
-    internal suspend fun freezeBinaryBooks(visit: suspend (BookEntity, File?) -> Unit) {
+    internal suspend fun freezeBinaryBooks(work: () -> Unit = {}, visit: suspend (BookEntity, File?) -> Unit) {
         captureLocalChanges()
-        db.withTransaction {
-            if (!binaryReady()) throw B2Exception("SOURCE_CHANGED")
-            var after = ""
-            while (true) {
-                val row = dao.nextBinaryBook(after) ?: break
-                after = row.bookId
-                visit(row, availablePackage(row))
-            }
+        if (!binaryReady()) throw B2Exception("SOURCE_CHANGED")
+        val reading = db.bookReadingDao().meta()
+        var after = ""
+        while (true) {
+            // DAO reads each row (including large JSON slices) in one short transaction.
+            // Neither hashing nor the visitor may hold Room while acquiring the B2 journal.
+            val row = dao.nextBinaryBook(after) ?: break
+            val original = verifiedPackage(row, work)
+            visit(row, original?.file)
+            if (dao.get(row.bookId) != row || original?.isCurrent() == false) throw B2Exception("SOURCE_CHANGED")
+            after = row.bookId
+        }
+        val currentReading = db.bookReadingDao().meta()
+        if (currentReading?.epoch != reading?.epoch || currentReading?.seq != reading?.seq || !binaryReady()) {
+            throw B2Exception("SOURCE_CHANGED")
         }
     }
     internal suspend fun binaryReadingPage(id: String, after: Int) = dao.binaryReadingPage(id, after)
@@ -189,9 +197,28 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         }
     }
     internal fun binaryPackage(id: String, hash: String): File = BookPackageFiles.binary(directory, id, hash)
-    private suspend fun availablePackage(row: BookEntity): File? = withContext(Dispatchers.IO) {
-        val revision = BookPackageFiles.Revision(row.packageSha256, row.packageBytes)
-        BookPackageFiles.resolve(directory, row.bookId, revision) { ensureActive() }
+    internal suspend fun resolvePackage(
+        id: String, revision: BookPackageFiles.Revision, work: () -> Unit
+    ): BookPackageFiles.Original? = withContext(Dispatchers.IO) {
+        BookPackageFiles.resolveOriginal(directory, id, revision) { ensureActive(); work() }
+    }
+
+    private fun BookEntity.packageRevision() = BookPackageFiles.Revision(packageSha256, packageBytes)
+    private suspend fun verifiedPackage(row: BookEntity, work: () -> Unit = {}) =
+        resolvePackage(row.bookId, row.packageRevision(), work)
+    private suspend fun availablePackage(row: BookEntity): File? = verifiedPackage(row)?.file
+
+    internal data class PreparedBinaryPackage(
+        val assembly: BookPackageFiles.Original,
+        val currentRevision: BookPackageFiles.Revision,
+        val currentOriginal: BookPackageFiles.Original?
+    )
+
+    internal suspend fun prepareBinaryPackage(
+        id: String, assembly: BookPackageFiles.Original, work: () -> Unit
+    ): PreparedBinaryPackage {
+        val row = dao.get(id) ?: throw B2Exception("DEPENDENCIES_PENDING")
+        return PreparedBinaryPackage(assembly, row.packageRevision(), verifiedPackage(row, work))
     }
 
     internal suspend fun packageForSync(id: String): Pair<File, String>? = dao.get(id)?.let { row ->
@@ -494,13 +521,18 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         changed
     }
     /** Called by the B2 FULL writer transaction, including the package APPLIED receipt. */
-    internal suspend fun installBinaryPackage(id: String, fingerprint: String, hash: String, bytes: Long,
-        sourceState: JSONObject, combined: File, scratch: File, check: () -> Unit): String {
+    internal suspend fun installBinaryPackage(id: String, fingerprint: String,
+        sourceState: JSONObject, prepared: PreparedBinaryPackage, scratch: File, check: () -> Unit): String {
         val content = contentStore as? FileArticleContentStore ?: throw B2Exception("LOCAL_IO")
         val current = dao.get(id) ?: throw B2Exception("DEPENDENCIES_PENDING")
+        val assembly = prepared.assembly
+        val combined = assembly.file
+        val (hash, bytes) = assembly.revision
+        if (current.packageRevision() != prepared.currentRevision || prepared.currentOriginal?.isCurrent() == false ||
+            !assembly.isCurrent()) throw B2Exception("SOURCE_CHANGED")
         val state = JSONObject(current.stateJson)
         val retired = state.getBoolean("deleted") || BookSync.compareLifecycle(state, sourceState) > 0
-        val present = availablePackage(current) != null && dao.binaryPresentChapters(id) == state.getInt("chapterCount")
+        val present = prepared.currentOriginal != null && dao.binaryPresentChapters(id) == state.getInt("chapterCount")
         val retain = retired || present
         val deleted = java.util.BitSet(state.getInt("chapterCount") + 1)
         val tombstones = state.getJSONArray("deletedChapters")
@@ -524,11 +556,13 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             }
         }
         if (verified != fingerprint || state.getString("fingerprint") != fingerprint) throw B2Exception("HASH_MISMATCH")
+        if (!assembly.isCurrent()) throw B2Exception("SOURCE_CHANGED")
         if (retain) return if (!retired && current.packageSha256 == hash && current.packageBytes == bytes)
             "alreadyPresent" else "retainedLocal"
         check()
         val target = binaryPackage(id, hash)
-        if (combined != target) {
+        // A resumed commit may already have its immutable original in either public layout.
+        if (combined != target && combined != file(id)) {
             Files.move(combined.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
             for (parent in setOf(combined.parentFile, directory)) {
                 java.nio.channels.FileChannel.open(parent.toPath(), java.nio.file.StandardOpenOption.READ).use { it.force(true) }

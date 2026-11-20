@@ -1,5 +1,10 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 
+import com.lightningstudio.watchrss.phone.data.book.ImportedBookStore
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -28,7 +33,10 @@ class B2ApplyContext internal constructor(
     internal val assembly: File? = null,
     internal val publishAssembly: suspend (File, List<String>) -> Unit = { _, _ -> },
     internal val assemblyReady: suspend () -> Boolean = { false }
-)
+) {
+    internal var preparedBook: ImportedBookStore.PreparedBinaryPackage? = null
+    internal var finishAsset: ((committed: Boolean) -> Unit)? = null
+}
 
 /** Construct only after LOCAL consent + current account/peer verification + successful
  * prepare confirmation. The controller owns consent; begin cannot manufacture it. */
@@ -85,6 +93,30 @@ class B2Receiver(
         auth.check()
         commitFence.admitCommit()
         result
+    }
+
+    private suspend fun applyTransaction(kind: String, context: B2ApplyContext, block: suspend () -> JSONObject): JSONObject {
+        if (kind != "noteAsset") return receiveTransaction(block)
+        val caller = currentCoroutineContext()
+        // Preserve the transaction outcome across cancellation so rollback never unlinks an
+        // admitted commit. The caller and account are still checked before commit admission.
+        return withContext(NonCancellable) {
+            val result = try {
+                receiveTransaction {
+                    caller.ensureActive()
+                    block().also { caller.ensureActive() }
+                }
+            } catch (failure: Throwable) {
+                try {
+                    context.finishAsset?.invoke(false)
+                } catch (cleanup: Exception) {
+                    failure.addSuppressed(cleanup)
+                }
+                throw failure
+            }
+            context.finishAsset?.invoke(true)
+            result
+        }
     }
 
     suspend fun revoke(cancelJobs: Boolean = false) {
@@ -657,7 +689,7 @@ class B2Receiver(
         })
         business.prepareFile(context, copy(d), metadata)
         leases[jobId] = monotonic() + B2Wire.LEASE
-        val result = receiveTransaction {
+        val result = applyTransaction(d.s("kind"), context) {
             fence(j, r)
             val outcome = business.applyFile(context, copy(d), metadata, B2FileRef(staged, 0, d.n("size")))
             fault("beforeApplyCommit")

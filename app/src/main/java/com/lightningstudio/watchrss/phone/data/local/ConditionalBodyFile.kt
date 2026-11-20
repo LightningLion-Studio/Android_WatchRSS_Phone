@@ -137,6 +137,25 @@ internal object ConditionalBodyFile {
             } else beforePublish()
         }
     }
+    /** Publish an already synced immutable file and leave its staging link as ownership proof. */
+    fun linkIfAbsent(target: File, staged: File): Boolean = locked(target) {
+        try {
+            Files.createLink(target.toPath(), staged.toPath())
+            true
+        } catch (_: FileAlreadyExistsException) {
+            false
+        }
+    }
+
+    fun unlinkPublication(target: File, staged: File) = locked(target) {
+        val ours = try {
+            Files.isSameFile(target.toPath(), staged.toPath())
+        } catch (_: java.nio.file.NoSuchFileException) {
+            false
+        }
+        if (ours && Files.deleteIfExists(target.toPath())) syncDirectory(target.parentFile!!)
+    }
+
     fun delete(target:File,expected:String?)=locked(target) {
         val actual=digest(target)
         if(actual!=expected)conflict(target,expected,actual,null)

@@ -79,6 +79,9 @@ class B2RoomIntegrationTest {
             assertEquals("AUTH_REVOKED", failure.code)
             assertEquals(commitFirst, store.get(rig.account, "assetReference", "picture.png") != null)
             assertEquals(commitFirst, !store.list(rig.account, "object").single().second.nil("receipt"))
+            val attachment = File(rig.root, "business-assets/picture.png")
+            assertEquals(commitFirst, attachment.isFile)
+            if (commitFirst) assertArrayEquals(rig.bytes, attachment.readBytes())
         } finally {
             db.close()
             rig.root.deleteRecursively()
@@ -183,6 +186,7 @@ class B2RoomIntegrationTest {
             try { x.apply(receiver, epoch); assertionFailed() } catch (e: B2Exception) { assertEquals("LOCAL_IO", e.code) }
             assertNull(store.get(x.account, "assetReference", "picture.png"))
             assertTrue(store.list(x.account, "object").single().second.nil("receipt"))
+            assertFalse(File(assets, "picture.png").exists())
             fault = false
             x.apply(receiver, epoch)
             assertEquals(x.descriptor.s("sha256"), store.get(x.account, "assetReference", "picture.png")!!.s("sha256"))
@@ -198,6 +202,36 @@ class B2RoomIntegrationTest {
         } finally { db.close(); x.root.deleteRecursively() }
         Unit
     }
+    @Test fun rollbackPreservesAttachmentPublishedByAnotherWriter() = runBlocking<Unit> {
+        val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()
+        val rig = ReceiverRig()
+        try {
+            val assets = File(rig.root, "notes/assets")
+            val target = File(assets, "picture.png")
+            val store = B2RoomStore(db)
+            val auth = B2Authorization(rig.account, "phone", "watch", rig.snapshot, rig.snapshot, listOf(rig.binding)) { true }
+            val business = B2NoteAssetBusiness(store, rig.account, assets) {}
+            val receiver = B2Receiver(store, rig.files, auth, business, fault = { phase ->
+                if (phase == "beforeApplyCommit") {
+                    val replacement = File(rig.root, "local").apply { writeText("locally restored") }
+                    java.nio.file.Files.move(replacement.toPath(), target.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                    throw B2Exception("LOCAL_IO")
+                }
+            })
+            val epoch = rig.begin(receiver)
+            rig.manifest(receiver, epoch)
+            rig.put(receiver, epoch)
+            val failure = runCatching { rig.apply(receiver, epoch) }.exceptionOrNull() as B2Exception
+            assertEquals("LOCAL_IO", failure.code)
+            assertEquals("locally restored", target.readText())
+            assertNull(store.get(rig.account, "assetReference", target.name))
+            assertTrue(store.list(rig.account, "object").single().second.nil("receipt"))
+        } finally {
+            db.close()
+            rig.root.deleteRecursively()
+        }
+    }
+
     @Test fun stagedChunkGroupRollsBackTogetherWhenSecondReceiptFails() = runBlocking {
         val context = RuntimeEnvironment.getApplication() as Context
         val db = Room.inMemoryDatabaseBuilder(context, PhoneCompanionDatabase::class.java).allowMainThreadQueries().build()

@@ -115,6 +115,73 @@ class B2BooksRoomTest {
         }
     }
 
+    @Test fun resumedPackageCommitsFromVerifiedLegacyBytesAndKeepsTheV1Original() = runBlocking<Unit> {
+        val root = java.nio.file.Files.createTempDirectory("b2-book-legacy-resume").toFile()
+        val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()
+        try {
+            val content = FileArticleContentStore(File(root, "content"))
+            val books = ImportedBookStore(db, root, content, "phone")
+            val ledger = B2RoomStore(db)
+            val scope = "a".repeat(64)
+            val job = "b".repeat(32)
+            val business = B2BookBusiness(ledger, scope, books) {}
+            val title = "章节"
+            val text = "旧版原件正文"
+            val fingerprint = BookSync.fingerprint(listOf(BookSync.chapterHash(1, title, text)))
+            val id = BookSync.id(fingerprint)
+            val source = "https://watchrss.local/import-txt-novel/legacy"
+            val state = obj("bookId" to id, "fingerprint" to fingerprint, "title" to title, "chapterCount" to 1,
+                "deletedChapters" to JSONArray(), "deletionClock" to 0, "deleted" to false, "deletedAt" to 0,
+                "updatedAt" to 1, "sourceDeviceId" to "watch", "sourceUrl" to source)
+            val legacy = File(root, "$id.jsonl").apply {
+                writeText(obj("format" to "watchrss-book", "version" to 1, "title" to title, "sourceUrl" to source,
+                    "kind" to "txt", "chapterCount" to 1).toString() + "\n")
+                appendText(obj("chapterIndex" to 1, "title" to title, "contentText" to text,
+                    "contentHtml" to null, "url" to "$source/chapter/1").toString() + "\n")
+            }
+            val original = legacy.readBytes()
+            val hashes = binaryFileHashes(legacy)
+            // The transfer plan binds the original independently of an unpublished Room package revision.
+            db.bookDao().put(BookEntity(id, BookSync.canonical(state)))
+            assertNull(books.packageFile(id))
+            ledger.exclusive {
+                ledger.put(scope, "bookStateWitness", "$job:$id", obj("jobId" to job, "fingerprint" to fingerprint, "chapterCount" to 1))
+            }
+            val empty = File(root, "commit").apply { createNewFile() }
+            val meta = obj("bookId" to id, "fingerprint" to fingerprint, "packageSha256" to hashes.sha256,
+                "packageBytes" to hashes.size, "segmentObjectIds" to JSONArray(listOf("c".repeat(64))))
+            val descriptor = binaryDescriptor(B2Wire.BOOK_COMMIT, id, meta, binaryFileHashes(empty),
+                listOf("c".repeat(64), "d".repeat(64)))
+            val context = B2ApplyContext(job, { error("segments already reclaimed") }, {},
+                assembly = File(root, "missing-assembly"), assemblyReady = { true })
+            val invalidPlan = copy(meta).put("packageSha256", "0".repeat(64))
+            assertEquals("JOURNAL_CORRUPT", (runCatching { business.prepareCommit(context, invalidPlan) {} }
+                .exceptionOrNull() as B2Exception).code)
+            business.prepareCommit(context, meta) {}
+            val staged = B2FileRef(empty, 0, 0)
+            suspend fun apply() = ledger.exclusive { ledger.transaction {
+                business.apply(context, descriptor, meta, staged) {}
+            } }
+            val replacement = File(root, "replacement").apply {
+                writeBytes(original.clone().also { it[it.lastIndex] = 32 })
+                java.nio.file.Files.setLastModifiedTime(toPath(), java.nio.file.Files.getLastModifiedTime(legacy.toPath()))
+            }
+            java.nio.file.Files.move(replacement.toPath(), legacy.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            assertEquals("SOURCE_CHANGED", (runCatching { apply() }.exceptionOrNull() as B2Exception).code)
+            legacy.writeBytes(original)
+            business.prepareCommit(context, meta) {}
+            assertEquals("merged", apply())
+            assertEquals(legacy, books.packageFile(id))
+            assertArrayEquals(original, legacy.readBytes())
+            assertFalse(books.binaryPackage(id, hashes.sha256).exists())
+            val chapter = db.phoneArticleDao().getById(BookSync.articleId(id, 1))!!
+            assertEquals(text, content.loadText(chapter.contentText))
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
     @Test fun bookPublicationAndReceiptRollbackTogether() = runBlocking<Unit> {
         val root = java.nio.file.Files.createTempDirectory("book-b2-room").toFile()
         val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()

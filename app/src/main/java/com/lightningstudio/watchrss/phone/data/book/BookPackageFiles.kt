@@ -12,7 +12,15 @@ import java.security.MessageDigest
 internal object BookPackageFiles {
     data class Revision(val sha256: String, val bytes: Long)
 
-    private data class FileIdentity(
+    class Original internal constructor(val file: File, val revision: Revision, private val identity: FileIdentity) {
+        fun isCurrent(): Boolean = try {
+            fileIdentity(file) == identity
+        } catch (_: IOException) {
+            false
+        }
+    }
+
+    internal data class FileIdentity(
         val bytes: Long,
         val modified: FileTime,
         val inode: Any?,
@@ -40,19 +48,23 @@ internal object BookPackageFiles {
         return if (hex.matches(revision.sha256)) listOf(legacy, binary(directory, id, revision.sha256)) else listOf(legacy)
     }
 
-    fun resolve(directory: File, id: String, revision: Revision, onRead: (Int) -> Unit = {}): File? {
-        if (!hex.matches(revision.sha256) || revision.bytes <= 0) return null
-        return candidates(directory, id, revision).firstOrNull { matches(it, revision, onRead) }
-    }
+    fun resolve(directory: File, id: String, revision: Revision, onRead: (Int) -> Unit = {}): File? =
+        resolveOriginal(directory, id, revision, onRead)?.file
 
-    private fun matches(file: File, revision: Revision, onRead: (Int) -> Unit): Boolean {
+    fun resolveOriginal(directory: File, id: String, revision: Revision, onRead: (Int) -> Unit = {}): Original? =
+        candidates(directory, id, revision).firstNotNullOfOrNull { verify(it, revision, onRead) }
+
+    fun verify(file: File, revision: Revision, onRead: (Int) -> Unit): Original? {
+        if (!hex.matches(revision.sha256) || revision.bytes <= 0) return null
         return try {
-            val identity = identity(file) ?: return false
-            if (identity.bytes != revision.bytes) return false
+            val identity = fileIdentity(file) ?: return null
+            if (identity.bytes != revision.bytes) return null
             val key = file.absoluteFile
             if (identity.inode != null && identity.changed != null) {
                 val cached = synchronized(verified) { verified[key] }
-                if (cached?.revision == revision && cached.identity == identity) return cached.matches
+                if (cached?.revision == revision && cached.identity == identity) {
+                    return if (cached.matches) Original(file, revision, identity) else null
+                }
             }
             val digest = MessageDigest.getInstance("SHA-256")
             var remaining = revision.bytes
@@ -60,26 +72,26 @@ internal object BookPackageFiles {
                 val buffer = ByteArray(65_536)
                 while (remaining > 0) {
                     val n = input.read(buffer, 0, minOf(remaining, buffer.size.toLong()).toInt())
-                    if (n <= 0) return false
+                    if (n <= 0) return null
                     onRead(n)
                     digest.update(buffer, 0, n)
                     remaining -= n
                 }
-                if (input.read() != -1) return false
+                if (input.read() != -1) return null
             }
-            if (identity(file) != identity) return false
+            if (fileIdentity(file) != identity) return null
             val matches = digest.digest().joinToString("") { "%02x".format(it) } == revision.sha256
             if (identity.inode != null && identity.changed != null) synchronized(verified) {
                 verified[key] = Verification(revision, identity, matches)
                 if (verified.size > CACHE_CAPACITY) verified.remove(verified.keys.first())
             }
-            matches
+            if (matches) Original(file, revision, identity) else null
         } catch (_: IOException) {
-            false
+            null
         }
     }
 
-    private fun identity(file: File): FileIdentity? {
+    private fun fileIdentity(file: File): FileIdentity? {
         val path = file.toPath()
         val unix = try {
             Files.readAttributes(path, "unix:isRegularFile,size,lastModifiedTime,fileKey,ctime")

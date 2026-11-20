@@ -89,8 +89,16 @@ internal class B2InheritedKinds(
 
     override suspend fun applyFile(context: B2ApplyContext, descriptor: JSONObject, metadata: JSONObject,
         staged: B2FileRef): String {
-        if (descriptor.getString("kind") in B2Wire.bookKinds) {
+        val kind = descriptor.getString("kind")
+        if (kind in B2Wire.bookKinds) {
             return (books ?: throw B2Exception("UNSUPPORTED_KIND")).apply(context, descriptor, metadata, staged, applyWork)
+        }
+        if (kind == B2_NOTE_ASSET) {
+            return try {
+                noteAssets.applyFile(context, descriptor, metadata, staged)
+            } catch (_: android.database.SQLException) {
+                throw B2Exception("LOCAL_IO")
+            }
         }
         return super.applyFile(context, descriptor, metadata, staged)
     }

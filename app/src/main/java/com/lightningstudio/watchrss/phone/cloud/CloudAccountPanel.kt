@@ -34,6 +34,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.lightningstudio.watchrss.phone.CloudMembershipPurchaseButton
 import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import com.lightningstudio.watchrss.phone.data.backup.BackupImportMode
 import kotlinx.coroutines.CancellationException
@@ -128,9 +129,7 @@ fun CloudAccountPanel(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SyncV2Section(service)
         Text("云空间", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        OutlinedButton(onClick = onPurchase, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-            Text("购买云同步会员")
-        }
+        CloudMembershipPurchaseButton(enabled = !busy, onClick = onPurchase)
         val keyWarning by service.keyWarning.collectAsState()
         val needsReapproval by service.needsReapproval.collectAsState()
         if (registrationConflict) {

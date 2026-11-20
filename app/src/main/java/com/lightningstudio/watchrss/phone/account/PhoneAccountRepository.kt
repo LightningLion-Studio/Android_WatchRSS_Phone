@@ -262,11 +262,17 @@ class PhoneAccountRepository(
         accountClient.releaseAppAccess(requireSession(), current)
 
     internal suspend fun createWeChatHandoff(expectedUserId: String): WeChatHandoff {
-        val owner = requireSession()
-        if (owner.userId != expectedUserId) throw WeChatHandoffUnavailable()
+        val owner = session.value
+        if (owner == null || owner.userId != expectedUserId || owner.userId.isBlank() ||
+            owner.accessToken.isBlank() || !hasUsableSession
+        ) {
+            throw WeChatHandoffUnavailable()
+        }
         val handoff = accountClient.createWeChatHandoff(owner)
-        val current = requireSession()
-        if (current.userId != owner.userId || current.accessToken != owner.accessToken) {
+        val current = session.value
+        if (current == null || current.userId != owner.userId ||
+            current.accessToken != owner.accessToken || !hasUsableSession
+        ) {
             throw WeChatHandoffUnavailable()
         }
         return handoff

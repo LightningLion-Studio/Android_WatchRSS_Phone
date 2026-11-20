@@ -108,6 +108,7 @@ import com.lightningstudio.watchrss.phone.account.TotpEnrollment
 import com.lightningstudio.watchrss.phone.account.TotpFactor
 import com.lightningstudio.watchrss.phone.account.accountLoginErrorMessage
 import com.lightningstudio.watchrss.phone.account.accountSecurityErrorMessage
+import com.lightningstudio.watchrss.phone.account.WeChatHandoff
 import com.lightningstudio.watchrss.phone.cloud.CloudAccountPanel
 import com.lightningstudio.watchrss.phone.tips.TipEvents
 import com.lightningstudio.watchrss.phone.tips.TipIds
@@ -361,12 +362,28 @@ internal fun AccountScreen(
     var paymentOrders by remember(session?.userId) { mutableStateOf<List<AppPaymentOrder>>(emptyList()) }
     var paymentOrdersLoading by remember(session?.userId) { mutableStateOf(session != null) }
     var showPaymentAgreement by remember { mutableStateOf(false) }
-    var showCloudPurchaseHelp by remember(session?.userId) { mutableStateOf(false) }
+    var showCloudPurchaseHelp by remember { mutableStateOf(false) }
     var pendingRefundOrder by remember { mutableStateOf<AppPaymentOrder?>(null) }
     var refundVerificationToken by remember { mutableStateOf<String?>(null) }
     var deleteVerificationToken by remember { mutableStateOf<String?>(null) }
     var accountDeletionResult by remember { mutableStateOf<AccountDeletionResult?>(null) }
     val canManageTotp = session != null
+
+    fun openCloudMembership(expectedUserId: String?) {
+        if (busy) return
+        busy = true
+        runAction {
+            try {
+                val requestHandoff: (suspend () -> WeChatHandoff)? = expectedUserId?.let { userId ->
+                    suspend { accountRepository.createWeChatHandoff(userId) }
+                }
+                showCloudPurchaseHelp = !context.openPurchaseInWeChat(requestHandoff)
+                onCloudPurchaseAttempted()
+            } finally {
+                busy = false
+            }
+        }
+    }
 
     LaunchedEffect(session?.userId) {
         if (session == null) {
@@ -2028,6 +2045,9 @@ internal fun AccountScreen(
                     }
                 }
                 accountControls(::openCloudSync)
+                if (!accountRepository.hasUsableSession) {
+                    CloudMembershipPurchaseButton(enabled = !busy) { openCloudMembership(null) }
+                }
                 if (page == AccountPage.ROOT) {
                     AccountFeedback(message = message, error = accountError)
                 }
@@ -2043,6 +2063,9 @@ internal fun AccountScreen(
                     val activeSession = session
                     if (activeSession == null || reauthenticationOwner != null || !accountRepository.hasUsableSession) {
                         Text("登录后可管理云同步。")
+                        if (!showCloudInventory) {
+                            CloudMembershipPurchaseButton(enabled = !busy) { openCloudMembership(null) }
+                        }
                     } else if (showCloudInventory) {
                         com.lightningstudio.watchrss.phone.cloud.CloudInventoryPanel(
                             service = cloudSyncService, userId = activeSession.userId,
@@ -2053,25 +2076,7 @@ internal fun AccountScreen(
                             service = cloudSyncService,
                             onOpenInventory = { showCloudInventory = true },
                             purchaseReturnRevision = cloudPurchaseReturnRevision,
-                            onPurchase = {
-                                if (!busy) {
-                                    busy = true
-                                    runAction {
-                                        try {
-                                            val fallback = context.openPurchaseInWeChat(
-                                                accountRepository,
-                                                activeSession.userId
-                                            )
-                                            if (accountRepository.session.value?.userId == activeSession.userId) {
-                                                onCloudPurchaseAttempted()
-                                                showCloudPurchaseHelp = fallback != null
-                                            }
-                                        } finally {
-                                            busy = false
-                                        }
-                                    }
-                                }
-                            },
+                            onPurchase = { openCloudMembership(activeSession.userId) },
                             userId = activeSession.userId,
                             busy = busy,
                             runAction = runAction,

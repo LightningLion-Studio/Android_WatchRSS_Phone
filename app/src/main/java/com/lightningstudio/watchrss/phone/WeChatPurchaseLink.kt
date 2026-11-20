@@ -1,71 +1,60 @@
 package com.lightningstudio.watchrss.phone
 
+import android.content.ActivityNotFoundException
 import android.content.Context
-import android.content.pm.PackageManager
+import android.content.Intent
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
-import com.lightningstudio.watchrss.phone.account.WeChatMiniProgram
-import com.lightningstudio.watchrss.phone.account.WeChatPurchase
-import com.lightningstudio.watchrss.phone.account.WeChatPurchaseFallback
-import com.tencent.mm.opensdk.constants.Build
-import com.tencent.mm.opensdk.modelbiz.WXLaunchMiniProgram
-import com.tencent.mm.opensdk.openapi.WXAPIFactory
-import com.tencent.mm.opensdk.utils.ILog
+import androidx.compose.ui.Modifier
+import androidx.core.net.toUri
+import com.lightningstudio.watchrss.phone.account.WECHAT_HANDOFF_TIMEOUT_MILLIS
+import com.lightningstudio.watchrss.phone.account.WeChatHandoff
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withTimeoutOrNull
+
+private const val WECHAT_CLOUD_MEMBERSHIP_URL = "https://wxmpurl.cn/kck25HzrRpc"
 
 internal suspend fun Context.openPurchaseInWeChat(
-    repository: PhoneAccountRepository,
-    expectedUserId: String
-): WeChatPurchaseFallback? =
-    WeChatPurchase(
-        installed = {
+    requestHandoff: (suspend () -> WeChatHandoff)? = null
+): Boolean {
+    val handoff = requestHandoff?.let { request ->
+        withTimeoutOrNull(WECHAT_HANDOFF_TIMEOUT_MILLIS) {
             try {
-                @Suppress("DEPRECATION")
-                packageManager.getPackageInfo("com.tencent.mm", 0)
-                true
-            } catch (_: PackageManager.NameNotFoundException) {
-                false
-            }
-        },
-        appId = BuildConfig.WATCHRSS_WECHAT_OPEN_APP_ID.trim(),
-        originalId = BuildConfig.WATCHRSS_WECHAT_MINI_PROGRAM_ORIGINAL_ID.trim(),
-        connect = { id ->
-            val api = WXAPIFactory.createWXAPI(this, id, true)
-            var ready = false
-            try {
-                api.setLogImpl(DiscardWeChatLogs)
-                ready = api.isWXAppInstalled &&
-                    api.wxAppSupportAPI >= Build.LAUNCH_MINIPROGRAM_SUPPORTED_SDK_INT &&
-                    api.registerApp(id)
-                if (ready) object : WeChatMiniProgram {
-                    override fun send(userName: String, path: String): Boolean {
-                        return api.sendReq(weChatPurchaseRequest(userName, path))
-                    }
-
-                    override fun close() { api.detach() }
-                } else null
-            } finally {
-                if (!ready) api.detach()
+                request()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
             }
         }
-    ).launch { repository.createWeChatHandoff(expectedUserId) }
-
-internal fun weChatPurchaseRequest(userName: String, miniPath: String) =
-    WXLaunchMiniProgram.Req().apply {
-        this.userName = userName
-        path = miniPath
-        miniprogramType = WXLaunchMiniProgram.Req.MINIPTOGRAM_TYPE_RELEASE
     }
+    currentCoroutineContext().ensureActive()
 
-/** The SDK receives an opaque credential in the path. Suppress its diagnostics. */
-private object DiscardWeChatLogs : ILog {
-    override fun v(tag: String?, message: String?) = Unit
-    override fun d(tag: String?, message: String?) = Unit
-    override fun i(tag: String?, message: String?) = Unit
-    override fun w(tag: String?, message: String?) = Unit
-    override fun e(tag: String?, message: String?) = Unit
+    val baseUri = WECHAT_CLOUD_MEMBERSHIP_URL.toUri()
+    val uri = if (handoff != null && handoff.expiresAtMillis > System.currentTimeMillis()) {
+        baseUri.buildUpon().appendQueryParameter("cq", "t=${handoff.token}").build()
+    } else {
+        baseUri
+    }
+    return try {
+        startActivity(Intent(Intent.ACTION_VIEW, uri))
+        true
+    } catch (_: ActivityNotFoundException) {
+        false
+    }
+}
+
+@Composable
+internal fun CloudMembershipPurchaseButton(enabled: Boolean, onClick: () -> Unit) {
+    OutlinedButton(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+        Text("购买云同步会员")
+    }
 }
 
 @Composable

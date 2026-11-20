@@ -1,16 +1,21 @@
 package com.lightningstudio.watchrss.phone.account
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import com.lightningstudio.watchrss.phone.network.withWatchRssAppVersionHeader
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 class PhoneAccountClient(
@@ -686,34 +691,49 @@ class PhoneAccountClient(
             .followRedirects(false)
             .followSslRedirects(false)
             .retryOnConnectionFailure(false)
+            .callTimeout(WECHAT_HANDOFF_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
             .build()
     }
 
-    internal suspend fun createWeChatHandoff(session: PhoneAccountSession): WeChatHandoff =
-        withContext(Dispatchers.IO) {
-            try {
-                requireConfigured()
-                val request = Request.Builder()
-                    // The public gateway forwards the backend's functions/v1 alias.
-                    .url(environment.backendBaseUrl + "/functions/v1/app/wechat-handoff")
-                    .header("apikey", environment.supabaseAnonKey)
-                    .header("authorization", "Bearer ${session.accessToken}")
-                    .header("Cache-Control", "no-store")
-                    .withWatchRssAppVersionHeader()
-                    .post("""{"purpose":"purchase"}""".toRequestBody(JSON_MEDIA_TYPE))
-                    .build()
-                handoffHttpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) throw WeChatHandoffUnavailable()
-                    val body = response.peekBody(4_097).bytes()
-                    if (body.size > 4_096) throw WeChatHandoffUnavailable()
-                    parseWeChatHandoff(body.toString(Charsets.UTF_8))
-                }
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                throw WeChatHandoffUnavailable()
-            }
+    internal suspend fun createWeChatHandoff(session: PhoneAccountSession): WeChatHandoff {
+        val request = try {
+            requireConfigured()
+            Request.Builder()
+                .url(environment.backendBaseUrl.trimEnd('/') + "/functions/v1/app/wechat-handoff/issue")
+                .header("apikey", environment.supabaseAnonKey)
+                .header("authorization", "Bearer ${session.accessToken}")
+                .header("Cache-Control", "no-store")
+                .withWatchRssAppVersionHeader()
+                .post("{}".toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+        } catch (_: Exception) {
+            throw WeChatHandoffUnavailable()
         }
+
+        return suspendCancellableCoroutine { continuation ->
+            val call = handoffHttpClient.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    continuation.resumeWith(Result.failure(WeChatHandoffUnavailable()))
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    val result = try {
+                        response.use {
+                            if (!it.isSuccessful) throw WeChatHandoffUnavailable()
+                            val body = it.peekBody(4_097).bytes()
+                            if (body.size > 4_096) throw WeChatHandoffUnavailable()
+                            Result.success(parseWeChatHandoff(body.toString(Charsets.UTF_8)))
+                        }
+                    } catch (_: Exception) {
+                        Result.failure(WeChatHandoffUnavailable())
+                    }
+                    continuation.resumeWith(result)
+                }
+            })
+        }
+    }
 
     suspend fun createPaymentOrder(session: PhoneAccountSession, idempotencyKey: String): AppPaymentOrder = withContext(Dispatchers.IO) {
         post(

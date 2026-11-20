@@ -1,65 +1,157 @@
 package com.lightningstudio.watchrss.phone.account
 
+import android.app.Application
+import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
+import okhttp3.Call
+import okhttp3.EventListener
 import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
 import org.json.JSONObject
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.util.ReflectionHelpers
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(application = Application::class, sdk = [35])
 class WeChatHandoffHttpTest {
+    private val context = ApplicationProvider.getApplicationContext<Context>()
     private val session = PhoneAccountSession("owner", "masked", "fixture-bearer", "fixture-refresh", Long.MAX_VALUE)
-    private val secret = buildString { repeat(32) { append('y') } }
+    private val fixtureToken = "A_-".repeat(14) + "A"
 
-    private fun client(server: MockWebServer): PhoneAccountClient = PhoneAccountClient(
-        AccountEnvironment(backendBaseUrl = server.url("/").toString().trimEnd('/'), supabaseAnonKey = "fixture-key"),
-        LicenseDeviceIdentity(ApplicationProvider.getApplicationContext()),
-        httpClient = OkHttpClient()
-    )
+    private fun environment(server: MockWebServer) =
+        AccountEnvironment(backendBaseUrl = server.url("/").toString().trimEnd('/'), supabaseAnonKey = "fixture-key")
 
-    @Test fun postsAuthenticatedPurchaseHandoffAndParsesTheResponse() = runBlocking {
+    private fun client(server: MockWebServer, http: OkHttpClient = OkHttpClient()) =
+        PhoneAccountClient(environment(server), LicenseDeviceIdentity(context), httpClient = http)
+
+    private fun issued(expiresAt: Long = System.currentTimeMillis() + 60_000) =
+        MockResponse().setBody(JSONObject().put("token", fixtureToken).put("expiresAt", expiresAt).toString())
+
+    private suspend fun expectUnavailable(block: suspend () -> Unit): WeChatHandoffUnavailable {
+        try {
+            block()
+        } catch (failure: WeChatHandoffUnavailable) {
+            return failure
+        }
+        throw AssertionError("Expected a sanitized handoff failure")
+    }
+
+    @Test
+    fun postsAuthenticatedIssueRequestAndParsesTheResult() = runBlocking {
         MockWebServer().use { server ->
-            val path = "pages/cloud-purchase/cloud-purchase?ticket=" + secret
-            server.enqueue(MockResponse().setBody(JSONObject().put("ticket", secret).put("expiresAt", Long.MAX_VALUE)
-                .put("miniPath", path).toString()))
+            val expiresAt = System.currentTimeMillis() + 60_000
+            server.enqueue(issued(expiresAt))
+
             val handoff = client(server).createWeChatHandoff(session)
-            val request = server.takeRequest()
+            val request = requireNotNull(server.takeRequest(2, TimeUnit.SECONDS))
             assertEquals("POST", request.method)
-            assertEquals("/functions/v1/app/wechat-handoff", request.path)
+            assertEquals("/functions/v1/app/wechat-handoff/issue", request.path)
             assertTrue(request.getHeader("Authorization") == "Bearer " + session.accessToken)
-            assertEquals("purchase", JSONObject(request.body.readUtf8()).getString("purpose"))
+            assertEquals("fixture-key", request.getHeader("apikey"))
             assertEquals("no-store", request.getHeader("Cache-Control"))
-            assertTrue(handoff.miniPath == path)
+            assertEquals(0, JSONObject(request.body.readUtf8()).length())
+            assertTrue(handoff.token == fixtureToken)
+            assertEquals(expiresAt, handoff.expiresAtMillis)
+            assertFalse(handoff.toString().contains(fixtureToken))
         }
     }
 
-    @Test fun failureBodyAndRedirectAreNotExposedOrRetried() = runBlocking {
+    @Test
+    fun rejectsRedirectsAndUnsafeResponsesWithoutRetryOrDisclosure() = runBlocking {
         MockWebServer().use { server ->
             val transport = client(server)
-            for (response in listOf(
-                MockResponse().setResponseCode(429).setBody(secret),
+            val responses = listOf(
+                MockResponse().setResponseCode(429).setBody(fixtureToken),
                 MockResponse().setResponseCode(307).setHeader("Location", "/must-not-follow"),
-                MockResponse().setBody("broken " + secret)
-            )) {
+                MockResponse().setBody("broken $fixtureToken"),
+                MockResponse().setBody(JSONObject().put("token", fixtureToken + "&extra=1").put("expiresAt", 7L).toString()),
+                MockResponse().setBody(JSONObject().put("token", fixtureToken).put("expiresAt", "bad").toString()),
+                MockResponse().setBody("z".repeat(4_097))
+            )
+            for (response in responses) {
                 server.enqueue(response)
-                try {
-                    transport.createWeChatHandoff(session)
-                    fail("Must return a safe handoff error")
-                } catch (failure: WeChatHandoffUnavailable) {
-                    assertFalse(failure.toString().contains(secret))
-                    // Coroutine stack recovery can wrap the sanitized exception in a copy.
-                    assertTrue(generateSequence<Throwable>(failure) { it.cause }
-                        .all { it is WeChatHandoffUnavailable && !it.toString().contains(secret) })
+                val failure = expectUnavailable { transport.createWeChatHandoff(session) }
+                assertTrue(generateSequence<Throwable>(failure) { it.cause }
+                    .all { it is WeChatHandoffUnavailable && !it.toString().contains(fixtureToken) })
+            }
+            assertEquals(responses.size, server.requestCount)
+        }
+    }
+
+    @Test
+    fun cancelsTheHttpCallWhenTheCoroutineIsCancelled() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+            val cancelled = CountDownLatch(1)
+            val http = OkHttpClient.Builder().eventListener(object : EventListener() {
+                override fun canceled(call: Call) {
+                    cancelled.countDown()
+                }
+            }).build()
+            val job = async(start = CoroutineStart.UNDISPATCHED) {
+                client(server, http).createWeChatHandoff(session)
+            }
+            try {
+                assertNotNull(server.takeRequest(2, TimeUnit.SECONDS))
+                job.cancelAndJoin()
+                assertTrue(cancelled.await(1, TimeUnit.SECONDS))
+                assertEquals(1, server.requestCount)
+            } finally {
+                job.cancelAndJoin()
+                http.dispatcher.executorService.shutdown()
+                http.connectionPool.evictAll()
+            }
+        }
+    }
+
+    @Test
+    fun checksTheAccountBeforeIssuingAndWhenTheResponseReturns() = runBlocking {
+        MockWebServer().use { server ->
+            val releaseResponse = CountDownLatch(1)
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    if (!releaseResponse.await(2, TimeUnit.SECONDS)) return MockResponse().setResponseCode(503)
+                    return issued()
                 }
             }
-            assertEquals(3, server.requestCount)
+            val store = EncryptedAccountSessionStore(context)
+            ReflectionHelpers.setField(store, "prefsRef", context.getSharedPreferences("handoff-session", Context.MODE_PRIVATE))
+            val repository = PhoneAccountRepository(
+                environment(server), store, PhoneInstallationIdentity(context), client(server), "phone"
+            )
+            expectUnavailable { repository.createWeChatHandoff(session.userId) }
+            store.save(session)
+            expectUnavailable { repository.createWeChatHandoff("another-owner") }
+            assertEquals(0, server.requestCount)
+
+            val result = async(start = CoroutineStart.UNDISPATCHED) {
+                expectUnavailable { repository.createWeChatHandoff(session.userId) }
+            }
+            try {
+                assertNotNull(server.takeRequest(2, TimeUnit.SECONDS))
+                store.save(session.copy(userId = "another-owner", accessToken = "fixture-other-bearer"))
+            } finally {
+                releaseResponse.countDown()
+            }
+            result.await()
+            assertEquals(1, server.requestCount)
         }
     }
 }

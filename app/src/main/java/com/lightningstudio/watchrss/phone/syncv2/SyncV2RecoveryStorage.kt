@@ -54,7 +54,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             }
         }
     }
-    private fun sources(record:JSONObject,maxBytes:Long?=null):List<Pair<String,Source>> {
+    private fun sources(record:JSONObject,maxBytes:Long?=null,allowUnregisteredNoteAssets:Boolean=false):List<Pair<String,Source>> {
         val m=record.getJSONObject("meta");val id=m.getString("logicalId");val value=record.getJSONObject("value")
         if(SyncV2Business.logicalId(m.getString("kind"),value)!=id || identity.entity(m.getString("kind"),id)!=m.getString("entityKey"))SyncV2Codec.fail("identity_conflict")
         return when(m.getString("kind")) {
@@ -98,8 +98,10 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                 val keys=texts.flatMap{com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.referencedStorageKeys(it)}.toSortedSet()
                 keys.map {name->
                     val hashes=db.query("SELECT sha256 FROM note_assets WHERE storageKey=?",arrayOf(name)).use{c->buildSet{while(c.moveToNext())add(c.getString(0))}}
-                    if(hashes.size!=1)SyncV2Codec.fail("closure_incomplete")
-                    "asset/$name" to fileSource(File(files,"notes/assets/$name"),hashes.single(),maxBytes)
+                    // Keeping the selected local note also keeps its legacy file in place.
+                    // A merge or a recovery copy still requires the registered digest.
+                    if(hashes.size>1 || (hashes.isEmpty() && !allowUnregisteredNoteAssets))SyncV2Codec.fail("closure_incomplete")
+                    "asset/$name" to fileSource(File(files,"notes/assets/$name"),hashes.singleOrNull(),maxBytes)
                 }
             }
             else->emptyList()
@@ -117,7 +119,11 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             else->false
         }
     }
-    fun contentReady(record:JSONObject):Boolean=record.getJSONObject("state").getJSONObject("payload").optBoolean("deleted",false) || try {sources(record);true}catch(_:Exception){false}
+    fun contentReady(record:JSONObject,allowUnregisteredNoteAssets:Boolean=false):Boolean =
+        record.getJSONObject("state").getJSONObject("payload").optBoolean("deleted",false) || try {
+            sources(record,allowUnregisteredNoteAssets=allowUnregisteredNoteAssets)
+            true
+        } catch(_:Exception) { false }
     fun prepare(local:List<JSONObject>,cloud:List<JSONObject>,base:JSONObject,captured:Set<String>,revision:String,accountOid:String,now:Long):Bundle {
         val localValues=JSONObject();val cloudValues=JSONObject();val refs=JSONObject();val records=local.associateBy{it.getJSONObject("meta").getString("entityKey")}
         for((id,r)in records)localValues.put(id,JSONObject().put("meta",r.getJSONObject("meta")).put("state",r.getJSONObject("state")))

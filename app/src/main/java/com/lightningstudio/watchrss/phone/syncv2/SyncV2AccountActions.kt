@@ -552,7 +552,11 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             for(r in local) {
                 val prior=byEntity[r.getJSONObject("meta").getString("entityKey")]
                 val preservesIndependent=prior!=null && r.getJSONObject("meta").getString("kind") in setOf("book","asset") && bodyIdentity(prior)==bodyIdentity(r)
-                if(!r.getJSONObject("state").getJSONObject("payload").optBoolean("deleted",false) && !preservesIndependent && (prior==null || !same(prior.getJSONObject("meta"),r.getJSONObject("meta")) || !same(prior.getJSONObject("state"),r.getJSONObject("state"))) && !recovery.contentReady(r))SyncV2Codec.fail("closure_incomplete")
+                val changed = prior==null || !same(prior.getJSONObject("meta"),r.getJSONObject("meta")) ||
+                    !same(prior.getJSONObject("state"),r.getJSONObject("state"))
+                if(changed && !preservesIndependent && !recovery.contentReady(r,allowUnregisteredNoteAssets=true)) {
+                    SyncV2Codec.fail("closure_incomplete")
+                }
             }
         }
         val requestId=id();val action=JSONObject().put("id",requestId).put("kind",choice).put("capture",c.json()).put("serverTime",now()).put("fileCapture",plan.files).put("legacySelected",JSONArray(plan.legacySelected))

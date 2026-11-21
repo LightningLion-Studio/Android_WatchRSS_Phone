@@ -19,6 +19,57 @@ class SyncV2P5RecoveryTest {
     private fun article(id:String)=PhoneArticleEntity(id,"synthetic","https://example.invalid/$id","title","site","summary",null,"necessary original body",null,"body-hash",0,0,true,0,0,null,null,true,0,0,false,0,0,false,0)
     private fun code(expected:String,block:()->Unit){val e=runCatching(block).exceptionOrNull();assertNotNull(e);assertEquals(expected,if(e is SyncV2CloudError)e.code else e!!.message)}
     private fun addArticle(w:SyncV2P5Fixture,id:String="local-article"){runBlocking{w.room.phoneArticleDao().upsert(article(id))};w.drain()}
+    @Test
+    fun keepLocalPublishesNoteWithAnUnregisteredLegacyAttachment() = SyncV2P5Fixture().use { w ->
+        w.start()
+        val original = File(w.root, "notes/assets/legacy.png").apply {
+            parentFile!!.mkdirs()
+            writeText("legacy attachment")
+        }
+        val markdown = "Offline edit\n\n![fixture](assets/legacy.png)"
+        w.edit(markdown)
+        w.rollbackRemote()
+        w.actions().use { actions ->
+            actions.refresh()
+            w.drain()
+            val preview = actions.pendingChoice()!!.preview
+            val before = w.publishCalls
+            assertTrue(actions.choose(preview, "local").getBoolean("localCommitted"))
+            assertEquals(before + 1, w.publishCalls)
+            assertTrue(w.projection.state().body.isNull("pendingChoice"))
+        }
+        assertEquals(markdown, w.text())
+        assertEquals("legacy attachment", original.readText())
+        assertEquals(0, w.sql.query("SELECT COUNT(*) FROM note_assets").use {
+            it.moveToFirst()
+            it.getInt(0)
+        })
+    }
+    @Test
+    fun keepLocalRejectsMissingAndMismatchedNoteAttachments() = SyncV2P5Fixture().use { w ->
+        w.pending()
+        val markdown = "![fixture](assets/legacy.png)"
+        w.edit(markdown)
+        w.actions().use { actions ->
+            val before = w.publishCalls
+            code("closure_incomplete") { actions.choose(actions.preview(), "local") }
+            assertEquals(before, w.publishCalls)
+
+            File(w.root, "notes/assets/legacy.png").apply {
+                parentFile!!.mkdirs()
+                writeText("different bytes")
+            }
+            w.sql.execSQL(
+                "INSERT INTO note_assets VALUES('asset','note',?,'legacy.png','image/png',4,'legacy.png',0,0,0,0)",
+                arrayOf("a".repeat(64))
+            )
+            w.drain()
+            code("closure_incomplete") { actions.choose(actions.preview(), "local") }
+            assertEquals(before, w.publishCalls)
+            assertNotNull(actions.pendingChoice())
+            assertEquals(markdown, w.text())
+        }
+    }
     @Test fun originalArticleBodyIsEncryptedPinnedAndReadableAfterSourceRowIsDiscarded():Unit=SyncV2P5Fixture().use{w->
         w.pending();addArticle(w);val a=w.actions();a.choose(a.preview(),"cloud")
         assertEquals(0,w.sql.query("SELECT COUNT(*) FROM phone_articles").use{it.moveToFirst();it.getInt(0)})

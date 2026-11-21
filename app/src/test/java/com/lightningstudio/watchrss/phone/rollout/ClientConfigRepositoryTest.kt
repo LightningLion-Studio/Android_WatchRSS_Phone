@@ -3,8 +3,16 @@ package com.lightningstudio.watchrss.phone.rollout
 import android.app.Application
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncDevice
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncEvent
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncProtocol
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncSession
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncTrigger
+import com.lightningstudio.watchrss.phone.features.EvaluateAt
+import com.lightningstudio.watchrss.phone.features.FeatureDecision
 import com.lightningstudio.watchrss.phone.features.FeatureOverride
 import com.lightningstudio.watchrss.phone.features.FeatureRegistry
+import com.lightningstudio.watchrss.phone.features.RolloutSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -72,6 +80,9 @@ class ClientConfigRepositoryTest {
                 val snapshot = repo.snapshotForSession()
                 assertEquals(0L, snapshot.version)
                 assertEquals(feature.defaults, snapshot.rollout(feature))
+                assertEquals(20, snapshot.rollout(feature).percent)
+                assertFalse(snapshot.stale)
+                clock += TimeUnit.DAYS.toMillis(8)
             }
         }
     }
@@ -116,12 +127,13 @@ class ClientConfigRepositoryTest {
     @Test
     fun oldServerTtlIsCappedAndOlderThanSevenDaysShutsOffUntilRefresh() = runBlocking {
         MockWebServer().use { server ->
-            server.enqueue(MockResponse().setBody(config(3, 100, null)))
+            // install-1 falls in bucket 41 with the fixture salt.
+            server.enqueue(MockResponse().setBody(config(3, 42, null)))
             val repo = repository(server)
             val offer = JSONObject().put("guardedLibraryVersion", 1).put("libraryBinary", JSONObject())
             assertEquals(600L, repo.snapshotForSession().ttlSeconds)
             val first = repo.decideB2(true, offer)
-            assertTrue(first.enabled)
+            assertEquals(B2RolloutDecision(true, B2Cohort.ON, 3), first)
             clock += 599_999
             assertNull(repo.refreshIfStale())
             clock++
@@ -129,7 +141,11 @@ class ClientConfigRepositoryTest {
             assertEquals(first, repo.decideB2(true, offer))
             assertEquals(2, server.requestCount)
 
-            clock += 7L * 24 * 60 * 60 * 1000 - 600_000
+            clock += TimeUnit.DAYS.toMillis(6) + TimeUnit.HOURS.toMillis(23) - 600_000
+            server.enqueue(MockResponse().setResponseCode(503))
+            assertEquals(first, repo.decideB2(true, offer))
+
+            clock += TimeUnit.HOURS.toMillis(1)
             assertFalse(repo.currentSnapshot().stale)
             clock++
             server.enqueue(MockResponse().setResponseCode(503))
@@ -138,9 +154,33 @@ class ClientConfigRepositoryTest {
             assertTrue(first.enabled)
             assertFalse(first.configStale)
             assertEquals(expired, repo.decideB2(false, null))
+            val staleSnapshot = repo.currentSnapshot()
+            val launchFeature = feature.copy(evaluateAt = EvaluateAt.LAUNCH)
+            assertEquals(
+                FeatureDecision(false, RolloutSource.STALE),
+                repo.decide(staleSnapshot, feature, eligible = true)
+            )
+            assertEquals(
+                FeatureDecision(true, RolloutSource.BUCKET),
+                repo.decide(staleSnapshot, launchFeature, eligible = true)
+            )
 
-            server.enqueue(MockResponse().setBody(config(4, 100, "on")))
-            assertEquals(B2RolloutDecision(true, B2Cohort.FORCED_ON, 4), repo.decideB2(true, offer))
+            val events = mutableListOf<BtSyncEvent>()
+            BtSyncSession(
+                BtSyncDevice(installId, "fixture", 121, "sample", "sample", "14", 34),
+                BtSyncTrigger.MANUAL, record = { events += it }, now = { clock }, monotonic = { clock }
+            ).apply {
+                decision = expired
+                protocol = BtSyncProtocol.V1
+            }.finishSuccess()
+            val event = events.single().data
+            assertTrue(event.getBoolean("configStale"))
+            assertEquals("b2_off", event.getString("cohort"))
+            assertEquals("off", event.getJSONObject("features").getString("b2"))
+            assertEquals("v1", event.getString("protocol"))
+
+            server.enqueue(MockResponse().setBody(config(4, 42, null)))
+            assertEquals(B2RolloutDecision(true, B2Cohort.ON, 4), repo.decideB2(true, offer))
         }
     }
 
@@ -169,8 +209,9 @@ class ClientConfigRepositoryTest {
 
     @Test
     fun registeredKeyAbsentInResponseUsesDefaultWithFetchedVersion() {
-        val snapshot = parseClientConfig(JSONObject("""{"configVersion":9,"ttlSeconds":3600,"features":{"other":42}}"""))
+        val snapshot = parseClientConfig(JSONObject("""{"configVersion":9,"ttlSeconds":300,"features":{"other":42}}"""))
         assertEquals(9L, snapshot.version)
+        assertEquals(300L, snapshot.ttlSeconds)
         assertEquals(feature.defaults, snapshot.rollout(feature))
     }
 

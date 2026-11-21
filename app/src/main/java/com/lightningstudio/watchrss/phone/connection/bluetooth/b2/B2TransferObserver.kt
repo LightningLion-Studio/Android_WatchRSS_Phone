@@ -10,11 +10,11 @@ internal interface B2TransferObserver {
     fun binaryDescriptor(id: String, kind: String, incoming: Boolean)
     fun chunk(objectId: String, index: Int, incoming: Boolean, length: Int, accepted: Boolean = false)
     fun binaryApplied(request: JSONObject, incoming: Boolean)
-}
 
-internal fun B2TransferObserver.chunk(request: JSONObject, incoming: Boolean, length: Int, accepted: Boolean = false) {
-    val body = request.o("payload")
-    chunk(body.s("objectId"), body.n("chunkIndex").toInt(), incoming, length, accepted)
+    fun chunk(request: JSONObject, incoming: Boolean, length: Int, accepted: Boolean = false) {
+        val body = request.optJSONObject("payload") ?: return
+        chunk(body.optString("objectId"), body.optInt("chunkIndex", -1), incoming, length, accepted)
+    }
 }
 
 internal fun B2TransferObserver.counting(input: InputStream): InputStream = object : InputStream() {

@@ -153,6 +153,10 @@ class PhoneBluetoothSyncManager(
     internal var b2RolloutConfig: ClientConfigRepository? = null
     internal var btSyncTelemetry: BtSyncTelemetry? = null
 
+    /** The offer must come from the guarded probe after validation. */
+    internal suspend fun decideLibraryRollout(binaryMerge: Boolean, guardedOffer: JSONObject? = null) =
+        b2RolloutConfig?.decideB2(binaryMerge, guardedOffer)
+
     internal fun beginBtSync(trigger: BtSyncTrigger = BtSyncTrigger.MANUAL): BtSyncSession? {
         b2RolloutConfig?.refreshIfStale()
         return btSyncTelemetry?.begin(trigger)
@@ -686,7 +690,7 @@ class PhoneBluetoothSyncManager(
             }
             telemetry?.stage = BtSyncStage.NEGOTIATE
             // ed3df08 has discovery only. D2 supplies the validated guarded offer at this seam.
-            val rollout = b2RolloutConfig?.decideB2(binaryMerge, guardedOffer = null)
+            val rollout = decideLibraryRollout(binaryMerge)
             if (rollout != null) telemetry?.decision = rollout
             telemetry?.protocol = if (initialBinding.response.optBoolean("supportsAccountDataSpaces"))
                 BtSyncProtocol.COMPOSE else BtSyncProtocol.V1

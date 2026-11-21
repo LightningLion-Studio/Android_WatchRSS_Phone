@@ -53,15 +53,14 @@ internal object NoteAssetFiles {
     }
 
     fun current(db: SupportSQLiteDatabase?, files: File, key: String): File {
-        val legacy = legacy(files, key)
-        if (legacy.isFile) return legacy
-        val reference = reference(db, key) ?: return legacy
+        val reference = reference(db, key) ?: return legacy(files, key)
         return candidate(files, reference.sha256)
     }
 
     fun publish(db: SupportSQLiteDatabase, key: String, revision: BookPackageFiles.Revision) {
         check(db.inTransaction())
-        db.execSQL("INSERT INTO $TABLE VALUES(?,?,?)", arrayOf(key, revision.sha256, revision.bytes))
+        db.execSQL("INSERT OR REPLACE INTO $TABLE VALUES(?,?,?)",
+            arrayOf(key, revision.sha256, revision.bytes))
     }
 
     fun ownerKeys(db: SupportSQLiteDatabase, key: String): List<String> {

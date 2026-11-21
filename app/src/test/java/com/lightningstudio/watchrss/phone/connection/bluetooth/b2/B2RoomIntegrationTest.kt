@@ -247,6 +247,8 @@ class B2RoomIntegrationTest {
             val alternate = B2Wire.request("apply", rig.job, rig.plan, resumed,
                 obj("objectId" to rig.descriptor.s("objectId")), "a".repeat(32))
             assertEquals(original.toString(), second.handle(alternate).o("result").o("receipt").toString())
+            NoteAssetFiles.legacy(rig.root, key).apply { parentFile!!.mkdirs(); writeText("stale legacy replacement") }
+            assertArrayEquals(rig.bytes, NoteAssetFiles.current(sql, rig.root, key).readBytes())
             candidate.writeBytes(ByteArray(rig.bytes.size))
             val stale = runCatching { rig.missing(second, resumed) }.exceptionOrNull() as B2Exception
             assertEquals("RECEIPT_CONFLICT", stale.code)

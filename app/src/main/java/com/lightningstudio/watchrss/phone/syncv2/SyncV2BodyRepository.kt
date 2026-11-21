@@ -21,11 +21,11 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     /** Destination for a verified cloud download. Local reads use the current package revision. */
     fun file(kind: String, id: String): File {
         SyncV2BodyCodec.name(kind, id)
-        return if (kind == "asset") File(files, "notes/assets/$id") else BookPackageFiles.legacy(bookDirectory, id)
+        return if (kind == "asset") NoteAssetFiles.current(db, files, id) else BookPackageFiles.legacy(bookDirectory, id)
     }
 
     fun read(kind: String, id: String): ByteArray? {
-        val target = if (kind == "asset") NoteAssetFiles.current(db, files, id) else file(kind, id)
+        val target = file(kind, id)
         val limit = SyncV2BodyCodec.limit(kind)
         if (kind == "book") {
             val revision = BookPackageFiles.revision(db, id) ?: return null
@@ -98,7 +98,8 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         val sha = ConditionalBodyFile.digest(target)
         if (identity(target) != observed || reference(kind, id, selected) != before) SyncV2Codec.fail("body_revision_changed")
         return RepairTarget(sha,
-            stillCurrent = { reference(kind, id, selected) == before && sameFile(target, observed, sha) },
+            stillCurrent = { file(kind, id) == target && reference(kind, id, selected) == before &&
+                sameFile(target, observed, sha) },
             sameIdentity = { identity(target) == observed })
     }
 
@@ -176,7 +177,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
 
     /** The reference is the committed local business selection; the digest always comes from readable bytes. */
     fun original(kind: String, id: String, selected: JSONObject): Original? {
-        val target = if (kind == "asset") NoteAssetFiles.current(db, files, id) else file(kind, id)
+        val target = file(kind, id)
         val before = reference(kind, id, selected) ?: return null
         val limit = SyncV2BodyCodec.limit(kind)
         val source = if (before is BookReference) {
@@ -252,11 +253,19 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     /** Call under the account lifetime and projection writer, after full validation.
      * A crash can leave a verified original with an old cache marker; the next round repairs it. */
     fun install(kind: String, id: String, raw: ByteArray, repair: RepairTarget? = null, checkWindow: () -> Unit = {}) {
-        check(db.inTransaction());val target=file(kind,id);val hash=SyncV2BodyCodec.hash(raw)
+        check(db.inTransaction())
+        val current = file(kind, id)
+        val hash = SyncV2BodyCodec.hash(raw)
+        val published = if (kind == "asset") NoteAssetFiles.reference(db, id) else null
+        val newReference = published?.takeIf { it.sha256 != hash }
+        val target = if (newReference == null) current else NoteAssetFiles.candidate(files, hash)
+        val expected = if (target == current) {
+            if (repair == null) hash else repair.expectedSha256
+        } else hash
         val bookState=if(kind=="book")db.controlQuery("SELECT stateJson FROM imported_books WHERE bookId=?",arrayOf(id)).use{c->if(!c.moveToFirst())SyncV2Codec.fail("body_revision_changed");JSONObject(c.getString(0))}else null
         if(bookState!=null)validate("book",id,bookState,raw)
         ConditionalBodyFile.installGuarded(
-            target, raw, if (repair == null) hash else repair.expectedSha256,
+            target, raw, expected,
             beforeStagingCommit = { beforeInstall(target) },
             beforePublish = {
                 repair?.requireCurrent()
@@ -265,8 +274,13 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             },
             privateBook = kind == "book"
         )
-        if(kind=="asset")db.execSQL("UPDATE note_assets SET sha256=?,byteCount=? WHERE storageKey=? AND (sha256 IS NOT ? OR byteCount IS NOT ?)",arrayOf<Any>(hash,raw.size,id,hash,raw.size))
-        else {
+        if(kind=="asset") {
+            if (newReference != null) {
+                NoteAssetFiles.publish(db, id, BookPackageFiles.Revision(hash, raw.size.toLong()))
+            }
+            db.execSQL("UPDATE note_assets SET sha256=?,byteCount=? WHERE storageKey=? AND (sha256 IS NOT ? OR byteCount IS NOT ?)",
+                arrayOf<Any>(hash,raw.size,id,hash,raw.size))
+        } else {
             materializeBook(id,raw,bookState!!)
             db.execSQL("UPDATE imported_books SET packageSha256=?,packageBytes=? WHERE bookId=? AND (packageSha256 IS NOT ? OR packageBytes IS NOT ?)",arrayOf<Any>(hash,raw.size,id,hash,raw.size))
         }

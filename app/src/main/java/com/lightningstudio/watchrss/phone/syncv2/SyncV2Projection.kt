@@ -121,7 +121,7 @@ internal class SyncV2Projection(
     private fun <T> writerLocal(expected: String?, body: (State)->T): T {
         state() // Consume only the small business witness, outside the projection transaction.
         db.beginTransaction() // Android uses an immediate/exclusive SQLite writer, never a read-deferred txn.
-        var started=false;var failure:Throwable?=null
+        var started=false;var ended=false;var failure:Throwable?=null
         try {
             val old=readState(); val following=SyncV2Codec.next(old.version) // before callbacks and fault hooks
             if(expected!=null && old.version!=expected) SyncV2Codec.fail("choice_stale")
@@ -135,9 +135,12 @@ internal class SyncV2Projection(
             db.execSQL("UPDATE syncv2_state SET state_version=?,body=? WHERE scope=? AND state_version=?",arrayOf(following,seal("state",old.body),scope,old.version))
             if(db.controlQuery("SELECT changes()").use { it.moveToFirst(); it.getInt(0) }!=1) SyncV2Codec.fail("choice_stale")
             fault("before-commit")
-            // Account release can invalidate the generation before acquiring the lifetime lock.
-            lifetime?.check()
-            db.setTransactionSuccessful()
+            val commit = {
+                db.setTransactionSuccessful()
+                ended = true
+                db.endTransaction()
+            }
+            if (lifetime == null) commit() else lifetime.commit(commit)
             return result
         } catch(e:Throwable) {
             val primary=if(e is android.database.sqlite.SQLiteFullException)IllegalStateException("storage_pressure",e)else e
@@ -145,7 +148,7 @@ internal class SyncV2Projection(
         } finally {
             // SQLITE_FULL may already have rolled back the native transaction. Android's
             // second ROLLBACK can fail with "no transaction"; preserve the causal failure.
-            try{db.endTransaction()}catch(e:Throwable){
+            try{if(!ended)db.endTransaction()}catch(e:Throwable){
                 val primary=failure
                 if(primary!=null){if(primary!==e)primary.addSuppressed(e)}
                 else throw if(e is android.database.sqlite.SQLiteFullException)IllegalStateException("storage_pressure",e)else e
@@ -288,7 +291,7 @@ internal class SyncV2Projection(
     /** Retire only derived pre-body-channel private-UUID aliases. Cloud rows and originals survive. */
     internal fun migrateBodyAssetCandidates() {
         while(true) {
-        val aliases=db.controlQuery("SELECT c.entity_key FROM syncv2_candidates c WHERE c.scope=? AND c.kind='asset' AND EXISTS(SELECT 1 FROM note_assets a WHERE a.assetId=c.logical_id AND a.storageKey<>c.logical_id) AND NOT EXISTS(SELECT 1 FROM note_assets a WHERE a.storageKey=c.logical_id) ORDER BY c.entity_key LIMIT 256",arrayOf(scope)).use{c->buildList{while(c.moveToNext())add(c.getString(0))}}
+        val aliases=db.controlQuery("SELECT c.entity_key FROM syncv2_candidates c WHERE c.scope=? AND c.kind='asset' AND EXISTS(SELECT 1 FROM note_assets a WHERE a.assetId=c.logical_id AND a.storageKey<>c.logical_id) AND NOT EXISTS(SELECT 1 FROM ${SyncV2NoteAssetNames.source} a WHERE a.storageKey=c.logical_id) ORDER BY c.entity_key LIMIT 256",arrayOf(scope)).use{c->buildList{while(c.moveToNext())add(c.getString(0))}}
         if(aliases.isEmpty())return
         writer { _ -> for(entity in aliases) {
             db.execSQL("DELETE FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity))
@@ -580,7 +583,7 @@ internal class SyncV2Projection(
         val domain = SyncV2Schema.domains.single { it.kind == "asset" }
         for (key in storageKeys) {
             val value = db.controlQuery(
-                "SELECT storageKey AS projection_key,${columns(domain)} FROM note_assets WHERE storageKey=?",
+                "SELECT storageKey AS projection_key,${columns(domain)} FROM ${sourceTable(domain)} WHERE storageKey=?",
                 arrayOf(key)
             ).use {
                 if (!it.moveToFirst()) SyncV2Codec.fail("closure_incomplete")
@@ -682,7 +685,7 @@ internal class SyncV2Projection(
             if(physicalRssChange || !same(semantics(source),semantics(oldSource))) {
                 val footprint=if(!physicalRssChange && prior!=null && same(prior.optJSONObject("value"),value.getJSONObject("value")))prior.opt("localValue")?:JSONObject.NULL
                     else if(d.kind=="rss-state")rss!!.footprint(value.getJSONObject("value"))?:JSONObject.NULL
-                    else db.controlQuery("SELECT ${d.key} AS projection_key,${columns(d)} FROM `${d.table}` WHERE (${d.key})=?",arrayOf(id)).use{c->if(c.moveToFirst())readStoredRecord(d,c)else if(virtualBaseline)JSONObject(value.getJSONObject("value").toString())else SyncV2Codec.fail("closure_incomplete")}
+                    else db.controlQuery("SELECT ${d.key} AS projection_key,${columns(d)} FROM `${sourceTable(d)}` WHERE (${d.key})=?",arrayOf(id)).use{c->if(c.moveToFirst())readStoredRecord(d,c)else if(virtualBaseline)JSONObject(value.getJSONObject("value").toString())else SyncV2Codec.fail("closure_incomplete")}
                 // Successful-prefix reconciliation keeps tail bodies in place. This virtual
                 // Room footprint represents the published baseline, before tail overlays.
                 if(virtualBaseline && footprint is JSONObject) {
@@ -1175,7 +1178,7 @@ internal class SyncV2Projection(
     }
     private fun reconciliationSemantics()=SyncV2Codec.hash(JSONArray(SyncV2Schema.domains.map{binding(it,"p1-local-v1")}))
     private fun binding(domain: SyncV2Schema.Domain, capability: String): String = SyncV2Codec.hash(JSONObject()
-        .put("schema",SyncV2Schema.semanticBinding(db,listOf(domain.table)+when(domain.table){"notes"->listOf("note_conflicts");"phone_articles"->listOf("article_register_provenance");"imported_books"->listOf("imported_book_chapters");else->emptyList()}))
+        .put("schema",SyncV2Schema.semanticBinding(db,listOf(domain.table)+when(domain.table){"notes"->listOf("note_conflicts");"phone_articles"->listOf("article_register_provenance");"imported_books"->listOf("imported_book_chapters");"note_assets"->listOf(SyncV2NoteAssetNames.aliases,SyncV2NoteAssetNames.source);else->emptyList()}))
         .put("bodyAssetMapping",2).put("scope",identity.scope).put("descriptor",identity.descriptorOid).put("account",identity.accountId).put("capability",capability)
         .put("businessEpoch",readState().body.optString("businessEpoch","0")))
     private fun completedScan(domainName:String,capability:String,stamp:String):Boolean {
@@ -1206,7 +1209,7 @@ internal class SyncV2Projection(
             var rows=0;var bytes=0;var keyAt=last;var exhausted=true
             for(id in ids) {
                 if(rows==limit){exhausted=false;break}
-                val value=db.controlQuery("SELECT ${domain.key} AS projection_key,${columns(domain)} FROM `${domain.table}` WHERE (${domain.key})=?",arrayOf(id)).use{c->if(c.moveToFirst())readRecord(domain,c)else null}
+                val value=db.controlQuery("SELECT ${domain.key} AS projection_key,${columns(domain)} FROM `${sourceTable(domain)}` WHERE (${domain.key})=?",arrayOf(id)).use{c->if(c.moveToFirst())readRecord(domain,c)else null}
                 val size=value?.let{SyncV2Codec.utf8(it.toString()).size}?:0
                 // C7 25.1: long note rows are legitimate local data; the row-size gate for them is
                 // the 2 MiB sealed-note budget, not the ordinary page byte budget.
@@ -1223,7 +1226,7 @@ internal class SyncV2Projection(
     }
     /** Include prior candidate keys so physical deletions during a closed/missing witness are seen. */
     private fun sourceKeys(d:SyncV2Schema.Domain,after:String,limit:Int):List<String> = db.controlQuery(
-        "SELECT projection_key FROM (SELECT (${d.key}) AS projection_key FROM `${d.table}` UNION SELECT logical_id AS projection_key FROM syncv2_candidates WHERE scope=? AND kind=?) WHERE projection_key COLLATE BINARY > ? ORDER BY projection_key COLLATE BINARY LIMIT ?",arrayOf<Any>(scope,d.kind,after,limit)).use{c->buildList{while(c.moveToNext())add(c.getString(0))}}
+        "SELECT projection_key FROM (SELECT (${d.key}) AS projection_key FROM `${sourceTable(d)}` UNION SELECT logical_id AS projection_key FROM syncv2_candidates WHERE scope=? AND kind=?) WHERE projection_key COLLATE BINARY > ? ORDER BY projection_key COLLATE BINARY LIMIT ?",arrayOf<Any>(scope,d.kind,after,limit)).use{c->buildList{while(c.moveToNext())add(c.getString(0))}}
     /** Outbox is now a DERIVED projection queue, written only by workers after business commit.
      * A fixed reconciliation pass handles the compact witness's lack of per-entity history.
      */
@@ -1258,7 +1261,7 @@ internal class SyncV2Projection(
             val table=e[2] as String
             val d=SyncV2Schema.domains.first{it.table==when(table){"note_conflicts"->"notes";"imported_book_chapters"->"imported_books";"article_register_provenance"->"phone_articles";else->table}}
             val id=e[3] as String;val eventAccount=open("state",e[4] as ByteArray).optJSONObject("account")
-            db.controlQuery("SELECT ${d.key} AS projection_key,${columns(d)} FROM `${d.table}` WHERE (${d.key})=?",arrayOf(id)).use{c->
+            db.controlQuery("SELECT ${d.key} AS projection_key,${columns(d)} FROM `${sourceTable(d)}` WHERE (${d.key})=?",arrayOf(id)).use{c->
                 if(c.moveToFirst())project(d,id,readRecord(d,c),st.revision,eventAccount,ownerBody=st.body)else markRemoved(d,id,st.revision)
             }
             fault("after-tail-entry");st.body.put("tailSeq",e[0])
@@ -1266,6 +1269,7 @@ internal class SyncV2Projection(
         if(entries.isEmpty() || entries.last()[0] as Long==end)st.body.remove("tailR1Seq")
         refreshPending(st.body);entries.size
     }
+    private fun sourceTable(d:SyncV2Schema.Domain)=if(d.table=="note_assets")SyncV2NoteAssetNames.source else d.table
     private fun columns(d: SyncV2Schema.Domain): String = when(d.table) {
         // guid is valid wire metadata but is not stored by PhoneArticleEntity.
         "phone_articles" -> SyncV2Business.articleFields.filterNot{it in setOf("guid","rssIndexRetired","bookIndexRetired","registerSources")}.sorted().joinToString(","){"`$it`"}
@@ -1434,7 +1438,7 @@ internal class SyncV2Projection(
         val statements=when(d.table) {
             "notes"->listOf("conflicts" to "SELECT * FROM note_conflicts WHERE noteId=? ORDER BY conflictId LIMIT 1025")
             "phone_articles"->listOf("register" to "SELECT * FROM article_register_provenance WHERE articleId=?")
-            "note_assets"->listOf("asset" to "SELECT * FROM note_assets WHERE storageKey=?")
+            "note_assets"->listOf("asset" to "SELECT * FROM ${SyncV2NoteAssetNames.source} WHERE storageKey=?")
             "imported_books"->listOf("chapters" to "SELECT * FROM imported_book_chapters WHERE bookId=? ORDER BY chapterIndex LIMIT 257")
             else->emptyList()
         }

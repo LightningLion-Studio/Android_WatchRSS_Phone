@@ -2,7 +2,9 @@ package com.lightningstudio.watchrss.phone.cloud
 
 import com.lightningstudio.watchrss.phone.pairing.*
 import com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness
+import androidx.room.withTransaction
 import com.lightningstudio.watchrss.phone.syncv2.SyncV2CloudError
+import com.lightningstudio.watchrss.phone.syncv2.SyncV2NoteAssetNames
 import com.lightningstudio.watchrss.phone.syncv2.SyncV2PhoneProduct
 import com.lightningstudio.watchrss.phone.network.CloudHttpDeadline
 import kotlinx.coroutines.asContextElement
@@ -176,7 +178,8 @@ class PhoneCloudSyncService(
                 CloudKeyTrust.validate(account.userId,bootstrap.libraryEpoch,bootstrap.keyVersionFloor,bootstrap.keyCommitments,keys)},
             approved={id->val session=accountRepository.session.value;val bootstrap=trustedBootstrap
                 session!=null && bootstrap!=null && bootstrap.devices.any{it.deviceId==id && it.revokedAt==null && deviceAuthenticated(session,bootstrap,it)}},
-            onAuthenticationResponse=accountRepository::recordAuthenticationResponse)
+            onAuthenticationResponse=accountRepository::recordAuthenticationResponse,
+            sessionCommitLock=accountRepository.cloudSessionCommitLock)
     }
     internal val usesSyncV2 get() = syncV2Database != null && syncV2Product.productEnabled
     internal val syncV2UiPort get()=syncV2Product.uiPort
@@ -702,7 +705,14 @@ class PhoneCloudSyncService(
         expectedUserId: String? = accountRepository.session.value?.userId
     ) = syncMutex.withLock {
         val session = requireSession(expectedUserId)
-        if (!merge) { repository.clearLibrary(); noteRepository.clearForAccountSwitch() }
+        if (!merge) {
+            repository.clearLibrary()
+            val database = syncV2Database?.invoke()
+            if (database == null) noteRepository.clearForAccountSwitch() else database.withTransaction {
+                noteRepository.clearForAccountSwitch()
+                SyncV2NoteAssetNames.clear(database.openHelper.writableDatabase)
+            }
+        }
         synchronized(syncStateLock) {
             checkApprovalOwner(session)
             settings.ownerUserId = session.userId

@@ -86,7 +86,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                     ?: SyncV2Codec.fail("closure_incomplete")
                 listOf("book" to fileSource(original, maxBytes = maxBytes, book = revision))
             }
-            "asset"->db.query("SELECT storageKey,sha256 FROM note_assets WHERE storageKey=?",arrayOf(id)).use{c->
+            "asset"->db.query("SELECT storageKey,sha256 FROM ${SyncV2NoteAssetNames.source} WHERE storageKey=?",arrayOf(id)).use{c->
                 if(!c.moveToFirst())SyncV2Codec.fail("closure_incomplete")
                 val name=c.getString(0);if(!com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.isSafeStorageKey(name))SyncV2Codec.fail("closure_incomplete")
                 listOf("asset/$name" to fileSource(File(files,"notes/assets/$name"),c.getString(1),maxBytes))
@@ -97,7 +97,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                 }
                 val keys=texts.flatMap{com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.referencedStorageKeys(it)}.toSortedSet()
                 keys.map {name->
-                    val hashes=db.query("SELECT sha256 FROM note_assets WHERE storageKey=?",arrayOf(name)).use{c->buildSet{while(c.moveToNext())add(c.getString(0))}}
+                    val hashes=db.query("SELECT sha256 FROM ${SyncV2NoteAssetNames.source} WHERE storageKey=?",arrayOf(name)).use{c->buildSet{while(c.moveToNext())add(c.getString(0))}}
                     if(hashes.size>1)SyncV2Codec.fail("closure_incomplete")
                     if(hashes.isEmpty())(onUnregisteredNoteAsset?:SyncV2Codec.fail("closure_incomplete"))(name)
                     "asset/$name" to fileSource(File(files,"notes/assets/$name"),hashes.singleOrNull(),maxBytes)
@@ -114,7 +114,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             "book" -> BookPackageFiles.revision(db, id)?.let { revision ->
                 BookPackageFiles.resolve(bookDirectory, id, revision) { sourceReads?.file(it) } != null
             } ?: false
-            "asset"->db.query("SELECT storageKey FROM note_assets WHERE storageKey=?",arrayOf(id)).use{c->c.moveToFirst() && com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.isSafeStorageKey(c.getString(0)) && File(files,"notes/assets/${c.getString(0)}").isFile}
+            "asset"->db.query("SELECT storageKey FROM ${SyncV2NoteAssetNames.source} WHERE storageKey=?",arrayOf(id)).use{c->c.moveToFirst() && com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.isSafeStorageKey(c.getString(0)) && File(files,"notes/assets/${c.getString(0)}").isFile}
             else->false
         }
     }

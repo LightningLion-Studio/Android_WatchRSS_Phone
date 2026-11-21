@@ -24,20 +24,22 @@ class ClosureReviewProbeTest {
 
     @Test
     fun switchAtWriterCommitBoundaryLeavesNoRegistrationOrStaging() {
-        var current = true
         var armed = false
         var switchInjected = false
-        SyncV2Lifetime { current }.use { lifetime ->
+        val generation = SyncV2Lifetime.Generation()
+        SyncV2Lifetime(generation) { true }.use { lifetime ->
             SyncV2P5Fixture(lifetime).use { w ->
                 w.pending()
-                asset(w, "legacy.png", "fixture attachment".toByteArray())
-                w.edit("![fixture](assets/legacy.png)")
+                val bytes = "fixture attachment".toByteArray()
+                asset(w, "legacy.png", bytes)
+                asset(w, "other.png", bytes)
+                w.edit("![fixture](assets/legacy.png)\n![other](assets/other.png)")
                 val projection = SyncV2Projection(w.sql, w.identity, SyncV2Fixtures.localKey, true,
                     fault = {
                         if (armed && it == "before-commit") {
                             armed = false
                             switchInjected = true
-                            current = false
+                            generation.invalidate()
                         }
                     }, lifetime = lifetime)
                 projection.install()
@@ -48,8 +50,8 @@ class ClosureReviewProbeTest {
                     assertTrue("writer commit fault must run: ${result.exceptionOrNull()}", switchInjected)
                     assertEquals("authentication_required", result.exceptionOrNull()?.message)
                     assertEquals(0, w.publishCalls)
-                    val counts = listOf("note_assets", "syncv2_p5_objects", "syncv2_p5_rows").map { count(w, it) }
-                    assertEquals("counts after invalidation at the commit boundary", listOf(0, 0, 0), counts)
+                    val counts = listOf("note_assets", SyncV2NoteAssetNames.aliases, "syncv2_p5_objects", "syncv2_p5_rows").map { count(w, it) }
+                    assertEquals("counts after invalidation at the commit boundary", listOf(0, 0, 0, 0), counts)
                 }
             }
         }
@@ -99,7 +101,8 @@ class ClosureReviewProbeTest {
         assertEquals(markdown, w.text())
         assertEquals(1, count(w, "note_assets"))
         val rows = w.projection.cloudRows()
-        assertEquals(1, rows.count { it.getJSONObject("meta").getString("kind") == "asset" })
+        assertEquals(setOf("first.png", "second.png"), rows.filter { it.getJSONObject("meta").getString("kind") == "asset" }
+            .map { it.getJSONObject("meta").getString("logicalId") }.toSet())
         val note = rows.single { it.getJSONObject("meta").getString("kind") == "note" }
         assertTrue(note.getJSONArray(SyncV2NoteWiring.SEGMENTS_KEY).length() > 0)
         for (name in listOf("first.png", "second.png")) {

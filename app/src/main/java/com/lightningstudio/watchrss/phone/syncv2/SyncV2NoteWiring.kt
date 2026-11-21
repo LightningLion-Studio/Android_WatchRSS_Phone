@@ -95,7 +95,7 @@ internal object SyncV2NoteWiring {
     fun seal(identity: SyncV2Identity, signer: SyncV2Signing, contentKey: ByteArray, keyVersion: Long,
         db: SupportSQLiteDatabase, scope: String, entityKey: String, ordinaryState: JSONObject,
         writeEnabled: Boolean, authors: SyncV2Authors?, remoteRevision: String?, remoteSegmentOids: List<String>,
-        remoteRefsMaps: JSONObject?, outboxOwned: Boolean, verifiedAssetAliasSizes: Map<String, Long> = emptyMap()): Sealed? {
+        remoteRefsMaps: JSONObject?, outboxOwned: Boolean): Sealed? {
         val payload = ordinaryState.getJSONObject("payload")
         val m = SyncV2NoteSegments.measure(entityKey, payload, ordinaryState.getJSONArray("requiredFeatures"))
         if (m.shortPlainBytes <= SyncV2NoteSegments.LIMIT) return null
@@ -151,8 +151,7 @@ internal object SyncV2NoteWiring {
         }
         // Persist the binding with the publish staging decision (25.3). A local delete records the
         // lifetime boundary {deleted, invalidated} so a rebuild can never reuse sealed segments (R2).
-        val reservation=SyncV2NoteBudget.reserve(db,scope,entityKey,m.shortPlainBytes,encoded.closureStoredBytesUpperBound,
-            payload,verifiedAssetAliasSizes)
+        val reservation=SyncV2NoteBudget.reserve(db,scope,entityKey,m.shortPlainBytes,encoded.closureStoredBytesUpperBound,payload)
         try {
         val removing = payload.optBoolean("deleted", false)
         putBinding(db, scope, entityKey, revision, removing, removing && priorExisted(db, scope, entityKey))

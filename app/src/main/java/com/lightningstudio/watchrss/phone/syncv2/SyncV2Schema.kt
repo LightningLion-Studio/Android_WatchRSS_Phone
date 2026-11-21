@@ -84,6 +84,7 @@ internal object SyncV2Schema {
             if(!hasColumn(db,"syncv2_scan","business_stamp"))db.execSQL("ALTER TABLE syncv2_scan ADD COLUMN business_stamp TEXT NOT NULL DEFAULT ''")
             beforeBusinessOpen(db)
             SyncV2BusinessWitness.install(db)
+            SyncV2NoteAssetNames.install(db)
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
     }

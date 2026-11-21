@@ -138,7 +138,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             }
         }
         if (owners.isEmpty()) return null
-        val revisions = db.controlQuery("SELECT sha256,byteCount,deleted FROM note_assets WHERE storageKey=?", arrayOf(id)).use { row ->
+        val revisions = db.controlQuery("SELECT sha256,byteCount,deleted FROM ${SyncV2NoteAssetNames.source} WHERE storageKey=?", arrayOf(id)).use { row ->
             var registered = false
             var live = false
             val found = buildSet {
@@ -230,31 +230,46 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     }
 
     private fun registerNoteAssetByDigest(id: String, sha256: String, byteCount: Int, now: Long): String {
-        db.controlQuery("SELECT storageKey FROM note_assets WHERE sha256=? AND deleted=0", arrayOf(sha256)).use {
-            if (it.moveToFirst()) return it.getString(0)
+        val existing = db.controlQuery("SELECT storageKey FROM note_assets WHERE sha256=? AND deleted=0", arrayOf(sha256)).use {
+            if (it.moveToFirst()) it.getString(0) else null
         }
+        if (existing == id) return id
         val mime=when(id.substringAfterLast('.',"").lowercase()){ "png"->"image/png";"jpg","jpeg"->"image/jpeg";"webp"->"image/webp";"md"->"text/markdown";else->"application/octet-stream" }
-        SyncV2PhoneApply(db).upsert("note_assets",listOf("assetId"),JSONObject().put("assetId",java.util.UUID.randomUUID().toString()).put("noteId","")
+        val value = JSONObject().put("noteId","")
             .put("storageKey",id).put("mimeType",mime).put("displayName",id).put("sha256",sha256).put("byteCount",byteCount)
-            .put("isOriginal",false).put("createdAt",now).put("deleted",false).put("deletedAt",0))
+            .put("isOriginal",false).put("createdAt",now).put("deleted",false).put("deletedAt",0)
+        if (existing != null) {
+            SyncV2NoteAssetNames.saveAlias(db, value)
+            return existing
+        }
+        SyncV2PhoneApply(db).upsert("note_assets",listOf("assetId"),value.put("assetId",java.util.UUID.randomUUID().toString()))
         return id
     }
 
     /** Discover referenced originals omitted by older private-UUID metadata. Absence never deletes. */
-    fun refreshReferences(now:Long,checkOwner:()->Unit):List<String> {
+    fun refreshReferences(now:Long,lifetime:SyncV2Lifetime?=null,checkOwner:()->Unit):List<String> {
         val errors=linkedSetOf<String>()
         for(id in references(db))try {
             checkOwner()
-            val exists=db.controlQuery("SELECT 1 FROM note_assets WHERE storageKey=?",arrayOf(id)).use{it.moveToFirst()}
-            if(exists)continue
-            val raw=read("asset",id)?:SyncV2Codec.fail("cloud_note_asset_missing")
+            if(SyncV2NoteAssetNames.exists(db,id))continue
+            val target = file("asset", id)
+            if (!target.isFile) SyncV2Codec.fail("cloud_note_asset_missing")
+            val asset = prepareNoteAssetRegistration(id)
             db.beginTransaction()
+            var ended = false
             try {
                 checkOwner()
-                if(!db.controlQuery("SELECT 1 FROM note_assets WHERE storageKey=?",arrayOf(id)).use{it.moveToFirst()})
-                    registerNoteAssetByDigest(id, SyncV2BodyCodec.hash(raw), raw.size, now)
-                db.setTransactionSuccessful()
-            }finally{db.endTransaction()}
+                if(!SyncV2NoteAssetNames.exists(db,id))registerNoteAsset(asset,now)
+                val commit = {
+                    db.setTransactionSuccessful()
+                    ended = true
+                    db.endTransaction()
+                }
+                if (lifetime == null) {
+                    checkOwner()
+                    commit()
+                } else lifetime.commit(commit)
+            } finally { if (!ended) db.endTransaction() }
         }catch(e:Exception){checkOwner();errors.add(SyncV2BodyChannel.code(e))}
         return errors.toList()
     }
@@ -299,7 +314,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             },
             privateBook = kind == "book"
         )
-        if(kind=="asset")db.execSQL("UPDATE note_assets SET sha256=?,byteCount=? WHERE storageKey=? AND (sha256 IS NOT ? OR byteCount IS NOT ?)",arrayOf<Any>(hash,raw.size,id,hash,raw.size))
+        if(kind=="asset")SyncV2NoteAssetNames.recordDownload(db,id,hash,raw.size)
         else {
             materializeBook(id,raw,bookState!!)
             db.execSQL("UPDATE imported_books SET packageSha256=?,packageBytes=? WHERE bookId=? AND (packageSha256 IS NOT ? OR packageBytes IS NOT ?)",arrayOf<Any>(hash,raw.size,id,hash,raw.size))

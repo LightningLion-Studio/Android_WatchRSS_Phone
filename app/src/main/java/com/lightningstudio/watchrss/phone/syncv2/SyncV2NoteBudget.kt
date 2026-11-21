@@ -26,8 +26,7 @@ internal object SyncV2NoteBudget {
             return Reservation(file)
         }catch(e:java.io.IOException){file.delete();SyncV2Codec.fail("storage_pressure")}
     }
-    fun reserve(db:SupportSQLiteDatabase,scope:String,entity:String,ordinaryBytes:Long,closureUpperBound:Long,payload:JSONObject,
-        verifiedAssetAliasSizes:Map<String,Long> = emptyMap()):Reservation {
+    fun reserve(db:SupportSQLiteDatabase,scope:String,entity:String,ordinaryBytes:Long,closureUpperBound:Long,payload:JSONObject):Reservation {
         val id=db.query("SELECT logical_id FROM syncv2_identity_map WHERE entity_key=? LIMIT 1",arrayOf(entity)).use{if(it.moveToFirst())it.getString(0)else null}
         // A fork keeps the original storageKey; attachment ownership is not the
         // reference graph. Charge every referenced key once, including ancestry
@@ -39,11 +38,10 @@ internal object SyncV2NoteBudget {
             for(i in 0 until records.length())for(field in listOf("baseMarkdown","localMarkdown","remoteMarkdown"))collect(records.getJSONObject(i).getString(field))
         }
         // Keep the existing conservative charge for owned attachment rows as well.
-        if(id!=null)db.query("SELECT storageKey FROM note_assets WHERE noteId=?",arrayOf(id)).use{c->while(c.moveToNext())keys.add(c.getString(0))}
+        if(id!=null)db.query("SELECT storageKey FROM ${SyncV2NoteAssetNames.source} WHERE noteId=?",arrayOf(id)).use{c->while(c.moveToNext())keys.add(c.getString(0))}
         var attachments=0L
         for(storageKey in keys) {
-            // A verified same-digest filename shares a row but still contributes its own file size.
-            val size=verifiedAssetAliasSizes[storageKey] ?: db.query("SELECT MAX(byteCount) FROM note_assets WHERE storageKey=?",arrayOf(storageKey)).use{c->
+            val size=db.query("SELECT MAX(byteCount) FROM ${SyncV2NoteAssetNames.source} WHERE storageKey=?",arrayOf(storageKey)).use{c->
                 if(!c.moveToFirst()||c.isNull(0))SyncV2Codec.fail("closure_incomplete")
                 c.getLong(0)
             }

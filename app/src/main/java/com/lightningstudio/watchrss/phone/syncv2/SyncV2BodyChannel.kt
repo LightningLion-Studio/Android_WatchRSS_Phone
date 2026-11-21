@@ -64,7 +64,10 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
     }
     private fun anchor(account:JSONObject)=JSONObject().put("commitOid",account.getString("oid")).put("revision",account.getString("revision")).put("rollbackGeneration",account.getString("generation"))
     private fun candidates():List<Pair<String,String>> = projection.accountDatabase.controlQuery("SELECT kind,logical_id FROM syncv2_candidates WHERE scope=? AND kind IN ('asset','book') ORDER BY entity_key",arrayOf(projection.scope)).use{c->buildList{while(c.moveToNext())add(c.getString(0) to c.getString(1))}}
-    fun refreshReferences():List<String> {projection.migrateBodyAssetCandidates();return repository.refreshReferences(now(),life::check)}
+    fun refreshReferences():List<String> {
+        projection.migrateBodyAssetCandidates()
+        return repository.refreshReferences(now(),life,life::check)
+    }
     /** Random old placeholders with originals must be republished even without metadata edits. */
     fun needsPublication():Boolean {
         for((kind,id)in candidates())try {

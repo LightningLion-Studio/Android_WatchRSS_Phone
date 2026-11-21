@@ -73,8 +73,11 @@ internal class CloudCallCancellation private constructor(
     }
 }
 
-internal suspend fun Call.executeBufferedCloudResponse(): Response = CloudCallCancellation.run { cancellation ->
+internal suspend fun Call.executeBufferedCloudResponse(
+    onHeaders: (Response) -> Unit = {}
+): Response = CloudCallCancellation.run { cancellation ->
     cancellation.execute(this) { response ->
+        onHeaders(response)
         val body = response.body?.let { it.bytes().toResponseBody(it.contentType()) }
         response.newBuilder().body(body).build()
     }

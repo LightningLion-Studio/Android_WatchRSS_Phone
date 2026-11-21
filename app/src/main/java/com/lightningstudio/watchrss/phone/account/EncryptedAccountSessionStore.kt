@@ -85,7 +85,7 @@ class EncryptedAccountSessionStore(
         authenticated: Boolean
     ): PurchaseSession? = synchronized(sessionLock) {
         val current = _session.value
-        if (logoutsInProgress > 0 || !current.hasSamePurchaseCredentials(expected) ||
+        if (logoutsInProgress > 0 || !current.hasSameSessionCredentials(expected) ||
             current.isUsableForPurchase() != authenticated
         ) return@synchronized null
         PurchaseSession(current, purchaseGeneration.value, authenticated)
@@ -95,7 +95,7 @@ class EncryptedAccountSessionStore(
         synchronized(sessionLock) {
             val current = _session.value
             if (logoutsInProgress > 0 || purchaseGeneration.value != snapshot.generation ||
-                !current.hasSamePurchaseCredentials(snapshot.session) ||
+                !current.hasSameSessionCredentials(snapshot.session) ||
                 current.isUsableForPurchase() != snapshot.authenticated
             ) return@synchronized null
             action()
@@ -110,7 +110,7 @@ class EncryptedAccountSessionStore(
         reauthenticationOwner: String? = _reauthenticationOwner.value
     ) = synchronized(sessionLock) {
         val previous = _session.value
-        val changed = !previous.hasSamePurchaseCredentials(next) || previous?.expiresAtMillis != next?.expiresAtMillis ||
+        val changed = !previous.hasSameSessionCredentials(next) || previous?.expiresAtMillis != next?.expiresAtMillis ||
             previous?.authenticationPaused != next?.authenticationPaused
         if (changed) {
             b2AccountFence.revoke()
@@ -120,9 +120,6 @@ class EncryptedAccountSessionStore(
         if (changed) b2AccountFence = B2AccountFence()
         _reauthenticationOwner.value = reauthenticationOwner
     }
-
-    private fun PhoneAccountSession?.hasSamePurchaseCredentials(other: PhoneAccountSession?) =
-        this?.userId == other?.userId && this?.accessToken == other?.accessToken
 
     private fun PhoneAccountSession?.isUsableForPurchase() =
         this != null && isUsableForAuthentication && userId.isNotBlank() && accessToken.isNotBlank()

@@ -33,13 +33,15 @@ class PhoneAccountRepository(
 
     private suspend fun <T> retireCloudSession(owner: PhoneAccountSession?, change: suspend () -> T): T {
         if (owner == null) return change()
-        return withPurchasesBlockedForLogout {
-            synchronized(cloudSessionLock) { departingCloudOwner = owner.userId }
-            try {
-                change()
-            } finally {
-                synchronized(cloudSessionLock) { departingCloudOwner = null }
-            }
+        return withPurchasesBlockedForLogout { withDepartingCloudOwner(owner, change) }
+    }
+
+    private suspend fun <T> withDepartingCloudOwner(owner: PhoneAccountSession?, change: suspend () -> T): T {
+        synchronized(cloudSessionLock) { departingCloudOwner = owner?.userId }
+        return try {
+            change()
+        } finally {
+            synchronized(cloudSessionLock) { departingCloudOwner = null }
         }
     }
 
@@ -262,12 +264,21 @@ class PhoneAccountRepository(
         }
     }
 
-    suspend fun logout() = withPurchasesBlockedForLogout {
-        sessionChanges.withLock {
-            val current = session.value
-            retireCloudSession(current) {
-                logoutSession(current)
-            }
+    suspend fun logout() = withPurchasesBlockedForLogout { expected ->
+        logoutWithSessionCheck(expected) {}
+    }
+
+    /** The caller holds the purchase block from logout entry through this operation. */
+    internal suspend fun <T> logoutWithSessionCheck(
+        expected: PhoneAccountSession?,
+        beforeLogout: suspend () -> T
+    ): T = sessionChanges.withLock {
+        val current = session.value
+        check(current.hasSameSessionCredentials(expected)) { "账号已变更，请重试" }
+        withDepartingCloudOwner(current) {
+            val result = beforeLogout()
+            logoutSession(current)
+            result
         }
     }
 

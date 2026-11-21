@@ -16,6 +16,9 @@ data class PhoneAccountSession(
         get() = expiresAtMillis > 0L && expiresAtMillis <= System.currentTimeMillis()
 }
 
+internal fun PhoneAccountSession?.hasSameSessionCredentials(other: PhoneAccountSession?) =
+    this?.userId == other?.userId && this?.accessToken == other?.accessToken
+
 data class WatchEntitlementSnapshot(
     val plan: String = "free",
     val active: Boolean = true,

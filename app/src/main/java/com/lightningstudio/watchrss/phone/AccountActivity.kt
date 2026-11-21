@@ -1081,9 +1081,10 @@ internal fun AccountScreen(
             ) { Text("扫码绑定手表") }
             OutlinedButton(
                 onClick = {
+                    val expected = session
                     runAction {
                         busy = true
-                        runCatching { accessCoordinator.logout() }
+                        runCatching { accessCoordinator.logout(expected) }
                             .onSuccess { released ->
                                 message = if (released) "已退出登录并释放名额" else "已在本机退出；名额将在联网后释放"
                             }

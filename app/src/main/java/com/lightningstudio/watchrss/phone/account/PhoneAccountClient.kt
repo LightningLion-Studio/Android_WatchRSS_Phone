@@ -466,30 +466,43 @@ class PhoneAccountClient(
         return execute(request)
     }
 
-    private fun execute(request: Request): okhttp3.Response = execute(request, Call::execute)
-
-    private suspend fun executeWithCloudDeadline(request: Request): okhttp3.Response {
-        val deadline = currentCoroutineContext()[CloudHttpDeadline]
-        return execute(request) { call ->
-            if (deadline != null) call.executeBufferedCloudResponse() else call.execute()
+    private fun execute(request: Request): okhttp3.Response = execute(request) { call, onHeaders ->
+        val response = call.execute()
+        try {
+            onHeaders(response)
+            response
+        } catch (error: Throwable) {
+            response.close()
+            throw error
         }
     }
 
-    private inline fun execute(request: Request, send: (Call) -> okhttp3.Response): okhttp3.Response {
+    private suspend fun executeWithCloudDeadline(request: Request): okhttp3.Response {
+        if (currentCoroutineContext()[CloudHttpDeadline] == null) return execute(request)
+        return execute(request) { call, onHeaders -> call.executeBufferedCloudResponse(onHeaders) }
+    }
+
+    private inline fun execute(
+        request: Request,
+        send: (Call, (okhttp3.Response) -> Unit) -> okhttp3.Response
+    ): okhttp3.Response {
         val owner = request.header("authorization")?.removePrefix("Bearer ")?.let(authenticatedOwner)
         val versionedRequest = request.newBuilder()
             .withWatchRssAppVersionHeader()
             .build()
         return try {
-            val response = send(httpClient.newCall(versionedRequest)).withAccountResponseStatus()
-            try {
-                if (owner != null && response.code in setOf(401, 403)) {
-                    onAuthenticatedFailure(owner, PhoneAccountHttpException(response.code, ""))
+            val response = send(httpClient.newCall(versionedRequest)) { headers ->
+                if (owner != null && headers.code in setOf(401, 403)) {
+                    onAuthenticatedFailure(owner, PhoneAccountHttpException(headers.code, ""))
                 }
+            }.withAccountResponseStatus()
+            try {
                 checkResponse(response)
-            } catch (error: Throwable) { response.close(); throw error }
-        }
-        catch (error: Throwable) {
+            } catch (error: Throwable) {
+                response.close()
+                throw error
+            }
+        } catch (error: Throwable) {
             if (owner != null) onAuthenticatedFailure(owner, error)
             throw error
         }

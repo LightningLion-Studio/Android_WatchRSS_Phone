@@ -2,9 +2,12 @@ package com.lightningstudio.watchrss.phone.account
 
 import android.app.Application
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.activity.ComponentActivity
 import androidx.test.core.app.ApplicationProvider
 import com.lightningstudio.watchrss.phone.WeChatPurchaseResult
+import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
+import com.lightningstudio.watchrss.phone.network.CloudHttpDeadline
 import com.lightningstudio.watchrss.phone.openPurchaseInWeChat
 import com.lightningstudio.watchrss.phone.purchaseTestAppAccessStore
 import kotlinx.coroutines.CompletableDeferred
@@ -37,6 +40,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -46,6 +50,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.util.ReflectionHelpers
+import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -146,9 +151,11 @@ class WeChatHandoffHttpTest {
         ReflectionHelpers.setField(it, "prefsRef", context.getSharedPreferences("handoff-session", Context.MODE_PRIVATE))
     }
 
-    private fun repository(server: MockWebServer, store: EncryptedAccountSessionStore) = PhoneAccountRepository(
-        environment(server), store, PhoneInstallationIdentity(context), client(server), "phone"
-    )
+    private fun repository(
+        server: MockWebServer,
+        store: EncryptedAccountSessionStore,
+        http: OkHttpClient = OkHttpClient()
+    ) = PhoneAccountRepository(environment(server), store, PhoneInstallationIdentity(context), client(server, http), "phone")
 
     @Test
     fun missingOrMismatchedSessionDoesNotIssue() = runBlocking {
@@ -241,6 +248,138 @@ class WeChatHandoffHttpTest {
     }
 
     @Test
+    fun logoutWaitingForLoginPreservesTheNewAccount() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(204))
+            val store = sessionStore()
+            store.save(session)
+            val repository = repository(server, store)
+            val next = session.copy(userId = "next-owner", accessToken = "next-bearer")
+            val keys = CloudKeyManager(context, "", context.getSharedPreferences("handoff-cloud", Context.MODE_PRIVATE))
+            val root = ByteArray(32) { it.toByte() }
+            keys.saveAccountKey(next.userId, 1, root, true)
+            repository.onClearCloudState = { keys.clearAccountKeys(it.userId) }
+            val releasedOwners = mutableListOf<String>()
+            repository.onReleaseCloudAuthorization = { releasedOwners += it.userId }
+
+            val loginWriting = CompletableDeferred<Unit>()
+            val allowLoginWrite = CountDownLatch(1)
+            val loginPublished = CompletableDeferred<Unit>()
+            val allowLoginFinish = CountDownLatch(1)
+            val prefs = context.getSharedPreferences("handoff-session", Context.MODE_PRIVATE)
+            ReflectionHelpers.setField(store, "prefsRef", object : SharedPreferences by prefs {
+                override fun edit(): SharedPreferences.Editor {
+                    val editor = prefs.edit()
+                    return object : SharedPreferences.Editor by editor {
+                        override fun remove(key: String?): SharedPreferences.Editor = apply { editor.remove(key) }
+
+                        override fun commit(): Boolean {
+                            if (repository.session.value == session && !loginWriting.isCompleted) {
+                                loginWriting.complete(Unit)
+                                check(allowLoginWrite.await(5, TimeUnit.SECONDS))
+                            } else if (repository.session.value == next && !loginPublished.isCompleted) {
+                                loginPublished.complete(Unit)
+                                check(allowLoginFinish.await(5, TimeUnit.SECONDS))
+                            }
+                            return editor.commit()
+                        }
+                    }
+                }
+            })
+
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val accessStore = purchaseTestAppAccessStore(context)
+            val coordinator = AppAccessCoordinator(context, repository, LicenseDeviceIdentity(context), scope, accessStore)
+            try {
+                val login = async(start = CoroutineStart.UNDISPATCHED) {
+                    repository.saveCompletedLogin(LoginProgress("login", 1, listOf("sms"), true, next))
+                }
+                try {
+                    withTimeout(5_000) { loginWriting.await() }
+                    val logout = async(start = CoroutineStart.UNDISPATCHED) { runCatching { coordinator.logout() } }
+                    assertFalse(logout.isCompleted)
+                    allowLoginWrite.countDown()
+                    withTimeout(5_000) { loginPublished.await() }
+                    val nextFence = repository.b2AccountFence
+                    val nextAuthorization = AppAuthorization("next-device", Long.MAX_VALUE, "next-lease",
+                        Long.MAX_VALUE, "next-release", AppAccessSummary(deviceStatus = "authorized"))
+                    val pendingOrder = AppPaymentOrder(orderId = "next-order", merchantOrderId = "next-merchant",
+                        amountFen = 100, status = "pending", paymentUrl = null)
+                    accessStore.save(nextAuthorization)
+                    accessStore.savePendingOrder(pendingOrder, next.userId)
+                    allowLoginFinish.countDown()
+                    login.await()
+                    val result = logout.await()
+
+                    assertEquals(next, repository.session.value)
+                    assertTrue(repository.hasUsableSession)
+                    nextFence.check()
+                    assertTrue(keys.getAccountKey(next.userId, 1)?.contentEquals(root) == true)
+                    assertEquals(nextAuthorization, accessStore.load())
+                    assertEquals(pendingOrder, accessStore.loadPendingOrder(next.userId))
+                    assertTrue(releasedOwners.isEmpty())
+                    assertEquals(0, server.requestCount)
+                    assertNull(store.pendingRevocation())
+                    assertEquals("账号已变更，请重试", result.exceptionOrNull()?.message)
+                } finally {
+                    allowLoginWrite.countDown()
+                    allowLoginFinish.countDown()
+                }
+            } finally {
+                scope.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun stalled401BodyClearsOfflineAuthorization() = verifyTruncatedRejection(
+        401, MockResponse().setBodyDelay(4, TimeUnit.SECONDS)
+    )
+
+    @Test
+    fun disconnected403BodyClearsOfflineAuthorization() = verifyTruncatedRejection(
+        403, MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY)
+    )
+
+    private fun verifyTruncatedRejection(status: Int, response: MockResponse) = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(response.setResponseCode(status).setBody("x".repeat(1024)))
+            val store = sessionStore()
+            store.save(session)
+            lateinit var repository: PhoneAccountRepository
+            var blockedWhenBodyFailed: Boolean? = null
+            val http = OkHttpClient.Builder().eventListener(object : EventListener() {
+                override fun responseFailed(call: Call, ioe: IOException) {
+                    blockedWhenBodyFailed = repository.offlineAuthorizationBlocked(session.userId)
+                }
+            }).build()
+            repository = repository(server, store, http)
+            val grant = JSONObject().put("account", JSONObject()
+                .put("userId", session.userId)
+                .put("backendBaseUrl", environment(server).backendBaseUrl))
+            store.saveBluetoothGrant("watch", grant)
+            val originalFence = repository.b2AccountFence
+            assertFalse(repository.offlineAuthorizationBlocked(session.userId))
+            var revocations = 0
+            originalFence.onRevoke { revocations++ }.use {
+                val start = System.nanoTime()
+                val failure = runCatching {
+                    withContext(CloudHttpDeadline.after(1_500)) { repository.appAccessStatus() }
+                }.exceptionOrNull()
+                val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)
+                assertTrue("failed body read: $failure", failure is IOException)
+                assertTrue("body read took ${elapsedMillis}ms", elapsedMillis < 3_000)
+                assertEquals(1, server.requestCount)
+                assertEquals("offline authorization at body failure", true, blockedWhenBodyFailed)
+                assertTrue(repository.offlineAuthorizationBlocked(session.userId))
+                assertNull(store.bluetoothGrant("watch"))
+                assertEquals(1, revocations)
+                assertNotSame(originalFence, repository.b2AccountFence)
+            }
+        }
+    }
+
+    @Test
     fun logoutEntryInvalidatesThePurchaseBeforeWaitingForTheAccessCoordinator() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(204))
@@ -267,6 +406,9 @@ class WeChatHandoffHttpTest {
                 scope.cancel()
             }
             assertNull(store.session.value)
+            val loggedOutPurchase = requireNotNull(repository.captureWeChatPurchaseSession(null, authenticated = false))
+            // One advance for logout entry and one for publishing the cleared session.
+            assertEquals(purchase.generation + 2, loggedOutPurchase.generation)
         }
     }
 

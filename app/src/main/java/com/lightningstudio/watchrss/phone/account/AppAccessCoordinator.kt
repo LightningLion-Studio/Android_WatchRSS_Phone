@@ -343,22 +343,27 @@ class AppAccessCoordinator(
         }
     } catch (error: Throwable) { accountSyncFailureResult(error) }
 
-    suspend fun logout(): Boolean = accountRepository.withPurchasesBlockedForLogout {
-        operationMutex.withLock {
-            val current = store.load()
-            val released = if (current != null) runCatching { accountRepository.releaseAppAccess(current) }.getOrDefault(false) else true
-            if (!released && current != null) {
-                store.queueRelease(identity.deviceId, current.releaseGrant)
-                PendingReleaseWorker.schedule(context)
+    suspend fun logout(expected: PhoneAccountSession? = accountRepository.session.value): Boolean =
+        accountRepository.withPurchasesBlockedForLogout {
+            operationMutex.withLock {
+                val released = accountRepository.logoutWithSessionCheck(expected) {
+                    val current = store.load()
+                    val released = if (current != null) {
+                        runCatching { accountRepository.releaseAppAccess(current) }.getOrDefault(false)
+                    } else true
+                    if (!released && current != null) {
+                        store.queueRelease(identity.deviceId, current.releaseGrant)
+                        PendingReleaseWorker.schedule(context)
+                    }
+                    store.clear()
+                    store.clearPendingOrder()
+                    store.clearOrderIdempotencyKey()
+                    released
+                }
+                _state.value = AppAccessState.LoggedOut
+                released
             }
-            store.clear()
-            store.clearPendingOrder()
-            store.clearOrderIdempotencyKey()
-            accountRepository.logout()
-            _state.value = AppAccessState.LoggedOut
-            released
         }
-    }
 
     suspend fun deleteAccount(verificationToken: String): AccountDeletionResult =
         operationMutex.withLock {

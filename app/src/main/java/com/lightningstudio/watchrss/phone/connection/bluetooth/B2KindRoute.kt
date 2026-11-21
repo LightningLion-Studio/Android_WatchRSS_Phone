@@ -22,6 +22,16 @@ internal data class B2KindRoute(val send: Set<String>, val receive: Set<String>)
 
     fun assetsOnly() = B2KindRoute(send.intersect(asset), receive.intersect(asset))
 
+    fun contains(other: B2KindRoute) = send.containsAll(other.send) && receive.containsAll(other.receive)
+
+    operator fun plus(other: B2KindRoute) = B2KindRoute(send + other.send, receive + other.receive)
+
+    fun plans(): List<B2KindRoute> = when {
+        isEmpty -> emptyList()
+        send.size <= MAX_SELECTION_KINDS && receive.size <= MAX_SELECTION_KINDS -> listOf(this)
+        else -> listOf(withoutLibrary(), B2KindRoute(send.intersect(library), receive.intersect(library)))
+    }
+
     companion object {
         // The S4 watch accepts up to six kinds in each prepare selection.
         private const val MAX_SELECTION_KINDS = 6
@@ -29,8 +39,10 @@ internal data class B2KindRoute(val send: Set<String>, val receive: Set<String>)
         private val asset = setOf(B2_NOTE_ASSET)
         val legacy = B2KindRoute(emptySet(), emptySet())
 
-        fun select(probe: JSONObject, includeNoteAssets: Boolean, libraryReady: Boolean, booksReady: Boolean = false): B2KindRoute {
-            if (B2Routing.classify(probe, B2Routing.Ready(true, true, true)) != B2Routing.Peer.B2) return legacy
+        fun select(probe: JSONObject, includeNoteAssets: Boolean, libraryReady: Boolean, booksReady: Boolean = false,
+            guarded: Boolean = false): B2KindRoute {
+            if (B2Routing.classify(probe, B2Routing.Ready(true, true, true), guardedOffered = guarded) != B2Routing.Peer.B2 ||
+                guarded && !probe.has(B2Routing.GUARDED_SELECTION)) return legacy
             val available = (if (libraryReady) library else emptySet()) +
                 (if (includeNoteAssets) asset else emptySet()) + (if (booksReady) B2Wire.bookKinds else emptySet())
             if (available.isEmpty()) return legacy
@@ -43,7 +55,9 @@ internal data class B2KindRoute(val send: Set<String>, val receive: Set<String>)
             fun wholeArticle(selection: Set<String>): Set<String> =
                 if (B2_ARTICLE_BODY in selection) selection else selection - B2_ARTICLE_METADATA
             val outgoing = wholeArticle(selected("phoneToWatch"))
-            val incoming = wholeArticle(selected("watchToPhone"))
+            val incoming = wholeArticle(selected("watchToPhone")).let {
+                if (guarded) it - setOf(B2_ARTICLE_BODY, B2_ARTICLE_METADATA) else it
+            }
             val books = outgoing.containsAll(B2Wire.bookKinds) && incoming.containsAll(B2Wire.bookKinds)
             val send = if (books) outgoing else outgoing - B2Wire.bookKinds
             val receive = if (books) incoming else incoming - B2Wire.bookKinds
@@ -53,7 +67,7 @@ internal data class B2KindRoute(val send: Set<String>, val receive: Set<String>)
                 else receive - B2_RSS_SOURCE)
             // Keep the four book kinds together. Route articles and RSS over the
             // complete legacy library exchange if the combined selection will not fit.
-            return if (route.send.size > MAX_SELECTION_KINDS || route.receive.size > MAX_SELECTION_KINDS) {
+            return if (!guarded && (route.send.size > MAX_SELECTION_KINDS || route.receive.size > MAX_SELECTION_KINDS)) {
                 route.withoutLibrary()
             } else route
         }

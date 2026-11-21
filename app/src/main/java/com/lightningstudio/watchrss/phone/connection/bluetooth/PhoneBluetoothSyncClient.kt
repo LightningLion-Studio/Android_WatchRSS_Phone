@@ -17,6 +17,7 @@ import androidx.core.content.ContextCompat
 import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSession
 import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSessionRegistry
 import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Routing
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -421,8 +422,9 @@ internal class PhoneSyncSession internal constructor(
 }
 
 internal fun b2Probe(request: JSONObject): JSONObject =
-    com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Routing.probe(
-        request, com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED
+    B2Routing.probe(
+        request, com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED &&
+            !com.lightningstudio.watchrss.phone.BuildConfig.SYNC_V2
     )
 
 class PhoneBluetoothSyncClient(
@@ -878,16 +880,18 @@ class PhoneBluetoothSyncClient(
             connectionMutex.withLock {
                 val transport=session.transport ?: error("持久同步连接已关闭")
                 writeFrameLogged(transport.outputStream,sessionId,"sessionRequest",session.requestForExchange(request))
-                val response=readFrameLogged(transport.inputStream,sessionId,"sessionResponse")
-                val acked=try {
+                val decoder = if (request.has(B2Routing.GUARDED_OFFER)) B2Routing::decodeGuardedReply else null
+                val response=try {
+                    val response=readFrameLogged(transport.inputStream,sessionId,"sessionResponse", decode = decoder)
                     validateAndWriteAppliedAck(response,validate) {
                         writeResponseAck(transport.outputStream,sessionId,success=true,applied=true)
                     }
+                    response
                 } catch(failure:Throwable) {
                     session.close()
                     throw failure
                 }
-                BluetoothSyncExchange(session.device.name,session.device.address,request,response,appliedAckWritten=acked)
+                BluetoothSyncExchange(session.device.name,session.device.address,request,response,appliedAckWritten=true)
             }
         }
     }
@@ -2188,6 +2192,7 @@ class PhoneBluetoothSyncClient(
             }
             writeFrameLogged(socket, sessionId, "probeRequest", request)
             val response = readFrameLogged(socket, sessionId, "probeResponse")
+            B2Routing.checkDiscovery(response)
             writeResponseAck(socket, sessionId, success = true, applied = true)
             val connectedSocket = checkNotNull(socket)
             if (!response.optBoolean("success", false)) {
@@ -2995,18 +3000,22 @@ class PhoneBluetoothSyncClient(
         sessionId: String,
         label: String,
         byteTracker: ByteTransferTracker? = null,
-        onBytesTransferred: ((Long) -> Unit)? = null
+        onBytesTransferred: ((Long) -> Unit)? = null,
+        decode: ((ByteArray) -> JSONObject)? = null
     ): JSONObject {
         val startedAt = SystemClock.elapsedRealtime()
         debugLog.appendEvent("bt.frame.read.start", sessionId, mapOf("label" to label))
         var wireBytes=0L
         return try {
-            BluetoothSyncProtocol.readFrame(inputStream) { bytes ->
+            val onRead: (Long) -> Unit = { bytes ->
                 wireBytes+=bytes
                 diagnosticBytes(bytes)
                 byteTracker?.add(bytes)
                 onBytesTransferred?.invoke(bytes)
-            }.also { payload ->
+            }
+            val decoded = if (decode == null) BluetoothSyncProtocol.readFrame(inputStream, onRead)
+                else BluetoothSyncProtocol.readFrameDecoded(inputStream, onRead, decode)
+            decoded.also { payload ->
                 diagnosticResponse(payload)
                 debugLog.appendEvent(
                     event = "bt.frame.read.success",

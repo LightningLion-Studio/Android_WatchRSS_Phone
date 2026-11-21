@@ -247,9 +247,33 @@ class PhoneBluetoothSyncManager(
         val result=if(probe!=null)BluetoothSyncExchange(session.device.name,session.device.address,LibrarySyncPayload.buildProbeRequest(deviceId),probe)
             else exchange(b2Probe(LibrarySyncPayload.buildProbeRequest(deviceId)),sessionId="$sessionId-binding",deviceAddress=address,syncSession=session)
         requireSuccess(result.response)
+        B2Routing.checkDiscovery(result.response)
         check(currentPhoneUserId()?.takeIf { it.isNotBlank() }==owner) { "手机账号已变化，请重新同步" }
         if(owner!=null && !(allowUnboundClear && result.response.optJSONObject("account")?.opt("bound")==false))requireWatchSyncBinding(result.response,owner)
         return BleSyncBindingSnapshot(result.deviceAddress.ifBlank { address.orEmpty() },owner,session,result.response)
+    }
+
+    internal suspend fun guardedLibraryProbe(binding: BleSyncBindingSnapshot, sessionId: String): JSONObject? {
+        val session = binding.session ?: return null
+        val transport = session.transport ?: return null
+        val peer = session.device.remoteDeviceId
+        if (!session.isPersistent || session.legacyFallback || transport.owner.startsWith("ip:")) return null
+        if (peer.isBlank() || binding.response.opt("deviceId") != peer) throw B2Exception("CAPABILITY_MISMATCH")
+        val discovered = B2Routing.classify(binding.response, B2Routing.Ready(true, true, true))
+        if (discovered == B2Routing.Peer.COMPOSE_V14) return null
+        val request = B2Routing.guardedProbe(LibrarySyncPayload.buildProbeRequest(deviceId))
+        return withTimeout(QUICK_EXCHANGE_TIMEOUT_MS) {
+            withContext(Dispatchers.IO) {
+                session.exchangeApplied(request, "$sessionId-guarded-probe") { reply ->
+                    val implementation = B2Routing.classify(reply, B2Routing.Ready(true, true, true), guardedOffered = true)
+                    if (implementation == B2Routing.Peer.COMPOSE_V14 || reply.opt("deviceId") != peer ||
+                        session.transport !== transport) throw B2Exception("CAPABILITY_MISMATCH")
+                    val owner = binding.owner ?: throw B2Exception("ACCOUNT_REQUIRED")
+                    if (currentPhoneUserId() != owner) throw B2Exception("AUTH_REVOKED")
+                    requireWatchSyncBinding(reply, owner)
+                }.response
+            }
+        }
     }
 
     internal suspend fun probeLibrarySyncTargets(
@@ -393,7 +417,8 @@ class PhoneBluetoothSyncManager(
         device: PhoneBluetoothWatchDevice,
         reusableSession: PhoneSyncSession? = null,
         finishSession: Boolean = true,
-        binding: BleSyncBindingSnapshot? = null
+        binding: BleSyncBindingSnapshot? = null,
+        allowDomainSummary: Boolean = true
     ): PhoneBluetoothSyncResult {
         val sessionId = BluetoothDebugLog.newSessionId("syncAccount")
         var syncSession = reusableSession ?: client.openPersistentSession(
@@ -419,7 +444,7 @@ class PhoneBluetoothSyncManager(
         )
         val result = runCatching {
             val activeBinding = bindingSnapshot(sessionId,effectiveDevice.address,syncSession,binding)
-            prepareAccountGrant(watchDeviceId, activeBinding.response, syncSession?.isPersistent == true) { request ->
+            prepareAccountGrant(watchDeviceId, activeBinding.response, allowDomainSummary && syncSession?.isPersistent == true) { request ->
                 exchange(request, deviceAddress = effectiveDevice.address,
                     sessionId = "$sessionId-account-state", syncSession = syncSession).response
             }
@@ -553,7 +578,17 @@ class PhoneBluetoothSyncManager(
         var booksApplied = 0
         var bookSyncIssues:List<BookSyncIssue> = emptyList()
         val binaryMerge = BuildConfig.B2_ENABLED && mode == LibrarySyncMode.MERGE
+        val guardedBinary = binaryMerge && BuildConfig.SYNC_V2
+        val guardedScope = if (guardedBinary) currentBinaryScope() else null
+        val binaryAssetsReady = binaryMerge && b2Database() != null &&
+            (!guardedBinary || guardedScope != null && b2AccountScope().isNotBlank())
+        val binaryLibraryReady = binaryAssetsReady && repository.binaryArticleStorageReady()
+        val binaryBooksReady = binaryAssetsReady && repository.books?.binaryReady() == true
+        var binaryProbe: JSONObject? = null
+        var binaryRouteChosen = false
         var binaryRoute = B2KindRoute.legacy
+        fun selectBinary(probe: JSONObject) = B2KindRoute.select(probe, includeNoteAssets = binaryAssetsReady,
+            libraryReady = binaryLibraryReady, booksReady = binaryBooksReady, guarded = guardedBinary)
         val binaryRecovery = if (binaryMerge) LibraryTransferRecovery(SystemClock::elapsedRealtime, reconnectDelay) {
             onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.RECONNECTING, 0, reconnectAttempt = it))
         } else null
@@ -566,7 +601,8 @@ class PhoneBluetoothSyncManager(
             check(currentPhoneUserId() == owner) { "手机账号已变化，请重新同步" }
             val open = reconnectSession
             val replacement = (if (open != null) open(targetDevice, "$sessionId-open")
-                else client.openPersistentSession(targetDevice, deviceId, "$sessionId-open", allowIpUpgrade = !bluetoothOnlyRecovery))
+                else client.openPersistentSession(targetDevice, deviceId, "$sessionId-open",
+                    allowIpUpgrade = !bluetoothOnlyRecovery && !(guardedBinary && binaryAssetsReady)))
                 ?: throw IOException("未找到可重新连接的原手表")
             if (expectedPeerId.isNotBlank() && replacement.device.remoteDeviceId != expectedPeerId) {
                 replacement.close()
@@ -580,6 +616,7 @@ class PhoneBluetoothSyncManager(
             effectiveDevice = replacement.device
             accountGate.invalidate()
             sharedBinding = null
+            binaryProbe = null
             libraryDeclarations = null
             fastPath=null;rootWindow=null;fastPeer=null;fastScope=null;completedDomains.clear()
             opened = true
@@ -587,8 +624,14 @@ class PhoneBluetoothSyncManager(
         suspend fun binding(): BleSyncBindingSnapshot {
             check(currentPhoneUserId()==owner){"手机账号已变化，请重新同步"}
             return sharedBinding ?: bindingSnapshot(sessionId, effectiveDevice.address, syncSession).also { active ->
-                if (!binaryRoute.isEmpty && B2KindRoute.select(active.response,
-                        binaryRoute.hasBinaryAssets, binaryRoute.hasBinaryLibrary, binaryRoute.hasBinaryBooks) != binaryRoute) {
+                binaryProbe = when {
+                    !guardedBinary -> active.response
+                    binaryAssetsReady && (!binaryRouteChosen || binaryRoute.hasBinaryLibrary) ->
+                        guardedLibraryProbe(active, sessionId)
+                    else -> null
+                }
+                if ((!guardedBinary && !binaryRoute.isEmpty || guardedBinary && binaryRoute.hasBinaryLibrary) &&
+                    binaryProbe?.let { selectBinary(it).contains(binaryRoute) } != true) {
                     throw B2Exception("CAPABILITY_MISMATCH")
                 }
                 sharedBinding = active
@@ -650,26 +693,34 @@ class PhoneBluetoothSyncManager(
             requirePhoneLogin()
             if (!opened) recovery.search(confirmAccount = false)
             recovery.run {
-                syncSession = syncSession?.let { client.promoteLateIpSession(it, "$sessionId-ip-upgrade") }
+                if (guardedBinary && binaryAssetsReady && syncSession?.transport?.owner?.startsWith("ip:") == true) {
+                    connect()
+                } else if (!guardedBinary || !binaryAssetsReady) {
+                    syncSession = syncSession?.let { client.promoteLateIpSession(it, "$sessionId-ip-upgrade") }
+                }
                 observeDiagnostics(syncSession)
                 effectiveDevice = syncSession?.device ?: device
                 syncSession?.recoveryGate?.tryAcquire()
                 binding()
             }
-            val binaryRuntime = if (binaryRecovery != null) {
+            val binaryRuntimes = if (binaryRecovery != null && binaryAssetsReady) {
                 val active = accountRecovery { binding() }
-                val route = B2KindRoute.select(active.response, includeNoteAssets = true,
-                    libraryReady = b2Database() != null && repository.binaryArticleStorageReady(),
-                    booksReady = b2Database() != null && repository.books?.binaryReady() == true)
+                binaryRouteChosen = true
+                val probe = binaryProbe ?: active.response
+                val route = selectBinary(probe)
                 if (!route.isEmpty && (effectiveDevice.remoteDeviceId.isBlank() ||
                         active.response.optString("deviceId") != effectiveDevice.remoteDeviceId)) {
                     throw B2Exception("CAPABILITY_MISMATCH")
                 }
-                val (selected, runtime) = prepareBinaryRoute(route, active.response, effectiveDevice,
-                    binaryRecovery::confirmedProgress)
-                binaryRoute = selected
-                runtime
-            } else null
+                if (!route.isEmpty && guardedBinary && currentBinaryScope() != guardedScope) {
+                    throw B2Exception("AUTH_REVOKED")
+                }
+                route.plans().mapNotNull { plan ->
+                    val (selected, runtime) = prepareBinaryRoute(plan, probe, effectiveDevice,
+                        binaryRecovery::confirmedProgress)
+                    if (runtime == null) null else (selected to runtime).also { binaryRoute += selected }
+                }
+            } else emptyList()
             accountRecovery {
             val active=binding()
             if(binaryRoute.isEmpty && repository.bleDomains!=null && DomainFastPath.enabled(active.capabilities,syncSession?.isPersistent==true,forceFull,mode)) {
@@ -799,14 +850,15 @@ class PhoneBluetoothSyncManager(
                     } else syncSession?.complete("$sessionId-complete")
                 }
             }
-            binaryRuntime?.let { runtime ->
-                val stage = if (binaryRoute.hasBinaryLibrary) PhoneBluetoothSyncStage.TRANSFERRING
-                    else if (binaryRoute.hasBinaryBooks) PhoneBluetoothSyncStage.SYNCING_BOOKS
+            for ((plan, runtime) in binaryRuntimes) {
+                val stage = if (plan.hasBinaryLibrary) PhoneBluetoothSyncStage.TRANSFERRING
+                    else if (plan.hasBinaryBooks) PhoneBluetoothSyncStage.SYNCING_BOOKS
                     else PhoneBluetoothSyncStage.SYNCING_NOTES
                 reportProgress(onProgress, stage, 0)
                 syncSession?.close()
                 syncSession = null
-                val binaryStats = syncBinaryKinds(effectiveDevice, "$sessionId-b2", requireNotNull(binaryRecovery), binaryRoute, runtime)
+                val binaryStats = syncBinaryKinds(effectiveDevice, "$sessionId-b2", requireNotNull(binaryRecovery), plan,
+                    runtime, guardedScope)
                 val legacyStats = requireNotNull(libraryResult.libraryStats)
                 libraryResult = libraryResult.copy(libraryStats = LibrarySyncStats(
                     legacyStats.sent + binaryStats.sent, legacyStats.received + binaryStats.received,
@@ -1549,14 +1601,18 @@ class PhoneBluetoothSyncManager(
             })
     }
 
+    private suspend fun currentBinaryScope(): String? = withContext(Dispatchers.IO) { bookRollbackWindow() }
+
     private suspend fun syncBinaryKinds(
         device: PhoneBluetoothWatchDevice,
         parent: String,
         recovery: LibraryTransferRecovery,
         route: B2KindRoute,
-        runtime: B2KindSync
+        runtime: B2KindSync,
+        scope: String?
     ): LibrarySyncStats {
         val authorize = runtime.authorize
+        val guarded = BuildConfig.SYNC_V2
         var session: PhoneSyncSession? = null
         var probe: JSONObject? = null
         var revocation: java.io.Closeable? = null
@@ -1572,6 +1628,7 @@ class PhoneBluetoothSyncManager(
 
         suspend fun openReady() {
             authorize()
+            if (guarded && (scope == null || currentBinaryScope() != scope)) throw B2Exception("AUTH_REVOKED")
             closeSession()
             val opened = try {
                 val open = reconnectSession
@@ -1598,16 +1655,23 @@ class PhoneBluetoothSyncManager(
                 authorize()
                 recovery.observe(transport.generation)
                 val binding = bindingSnapshot(parent, opened.device.address, opened)
-                if (B2Routing.classify(binding.response, B2Routing.Ready(true, true, true)) != B2Routing.Peer.B2 ||
-                    B2KindRoute.select(binding.response, route.hasBinaryAssets, route.hasBinaryLibrary, route.hasBinaryBooks) != route) {
+                val offer = if (guarded) guardedLibraryProbe(binding, parent)
+                    ?: throw B2Exception("CAPABILITY_MISMATCH") else binding.response
+                val available = B2KindRoute.select(offer, route.hasBinaryAssets, route.hasBinaryLibrary,
+                    route.hasBinaryBooks, guarded = guarded)
+                if (!available.contains(route)) {
                     throw B2Exception("CAPABILITY_MISMATCH")
                 }
-                syncAccount(opened.device, opened, false, binding)
+                val ready = syncAccount(opened.device, opened, false, binding, allowDomainSummary = !guarded).accountSync
+                if (guarded && (ready == null || ready.boundUserId != binding.owner || ready.watchDeviceId != device.remoteDeviceId)) {
+                    throw B2Exception("AUTH_REVOKED")
+                }
                 authorize()
+                if (guarded && currentBinaryScope() != scope) throw B2Exception("AUTH_REVOKED")
                 if (opened.transport !== transport || transport.isClosed) {
                     throw LibraryTransportFailure(transport.generation, java.io.EOFException("B2 account connection closed"))
                 }
-                probe = binding.response
+                probe = offer
             } catch (failure: Throwable) {
                 closeSession()
                 authorize()

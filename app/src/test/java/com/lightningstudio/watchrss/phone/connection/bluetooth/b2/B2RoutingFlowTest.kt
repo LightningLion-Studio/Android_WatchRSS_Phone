@@ -22,6 +22,59 @@ class B2RoutingFlowTest {
             assertEquals(c.getString("name"), c.getString("expected"), got)
         }
     }
+
+    @Test fun guardedProbeRejectsUnsolicitedSelectionAndAmbiguousWireTokens() {
+        val kinds = setOf("noteAsset")
+        val base = obj("success" to true, "version" to 14, "action" to "syncLibrary", "phase" to "probe",
+            "supportsPersistentSession" to true, "deviceId" to "watch",
+            "libraryPeer" to obj("implementation" to "podjs", "appVersion" to "2.0.3"),
+            "libraryBinary" to B2Negotiation.capability(kinds, kinds))
+        val ready = B2Routing.Ready(true, true, true)
+        val request = LibrarySyncPayload.buildProbeRequest("phone")
+        val guarded = B2Routing.guardedProbe(request)
+        assertFalse(request.has("supportedGuardedLibraryVersions"))
+        assertEquals("[1]", guarded.getJSONArray("supportedGuardedLibraryVersions").toString())
+        assertEquals("[2]", guarded.getJSONArray("supportedLibraryBinaryVersions").toString())
+        assertFalse(guarded.has("supportedLibraryResumeVersions"))
+        assertTrue(B2KindRoute.select(base, true, true, guarded = true).isEmpty)
+        for (raw in listOf("null", "\"1\"", "true", "1.0", "1e0", "0", "2", "1,\"guardedLibraryVersion\":1")) {
+            val bytes = (base.toString().dropLast(1) + ",\"guardedLibraryVersion\":$raw}").toByteArray()
+            rejected("CAPABILITY_MISMATCH") {
+                B2Routing.classify(B2Routing.decodeGuardedReply(bytes), ready, guardedOffered = true)
+            }
+        }
+        val reply = base.put("guardedLibraryVersion", 1)
+        rejected("CAPABILITY_MISMATCH") { B2Routing.classify(reply, ready) }
+        assertEquals(B2Routing.Peer.B2, B2Routing.classify(reply, ready, guardedOffered = true))
+        assertEquals(B2Routing.Peer.WAIT_READY,
+            B2Routing.classify(reply, ready.copy(legacyAcksDrained = false), guardedOffered = true))
+        reply.put("supportsAccountDataSpaces", true)
+        rejected("CAPABILITY_MISMATCH") { B2Routing.classify(reply, ready, guardedOffered = true) }
+        reply.remove("supportsAccountDataSpaces")
+        reply.remove("libraryBinary")
+        rejected("CAPABILITY_MISMATCH") { B2Routing.classify(reply, ready, guardedOffered = true) }
+    }
+
+    @Test fun guardedPlansKeepDirectionalArticlesAndBooksWithoutOverlappingKinds() {
+        val articles = setOf("articleBody", "articleMetadata")
+        val all = B2Wire.bookKinds + articles + setOf("rssSource", "noteAsset")
+        val probe = obj("success" to true, "version" to 14, "action" to "syncLibrary", "phase" to "probe",
+            "supportsPersistentSession" to true, "guardedLibraryVersion" to 1,
+            "libraryPeer" to obj("implementation" to "podjs", "appVersion" to "2.0.3"),
+            "libraryBinary" to B2Negotiation.capability(all, all))
+        val route = B2KindRoute.select(probe, true, true, booksReady = true, guarded = true)
+        val (books, library) = route.plans()
+        assertEquals(B2Wire.bookKinds + "noteAsset", books.send)
+        assertEquals(books.send, books.receive)
+        assertEquals(articles + "rssSource", library.send)
+        assertTrue(library.receive.isEmpty())
+        assertTrue(route.receiveLegacyArticles)
+        assertEquals(route, books + library)
+        probe.put("libraryBinary", B2Negotiation.capability(all - B2Wire.BOOK_READING, all))
+        val withoutBooks = B2KindRoute.select(probe, true, true, booksReady = true, guarded = true)
+        assertTrue(withoutBooks.send.intersect(B2Wire.bookKinds).isEmpty())
+        assertTrue(withoutBooks.receive.intersect(B2Wire.bookKinds).isEmpty())
+    }
     @Test fun s2S2S2V1V1S2AndMissingKindRouting() {
         val p = fixture("peer-fixtures.json").getJSONArray("cases").let { a -> (0 until a.length()).map { a.getJSONObject(it) }.first { it.getString("expected") == "B2" }.getJSONObject("probe") }
         val cap = fixture("spec-r3-vectors.json").getJSONObject("s2Capability")

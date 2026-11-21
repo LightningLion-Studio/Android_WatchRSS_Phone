@@ -1,25 +1,36 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 
 import org.json.JSONObject
+import org.json.JSONArray
 
 object B2Routing {
+    internal const val GUARDED_OFFER = "supportedGuardedLibraryVersions"
+    internal const val GUARDED_SELECTION = "guardedLibraryVersion"
     enum class Peer { B2, PODJS_V1, COMPOSE_V14, WAIT_READY }
     data class Ready(val identityVerified: Boolean, val accountConfirmed: Boolean, val legacyAcksDrained: Boolean)
     private val bits = setOf("supportsManifestBatches", "supportsReaderPresets", "supportsReaderAssets", "supportsResourceChunkAck", "supportsReaderPresetPreview", "supportsPersistentSession", "supportsTransferByteProgress")
     private val extensions = setOf("supportsAutomaticAccountSync", "supportsDomainFastPathV2", "supportsBookSyncV1", "supportsBookReadingDeltaV1", "supportsNoteManifestV2", "supportsNoteAssetInventory", "supportsRssCanonicalIds", "supportsFullMetadataOnlyArticles", "supportsMetadataOnlyArticles", "supportsTokenUsageCursor", "persistentSessionAccepted")
     private val dynamic = setOf("deviceId", "sentAt", "account", "accountMatchesRequest", "ipUpgradeAccepted", "watchCapabilities")
     private val special = setOf("libraryPeer", "libraryBinary", "libraryResume", "supportedLibraryResumeVersions", "supportedLibraryBinaryVersions")
-    fun classify(p: JSONObject, ready: Ready): Peer = try { classifyChecked(p, ready) } catch (e: B2Exception) {
+    fun classify(p: JSONObject, ready: Ready, guardedOffered: Boolean = false): Peer = try {
+        classifyChecked(p, ready, guardedOffered)
+    } catch (e: B2Exception) {
         if (e.code in setOf("INVALID_FRAME", "UNSUPPORTED_VERSION", "UNSUPPORTED_KIND", "PLAN_CONFLICT")) fail("CAPABILITY_MISMATCH") else throw e
     }
-    private fun classifyChecked(p: JSONObject, ready: Ready): Peer {
+    private fun classifyChecked(p: JSONObject, ready: Ready, guardedOffered: Boolean): Peer {
         if (p.opt("success") != true || p.opt("version") !is Number || p.n("version") != 14L || p.opt("action") != "syncLibrary" || p.opt("phase") != "probe") fail("CAPABILITY_MISMATCH")
+        val guarded = p.has(GUARDED_SELECTION)
+        if (guarded && (!guardedOffered || p.n(GUARDED_SELECTION) != 1L ||
+                p.has("supportsAccountDataSpaces") || p.opt("supportsPersistentSession") != true ||
+                !p.has("libraryBinary") && !p.has("libraryResume"))) fail("CAPABILITY_MISMATCH")
         for (key in bits + extensions + "supportsAccountDataSpaces") if (p.has(key) && p.get(key) !is Boolean) fail("CAPABILITY_MISMATCH")
         for ((key, version) in listOf("supportedLibraryResumeVersions" to 1L, "supportedLibraryBinaryVersions" to 2L)) if (p.has(key)) {
             val versions = p.a(key).values().map { B2Json.integer(it) }
             if (versions != listOf(version)) fail("CAPABILITY_MISMATCH")
         }
+        val resume = p.optJSONObject("libraryResume")
         if (p.has("libraryResume")) validateLegacyResume(p.o("libraryResume"))
+        if (guarded && !hasDirection(p.optJSONObject("libraryBinary")) && !hasDirection(resume)) fail("CAPABILITY_MISMATCH")
         val live = ready.identityVerified && ready.accountConfirmed && ready.legacyAcksDrained
         fun route(v: Peer) = if (live) v else Peer.WAIT_READY
         val peer = if (p.has("libraryPeer")) B2Json.exact(p.get("libraryPeer"), "implementation", "appVersion").also {
@@ -27,13 +38,14 @@ object B2Routing {
             it.s("implementation")
         } else null
         if (peer != null && peer.s("implementation") == "podjs") {
-            if (peer.s("appVersion").matches(Regex("2\\.0\\.[01](-[1-9][0-9]*)?"))) {
+            if (!guarded && peer.s("appVersion").matches(Regex("2\\.0\\.[01](-[1-9][0-9]*)?"))) {
                 if (p.has("libraryBinary") || p.has("supportsAccountDataSpaces")) fail("CAPABILITY_MISMATCH")
                 return route(Peer.PODJS_V1)
             }
             if (p.has("supportsAccountDataSpaces")) fail("CAPABILITY_MISMATCH")
         }
-        val allowed = bits + extensions + dynamic + special + setOf("supportsAccountDataSpaces", "success", "version", "action", "phase")
+        val allowed = bits + extensions + dynamic + special + setOf("supportsAccountDataSpaces", "success", "version", "action", "phase") +
+            if (guardedOffered) setOf(GUARDED_SELECTION) else emptySet()
         if (p.keys().asSequence().any { it !in allowed }) fail("PEER_IMPLEMENTATION_UNKNOWN")
         if (peer != null) {
             if (peer.s("implementation") != "podjs") fail("PEER_IMPLEMENTATION_UNKNOWN")
@@ -48,6 +60,11 @@ object B2Routing {
         } else if (p.getBoolean("supportsAccountDataSpaces") && bits.all { p.getBoolean(it) }) return route(Peer.COMPOSE_V14)
         fail("PEER_IMPLEMENTATION_UNKNOWN")
     }
+    private fun hasDirection(capability: JSONObject?): Boolean =
+        capability?.a("kinds")?.values()?.any {
+            val kind = it as? JSONObject ?: fail()
+            kind.opt("send") == true || kind.opt("receive") == true
+        } == true
     private fun validateLegacyResume(c: JSONObject) {
         B2Json.exact(c, "version", "kinds", "limits")
         if (c.n("version") != 1L) fail("CAPABILITY_MISMATCH")
@@ -68,6 +85,19 @@ object B2Routing {
     }
     /** Off returns the identical object: no copy, new field, parser or capability access. */
     fun probe(probe: JSONObject, b2Enabled: Boolean): JSONObject = if (!b2Enabled) probe else B2Negotiation.propose(probe, true)
+
+    internal fun guardedProbe(probe: JSONObject): JSONObject =
+        B2Negotiation.propose(probe, true).put(GUARDED_OFFER, JSONArray(listOf(1)))
+
+    internal fun decodeGuardedReply(bytes: ByteArray): JSONObject = try {
+        B2Json.parse(bytes, integersOnly = false)
+    } catch (_: B2Exception) {
+        fail("CAPABILITY_MISMATCH")
+    }
+
+    internal fun checkDiscovery(p: JSONObject) {
+        if (p.has(GUARDED_SELECTION)) fail("CAPABILITY_MISMATCH")
+    }
     fun selected(probe: JSONObject, ready: Ready, enabled: Boolean, phone: JSONObject, direction: String, kind: String): Boolean {
         if (!enabled) return false
         if (classify(probe, ready) != Peer.B2) return false

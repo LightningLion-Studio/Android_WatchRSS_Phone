@@ -1,6 +1,10 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2CommitWindow
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.assetDescriptor
+import com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles
+import java.io.File
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -50,6 +54,98 @@ class SyncV2P5LegacyActionsTest {
         assertEquals(1,w.projection.state().body.getJSONObject("pendingChoice").getJSONArray("inboxKeys").length())
         assertTrue(w.projection.state().body.getJSONObject("applied").length()==0)
     }
+    @Test fun rollbackClosureKeepsIndependentFolderAndRefusesAMissingAssetWitness(): Unit = SyncV2P5Fixture().use { w ->
+        fun row(kind: String, key: String, value: JSONObject, revision: String): JSONObject {
+            val entity = w.identity.entity(kind, key)
+            val parts = SyncV2Business.split(kind, key, entity, value, null)
+            return JSONObject().put("meta", parts.meta).put("state", parts.state)
+                .put("row", JSONObject().put("revision", revision))
+        }
+        val folder = JSONObject().put("folderId", "independent").put("name", "independent").put("sortOrder", 0)
+            .put("updatedAt", 1).put("modifiedBy", "phone").put("deleted", false).put("deletedAt", 0)
+        val assetId = "attached.png"
+        val asset = JSONObject().put("assetId", assetId).put("mime", "image/png").put("originalFilename", assetId)
+            .put("updatedAt", 1).put("sourceDeviceId", "phone").put("deleted", false).put("deletedAt", 0)
+        val body = "![attached](assets/$assetId)"
+        val untouched = row("folder", "independent", folder, "1")
+        val attachment = row("asset", assetId, asset, "1")
+        val first = row("note", "note", w.note("before", body), "1")
+        val second = row("note", "note", w.note("after", body), "2")
+        val stable = SyncV2BluetoothImpact.stableEntities(w.identity,
+            listOf(untouched, attachment, first), listOf(untouched, attachment, second))
+        assertEquals(setOf(w.identity.entity("folder", "independent")), stable)
+        assertNull(SyncV2BluetoothImpact.stableEntities(w.identity,
+            listOf(untouched, first), listOf(untouched, second)))
+    }
+
+    @Test fun cloudChoicePinsTheReceivedAttachmentAndLeavesItsOldReceiptRejected(): Unit = SyncV2P5Fixture().use { w ->
+        w.pending()
+        val key = "archive.png"
+        val raw = "synthetic incoming image".toByteArray()
+        val legacy = NoteAssetFiles.legacy(w.root, key).apply {
+            parentFile!!.mkdirs()
+            writeText("independent local image")
+        }
+        val oldSha = SyncV2Codec.hex(SyncV2Codec.sha(legacy.readBytes()))
+        w.edit("![picture](assets/$key)")
+        w.sql.execSQL("INSERT INTO note_assets VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            arrayOf("local-asset", "note", oldSha, key, "image/png", legacy.length(), key, true, w.f.now, false, 0L))
+        w.drain()
+        val original = File(w.root, "staged").apply { writeBytes(raw) }
+        val descriptor = assetDescriptor(raw, key)
+        val input = B2CommitWindow.InboxInput("watch", "watchToPhone", "a".repeat(32), "b".repeat(64), descriptor, original)
+        val inbox = SyncV2BluetoothInbox(w.projection, w.root)
+        val pending = requireNotNull(inbox.prepare(input) {})
+        w.sql.beginTransaction()
+        try {
+            pending.commit()
+            w.sql.setTransactionSuccessful()
+        } finally {
+            w.sql.endTransaction()
+        }
+        pending.finish(true)
+        val record = w.projection.accountLegacyEntries().single()
+        assertTrue(w.projection.state().body.getJSONObject("applied").length() == 0)
+        val archived = record.getJSONObject("intent").getJSONObject("body").getJSONObject("guarded-transfer")
+        val file = File(w.root, "syncv2-guarded-inbox/${archived.getString("archiveId")}.body")
+        assertFalse(file.readBytes().contentEquals(raw))
+        assertArrayEquals(raw, inbox.read(archived.getString("archiveId"), raw.size.toLong(), 0, raw.size))
+        val actions = w.actions()
+        val preview = actions.preview(firstLegacyOnly = true)
+        assertEquals(listOf(record.getString("key")), preview.selectedLegacyKeys)
+        actions.choose(preview, "cloud")
+        assertFalse(file.exists())
+        assertTrue(w.projection.state().body.getJSONObject("applied").length() == 0)
+        val restored = actions.recoveryCopies().let { copies ->
+            (0 until copies.length()).map { copies.getJSONObject(it).getString("copyId") }
+        }.first { id ->
+            val changes = actions.recoveryDelta(id).getJSONArray("changes")
+            changes.length() == 1 && changes.getJSONObject(0).optJSONObject("value")?.has("guardedAsset") == true
+        }
+        val header = actions.recoveryCopies().let { copies ->
+            (0 until copies.length()).map(copies::getJSONObject).single { it.getString("copyId") == restored }
+        }
+        assertEquals(604800000L, header.getLong("expiresAtMillis") - header.getLong("createdAtMillis"))
+        val bodyRefs = actions.recoveryDelta(restored).getJSONArray("bodyRefs")
+        val recipe = (0 until bodyRefs.length()).map(bodyRefs::getString).single { it.startsWith("recipe:") }
+        assertArrayEquals(raw, actions.recoveryBodyPart(restored, recipe, 0, raw.size))
+        code("choice_stale") { actions.restoreRecovery(restored) }
+    }
+
+    @Test fun capturedFirstChoiceCannotApplyTheNewFirstEntry(): Unit = SyncV2P5Fixture().use { w ->
+        w.pending()
+        receive(w, input(w, "first"))
+        receive(w, input(w, "second", w.note("other title", "other pending body")))
+        val actions = w.actions()
+        val old = actions.preview(firstLegacyOnly = true)
+        assertEquals(listOf(key("first")), old.selectedLegacyKeys)
+        actions.choose(actions.preview(setOf(key("first"))), "cloud")
+        val calls = w.choiceCalls
+        code("choice_stale") { actions.choose(old, "cloud") }
+        assertEquals(calls, w.choiceCalls)
+        assertEquals(listOf(key("second")), actions.preview(firstLegacyOnly = true).selectedLegacyKeys)
+    }
+
     @Test fun rawFrameDoesNotBlockAnotherExplicitNormalizedSelection():Unit=SyncV2P5Fixture().use{w->
         w.pending();receive(w,SyncV2Projection.LegacyInput("peer",14,"raw",JSONObject().put("legacy-frame",JSONObject().put("opaque","kept"))))
         receive(w,input(w,"normalized"));val a=w.actions();a.choose(a.preview(setOf(key("normalized"))),"cloud")

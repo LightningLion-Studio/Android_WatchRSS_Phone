@@ -57,6 +57,13 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         val selected=JSONArray();val proposals=JSONArray();val ids=mutableSetOf<String>();var missing=false
         for(entry in entries) {
             val intent=entry.getJSONObject("intent")
+            val guarded = intent.getJSONObject("body").optJSONObject("guarded-transfer")
+            if (guarded != null) {
+                selected.put(JSONObject().put("key", entry.getString("key"))
+                    .put("hash", entry.getString("hash")).put("guarded", guarded))
+                if (!recovery.guardedAlreadyPresent(guarded)) missing = true
+                continue
+            }
             val attempt=runCatching {
                 val body=intent.getJSONObject("body");if(body.has("legacy-frame"))SyncV2Codec.fail("unsupported_feature")
                 val normalized=mutableListOf<JSONObject>()
@@ -166,7 +173,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     data class PendingChoice(val accountOid:String,val accountRevision:String,val generation:String,val localChangeRevision:String,val canMerge:Boolean,val reason:String?,val preview:Preview)
     fun pendingChoice():PendingChoice? {
         gate();if(projection.state().body.isNull("pendingChoice"))return null
-        val p=preview();return PendingChoice(p.capture.accountOid,p.capture.accountRevision,p.capture.generation,p.capture.localChangeRevision,p.canMerge,p.reason,p)
+        val p=preview(firstLegacyOnly=true);return PendingChoice(p.capture.accountOid,p.capture.accountRevision,p.capture.generation,p.capture.localChangeRevision,p.canMerge,p.reason,p)
     }
     fun history(pageToken:String?=null):JSONObject {gate();client.capabilities();return client.history(pageToken)}
     fun keepDiscardedLocalChanges7Days():Boolean=projection.state().body.optBoolean("keepDiscardedLocalChanges7Days",true)
@@ -217,13 +224,23 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                 JSONObject().put("title",meta.getJSONObject("payload").optString("title",meta.getString("kind")))
                     .put("kind",if(row==null || row.optJSONObject("state")?.optJSONObject("payload")?.optBoolean("deleted")==true)"delete"else if(base==null)"add"else"edit")
             }
-            return JSONObject().put("items",JSONArray(changed.take(50))).put("more",(changed.size-50).coerceAtLeast(0)).put("count",changed.size)
+            val listed = changed.toMutableList()
+            if (local) for (link in guardedSelection(plan)) {
+                val descriptor = link.getJSONObject("descriptor")
+                listed.add(JSONObject().put("title", descriptor.optString("businessId", descriptor.getString("kind")))
+                    .put("kind", "edit"))
+            }
+            return JSONObject().put("items",JSONArray(listed.take(50))).put("more",(listed.size-50).coerceAtLeast(0)).put("count",listed.size)
         }
         return JSONObject().put("local",summary(plan.local,true)).put("cloud",summary(plan.cloud,false)).put("canMerge",preview.canMerge).put("reason",preview.reason?:JSONObject.NULL)
     }
     fun restoreRecovery(copyId:String):JSONObject {
         gate();now();syncFiles();complete()
         val delta=recoveryDelta(copyId)
+        if (recovery.restoreGuardedAsset(copyId, delta, now())) {
+            projection.runWindow()
+            return JSONObject().put("restoredEdits", 1)
+        }
         // Private file bodies require their own staged restore workflow; never claim metadata
         // restoration reconstitutes an unavailable original file or release its recovery pin.
         if(delta.getJSONArray("bodyRefs").length()!=0)SyncV2Codec.fail("unsupported_feature")
@@ -256,14 +273,16 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     })}
     private fun release(plan:Plan) {for(rows in listOfNotNull(plan.local,plan.cloud,plan.input,plan.candidate,plan.actual).distinctBy{System.identityHashCode(it)})(rows as? AutoCloseable)?.close()}
     /** One unique planner entry, including all nonempty/unknown note conflict channels and authenticated bases. */
-    fun preview(legacyKeys:Set<String>?=null):Preview {
+    fun preview(legacyKeys:Set<String>?=null, firstLegacyOnly:Boolean=false):Preview {
         try {
         gate();syncFiles();complete()
         projection.state().body.optJSONObject("pendingAccountAction")?.takeIf{it.opt("publicationAttempted")==false}?.let(::checkActionCurrent)
         val capture=projection.accountCapture();val st=projection.state()
         projection.accountCheck(st,capture)
         val fileToken=fileCapture()
-        val selectedEntries=projection.accountLegacyEntries(legacyKeys)
+        val selectedKeys = if (firstLegacyOnly) projection.firstPendingLegacyKey()?.let(::setOf) ?: emptySet()
+            else legacyKeys
+        val selectedEntries=projection.accountLegacyEntries(selectedKeys)
         val legacyIds=selectedEntries.flatMap{entry->val intent=entry.getJSONObject("intent");intent.getJSONObject("body").keys().asSequence().filter{Regex("[0-9a-f]{64}").matches(it)}.toList()+SyncV2Wire.strings(intent.getJSONArray("removed"),1000000,false)}.toSet()
         var scopeIds=projection.accountCatalog.differences()+projection.accountChangedIds()+legacyIds+st.body.optJSONArray("contentPendingIds").let{a->if(a==null)emptySet()else SyncV2Wire.strings(a,1000000,false).toSet()}
         // Public article footprints matter only for operations in the RSS domains.
@@ -273,7 +292,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             if(rss.isNotEmpty())scopeIds=scopeIds+rss+projection.accountCatalog.typedIds("source")
         }
         val root=st.body.optString("metadataTreeRoot").takeIf{it.isNotEmpty() && scopeIds.size<=64 && !st.body.optBoolean("unknownEditBase") && same(st.body.optJSONObject("metadataAccount"),st.body.optJSONObject("account"))}
-        val actual=projection.accountLocalRows(if(root!=null)scopeIds else null);val remote=cloudRows(if(root!=null)scopeIds else null);val legacy=legacyView(actual,remote,legacyKeys);val local=legacy.rows
+        val actual=projection.accountLocalRows(if(root!=null)scopeIds else null);val remote=cloudRows(if(root!=null)scopeIds else null);val legacy=legacyView(actual,remote,selectedKeys);val local=legacy.rows
         val actualIds=projection.accountChangedIds()+st.body.optJSONArray("contentPendingIds").let{a->if(a==null)emptySet()else (0 until a.length()).map{a.getString(it)}.toSet()}+actual.asSequence().filter{it.has("p5Base")}.map{it.getJSONObject("meta").getString("entityKey")}.toSet()
         val changed=actualIds+legacy.ids
         // Unchanged non-note entities have no operations and cannot affect the planner.
@@ -507,14 +526,22 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         prepareChoice(preview,choice,keyVersion)
         return resume()?:SyncV2Codec.fail("choice_stale")
     }
+    private fun guardedSelection(plan: Plan): List<JSONObject> {
+        val selected = JSONArray(plan.legacySelected)
+        return (0 until selected.length()).mapNotNull { selected.getJSONObject(it).optJSONObject("guarded") }
+    }
+
     private fun prepareChoice(preview:Preview,choice:String,keyVersion:Long) {
         gate();syncFiles();val plan=plans[preview]?:SyncV2Codec.fail("choice_stale");val c=preview.capture
         projection.accountCheck(projection.state(),c);SyncV2Codec.next(c.stateVersion);if(SyncV2Codec.hash(projection.state().body)!=plan.digest)SyncV2Codec.fail("choice_stale")
         if(choice !in setOf("cloud","local","merge"))SyncV2Codec.fail("invalid_schema")
+        val guarded = guardedSelection(plan)
+        if (choice != "cloud" && guarded.any { !recovery.guardedAlreadyPresent(it) }) SyncV2Codec.fail("closure_incomplete")
         if(choice=="merge" && !preview.canMerge)throw SyncV2CloudError("merge_unavailable",details=JSONObject().put("reason",preview.reason?:"missing_base"))
         if(choice=="merge") {
             for(input in plan.input){val result=SyncV2Planner.canMerge(input);if(!result.getBoolean("canMerge"))SyncV2Codec.fail("choice_stale")}
         }
+        projection.checkLegacySelection(JSONArray(plan.legacySelected))
         fileGuard(plan.files){}
         val context=context(c, choice);val local=rows(plan.local);val remote=rows(plan.cloud)
         // R3: every choice (cloud/local/merge) carries isolated rows back verbatim under their
@@ -544,6 +571,13 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             for(i in 0 until proposals.length()) {
                 val proposal=proposals.getJSONObject(i);val records=proposal.getJSONArray("rows").let{a->(0 until a.length()).map{a.getJSONObject(it)}}
                 prepare(records,SyncV2Wire.strings(proposal.getJSONArray("ids"),1000000,false).toSet())
+            }
+            for (link in guarded) {
+                val descriptor = link.getJSONObject("descriptor")
+                if (descriptor.optString("kind") != "noteAsset") SyncV2Codec.fail("closure_incomplete")
+                val entity = identity.entity("asset", descriptor.getString("businessId"))
+                val row = local.indexRows()[entity] ?: remote.indexRows()[entity] ?: SyncV2Codec.fail("closure_incomplete")
+                bundles.add(recovery.prepareGuardedAsset(row, link, base, c, now()))
             }
             recovery.checkBundles(bundles)
         }
@@ -833,7 +867,14 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     }
     /** Restarts replay exact signed bytes/request IDs. A changed whole state never clears edits. */
     fun resume():JSONObject? {
-        try { return resumeStaged() } finally {transientRows.forEach{it.close()};transientRows.clear()}
+        try {
+            val result = resumeStaged()
+            runCatching { SyncV2BluetoothInbox(projection, files).collectResolved() }
+            return result
+        } finally {
+            transientRows.forEach { it.close() }
+            transientRows.clear()
+        }
     }
     private fun resumeStaged():JSONObject? {
         gate();syncFiles();val st=projection.state();val action=st.body.optJSONObject("pendingAccountAction")?:return flushAppliedAck()

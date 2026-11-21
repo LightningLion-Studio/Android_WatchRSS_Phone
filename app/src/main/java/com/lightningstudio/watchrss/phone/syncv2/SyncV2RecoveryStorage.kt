@@ -1,9 +1,14 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
 import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
+import com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Metadata
+import com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile
+import com.lightningstudio.watchrss.phone.data.local.syncDirectory
 import java.io.RandomAccessFile
 import java.security.MessageDigest
 import java.nio.file.Files
@@ -89,7 +94,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             "asset"->db.query("SELECT storageKey,sha256 FROM note_assets WHERE storageKey=?",arrayOf(id)).use{c->
                 if(!c.moveToFirst())SyncV2Codec.fail("closure_incomplete")
                 val name=c.getString(0);if(!com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.isSafeStorageKey(name))SyncV2Codec.fail("closure_incomplete")
-                listOf("asset/$name" to fileSource(File(files,"notes/assets/$name"),c.getString(1),maxBytes))
+                listOf("asset/$name" to fileSource(NoteAssetFiles.current(db, files, name),c.getString(1),maxBytes))
             }
             "note"->{
                 val texts=mutableListOf(value.getString("markdown"),value.getString("baseMarkdown"));SyncV2NoteConflicts.declared(value)?.getJSONArray("records")?.let { conflicts ->
@@ -99,7 +104,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                 keys.map {name->
                     val hashes=db.query("SELECT sha256 FROM note_assets WHERE storageKey=?",arrayOf(name)).use{c->buildSet{while(c.moveToNext())add(c.getString(0))}}
                     if(hashes.size!=1)SyncV2Codec.fail("closure_incomplete")
-                    "asset/$name" to fileSource(File(files,"notes/assets/$name"),hashes.single(),maxBytes)
+                    "asset/$name" to fileSource(NoteAssetFiles.current(db, files, name),hashes.single(),maxBytes)
                 }
             }
             else->emptyList()
@@ -113,15 +118,39 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             "book" -> BookPackageFiles.revision(db, id)?.let { revision ->
                 BookPackageFiles.resolve(bookDirectory, id, revision) { sourceReads?.file(it) } != null
             } ?: false
-            "asset"->db.query("SELECT storageKey FROM note_assets WHERE storageKey=?",arrayOf(id)).use{c->c.moveToFirst() && com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.isSafeStorageKey(c.getString(0)) && File(files,"notes/assets/${c.getString(0)}").isFile}
+            "asset"->db.query("SELECT storageKey FROM note_assets WHERE storageKey=?",arrayOf(id)).use{c->c.moveToFirst() && com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.isSafeStorageKey(c.getString(0)) && NoteAssetFiles.current(db, files, c.getString(0)).isFile}
             else->false
         }
     }
     fun contentReady(record:JSONObject):Boolean=record.getJSONObject("state").getJSONObject("payload").optBoolean("deleted",false) || try {sources(record);true}catch(_:Exception){false}
-    fun prepare(local:List<JSONObject>,cloud:List<JSONObject>,base:JSONObject,captured:Set<String>,revision:String,accountOid:String,now:Long):Bundle {
+    fun guardedAlreadyPresent(link: JSONObject): Boolean {
+        val descriptor = link.getJSONObject("descriptor")
+        if (descriptor.optString("kind") != "noteAsset") return false
+        val metadata = B2Metadata.validate(descriptor)
+        val id = metadata.getString("storageKey")
+        val revision = BookPackageFiles.Revision(metadata.getString("sha256"), metadata.getLong("size"))
+        val actual = NoteAssetFiles.current(db, files, id)
+        return NoteAssetFiles.ownerKeys(db, id).isNotEmpty() && NoteAssetFiles.winnerAllows(db, id, revision) &&
+            BookPackageFiles.verify(actual, revision) {} != null
+    }
+
+    fun prepareGuardedAsset(record: JSONObject, link: JSONObject, base: JSONObject, capture: ChoiceCapture, now: Long): Bundle {
+        val descriptor = link.getJSONObject("descriptor")
+        if (descriptor.optString("kind") != "noteAsset") SyncV2Codec.fail("closure_incomplete")
+        val metadata = B2Metadata.validate(descriptor)
+        val id = metadata.getString("storageKey")
+        val meta = record.getJSONObject("meta")
+        if (meta.getString("kind") != "asset" || meta.getString("logicalId") != id ||
+            NoteAssetFiles.ownerKeys(db, id).isEmpty()) SyncV2Codec.fail("closure_incomplete")
+        val entity = meta.getString("entityKey")
+        return prepare(listOf(record), emptyList(), base, setOf(entity), capture.localChangeRevision, capture.accountOid, now, link)
+    }
+    fun prepare(local:List<JSONObject>,cloud:List<JSONObject>,base:JSONObject,captured:Set<String>,revision:String,
+        accountOid:String,now:Long,guardedAsset:JSONObject?=null):Bundle {
         val localValues=JSONObject();val cloudValues=JSONObject();val refs=JSONObject();val records=local.associateBy{it.getJSONObject("meta").getString("entityKey")}
         for((id,r)in records)localValues.put(id,JSONObject().put("meta",r.getJSONObject("meta")).put("state",r.getJSONObject("state")))
         for(r in cloud)cloudValues.put(r.getJSONObject("meta").getString("entityKey"),JSONObject().put("meta",r.getJSONObject("meta")).put("state",r.getJSONObject("state")))
+        if (guardedAsset != null) localValues.getJSONObject(captured.single()).put("guardedAsset", guardedAsset.getJSONObject("descriptor"))
         val objects=linkedMapOf<String,ByteArray>();var size=0L
         val key=projection.recoveryKey()
         fun add(oid:String,bytes:ByteArray){if(oid !in objects){size=Math.addExact(size,bytes.size.toLong());if(size>quotaBytes)SyncV2Codec.fail("quota_exceeded");objects[oid]=bytes}}
@@ -130,7 +159,18 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                 val record=records[id]?:continue
                 if(SyncV2Codec.canonical(localValues.opt(id))==SyncV2Codec.canonical(cloudValues.opt(id)))continue
                 val oids=sortedSetOf<String>()
-                for((part,source)in sources(record,quotaBytes-size)) {
+                val selectedSources = if (guardedAsset == null) sources(record, quotaBytes - size) else {
+                    val descriptor = guardedAsset.getJSONObject("descriptor")
+                    val archive = SyncV2BluetoothInbox(projection, files)
+                    val source = object : Source {
+                        override val size = descriptor.getLong("size")
+                        override val expectedSha256 = descriptor.getString("sha256")
+                        override fun read(offset: Long, n: Int): ByteArray =
+                            archive.read(guardedAsset.getString("archiveId"), this.size, offset, n)
+                    }
+                    listOf("asset/" + descriptor.getString("businessId") to source)
+                }
+                for((part,source)in selectedSources) {
                     if(source.size>quotaBytes-size)SyncV2Codec.fail("quota_exceeded")
                     val blocks=JSONArray();val digest=MessageDigest.getInstance("SHA-256");var offset=0L
                     while(offset<source.size) {
@@ -270,6 +310,87 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             return out.toByteArray()
         } finally {key.fill(0)}
     }
+    /** Restore one authenticated archived attachment through the same committed file lookup.
+     * A different current version or a disappeared owner makes the preview stale. */
+    fun restoreGuardedAsset(copyId: String, delta: JSONObject, now: Long): Boolean {
+        val changes = delta.getJSONArray("changes")
+        if (changes.length() != 1) return false
+        val change = changes.getJSONObject(0)
+        val value = change.optJSONObject("value") ?: return false
+        val descriptor = value.optJSONObject("guardedAsset") ?: return false
+        val meta = value.getJSONObject("meta")
+        val metadata = B2Metadata.validate(descriptor)
+        val id = metadata.getString("storageKey")
+        if (descriptor.optString("kind") != "noteAsset" || meta.optString("kind") != "asset" ||
+            meta.optString("logicalId") != id || change.getString("id") != identity.entity("asset", id)) {
+            SyncV2Codec.fail("closure_incomplete")
+        }
+        val revision = BookPackageFiles.Revision(metadata.getString("sha256"), metadata.getLong("size"))
+        val refs = delta.getJSONArray("bodyRefs")
+        val recipe = (0 until refs.length()).map(refs::getString).singleOrNull { it.startsWith("recipe:") }
+            ?: SyncV2Codec.fail("closure_incomplete")
+        val capture = projection.accountCapture(false)
+        val before = NoteAssetFiles.current(db, files, id)
+        val ownerKeys = NoteAssetFiles.ownerKeys(db, id)
+        if (ownerKeys.isEmpty() || !NoteAssetFiles.winnerAllows(db, id, revision)) SyncV2Codec.fail("choice_stale")
+        if (before.isFile && BookPackageFiles.verify(before, revision) {} == null) SyncV2Codec.fail("choice_stale")
+        val previousReference = NoteAssetFiles.reference(db, id)
+        if (previousReference != null && previousReference != revision) SyncV2Codec.fail("choice_stale")
+        val candidate = NoteAssetFiles.candidate(files, revision.sha256)
+        val parent = NoteAssetFiles.ensureCandidateDirectory(files)
+        val staged = File.createTempFile("restore-", ".part", parent)
+        var linked = false
+        var committed = false
+        try {
+            FileOutputStream(staged).use { output ->
+                var offset = 0L
+                while (offset < revision.bytes) {
+                    val count = minOf(65536L, revision.bytes - offset).toInt()
+                    val raw = readPart(copyId, recipe, offset, count)
+                    if (raw.size != count) SyncV2Codec.fail("closure_incomplete")
+                    output.write(raw)
+                    offset += raw.size
+                }
+                output.fd.sync()
+            }
+            if (BookPackageFiles.verify(staged, revision) {} == null) SyncV2Codec.fail("hash_mismatch")
+            if (!before.isFile) {
+                linked = ConditionalBodyFile.linkIfAbsent(candidate, staged)
+                if (linked) syncDirectory(parent)
+            }
+            val selected = if (before.isFile) before else candidate
+            val verified = BookPackageFiles.verify(selected, revision) {} ?: SyncV2Codec.fail("choice_stale")
+            projection.accountWriter(capture.stateVersion) { st ->
+                projection.accountCheck(st, capture, false)
+                if (!verified.isCurrent() || NoteAssetFiles.current(db, files, id) != before ||
+                    NoteAssetFiles.reference(db, id) != previousReference || NoteAssetFiles.ownerKeys(db, id) != ownerKeys ||
+                    !NoteAssetFiles.winnerAllows(db, id, revision) ||
+                    (selected == candidate && before != candidate && before.exists())) SyncV2Codec.fail("choice_stale")
+                if (selected == candidate && previousReference == null) {
+                    NoteAssetFiles.initialize(db)
+                    NoteAssetFiles.publish(db, id, revision)
+                }
+                val matched = db.query("SELECT assetId,createdAt FROM note_assets WHERE storageKey=? AND deleted=0 AND sha256=?",
+                    arrayOf(id, revision.sha256)).use { if (it.moveToFirst()) it.getString(0) to it.getLong(1) else null }
+                if (matched == null) {
+                    val asset = meta.getJSONObject("payload")
+                    db.execSQL("INSERT INTO note_assets VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                        arrayOf<Any>(java.util.UUID.randomUUID().toString(), "", revision.sha256,
+                            asset.optString("originalFilename", id), asset.getString("mime"), revision.bytes,
+                            id, true, now, false, 0L))
+                } else {
+                    db.execSQL("UPDATE note_assets SET createdAt=? WHERE assetId=?", arrayOf(maxOf(now, matched.second + 1), matched.first))
+                }
+            }
+            committed = true
+            NoteAssetFiles.published()
+            return true
+        } finally {
+            if (!committed && linked) ConditionalBodyFile.unlinkPublication(candidate, staged)
+            staged.delete()
+        }
+    }
+
     fun purge(trustedNow:Long?) {
         if(trustedNow==null)return
         val st=projection.state();val old=st.body.optLong("recoveryTrustedNow",0)

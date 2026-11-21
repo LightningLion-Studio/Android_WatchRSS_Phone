@@ -56,7 +56,7 @@ internal class SyncV2PhoneUiPort(private val product:SyncV2PhoneProduct,private 
     }
     suspend fun syncNow()=product.action(this){if(it.bodies==null || !it.contentEnabled)gate("any");_state.value=_state.value.copy(phase="syncing");it.round(manual=true)}
     suspend fun openChoice():ChoicePreview=product.action(this) {
-        gate("choice");val p=it.actions.preview();val s=it.actions.previewSummary(p)
+        gate("choice");val p=it.actions.preview(firstLegacyOnly=true);val s=it.actions.previewSummary(p)
         ChoicePreview(p,items(s.getJSONObject("local")),items(s.getJSONObject("cloud")),s.getJSONObject("local").getInt("more"),s.getJSONObject("cloud").getInt("more"),p.canMerge,p.reason)
     }
     private suspend fun choose(preview:ChoicePreview,kind:String)=product.action(this){gate("choice");it.actions.choose(preview.handle,kind,it.keys.newestVersion)}

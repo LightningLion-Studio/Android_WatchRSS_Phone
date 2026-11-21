@@ -56,7 +56,7 @@ internal enum class BtSyncError(val wire: String) {
     UNSUPPORTED_PHASE("unsupported_phase"), UNSUPPORTED_VERSION("unsupported_version")
 }
 
-internal data class BtSyncEvent(val data: JSONObject, val owner: String?) {
+internal data class BtSyncEvent(val data: JSONObject) {
     val id: String get() = data.getString("eventId")
     val occurredAt: Long get() = data.getLong("occurredAt")
 }
@@ -73,7 +73,6 @@ internal data class BtSyncDevice(
 
 internal class BtSyncSession(
     private val device: BtSyncDevice,
-    private val owner: String?,
     private val trigger: BtSyncTrigger,
     private val record: suspend (BtSyncEvent) -> Unit,
     private val now: () -> Long,
@@ -111,9 +110,7 @@ internal class BtSyncSession(
                 is Long -> version.takeIf { it in 0..Int.MAX_VALUE.toLong() } ?: JSONObject.NULL
                 else -> JSONObject.NULL
             })
-            .put("model", model?.takeIf { it.length in 1..128 && it.any(Char::isLetterOrDigit) &&
-                it.all { char -> char.isLetterOrDigit() || char in " -_().+" } }
-                ?.let { telemetryLabel(it, 128) } ?: JSONObject.NULL)
+            .put("model", telemetryLabel(model) ?: JSONObject.NULL)
     }
 
     @Synchronized
@@ -247,14 +244,15 @@ internal class BtSyncSession(
                 .put("occurredAt", now())
                 .put("installId", device.installId)
                 .put("platform", "phone")
-                .put("appVersionName", telemetryLabel(device.versionName, 64))
+                .put("appVersionName", telemetryLabel(device.versionName).orEmpty())
                 .put("appVersionCode", device.versionCode)
-                .put("device", JSONObject().put("manufacturer", telemetryLabel(device.manufacturer, 128))
-                    .put("model", telemetryLabel(device.model, 128)).put("osName", "Android")
-                    .put("osVersion", telemetryLabel(device.osVersion, 128))
+                .put("device", JSONObject().put("manufacturer", telemetryLabel(device.manufacturer) ?: JSONObject.NULL)
+                    .put("model", telemetryLabel(device.model) ?: JSONObject.NULL).put("osName", "Android")
+                    .put("osVersion", telemetryLabel(device.osVersion) ?: JSONObject.NULL)
                     .put("sdkInt", device.sdkInt))
                 .put("peer", peer ?: JSONObject.NULL)
                 .put("configVersion", decision.configVersion)
+                .put("configStale", decision.configStale)
                 .put("features", JSONObject().put(FeatureRegistry.b2.key, if (decision.enabled) "on" else "off"))
                 .put("cohort", decision.cohort.wire)
                 .put("protocol", protocol.wire)
@@ -264,7 +262,7 @@ internal class BtSyncSession(
                 .put("errorCode", error?.wire ?: JSONObject.NULL)
                 .put("durationMs", (monotonic() - started).coerceAtLeast(0))
                 .put("transfer", transfer)
-                .put("kinds", JSONObject(kinds)), owner)
+                .put("kinds", JSONObject(kinds)))
         }
         record(event)
     }
@@ -332,14 +330,10 @@ internal fun mapBtSyncFailure(error: Throwable, stage: BtSyncStage): Pair<BtSync
     return observed to code
 }
 
-private fun telemetryLabel(value: String, maxBytes: Int): String {
-    val clean = value.filterNot(Char::isISOControl)
-    val bytes = clean.toByteArray(Charsets.UTF_8)
-    if (bytes.size <= maxBytes) return clean
-    var end = maxBytes
-    while (bytes[end].toInt() and 0xc0 == 0x80) end--
-    return bytes.decodeToString(endIndex = end)
-}
+// Keep this ASCII whitelist in sync with the backend telemetry label validator.
+private fun telemetryLabel(value: String?): String? = value?.asSequence()?.filter {
+    it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it in " ._-+()[],&"
+}?.take(64)?.joinToString("")?.takeIf(String::isNotEmpty)
 
 internal suspend fun <T> BtSyncSession?.runBtSync(block: suspend () -> T): T {
     if (this == null) return block()

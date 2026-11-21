@@ -10,14 +10,20 @@ internal enum class B2Cohort(val wire: String) {
     FORCED_ON("forced_on"), FORCED_OFF("forced_off"), DEBUG("debug_override")
 }
 
-internal data class B2RolloutDecision(val enabled: Boolean, val cohort: B2Cohort, val configVersion: Long) {
+internal data class B2RolloutDecision(
+    val enabled: Boolean,
+    val cohort: B2Cohort,
+    val configVersion: Long,
+    val configStale: Boolean = false
+) {
     constructor(decision: FeatureDecision, configVersion: Long) : this(decision.enabled, when (decision.source) {
         RolloutSource.BUCKET -> if (decision.enabled) B2Cohort.ON else B2Cohort.OFF
         RolloutSource.INELIGIBLE -> B2Cohort.INELIGIBLE
         RolloutSource.FORCED_ON -> B2Cohort.FORCED_ON
         RolloutSource.FORCED_OFF -> B2Cohort.FORCED_OFF
         RolloutSource.DEBUG -> B2Cohort.DEBUG
-    }, configVersion)
+        RolloutSource.STALE -> B2Cohort.OFF
+    }, configVersion, configStale = decision.source == RolloutSource.STALE)
 }
 
 /** Only a validated D2 offer is eligible. A v14 discovery response can advertise legacy B2. */

@@ -67,6 +67,7 @@ class BtSyncSessionTest {
         assertEquals("b2_on", json.getString("cohort"))
         assertEquals("on", json.getJSONObject("features").getString("b2"))
         assertEquals(3, json.getInt("configVersion"))
+        assertFalse(json.getBoolean("configStale"))
         assertEquals("phone", json.getString("platform"))
         assertEquals("watch", json.getJSONObject("peer").getString("platform"))
         assertEquals("Watch 4", json.getJSONObject("peer").getString("model"))
@@ -115,10 +116,31 @@ class BtSyncSessionTest {
         assertEquals(listOf("failure", "success"), events.map { it.data.getString("result") })
     }
 
+    @Test
+    fun sanitizesSystemAndPeerLabelsAndRecordsStaleOff() = runBlocking {
+        val session = BtSyncSession(
+            BtSyncDevice("install-0", "fixture", 121, "手表\t", "OPPO-[" + "a".repeat(80) + "]", "14\n/.02", 34),
+            BtSyncTrigger.MANUAL, record = { events += it }, now = { 42L }, monotonic = { 42L }
+        )
+        session.decision = B2RolloutDecision(false, B2Cohort.OFF, 42, configStale = true)
+        session.observePeer(JSONObject("""{"success":true,"watchCapabilities":{"model":"AT&T [Watch]+手表"}}"""))
+        session.finishSuccess()
+        val event = events.single().data
+        val labels = event.getJSONObject("device")
+        assertTrue(labels.isNull("manufacturer"))
+        assertEquals("OPPO-[" + "a".repeat(58), labels.getString("model"))
+        assertEquals("14.02", labels.getString("osVersion"))
+        assertEquals("AT&T [Watch]+", event.getJSONObject("peer").getString("model"))
+        assertTrue(event.getBoolean("configStale"))
+        assertEquals(42L, event.getLong("configVersion"))
+        assertEquals("b2_off", event.getString("cohort"))
+        assertEquals("off", event.getJSONObject("features").getString("b2"))
+    }
+
     private fun session(): BtSyncSession {
         var elapsed = 90L
         return BtSyncSession(BtSyncDevice("install-0", "1.4.0-13", 121, "Vendor", "Model", "14", 34),
-            null, BtSyncTrigger.MANUAL, record = { events += it },
+            BtSyncTrigger.MANUAL, record = { events += it },
             now = { 1_000_000L }, monotonic = { elapsed += 10; elapsed })
     }
 }

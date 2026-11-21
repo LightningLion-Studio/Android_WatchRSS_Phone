@@ -4,7 +4,7 @@ import java.security.MessageDigest
 
 internal enum class FeatureOverride(val wire: String) { ON("on"), OFF("off") }
 
-internal enum class RolloutSource { BUCKET, INELIGIBLE, FORCED_ON, FORCED_OFF, DEBUG }
+internal enum class RolloutSource { BUCKET, INELIGIBLE, FORCED_ON, FORCED_OFF, DEBUG, STALE }
 
 internal data class FeatureDecision(val enabled: Boolean, val source: RolloutSource)
 

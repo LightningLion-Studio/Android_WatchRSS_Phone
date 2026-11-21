@@ -191,8 +191,7 @@ class PhoneCompanionContainer(context: Context) {
     }
 
     internal val btSyncTelemetry by lazy {
-        BtSyncTelemetry(appContext, accountEnvironment, installationIdentity.installId,
-            currentAccount = { accountRepository.session.value })
+        BtSyncTelemetry(appContext, accountEnvironment, installationIdentity.installId)
     }
 
     val usageTelemetry: PhoneUsageTelemetry by lazy {

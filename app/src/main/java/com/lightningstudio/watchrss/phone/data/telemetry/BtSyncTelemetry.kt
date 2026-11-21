@@ -14,7 +14,6 @@ import androidx.work.WorkerParameters
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
-import com.lightningstudio.watchrss.phone.account.PhoneAccountSession
 import com.lightningstudio.watchrss.phone.network.CloudCallCancellation
 import com.lightningstudio.watchrss.phone.network.withWatchRssAppVersionHeader
 import com.lightningstudio.watchrss.phone.privacy.PhonePrivacyConsentStore
@@ -36,7 +35,6 @@ internal class BtSyncTelemetry(
     context: Context,
     environment: AccountEnvironment,
     private val installId: String,
-    private val currentAccount: () -> PhoneAccountSession?,
     private val http: OkHttpClient = OkHttpClient.Builder().callTimeout(15, TimeUnit.SECONDS).build(),
     private val scheduleUpload: (ExistingWorkPolicy) -> Unit = { BtSyncTelemetryWorker.schedule(context, it) }
 ) {
@@ -50,7 +48,7 @@ internal class BtSyncTelemetry(
         if (!consent.hasRequiredConsent()) return null
         val device = BtSyncDevice(installId, BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE,
             Build.MANUFACTURER, Build.MODEL, Build.VERSION.RELEASE, Build.VERSION.SDK_INT)
-        return BtSyncSession(device, currentAccount()?.userId, trigger, ::record,
+        return BtSyncSession(device, trigger, ::record,
             System::currentTimeMillis, SystemClock::elapsedRealtime)
     }
 
@@ -79,24 +77,18 @@ internal class BtSyncTelemetry(
         }
         val url = endpoint ?: return@withContext true
         while (consent.hasRequiredConsent()) {
-            val session = currentAccount()?.takeIf { it.isUsableForAuthentication }
-            val batch = queue.batch(session?.userId)
+            val batch = queue.batch()
             if (batch.isEmpty()) return@withContext true
-            if (!consent.hasRequiredConsent()) break
-            val token = session?.takeIf { it.userId == batch.first().owner }?.accessToken
             val payload = JSONObject().put("events", JSONArray(batch.map { it.data })).toString()
                 .toRequestBody("application/json; charset=utf-8".toMediaType())
-            val request = Request.Builder().url(url).withWatchRssAppVersionHeader().post(payload)
-            suspend fun post(token: String?): Int = CloudCallCancellation.run { call ->
+            val request = Request.Builder().url(url).withWatchRssAppVersionHeader().post(payload).build()
+            val status = CloudCallCancellation.run { call ->
                 if (!consent.hasRequiredConsent()) return@run 0
-                val builder = request.build().newBuilder()
-                if (token != null) builder.header("Authorization", "Bearer $token")
-                call.execute(http.newCall(builder.build())) { it.code }
+                call.execute(http.newCall(request)) { it.code }
             }
-            val first = post(token)
-            val status = if (token != null && (first == 401 || first == 403)) post(null) else first
             if (status == 0) break
-            if (status !in 200..299) return@withContext false
+            // A 200 includes rejected rows. They are terminal just like a bad request.
+            if (status == 429 || status in 500..599) return@withContext false
             queue.remove(batch.mapTo(mutableSetOf()) { it.id })
         }
         queue.clear()

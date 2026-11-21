@@ -4,6 +4,8 @@ import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncDevice
 import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncEvent
 import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncSession
 import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncTrigger
+import com.lightningstudio.watchrss.phone.rollout.B2Cohort
+import com.lightningstudio.watchrss.phone.rollout.B2RolloutDecision
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -32,8 +34,11 @@ class B2SessionTest {
             val events = mutableListOf<BtSyncEvent>()
             val telemetry = BtSyncSession(
                 BtSyncDevice("install-0", "fixture", 121, "fixture", "fixture", "14", 34),
-                null, BtSyncTrigger.MANUAL, { events += it }, { 42L }, { 42L }
-            ).apply { binaryStarted() }
+                BtSyncTrigger.MANUAL, { events += it }, { 42L }, { 42L }
+            ).apply {
+                decision = B2RolloutDecision(true, B2Cohort.ON, 0)
+                binaryStarted()
+            }
             val phone = B2Session(phoneIn, phoneOut, this, close).also { it.transferObserver = telemetry }
             val watch = B2Session(watchIn, watchOut, this, close)
             var receiver: B2Receiver? = null

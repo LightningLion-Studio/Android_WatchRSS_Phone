@@ -3,7 +3,6 @@ package com.lightningstudio.watchrss.phone.data.telemetry
 import android.app.Application
 import androidx.work.ExistingWorkPolicy
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
-import com.lightningstudio.watchrss.phone.account.PhoneAccountSession
 import com.lightningstudio.watchrss.phone.privacy.PhonePrivacyConsentStore
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
@@ -34,18 +33,18 @@ class BtSyncTelemetryQueueTest {
         val path = File(temp.root, "events")
         val queue = BtSyncEventQueue(path) { clock }
         repeat(501) { index ->
-            queue.append(BtSyncEvent(JSONObject().put("eventId", "$index").put("occurredAt", clock), null))
+            queue.append(BtSyncEvent(JSONObject().put("eventId", "$index").put("occurredAt", clock)))
         }
         val reopened = BtSyncEventQueue(path) { clock }
         val remaining = mutableListOf<Int>()
         while (reopened.hasPending()) {
-            val rows = reopened.batch(null)
+            val rows = reopened.batch()
             assertEquals(50, rows.size)
             remaining += rows.map { it.id.toInt() }
             reopened.remove(rows.mapTo(mutableSetOf()) { it.id })
         }
         assertEquals((1..500).toList(), remaining)
-        queue.append(BtSyncEvent(JSONObject().put("eventId", "live").put("occurredAt", clock), null))
+        queue.append(BtSyncEvent(JSONObject().put("eventId", "live").put("occurredAt", clock)))
         clock += BT_SYNC_EVENT_LIMIT_MS + 1
         assertFalse(reopened.hasPending())
         assertFalse(path.exists())
@@ -88,41 +87,64 @@ class BtSyncTelemetryQueueTest {
     }
 
     @Test
-    fun delayedEventsKeepOriginalAccountAssociationAndPauseOnConsentWithdrawal() = runBlocking {
+    fun mixedAcceptedResponseAndBadRequestBothRemoveTheWholeBatch() = runBlocking {
         MockWebServer().use { server ->
             acceptConsent()
-            var account = account("alice")
-            val service = service(server, account = { account })
-            service.begin(BtSyncTrigger.MANUAL)!!.finishSuccess()
-            account = account("bob")
-            service.begin(BtSyncTrigger.MANUAL)!!.finishSuccess()
-            repeat(2) { server.enqueue(MockResponse().setResponseCode(200)) }
+            val service = service(server)
+            repeat(2) { service.begin(BtSyncTrigger.MANUAL)!!.finishSuccess() }
+            server.enqueue(MockResponse().setResponseCode(503))
+            assertFalse(service.uploadPending())
+            val retried = server.takeRequest(2, TimeUnit.SECONDS)!!
+            val first = JSONObject(retried.body.readUtf8()).getJSONArray("events")
+            assertEquals(2, first.length())
+            val rejectedId = first.getJSONObject(1).getString("eventId")
+            server.enqueue(MockResponse().setBody(
+                """{"accepted":1,"rejected":[{"eventId":"$rejectedId","reason":"invalid_event"}]}"""
+            ))
             assertTrue(service.uploadPending())
-            assertNull(server.takeRequest(2, TimeUnit.SECONDS)!!.getHeader("Authorization"))
-            assertEquals("Bearer token-bob", server.takeRequest(2, TimeUnit.SECONDS)!!.getHeader("Authorization"))
+            val request = server.takeRequest(2, TimeUnit.SECONDS)!!
+            assertNull(request.getHeader("Authorization"))
+            val body = JSONObject(request.body.readUtf8()).getJSONArray("events")
+            assertEquals(rejectedId, body.getJSONObject(1).getString("eventId"))
+            assertFalse(body.getJSONObject(0).has("userId"))
 
+            service.begin(BtSyncTrigger.MANUAL)!!.finishSuccess()
+            server.enqueue(MockResponse().setResponseCode(400))
+            assertTrue(service.uploadPending())
+            val badRequest = server.takeRequest(2, TimeUnit.SECONDS)!!
+            assertEquals(1, JSONObject(badRequest.body.readUtf8()).getJSONArray("events").length())
+            assertTrue(service.uploadPending())
+            assertEquals(3, server.requestCount)
+        }
+    }
+
+    @Test
+    fun consentWithdrawalClearsPendingAndStopsNewRecords() = runBlocking {
+        MockWebServer().use { server ->
+            acceptConsent()
+            val service = service(server)
+            service.begin(BtSyncTrigger.MANUAL)!!.finishSuccess()
             val active = service.begin(BtSyncTrigger.MANUAL)!!
             val application = RuntimeEnvironment.getApplication()
             application.getSharedPreferences(PhonePrivacyConsentStore.PREFERENCES_NAME, 0).edit().clear().commit()
             active.finishSuccess()
             assertTrue(service.uploadPending())
             assertNull(service.begin(BtSyncTrigger.MANUAL))
-            assertEquals(2, server.requestCount)
+            acceptConsent()
+            assertTrue(service.uploadPending())
+            assertEquals(0, server.requestCount)
         }
     }
 
     private fun acceptConsent() =
         PhonePrivacyConsentStore(RuntimeEnvironment.getApplication()).acceptRequiredPolicies()
 
-    private fun account(owner: String) = PhoneAccountSession(owner, "", "token-$owner", "", 0L)
-
     private fun service(
         server: MockWebServer,
-        account: () -> PhoneAccountSession? = { null },
         schedule: (ExistingWorkPolicy) -> Unit = {}
     ) = BtSyncTelemetry(
         RuntimeEnvironment.getApplication(),
         AccountEnvironment(backendBaseUrl = server.url("/").toString().trimEnd('/')),
-        "install-0", currentAccount = account, scheduleUpload = schedule
+        "install-0", scheduleUpload = schedule
     )
 }

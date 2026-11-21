@@ -114,6 +114,39 @@ class ClientConfigRepositoryTest {
     }
 
     @Test
+    fun oldServerTtlIsCappedAndOlderThanSevenDaysShutsOffUntilRefresh() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(config(3, 100, "on")))
+            val repo = repository(server)
+            val offer = JSONObject().put("guardedLibraryVersion", 1).put("libraryBinary", JSONObject())
+            assertEquals(600L, repo.snapshotForSession().ttlSeconds)
+            val first = repo.decideB2(true, offer)
+            assertTrue(first.enabled)
+            clock += 599_999
+            assertNull(repo.refreshIfStale())
+            clock++
+            server.enqueue(MockResponse().setResponseCode(503))
+            assertEquals(first, repo.decideB2(true, offer))
+            assertEquals(2, server.requestCount)
+
+            clock += 7L * 24 * 60 * 60 * 1000 - 600_000
+            assertFalse(repo.currentSnapshot().stale)
+            clock++
+            repo.setDebugOverride(feature, FeatureOverride.ON)
+            server.enqueue(MockResponse().setResponseCode(503))
+            val expired = repo.decideB2(true, offer)
+            assertEquals(B2RolloutDecision(false, B2Cohort.OFF, 3, configStale = true), expired)
+            assertTrue(first.enabled)
+            assertFalse(first.configStale)
+            assertEquals(expired, repo.decideB2(false, null))
+
+            repo.setDebugOverride(feature, null)
+            server.enqueue(MockResponse().setBody(config(4, 100, "on")))
+            assertEquals(B2RolloutDecision(true, B2Cohort.FORCED_ON, 4), repo.decideB2(true, offer))
+        }
+    }
+
+    @Test
     fun registeredKeyAbsentInResponseUsesDefaultWithFetchedVersion() {
         val snapshot = parseClientConfig(JSONObject("""{"configVersion":9,"ttlSeconds":3600,"features":{"other":42}}"""))
         assertEquals(9L, snapshot.version)

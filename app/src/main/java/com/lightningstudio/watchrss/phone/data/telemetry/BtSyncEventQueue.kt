@@ -3,7 +3,6 @@ package com.lightningstudio.watchrss.phone.data.telemetry
 import android.util.AtomicFile
 import org.json.JSONArray
 import org.json.JSONException
-import org.json.JSONObject
 import java.io.File
 import java.io.FileNotFoundException
 
@@ -22,12 +21,7 @@ internal class BtSyncEventQueue(path: File, private val now: () -> Long = System
     fun hasPending(): Boolean = prune().isNotEmpty()
 
     @Synchronized
-    fun batch(authenticatedOwner: String?): List<BtSyncEvent> {
-        val rows = prune()
-        val authenticated = authenticatedOwner != null && rows.firstOrNull()?.owner == authenticatedOwner
-        return rows.takeWhile { (authenticatedOwner != null && it.owner == authenticatedOwner) == authenticated }
-            .take(MAX_BATCH)
-    }
+    fun batch(): List<BtSyncEvent> = prune().take(MAX_BATCH)
 
     @Synchronized
     fun remove(ids: Set<String>) = write(liveRows().filterNot { it.id in ids })
@@ -51,7 +45,7 @@ internal class BtSyncEventQueue(path: File, private val now: () -> Long = System
         val array = JSONArray(file.readFully().toString(Charsets.UTF_8))
         (0 until array.length()).map { i ->
             val row = array.getJSONObject(i)
-            BtSyncEvent(row.getJSONObject("event"), row.opt("owner") as? String)
+            BtSyncEvent(row.optJSONObject("event") ?: row)
         }
     } catch (_: FileNotFoundException) {
         emptyList()
@@ -64,7 +58,7 @@ internal class BtSyncEventQueue(path: File, private val now: () -> Long = System
             file.delete()
             return
         }
-        val payload = JSONArray(rows.map { JSONObject().put("event", it.data).put("owner", it.owner ?: JSONObject.NULL) })
+        val payload = JSONArray(rows.map { it.data })
         val out = file.startWrite()
         try {
             out.write(payload.toString().toByteArray(Charsets.UTF_8))

@@ -1,13 +1,17 @@
 package com.lightningstudio.watchrss.phone.rollout
 
 import android.content.Context
+import androidx.core.content.edit
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
+import com.lightningstudio.watchrss.phone.features.EvaluateAt
+import com.lightningstudio.watchrss.phone.features.FeatureDecision
 import com.lightningstudio.watchrss.phone.features.FeatureOverride
 import com.lightningstudio.watchrss.phone.features.FeatureRegistry
 import com.lightningstudio.watchrss.phone.features.FeatureRollout
 import com.lightningstudio.watchrss.phone.features.FeatureRolloutPolicy
 import com.lightningstudio.watchrss.phone.features.RegisteredFeature
+import com.lightningstudio.watchrss.phone.features.RolloutSource
 import com.lightningstudio.watchrss.phone.network.withWatchRssAppVersionHeader
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -23,10 +27,14 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
+private const val MAX_CONFIG_TTL_SECONDS = 600L
+private const val CONFIG_EXPIRATION_MS = 7L * 24 * 60 * 60 * 1000
+
 internal data class ClientConfig(
     val version: Long = 0,
-    val ttlSeconds: Long = 3600,
-    val features: Map<String, FeatureRollout> = emptyMap()
+    val ttlSeconds: Long = MAX_CONFIG_TTL_SECONDS,
+    val features: Map<String, FeatureRollout> = emptyMap(),
+    val stale: Boolean = false
 ) {
     fun rollout(feature: RegisteredFeature) = features[feature.key] ?: feature.defaults
 }
@@ -59,7 +67,7 @@ internal class ClientConfigRepository(
 
     fun setDebugOverride(feature: RegisteredFeature, value: FeatureOverride?) {
         if (BuildConfig.DEBUG || feature.releaseDebugOverride) {
-            prefs.edit().putString("debug_override_${feature.key}", value?.wire).apply()
+            prefs.edit { putString("debug_override_${feature.key}", value?.wire) }
         }
     }
 
@@ -83,8 +91,11 @@ internal class ClientConfigRepository(
                     if (config.version < (cached?.config?.version ?: 0)) return@use
                     val fetchedAt = now()
                     cached = Cached(config, fetchedAt)
-                    prefs.edit().putString("last_config", json.toString()).putString("install_id", installId)
-                        .putLong("fetched_at", fetchedAt).apply()
+                    prefs.edit {
+                        putString("last_config", json.toString())
+                        putString("install_id", installId)
+                        putLong("fetched_at", fetchedAt)
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -103,11 +114,19 @@ internal class ClientConfigRepository(
         return currentSnapshot()
     }
 
-    fun currentSnapshot(): ClientConfig = cached?.config ?: ClientConfig()
+    fun currentSnapshot(): ClientConfig {
+        val snapshot = cached ?: return ClientConfig()
+        return if (now() - snapshot.fetchedAt > CONFIG_EXPIRATION_MS) snapshot.config.copy(stale = true)
+            else snapshot.config
+    }
 
-    fun decide(config: ClientConfig, feature: RegisteredFeature, eligible: Boolean) =
-        FeatureRolloutPolicy.decide(config.rollout(feature), installId, eligible,
+    fun decide(config: ClientConfig, feature: RegisteredFeature, eligible: Boolean): FeatureDecision {
+        if (config.stale && feature.evaluateAt == EvaluateAt.SESSION) {
+            return FeatureDecision(false, RolloutSource.STALE)
+        }
+        return FeatureRolloutPolicy.decide(config.rollout(feature), installId, eligible,
             BuildConfig.VERSION_CODE, debugOverride(feature))
+    }
 
     private fun readCache(): Cached? = try {
         prefs.getString("last_config", null)?.takeIf { prefs.getString("install_id", null) == installId }?.let {
@@ -133,7 +152,7 @@ internal fun parseClientConfig(json: JSONObject): ClientConfig {
     }.toMap()
     return ClientConfig(
         version = integer(json, "configVersion", 0, 9_007_199_254_740_991L),
-        ttlSeconds = integer(json, "ttlSeconds", 0, Long.MAX_VALUE / 1000),
+        ttlSeconds = integer(json, "ttlSeconds", 0, Long.MAX_VALUE).coerceAtMost(MAX_CONFIG_TTL_SECONDS),
         features = rollouts
     )
 }

@@ -192,7 +192,11 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
     }
 
     private fun refreshClientConfig() {
-        if (PhonePrivacyConsentStore(this).hasRequiredConsent()) container.clientConfig.refreshIfStale()
+        appScope.launch {
+            if (PhonePrivacyConsentStore(this@PhoneCompanionApplication).hasRequiredConsent()) {
+                container.clientConfig.refreshIfStale()
+            }
+        }
     }
 
     private fun startConsentDependentServices() {

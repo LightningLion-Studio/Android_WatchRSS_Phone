@@ -450,8 +450,8 @@ class PhoneCompanionContainer(context: Context) {
                 }
             }
         ).also { manager ->
-            manager.b2RolloutConfig = clientConfig
-            manager.btSyncTelemetry = btSyncTelemetry
+            manager.b2RolloutConfig = { clientConfig }
+            manager.btSyncTelemetry = { btSyncTelemetry }
             manager.b2AccountFence = { accountRepository.b2AccountFence }
             if (BuildConfig.SYNC_V2) manager.bookRollbackWindow = cloudSyncService::syncV2BookRollbackWindow
             if(BuildConfig.SYNC_V2 || BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION)manager.recordLegacyProjection={peer,version,cursor,payload ->

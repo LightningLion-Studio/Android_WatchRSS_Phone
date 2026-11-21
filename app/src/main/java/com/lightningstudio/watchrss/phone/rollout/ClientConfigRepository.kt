@@ -1,6 +1,9 @@
 package com.lightningstudio.watchrss.phone.rollout
 
 import android.content.Context
+import android.content.SharedPreferences
+import android.os.SystemClock
+import android.provider.Settings
 import androidx.core.content.edit
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
@@ -16,6 +19,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -27,6 +31,9 @@ import java.util.concurrent.TimeUnit
 
 private const val MAX_CONFIG_TTL_SECONDS = 600L
 private const val CONFIG_EXPIRATION_MS = 7L * 24 * 60 * 60 * 1000
+private const val SESSION_CONFIG_WAIT_MS = 1500L
+private const val FETCHED_ELAPSED = "fetched_elapsed"
+private const val FETCHED_BOOT = "fetched_boot"
 
 internal data class ClientConfig(
     val version: Long = 0,
@@ -45,39 +52,67 @@ internal class ClientConfigRepository(
     private val http: OkHttpClient = OkHttpClient.Builder().callTimeout(8, TimeUnit.SECONDS).build(),
     private val now: () -> Long = System::currentTimeMillis
 ) {
-    private val prefs = context.applicationContext.getSharedPreferences(
-        "watchrss_client_config${environment.storageSuffix}", Context.MODE_PRIVATE
-    )
     private val endpoint = "${environment.backendBaseUrl}/functions/v1/client-config".toHttpUrlOrNull()
         ?.newBuilder()
         ?.addQueryParameter("platform", "phone")
         ?.addQueryParameter("appVersionCode", BuildConfig.VERSION_CODE.toString())
         ?.addQueryParameter("installId", installId)
         ?.build()
-    private data class Cached(val config: ClientConfig, val fetchedAt: Long)
-    @Volatile private var cached = readCache()
+    private data class Cached(val config: ClientConfig, val elapsedAnchor: Long) {
+        fun age() = SystemClock.elapsedRealtime() - elapsedAnchor
+        fun isFresh() = age() in 0 until config.ttlSeconds * 1000L
+    }
+
+    private data class Storage(val prefs: SharedPreferences, val boot: Int)
+    @Volatile private var cached: Cached? = null
+    @Volatile private var debugOverrides = emptyMap<String, FeatureOverride>()
     private var inFlight: Deferred<Unit>? = null
+    private val storage = scope.async(Dispatchers.IO) {
+        val app = context.applicationContext
+        val prefs = app.getSharedPreferences(
+            "watchrss_client_config${environment.storageSuffix}", Context.MODE_PRIVATE
+        )
+        val boot = runCatching {
+            Settings.Global.getInt(app.contentResolver, Settings.Global.BOOT_COUNT, -1)
+        }.getOrDefault(-1)
+        debugOverrides = FeatureRegistry.entries.filter(::supportsDebugOverride).mapNotNull { feature ->
+            val wire = prefs.getString("debug_override_${feature.key}", null)
+            FeatureOverride.entries.firstOrNull { it.wire == wire }?.let { feature.key to it }
+        }.toMap()
+        cached = readCache(prefs, boot)
+        Storage(prefs, boot)
+    }
 
-    fun debugOverride(feature: RegisteredFeature): FeatureOverride? =
-        if (BuildConfig.DEBUG || feature.releaseDebugOverride) {
-            FeatureOverride.entries.firstOrNull { it.wire == prefs.getString("debug_override_${feature.key}", null) }
-        } else null
+    private fun supportsDebugOverride(feature: RegisteredFeature) = BuildConfig.DEBUG || feature.releaseDebugOverride
 
-    fun setDebugOverride(feature: RegisteredFeature, value: FeatureOverride?) {
-        if (BuildConfig.DEBUG || feature.releaseDebugOverride) {
-            prefs.edit { putString("debug_override_${feature.key}", value?.wire) }
+    suspend fun loadDebugOverride(feature: RegisteredFeature): FeatureOverride? {
+        storage.await()
+        return debugOverride(feature)
+    }
+
+    private fun debugOverride(feature: RegisteredFeature) =
+        debugOverrides[feature.key].takeIf { supportsDebugOverride(feature) }
+
+    suspend fun setDebugOverride(feature: RegisteredFeature, value: FeatureOverride?) {
+        if (!supportsDebugOverride(feature)) return
+        val prefs = storage.await().prefs
+        withContext(Dispatchers.IO) {
+            synchronized(prefs) {
+                prefs.edit { putString("debug_override_${feature.key}", value?.wire) }
+                debugOverrides = if (value == null) debugOverrides - feature.key
+                    else debugOverrides + (feature.key to value)
+            }
         }
     }
 
     @Synchronized
     fun refreshIfStale(): Deferred<Unit>? {
         val url = endpoint ?: return null
-        val snapshot = cached
-        if (snapshot != null && now() - snapshot.fetchedAt in 0 until snapshot.config.ttlSeconds * 1000L) {
-            return null
-        }
+        if (cached?.isFresh() == true) return null
         inFlight?.takeIf { !it.isCompleted }?.let { return it }
         return scope.async(Dispatchers.IO) {
+            val (prefs, boot) = storage.await()
+            if (cached?.isFresh() == true) return@async
             try {
                 val request = Request.Builder().url(url).withWatchRssAppVersionHeader().build()
                 http.newCall(request).execute().use { response ->
@@ -88,12 +123,15 @@ internal class ClientConfigRepository(
                     val config = parseClientConfig(json)
                     if (config.version < (cached?.config?.version ?: 0)) return@use
                     val fetchedAt = now()
-                    cached = Cached(config, fetchedAt)
+                    val elapsed = SystemClock.elapsedRealtime()
                     prefs.edit {
                         putString("last_config", json.toString())
                         putString("install_id", installId)
                         putLong("fetched_at", fetchedAt)
+                        putLong(FETCHED_ELAPSED, elapsed)
+                        putInt(FETCHED_BOOT, boot)
                     }
+                    cached = Cached(config, elapsed)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -106,25 +144,43 @@ internal class ClientConfigRepository(
         }.also { inFlight = it }
     }
 
-    suspend fun snapshotForSession(): ClientConfig {
-        val refresh = refreshIfStale()
-        if (refresh != null) withTimeoutOrNull(1500L) { refresh.await() }
+    suspend fun snapshotForSession(waitForRefresh: Boolean = true): ClientConfig {
+        val pending = if (waitForRefresh) refreshIfStale() ?: storage else storage
+        withTimeoutOrNull(SESSION_CONFIG_WAIT_MS) { pending.await() }
         return currentSnapshot()
     }
 
     fun currentSnapshot(): ClientConfig {
         val snapshot = cached ?: return ClientConfig()
-        return if (now() - snapshot.fetchedAt > CONFIG_EXPIRATION_MS) snapshot.config.copy(stale = true)
-            else snapshot.config
+        return if (snapshot.age() in 0..CONFIG_EXPIRATION_MS) snapshot.config
+            else snapshot.config.copy(stale = true)
     }
 
     fun decide(config: ClientConfig, feature: RegisteredFeature, eligible: Boolean) =
         FeatureRolloutPolicy.decide(config.rollout(feature), installId, eligible,
             BuildConfig.VERSION_CODE, debugOverride(feature), stale = config.stale && feature.evaluateAt == EvaluateAt.SESSION)
 
-    private fun readCache(): Cached? = try {
+    private fun readCache(prefs: SharedPreferences, boot: Int): Cached? = try {
         prefs.getString("last_config", null)?.takeIf { prefs.getString("install_id", null) == installId }?.let {
-            Cached(parseClientConfig(JSONObject(it)), prefs.getLong("fetched_at", 0L))
+            val config = parseClientConfig(JSONObject(it))
+            val elapsed = SystemClock.elapsedRealtime()
+            val savedAnchor = prefs.getLong(FETCHED_ELAPSED, Long.MIN_VALUE)
+            val sameBoot = boot >= 0 && boot == prefs.getInt(FETCHED_BOOT, -1)
+            val anchor = if (sameBoot && savedAnchor != Long.MIN_VALUE && savedAnchor <= elapsed) {
+                savedAnchor
+            } else {
+                // A reboot or legacy cache has no usable elapsed anchor. Rebase its wall age
+                // onto this boot so subsequent wall adjustments do not extend the cache.
+                val wallAge = now() - prefs.getLong("fetched_at", 0L)
+                val age = if (wallAge < 0) CONFIG_EXPIRATION_MS + 1 else wallAge
+                (elapsed - age).also { rebased ->
+                    if (boot >= 0) prefs.edit {
+                        putLong(FETCHED_ELAPSED, rebased)
+                        putInt(FETCHED_BOOT, boot)
+                    }
+                }
+            }
+            Cached(config, anchor)
         }
     } catch (_: JSONException) {
         null

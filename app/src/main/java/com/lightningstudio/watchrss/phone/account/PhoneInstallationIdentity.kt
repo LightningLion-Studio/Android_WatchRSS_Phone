@@ -18,6 +18,7 @@ class PhoneInstallationIdentity(context: Context) {
     val databaseInitializedAtMillis: Long
         get() = getOrCreateLong(KEY_DATABASE_INITIALIZED_AT) { System.currentTimeMillis() }
 
+    @Synchronized
     private fun getOrCreateString(key: String, create: () -> String): String {
         val existing = preferences.getString(key, null)
         if (!existing.isNullOrBlank()) return existing

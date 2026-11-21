@@ -16,21 +16,22 @@ import java.io.*
 import java.util.concurrent.atomic.AtomicInteger
 
 class B2SessionTest {
-    /** Phone B2Client and a separate watch B2Receiver execute real raw frames over two
-     * host pipes. No Android classes or in-memory frame shortcut crosses this boundary. */
-    @Test fun s2ClientAndReceiverCompleteRawMultiBlockTransfer() = runBlocking {
+    @Test fun s2ClientAndReceiverCompleteRawMultiBlockTransfer() = runRawTransfer(dropAck = false)
+
+    @Test fun resumeCountsDurableChunkWhoseAckWasLostWithoutCountingEarlierAckTwice() =
+        runRawTransfer(dropAck = true)
+
+    /** A separate B2Receiver executes raw frames over host pipes on each connection. */
+    private fun runRawTransfer(dropAck: Boolean) = runBlocking<Unit> {
         withTimeout(15000) {
-            val phoneIn = PipedInputStream(262144); val watchOut = PipedOutputStream(phoneIn)
-            val watchIn = PipedInputStream(262144); val phoneOut = PipedOutputStream(watchIn)
-            val close = { runCatching { phoneIn.close() }; runCatching { watchIn.close() }; runCatching { phoneOut.close() }; runCatching { watchOut.close() }; Unit }
-            val x = ReceiverRig(ByteArray(65536 + 19) { (it * 7).toByte() })
-            val sourceStore = MemoryB2Store(); val sourceRoot = java.nio.file.Files.createTempDirectory("b2-source").toFile()
+            val x = ReceiverRig(ByteArray(2 * B2Wire.CHUNK + 19) { (it * 7).toByte() })
+            val sourceStore = MemoryB2Store()
+            val sourceRoot = java.nio.file.Files.createTempDirectory("b2-source").toFile()
             val sourceFile = File(sourceRoot, "original").apply { writeBytes(x.bytes) }
             val sourceSnapshots = B2Snapshots(sourceStore, B2Files(File(sourceRoot, "frozen")))
             val witness = sourceSnapshots.freeze(x.account, "source", listOf(x.descriptor)) { sourceFile }
             val cap = B2Negotiation.capability(setOf("noteAsset"), setOf("noteAsset"), B2Wire.s2Limits())
             val selection = B2Negotiation.select(x.cap, cap, "phoneToWatch")!!
-            val binding = obj("direction" to "phoneToWatch", "jobId" to x.job, "intent" to "create", "selection" to selection)
             val events = mutableListOf<BtSyncEvent>()
             val telemetry = BtSyncSession(
                 BtSyncDevice("install-0", "fixture", 121, "fixture", "fixture", "14", 34),
@@ -39,42 +40,82 @@ class B2SessionTest {
                 decision = B2RolloutDecision(true, B2Cohort.ON, 0)
                 binaryStarted()
             }
-            val phone = B2Session(phoneIn, phoneOut, this, close).also { it.transferObserver = telemetry }
-            val watch = B2Session(watchIn, watchOut, this, close)
-            var receiver: B2Receiver? = null
             val commits = AtomicInteger()
-            // An installed dummy receiver permits prepare routing before confirm.
-            val dummy = x.receiver()
-            watch.install(dummy) { r ->
-                if (r.s("phase") == "prepare") {
+            val lostAcks = AtomicInteger()
+
+            suspend fun transfer(intent: String, interrupt: Boolean): JSONObject {
+                val phoneIn = PipedInputStream(262144)
+                val watchOut = PipedOutputStream(phoneIn)
+                val watchIn = PipedInputStream(262144)
+                val phoneOut = PipedOutputStream(watchIn)
+                val close = {
+                    listOf(phoneIn, watchIn, phoneOut, watchOut).forEach { runCatching { it.close() } }
+                }
+                val responseStream = if (!interrupt) watchOut else object : ByteArrayOutputStream() {
+                    override fun flush() {
+                        val encoded = toByteArray()
+                        reset()
+                        val frame = B2Frames.decode(encoded)
+                        if (frame is B2Frame.Ack && frame.entries.any { it.txSeq == 2L && it.disposition == 1 }) {
+                            lostAcks.incrementAndGet()
+                            throw EOFException("Disconnect after durable chunk, before ACK delivery")
+                        }
+                        watchOut.write(encoded)
+                    }
+                }
+                val phone = B2Session(phoneIn, phoneOut, this, close).also { it.transferObserver = telemetry }
+                val watch = B2Session(watchIn, responseStream, this, close)
+                val binding = obj("direction" to "phoneToWatch", "jobId" to x.job,
+                    "intent" to intent, "selection" to selection)
+                watch.install(x.receiver()) { r ->
                     val p = r.o("payload")
-                    val result = if (p.s("step") == "offer") obj("step" to "offer", "watchCapabilities" to cap, "watchSnapshot" to x.snapshot, "offerDigest" to B2Digests.offer(p, cap, x.snapshot))
-                    else {
+                    val result = if (p.s("step") == "offer") {
+                        obj("step" to "offer", "watchCapabilities" to cap, "watchSnapshot" to x.snapshot,
+                            "offerDigest" to B2Digests.offer(p, cap, x.snapshot))
+                    } else {
                         val auth = B2Authorization(x.account, "phone", "watch", witness, x.snapshot, listOf(binding)) { true }
-                        receiver = B2Receiver(x.store, x.files, auth, object : B2BusinessPort {
+                        val receiver = B2Receiver(x.store, x.files, auth, object : B2BusinessPort {
                             override val kinds = setOf("noteAsset")
                             override suspend fun apply(descriptor: JSONObject, metadata: JSONObject, staged: File): String {
-                                assertArrayEquals(x.bytes, staged.readBytes()); commits.incrementAndGet(); return "merged"
+                                assertArrayEquals(x.bytes, staged.readBytes())
+                                commits.incrementAndGet()
+                                return "merged"
                             }
                         }, receiveDirection = "phoneToWatch")
-                        // Swap handler before writing confirm response, so the next DATA is routable.
-                        watch.install(receiver!!) { receiver!!.handle(it) }
+                        watch.install(receiver, receiver::handle)
                         obj("step" to "confirm", "preparationDigest" to p.s("preparationDigest"))
                     }
                     B2Results.answer(r, result, null)
-                } else receiver!!.handle(r)
+                }
+                val client = B2Client(sourceStore, sourceSnapshots, phone::exchange, {}, phone)
+                client.acceptProbe(obj("libraryBinary" to cap))
+                try {
+                    watch.start()
+                    phone.start()
+                    client.offer(x.account, "phone", "watch", x.cap, witness)
+                    client.confirm(listOf(binding)) { }
+                    val complete = client.send(x.job)
+                    sourceRoot.deleteRecursively()
+                    client.retire(x.job)
+                    return complete
+                } finally {
+                    phone.close()
+                    watch.close()
+                    close()
+                }
             }
-            watch.start(); phone.start()
-            val client = B2Client(sourceStore, sourceSnapshots, phone::exchange, {}, phone)
-            client.acceptProbe(obj("libraryBinary" to cap))
+
             try {
-                client.offer(x.account, "phone", "watch", x.cap, witness)
-                client.confirm(listOf(binding)) { }
-                val complete = client.send(x.job)
-                assertEquals("COMPLETE", complete.s("state")); assertEquals(1, commits.get())
+                if (dropAck) {
+                    val failure = runCatching { transfer("create", interrupt = true) }.exceptionOrNull()
+                    assertTrue("Expected transport failure, got $failure", failure is IOException)
+                    assertEquals(1, lostAcks.get())
+                    assertEquals(2, x.store.list(x.account, "chunk").size)
+                    assertEquals(0, commits.get())
+                }
+                val complete = transfer(if (dropAck) "resume" else "create", interrupt = false)
+                assertEquals("COMPLETE", complete.s("state"))
                 assertNotNull(sourceStore.get(x.account, "peerAck", x.job))
-                sourceRoot.deleteRecursively()
-                client.retire(x.job)
                 assertEquals("COMPLETE", x.store.get(x.account, "job", x.job)!!.s("state"))
                 assertEquals(1, commits.get())
                 telemetry.finishSuccess()
@@ -86,10 +127,13 @@ class B2SessionTest {
                 assertEquals(1, transfer.getInt("objects"))
                 assertEquals(0, transfer.getInt("resentChunks"))
                 assertEquals(1, event.getJSONObject("kinds").getInt("noteAsset"))
-            } finally { phone.close(); watch.close(); close(); sourceRoot.deleteRecursively(); x.root.deleteRecursively() }
+            } finally {
+                sourceRoot.deleteRecursively()
+                x.root.deleteRecursively()
+            }
         }
-        Unit
     }
+
     @Test fun onlyCorrelatedApplyBusinessStopCarriesRejectedObjectToTheController() = runBlocking<Unit> {
         for ((phase, code) in listOf("apply" to "BUSINESS_REJECTED", "apply" to "LOCAL_IO",
             "missing" to "LIMIT_EXCEEDED")) {

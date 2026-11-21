@@ -100,7 +100,8 @@ class BtSyncTelemetryWorker(context: Context, parameters: WorkerParameters) : Co
     override suspend fun doWork(): Result {
         val app = applicationContext as PhoneCompanionApplication
         return try {
-            if (app.container.btSyncTelemetry.uploadPending()) Result.success() else Result.retry()
+            val uploaded = withContext(Dispatchers.IO) { app.container.btSyncTelemetry.uploadPending() }
+            if (uploaded) Result.success() else Result.retry()
         } catch (_: IOException) {
             Result.retry()
         }

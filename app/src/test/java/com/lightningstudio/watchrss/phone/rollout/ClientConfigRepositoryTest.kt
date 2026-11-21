@@ -1,6 +1,10 @@
 package com.lightningstudio.watchrss.phone.rollout
 
 import android.app.Application
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.SharedPreferences
+import android.provider.Settings
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
 import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncDevice
@@ -32,6 +36,9 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowSystemClock
+import java.time.Duration
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
@@ -62,7 +69,7 @@ class ClientConfigRepositoryTest {
             assertEquals(downloaded, first.snapshotForSession())
             assertEquals(1, server.requestCount)
 
-            clock += 3_601_000
+            advanceClock(3_601_000)
             server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
             val afterRestart = repository(server)
             assertEquals(downloaded, afterRestart.snapshotForSession())
@@ -82,7 +89,7 @@ class ClientConfigRepositoryTest {
                 assertEquals(feature.defaults, snapshot.rollout(feature))
                 assertEquals(20, snapshot.rollout(feature).percent)
                 assertFalse(snapshot.stale)
-                clock += TimeUnit.DAYS.toMillis(8)
+                advanceClock(TimeUnit.DAYS.toMillis(8))
             }
         }
     }
@@ -104,6 +111,40 @@ class ClientConfigRepositoryTest {
     }
 
     @Test
+    fun sessionUsesDefaultsWhenIoCacheLoadExceedsItsBudget() = runBlocking {
+        val app = RuntimeEnvironment.getApplication()
+        val prefs = app.getSharedPreferences("watchrss_client_config", Context.MODE_PRIVATE)
+        check(prefs.edit()
+            .putString("install_id", installId)
+            .putString("last_config", config(3, 100, null))
+            .putLong("fetched_at", clock)
+            .commit())
+        val caller = Thread.currentThread()
+        val loadStarted = CountDownLatch(1)
+        val releaseLoad = CountDownLatch(1)
+        val delayedContext = object : ContextWrapper(app) {
+            override fun getApplicationContext(): Context = this
+            override fun getSharedPreferences(name: String, mode: Int): SharedPreferences {
+                check(Thread.currentThread() != caller)
+                loadStarted.countDown()
+                check(releaseLoad.await(5, TimeUnit.SECONDS))
+                return super.getSharedPreferences(name, mode)
+            }
+        }
+        val repo = ClientConfigRepository(delayedContext, AccountEnvironment(backendBaseUrl = ""),
+            installId, scope, now = { clock })
+        try {
+            assertTrue(loadStarted.await(2, TimeUnit.SECONDS))
+            val cold = repo.snapshotForSession()
+            assertEquals(0L, cold.version)
+            assertEquals(feature.defaults, cold.rollout(feature))
+        } finally {
+            releaseLoad.countDown()
+        }
+        assertEquals(3L, repo.snapshotForSession(waitForRefresh = false).version)
+    }
+
+    @Test
     fun snapshotFreezesEachDecisionAndRejectsUnguardedPeers() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody(config(3, 100, "on")))
@@ -115,7 +156,7 @@ class ClientConfigRepositoryTest {
             assertTrue(first.enabled)
             assertEquals(B2Cohort.FORCED_ON, first.cohort)
 
-            clock += 3_601_000
+            advanceClock(3_601_000)
             server.enqueue(MockResponse().setBody(config(4, 0, "on")))
             val next = repo.decideB2(true, offer)
             assertFalse(next.enabled)
@@ -134,20 +175,20 @@ class ClientConfigRepositoryTest {
             assertEquals(600L, repo.snapshotForSession().ttlSeconds)
             val first = repo.decideB2(true, offer)
             assertEquals(B2RolloutDecision(true, B2Cohort.ON, 3), first)
-            clock += 599_999
+            advanceClock(599_999)
             assertNull(repo.refreshIfStale())
-            clock++
+            advanceClock(1)
             server.enqueue(MockResponse().setResponseCode(503))
             assertEquals(first, repo.decideB2(true, offer))
             assertEquals(2, server.requestCount)
 
-            clock += TimeUnit.DAYS.toMillis(6) + TimeUnit.HOURS.toMillis(23) - 600_000
+            advanceClock(TimeUnit.DAYS.toMillis(6) + TimeUnit.HOURS.toMillis(23) - 600_000)
             server.enqueue(MockResponse().setResponseCode(503))
             assertEquals(first, repo.decideB2(true, offer))
 
-            clock += TimeUnit.HOURS.toMillis(1)
+            advanceClock(TimeUnit.HOURS.toMillis(1))
             assertFalse(repo.currentSnapshot().stale)
-            clock++
+            advanceClock(1)
             server.enqueue(MockResponse().setResponseCode(503))
             val expired = repo.decideB2(true, offer)
             assertEquals(B2RolloutDecision(false, B2Cohort.OFF, 3, configStale = true), expired)
@@ -185,13 +226,60 @@ class ClientConfigRepositoryTest {
     }
 
     @Test
+    fun wallClockRollbackCannotExtendCacheAcrossProcessRestartInSameBoot() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        Settings.Global.putInt(context.contentResolver, Settings.Global.BOOT_COUNT, 12)
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(config(3, 42, null)))
+            val repo = repository(server)
+            val offer = JSONObject().put("guardedLibraryVersion", 1).put("libraryBinary", JSONObject())
+            assertEquals(B2RolloutDecision(true, B2Cohort.ON, 3), repo.decideB2(true, offer))
+
+            clock -= TimeUnit.DAYS.toMillis(8)
+            ShadowSystemClock.advanceBy(Duration.ofDays(8))
+            clock += TimeUnit.DAYS.toMillis(8)
+            val expected = B2RolloutDecision(false, B2Cohort.OFF, 3, configStale = true)
+            server.enqueue(MockResponse().setResponseCode(503))
+            assertEquals(expected, repo.decideB2(true, offer))
+            server.enqueue(MockResponse().setResponseCode(503))
+            assertEquals(expected, repository(server).decideB2(true, offer))
+        }
+    }
+
+    @Test
+    fun rebootUsesWallClockAndTreatsNegativeAgeAsExpired() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        Settings.Global.putInt(context.contentResolver, Settings.Global.BOOT_COUNT, 12)
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(config(3, 42, null)))
+            val repo = repository(server)
+            val offer = JSONObject().put("guardedLibraryVersion", 1).put("libraryBinary", JSONObject())
+            val enabled = B2RolloutDecision(true, B2Cohort.ON, 3)
+            assertEquals(enabled, repo.decideB2(true, offer))
+
+            Settings.Global.putInt(context.contentResolver, Settings.Global.BOOT_COUNT, 13)
+            // New uptime can already exceed the old fetch's elapsedRealtime.
+            ShadowSystemClock.advanceBy(Duration.ofDays(8))
+            clock += TimeUnit.DAYS.toMillis(1)
+            server.enqueue(MockResponse().setResponseCode(503))
+            assertEquals(enabled, repository(server).decideB2(true, offer))
+
+            Settings.Global.putInt(context.contentResolver, Settings.Global.BOOT_COUNT, 14)
+            clock -= TimeUnit.DAYS.toMillis(8)
+            server.enqueue(MockResponse().setResponseCode(503))
+            assertEquals(B2RolloutDecision(false, B2Cohort.OFF, 3, configStale = true),
+                repository(server).decideB2(true, offer))
+        }
+    }
+
+    @Test
     fun explicitOverridesSurviveExpirationAndZeroStillShutsDown() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody(config(3, 1, "on")))
             val repo = repository(server)
             val offer = JSONObject().put("guardedLibraryVersion", 1).put("libraryBinary", JSONObject())
             assertTrue(repo.decideB2(true, offer).enabled)
-            clock += 7L * 24 * 60 * 60 * 1000 + 1
+            advanceClock(7L * 24 * 60 * 60 * 1000 + 1)
             server.enqueue(MockResponse().setResponseCode(503))
             assertEquals(B2RolloutDecision(true, B2Cohort.FORCED_ON, 3, configStale = true),
                 repo.decideB2(true, offer))
@@ -220,10 +308,15 @@ class ClientConfigRepositoryTest {
         MockWebServer().use { server ->
             val repo = repository(server)
             repo.setDebugOverride(feature, FeatureOverride.ON)
-            assertEquals(if (BuildConfig.DEBUG) FeatureOverride.ON else null, repo.debugOverride(feature))
+            assertEquals(if (BuildConfig.DEBUG) FeatureOverride.ON else null, repo.loadDebugOverride(feature))
             repo.setDebugOverride(feature, null)
-            assertNull(repo.debugOverride(feature))
+            assertNull(repo.loadDebugOverride(feature))
         }
+    }
+
+    private fun advanceClock(millis: Long) {
+        ShadowSystemClock.advanceBy(Duration.ofMillis(millis))
+        clock += millis
     }
 
     private fun repository(server: MockWebServer): ClientConfigRepository = ClientConfigRepository(

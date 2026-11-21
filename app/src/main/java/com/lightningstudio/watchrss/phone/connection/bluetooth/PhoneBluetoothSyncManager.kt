@@ -150,17 +150,18 @@ class PhoneBluetoothSyncManager(
     private val syncDiagnostics=com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnostics.open(context.applicationContext)
     internal var b2AccountFence: () -> B2AccountFence? = { null }
     internal var bookRollbackWindow: () -> String? = { null }
-    internal var b2RolloutConfig: ClientConfigRepository? = null
-    internal var btSyncTelemetry: BtSyncTelemetry? = null
+    internal var b2RolloutConfig: () -> ClientConfigRepository? = { null }
+    internal var btSyncTelemetry: () -> BtSyncTelemetry? = { null }
 
     /** The offer must come from the guarded probe after validation. */
     internal suspend fun decideLibraryRollout(binaryMerge: Boolean, guardedOffer: JSONObject? = null) =
-        b2RolloutConfig?.decideB2(binaryMerge, guardedOffer)
+        withContext(Dispatchers.IO) { b2RolloutConfig()?.decideB2(binaryMerge, guardedOffer) }
 
-    internal fun beginBtSync(trigger: BtSyncTrigger = BtSyncTrigger.MANUAL): BtSyncSession? {
-        b2RolloutConfig?.refreshIfStale()
-        return btSyncTelemetry?.begin(trigger)
-    }
+    internal suspend fun beginBtSync(trigger: BtSyncTrigger = BtSyncTrigger.MANUAL): BtSyncSession? =
+        withContext(Dispatchers.IO) {
+            b2RolloutConfig()?.refreshIfStale()
+            btSyncTelemetry()?.begin(trigger)
+        }
     /** P1 optional local projection copy; null leaves the legacy path byte-for-byte unchanged. */
     internal var recordLegacyProjection:((peer:String,version:Int,cursor:String,payload:JSONObject)->Unit)?=null
     private val appContext = context.applicationContext

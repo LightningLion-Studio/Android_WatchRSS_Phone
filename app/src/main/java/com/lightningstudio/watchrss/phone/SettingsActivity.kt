@@ -4329,7 +4329,7 @@ private fun AppFeatureSettings(
         }
         if (BuildConfig.DEBUG) {
             SectionTitle("开发者设置")
-            com.lightningstudio.watchrss.phone.rollout.B2RolloutSettings(container.clientConfig)
+            com.lightningstudio.watchrss.phone.rollout.B2RolloutSettings(container)
             SettingsEntry("新手引导", "重新查看首次使用引导", Icons.Default.Edit) {
                 context.startActivity(PhoneOobeActivity.createIntent(context, replayFromStart = true))
             }

@@ -34,6 +34,6 @@ internal suspend fun ClientConfigRepository.decideB2(
     val guardedVersion = guardedOffer?.opt("guardedLibraryVersion")
     val eligible = buildAndModeEligible && (guardedVersion == 1 || guardedVersion == 1L) &&
         guardedOffer?.optJSONObject("libraryBinary") != null
-    val config = if (eligible) snapshotForSession() else currentSnapshot()
+    val config = snapshotForSession(waitForRefresh = eligible)
     return B2RolloutDecision(decide(config, FeatureRegistry.b2, eligible), config.version, config.stale)
 }

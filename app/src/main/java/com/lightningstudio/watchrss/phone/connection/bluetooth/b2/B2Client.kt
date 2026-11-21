@@ -217,12 +217,23 @@ class B2Client(
             }
             cursor = copy(next).put("limit", cursor.n("limit"))
         }
-        // missing() is a fresh verified observation. Only newly seen semantic blocks
-        // count in the shared recovery controller; repeated observations cannot reset it.
-        for (d in objects) if (d.s("objectId") !in applied) {
-            val ranges = observed[d.s("objectId")] ?: fail("RECEIPT_CONFLICT")
-            for (index in 0 until d.a("chunkHashes").length()) if (ranges.none { index >= it.first && index < it.second })
-                progress("phoneToWatch:" + B2Progress.chunk(d, index))
+        // The complete missing report confirms durable chunks even if the old ACK was lost.
+        // Feed the same session observer as ACK settlement; it deduplicates by direction,
+        // object and chunk across connections.
+        val resumeObserver = session.transferObserver.takeIf { p.s("intent") == "resume" }
+        for (d in objects) {
+            val id = d.s("objectId")
+            val alreadyApplied = id in applied
+            if (alreadyApplied && resumeObserver == null) continue
+            val ranges = observed[id] ?: fail("RECEIPT_CONFLICT")
+            for (index in 0 until d.a("chunkHashes").length()) {
+                if (ranges.any { (from, to) -> index in from until to }) continue
+                if (resumeObserver != null) {
+                    val length = minOf(B2Wire.CHUNK.toLong(), d.n("size") - index * B2Wire.CHUNK.toLong())
+                    resumeObserver.chunk(id, index, incoming = false, length.toInt(), accepted = true)
+                }
+                if (!alreadyApplied) progress("phoneToWatch:" + B2Progress.chunk(d, index))
+            }
         }
         while (applied.size < objects.size) {
             val m = b.o("selection").o("limits").n("maxInFlightObjects").toInt()

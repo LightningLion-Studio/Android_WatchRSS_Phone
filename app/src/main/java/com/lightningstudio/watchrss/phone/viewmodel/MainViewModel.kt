@@ -910,7 +910,12 @@ class MainViewModel(
     ) {
         viewModelScope.launch {
             if (sessionState.value.isBusy) return@launch
-            val telemetry = bluetoothSyncManager.beginBtSync()
+            sessionState.value = sessionState.value.copy(isBusy = true)
+            val telemetry = try {
+                bluetoothSyncManager.beginBtSync()
+            } finally {
+                sessionState.value = sessionState.value.copy(isBusy = false)
+            }
             var active = false
             try {
                 telemetry?.stage = BtSyncStage.ACCOUNT

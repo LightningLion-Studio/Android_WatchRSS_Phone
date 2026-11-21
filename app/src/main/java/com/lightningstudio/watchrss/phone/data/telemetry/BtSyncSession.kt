@@ -163,17 +163,15 @@ internal class BtSyncSession(
     }
 
     @Synchronized
-    override fun chunk(request: JSONObject, incoming: Boolean, length: Int, accepted: Boolean) {
-        val body = request.optJSONObject("payload") ?: return
-        val key = incoming to body.optString("objectId")
-        val index = body.optInt("chunkIndex", -1)
+    override fun chunk(objectId: String, index: Int, incoming: Boolean, length: Int, accepted: Boolean) {
+        val key = incoming to objectId
         if (index !in 0..255) return
         val recorded = (if (accepted) acceptedChunks else seenChunks).getOrPut(key) { BitSet() }
         val repeat = recorded[index]
         recorded.set(index)
         if (accepted) {
             if (!repeat) effectiveBytes += length
-            binaryApplied(request, incoming)
+            recordBinaryObject(key)
         } else {
             stage = BtSyncStage.TRANSFER
             if (repeat) resent++
@@ -192,7 +190,10 @@ internal class BtSyncSession(
     @Synchronized
     override fun binaryApplied(request: JSONObject, incoming: Boolean) {
         val id = request.optJSONObject("payload")?.optString("objectId") ?: return
-        val key = incoming to id
+        recordBinaryObject(incoming to id)
+    }
+
+    private fun recordBinaryObject(key: Pair<Boolean, String>) {
         if (!transferred.add(key)) return
         val kind = descriptors[key] ?: return
         kinds[kind] = (kinds[kind] ?: 0) + 1

@@ -34,6 +34,9 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
         val issue=BookSyncIssue(id.takeIf{it.matches(Regex("[0-9a-f]{64}"))}?.take(8)?:"invalid",code,titles[id],reason)
         itemIssues+=issue;trace("book-item-isolated:id=${issue.bookIdPrefix}:code=$code:reason=$reason");onIssue(issue)
     }
+    var checkOwner: () -> Unit = {}
+    var admitOwnerCommit: () -> Unit = {}
+    var rollbackWindow: () -> String? = { null }
     var domainFastPath=false
     var onApplied:(Int)->Unit={}
     var trace:(String)->Unit={}
@@ -117,7 +120,10 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
                 validateBookPackage {require(tmp.length()==expectedSize&&digest.digest().joinToString(""){"%02x".format(it)}==expectedSha)}
                 val owner = currentCoroutineContext()
                 val revision = BookPackageFiles.Revision(expectedSha, expectedSize)
-                store.receiveVerifiedPackage(id, tmp, revision) { owner.ensureActive() }.let { applied += it; recordApplied(it) }
+                store.receiveVerifiedPackage(id, tmp, revision, admitOwnerCommit) {
+                    owner.ensureActive()
+                    checkOwner()
+                }.let { applied += it; recordApplied(it) }
             } catch(e:InvalidBookPackageException) {reject(id,"book_package_invalid",e.reason)}
             finally {tmp.delete()}
         }
@@ -130,7 +136,8 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
         }
         if(!syncReading)return applied
         if(deltaPeer!=null && peerReadingDelta) {
-            return applied+BookReadingDeltaSync(store,deviceId,requireNotNull(deltaPeer),::send,requireNotNull(appliedExchange),onApplied,trace).sync()
+            return applied+BookReadingDeltaSync(store,deviceId,requireNotNull(deltaPeer),::send,requireNotNull(appliedExchange),onApplied,trace,
+                rollbackWindow, checkOwner, admitOwnerCommit).sync()
         }
         val localReading=store.readingStates();var localOffset=0;var remoteOffset=0L;var more=true
         do {

@@ -7,6 +7,7 @@ import java.io.RandomAccessFile
 import java.nio.file.Files
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantLock
@@ -57,19 +58,60 @@ internal object ConditionalBodyFile {
     }
     /** The final comparison and publication are inside both process and OS leases.
      * link(2) also preserves a target created by an uncooperative writer after the comparison. */
-    fun install(target:File,staged:File,expectedSha:String?=digest(staged),beforeCommit:()->Unit={}) =
+    fun install(target:File,staged:File,expectedSha:String?=digest(staged),beforeCommit:()->Unit={}) {
         installStaged(target,staged,expectedSha,beforeCommit,useHardLink=true)
+    }
 
     // Every book publisher shares the lock below. Android can deny link(2) in app data.
-    fun installPrivateBook(target: File, staged: File, expectedSha: String? = digest(staged), beforeCommit: () -> Unit = {}) =
-        installStaged(target,staged,expectedSha,beforeCommit,useHardLink=false)
+    fun installPrivateBook(target: File, staged: File, expectedSha: String? = digest(staged), beforeCommit: () -> Unit = {}) {
+        installStaged(target, staged, expectedSha, beforeCommit, useHardLink = false)
+    }
+
+    fun installGuarded(target: File, raw: ByteArray, expectedSha: String?, beforeStagingCommit: () -> Unit,
+        beforePublish: () -> Unit, privateBook: Boolean) {
+        target.parentFile!!.mkdirs()
+        val staged = File.createTempFile(".body-cas-", ".part", target.parentFile)
+        try {
+            FileOutputStream(staged).use { it.write(raw); it.fd.sync() }
+            installStaged(target, staged, expectedSha, beforeStagingCommit, useHardLink = !privateBook,
+                beforePublish = beforePublish)
+        } finally { staged.delete() }
+    }
+
+    fun publishNewBook(target: File, staged: File, sha256: String, authorize: () -> Unit,
+        onPublished: (PublishedBook) -> Unit) {
+        installStaged(target, staged, sha256, {}, useHardLink = false, beforePublish = authorize,
+            onPublish = { installed -> onPublished(PublishedBook(target, installed, sha256)) })
+    }
+
+    class PublishedBook internal constructor(private val target: File, private val installed: BasicFileAttributes,
+        private val sha256: String) {
+        fun withdraw() = locked(target) {
+            val actual = try {
+                Files.readAttributes(target.toPath(), BasicFileAttributes::class.java)
+            } catch (_: java.nio.file.NoSuchFileException) {
+                return@locked
+            }
+            if (installed.fileKey() != null && actual.fileKey() == installed.fileKey() &&
+                actual.size() == installed.size() && actual.lastModifiedTime() == installed.lastModifiedTime() &&
+                digest(target) == sha256) {
+                val latest = Files.readAttributes(target.toPath(), BasicFileAttributes::class.java)
+                if (latest.fileKey() == installed.fileKey() && latest.size() == installed.size() &&
+                    latest.lastModifiedTime() == installed.lastModifiedTime() && Files.deleteIfExists(target.toPath())) {
+                    syncDirectory(target.parentFile!!)
+                }
+            }
+        }
+    }
 
     private fun installStaged(
         target: File,
         staged: File,
         expectedSha: String?,
         beforeCommit: () -> Unit,
-        useHardLink: Boolean
+        useHardLink: Boolean,
+        beforePublish: () -> Unit = {},
+        onPublish: ((BasicFileAttributes) -> Unit)? = null
     ) {
         val incoming=digest(staged)?:error("closure_incomplete")
         val expected=expectedSha
@@ -83,13 +125,16 @@ internal object ConditionalBodyFile {
                 try {
                     staged.inputStream().use{input->FileOutputStream(local).use{out->input.copyTo(out);out.fd.sync()}}
                     check(digest(local)==incoming){"hash_mismatch"}
+                    val installed = onPublish?.let { Files.readAttributes(local.toPath(), BasicFileAttributes::class.java) }
+                    beforePublish()
                     if(actual==null && useHardLink) {
                         try{Files.createLink(target.toPath(),local.toPath())}
                         catch(_:FileAlreadyExistsException){val raced=digest(target);if(raced!=expected)conflict(target,expected,raced,incoming)}
                     } else Files.move(local.toPath(),target.toPath(),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING)
+                    if (installed != null) onPublish?.invoke(installed)
                     syncDirectory(target.parentFile!!)
                 }finally{local.delete()}
-            }
+            } else beforePublish()
         }
     }
     fun delete(target:File,expected:String?)=locked(target) {

@@ -21,7 +21,10 @@ internal class BookReadingDeltaSync(
     private val store:ImportedBookStore,private val deviceId:String,private val peer:String,
     private val exchange:suspend(JSONObject)->JSONObject,
     private val appliedExchange:suspend(JSONObject,(JSONObject)->Unit)->BluetoothSyncExchange,
-    private val onApplied:(Int)->Unit={},private val trace:(String)->Unit={}
+    private val onApplied:(Int)->Unit={},private val trace:(String)->Unit={},
+    private val rollbackWindow: () -> String? = { null },
+    private val checkOwner: () -> Unit = {},
+    private val admitCommit: () -> Unit = {}
 ) {
     private fun request(phase:String)=JSONObject().put("action","syncBooks").put("version",1).put("phase",phase).put("deviceId",deviceId)
     private fun validate(v:JSONObject,phase:String,window:String?=null) {
@@ -32,6 +35,14 @@ internal class BookReadingDeltaSync(
         require(peer.isNotBlank())
         var applied=0
         repeat(3) { round ->
+            val owner = currentCoroutineContext()
+            val generation = rollbackWindow()
+            fun checkWindow() {
+                owner.ensureActive()
+                checkOwner()
+                check(rollbackWindow() == generation) { "choice_stale" }
+            }
+            checkWindow()
             val start=System.nanoTime();val hashes=store.readingHashCounts
             val local=store.readingSummary()
             trace("reading-summary:round=$round:ms=${(System.nanoTime()-start)/1_000_000}:hashes=${store.readingHashCounts.zip(hashes).sumOf{it.first-it.second}}")
@@ -71,7 +82,7 @@ internal class BookReadingDeltaSync(
                     require(!remoteFinished || (!more && incoming.isEmpty()))
                     remoteFinished=!more
                     receivedCount+=incoming.size;require(receivedCount<=remote.count)
-                    val changed=store.mergeReadingBatch(incoming);applied+=changed;onApplied(changed)
+                    val changed=store.mergeReadingBatch(incoming, ::checkWindow);applied+=changed;onApplied(changed)
                     after=next;sentCount+=entries.size
                 } while(at<outgoing.size || more)
             }
@@ -89,7 +100,7 @@ internal class BookReadingDeltaSync(
             check(result.appliedAckWritten){"阅读确认回执未写入，请重试同步"}
             if(result.response.getBoolean("committed")) {
                 currentCoroutineContext().ensureActive()
-                store.acknowledgeReading(peer,local,remote,merged.root)
+                store.acknowledgeReading(peer, local, remote, merged.root, ::checkWindow, admitCommit)
                 trace("reading-committed:round=$round")
                 return applied
             }

@@ -2,6 +2,7 @@ package com.lightningstudio.watchrss.phone.syncv2
 
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
+import com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile
 import com.lightningstudio.watchrss.phone.data.book.BookSync
 import org.json.JSONObject
 import java.io.DataInputStream
@@ -9,6 +10,8 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.FileTime
+import java.nio.file.NoSuchFileException
 
 /** Original bytes are the offline queue. Downloaded SHA values never change business clocks. */
 internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private val files:File,private val beforeInstall:(File)->Unit={}) {
@@ -43,9 +46,59 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     private data class BookReference(val revision: BookPackageFiles.Revision, val identity: String) : Reference
     private data class AssetReference(val owners: Set<String>, val revisions: Set<BookPackageFiles.Revision>) : Reference
 
-    internal class Original(val raw: ByteArray, val sha256: String, private val reference: Reference) {
+    internal class Original(val raw: ByteArray, val sha256: String, private val reference: Reference,
+        private val stillCurrent: () -> Boolean) {
+        val hasRegisteredDigest = reference is BookReference || reference is AssetReference && reference.revisions.isNotEmpty()
         fun matches(other: Original?): Boolean =
             other != null && reference == other.reference && sha256 == other.sha256 && raw.size == other.raw.size
+        fun requireCurrent() {
+            if (!stillCurrent()) SyncV2Codec.fail("body_revision_changed")
+        }
+    }
+
+    private data class FileIdentity(val size: Long, val mtime: FileTime, val inode: Any?, val ctime: FileTime?)
+
+    private fun identity(file: File): FileIdentity? {
+        val path = file.toPath()
+        return try {
+            val basic = Files.readAttributes(path, BasicFileAttributes::class.java)
+            if (!basic.isRegularFile) SyncV2Codec.fail("body_revision_changed")
+            val ctime = try { Files.getAttribute(path, "unix:ctime") as? FileTime }
+                catch (_: UnsupportedOperationException) { null }
+            FileIdentity(basic.size(), basic.lastModifiedTime(), basic.fileKey(), ctime)
+        } catch (_: NoSuchFileException) {
+            null
+        }
+    }
+
+    private fun sameFile(file: File, observed: FileIdentity?, sha256: String?): Boolean {
+        if (identity(file) != observed) return false
+        if (observed == null || observed.inode != null && observed.ctime != null) return true
+        return ConditionalBodyFile.digest(file) == sha256 &&
+            identity(file) == observed
+    }
+
+    internal class RepairTarget(val expectedSha256: String?, private val stillCurrent: () -> Boolean,
+        private val sameIdentity: () -> Boolean) {
+        fun requireCurrent() {
+            if (!stillCurrent()) SyncV2Codec.fail("body_revision_changed")
+        }
+        fun requireSameIdentity() {
+            if (!sameIdentity()) SyncV2Codec.fail("body_revision_changed")
+        }
+    }
+
+    fun repairTarget(kind: String, id: String, selected: JSONObject): RepairTarget {
+        val target = file(kind, id)
+        if (target.canonicalFile.parentFile != target.parentFile!!.canonicalFile) SyncV2Codec.fail("body_revision_changed")
+        val before = reference(kind, id, selected)
+        val observed = identity(target)
+        if (observed != null && observed.size > SyncV2BodyCodec.limit(kind)) SyncV2Codec.fail("object_too_large")
+        val sha = ConditionalBodyFile.digest(target)
+        if (identity(target) != observed || reference(kind, id, selected) != before) SyncV2Codec.fail("body_revision_changed")
+        return RepairTarget(sha,
+            stillCurrent = { reference(kind, id, selected) == before && sameFile(target, observed, sha) },
+            sameIdentity = { identity(target) == observed })
     }
 
     private fun bookIdentity(value: JSONObject): String = SyncV2Codec.canonical(org.json.JSONArray().apply {
@@ -103,32 +156,27 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         return AssetReference(owners, revisions)
     }
 
-    private fun stableRead(file: File, limit: Int): ByteArray? {
+    private fun stableRead(file: File, observed: FileIdentity, limit: Int): ByteArray? {
+        if (observed.size > limit) SyncV2Codec.fail("object_too_large")
         return try {
-            val path = file.toPath()
-            val before = Files.readAttributes(path, BasicFileAttributes::class.java)
-            if (!before.isRegularFile) return null
-            if (before.size() > limit) SyncV2Codec.fail("object_too_large")
-            val raw = ByteArray(before.size().toInt())
+            val raw = ByteArray(observed.size.toInt())
             DataInputStream(file.inputStream()).use { input ->
                 input.readFully(raw)
                 if (input.read() != -1) return null
             }
-            val after = Files.readAttributes(path, BasicFileAttributes::class.java)
-            raw.takeIf { after.isRegularFile && after.size() == before.size() &&
-                after.lastModifiedTime() == before.lastModifiedTime() && after.fileKey() == before.fileKey() }
+            raw.takeIf { identity(file) == observed }
         } catch (_: IOException) {
             null
         }
     }
 
+    private fun reference(kind: String, id: String, selected: JSONObject): Reference? =
+        if (kind == "book") bookReference(id, selected) else assetReference(id)
+
     /** The reference is the committed local business selection; the digest always comes from readable bytes. */
     fun original(kind: String, id: String, selected: JSONObject): Original? {
         val target = file(kind, id)
-        fun reference(): Reference? =
-            if (kind == "book") bookReference(id, selected) else assetReference(id)
-
-        val before = reference() ?: return null
+        val before = reference(kind, id, selected) ?: return null
         val limit = SyncV2BodyCodec.limit(kind)
         val source = if (before is BookReference) {
             if (before.revision.bytes > limit) SyncV2Codec.fail("object_too_large")
@@ -137,7 +185,8 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             if (target.canonicalFile.parentFile != target.parentFile!!.canonicalFile) return null
             target
         }
-        val raw = stableRead(source, limit) ?: return null
+        val observed = identity(source) ?: return null
+        val raw = stableRead(source, observed, limit) ?: return null
         val hash = SyncV2BodyCodec.hash(raw)
         val actual = BookPackageFiles.Revision(hash, raw.size.toLong())
         when (before) {
@@ -145,8 +194,11 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             is AssetReference -> if (before.revisions.isNotEmpty() && before.revisions != setOf(actual)) return null
         }
         validate(kind, id, selected, raw)
-        if (reference() != before) SyncV2Codec.fail("body_revision_changed")
-        return Original(raw, hash, before)
+        val original = Original(raw, hash, before) {
+            reference(kind, id, selected) == before && sameFile(source, observed, hash)
+        }
+        original.requireCurrent()
+        return original
     }
 
     /** Discover referenced originals omitted by older private-UUID metadata. Absence never deletes. */
@@ -197,11 +249,20 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     }
     /** Call under the account lifetime and projection writer, after full validation.
      * A crash can leave a verified original with an old cache marker; the next round repairs it. */
-    fun install(kind:String,id:String,raw:ByteArray) {
+    fun install(kind: String, id: String, raw: ByteArray, repair: RepairTarget? = null, checkWindow: () -> Unit = {}) {
         check(db.inTransaction());val target=file(kind,id);val hash=SyncV2BodyCodec.hash(raw)
         val bookState=if(kind=="book")db.controlQuery("SELECT stateJson FROM imported_books WHERE bookId=?",arrayOf(id)).use{c->if(!c.moveToFirst())SyncV2Codec.fail("body_revision_changed");JSONObject(c.getString(0))}else null
         if(bookState!=null)validate("book",id,bookState,raw)
-        com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.install(target,raw){beforeInstall(target)}
+        ConditionalBodyFile.installGuarded(
+            target, raw, if (repair == null) hash else repair.expectedSha256,
+            beforeStagingCommit = { beforeInstall(target) },
+            beforePublish = {
+                repair?.requireCurrent()
+                checkWindow()
+                repair?.requireSameIdentity()
+            },
+            privateBook = kind == "book"
+        )
         if(kind=="asset")db.execSQL("UPDATE note_assets SET sha256=?,byteCount=? WHERE storageKey=? AND (sha256 IS NOT ? OR byteCount IS NOT ?)",arrayOf<Any>(hash,raw.size,id,hash,raw.size))
         else {
             materializeBook(id,raw,bookState!!)
@@ -236,7 +297,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
                         // Hydration is a cache write: an immutable private marker must not bump the edit witness.
                         val marker=content.markerFor("syncv2-body-${SyncV2BodyCodec.hash(textBytes)}")
                         val target=File(files,"imported_text/${com.lightningstudio.watchrss.phone.data.local.articleContentMarkerFileName(marker)!!}")
-                        com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.install(target,textBytes)
+                        ConditionalBodyFile.install(target,textBytes)
 
                         marker
                     }else text

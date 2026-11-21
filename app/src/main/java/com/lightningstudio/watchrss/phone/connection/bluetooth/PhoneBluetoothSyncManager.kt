@@ -141,6 +141,7 @@ class PhoneBluetoothSyncManager(
 ) {
     private val syncDiagnostics=com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnostics.open(context.applicationContext)
     internal var b2AccountFence: () -> B2AccountFence? = { null }
+    internal var bookRollbackWindow: () -> String? = { null }
     /** P1 optional local projection copy; null leaves the legacy path byte-for-byte unchanged. */
     internal var recordLegacyProjection:((peer:String,version:Int,cursor:String,payload:JSONObject)->Unit)?=null
     private val appContext = context.applicationContext
@@ -530,6 +531,7 @@ class PhoneBluetoothSyncManager(
         var fastPeer:String?=null
         var fastScope:String?=null
         val owner = currentPhoneUserId()
+        val bookAccount = b2AccountFence()
         val completedDomains=linkedSetOf<String>()
         suspend fun localRoots(peer:String):Map<String,String> = withContext(Dispatchers.IO) {
             check(currentPhoneUserId()==owner){"手机账号已变化，请重新同步"}
@@ -701,6 +703,15 @@ class PhoneBluetoothSyncManager(
                             }
                         }
                     }
+                    bookSync.checkOwner = {
+                        check(canSyncAccount() && currentPhoneUserId() == owner) { "AUTH_REVOKED" }
+                        bookAccount?.check()
+                    }
+                    bookSync.admitOwnerCommit = {
+                        bookSync.checkOwner()
+                        bookAccount?.commitFence?.admitCommit()
+                    }
+                    bookSync.rollbackWindow = bookRollbackWindow
                     bookSync.diagnosticItem={id,result,code->trace.item("book",id,result,code)}
                     bookSync.domainFastPath=fastPath!=null
                     bookSync.onApplied = ::recordApplied

@@ -73,7 +73,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
             val r=remote.getJSONObject("row");if(!r.isNull("recipeOid"))continue
             // A changed remote business binding requires the existing account-choice flow.
             if(SyncV2Codec.canonical(remote.getJSONObject("meta"))!=SyncV2Codec.canonical(c.first) || SyncV2Codec.canonical(remote.getJSONObject("state"))!=SyncV2Codec.canonical(c.second))continue
-            if(r.optString("bodyRevision")!=SyncV2BodyCodec.revision(kind,entity,original.sha256))return true
+            if(original.hasRegisteredDigest && r.optString("bodyRevision")!=SyncV2BodyCodec.revision(kind,entity,original.sha256))return true
         } catch(e:Exception){life.check()}
         return false
     }
@@ -83,7 +83,11 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
             life.check();val c=projection.candidate(kind,id)?:continue;val v=SyncV2Business.join(kind,c.first,c.second);if(v.optBoolean("deleted"))continue
             val entity=identity.entity(kind,id);val row=projection.wireContentRow(entity)?:continue;if(!row.isNull("recipeOid"))continue
             val original=repository.original(kind,id,v)?:continue
-            projection.bindArticleRevision(row,SyncV2BodyCodec.revision(kind,entity,original.sha256),independent=true)
+            val revision = SyncV2BodyCodec.revision(kind, entity, original.sha256)
+            val previous = if (original.hasRegisteredDigest) null else projection.cloudRows(setOf(entity))
+                .firstOrNull()?.getJSONObject("row")
+            if (previous != null && !previous.isNull("bodyRevision") && previous.getString("bodyRevision") != revision) continue
+            projection.bindArticleRevision(row,revision,independent=true)
         } catch(e:Exception){life.check()}
     }
     fun sync(manual:Boolean=false):Result {
@@ -122,7 +126,8 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
     private fun matchingOriginal(binding: SyncV2BodyCodec.Binding, selected: JSONObject): SyncV2BodyRepository.Original? {
         val original = repository.original(binding.kind, binding.logicalId, selected) ?: return null
         if (SyncV2BodyCodec.revision(binding.kind, binding.entityKey, original.sha256) != binding.bodyRevision) {
-            SyncV2Codec.fail("body_revision_changed")
+            if (original.hasRegisteredDigest) SyncV2Codec.fail("body_revision_changed")
+            return null
         }
         return original
     }
@@ -137,6 +142,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         val b = binding(entry)
         val selected = value(entry)
         var local = matchingOriginal(b, selected)
+        val repair = if (local == null) repository.repairTarget(b.kind, b.logicalId, selected) else null
         var cursor = ""
         var last: Exception? = null
         do {
@@ -154,7 +160,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
                         val signed = SyncV2BodyCodec.verifyDescriptor(descriptor, identity.scope, b, carrierPublicKey(descriptor))
                         keys.read(signed.getLong("keyVersion"))
                     } else {
-                        receive(entry, anchor, descriptor, dir, expires)
+                        receive(entry, anchor, descriptor, dir, expires, requireNotNull(repair))
                     }
                 } catch (e: Exception) {
                     life.check()
@@ -163,8 +169,8 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
                     continue
                 }
                 if (local != null) {
-                    if (!local.matches(matchingOriginal(b, selected))) SyncV2Codec.fail("body_revision_changed")
                     current(entry, anchor, expires)
+                    requireCurrentOriginal(local, b, selected, anchor, expires)
                 }
                 return
             }
@@ -193,29 +199,43 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         // Authenticate restart state and the complete local ciphertext closure before reserve.
         val upload = requireNotNull(descriptor)
         SyncV2BodyCodec.open(upload, identity.scope, b, signer.publicHex, keys::read) { hash, _ -> File(dir, hash).readBytes() }
-        if (!source.matches(matchingOriginal(b, selected))) SyncV2Codec.fail("body_revision_changed")
         current(entry, anchor, expires)
-        http.upload(upload, dir) { checkWindow(anchor, expires) }
+        val latest = requireCurrentOriginal(source, b, selected, anchor, expires)
+        http.upload(upload, dir) { checkWindow(anchor, expires); latest.requireCurrent() }
         current(entry, anchor, expires)
     }
 
+    private fun requireCurrentOriginal(original: SyncV2BodyRepository.Original, binding: SyncV2BodyCodec.Binding,
+        selected: JSONObject, anchor: JSONObject, expires: Long): SyncV2BodyRepository.Original {
+        val latest = matchingOriginal(binding, selected)
+        if (latest == null || !original.matches(latest)) SyncV2Codec.fail("body_revision_changed")
+        checkWindow(anchor, expires)
+        latest.requireCurrent()
+        return latest
+    }
+
     internal fun receive(entry: JSONObject, anchor: JSONObject, descriptor: JSONObject, dir: File,
-        expires: Long = captureWindow(anchor)) {
+        expires: Long = captureWindow(anchor), capturedTarget: SyncV2BodyRepository.RepairTarget? = null) {
         current(entry, anchor, expires)
         val b = binding(entry)
+        val selected = value(entry)
+        val repair = capturedTarget ?: repository.repairTarget(b.kind, b.logicalId, selected)
         val raw = SyncV2BodyCodec.open(descriptor, identity.scope, b, carrierPublicKey(descriptor), keys::read) { hash, size ->
             http.download(descriptor.getJSONObject("body").getString("carrierId"), hash, size, dir) { checkWindow(anchor, expires) }
         }
-        val selected = value(entry)
         repository.validate(b.kind, b.logicalId, selected, raw)
-        val committedDuringDownload = matchingOriginal(b, selected) != null
         current(entry, anchor, expires)
-        if (committedDuringDownload) return
+        val committedDuringDownload = matchingOriginal(b, selected)
+        if (committedDuringDownload != null) {
+            checkWindow(anchor, expires)
+            committedDuringDownload.requireCurrent()
+            return
+        }
         life.guard {
             val st = projection.state()
             projection.accountWriter(st.version) { state ->
                 current(entry, anchor, expires, state)
-                repository.install(b.kind, b.logicalId, raw)
+                repository.install(b.kind, b.logicalId, raw, repair) { checkWindow(anchor, expires, state) }
                 // Only cache columns changed inside this writer. Hydration is not a local business edit.
                 state.body.put("businessStamp", SyncV2BusinessWitness.read(projection.accountDatabase).encoded())
             }

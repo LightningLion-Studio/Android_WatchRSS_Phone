@@ -155,6 +155,7 @@ class PhoneCloudSyncService(
             onAuthenticationResponse=accountRepository::recordAuthenticationResponse)
     }
     internal val syncV2UiPort get()=syncV2Product.uiPort
+    internal fun syncV2BookRollbackWindow() = syncV2Product.legacyRollbackWindow()
     internal fun captureSyncV2Legacy(peer:String,version:Int,cursor:String,payload:JSONObject)=syncV2Product.captureLegacyMetadata(peer,version,cursor,payload)
 
     private val approvalMutex = Mutex()

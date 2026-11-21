@@ -39,7 +39,7 @@ class BookSessionIsolationTest {
         .put("sourceUrl",fixture.getString("sourceUrl")).put("kind","txt").put("deletedChapters",JSONArray()).put("deletionClock",0).put("deleted",false).put("deletedAt",0).put("updatedAt",1).put("sourceDeviceId","cli").put("contentAvailable",true)
     private fun reply(action:String,phase:String)=JSONObject().put("success",true).put("action",action).put("phase",phase).put("version",if(action=="syncDomains")2 else if(action=="syncBooks")1 else 14).put("deviceId","watch")
     @After fun close(){scope.cancel();db.close();root.deleteRecursively()}
-    private suspend fun runSession(invalid:Boolean,fatalLibrary:Boolean=false):PhoneBluetoothSyncResult {
+    private suspend fun runSession(invalid:Boolean,fatalLibrary:Boolean=false,onPull:()->Unit={},owner:()->String?={"owner"}):PhoneBluetoothSyncResult {
         books.manifests()
         repo.markLibrarySyncSuccess("watch",0,0,14,true,true,domains.libraryDefinition())
         val initial=domains.roots("account");val remote=BleDomainStore.DOMAINS.associateWith{"b".repeat(64)}
@@ -72,8 +72,8 @@ class BookSessionIsolationTest {
                     }
                     "syncBooks"->when(phase) {
                         "manifest"->reply(action,phase).put("books",JSONArray().put(state())).put("missingBookIds",JSONArray())
-                        "pull"->reply(action,"body").put("bookId",fixture.getString("bookId")).put("fingerprint",fixture.getString("fingerprint")).put("packageSha256",CloudSnapshotCodec.sha256(bytes))
-                            .put("byteCount",bytes.size).put("chunkIndex",0).put("chunkCount",1).put("dataBase64",Base64.getEncoder().encodeToString(bytes))
+                        "pull"->{onPull();reply(action,"body").put("bookId",fixture.getString("bookId")).put("fingerprint",fixture.getString("fingerprint")).put("packageSha256",CloudSnapshotCodec.sha256(bytes))
+                            .put("byteCount",bytes.size).put("chunkIndex",0).put("chunkCount",1).put("dataBase64",Base64.getEncoder().encodeToString(bytes))}
                         "reading"->reply(action,phase).put("states",JSONArray()).put("hasMore",false).put("nextAfter",0)
                         else->error("unexpected book phase")
                     }
@@ -88,7 +88,7 @@ class BookSessionIsolationTest {
         val input=object:InputStream(){override fun read()=if(incoming.isEmpty())-1 else incoming.removeFirst().toInt() and 255}
         val session=PhoneSyncSession(PhoneBluetoothSyncClient(context,log),device,"phone",PhoneSyncSession.Transport(input,output,"test",false,{}),true,false,false)
         val manager=PhoneBluetoothSyncManager(context,repo,NoteRepository(db.noteDao(),"phone"),ReaderPresetRepository(context,db,db.readerPresetDao(),"phone",scope),PhoneLlmTokenUsageRepository(db.llmTokenUsageDao()),"phone",log,
-            canSyncAccount={true},buildAccountSyncRequest={_,_,_->JSONObject().put("action","syncAccount")},currentPhoneUserId={"owner"},domainScope={"scope"},accountDomainWitness={"account"})
+            canSyncAccount={true},buildAccountSyncRequest={_,_,_->JSONObject().put("action","syncAccount")},currentPhoneUserId=owner,domainScope={"scope"},accountDomainWitness={"account"})
         manager.reconnectDelay={};manager.reconnectSession={_,_->error("must not reconnect for invalid items")}
         return manager.syncAll(device,reusableSession=session)
     }
@@ -125,5 +125,37 @@ class BookSessionIsolationTest {
         assertEquals(fixture.getJSONObject("chapter").getString("contentText"),db.phoneArticleDao().getAllForSync().single().contentText)
         assertTrue(frames.any{it.optString("action")=="syncNotes"})
         assertTrue(frames.any{it.optString("action")=="syncSession"&&it.optString("phase")=="complete"})
+    }
+    @Test fun finalV1PartAfterAccountClearedDoesNotCommit() = runBlocking<Unit> {
+        var revoked = false
+        val result = runCatching { runSession(false, onPull = { revoked = true }, owner = { if (revoked) null else "owner" }) }
+        val chapters = db.bookDao().chapters().size
+        val files = File(root, "books").listFiles()?.count { it.extension == "jsonl" } ?: 0
+        assertTrue(revoked)
+        assertEquals(0, chapters)
+        assertEquals(0, files)
+        assertEquals("AUTH_REVOKED", result.exceptionOrNull()?.message)
+        println("v1 final part after owner cleared: chapters=$chapters, originals=$files, sessionSuccess=${result.isSuccess}")
+    }
+
+    @Test fun reviewNormalV1TranscriptAndRoomProjection() = runBlocking<Unit> {
+        assertFalse(com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED)
+        val result = runSession(false)
+        val trace = frames.filter { it.optString("action") != "syncDomains" }.map {
+            val copy = JSONObject(it.toString())
+            copy.remove("timestamp")
+            copy.remove("sessionId")
+            copy.remove("sessionToken")
+            copy
+        }
+        val bookFrames = trace.filter { it.optString("action") == "syncBooks" }
+        val out = ByteArrayOutputStream()
+        bookFrames.forEach { BluetoothSyncProtocol.writeFrame(out, it) }
+        val row = db.bookDao().get(fixture.getString("bookId"))!!
+        val file = books.packageFile(fixture.getString("bookId"))!!
+        val article = db.phoneArticleDao().getAllForSync().single()
+        println("v1-parity bookFrameSha=${CloudSnapshotCodec.sha256(out.toByteArray())} phases=${bookFrames.map { it.getString("phase") }} " +
+            "bookStateSha=${CloudSnapshotCodec.sha256(row.stateJson.toByteArray())} originalSha=${CloudSnapshotCodec.sha256(file.readBytes())} " +
+            "registeredSha=${row.packageSha256} chapters=${db.bookDao().chapters().size} chapterTextSha=${article.contentHash} issues=${result.bookSyncIssues.size}")
     }
 }

@@ -77,6 +77,12 @@ internal class SyncV2Projection(
     private fun readState():State = db.controlQuery("SELECT state_version,local_revision,body FROM syncv2_state WHERE scope=?",arrayOf(scope)).use { c ->
         check(c.moveToFirst());State(c.getString(0),c.getString(1),open("state",c.getBlob(2)))
     }
+    // May run in the caller's Room writer. Keep this read on the pinned SQLite
+    // connection and avoid the lifetime monitor (cloud writers take it before Room).
+    internal fun legacyRollbackGeneration(): String {
+        ensureActive()
+        return readState().body.getString("rollbackGeneration")
+    }
     fun state():State=guarded { stateLocal() }
     private fun stateLocal(): State {
         requireWorkerContext();ensureActive()

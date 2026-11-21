@@ -440,7 +440,8 @@ class PhoneCompanionContainer(context: Context) {
                 }
             }
         ).also { manager ->
-            if (BuildConfig.B2_ENABLED) manager.b2AccountFence = { accountRepository.b2AccountFence }
+            manager.b2AccountFence = { accountRepository.b2AccountFence }
+            if (BuildConfig.SYNC_V2) manager.bookRollbackWindow = cloudSyncService::syncV2BookRollbackWindow
             if(BuildConfig.SYNC_V2 || BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION)manager.recordLegacyProjection={peer,version,cursor,payload ->
                 if(BuildConfig.SYNC_V2)cloudSyncService.captureSyncV2Legacy(peer,version,cursor,payload)
                 else localSyncV2Projection.captureLegacyMetadata(peer,version,cursor,payload)

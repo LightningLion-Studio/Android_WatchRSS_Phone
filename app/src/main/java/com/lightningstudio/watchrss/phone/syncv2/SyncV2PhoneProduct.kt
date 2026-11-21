@@ -49,6 +49,10 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         if (syncV2 == null && announcement != null) release()
     }
 
+    internal fun legacyRollbackWindow(): String? = runtime?.projection?.let {
+        it.scope + ":" + it.legacyRollbackGeneration()
+    }
+
     fun captureLegacyMetadata(peer:String,version:Int,cursor:String,payload:JSONObject) {
         if(!enabled() || announcement==null)return
         val live=runtime?:return

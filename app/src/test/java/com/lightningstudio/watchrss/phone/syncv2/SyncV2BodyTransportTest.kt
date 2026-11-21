@@ -314,10 +314,10 @@ class SyncV2BodyTransportTest {
                 assertEquals(listOf("body_revision_changed"), sync().errors)
                 assertEquals(0, backend.reads.size)
                 f.sql.execSQL("UPDATE note_assets SET sha256=? WHERE storageKey=?", arrayOf(hash, id))
-                // Equal-length corruption lacks a proof. The authenticated fallback runs.
-                assertEquals(listOf("body_revision_changed"), sync().errors)
+                // An unchanged corrupted file can be repaired by the authenticated current carrier.
+                assertEquals(emptyList<String>(), sync().errors)
                 assertTrue(backend.downloadBytes > 0)
-                assertArrayEquals(changed, file.readBytes())
+                assertArrayEquals(raw, file.readBytes())
                 val downloaded = backend.downloadBytes
                 assertTrue(file.delete())
                 assertEquals(emptyList<String>(), sync().errors)
@@ -330,7 +330,7 @@ class SyncV2BodyTransportTest {
                 assertEquals("1", f.projection.state().body.getString("rollbackGeneration"))
                 assertEquals(reads, backend.reads.size)
                 assertEquals(0, backend.puts.size)
-                assertEquals(2, installs) // Rejected overwrite and subsequent authenticated hydration.
+                assertEquals(2, installs) // Repair and subsequent authenticated hydration.
             }
         }
     }
@@ -384,6 +384,21 @@ class SyncV2BodyTransportTest {
             keys(f).use{keys->val channel=SyncV2BodyChannel(f.projection,f.identity,keys,f.f.signer,client,repository,File(f.root,"receiver-cache"),SyncV2Lifetime{true},{true},{SyncV2TransportSignals(wifi=true,internet=true)},{f.f.now})
                 assertEquals(emptyList<String>(),channel.sync().errors)}
             assertArrayEquals(raw,repository.file(kind,id).readBytes());assertEquals(ack,f.ackCalls)
+            if (kind == "book" && !choice) {
+                val path = repository.file(kind, id)
+                val damaged = raw.clone().also { it[it.lastIndex] = 32 }
+                path.writeBytes(damaged)
+                val readBytes = backend.downloadBytes
+                keys(f).use { ring ->
+                    val channel = SyncV2BodyChannel(f.projection, f.identity, ring, f.f.signer, client, repository,
+                        File(f.root, "repair-cold-cache"), SyncV2Lifetime { true }, { true },
+                        { SyncV2TransportSignals(wifi = true, internet = true) }, { f.f.now })
+                    assertEquals(emptyList<String>(), channel.sync().errors)
+                }
+                assertTrue(backend.downloadBytes > readBytes)
+                assertArrayEquals(raw, path.readBytes())
+                assertEquals(ack, f.ackCalls)
+            }
             val title=if(kind=="book")f.sql.query("SELECT stateJson FROM imported_books WHERE bookId=?",arrayOf(id)).use{it.moveToFirst();JSONObject(it.getString(0)).getString("title")}else f.sql.query("SELECT displayName FROM note_assets WHERE storageKey=?",arrayOf(id)).use{it.moveToFirst();it.getString(0)}
             assertEquals("offline renamed",title);assertEquals(1,backend.ready.size)
         }
@@ -465,5 +480,145 @@ class SyncV2BodyTransportTest {
    assertFalse(receive.listFiles()!!.any{it.name.endsWith(".part")})
   }
  }
+
+    private inner class ReviewAsset(val f: SyncV2P5Fixture, ready: Boolean) : AutoCloseable {
+        val backend: Backend
+        val client: SyncV2CloudClient
+        val id = "review.png"
+        val raw = ByteArray(180000) { (it % 251).toByte() }
+        val hash = SyncV2BodyCodec.hash(raw)
+        val changed = raw.clone().also { it[0] = 42 }
+        val entity = f.identity.entity("asset", id)
+        val rev = SyncV2BodyCodec.revision("asset", entity, hash)
+        val file = SyncV2BodyRepository(f.sql, f.root).file("asset", id)
+        val ring: SyncV2ContentKeys
+        val descriptor: SyncV2BodyCodec.Prepared
+        val life = SyncV2Lifetime { true }
+        val clock = java.util.concurrent.atomic.AtomicLong()
+        var attempt = 0
+        var installs = 0
+        init {
+            f.start()
+            backend = Backend(f)
+            client = f.f.client()
+            f.edit("![review](assets/$id)\n")
+            file.parentFile!!.mkdirs()
+            file.writeBytes(raw)
+            SyncV2PhoneApply(f.sql).upsert("note_assets", listOf("assetId"), JSONObject()
+                .put("assetId", "private-fixture").put("storageKey", id).put("noteId", "note")
+                .put("mimeType", "image/png").put("displayName", id).put("createdAt", 1)
+                .put("sha256", hash).put("byteCount", raw.size).put("deleted", false).put("deletedAt", 0))
+            f.drain()
+            f.projection.prepareWireIndex(f.f.signer, f.key, 1).close()
+            f.projection.bindArticleRevision(f.projection.wireContentRow(entity)!!, rev, true)
+            SyncV2CloudSync(client, f.identity, f.projection, { true }, { f.key }, { f.f.now })
+                .publishIndex(f.f.signer, f.key, 1)
+            f.actions().refresh()
+            val a = f.projection.state().body.getJSONObject("account")
+            val anchor = JSONObject().put("commitOid", a.get("oid")).put("revision", a.get("revision"))
+                .put("rollbackGeneration", a.get("generation"))
+            descriptor = SyncV2BodyCodec.prepare(f.identity.scope, anchor, SyncV2BodyCodec.Binding("asset", id, entity, rev),
+                f.key, 1, f.f.signer, raw)
+            if (ready) {
+                val carrier = descriptor.descriptor.getJSONObject("body").getString("carrierId")
+                backend.ready.add(carrier)
+                backend.descriptors[carrier] = descriptor.descriptor
+                backend.objects.putAll(descriptor.objects)
+            }
+            ring = keys(f)
+            clock.set(f.f.now)
+        }
+        fun channel(approved: (String) -> Boolean = { true }, now: () -> Long = clock::get,
+            beforeInstall: () -> Unit = {}, originals: File = f.root) =
+            SyncV2BodyChannel(f.projection, f.identity, ring, f.f.signer, client,
+                SyncV2BodyRepository(f.sql, originals) { installs++; beforeInstall() },
+                File(f.root, "review-${attempt++}"), life, approved,
+                { SyncV2TransportSignals(wifi = true, internet = true) }, now)
+        override fun close() { life.close(); ring.close(); client.close(); f.close() }
+    }
+
+    @Test fun finalOriginalCheckRejectsReplacementDuringLastWindowCheck() {
+        ReviewAsset(SyncV2P5Fixture(), true).use { a ->
+            val ack = a.f.ackCalls
+            var replaced = false
+            val result = a.channel(now = {
+                val onFinalCurrentCheck = a.backend.listCalls == 1 && Thread.currentThread().stackTrace.any {
+                    it.className == SyncV2BodyChannel::class.java.name && it.methodName == "current"
+                }
+                if (onFinalCurrentCheck && !replaced) {
+                    replaced = true
+                    val other = File(a.f.root, "replacement").apply { writeBytes(a.changed) }
+                    java.nio.file.Files.move(other.toPath(), a.file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                }
+                a.clock.get()
+            }).sync()
+            assertTrue(replaced)
+            assertArrayEquals(a.changed, a.file.readBytes())
+            assertEquals(0, a.backend.reads.size)
+            assertEquals(0, a.installs)
+            assertEquals(0, a.backend.puts.size)
+            assertEquals(ack, a.f.ackCalls)
+            assertEquals(SyncV2BodyChannel.Result(1, listOf("body_revision_changed")), result)
+            println("final-proof race: $result, replaced=true, GET=0, PUT=0, install=0, ACK=0")
+        }
+    }
+
+    @Test fun installRefusesPublicationAfterWindowExpires() {
+        ReviewAsset(SyncV2P5Fixture(), true).use { a ->
+            val ack = a.f.ackCalls
+            assertTrue(a.file.delete())
+            val result = a.channel(beforeInstall = {
+                assertFalse(a.file.exists())
+                a.clock.set(a.f.f.now + 300001)
+            }).sync()
+            assertEquals(1, a.installs)
+            assertFalse(a.file.exists())
+            assertTrue(a.backend.downloadBytes > 0)
+            assertEquals(SyncV2BodyChannel.Result(1, listOf("window_expired")), result)
+            assertEquals(ack, a.f.ackCalls)
+            println("expired install: $result, visible=${a.file.length()}, GET=${a.backend.downloadBytes}, ACK=0")
+        }
+    }
+
+    @Test fun legacyUnknownDigestIsRepairedByAuthenticatedCarrier() {
+        ReviewAsset(SyncV2P5Fixture(), true).use { a ->
+            a.f.sql.execSQL("UPDATE note_assets SET sha256='' WHERE storageKey=?", arrayOf(a.id))
+            a.file.writeBytes(a.changed)
+            val result = a.channel().sync()
+            assertEquals(SyncV2BodyChannel.Result(0, emptyList()), result)
+            assertEquals(1, a.backend.listCalls)
+            assertTrue(a.backend.reads.isNotEmpty())
+            assertArrayEquals(a.raw, a.file.readBytes())
+            assertEquals(1, a.installs)
+            println("legacy damaged original: $result, list=${a.backend.listCalls}, GET=${a.backend.downloadBytes}, installs=${a.installs}, restored=true")
+        }
+    }
+
+    @Test fun registeredCorruptionIsRepairedByAuthenticatedCarrier() {
+        ReviewAsset(SyncV2P5Fixture(), true).use { a ->
+            a.file.writeBytes(a.changed)
+            val result = a.channel().sync()
+            assertEquals(SyncV2BodyChannel.Result(0, emptyList()), result)
+            assertEquals(1, a.backend.listCalls)
+            assertTrue(a.backend.downloadBytes > 0)
+            assertEquals(1, a.installs)
+            assertArrayEquals(a.raw, a.file.readBytes())
+            println("registered damaged original: $result, GET=${a.backend.downloadBytes}, installs=${a.installs}, restored=true")
+        }
+    }
+
+    @Test fun repairPreservesReplacementMadeDuringAuthenticatedDownload() {
+        ReviewAsset(SyncV2P5Fixture(), true).use { a ->
+            a.file.writeBytes(a.changed)
+            val unrelated = a.raw.clone().also { it[0] = 99 }
+            a.backend.beforeRead = {
+                val other = File(a.f.root, "repaired-concurrent-replacement").apply { writeBytes(unrelated) }
+                java.nio.file.Files.move(other.toPath(), a.file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                a.backend.beforeRead = null
+            }
+            assertEquals(SyncV2BodyChannel.Result(1, listOf("body_revision_changed")), a.channel().sync())
+            assertArrayEquals(unrelated, a.file.readBytes())
+        }
+    }
 
 }

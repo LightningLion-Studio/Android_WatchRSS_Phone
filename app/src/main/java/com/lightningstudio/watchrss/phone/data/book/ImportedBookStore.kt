@@ -4,6 +4,7 @@ import androidx.room.withTransaction
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.data.db.*
 import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
+import com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Frames
@@ -11,6 +12,7 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Scratch
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -33,6 +35,7 @@ internal inline fun <T> validateBookPackage(block:()->T):T = try {block()}
 class ImportedBookStore(private val db:PhoneCompanionDatabase,private val directory:File,
     private val contentStore:ArticleContentStore?,private val deviceId:String) {
     private val registrationLock=Mutex()
+    private val verifiedReceiveLock = Mutex()
     private val dao get()=db.bookDao()
     private val articles get()=db.phoneArticleDao()
     private val readingJournal=BookReadingJournal(db)
@@ -427,8 +430,13 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         readingJournal.initialize();readingJournal.entries(from,to)
     }
     suspend fun readingPeer(peer:String)=db.withTransaction {readingJournal.initialize();db.bookReadingDao().peer(peer)}
-    suspend fun acknowledgeReading(peer:String,local:BookReadingSummary,remote:BookReadingSummary,root:String)=db.withTransaction {
-        readingJournal.initialize();readingJournal.acknowledge(peer,local,remote,root)
+    suspend fun acknowledgeReading(peer: String, local: BookReadingSummary, remote: BookReadingSummary, root: String,
+        checkWindow: () -> Unit = {}, admitCommit: () -> Unit = {}) = db.withTransaction {
+        checkWindow()
+        readingJournal.initialize()
+        readingJournal.acknowledge(peer, local, remote, root)
+        checkWindow()
+        admitCommit()
     }
     suspend fun mergeReading(remote:JSONObject,checkOwner:()->Unit={}):Int=mergeReadingBatch(listOf(remote),checkOwner)
     suspend fun mergeReadingBatch(values:List<JSONObject>,checkOwner:()->Unit={},binary:Boolean=false):Int=db.withTransaction {
@@ -624,18 +632,31 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
 
     /** Validate the package before publishing its original reference and chapter mappings. */
     suspend fun receivePackage(id: String, input: File, checkOwner: () -> Unit = {}): Int =
-        receivePackage(id, input, null, checkOwner)
+        receivePackage(id, input, null, {}, checkOwner)
 
     internal suspend fun receiveVerifiedPackage(id: String, input: File, revision: BookPackageFiles.Revision,
-        checkOwner: () -> Unit): Int = receivePackage(id, input, revision, checkOwner)
+        admitCommit: () -> Unit = {}, checkOwner: () -> Unit): Int = verifiedReceiveLock.withLock {
+        receivePackage(id, input, revision, admitCommit, checkOwner)
+    }
 
     private suspend fun receivePackage(id: String, input: File, expected: BookPackageFiles.Revision?,
-        checkOwner: () -> Unit): Int = withContext(Dispatchers.IO) {
+        admitCommit: () -> Unit, checkOwner: () -> Unit): Int = withContext(Dispatchers.IO) {
         checkOwner()
+        val staged = temporary("received-")
+        try {
+            input.copyTo(staged, true)
+            val original = BookPackageFiles.Revision(sha(staged), staged.length())
+            if (expected != null && expected != original) throw InvalidBookPackageException("package_digest_changed")
+            applyStagedPackage(id, staged, original, expected != null, admitCommit, checkOwner)
+        } finally { staged.delete() }
+    }
+
+    private suspend fun applyStagedPackage(id: String, staged: File, original: BookPackageFiles.Revision,
+        bluetooth: Boolean, admitCommit: () -> Unit, checkOwner: () -> Unit): Int {
         var header:JSONObject?=null;val hashes=mutableListOf<String>()
         val fingerprint=validateBookPackage {
             require(id.matches(Regex("[0-9a-f]{64}")))
-            input.bufferedReader(Charsets.UTF_8).use { r ->
+            staged.bufferedReader(Charsets.UTF_8).use { r ->
                 val h=JSONObject(requireNotNull(r.readLine()));header=h
                 require(h.getString("format")=="watchrss-book" && BookSync.integer(h,"version")==1L)
                 val count=BookSync.integer(h,"chapterCount");require(count in 1..100_000)
@@ -660,50 +681,65 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         checkOwner()
         if(existing!=null && availablePackage(existing) != null) {
             val mappings=dao.chapters(id);val present=articles.getAllIds().toHashSet()
-            if(mappings.size==hashes.size && mappings.all{it.articleId in present})return@withContext merge(JSONObject(existing.stateJson),checkOwner,forceProjection=true)
+            if(mappings.size==hashes.size && mappings.all{it.articleId in present}) {
+                return db.withTransaction {
+                    val changed = merge(JSONObject(existing.stateJson), checkOwner, forceProjection = true)
+                    checkOwner()
+                    admitCommit()
+                    changed
+                }
+            }
         }
         val h=requireNotNull(header);val state=existing?.let{JSONObject(it.stateJson)}?:JSONObject().put("bookId",id).put("fingerprint",fingerprint).put("title",h.getString("title")).put("chapterCount",hashes.size).put("sourceUrl",h.getString("sourceUrl")).put("kind",h.getString("kind")).put("deletedChapters",JSONArray()).put("deletionClock",0).put("deleted",false).put("deletedAt",0).put("updatedAt",0).put("sourceDeviceId",deviceId)
         require(ImportedContentIds.isImportedContentUrl(h.getString("sourceUrl")))
-        val tmp = temporary("received-")
-        val original = try {
-            input.copyTo(tmp, true)
-            val revision = BookPackageFiles.Revision(sha(tmp), tmp.length())
-            if (expected != null && expected != revision) throw InvalidBookPackageException("package_digest_changed")
-            directory.mkdirs()
-            com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)) {
-                com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile
-                    .installPrivateBook(file(id), tmp, revision.sha256, checkOwner)
-            }
-            revision
-        } finally {
-            tmp.delete()
-        }
-        var changed=0
-        db.withTransaction {
-            checkOwner()
-            val current=dao.get(id);val merged=BookSync.merge(current?.let{JSONObject(it.stateJson)},state)
-            if(merged.optString("sourceUrl").isBlank())merged.put("sourceUrl",h.getString("sourceUrl"))
-            val mappings=dao.chapters(id).associateBy{it.chapterIndex};val allOld=articles.getAllMetadataForSync().associateBy{it.url}
-            input.bufferedReader(Charsets.UTF_8).use {r->r.readLine();repeat(hashes.size){i->checkOwner();val c=JSONObject(requireNotNull(r.readLine()));val index=i+1
-                val oldId=mappings[index]?.articleId?:allOld[c.getString("url")]?.articleId
-                val articleId=oldId?:BookSync.articleId(id,index);val previous=articles.getById(articleId)
-                fun missing(value:String?)=value.isNullOrBlank() || contentStore?.isMarker(value)==true && contentStore.loadText(value).isNullOrBlank()
-                val repaired=previous?.let { row ->
-                    val text=if(missing(row.contentText))c.getString("contentText") else row.contentText
-                    val html=if(missing(row.contentHtml) && !c.isNull("contentHtml"))c.getString("contentHtml") else row.contentHtml
-                    if(text==row.contentText && html==row.contentHtml)row else row.copy(contentText=text,contentHtml=html,
-                        contentHash=CloudSnapshotCodec.sha256(c.getString("contentText").toByteArray()),syncBodyHash="",syncBodyByteCount=0,syncChunkSize=0,syncChunkHashesJson="",syncMetadataHash="")
+        val owner = currentCoroutineContext()
+        fun authorize() { owner.ensureActive(); checkOwner() }
+        suspend fun commit(): Int {
+            var published: ConditionalBodyFile.PublishedBook? = null
+            try {
+                authorize()
+                directory.mkdirs()
+                com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)) {
+                    if (bluetooth) ConditionalBodyFile.publishNewBook(file(id), staged, original.sha256, ::authorize) { published = it }
+                    else ConditionalBodyFile.installPrivateBook(file(id), staged, original.sha256, ::authorize)
                 }
-                val tombstone=merged.getBoolean("deleted")||index in BookSync.deletions(merged)
-                val next=repaired?.copy(deleted=previous!!.deleted||tombstone,deletedAt=maxOf(previous.deletedAt,if(tombstone)maxOf(merged.getLong("deletedAt"),merged.getLong("deletionClock"))else 0))?:PhoneArticleEntity(articleId,merged.getString("sourceDeviceId"),c.getString("url"),c.getString("title"),h.getString("title"),"",if(c.isNull("contentHtml"))null else c.getString("contentHtml"),c.getString("contentText"),null,CloudSnapshotCodec.sha256(c.getString("contentText").toByteArray()),1,1,false,0,0,if(ImportedContentIds.isImportedTextArticleUrl(c.getString("url")))ImportedContentIds.ROOT_SOURCE_URL else h.getString("sourceUrl"),if(ImportedContentIds.isImportedTextArticleUrl(c.getString("url")))ImportedContentIds.ROOT_SOURCE_TITLE else h.getString("title"),false,0,0,false,0,0,tombstone,if(tombstone)maxOf(merged.getLong("deletedAt"),merged.getLong("deletionClock"))else 0)
-                if(next!=previous){writeArticle(next);changed++};dao.putChapters(listOf(BookChapterEntity(id,index,articleId)))
-            }}
-            val next=BookEntity(id,BookSync.canonical(merged),original.sha256,original.bytes);if(current!=next){dao.put(next);changed++}
-            val singleText=ImportedContentIds.isImportedTextArticleUrl(h.getString("sourceUrl"))
-            val source=if(singleText)ImportedContentIds.ROOT_SOURCE_URL else h.getString("sourceUrl")
-            if(db.phoneRssSourceDao().getByUrl(source)==null)db.phoneRssSourceDao().upsert(PhoneRssSourceEntity(source,merged.getString("sourceDeviceId"),if(singleText)ImportedContentIds.ROOT_SOURCE_TITLE else merged.getString("title"),"",null,null,1,merged.getLong("updatedAt"),1,false,!singleText&&merged.getBoolean("deleted"),if(singleText)0 else merged.getLong("deletedAt")))
-            for(reading in dao.reading().filter{it.bookId==id})mergeReading(JSONObject(reading.stateJson))
-        };changed
+                var changed=0
+                db.withTransaction {
+                    authorize()
+                    val current=dao.get(id);val merged=BookSync.merge(current?.let{JSONObject(it.stateJson)},state)
+                    if(merged.optString("sourceUrl").isBlank())merged.put("sourceUrl",h.getString("sourceUrl"))
+                    val mappings=dao.chapters(id).associateBy{it.chapterIndex};val allOld=articles.getAllMetadataForSync().associateBy{it.url}
+                    staged.bufferedReader(Charsets.UTF_8).use {r->r.readLine();repeat(hashes.size){i->authorize();val c=JSONObject(requireNotNull(r.readLine()));val index=i+1
+                        val oldId=mappings[index]?.articleId?:allOld[c.getString("url")]?.articleId
+                        val articleId=oldId?:BookSync.articleId(id,index);val previous=articles.getById(articleId)
+                        fun missing(value:String?)=value.isNullOrBlank() || contentStore?.isMarker(value)==true && contentStore.loadText(value).isNullOrBlank()
+                        val repaired=previous?.let { row ->
+                            val text=if(missing(row.contentText))c.getString("contentText") else row.contentText
+                            val html=if(missing(row.contentHtml) && !c.isNull("contentHtml"))c.getString("contentHtml") else row.contentHtml
+                            if(text==row.contentText && html==row.contentHtml)row else row.copy(contentText=text,contentHtml=html,
+                                contentHash=CloudSnapshotCodec.sha256(c.getString("contentText").toByteArray()),syncBodyHash="",syncBodyByteCount=0,syncChunkSize=0,syncChunkHashesJson="",syncMetadataHash="")
+                        }
+                        val tombstone=merged.getBoolean("deleted")||index in BookSync.deletions(merged)
+                        val next=repaired?.copy(deleted=previous!!.deleted||tombstone,deletedAt=maxOf(previous.deletedAt,if(tombstone)maxOf(merged.getLong("deletedAt"),merged.getLong("deletionClock"))else 0))?:PhoneArticleEntity(articleId,merged.getString("sourceDeviceId"),c.getString("url"),c.getString("title"),h.getString("title"),"",if(c.isNull("contentHtml"))null else c.getString("contentHtml"),c.getString("contentText"),null,CloudSnapshotCodec.sha256(c.getString("contentText").toByteArray()),1,1,false,0,0,if(ImportedContentIds.isImportedTextArticleUrl(c.getString("url")))ImportedContentIds.ROOT_SOURCE_URL else h.getString("sourceUrl"),if(ImportedContentIds.isImportedTextArticleUrl(c.getString("url")))ImportedContentIds.ROOT_SOURCE_TITLE else h.getString("title"),false,0,0,false,0,0,tombstone,if(tombstone)maxOf(merged.getLong("deletedAt"),merged.getLong("deletionClock"))else 0)
+                        if(next!=previous){writeArticle(next);changed++};dao.putChapters(listOf(BookChapterEntity(id,index,articleId)))
+                    }}
+                    val next=BookEntity(id,BookSync.canonical(merged),original.sha256,original.bytes);if(current!=next){dao.put(next);changed++}
+                    val singleText=ImportedContentIds.isImportedTextArticleUrl(h.getString("sourceUrl"))
+                    val source=if(singleText)ImportedContentIds.ROOT_SOURCE_URL else h.getString("sourceUrl")
+                    if(db.phoneRssSourceDao().getByUrl(source)==null)db.phoneRssSourceDao().upsert(PhoneRssSourceEntity(source,merged.getString("sourceDeviceId"),if(singleText)ImportedContentIds.ROOT_SOURCE_TITLE else merged.getString("title"),"",null,null,1,merged.getLong("updatedAt"),1,false,!singleText&&merged.getBoolean("deleted"),if(singleText)0 else merged.getLong("deletedAt")))
+                    for(reading in dao.reading().filter{it.bookId==id})mergeReading(JSONObject(reading.stateJson))
+                    authorize()
+                    admitCommit()
+                }
+                return changed
+            } catch (failure: Throwable) {
+                try { published?.withdraw() } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+                throw failure
+            }
+        }
+        // Await the actual SQLite outcome before withdrawing a file. The original job and
+        // account still gate admission after the writer queue and before committing.
+        return if (bluetooth) withContext(NonCancellable) { commit() } else commit()
     }
     private suspend fun writeArticle(row:PhoneArticleEntity) {
         val text=if(contentStore!=null && ImportedContentIds.isImportedTextArticleUrl(row.url) &&

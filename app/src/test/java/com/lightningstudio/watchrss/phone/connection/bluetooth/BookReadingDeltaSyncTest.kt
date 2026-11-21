@@ -84,6 +84,8 @@ class BookReadingDeltaSyncTest {
             afterAck()
             return BluetoothSyncExchange("watch","address",q,v,acked&&!omitAckEvidence)
         }
+        fun scopedClient(s: ImportedBookStore, generation: () -> String) =
+            BookReadingDeltaSync(s, "phone", "watch", ::exchange, ::applied, rollbackWindow = generation)
         fun client(s:ImportedBookStore,onApplied:(Int)->Unit={})=BookReadingDeltaSync(s,"phone","watch",::exchange,::applied,onApplied)
     }
     @Test fun equalRootsSendOnlySummaryCommitAndPersistBothWatermarksAfterAck()=runBlocking<Unit> {
@@ -218,5 +220,24 @@ class BookReadingDeltaSyncTest {
         assertTrue(BleSyncCapabilities.read(JSONObject().advertiseBleSyncV2()).bookReadingDelta)
         assertFalse(BleSyncCapabilities.read(JSONObject().put("supportsBookReadingDeltaV1","true")).bookReadingDelta)
         assertFalse(BleSyncCapabilities.read(JSONObject().advertiseBleSyncV2()).withDeclarations(JSONObject().put("supportsBookReadingDeltaV1",false)).bookReadingDelta)
+    }
+    @Test fun acknowledgedV1WindowDoesNotSaveCursorAfterSignedRollback() = runBlocking<Unit> {
+        com.lightningstudio.watchrss.phone.syncv2.SyncV2P5Fixture().use { f ->
+            f.start()
+            val s = ImportedBookStore(f.room, File(f.root, "ack-books"), null, "phone")
+            s.mergeReading(state())
+            val peer = Peer(listOf(state()))
+            peer.afterAck = {
+                assertNull(s.readingPeer("watch"))
+                f.rollbackRemote()
+                f.actions().refresh()
+                assertEquals("1", f.projection.state().body.getString("rollbackGeneration"))
+            }
+            val failure = runCatching { peer.scopedClient(s, f.projection::legacyRollbackGeneration).sync() }.exceptionOrNull()
+            assertEquals("choice_stale", failure?.message)
+            assertEquals(1, peer.ackWrites)
+            assertNull(s.readingPeer("watch"))
+            println("v1 reading cursor: generation=1, ACK=1, stale cursor absent")
+        }
     }
 }

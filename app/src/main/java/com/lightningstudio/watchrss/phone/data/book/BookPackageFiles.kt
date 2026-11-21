@@ -91,7 +91,7 @@ internal object BookPackageFiles {
         }
     }
 
-    private fun fileIdentity(file: File): FileIdentity? {
+    internal fun fileIdentity(file: File): FileIdentity? {
         val path = file.toPath()
         val unix = try {
             Files.readAttributes(path, "unix:isRegularFile,size,lastModifiedTime,fileKey,ctime")

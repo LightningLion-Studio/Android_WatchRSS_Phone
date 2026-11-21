@@ -4,6 +4,7 @@ import androidx.room.Room
 import androidx.room.withTransaction
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception
 import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.book.ImportedBookStore
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
@@ -68,6 +69,36 @@ class V1BookCommitTest {
             println("queued cancellation: Room book=0, chapters=0, final file visible=false")
         } finally {
             permit.complete(Unit)
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun guardedFinalCommitRollsBackChapterRowsAndPrivateOriginalTogether() = runBlocking<Unit> {
+        val context = RuntimeEnvironment.getApplication()
+        val root = File(context.cacheDir, "guarded-book-${System.nanoTime()}").apply { mkdirs() }
+        val db = Room.inMemoryDatabaseBuilder(context, PhoneCompanionDatabase::class.java).allowMainThreadQueries().build()
+        try {
+            val stage = File(root, "wire").apply { writeText(raw) }
+            val directory = File(root, "imported_books")
+            val store = ImportedBookStore(db, directory, null, "phone")
+            var reachedAdmission = false
+            val result = runCatching {
+                store.receiveVerifiedPackage(id, stage, revision, commitOwner = { write ->
+                    db.withTransaction {
+                        assertTrue(write() > 0)
+                        reachedAdmission = true
+                        throw B2Exception("AUTH_REVOKED")
+                    }
+                }) {}
+            }
+            assertTrue(reachedAdmission)
+            assertEquals("AUTH_REVOKED",
+                (result.exceptionOrNull() as? B2Exception)?.code)
+            assertNull(db.bookDao().get(id))
+            assertTrue(db.bookDao().chapters().isEmpty())
+            assertFalse(File(directory, "$id.jsonl").exists())
+        } finally {
             db.close()
             root.deleteRecursively()
         }

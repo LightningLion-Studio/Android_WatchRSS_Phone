@@ -713,6 +713,7 @@ class PhoneBluetoothSyncManager(
                         }
                     }
                     val bookConnection = syncSession?.transport
+                    if (legacyCommit != null) bookSync.commitOwner = { legacyCommit.commit(it) }
                     bookSync.checkOwner = {
                         legacyCommit?.check()
                         if (bookConnection != null && (syncSession?.transport !== bookConnection || bookConnection.isClosed)) {
@@ -723,7 +724,8 @@ class PhoneBluetoothSyncManager(
                     }
                     bookSync.admitOwnerCommit = {
                         val admit = { bookAccount?.commitFence?.admitCommit(bookSync.checkOwner) ?: bookSync.checkOwner() }
-                        bookConnection?.admitLegacyCommit(admit) ?: admit()
+                        if (legacyCommit != null) legacyCommit.admit()
+                        else bookConnection?.admitLegacyCommit(admit) ?: admit()
                     }
                     bookSync.rollbackWindow = bookRollbackWindow
                     bookSync.diagnosticItem={id,result,code->trace.item("book",id,result,code)}
@@ -1537,7 +1539,7 @@ class PhoneBluetoothSyncManager(
             window.checkHead()
         }
 
-        fun admit() = connection.admitLegacyCommit { account.commitFence.admitCommit(::check) }
+        fun admit() = account.commitFence.admitCommit { connection.admitLegacyCommit(::check) }
 
         suspend fun rejectIfAffected(peer: String, version: Int, action: String, payload: JSONObject) {
             val inbox = window.prepareLegacy(B2CommitWindow.LegacyInput(peer, version, action, payload), ::check)

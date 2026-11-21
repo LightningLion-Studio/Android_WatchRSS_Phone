@@ -36,6 +36,9 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
     }
     var checkOwner: () -> Unit = {}
     var admitOwnerCommit: () -> Unit = {}
+    var commitOwner: (suspend (suspend () -> Int) -> Int)? = null
+
+    private suspend fun write(block: suspend () -> Int): Int = commitOwner?.invoke(block) ?: block()
     var rollbackWindow: () -> String? = { null }
     var domainFastPath=false
     var onApplied:(Int)->Unit={}
@@ -77,7 +80,7 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
         val remote=candidates.filter{it.getString("bookId") !in rejected}
         var metadataApplied=0
         remote.forEach { state ->
-            try {val count=store.merge(state);metadataApplied+=count;applied+=count;recordApplied(count)}
+            try {val count=write { store.merge(state, checkOwner) };metadataApplied+=count;applied+=count;recordApplied(count)}
             catch(e:InvalidBookPackageException){reject(state.getString("bookId"),"book_manifest_invalid",e.reason)}
         }
         trace("manifest-merged:books=${remote.size}:applied=$metadataApplied:ms=${(System.nanoTime()-started)/1_000_000}")
@@ -120,7 +123,7 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
                 validateBookPackage {require(tmp.length()==expectedSize&&digest.digest().joinToString(""){"%02x".format(it)}==expectedSha)}
                 val owner = currentCoroutineContext()
                 val revision = BookPackageFiles.Revision(expectedSha, expectedSize)
-                store.receiveVerifiedPackage(id, tmp, revision, admitOwnerCommit) {
+                store.receiveVerifiedPackage(id, tmp, revision, admitOwnerCommit, commitOwner) {
                     owner.ensureActive()
                     checkOwner()
                 }.let { applied += it; recordApplied(it) }
@@ -137,7 +140,7 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
         if(!syncReading)return applied
         if(deltaPeer!=null && peerReadingDelta) {
             return applied+BookReadingDeltaSync(store,deviceId,requireNotNull(deltaPeer),::send,requireNotNull(appliedExchange),onApplied,trace,
-                rollbackWindow, checkOwner, admitOwnerCommit).sync()
+                rollbackWindow, checkOwner, admitOwnerCommit, commitOwner).sync()
         }
         val localReading=store.readingStates();var localOffset=0;var remoteOffset=0L;var more=true
         do {
@@ -147,7 +150,7 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
             val rows=page.getJSONArray("states");require(rows.length()<=100)
             val incoming=(0 until rows.length()).map{rows.getJSONObject(it).also(BookSync::validateReading)}
             more=page.getBoolean("hasMore");val next=BookSync.integer(page,"nextAfter");require(next>=remoteOffset&&(!more||next>remoteOffset))
-            store.mergeReadingBatch(incoming).let{applied+=it;recordApplied(it)};remoteOffset=next
+            write { store.mergeReadingBatch(incoming, checkOwner) }.let{applied+=it;recordApplied(it)};remoteOffset=next
         }while(localOffset<localReading.size||more)
         return applied
     }

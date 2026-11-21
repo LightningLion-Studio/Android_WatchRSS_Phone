@@ -852,11 +852,13 @@ class PhoneBluetoothSyncClient(
                 val wireRequest = session.requestForExchange(request)
                 writeFrameLogged(transport.outputStream, sessionId, "sessionRequest", wireRequest)
                 val response = readFrameLogged(transport.inputStream, sessionId, "sessionResponse")
+                val guardedBook = action == "syncBooks" && transport.legacyResponseAdmission != null
+                if (guardedBook) transport.legacyResponseAdmission?.invoke()
                 val ackFailure = writeResponseAck(
                     transport.outputStream,
                     sessionId,
                     success = true,
-                    applied = true
+                    applied = !guardedBook
                 )
                 session.recordNegotiation(response)
                 ackFailure?.let { throwable ->

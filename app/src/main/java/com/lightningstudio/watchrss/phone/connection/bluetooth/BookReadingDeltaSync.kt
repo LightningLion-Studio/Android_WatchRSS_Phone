@@ -24,7 +24,8 @@ internal class BookReadingDeltaSync(
     private val onApplied:(Int)->Unit={},private val trace:(String)->Unit={},
     private val rollbackWindow: () -> String? = { null },
     private val checkOwner: () -> Unit = {},
-    private val admitCommit: () -> Unit = {}
+    private val admitCommit: () -> Unit = {},
+    private val commitOwner: (suspend (suspend () -> Int) -> Int)? = null
 ) {
     private fun request(phase:String)=JSONObject().put("action","syncBooks").put("version",1).put("phase",phase).put("deviceId",deviceId)
     private fun validate(v:JSONObject,phase:String,window:String?=null) {
@@ -82,7 +83,8 @@ internal class BookReadingDeltaSync(
                     require(!remoteFinished || (!more && incoming.isEmpty()))
                     remoteFinished=!more
                     receivedCount+=incoming.size;require(receivedCount<=remote.count)
-                    val changed=store.mergeReadingBatch(incoming, ::checkWindow);applied+=changed;onApplied(changed)
+                    val merge: suspend () -> Int = { store.mergeReadingBatch(incoming, ::checkWindow) }
+                    val changed=commitOwner?.invoke(merge) ?: merge();applied+=changed;onApplied(changed)
                     after=next;sentCount+=entries.size
                 } while(at<outgoing.size || more)
             }
@@ -100,7 +102,11 @@ internal class BookReadingDeltaSync(
             check(result.appliedAckWritten){"阅读确认回执未写入，请重试同步"}
             if(result.response.getBoolean("committed")) {
                 currentCoroutineContext().ensureActive()
-                store.acknowledgeReading(peer, local, remote, merged.root, ::checkWindow, admitCommit)
+                val acknowledge: suspend () -> Int = {
+                    store.acknowledgeReading(peer, local, remote, merged.root, ::checkWindow, admitCommit)
+                    0
+                }
+                if (commitOwner == null) acknowledge() else commitOwner(acknowledge)
                 trace("reading-committed:round=$round")
                 return applied
             }

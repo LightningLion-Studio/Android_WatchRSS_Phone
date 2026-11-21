@@ -200,7 +200,9 @@ internal class B2BookBusiness(
                 val fingerprint = metadata.s("fingerprint")
                 if (state.s("fingerprint") != fingerprint) fail("OBJECT_CONFLICT")
                 val prepared = context.preparedBook ?: fail("JOURNAL_CORRUPT")
-                B2Scratch.open(importRoot(), B2Scratch.BOOK_IMPORT).use { scratch ->
+                if (prepared.shadow != null) {
+                    books.installBinaryPackage(id, fingerprint, state, prepared, requireNotNull(prepared.shadow.records.parentFile), check)
+                } else B2Scratch.open(importRoot(), B2Scratch.BOOK_IMPORT).use { scratch ->
                     books.installBinaryPackage(id, fingerprint, state, prepared, scratch.file, check)
                 }
             }
@@ -311,9 +313,19 @@ internal class B2BookBusiness(
                     BookPackageFiles.verify(original, revision) { check() } ?: fail("HASH_MISMATCH")
                 }
             }
-            context.preparedBook = books.prepareBinaryPackage(id, assembly, check)
+            context.preparedBook = if (!context.guarded) books.prepareBinaryPackage(id, assembly, check) else {
+                val state = persistence.get(scope, "bookStateWitness", stateKey(context.jobId, id))
+                    ?: fail("DEPENDENCIES_PENDING")
+                val shadow = B2Scratch.open(importRoot(), B2Scratch.BOOK_IMPORT)
+                context.closeBookShadow = shadow
+                books.prepareBinaryPackage(id, assembly, check, shadow.file, state)
+            }
         } catch (_: IOException) {
             fail("LOCAL_IO")
+        } catch (_: IllegalArgumentException) {
+            fail("BUSINESS_REJECTED")
+        } catch (_: org.json.JSONException) {
+            fail("BUSINESS_REJECTED")
         }
     }
 

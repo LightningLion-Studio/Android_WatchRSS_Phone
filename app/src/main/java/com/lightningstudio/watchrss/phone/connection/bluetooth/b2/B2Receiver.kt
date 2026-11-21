@@ -41,6 +41,7 @@ class B2ApplyContext internal constructor(
     internal val stagedFile: File? = null
 ) {
     internal var preparedBook: ImportedBookStore.PreparedBinaryPackage? = null
+    internal var closeBookShadow: java.io.Closeable? = null
     internal var finishAsset: ((committed: Boolean) -> Unit)? = null
     internal var readingIndices: List<Int> = emptyList()
     internal var preparedAsset: com.lightningstudio.watchrss.phone.connection.bluetooth.B2NoteAssetBusiness.Prepared? = null
@@ -497,7 +498,7 @@ class B2Receiver(
             light[id] = copy(j)
         }
         begun.add(id)
-        if (auth.commitWindow == null) cleanupApplied(j)
+        cleanupApplied(j)
         return B2Results.answer(r, obj("disposition" to if (old == null && !cancelBeforeBegin) "CREATED" else "RESUMED", "selectionDigest" to p.s("selectionDigest"), "state" to j.s("state"), "expiresAtMillis" to j.n("expiresAtMillis"), "nextManifestPage" to j.n("nextManifestPage"), "completion" to j.get("completion")), epoch)
     }
     private suspend fun manifest(j: JSONObject, r: JSONObject): JSONObject {
@@ -624,6 +625,7 @@ class B2Receiver(
      * Only our disposable chunk/compose paths are removed. Failure leaves that record
      * intact, never rolls back APPLIED, and is retried on observation or admission. */
     private suspend fun cleanupApplied(j: JSONObject) {
+        if (auth.commitWindow != null) return
         for (row in objects(j.s("jobId"))) if (receipt(j, row) != null) {
             releaseApplied(j, row.o("descriptor"))
         }
@@ -662,7 +664,7 @@ class B2Receiver(
         if (p.n("limit") == 0L || j.s("state") == "CANCELLED") return base.put("items", items).put("next", JSONObject.NULL).put("done", true)
         if (j.s("state") == "PLANNING") fail("MANIFEST_INCOMPLETE")
         if (p.n("limit") > lim(j).n("maxResultsPerPage")) fail()
-        if (auth.commitWindow == null) cleanupApplied(j)
+        cleanupApplied(j)
         val all = objects(j.s("jobId")); var start = 0; var from = 0
         if (!p.nil("afterObjectId")) {
             val index = all.indexOfFirst { it.o("descriptor").s("objectId") == p.s("afterObjectId") }; if (index < 0) fail()
@@ -795,25 +797,30 @@ class B2Receiver(
             business.prepareFile(context, copy(d), metadata)
         } catch (failure: Throwable) {
             runCatching { context.finishAsset?.invoke(false) }.onFailure(failure::addSuppressed)
+            runCatching { context.closeBookShadow?.close() }.onFailure(failure::addSuppressed)
             throw failure
         }
         leases[jobId] = monotonic() + B2Wire.LEASE
-        val result = applyTransaction(d.s("kind"), context) {
-            fence(j, r)
-            val outcome = business.applyFile(context, copy(d), metadata, B2FileRef(staged, 0, d.n("size")))
-            fault("beforeApplyCommit")
-            check()
-            touch(j, retention.clock())
-            val rc = B2Digests.receipt(r, d.s("objectId"), if (receiveDirection == "watchToPhone") auth.phoneDeviceId else auth.watchDeviceId, outcome)
-            if (auth.commitWindow != null) {
-                val witness = if (d.s("kind") == B2Wire.BOOK_SEGMENT) obj("sha256" to d.s("sha256"))
-                    else business.receiptWitness(context, d, metadata, null) ?: fail("BUSINESS_REJECTED")
-                row.put("witness", witness)
+        val result = try {
+            applyTransaction(d.s("kind"), context) {
+                fence(j, r)
+                val outcome = business.applyFile(context, copy(d), metadata, B2FileRef(staged, 0, d.n("size")))
+                fault("beforeApplyCommit")
+                check()
+                touch(j, retention.clock())
+                val rc = B2Digests.receipt(r, d.s("objectId"), if (receiveDirection == "watchToPhone") auth.phoneDeviceId else auth.watchDeviceId, outcome)
+                if (auth.commitWindow != null) {
+                    val witness = if (d.s("kind") == B2Wire.BOOK_SEGMENT) obj("sha256" to d.s("sha256"))
+                        else business.receiptWitness(context, d, metadata, null) ?: fail("BUSINESS_REJECTED")
+                    row.put("witness", witness)
+                }
+                row.put("receipt", rc); store.put(scope, "object", objectKey(j.s("jobId"), d.s("objectId")), row)
+                if (objects(j.s("jobId")).all { !it.nil("receipt") }) j.put("state", "APPLIED") else j.put("state", "TRANSFERRING")
+                store.put(scope, "job", j.s("jobId"), j)
+                obj("state" to "APPLIED", "receipt" to rc).also { bind(j, r, it) }
             }
-            row.put("receipt", rc); store.put(scope, "object", objectKey(j.s("jobId"), d.s("objectId")), row)
-            if (objects(j.s("jobId")).all { !it.nil("receipt") }) j.put("state", "APPLIED") else j.put("state", "TRANSFERRING")
-            store.put(scope, "job", j.s("jobId"), j)
-            obj("state" to "APPLIED", "receipt" to rc).also { bind(j, r, it) }
+        } finally {
+            context.closeBookShadow?.close()
         }
         applied.add(d.s("objectId"))
         synchronized(active) { active.remove(d.s("objectId")) }

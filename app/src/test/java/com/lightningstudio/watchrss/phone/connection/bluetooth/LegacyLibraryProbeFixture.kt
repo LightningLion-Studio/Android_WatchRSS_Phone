@@ -2,6 +2,14 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import org.json.JSONObject
 
-/** Identifies the synthetic v14 response as a legacy peer in either B2 configuration. */
-internal fun JSONObject.asLegacyPodJsProbe(): JSONObject =
-    put("phase", "probe").put("libraryPeer", JSONObject().put("implementation", "podjs").put("appVersion", "2.0.1-2"))
+/** Matches the capabilities advertised by the frozen PodJS v2.0.1-2 probe. */
+internal fun JSONObject.asLegacyPodJsProbe(readerResources: Boolean = true): JSONObject = apply {
+    put("phase", "probe")
+    put("supportsManifestBatches", true)
+    put("supportsReaderPresets", readerResources)
+    put("supportsReaderAssets", readerResources)
+    put("supportsResourceChunkAck", readerResources)
+    put("supportsReaderPresetPreview", true)
+    put("supportsPersistentSession", true)
+    put("supportsTransferByteProgress", true)
+}

@@ -56,7 +56,7 @@ class BookSessionIsolationTest {
                 val action=q.optString("action");val phase=q.optString("phase");if(action=="ack")return
                 val a=when(action) {
                     "syncLibrary"->when(phase) {
-                        "probe"->reply(action,phase).asLegacyPodJsProbe().put("account",JSONObject().put("bound",true).put("userIdHash",CloudSnapshotCodec.sha256("owner".toByteArray())))
+                        "probe"->reply(action,phase).asLegacyPodJsProbe(readerResources = false).put("account",JSONObject().put("bound",true).put("userIdHash",CloudSnapshotCodec.sha256("owner".toByteArray())))
                             .put("supportsPersistentSession",true).put("persistentSessionAccepted",true).advertiseBleSyncV2()
                         "cursor"->LibrarySyncPayload.buildCursorResponse("watch",LibrarySyncCursor(0,0,0))
                         "manifest"->if(fatalLibrary)reply(action,phase).put("success",false).put("fatalSession",true).put("errorCode","library_exchange_failed")

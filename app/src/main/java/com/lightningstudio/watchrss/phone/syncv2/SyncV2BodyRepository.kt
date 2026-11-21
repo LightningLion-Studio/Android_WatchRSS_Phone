@@ -201,6 +201,41 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         return original
     }
 
+    internal class NoteAssetRegistration(val storageKey: String, val sha256: String, val byteCount: Int,
+        private val stillCurrent: () -> Boolean) {
+        fun requireCurrent() {
+            if (!stillCurrent()) SyncV2Codec.fail("closure_incomplete")
+        }
+    }
+
+    fun prepareNoteAssetRegistration(id: String): NoteAssetRegistration {
+        val target = file("asset", id)
+        if (target.canonicalFile.parentFile != target.parentFile!!.canonicalFile) SyncV2Codec.fail("closure_incomplete")
+        val observed = identity(target) ?: SyncV2Codec.fail("closure_incomplete")
+        val raw = stableRead(target, observed, SyncV2BodyCodec.limit("asset")) ?: SyncV2Codec.fail("closure_incomplete")
+        val digest = SyncV2BodyCodec.hash(raw)
+        return NoteAssetRegistration(id, digest, raw.size) {
+            target.canonicalFile.parentFile == target.parentFile!!.canonicalFile && sameFile(target, observed, digest)
+        }
+    }
+
+    fun registerNoteAsset(asset: NoteAssetRegistration, now: Long) {
+        check(db.inTransaction())
+        asset.requireCurrent()
+        try {
+            insertNoteAsset(asset.storageKey, asset.sha256, asset.byteCount, now)
+        } catch (_: android.database.sqlite.SQLiteConstraintException) {
+            SyncV2Codec.fail("closure_incomplete")
+        }
+    }
+
+    private fun insertNoteAsset(id: String, sha256: String, byteCount: Int, now: Long) {
+        val mime=when(id.substringAfterLast('.',"").lowercase()){ "png"->"image/png";"jpg","jpeg"->"image/jpeg";"webp"->"image/webp";"md"->"text/markdown";else->"application/octet-stream" }
+        SyncV2PhoneApply(db).upsert("note_assets",listOf("assetId"),JSONObject().put("assetId",java.util.UUID.randomUUID().toString()).put("noteId","")
+            .put("storageKey",id).put("mimeType",mime).put("displayName",id).put("sha256",sha256).put("byteCount",byteCount)
+            .put("isOriginal",false).put("createdAt",now).put("deleted",false).put("deletedAt",0))
+    }
+
     /** Discover referenced originals omitted by older private-UUID metadata. Absence never deletes. */
     fun refreshReferences(now:Long,checkOwner:()->Unit):List<String> {
         val errors=linkedSetOf<String>()
@@ -209,14 +244,11 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             val exists=db.controlQuery("SELECT 1 FROM note_assets WHERE storageKey=?",arrayOf(id)).use{it.moveToFirst()}
             if(exists)continue
             val raw=read("asset",id)?:SyncV2Codec.fail("cloud_note_asset_missing")
-            val mime=when(id.substringAfterLast('.',"").lowercase()){ "png"->"image/png";"jpg","jpeg"->"image/jpeg";"webp"->"image/webp";"md"->"text/markdown";else->"application/octet-stream" }
             db.beginTransaction()
             try {
                 checkOwner()
                 if(!db.controlQuery("SELECT 1 FROM note_assets WHERE storageKey=?",arrayOf(id)).use{it.moveToFirst()})
-                    SyncV2PhoneApply(db).upsert("note_assets",listOf("assetId"),JSONObject().put("assetId",java.util.UUID.randomUUID().toString()).put("noteId","")
-                        .put("storageKey",id).put("mimeType",mime).put("displayName",id).put("sha256",SyncV2BodyCodec.hash(raw)).put("byteCount",raw.size)
-                        .put("isOriginal",false).put("createdAt",now).put("deleted",false).put("deletedAt",0))
+                    insertNoteAsset(id, SyncV2BodyCodec.hash(raw), raw.size, now)
                 db.setTransactionSuccessful()
             }finally{db.endTransaction()}
         }catch(e:Exception){checkOwner();errors.add(SyncV2BodyChannel.code(e))}

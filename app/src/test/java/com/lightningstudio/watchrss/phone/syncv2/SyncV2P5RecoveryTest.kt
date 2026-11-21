@@ -16,6 +16,35 @@ import java.io.File
 @Config(manifest=Config.NONE,sdk=[35])
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 class SyncV2P5RecoveryTest {
+    @Test
+    fun keepLocalRegistersAnUnregisteredAttachmentBeforeSealingASegmentedNote() = SyncV2P5Fixture().use { w ->
+        w.pending()
+        val attachment = "fixture attachment".toByteArray()
+        File(w.root, "notes/assets/legacy.png").apply {
+            parentFile!!.mkdirs()
+            writeBytes(attachment)
+        }
+        val markdown = "![fixture](assets/legacy.png)\n" + "paragraph\n".repeat(29_000)
+        w.edit(markdown)
+        w.noteSegmentsAnnounced = true
+        val client = w.f.client().also { it.noteSegmentsLocal = true }
+        SyncV2AccountActions(client, w.identity, w.projection, w.f.signer, { w.key },
+            { it == "synthetic-phone" }, w.root, true, { w.f.now }, noteSegmentsRead = true).use { actions ->
+            assertTrue(actions.choose(actions.pendingChoice()!!.preview, "local").getBoolean("localCommitted"))
+        }
+        assertEquals(markdown, w.text())
+        assertEquals(1, w.publishCalls)
+        val rows = w.projection.cloudRows()
+        assertEquals("legacy.png", rows.single { it.getJSONObject("meta").getString("kind") == "asset" }
+            .getJSONObject("meta").getString("logicalId"))
+        val note = rows.single { it.getJSONObject("meta").getString("kind") == "note" }
+        assertTrue(note.getJSONArray(SyncV2NoteWiring.SEGMENTS_KEY).length() > 0)
+        w.sql.query("SELECT sha256,byteCount FROM note_assets WHERE storageKey='legacy.png'").use {
+            assertTrue(it.moveToFirst())
+            assertEquals(SyncV2BodyCodec.hash(attachment), it.getString(0))
+            assertEquals(attachment.size, it.getInt(1))
+        }
+    }
     private fun article(id:String)=PhoneArticleEntity(id,"synthetic","https://example.invalid/$id","title","site","summary",null,"necessary original body",null,"body-hash",0,0,true,0,0,null,null,true,0,0,false,0,0,false,0)
     private fun code(expected:String,block:()->Unit){val e=runCatching(block).exceptionOrNull();assertNotNull(e);assertEquals(expected,if(e is SyncV2CloudError)e.code else e!!.message)}
     private fun addArticle(w:SyncV2P5Fixture,id:String="local-article"){runBlocking{w.room.phoneArticleDao().upsert(article(id))};w.drain()}
@@ -40,7 +69,7 @@ class SyncV2P5RecoveryTest {
         }
         assertEquals(markdown, w.text())
         assertEquals("legacy attachment", original.readText())
-        assertEquals(0, w.sql.query("SELECT COUNT(*) FROM note_assets").use {
+        assertEquals(1, w.sql.query("SELECT COUNT(*) FROM note_assets").use {
             it.moveToFirst()
             it.getInt(0)
         })
@@ -55,7 +84,13 @@ class SyncV2P5RecoveryTest {
             code("closure_incomplete") { actions.choose(actions.preview(), "local") }
             assertEquals(before, w.publishCalls)
 
-            File(w.root, "notes/assets/legacy.png").apply {
+            val unreadable = File(w.root, "notes/assets/legacy.png").apply {
+                assertTrue(mkdirs())
+            }
+            code("closure_incomplete") { actions.choose(actions.preview(), "local") }
+            assertEquals(before, w.publishCalls)
+            assertTrue(unreadable.delete())
+            unreadable.apply {
                 parentFile!!.mkdirs()
                 writeText("different bytes")
             }
@@ -68,6 +103,32 @@ class SyncV2P5RecoveryTest {
             assertEquals(before, w.publishCalls)
             assertNotNull(actions.pendingChoice())
             assertEquals(markdown, w.text())
+        }
+    }
+    @Test
+    fun keepLocalRollsBackAttachmentRegistrationIfAccountChangesDuringStaging() {
+        var current = true
+        SyncV2Lifetime { current }.use { lifetime ->
+            SyncV2P5Fixture(lifetime).use { w ->
+                w.pending()
+                File(w.root, "notes/assets/legacy.png").apply {
+                    parentFile!!.mkdirs()
+                    writeText("fixture attachment")
+                }
+                w.edit("![fixture](assets/legacy.png)")
+                w.actions(fault = { if (it == "before-action-stage") current = false }).use { actions ->
+                    code("authentication_required") { actions.choose(actions.preview(), "local") }
+                }
+                assertEquals(0, w.publishCalls)
+                for (table in listOf("note_assets", "syncv2_p5_objects", "syncv2_p5_rows")) {
+                    assertEquals(0, w.sql.query("SELECT COUNT(*) FROM $table").use { it.moveToFirst(); it.getInt(0) })
+                }
+                current = true
+                assertFalse(w.projection.state().body.isNull("pendingChoice"))
+                w.actions().use { actions ->
+                    assertTrue(actions.choose(actions.preview(), "local").getBoolean("localCommitted"))
+                }
+            }
         }
     }
     @Test fun originalArticleBodyIsEncryptedPinnedAndReadableAfterSourceRowIsDiscarded():Unit=SyncV2P5Fixture().use{w->

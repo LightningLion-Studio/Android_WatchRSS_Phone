@@ -568,6 +568,36 @@ internal class SyncV2Projection(
         if(c.stateVersion!=st.version || c.localChangeRevision!=st.revision || c.accountOid!=a.getString("oid") || c.accountRevision!=a.getString("revision") || c.generation!=a.getString("generation"))SyncV2Codec.fail("choice_stale")
         if(requirePending && st.body.optJSONObject("pendingChoice")?.optString("generation")!=c.generation)SyncV2Codec.fail("choice_stale")
     }
+    internal fun accountCheckOwner() = guarded { ensureActive() }
+
+    /** The choice writer starts at a reconciled capture and adds only these asset rows. */
+    internal fun accountProjectRegisteredNoteAssets(st: State, storageKeys: Set<String>): List<JSONObject> {
+        check(db.inTransaction())
+        val domain = SyncV2Schema.domains.single { it.kind == "asset" }
+        for (key in storageKeys) {
+            val value = db.controlQuery(
+                "SELECT storageKey AS projection_key,${columns(domain)} FROM note_assets WHERE storageKey=?",
+                arrayOf(key)
+            ).use {
+                if (!it.moveToFirst()) SyncV2Codec.fail("closure_incomplete")
+                readStoredRecord(domain, it)
+            }
+            project(domain, key, value, st.revision, ownerBody=st.body)
+        }
+        val previous = st.body.getString("businessStamp")
+        val stamp = SyncV2BusinessWitness.read(db).encoded()
+        st.body.put("businessStamp", stamp)
+        if (st.body.optString("reconciledStamp") == previous) {
+            st.body.put("reconciledStamp", stamp)
+            db.execSQL(
+                "UPDATE syncv2_scan SET business_stamp=? WHERE scope=? AND complete=1 AND business_stamp=?",
+                arrayOf(stamp, scope, previous)
+            )
+        }
+        return storageKeys.map { identity.entity("asset", it) }.chunked(64).flatMap { ids ->
+            accountLocalRows(ids.toSet())
+        }
+    }
     /** Values are always from the current local projection, never a browsable old cloud cache. */
     internal fun accountLocalRows(ids:Set<String>?=null):List<JSONObject> {
         if(!db.inTransaction())state();val selected=selection(ids)

@@ -12,7 +12,7 @@ import org.robolectric.RuntimeEnvironment
 import java.io.File
 
 /** Native Room + actual product HTTP/crypto/actions. All identifiers and keys are synthetic. */
-internal class SyncV2P5Fixture:AutoCloseable {
+internal class SyncV2P5Fixture(private val lifetime:SyncV2Lifetime?=null):AutoCloseable {
     val f=SyncV2P3Fixture();val identity=f.identity;val key=ByteArray(32){7}
     val root=File((RuntimeEnvironment.getApplication() as Context).cacheDir,"p5-${System.nanoTime()}").also{it.mkdirs()}
     private val path=File(root,"phone.db")
@@ -20,7 +20,7 @@ internal class SyncV2P5Fixture:AutoCloseable {
     private fun room()=Room.databaseBuilder(RuntimeEnvironment.getApplication(),PhoneCompanionDatabase::class.java,path.absolutePath).allowMainThreadQueries().build()
     val sql get()=room.openHelper.writableDatabase
     var projection=projection();private set
-    private fun projection()=SyncV2Projection(sql,identity,SyncV2Fixtures.localKey,true).also{it.install()}
+    private fun projection()=SyncV2Projection(sql,identity,SyncV2Fixtures.localKey,true,lifetime=lifetime).also{it.install()}
     val headers=linkedMapOf<String,JSONObject>();val refs=linkedMapOf<String,JSONObject>()
     val results=mutableMapOf<String,JSONObject>();val requests=mutableListOf<String>()
     var current=JSONObject();var deviceOid:String?=null;var deviceRevision="0"

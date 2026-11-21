@@ -5,6 +5,7 @@ import androidx.work.ExistingWorkPolicy
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
 import com.lightningstudio.watchrss.phone.privacy.PhonePrivacyConsentStore
 import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONObject
@@ -20,7 +21,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class, sdk = [34])
@@ -108,13 +111,51 @@ class BtSyncTelemetryQueueTest {
             assertEquals(rejectedId, body.getJSONObject(1).getString("eventId"))
             assertFalse(body.getJSONObject(0).has("userId"))
 
-            service.begin(BtSyncTrigger.MANUAL)!!.finishSuccess()
+            repeat(BtSyncEventQueue.MAX_BATCH + 1) {
+                service.begin(BtSyncTrigger.MANUAL)!!.finishSuccess()
+            }
             server.enqueue(MockResponse().setResponseCode(400))
+            server.enqueue(MockResponse().setBody("""{"accepted":1,"rejected":[]}"""))
             assertTrue(service.uploadPending())
+
             val badRequest = server.takeRequest(2, TimeUnit.SECONDS)!!
-            assertEquals(1, JSONObject(badRequest.body.readUtf8()).getJSONArray("events").length())
+            val discarded = JSONObject(badRequest.body.readUtf8()).getJSONArray("events")
+            assertEquals(BtSyncEventQueue.MAX_BATCH, discarded.length())
+            val discardedIds = (0 until discarded.length()).mapTo(mutableSetOf()) {
+                discarded.getJSONObject(it).getString("eventId")
+            }
+            val nextRequest = server.takeRequest(2, TimeUnit.SECONDS)!!
+            val nextBatch = JSONObject(nextRequest.body.readUtf8()).getJSONArray("events")
+            assertEquals(1, nextBatch.length())
+            assertFalse(nextBatch.getJSONObject(0).getString("eventId") in discardedIds)
             assertTrue(service.uploadPending())
-            assertEquals(3, server.requestCount)
+            assertEquals(4, server.requestCount)
+        }
+    }
+
+    @Test
+    fun networkFailureRetainsTheQueuedEventUntilTheNextUpload() = runBlocking {
+        MockWebServer().use { server ->
+            acceptConsent()
+            val failFirstCall = AtomicBoolean(true)
+            val http = OkHttpClient.Builder().addInterceptor { chain ->
+                if (failFirstCall.getAndSet(false)) throw IOException("test network failure")
+                chain.proceed(chain.request())
+            }.build()
+            val service = service(server, http = http)
+            service.begin(BtSyncTrigger.MANUAL)!!.finishSuccess()
+
+            assertTrue(runCatching { service.uploadPending() }.exceptionOrNull() is IOException)
+            assertEquals(0, server.requestCount)
+            server.enqueue(MockResponse().setBody("""{"accepted":1,"rejected":[]}"""))
+            val reopened = service(server)
+            assertTrue(reopened.uploadPending())
+            val uploaded = server.takeRequest(2, TimeUnit.SECONDS)!!
+            val events = JSONObject(uploaded.body.readUtf8()).getJSONArray("events")
+            assertEquals(1, events.length())
+            assertEquals("success", events.getJSONObject(0).getString("result"))
+            assertTrue(reopened.uploadPending())
+            assertEquals(1, server.requestCount)
         }
     }
 
@@ -141,10 +182,11 @@ class BtSyncTelemetryQueueTest {
 
     private fun service(
         server: MockWebServer,
-        schedule: (ExistingWorkPolicy) -> Unit = {}
+        schedule: (ExistingWorkPolicy) -> Unit = {},
+        http: OkHttpClient = OkHttpClient.Builder().callTimeout(15, TimeUnit.SECONDS).build()
     ) = BtSyncTelemetry(
         RuntimeEnvironment.getApplication(),
         AccountEnvironment(backendBaseUrl = server.url("/").toString().trimEnd('/')),
-        "install-0", scheduleUpload = schedule
+        "install-0", http = http, scheduleUpload = schedule
     )
 }

@@ -3,6 +3,8 @@ package com.lightningstudio.watchrss.phone.data.telemetry
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired
 import com.lightningstudio.watchrss.phone.connection.bluetooth.ProbeTransportException
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception
+import com.lightningstudio.watchrss.phone.features.FeatureDecision
+import com.lightningstudio.watchrss.phone.features.RolloutSource
 import com.lightningstudio.watchrss.phone.rollout.B2Cohort
 import com.lightningstudio.watchrss.phone.rollout.B2RolloutDecision
 import kotlinx.coroutines.CancellationException
@@ -135,6 +137,33 @@ class BtSyncSessionTest {
         assertEquals(42L, event.getLong("configVersion"))
         assertEquals("b2_off", event.getString("cohort"))
         assertEquals("off", event.getJSONObject("features").getString("b2"))
+    }
+
+    @Test
+    fun reportsConsistentB2FeatureStateForEachRolloutCohort() = runBlocking {
+        val cases = listOf(
+            Triple(FeatureDecision(true, RolloutSource.BUCKET), "b2_on", "on"),
+            Triple(FeatureDecision(false, RolloutSource.BUCKET), "b2_off", "off"),
+            Triple(FeatureDecision(false, RolloutSource.INELIGIBLE), "ineligible", "off"),
+            Triple(FeatureDecision(true, RolloutSource.FORCED_ON), "forced_on", "on"),
+            Triple(FeatureDecision(false, RolloutSource.FORCED_OFF), "forced_off", "off"),
+            Triple(FeatureDecision(true, RolloutSource.DEBUG), "debug_override", "on"),
+            Triple(FeatureDecision(false, RolloutSource.DEBUG), "debug_override", "off"),
+            Triple(FeatureDecision(false, RolloutSource.STALE), "b2_off", "off")
+        )
+        for ((result, expectedCohort, expectedFeature) in cases) {
+            events.clear()
+            val session = session()
+            session.decision = B2RolloutDecision(
+                result,
+                configVersion = 3,
+                configStale = result.source == RolloutSource.STALE
+            )
+            session.finishSuccess()
+            val event = events.single().data
+            assertEquals(expectedCohort, event.getString("cohort"))
+            assertEquals(expectedFeature, event.getJSONObject("features").getString("b2"))
+        }
     }
 
     private fun session(): BtSyncSession {

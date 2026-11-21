@@ -326,7 +326,11 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             val offer = client.offer(account, phone, watch, capability, a.getJSONObject("phoneSnapshot"), if (a.isNull("watchSnapshot")) null else a.getJSONObject("watchSnapshot"), verifySource = !retiring)
             val oldBindings = a.getJSONArray("bindings")
             val bindings = if (oldBindings.length() > 0) (0 until oldBindings.length()).map { i ->
-                JSONObject(oldBindings.getJSONObject(i).toString()).put("intent", "resume")
+                val previous = copy(oldBindings.getJSONObject(i))
+                val job = previous.s("jobId")
+                val namespace = if (previous.s("direction") == "phoneToWatch") "sourceJob" else "job"
+                val started = store.get(account, namespace, job) != null
+                previous.put("intent", if (retiring || started) "resume" else "create")
             }.filter { !retiring || it.s("direction") == (retiringDirection ?: "phoneToWatch") } else listOf("phoneToWatch", "watchToPhone").mapNotNull { direction ->
                 B2Negotiation.select(capability, offer.getJSONObject("watchCapabilities"), direction)?.let { s ->
                     JSONObject().put("direction", direction).put("jobId", id()).put("intent", "create").put("selection", s)

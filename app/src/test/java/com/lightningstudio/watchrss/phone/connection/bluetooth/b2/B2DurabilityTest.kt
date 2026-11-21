@@ -27,10 +27,15 @@ internal class MemoryB2Store : B2Persistence {
 }
 internal fun assetDescriptor(bytes: ByteArray, name: String = "picture.png"): JSONObject {
     val hash = B2Digests.hash(bytes)
+    val chunkHashes = bytes.indices.step(B2Wire.CHUNK).map { offset ->
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        digest.update(bytes, offset, minOf(B2Wire.CHUNK, bytes.size - offset))
+        B2Frames.hex(digest.digest())
+    }
     val metadata = obj("storageKey" to name, "sha256" to hash, "size" to bytes.size).toString()
     val d = obj("objectId" to "0".repeat(64), "kind" to "noteAsset", "schemaVersion" to 1,
         "businessId" to name, "contentVersion" to hash, "encoding" to "raw", "size" to bytes.size, "chunkBytes" to 65536,
-        "sha256" to hash, "chunkHashes" to JSONArray(bytes.asList().chunked(65536).map { B2Digests.hash(it.toByteArray()) }),
+        "sha256" to hash, "chunkHashes" to JSONArray(chunkHashes),
         "metadataUtf8" to metadata, "metadataSha256" to B2Digests.hash(B2Json.utf8(metadata)), "dependsOn" to JSONArray())
     return d.put("objectId", B2Digests.objectId(d)).also { B2Wire.descriptor(it) }
 }
@@ -77,6 +82,117 @@ internal class ReceiverRig(val bytes: ByteArray = "abc".toByteArray(), val store
     suspend fun missing(r: B2Receiver, epoch: Long) = r.handle(B2Wire.request("missing", job, plan, epoch, obj("afterObjectId" to null, "afterChunkIndex" to null, "limit" to 1))).o("result")
 }
 class B2DurabilityTest {
+    @Test fun guardedApplyRefusesHeadChangeAfterDurableObjectBeforeBusinessCommit() = runBlocking<Unit> {
+        val rig = ReceiverRig()
+        var version = B2CommitWindow.Version(
+            B2CommitWindow.Head("scope", "original", "1", "0"), "1", "original-business"
+        )
+        val auth = B2Authorization(rig.account, "phone", "watch", rig.snapshot, rig.snapshot, listOf(rig.binding)) {
+            true
+        }.apply { commitWindow = B2CommitWindow { version } }
+        val receiver = B2Receiver(rig.store, rig.files, auth, object : B2BusinessPort {
+            override val kinds = setOf("noteAsset")
+            override suspend fun apply(descriptor: JSONObject, metadata: JSONObject, staged: File): String {
+                rig.commits++
+                return "merged"
+            }
+        }, fault = {
+            if (it == "afterObjectDurable") {
+                version = version.copy(head = version.head.copy(oid = "replacement", revision = "2"))
+            }
+        })
+        try {
+            val epoch = rig.begin(receiver)
+            rig.manifest(receiver, epoch)
+            rig.put(receiver, epoch)
+            val error = runCatching { rig.apply(receiver, epoch) }.exceptionOrNull() as B2Exception
+            assertEquals("BUSINESS_REJECTED", error.code)
+            assertEquals(0, rig.commits)
+            assertTrue(rig.store.list(rig.account, "object").single().second.nil("receipt"))
+            assertTrue(rig.files.composed(rig.account, rig.job, rig.descriptor.s("objectId")).isFile)
+        } finally {
+            rig.root.deleteRecursively()
+        }
+    }
+
+    @Test fun guardedAttachmentResumesBothDirectionsWithoutResendingDurableBlocks() = runBlocking<Unit> {
+        val total = 5 * 1024 * 1024 / B2Wire.CHUNK
+        val beforeDrop = 27
+        for (direction in listOf("phoneToWatch", "watchToPhone")) {
+            val rig = ReceiverRig(ByteArray(total * B2Wire.CHUNK) { (it * 7 + it / B2Wire.CHUNK).toByte() })
+            try {
+                val stream = if (direction == "phoneToWatch") 1 else 2
+                val cap = B2Negotiation.capability(setOf("noteAsset"), setOf("noteAsset"), B2Wire.s4Limits())
+                val selection = B2Negotiation.select(cap, cap, direction)!!
+                val description = rig.description.put("direction", direction).put("selection", selection)
+                    .put("selectionDigest", B2Digests.selection(selection))
+                val plan = B2Digests.plan(description)
+                val oid = rig.descriptor.s("objectId")
+                val frames = mutableListOf<Int>()
+                val version = B2CommitWindow.Version(B2CommitWindow.Head("scope", "head", "1", "0"), "1", "business")
+                val business = object : B2BusinessPort {
+                    override val kinds = setOf("noteAsset")
+                    override suspend fun apply(descriptor: JSONObject, metadata: JSONObject, staged: File): String {
+                        assertArrayEquals(rig.bytes, staged.readBytes())
+                        rig.commits++
+                        return "merged"
+                    }
+
+                    override suspend fun receiptWitness(context: B2ApplyContext?, descriptor: JSONObject,
+                        metadata: JSONObject, prior: JSONObject?): JSONObject? =
+                        if (rig.commits == 1) obj("sha256" to descriptor.s("sha256")) else null
+                }
+                fun receiver(intent: String): B2Receiver {
+                    val binding = rig.binding.put("direction", direction).put("selection", selection).put("intent", intent)
+                    val auth = B2Authorization(rig.account, "phone", "watch", rig.snapshot, rig.snapshot, listOf(binding)) { true }
+                    auth.commitWindow = B2CommitWindow { version }
+                    return B2Receiver(rig.store, rig.files, auth, business, receiveDirection = direction)
+                }
+                suspend fun send(target: B2Receiver, epoch: Long, seq: Long, index: Int) {
+                    val request = B2Wire.request("putChunk", rig.job, plan, epoch,
+                        obj("objectId" to oid, "chunkIndex" to index))
+                    val bytes = rig.bytes.copyOfRange(index * B2Wire.CHUNK, (index + 1) * B2Wire.CHUNK)
+                    val frame = B2Frame.Data(B2DataHeader(stream, 0, epoch, seq, index, bytes.size,
+                        request.s("requestId"), request.s("requestDigest")), bytes)
+                    val checked = target.inspect(frame.header).first
+                    frames += index
+                    assertEquals(1, target.data(frame, checked).entries.single().disposition)
+                }
+                val first = receiver("create")
+                val epoch = first.handle(B2Wire.request("begin", rig.job, plan, null, description)).n("epoch")
+                val page = obj("pageIndex" to 0, "startIndex" to 0, "previousPageDigest" to "0".repeat(64),
+                    "pageDigest" to "0".repeat(64), "entries" to JSONArray(listOf(rig.descriptor)))
+                page.put("pageDigest", B2Digests.page(plan, page))
+                first.handle(B2Wire.request("manifestPage", rig.job, plan, epoch, page))
+                for (index in 0 until beforeDrop) send(first, epoch, index + 1L, index)
+                first.fenceNow()
+                first.closeIndex()
+                val resumed = receiver("resume")
+                val reply = resumed.handle(B2Wire.request("begin", rig.job, plan, null, copy(description).put("intent", "resume")))
+                val newEpoch = reply.n("epoch")
+                assertEquals(epoch + 1, newEpoch)
+                val missing = resumed.handle(B2Wire.request("missing", rig.job, plan, newEpoch,
+                    obj("afterObjectId" to null, "afterChunkIndex" to null, "limit" to 1))).o("result")
+                val ranges = missing.a("items").getJSONObject(0).a("missingRanges")
+                assertEquals("[[$beforeDrop,$total]]", ranges.toString())
+                var seq = 0L
+                for (range in ranges.values().map { it as JSONArray }) {
+                    for (index in range.getInt(0) until range.getInt(1)) send(resumed, newEpoch, ++seq, index)
+                }
+                val receipt = resumed.handle(B2Wire.request("apply", rig.job, plan, newEpoch,
+                    obj("objectId" to oid))).o("result").o("receipt")
+                val result = resumed.handle(B2Wire.request("complete", rig.job, plan, newEpoch,
+                    obj("objectCount" to 1, "receiptsRoot" to B2Digests.receipts(listOf(receipt)), "ackToInclusive" to 0))).o("result")
+                assertEquals("COMPLETE", result.s("state"))
+                assertEquals((0 until total).toList(), frames)
+                assertEquals(1, rig.commits)
+                resumed.closeIndex()
+            } finally {
+                rig.root.deleteRecursively()
+            }
+        }
+    }
+
     @Test fun rawDataDurableBeforeAckAndAppliedSharesBusinessTransaction() = runBlocking {
         val x = ReceiverRig(); val r = x.receiver(); val e = x.begin(r); x.manifest(r, e)
         val ack = x.put(r, e)

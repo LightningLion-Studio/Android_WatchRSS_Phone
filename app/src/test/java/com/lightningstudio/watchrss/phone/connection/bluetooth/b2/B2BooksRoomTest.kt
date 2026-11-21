@@ -182,6 +182,163 @@ class B2BooksRoomTest {
         }
     }
 
+    @Test fun guardedBookResumesBothDirectionsWithOneRoomInstallation() = runBlocking<Unit> {
+        val total = 128
+        val prefix = 27
+        val bytes = total * B2Wire.CHUNK
+        val source = "https://watchrss.local/import-txt-novel/synthetic"
+        val title = "Synthetic book"
+        val instance = "d".repeat(32)
+        val header = obj("format" to "watchrss-book", "version" to 1, "title" to title,
+            "sourceUrl" to source, "kind" to "txt", "chapterCount" to 32, "instanceId" to instance)
+        fun chapter(index: Int, text: String) = obj("chapterIndex" to index, "title" to "Chapter $index",
+            "contentText" to text, "contentHtml" to null, "url" to "$source/chapter/$index")
+        val headerLine = header.toString() + "\n"
+        val overhead = headerLine.length + (1..32).sumOf { chapter(it, "").toString().length + 1 }
+        val text = "a".repeat((bytes - overhead) / 32)
+        val remainder = (bytes - overhead) % 32
+        val texts = (1..32).map { if (it == 32) text + "a".repeat(remainder) else text }
+        val fingerprint = BookSync.fingerprint(texts.mapIndexed { i, body -> BookSync.chapterHash(i + 1, "Chapter ${i + 1}", body) })
+        val id = BookSync.binaryId(fingerprint, instance)
+        val state = obj("bookId" to id, "fingerprint" to fingerprint, "title" to title, "chapterCount" to 32,
+            "deletedChapters" to JSONArray(), "deletionClock" to 0, "deleted" to false, "deletedAt" to 0,
+            "updatedAt" to 1, "sourceDeviceId" to "synthetic", "instanceId" to instance, "sourceUrl" to source,
+            "kind" to "txt", "lifecycle" to obj("generation" to 1, "operationId" to instance, "startedAt" to 1))
+
+        for (direction in listOf("phoneToWatch", "watchToPhone")) {
+            val root = java.nio.file.Files.createTempDirectory("guarded-book-resume").toFile()
+            val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java)
+                .build()
+            try {
+                val account = "a".repeat(64)
+                val job = "b".repeat(32)
+                val stream = if (direction == "phoneToWatch") 1 else 2
+                val store = B2RoomStore(db)
+                val files = B2Files(File(root, "transfer"), File(root, "books"))
+                val articleFiles = FileArticleContentStore(File(root, "content"))
+                val books = ImportedBookStore(db, File(root, "books"), articleFiles, "phone")
+                val adapter = B2BookBusiness(store, account, books) {}
+                val stateFile = File(root, "state").apply { writeText(state.toString()) }
+                val original = File(root, "package").apply {
+                    bufferedWriter().use { out ->
+                        out.write(headerLine)
+                        for ((i, body) in texts.withIndex()) {
+                            out.write(chapter(i + 1, body).toString())
+                            out.newLine()
+                        }
+                    }
+                }
+                assertEquals(bytes.toLong(), original.length())
+                val hashes = binaryFileHashes(original)
+                val stateObject = binaryDescriptor(B2Wire.BOOK_STATE, id, obj("bookId" to id), binaryFileHashes(stateFile))
+                val metadata = obj("bookId" to id, "fingerprint" to fingerprint, "packageSha256" to hashes.sha256,
+                    "packageBytes" to hashes.size)
+                val segment = binaryDescriptor(B2Wire.BOOK_SEGMENT, "$id:${hashes.sha256}:0",
+                    copy(metadata).put("segmentIndex", 0).put("segmentCount", 1).put("segmentOffset", 0),
+                    hashes, listOf(stateObject.s("objectId")))
+                val empty = File(root, "empty").apply { createNewFile() }
+                val commit = binaryDescriptor(B2Wire.BOOK_COMMIT, id,
+                    copy(metadata).put("segmentObjectIds", JSONArray(listOf(segment.s("objectId")))),
+                    binaryFileHashes(empty), listOf(stateObject.s("objectId"), segment.s("objectId")).sorted())
+                val ordered = listOf(stateObject, segment, commit)
+                val orderedForManifest = ordered.sortedBy { it.s("objectId") }
+                val caps = B2Negotiation.capability(B2Wire.bookKinds, B2Wire.bookKinds, B2Wire.s4Limits())
+                val selection = B2Negotiation.select(caps, caps, direction)!!
+                val snapshot = obj("snapshotId" to "book", "manifestDigest" to hashes.sha256,
+                    "fromExclusive" to 0, "toInclusive" to 0)
+                val start = obj("intent" to "create", "accountScope" to account, "phoneDeviceId" to "phone",
+                    "watchDeviceId" to "watch", "direction" to direction, "phoneSnapshot" to snapshot,
+                    "watchSnapshot" to snapshot, "selection" to selection, "selectionDigest" to B2Digests.selection(selection),
+                    "objectCount" to ordered.size, "objectsRoot" to B2Digests.objects(orderedForManifest.map { it.s("objectId") }),
+                    "pageObjectCounts" to JSONArray(listOf(ordered.size)))
+                val plan = B2Digests.plan(start)
+                var installs = 0
+                val business = object : B2BusinessPort {
+                    override val kinds = B2Wire.bookKinds
+                    override suspend fun apply(descriptor: JSONObject, metadata: JSONObject, staged: File) =
+                        error("Requires contextual application")
+                    override suspend fun prepareFile(context: B2ApplyContext, descriptor: JSONObject, metadata: JSONObject) {
+                        if (descriptor.s("kind") == B2Wire.BOOK_COMMIT) adapter.prepareCommit(context, metadata) {}
+                    }
+                    override suspend fun applyFile(context: B2ApplyContext, descriptor: JSONObject, metadata: JSONObject,
+                        staged: B2FileRef): String {
+                        val outcome = adapter.apply(context, descriptor, metadata, staged) {}
+                        if (descriptor.s("kind") == B2Wire.BOOK_COMMIT && outcome == "merged") installs++
+                        return outcome
+                    }
+                    override suspend fun receiptWitness(context: B2ApplyContext?, descriptor: JSONObject,
+                        metadata: JSONObject, prior: JSONObject?) = adapter.receiptWitness(context, descriptor, metadata, prior)
+                }
+                fun receiver(intent: String): B2Receiver {
+                    val binding = obj("direction" to direction, "jobId" to job, "intent" to intent, "selection" to selection)
+                    val auth = B2Authorization(account, "phone", "watch", snapshot, snapshot, listOf(binding)) { true }
+                    auth.commitWindow = B2CommitWindow {
+                        B2CommitWindow.Version(B2CommitWindow.Head("scope", "head", "1", "0"), "1", "business")
+                    }
+                    return B2Receiver(store, files, auth, business, receiveDirection = direction)
+                }
+                val frames = mutableListOf<Int>()
+                suspend fun send(target: B2Receiver, epoch: Long, seq: Long, descriptor: JSONObject,
+                    index: Int, data: ByteArray) {
+                    val request = B2Wire.request("putChunk", job, plan, epoch,
+                        obj("objectId" to descriptor.s("objectId"), "chunkIndex" to index))
+                    val frame = B2Frame.Data(B2DataHeader(stream, orderedForManifest.indexOf(descriptor), epoch, seq,
+                        index, data.size, request.s("requestId"), request.s("requestDigest")), data)
+                    val verified = target.inspect(frame.header).first
+                    if (descriptor == segment) frames += index
+                    assertEquals(1, target.data(frame, verified).entries.single().disposition)
+                }
+                suspend fun apply(target: B2Receiver, epoch: Long, descriptor: JSONObject): JSONObject =
+                    target.handle(B2Wire.request("apply", job, plan, epoch,
+                        obj("objectId" to descriptor.s("objectId")))).o("result").o("receipt")
+                val first = receiver("create")
+                val epoch = first.handle(B2Wire.request("begin", job, plan, null, start)).n("epoch")
+                val page = obj("pageIndex" to 0, "startIndex" to 0, "previousPageDigest" to "0".repeat(64),
+                    "pageDigest" to "0".repeat(64), "entries" to JSONArray(orderedForManifest))
+                page.put("pageDigest", B2Digests.page(plan, page))
+                first.handle(B2Wire.request("manifestPage", job, plan, epoch, page))
+                send(first, epoch, 1, stateObject, 0, stateFile.readBytes())
+                val stateReceipt = apply(first, epoch, stateObject)
+                java.io.RandomAccessFile(original, "r").use { file ->
+                    for (i in 0 until prefix) {
+                        send(first, epoch, i + 2L, segment, i, ByteArray(B2Wire.CHUNK).also(file::readFully))
+                    }
+                    first.fenceNow()
+                    first.closeIndex()
+                    val resumed = receiver("resume")
+                    val continuation = copy(start).put("intent", "resume")
+                    val next = resumed.handle(B2Wire.request("begin", job, plan, null, continuation)).n("epoch")
+                    assertEquals(epoch + 1, next)
+                    val missing = resumed.handle(B2Wire.request("missing", job, plan, next,
+                        obj("afterObjectId" to null, "afterChunkIndex" to null, "limit" to 4))).o("result")
+                    val part = missing.a("items").values().map { it as JSONObject }
+                        .single { it.s("objectId") == segment.s("objectId") }
+                    assertEquals("[[$prefix,$total]]", part.a("missingRanges").toString())
+                    val range = part.a("missingRanges").getJSONArray(0)
+                    file.seek(range.getLong(0) * B2Wire.CHUNK)
+                    for (i in range.getInt(0) until range.getInt(1)) {
+                        send(resumed, next, i - prefix + 1L, segment, i, ByteArray(B2Wire.CHUNK).also(file::readFully))
+                    }
+                    val partReceipt = apply(resumed, next, segment)
+                    assertNull(books.packageFile(id))
+                    val commitReceipt = apply(resumed, next, commit)
+                    val roots = B2Digests.receipts(listOf(stateReceipt, partReceipt, commitReceipt))
+                    val complete = resumed.handle(B2Wire.request("complete", job, plan, next,
+                        obj("objectCount" to 3, "receiptsRoot" to roots, "ackToInclusive" to 0))).o("result")
+                    assertEquals("COMPLETE", complete.s("state"))
+                    assertEquals((0 until total).toList(), frames)
+                    assertEquals(1, installs)
+                    assertEquals(32, db.bookDao().binaryPresentChapters(id))
+                    assertEquals(hashes.sha256, binaryFileHashes(requireNotNull(books.packageFile(id))).sha256)
+                    resumed.closeIndex()
+                }
+            } finally {
+                db.close()
+                root.deleteRecursively()
+            }
+        }
+    }
+
     @Test fun bookPublicationAndReceiptRollbackTogether() = runBlocking<Unit> {
         val root = java.nio.file.Files.createTempDirectory("book-b2-room").toFile()
         val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()

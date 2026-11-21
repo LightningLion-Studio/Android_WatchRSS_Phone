@@ -6,6 +6,8 @@ import org.json.JSONObject
 import java.io.File
 import java.io.RandomAccessFile
 import java.security.MessageDigest
+import java.nio.file.Files
+import java.nio.file.attribute.BasicFileAttributes
 
 /** N07 uses the existing recovery envelope and the SAME SQLite stateVersion commit.
  * This depot owns only local encrypted recovery bytes. It never uploads them or deletes originals. */
@@ -23,16 +25,34 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
     private val scope get()=projection.scope
     private val bookDirectory = File(files, "imported_books")
     data class Bundle(val copy:JSONObject,val pin:JSONObject,val objects:Map<String,ByteArray>)
-    private interface Source {val size:Long;fun read(offset:Long,n:Int):ByteArray}
+    private interface Source {
+        val size: Long
+        val expectedSha256: String? get() = null
+        fun read(offset: Long, n: Int): ByteArray
+    }
     private fun byteSource(bytes:ByteArray)=object:Source {override val size=bytes.size.toLong();override fun read(offset:Long,n:Int)=bytes.copyOfRange(offset.toInt(),offset.toInt()+n)}
-    private fun fileSource(file:File,expected:String?=null,maxBytes:Long?=null):Source {
-        if(!file.isFile)SyncV2Codec.fail("closure_incomplete")
-        val size=file.length();val modified=file.lastModified();if(maxBytes!=null && size>maxBytes)SyncV2Codec.fail("quota_exceeded")
+    private fun fileSource(file: File, expected: String? = null, maxBytes: Long? = null,
+        book: BookPackageFiles.Revision? = null): Source {
+        val path = file.toPath()
+        fun stat() = Files.readAttributes(path, BasicFileAttributes::class.java)
+        if (!file.isFile) SyncV2Codec.fail("closure_incomplete")
+        val selected = stat()
+        val size = selected.size()
+        if (book != null && size != book.bytes) SyncV2Codec.fail("choice_stale")
+        if (maxBytes != null && size > maxBytes) SyncV2Codec.fail("quota_exceeded")
         if(expected!=null && file.inputStream().use{input->val d=MessageDigest.getInstance("SHA-256");val b=ByteArray(65536);while(true){val n=input.read(b);if(n<0)break;sourceReads?.file(n);d.update(b,0,n)};SyncV2Codec.hex(d.digest())}!=expected)SyncV2Codec.fail("closure_incomplete")
-        return object:Source {override val size=size;override fun read(offset:Long,n:Int):ByteArray {
-            if(file.length()!=size || file.lastModified()!=modified)SyncV2Codec.fail("choice_stale")
-            return ByteArray(n).also{out->RandomAccessFile(file,"r").use{it.seek(offset);it.readFully(out);sourceReads?.file(n)}}
-        }}
+        return object : Source {
+            override val size = size
+            override val expectedSha256 = book?.sha256 ?: expected
+            override fun read(offset: Long, n: Int): ByteArray {
+                val current = stat()
+                if (!current.isRegularFile || current.fileKey() != selected.fileKey() || current.size() != size ||
+                    current.lastModifiedTime() != selected.lastModifiedTime()) SyncV2Codec.fail("choice_stale")
+                return ByteArray(n).also { out ->
+                    RandomAccessFile(file, "r").use { it.seek(offset); it.readFully(out); sourceReads?.file(n) }
+                }
+            }
+        }
     }
     private fun sources(record:JSONObject,maxBytes:Long?=null):List<Pair<String,Source>> {
         val m=record.getJSONObject("meta");val id=m.getString("logicalId");val value=record.getJSONObject("value")
@@ -64,7 +84,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                 if (maxBytes != null && revision.bytes > maxBytes) SyncV2Codec.fail("quota_exceeded")
                 val original = BookPackageFiles.resolve(bookDirectory, id, revision) { sourceReads?.file(it) }
                     ?: SyncV2Codec.fail("closure_incomplete")
-                listOf("book" to fileSource(original, maxBytes = maxBytes))
+                listOf("book" to fileSource(original, maxBytes = maxBytes, book = revision))
             }
             "asset"->db.query("SELECT storageKey,sha256 FROM note_assets WHERE storageKey=?",arrayOf(id)).use{c->
                 if(!c.moveToFirst())SyncV2Codec.fail("closure_incomplete")
@@ -118,8 +138,11 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                         val sealed=SyncV2Envelope.seal(identity,key,1,"blob",bytes);add(sealed.oid,sealed.bytes);oids.add(sealed.oid)
                         blocks.put(JSONObject().put("index",blocks.length()).put("oid",sealed.oid).put("plainBytes",bytes.size).put("opaqueContentId",identity.opaque("blob",bytes)));offset+=bytes.size
                     }
-                    val hash=digest.digest();val recipe=JSONObject().put("version",2).put("entityKey",id).put("bodyRevision",SyncV2Codec.hex(SyncV2Codec.random(16)))
-                        .put("opaqueContentId",identity.opaqueDigest("recipe",hash)).put("plaintextSha256",SyncV2Codec.hex(hash)).put("totalPlainBytes",source.size).put("blocks",blocks)
+                    val hash = digest.digest()
+                    val sha256 = SyncV2Codec.hex(hash)
+                    if (source.expectedSha256?.let { it != sha256 } == true) SyncV2Codec.fail("choice_stale")
+                    val recipe=JSONObject().put("version",2).put("entityKey",id).put("bodyRevision",SyncV2Codec.hex(SyncV2Codec.random(16)))
+                        .put("opaqueContentId",identity.opaqueDigest("recipe",hash)).put("plaintextSha256",sha256).put("totalPlainBytes",source.size).put("blocks",blocks)
                         .put("ranges",JSONArray().put(JSONObject().put("logicalPart",part).put("offset",0).put("length",source.size)))
                     SyncV2ContentCodec.recipe(recipe)
                     val sealed=SyncV2Envelope.seal(identity,key,1,"recipe",SyncV2Codec.utf8(SyncV2Codec.canonical(recipe)));add(sealed.oid,sealed.bytes);oids.add(sealed.oid)

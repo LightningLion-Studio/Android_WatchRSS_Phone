@@ -50,7 +50,7 @@ internal object BookPackageFiles {
             val identity = identity(file) ?: return false
             if (identity.bytes != revision.bytes) return false
             val key = file.absoluteFile
-            if (identity.inode != null) {
+            if (identity.inode != null && identity.changed != null) {
                 val cached = synchronized(verified) { verified[key] }
                 if (cached?.revision == revision && cached.identity == identity) return cached.matches
             }
@@ -69,7 +69,7 @@ internal object BookPackageFiles {
             }
             if (identity(file) != identity) return false
             val matches = digest.digest().joinToString("") { "%02x".format(it) } == revision.sha256
-            if (identity.inode != null) synchronized(verified) {
+            if (identity.inode != null && identity.changed != null) synchronized(verified) {
                 verified[key] = Verification(revision, identity, matches)
                 if (verified.size > CACHE_CAPACITY) verified.remove(verified.keys.first())
             }

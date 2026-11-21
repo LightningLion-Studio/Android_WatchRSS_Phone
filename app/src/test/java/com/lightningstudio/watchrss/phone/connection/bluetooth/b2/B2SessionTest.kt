@@ -12,7 +12,13 @@ import java.util.concurrent.atomic.AtomicInteger
 class B2SessionTest {
     /** Phone B2Client and a separate watch B2Receiver execute real raw frames over two
      * host pipes. No Android classes or in-memory frame shortcut crosses this boundary. */
-    @Test fun s2ClientAndReceiverCompleteRawMultiBlockTransfer() = runBlocking {
+    @Test fun s2ClientAndReceiverCompleteRawMultiBlockTransfer() = rawTransfer(guarded = false)
+
+    @Test fun guardedSourceRecordsOnlyItsVerifiedCompletion() = rawTransfer(guarded = true)
+
+    @Test fun guardedSourceRejectsAValidDigestForTheWrongReceiptRoot() = rawTransfer(guarded = true, forge = true)
+
+    private fun rawTransfer(guarded: Boolean, forge: Boolean = false) = runBlocking {
         withTimeout(15000) {
             val phoneIn = PipedInputStream(262144); val watchOut = PipedOutputStream(phoneIn)
             val watchIn = PipedInputStream(262144); val phoneOut = PipedOutputStream(watchIn)
@@ -29,6 +35,7 @@ class B2SessionTest {
             val watch = B2Session(watchIn, watchOut, this, close)
             var receiver: B2Receiver? = null
             val commits = AtomicInteger()
+            val version = B2CommitWindow.Version(B2CommitWindow.Head("scope", "head", "1", "0"), "1", "business")
             // An installed dummy receiver permits prepare routing before confirm.
             val dummy = x.receiver()
             watch.install(dummy) { r ->
@@ -37,14 +44,26 @@ class B2SessionTest {
                     val result = if (p.s("step") == "offer") obj("step" to "offer", "watchCapabilities" to cap, "watchSnapshot" to x.snapshot, "offerDigest" to B2Digests.offer(p, cap, x.snapshot))
                     else {
                         val auth = B2Authorization(x.account, "phone", "watch", witness, x.snapshot, listOf(binding)) { true }
+                        if (guarded) auth.commitWindow = B2CommitWindow { version }
                         receiver = B2Receiver(x.store, x.files, auth, object : B2BusinessPort {
                             override val kinds = setOf("noteAsset")
                             override suspend fun apply(descriptor: JSONObject, metadata: JSONObject, staged: File): String {
                                 assertArrayEquals(x.bytes, staged.readBytes()); commits.incrementAndGet(); return "merged"
                             }
+                            override suspend fun receiptWitness(context: B2ApplyContext?, descriptor: JSONObject,
+                                metadata: JSONObject, prior: JSONObject?): JSONObject? =
+                                if (commits.get() == 1) obj("sha256" to descriptor.s("sha256")) else null
                         }, receiveDirection = "phoneToWatch")
                         // Swap handler before writing confirm response, so the next DATA is routable.
-                        watch.install(receiver!!) { receiver!!.handle(it) }
+                        watch.install(receiver!!) { request ->
+                            val answer = receiver!!.handle(request)
+                            if (forge && request.s("phase") == "complete") {
+                                val value = answer.o("result")
+                                val wrong = B2Digests.completion(request.s("jobId"), request.s("planDigest"),
+                                    value.n("objectCount"), "f".repeat(64), value.n("ackToInclusive"))
+                                B2Results.answer(request, wrong, request.n("epoch"))
+                            } else answer
+                        }
                         obj("step" to "confirm", "preparationDigest" to p.s("preparationDigest"))
                     }
                     B2Results.answer(r, result, null)
@@ -53,9 +72,16 @@ class B2SessionTest {
             watch.start(); phone.start()
             val client = B2Client(sourceStore, sourceSnapshots, phone::exchange, {}, phone)
             client.acceptProbe(obj("libraryBinary" to cap))
+            if (guarded) client.commitWindow = B2CommitWindow { version }
             try {
                 client.offer(x.account, "phone", "watch", x.cap, witness)
                 client.confirm(listOf(binding)) { }
+                if (forge) {
+                    val failure = runCatching { client.send(x.job) }.exceptionOrNull() as B2Exception
+                    assertEquals("RECEIPT_CONFLICT", failure.code)
+                    assertNull(sourceStore.get(x.account, "peerAck", x.job))
+                    return@withTimeout
+                }
                 val complete = client.send(x.job)
                 assertEquals("COMPLETE", complete.s("state")); assertEquals(1, commits.get())
                 assertNotNull(sourceStore.get(x.account, "peerAck", x.job))

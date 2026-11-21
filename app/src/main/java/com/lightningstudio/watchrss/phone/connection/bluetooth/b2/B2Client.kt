@@ -39,13 +39,16 @@ class B2Client(
         echoed = B2Negotiation.echoed(probe); offer = null; offerReply = null; offerId = null; bindings = emptyList()
         return echoed != null
     }
+    private fun stableRequestId(job: String?, digest: String): String =
+        B2Digests.d("wrss.library-binary.v2/source-request", listOf(job ?: "", digest)).take(32)
+
     private suspend fun call(phase: String, job: String?, plan: String?, epoch: Long?, p: JSONObject, stable: Boolean = true): JSONObject {
         val connectionGeneration = generation
         authorize()
         if (job != null && job in cancelledSources && phase != "cancel") fail("JOB_CANCELLED")
         if (echoed == null) fail("CAPABILITY_MISMATCH")
         val digest = B2Digests.request(job, plan, phase, p)
-        val id = if (stable) B2Digests.d("wrss.library-binary.v2/source-request", listOf(job ?: "", digest)).take(32) else java.util.UUID.randomUUID().toString().replace("-", "")
+        val id = if (stable) stableRequestId(job, digest) else java.util.UUID.randomUUID().toString().replace("-", "")
         val request = B2Wire.request(phase, job, plan, epoch, p, id)
         val limits = bindings.find { it.s("jobId") == job }?.o("selection")?.o("limits") ?: echoed!!.o("limits")
         val headerBytes = B2Json.utf8(request.toString()).size
@@ -108,6 +111,10 @@ class B2Client(
     private fun validateReceipt(r: JSONObject, job: String, plan: String, oid: String) {
         B2Results.receipt(r)
         if (r.s("jobId") != job || r.s("planDigest") != plan || r.s("objectId") != oid || r.s("receiverDeviceId") != watch) fail("RECEIPT_CONFLICT")
+        if (commitWindow != null) {
+            val request = stableRequestId(job, B2Digests.request(job, plan, "apply", obj("objectId" to oid)))
+            if (r.s("applyRequestId") != request) fail("RECEIPT_CONFLICT")
+        }
     }
     private suspend fun acceptCompletion(job: String, plan: String, p: JSONObject, c: JSONObject) {
         B2Results.completion(c)
@@ -115,10 +122,22 @@ class B2Client(
         if (c.toString() != expected.toString()) { // Object key order is not a semantic identity.
             if (listOf("state", "objectCount", "receiptsRoot", "ackToInclusive", "completionDigest").any { c.get(it).toString() != expected.get(it).toString() }) fail("RECEIPT_CONFLICT")
         }
-        store.exclusive { authorize(); store.transaction { store.put(account, "peerAck", job, copy(c))
-            val source = store.get(account, "sourceJob", job) ?: fail("JOURNAL_CORRUPT")
-            if (source.s("connection") != connectionId) fail("STALE_EPOCH")
-            source.put("state", "COMPLETE"); store.put(account, "sourceJob", job, source); authorize() } }
+        store.exclusive {
+            store.transaction {
+                authorize()
+                commitWindow?.check()
+                val source = store.get(account, "sourceJob", job) ?: fail("JOURNAL_CORRUPT")
+                if (source.s("connection") != connectionId) fail("STALE_EPOCH")
+                if (source.s("planDigest") != plan || commitWindow != null &&
+                    source.optString("expectedCompletion") != c.s("completionDigest")) fail("RECEIPT_CONFLICT")
+                val old = store.get(account, "peerAck", job)
+                if (old != null && old.s("completionDigest") != c.s("completionDigest")) fail("RECEIPT_CONFLICT")
+                if (old == null) store.put(account, "peerAck", job, copy(c))
+                source.put("state", "COMPLETE")
+                store.put(account, "sourceJob", job, source)
+                session.admitSourceCommit({ authorize(); commitWindow?.checkHead() }, accountCommitFence)
+            }
+        }
     }
     /** B2 uses the exact persisted plan and files. Errors are returned to A/B/C
      * orchestration as typed errors; this method never reconnects or downgrades. */
@@ -238,7 +257,24 @@ class B2Client(
                 val rc = apply(job, plan, epoch, d.s("objectId")); validateReceipt(rc, job, plan, d.s("objectId")); applied[d.s("objectId")] = rc
             }
         }
-        val c = call("complete", job, plan, epoch, obj("objectCount" to objects.size, "receiptsRoot" to B2Digests.receipts(objects.map { applied.getValue(it.s("objectId")) }), "ackToInclusive" to p.o("phoneSnapshot").n("toInclusive"))).o("result")
+        val root = B2Digests.receipts(objects.map { applied.getValue(it.s("objectId")) })
+        val through = p.o("phoneSnapshot").n("toInclusive")
+        commitWindow?.let { guard ->
+            val expected = B2Digests.completion(job, plan, objects.size.toLong(), root, through)
+            store.exclusive {
+                store.transaction {
+                    authorize()
+                    guard.check()
+                    val source = store.get(account, "sourceJob", job) ?: fail("JOURNAL_CORRUPT")
+                    if (source.s("connection") != connectionId || source.n("epoch") != epoch) fail("STALE_EPOCH")
+                    source.put("expectedCompletion", expected.s("completionDigest"))
+                    store.put(account, "sourceJob", job, source)
+                    session.admitSourceCommit({ authorize(); commitWindow?.checkHead() }, accountCommitFence)
+                }
+            }
+        }
+        val c = call("complete", job, plan, epoch,
+            obj("objectCount" to objects.size, "receiptsRoot" to root, "ackToInclusive" to through)).o("result")
         acceptCompletion(job, plan, p, c); session.finishSource(job); progress("complete:phoneToWatch"); return c
     }
     /** Session routing seam: watch may cancel a job for which the phone is source. */

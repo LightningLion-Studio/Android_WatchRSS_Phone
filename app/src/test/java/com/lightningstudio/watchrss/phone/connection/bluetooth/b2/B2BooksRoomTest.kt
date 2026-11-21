@@ -115,6 +115,130 @@ class B2BooksRoomTest {
         }
     }
 
+    @Test fun firstLegacyRegistrationCannotCommitDigestOfFileRemovedBeforeRoomWriter() = runBlocking<Unit> {
+        assumeFalse(BuildConfig.B2_ENABLED)
+        val fixture = JSONObject(requireNotNull(javaClass.getResource("/book/cli-single-txt-book.json")).readText())
+        val id = fixture.getString("bookId")
+        val chapter = fixture.getJSONObject("chapter")
+        val url = ImportedContentIds.txtArticleUrl("review-unregistered")
+        val root = java.nio.file.Files.createTempDirectory("v1-registration-cleanup").toFile()
+        val directory = File(root, "books")
+        val packageFile = File(directory, "$id.jsonl")
+        val removed = java.util.concurrent.atomic.AtomicBoolean()
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java)
+            .setTransactionExecutor { command ->
+                executor.execute {
+                    if (!removed.get() && packageFile.isFile) removed.set(packageFile.delete())
+                    command.run()
+                }
+            }.build()
+        try {
+            val text = chapter.getString("contentText")
+            db.phoneArticleDao().upsert(PhoneArticleEntity(
+                articleId = "unregistered", sourceDeviceId = "phone", url = url,
+                title = chapter.getString("title"), siteName = "", excerpt = "",
+                contentHtml = chapter.optString("contentHtml").takeIf { !chapter.isNull("contentHtml") },
+                contentText = text, imageUrl = null, contentHash = "", importedAt = 1, updatedAt = 1,
+                independentSaved = true, independentChangedAt = 1, independentSortOrder = 1,
+                rssSourceUrl = ImportedContentIds.ROOT_SOURCE_URL, rssSourceTitle = null,
+                favoriteSaved = false, favoriteChangedAt = 0, favoriteSortOrder = 0,
+                watchLaterSaved = false, watchLaterChangedAt = 0, watchLaterSortOrder = 0,
+                deleted = false, deletedAt = 0
+            ))
+            val store = ImportedBookStore(db, directory, FileArticleContentStore(File(root, "text")), "phone")
+            store.ensureRegistered()
+            assertTrue("fixture removed the published original before the Room writer entered", removed.get())
+            assertNull(db.bookDao().get(id))
+            assertTrue(db.bookDao().chapters(id).isEmpty())
+            assertFalse(packageFile.exists())
+        } finally {
+            db.close()
+            executor.shutdownNow()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun bookCommitKeepsRegisteredOriginalRestoredAfterPreparation() = runBlocking<Unit> {
+        val fixture = JSONObject(requireNotNull(javaClass.getResource("/book/cli-single-txt-book.json")).readText())
+        val raw = fixture.getString("packageUtf8")
+        val id = fixture.getString("bookId")
+        val fingerprint = fixture.getString("fingerprint")
+        for (guarded in listOf(false, true)) {
+            val root = java.nio.file.Files.createTempDirectory("b2-restored-original").toFile()
+            val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()
+            try {
+                val directory = File(root, "books")
+                val books = ImportedBookStore(db, directory, FileArticleContentStore(File(root, "text")), "phone")
+                val legacyInput = File(root, "original").apply { writeText(raw) }
+                assertTrue(books.receivePackage(id, legacyInput) > 0)
+                val before = requireNotNull(db.bookDao().get(id))
+                val local = requireNotNull(books.packageFile(id))
+                assertTrue(local.delete())
+                val first = JSONObject(raw.lineSequence().first()).put("title", "Alternate title")
+                val incoming = File(root, "incoming").apply { writeText(first.toString() + "\n" + raw.substringAfter('\n')) }
+                val revision = com.lightningstudio.watchrss.phone.data.book.BookPackageFiles.Revision(
+                    binaryFileHashes(incoming).sha256, incoming.length())
+                assertNotEquals(before.packageSha256, revision.sha256)
+                val original = requireNotNull(com.lightningstudio.watchrss.phone.data.book.BookPackageFiles.verify(incoming, revision) {})
+                val state = JSONObject(before.stateJson)
+                val scratch = books.binaryImportDirectory()
+                val prepared = if (guarded) books.prepareBinaryPackage(id, original, {}, scratch, state)
+                    else books.prepareBinaryPackage(id, original, {})
+                assertNull(prepared.currentOriginal)
+
+                val ledger = B2RoomStore(db)
+                val outcome = ledger.exclusive {
+                    ledger.transaction {
+                        // Restore the bytes of the already registered revision in an earlier writer.
+                        local.writeText(raw)
+                        assertEquals(before, db.bookDao().get(id))
+                    }
+                    ledger.transaction { books.installBinaryPackage(id, fingerprint, state, prepared, scratch) {} }
+                }
+                assertEquals("retainedLocal", outcome)
+                assertEquals(before, db.bookDao().get(id))
+                assertEquals(raw, requireNotNull(books.packageFile(id)).readText())
+                assertFalse(books.binaryPackage(id, revision.sha256).exists())
+            } finally {
+                db.close()
+                root.deleteRecursively()
+            }
+        }
+    }
+
+    @Test fun freezeRejectsChangeToAnEarlierBookDuringTheLaterVisit() = runBlocking<Unit> {
+        val root = java.nio.file.Files.createTempDirectory("b2-book-scan-generation").toFile()
+        val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()
+        try {
+            val books = ImportedBookStore(db, root, FileArticleContentStore(File(root, "content")), "phone")
+            val fingerprints = listOf("1".repeat(64), "2".repeat(64))
+            val ids = fingerprints.map(BookSync::id).sorted()
+            for (fingerprint in fingerprints) {
+                val id = BookSync.id(fingerprint)
+                val state = obj("bookId" to id, "fingerprint" to fingerprint, "title" to id, "chapterCount" to 1,
+                    "deletedChapters" to JSONArray(), "deletionClock" to 0, "deleted" to false, "deletedAt" to 0,
+                    "updatedAt" to 1, "sourceDeviceId" to "phone")
+                db.bookDao().put(BookEntity(id, BookSync.canonical(state)))
+            }
+            val seen = mutableListOf<String>()
+            val failure = runCatching {
+                books.freezeBinaryBooks { row, _ ->
+                    seen += row.bookId
+                    if (row.bookId == ids.last()) {
+                        val earlier = requireNotNull(db.bookDao().get(ids.first()))
+                        db.bookDao().put(earlier.copy(stateJson = JSONObject(earlier.stateJson).put("title", "changed").toString()))
+                    }
+                }
+            }.exceptionOrNull()
+            assertEquals(ids, seen)
+            assertEquals("SOURCE_CHANGED", (failure as? B2Exception)?.code)
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
     @Test fun resumedPackageCommitsFromVerifiedLegacyBytesAndKeepsTheV1Original() = runBlocking<Unit> {
         val root = java.nio.file.Files.createTempDirectory("b2-book-legacy-resume").toFile()
         val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()

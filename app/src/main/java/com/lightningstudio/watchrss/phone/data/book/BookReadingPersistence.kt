@@ -66,6 +66,21 @@ object BookReadingSchema {
         ).forEach(db::execSQL)
         install(db)
     }
+    fun installBinaryScanWitness(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS b2_book_scan_revision (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL)")
+        db.execSQL("INSERT OR IGNORE INTO b2_book_scan_revision VALUES(1,0)")
+        val bump = "UPDATE b2_book_scan_revision SET revision=revision+1 WHERE id=1;"
+        for (op in listOf("insert", "update", "delete")) {
+            db.execSQL("CREATE TRIGGER IF NOT EXISTS b2_book_scan_$op AFTER $op ON imported_books BEGIN $bump END")
+        }
+    }
+
+    fun binaryScanRevision(db: SupportSQLiteDatabase): Long =
+        db.query("SELECT revision FROM b2_book_scan_revision WHERE id=1").use {
+            check(it.moveToFirst())
+            it.getLong(0)
+        }
+
     fun install(db:SupportSQLiteDatabase) {
         val fields=listOf("sourceDeviceId","isRead","readingProgress","readingPositionBytes","readingPositionContentHash","readingPositionChangedAt",
             "favoriteSaved","favoriteChangedAt","favoriteSortOrder","watchLaterSaved","watchLaterChangedAt","watchLaterSortOrder","deleted","deletedAt")

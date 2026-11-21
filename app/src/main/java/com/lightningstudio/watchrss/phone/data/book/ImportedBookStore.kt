@@ -122,8 +122,11 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             val existing=dao.get(id)
             if(existing==null) {
                 directory.mkdirs();com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)){com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.installPrivateBook(file(id),temporary)}
-                val installed = BookEntity(id, BookSync.canonical(state), sha(file(id)), file(id).length())
-                db.withTransaction {dao.put(installed);dao.putChapters(metadata.mapIndexed {i,row->BookChapterEntity(id,i+1,row.articleId)})}
+                db.withTransaction {
+                    val installed = BookEntity(id, BookSync.canonical(state), sha(file(id)), file(id).length())
+                    dao.put(installed)
+                    dao.putChapters(metadata.mapIndexed {i,row->BookChapterEntity(id,i+1,row.articleId)})
+                }
             } else {
                 // Same immutable sequence imported under a new filename: one identity, merge deletion state.
                 if(availablePackage(existing) == null){directory.mkdirs();com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.changing(file(id)){com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.installPrivateBook(file(id),temporary)};dao.put(existing.copy(packageSha256=sha(file(id)),packageBytes=file(id).length()))}
@@ -169,8 +172,12 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
 
     internal suspend fun freezeBinaryBooks(work: () -> Unit = {}, visit: suspend (BookEntity, File?) -> Unit) {
         captureLocalChanges()
-        if (!binaryReady()) throw B2Exception("SOURCE_CHANGED")
-        val reading = db.bookReadingDao().meta()
+        val sql = db.openHelper.writableDatabase
+        val (generation, reading) = db.withTransaction {
+            BookReadingSchema.installBinaryScanWitness(sql)
+            if (!binaryReady()) throw B2Exception("SOURCE_CHANGED")
+            BookReadingSchema.binaryScanRevision(sql) to db.bookReadingDao().meta()
+        }
         var after = ""
         while (true) {
             // DAO reads each row (including large JSON slices) in one short transaction.
@@ -181,9 +188,12 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             if (dao.get(row.bookId) != row || original?.isCurrent() == false) throw B2Exception("SOURCE_CHANGED")
             after = row.bookId
         }
-        val currentReading = db.bookReadingDao().meta()
-        if (currentReading?.epoch != reading?.epoch || currentReading?.seq != reading?.seq || !binaryReady()) {
-            throw B2Exception("SOURCE_CHANGED")
+        db.withTransaction {
+            val currentReading = db.bookReadingDao().meta()
+            if (BookReadingSchema.binaryScanRevision(sql) != generation ||
+                currentReading?.epoch != reading?.epoch || currentReading?.seq != reading?.seq || !binaryReady()) {
+                throw B2Exception("SOURCE_CHANGED")
+            }
         }
     }
     internal suspend fun binaryReadingPage(id: String, after: Int) = dao.binaryReadingPage(id, after)
@@ -598,7 +608,10 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             !assembly.isCurrent()) throw B2Exception("SOURCE_CHANGED")
         val state = JSONObject(current.stateJson)
         val retired = state.getBoolean("deleted") || BookSync.compareLifecycle(state, sourceState) > 0
-        val present = prepared.currentOriginal != null && dao.binaryPresentChapters(id) == state.getInt("chapterCount")
+        // A cloud writer can restore the registered bytes without updating the Room row.
+        // Reuse a positive file witness and resolve a missed original again under the writer.
+        val currentOriginal = prepared.currentOriginal ?: if (retired) null else verifiedPackage(current, check)
+        val present = currentOriginal != null && dao.binaryPresentChapters(id) == state.getInt("chapterCount")
         val retain = retired || present
         val deleted = java.util.BitSet(state.getInt("chapterCount") + 1)
         val tombstones = state.getJSONArray("deletedChapters")
@@ -610,7 +623,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         }
         val shadow = prepared.shadow
         val verified = if (shadow != null) {
-            if (current.stateJson != shadow.stateJson || retain != shadow.retain) throw B2Exception("SOURCE_CHANGED")
+            if (current.stateJson != shadow.stateJson || (shadow.retain && !retain)) throw B2Exception("SOURCE_CHANGED")
             if (!retain) shadow.records.bufferedReader().use { journal ->
                 for (index in 1..shadow.header.count) {
                     check()

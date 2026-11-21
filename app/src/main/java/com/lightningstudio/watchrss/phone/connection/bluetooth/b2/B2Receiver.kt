@@ -85,6 +85,7 @@ class B2Receiver(
     private val flows = mapOf(1 to B2Flow(1), 2 to B2Flow(2))
     private val epochs = Any()
     private val active = mutableSetOf<String>()
+    internal var onVerifiedPlan: ((String, List<JSONObject>) -> Unit)? = null
     fun fenceNow() = commitFence.revoke()
     internal fun closeIndex() = synchronized(epochs) {
         receiveIndex?.close()
@@ -498,6 +499,9 @@ class B2Receiver(
             light[id] = copy(j)
         }
         begun.add(id)
+        if (rows != null && !terminal(j) && j.s("state") != "PLANNING") {
+            onVerifiedPlan?.invoke(id, rows.filter { it.nil("receipt") }.map { it.o("descriptor") })
+        }
         cleanupApplied(j)
         return B2Results.answer(r, obj("disposition" to if (old == null && !cancelBeforeBegin) "CREATED" else "RESUMED", "selectionDigest" to p.s("selectionDigest"), "state" to j.s("state"), "expiresAtMillis" to j.n("expiresAtMillis"), "nextManifestPage" to j.n("nextManifestPage"), "completion" to j.get("completion")), epoch)
     }
@@ -547,6 +551,7 @@ class B2Receiver(
             }
         }
         light[j.s("jobId")] = copy(j)
+        if (full) onVerifiedPlan?.invoke(j.s("jobId"), all)
         return result
     }
     private suspend fun otherReservations(jobId: String): Long =

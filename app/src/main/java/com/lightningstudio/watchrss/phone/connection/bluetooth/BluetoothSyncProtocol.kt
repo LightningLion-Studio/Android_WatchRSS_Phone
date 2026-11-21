@@ -46,7 +46,10 @@ object BluetoothSyncProtocol {
     fun readFrame(
         input: InputStream,
         onBytesTransferred: ((Long) -> Unit)? = null
-    ): JSONObject {
+    ): JSONObject = readFrameDecoded(input, onBytesTransferred) { JSONObject(it.toString(Charsets.UTF_8)) }
+
+    internal fun readFrameDecoded(input: InputStream, onBytesTransferred: ((Long) -> Unit)?,
+        decode: (ByteArray) -> JSONObject): JSONObject {
         val dataInput = DataInputStream(input)
         val length = dataInput.readInt()
         onBytesTransferred?.invoke(LENGTH_PREFIX_BYTES.toLong())
@@ -59,7 +62,7 @@ object BluetoothSyncProtocol {
             offset += read
             onBytesTransferred?.invoke(read.toLong())
         }
-        return JSONObject(bytes.toString(Charsets.UTF_8))
+        return decode(bytes)
     }
 
     fun writeFrame(

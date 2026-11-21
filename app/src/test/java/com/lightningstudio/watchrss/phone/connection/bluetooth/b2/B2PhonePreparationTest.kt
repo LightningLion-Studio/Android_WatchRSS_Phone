@@ -71,6 +71,48 @@ class B2PhonePreparationTest {
         root.deleteRecursively()
     }
 
+    @Test fun guardedOfferUsesTheIdentifiedRfcommConnectionAndChecksReplyBeforeAck() = runBlocking<Unit> {
+        val discovery = fixture("peer-fixtures.json").getJSONArray("cases").getJSONObject(0).getJSONObject("probe")
+            .put("deviceId", "watch")
+        val podjs = JSONObject(discovery.toString()).apply { remove("supportsAccountDataSpaces") }
+        val reply = probe().put("deviceId", "watch").put("guardedLibraryVersion", 1)
+            .put("supportsPersistentSession", true)
+        val client = PhoneBluetoothSyncClient(context, BluetoothDebugLog(context))
+        fun bind(initial: JSONObject, response: JSONObject, output: ByteArrayOutputStream,
+            owner: String = "rfcomm"): BleSyncBindingSnapshot {
+            val bytes = ByteArrayOutputStream().also { BluetoothSyncProtocol.writeFrame(it, response) }
+            val session = PhoneSyncSession(client, device, "phone",
+                PhoneSyncSession.Transport(bytes.toByteArray().inputStream(), output, owner, false) {},
+                true, false, false)
+            return BleSyncBindingSnapshot(device.address, "owner", session, initial)
+        }
+        val output = ByteArrayOutputStream()
+        bind(discovery, reply, output).session!!.use {
+            assertNull(manager.guardedLibraryProbe(BleSyncBindingSnapshot(device.address, "owner", it, discovery), "compose"))
+        }
+        val ip = bind(podjs, reply, output, owner = "ip:wifiLan")
+        ip.session!!.use { assertNull(manager.guardedLibraryProbe(ip, "ip")) }
+        assertEquals(0, output.size())
+
+        val valid = bind(podjs, reply, output)
+        valid.session!!.use { assertEquals(1, manager.guardedLibraryProbe(valid, "podjs")!!.getInt("guardedLibraryVersion")) }
+        val wire = output.toByteArray().inputStream()
+        assertEquals("[1]", BluetoothSyncProtocol.readFrame(wire).getJSONArray("supportedGuardedLibraryVersions").toString())
+        assertEquals("ack", BluetoothSyncProtocol.readFrame(wire).getString("action"))
+        assertEquals(0, wire.available())
+
+        output.reset()
+        val wrongPeer = bind(podjs, reply.put("deviceId", "different-watch"), output)
+        wrongPeer.session!!.use {
+            assertEquals("CAPABILITY_MISMATCH",
+                (runCatching { manager.guardedLibraryProbe(wrongPeer, "wrong-peer") }.exceptionOrNull() as B2Exception).code)
+            assertFalse(it.isPersistent)
+        }
+        val rejectedWire = output.toByteArray().inputStream()
+        BluetoothSyncProtocol.readFrame(rejectedWire)
+        assertEquals(0, rejectedWire.available())
+    }
+
     @Test fun watchProbeLimitsCoverSingleAndAggregateBodyPeaks() {
         val limits = B2Wire.s2Limits().put("maxJournalBytes", 32L * MIB)
         for (delta in -1..0) {
@@ -199,7 +241,7 @@ class B2PhonePreparationTest {
                         watch.soTimeout = 10_000
                         val peer = async(Dispatchers.IO) { receiveArticleWindow(watch, probe, text) }
                         val stats = requireNotNull(runtime).run(phone.getInputStream(), phone.getOutputStream(),
-                            probe, emptyList(), phone::close)
+                            probe, emptyList(), close = phone::close)
                         peer.await()
                         assertEquals(1, stats.sent)
                     }

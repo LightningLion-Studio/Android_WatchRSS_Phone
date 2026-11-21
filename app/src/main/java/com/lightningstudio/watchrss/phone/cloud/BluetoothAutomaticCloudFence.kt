@@ -12,6 +12,7 @@ internal class BluetoothAutomaticCloudFence {
     private val pending=AtomicBoolean(false)
     val active get()=foreground.get()
     val needsResume get()=!active&&pending.get()
+    fun deferBodyRetry() { pending.set(true) }
     fun setActive(value:Boolean) {
         foreground.set(value)
         if(value)automatic.get()?.takeIf{it.isActive}?.let {pending.set(true);it.cancel(CancellationException("foreground Bluetooth sync"))}

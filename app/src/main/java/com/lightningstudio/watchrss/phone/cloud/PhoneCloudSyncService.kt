@@ -1270,6 +1270,7 @@ class PhoneCloudSyncService(
         head.sourceDeviceId==deviceId && head.keyVersion<keyManager.currentKeyVersion(session.userId) &&
             head.keyVersion !in keyManager.keyVersions(session.userId)
     fun setBluetoothSyncActive(active:Boolean) {bluetoothFence.setActive(active)}
+    internal fun deferBluetoothBodyRetry() { bluetoothFence.deferBodyRetry() }
     val hasDeferredBluetoothSync:Boolean get()=bluetoothFence.needsResume
 
     private suspend fun prepareCloudSyncKeys(session: PhoneAccountSession, bootstrap: CloudBootstrap): CloudBootstrap {

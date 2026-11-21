@@ -1,5 +1,7 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
+import com.lightningstudio.watchrss.phone.BuildConfig
+import com.lightningstudio.watchrss.phone.connection.bluetooth.B2BodyHandoff
 import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 import java.io.File
@@ -64,10 +66,18 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
     }
     private fun anchor(account:JSONObject)=JSONObject().put("commitOid",account.getString("oid")).put("revision",account.getString("revision")).put("rollbackGeneration",account.getString("generation"))
     private fun candidates():List<Pair<String,String>> = projection.accountDatabase.controlQuery("SELECT kind,logical_id FROM syncv2_candidates WHERE scope=? AND kind IN ('asset','book') ORDER BY entity_key",arrayOf(projection.scope)).use{c->buildList{while(c.moveToNext())add(c.getString(0) to c.getString(1))}}
-    fun refreshReferences():List<String> {projection.migrateBodyAssetCandidates();return repository.refreshReferences(now(),life::check)}
+    private fun localBluetoothScope(): String? = if (BuildConfig.B2_ENABLED)
+        "${projection.scope}:${projection.legacyRollbackGeneration()}" else null
+
+    fun refreshReferences(): List<String> {
+        projection.migrateBodyAssetCandidates()
+        return repository.refreshReferences(now(), life::check, localBluetoothScope())
+    }
     /** Random old placeholders with originals must be republished even without metadata edits. */
     fun needsPublication():Boolean {
+        val scope = localBluetoothScope()
         for((kind,id)in candidates())try {
+            if (repository.pendingBluetooth(kind, id, scope)) continue
             val c=projection.candidate(kind,id)?:continue;val v=SyncV2Business.join(kind,c.first,c.second);if(v.optBoolean("deleted"))continue
             val original=repository.original(kind,id,v)?:continue
             val entity=identity.entity(kind,id);val remote=projection.cloudRows(setOf(entity)).firstOrNull()?:return true
@@ -80,7 +90,9 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
     }
     /** Before account publication, bind actual original bytes without creating P3 recipes. */
     fun bindPrepared() {
+        val scope = localBluetoothScope()
         for((kind,id)in candidates())try {
+            if (repository.pendingBluetooth(kind, id, scope)) continue
             life.check();val c=projection.candidate(kind,id)?:continue;val v=SyncV2Business.join(kind,c.first,c.second);if(v.optBoolean("deleted"))continue
             val entity=identity.entity(kind,id);val row=projection.wireContentRow(entity)?:continue;if(!row.isNull("recipeOid"))continue
             val original=repository.original(kind,id,v)?:continue
@@ -88,7 +100,10 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
             val previous = if (original.hasRegisteredDigest) null else projection.cloudRows(setOf(entity))
                 .firstOrNull()?.getJSONObject("row")
             if (previous != null && !previous.isNull("bodyRevision") && previous.getString("bodyRevision") != revision) continue
-            projection.bindArticleRevision(row,revision,independent=true)
+            if (!repository.pendingBluetooth(kind, id, scope)) {
+                original.requireCurrent()
+                projection.bindArticleRevision(row,revision,independent=true)
+            }
         } catch(e:Exception){if(e is CancellationException)throw e;life.check()}
     }
     fun sync(manual:Boolean=false, downloadOnly:Boolean=false):Result {
@@ -139,19 +154,28 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         return authors().publicKey(author)
     }
 
+    private fun incoming(binding: SyncV2BodyCodec.Binding, anchor: JSONObject, defer: Boolean = false): Boolean =
+        repository.pendingBluetooth(binding, "${projection.scope}:${anchor.getString("rollbackGeneration")}", defer)
+
+    private fun checkIncoming(binding: SyncV2BodyCodec.Binding, anchor: JSONObject) {
+        if (incoming(binding, anchor, defer = true)) SyncV2Codec.fail("body_channel_pending")
+    }
+
     private fun syncEntry(entry: JSONObject, anchor: JSONObject, expires: Long, dir: File, downloadOnly: Boolean) {
         current(entry, anchor, expires)
         val b = binding(entry)
         val selected = value(entry)
-        var local = matchingOriginal(b, selected)
-        val repair = if (local == null) repository.repairTarget(b.kind, b.logicalId, selected) else null
+        val deferred = incoming(b, anchor)
+        var local = if (deferred) null else matchingOriginal(b, selected)
+        var repair = if (!deferred && local == null) repository.repairTarget(b.kind, b.logicalId, selected) else null
         var cursor = ""
         var last: Exception? = null
         do {
             checkWindow(anchor, expires)
             val page = http.list(b.entityKey, b.bodyRevision, cursor)
             checkWindow(anchor, expires)
-            // The v1 receiver may have committed while the ready list was in flight.
+            // Finish the control read even when a verified B2 plan owns this body.
+            checkIncoming(b, anchor)
             if (local == null) local = matchingOriginal(b, selected)
             val carriers = page.getJSONArray("carriers")
             for (i in 0 until carriers.length()) {
@@ -162,12 +186,14 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
                         val signed = SyncV2BodyCodec.verifyDescriptor(descriptor, identity.scope, b, carrierPublicKey(descriptor))
                         keys.read(signed.getLong("keyVersion"))
                     } else {
-                        receive(entry, anchor, descriptor, dir, expires, requireNotNull(repair))
+                        val captured = repair ?: repository.repairTarget(b.kind, b.logicalId, selected).also { repair = it }
+                        receive(entry, anchor, descriptor, dir, expires, captured)
                     }
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                     life.check()
-                    if (code(e) in setOf("choice_stale", "window_expired", "authentication_required", "device_revoked")) throw e
+                    if (code(e) in setOf("choice_stale", "window_expired", "authentication_required", "device_revoked",
+                            "body_channel_pending")) throw e
                     last = e
                     continue
                 }
@@ -205,7 +231,8 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         SyncV2BodyCodec.open(upload, identity.scope, b, signer.publicHex, keys::read) { hash, _ -> File(dir, hash).readBytes() }
         current(entry, anchor, expires)
         val latest = requireCurrentOriginal(source, b, selected, anchor, expires)
-        http.upload(upload, dir) { checkWindow(anchor, expires); latest.requireCurrent() }
+        checkIncoming(b, anchor)
+        http.upload(upload, dir) { checkWindow(anchor, expires); checkIncoming(b, anchor); latest.requireCurrent() }
         current(entry, anchor, expires)
     }
 
@@ -218,17 +245,38 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         return latest
     }
 
+    private class OriginalCommitted : RuntimeException()
+
     internal fun receive(entry: JSONObject, anchor: JSONObject, descriptor: JSONObject, dir: File,
         expires: Long = captureWindow(anchor), capturedTarget: SyncV2BodyRepository.RepairTarget? = null) {
         current(entry, anchor, expires)
         val b = binding(entry)
         val selected = value(entry)
+        var handoffGeneration = B2BodyHandoff.generation
+        checkIncoming(b, anchor)
         val repair = capturedTarget ?: repository.repairTarget(b.kind, b.logicalId, selected)
-        val raw = SyncV2BodyCodec.open(descriptor, identity.scope, b, carrierPublicKey(descriptor), keys::read) { hash, size ->
-            http.download(descriptor.getJSONObject("body").getString("carrierId"), hash, size, dir) { checkWindow(anchor, expires) }
+        val raw = try {
+            SyncV2BodyCodec.open(descriptor, identity.scope, b, carrierPublicKey(descriptor), keys::read) { hash, size ->
+                http.download(descriptor.getJSONObject("body").getString("carrierId"), hash, size, dir) {
+                    checkWindow(anchor, expires)
+                    val generation = B2BodyHandoff.generation
+                    if (generation != handoffGeneration) {
+                        handoffGeneration = generation
+                        checkIncoming(b, anchor)
+                        matchingOriginal(b, selected)?.let {
+                            current(entry, anchor, expires)
+                            it.requireCurrent()
+                            throw OriginalCommitted()
+                        }
+                    }
+                }
+            }
+        } catch (_: OriginalCommitted) {
+            return
         }
         repository.validate(b.kind, b.logicalId, selected, raw)
         current(entry, anchor, expires)
+        checkIncoming(b, anchor)
         val committedDuringDownload = matchingOriginal(b, selected)
         if (committedDuringDownload != null) {
             checkWindow(anchor, expires)
@@ -239,6 +287,13 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
             val st = projection.state()
             projection.accountWriter(st.version) { state ->
                 current(entry, anchor, expires, state)
+                checkIncoming(b, anchor)
+                val latest = matchingOriginal(b, selected)
+                if (latest != null) {
+                    checkWindow(anchor, expires, state)
+                    latest.requireCurrent()
+                    return@accountWriter
+                }
                 repository.install(b.kind, b.logicalId, raw, repair) { checkWindow(anchor, expires, state) }
                 // Only cache columns changed inside this writer. Hydration is not a local business edit.
                 state.body.put("businessStamp", SyncV2BusinessWitness.read(projection.accountDatabase).encoded())

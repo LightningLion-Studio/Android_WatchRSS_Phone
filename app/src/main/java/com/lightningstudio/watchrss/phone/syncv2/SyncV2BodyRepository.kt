@@ -219,21 +219,25 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         }
     }
 
-    fun registerNoteAsset(asset: NoteAssetRegistration, now: Long) {
+    fun registerNoteAsset(asset: NoteAssetRegistration, now: Long): String {
         check(db.inTransaction())
         asset.requireCurrent()
-        try {
-            insertNoteAsset(asset.storageKey, asset.sha256, asset.byteCount, now)
+        return try {
+            registerNoteAssetByDigest(asset.storageKey, asset.sha256, asset.byteCount, now)
         } catch (_: android.database.sqlite.SQLiteConstraintException) {
             SyncV2Codec.fail("closure_incomplete")
         }
     }
 
-    private fun insertNoteAsset(id: String, sha256: String, byteCount: Int, now: Long) {
+    private fun registerNoteAssetByDigest(id: String, sha256: String, byteCount: Int, now: Long): String {
+        db.controlQuery("SELECT storageKey FROM note_assets WHERE sha256=? AND deleted=0", arrayOf(sha256)).use {
+            if (it.moveToFirst()) return it.getString(0)
+        }
         val mime=when(id.substringAfterLast('.',"").lowercase()){ "png"->"image/png";"jpg","jpeg"->"image/jpeg";"webp"->"image/webp";"md"->"text/markdown";else->"application/octet-stream" }
         SyncV2PhoneApply(db).upsert("note_assets",listOf("assetId"),JSONObject().put("assetId",java.util.UUID.randomUUID().toString()).put("noteId","")
             .put("storageKey",id).put("mimeType",mime).put("displayName",id).put("sha256",sha256).put("byteCount",byteCount)
             .put("isOriginal",false).put("createdAt",now).put("deleted",false).put("deletedAt",0))
+        return id
     }
 
     /** Discover referenced originals omitted by older private-UUID metadata. Absence never deletes. */
@@ -248,7 +252,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             try {
                 checkOwner()
                 if(!db.controlQuery("SELECT 1 FROM note_assets WHERE storageKey=?",arrayOf(id)).use{it.moveToFirst()})
-                    insertNoteAsset(id, SyncV2BodyCodec.hash(raw), raw.size, now)
+                    registerNoteAssetByDigest(id, SyncV2BodyCodec.hash(raw), raw.size, now)
                 db.setTransactionSuccessful()
             }finally{db.endTransaction()}
         }catch(e:Exception){checkOwner();errors.add(SyncV2BodyChannel.code(e))}

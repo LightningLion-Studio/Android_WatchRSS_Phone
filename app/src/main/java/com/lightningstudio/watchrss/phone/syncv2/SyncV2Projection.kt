@@ -134,7 +134,11 @@ internal class SyncV2Projection(
             fault("before-state")
             db.execSQL("UPDATE syncv2_state SET state_version=?,body=? WHERE scope=? AND state_version=?",arrayOf(following,seal("state",old.body),scope,old.version))
             if(db.controlQuery("SELECT changes()").use { it.moveToFirst(); it.getInt(0) }!=1) SyncV2Codec.fail("choice_stale")
-            fault("before-commit"); db.setTransactionSuccessful(); return result
+            fault("before-commit")
+            // Account release can invalidate the generation before acquiring the lifetime lock.
+            lifetime?.check()
+            db.setTransactionSuccessful()
+            return result
         } catch(e:Throwable) {
             val primary=if(e is android.database.sqlite.SQLiteFullException)IllegalStateException("storage_pressure",e)else e
             failure=primary;throw primary

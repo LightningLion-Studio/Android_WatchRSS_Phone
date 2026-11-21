@@ -386,7 +386,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         }.map{it.getJSONObject("meta").getString("entityKey")}.toSet()
     }
     private fun wireIndex(records:List<JSONObject>,version:Long,current:List<JSONObject>?=null,sparseRoot:String?=null,scopeIds:Set<String> = emptySet(),
-        authors:SyncV2Authors?=null):SyncV2Projection.WireIndex {
+        authors:SyncV2Authors?=null, verifiedAssetAliasSizes:Map<String,Long> = emptyMap()):SyncV2Projection.WireIndex {
         val objects=SyncV2Spool(db);val refs=mutableListOf<JSONObject>();val rows=mutableListOf<JSONObject>();val noteMetadata=mutableMapOf<String,JSONObject>();val reservations=mutableListOf<AutoCloseable>()
         try {
         val candidates=(current?:projection.cloudRows()).indexRows()
@@ -438,7 +438,8 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                     client.noteSegmentsWrite(),authors,
                     remote?.optString(SyncV2NoteWiring.REVISION_KEY)?.takeIf{it.matches(Regex("[0-9a-f]{32}"))},
                     remote?.optJSONArray(SyncV2NoteWiring.SEGMENTS_KEY)?.let{a->(0 until a.length()).map{a.getString(it)}}?:emptyList(),
-                    remote?.optJSONObject(SyncV2NoteWiring.REFS_MAPS_KEY),SyncV2NoteWiring.outboxOwned(db,scope,entity))
+                    remote?.optJSONObject(SyncV2NoteWiring.REFS_MAPS_KEY),SyncV2NoteWiring.outboxOwned(db,scope,entity),
+                    verifiedAssetAliasSizes)
             } else null
             // Account choices publish complete selected snapshots. A local budget failure
             // aborts before publication; silently omitting it would erase its Room row/queue.
@@ -571,8 +572,14 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                 projection.accountWriter(c.stateVersion) { st ->
                     projection.accountCheck(st,c)
                     if (!st.body.isNull("pendingAccountAction") || !st.body.isNull("pendingPublish")) SyncV2Codec.fail("choice_pending")
-                    for (asset in registrations.values) bodyRepository.registerNoteAsset(asset, now())
-                    val assets = projection.accountProjectRegisteredNoteAssets(st, registrations.keys)
+                    val storageKeys = linkedSetOf<String>()
+                    val verifiedAssetAliasSizes = mutableMapOf<String, Long>()
+                    for (asset in registrations.values) {
+                        val storageKey = bodyRepository.registerNoteAsset(asset, now())
+                        storageKeys.add(storageKey)
+                        if (storageKey != asset.storageKey) verifiedAssetAliasSizes[asset.storageKey] = asset.byteCount.toLong()
+                    }
+                    val assets = projection.accountProjectRegisteredNoteAssets(st, storageKeys)
                     val assetIds = assets.indexRows().keys
                     val expandedIds = plan.scopeIds + assetIds
                     val full = plan.root != null && expandedIds.size > 64
@@ -587,7 +594,8 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                     val selected = untouched.plusRows(target.filterRows { it.getJSONObject("meta").getString("entityKey") !in assetIds }).plusRows(assets)
                     val captureRows = actual.filterRows { it.getJSONObject("meta").getString("entityKey") !in assetIds }.plusRows(assets)
                     val expanded = plan.copy(root=if (full) null else plan.root, scopeIds=expandedIds)
-                    stageChoice(c, choice, keyVersion, context, expanded, selected, cloud, captureRows, bundles, st)
+                    stageChoice(c, choice, keyVersion, context, expanded, selected, cloud, captureRows, bundles, st,
+                        verifiedAssetAliasSizes)
                     for (asset in registrations.values) asset.requireCurrent()
                     projection.accountCheckOwner()
                 }
@@ -598,10 +606,12 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
 
     private fun stageChoice(c: ChoiceCapture, choice: String, keyVersion: Long, context: Context, plan: Plan,
         target: List<JSONObject>, remote: List<JSONObject>, captured: List<JSONObject>?,
-        bundles: List<SyncV2RecoveryStorage.Bundle>, writerState: SyncV2Projection.State? = null) {
+        bundles: List<SyncV2RecoveryStorage.Bundle>, writerState: SyncV2Projection.State? = null,
+        verifiedAssetAliasSizes: Map<String, Long> = emptyMap()) {
         val requestId=id();val action=JSONObject().put("id",requestId).put("kind",choice).put("capture",c.json()).put("serverTime",now()).put("fileCapture",plan.files).put("legacySelected",JSONArray(plan.legacySelected))
         if(plan.root!=null)action.put("sparseBaseRoot",plan.root).put("sparseIds",JSONArray(plan.scopeIds.sorted()))
-        val index=if(choice=="cloud")null else wireIndex(target,keyVersion,remote,plan.root,plan.scopeIds,context.authors)
+        val index=if(choice=="cloud")null else wireIndex(target,keyVersion,remote,plan.root,plan.scopeIds,context.authors,
+            verifiedAssetAliasSizes)
         if(index!=null && plan.root!=null)action.put("retiredTrees",JSONArray(index.retiredTrees.sorted()))
         val objects=SyncV2Spool(db).apply{if(index!=null)putAll(index.objects.selectObjects{it !in index.reused})}
         try {

@@ -48,6 +48,9 @@ internal class B2NoteAssetBusiness(private val store: B2RoomStore, private val a
             val staged = context.stagedFile ?: fail("LOCAL_IO")
             val candidate = NoteAssetFiles.candidate(files, requested.sha256)
             val parent = NoteAssetFiles.ensureCandidateDirectory(files)
+            // A different committed key can already point at this digest. Restoring its
+            // missing bytes here would expose this attempt before this transaction commits.
+            if (!candidate.exists() && NoteAssetFiles.referencesDigest(db, requested.sha256)) fail("RECEIPT_CONFLICT")
             val linked = ConditionalBodyFile.linkIfAbsent(candidate, staged)
             context.finishAsset = { committed ->
                 if (committed) NoteAssetFiles.published()

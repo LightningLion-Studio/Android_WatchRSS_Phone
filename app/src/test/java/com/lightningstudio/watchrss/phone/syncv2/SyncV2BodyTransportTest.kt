@@ -138,7 +138,9 @@ class SyncV2BodyTransportTest {
                     assertEquals("merged", store.installBinaryPackage(bookId, fingerprint, state, prepared,
                         File(files, "b2-chapter-scratch").apply { mkdirs() }) {})
                 }
-                assertEquals("b2-$bookId-$hash.jsonl", store.packageFile(bookId)!!.name)
+                val published = requireNotNull(BookPackageFiles.publication(f.sql, bookId))
+                assertEquals(BookPackageFiles.Revision(hash, raw.size.toLong()), published.revision)
+                assertEquals("b2-$bookId-$hash-${published.slot}.jsonl", store.packageFile(bookId)!!.name)
                 File(directory, "$bookId.jsonl").writeBytes(raw.copyOf().apply { this[lastIndex - 1] = 0 })
             } else {
                 bluetooth.sync(syncReading = false)

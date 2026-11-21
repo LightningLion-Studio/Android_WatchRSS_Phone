@@ -1829,8 +1829,11 @@ class PhoneBluetoothSyncManager(
         }
     }
 
-    private fun noteAssetFile(key: String): File =
-        NoteAssetFiles.current(b2Database()?.openHelper?.writableDatabase, appContext.filesDir, key)
+    private fun noteAssetFile(key: String): File? {
+        val sql = b2Database()?.openHelper?.readableDatabase
+        return if (sql == null) NoteAssetFiles.legacy(appContext.filesDir, key)
+            else NoteAssetFiles.readable(sql, appContext.filesDir, key)
+    }
 
     private suspend fun noteAssetInventory(notes:List<com.lightningstudio.watchrss.phone.data.note.NoteEntity>):List<NoteAssetInventoryEntry> {
         val keys=linkedSetOf<String>()
@@ -1838,7 +1841,7 @@ class PhoneBluetoothSyncManager(
             keys+=noteRepository.assets(note.noteId).filterNot { it.deleted }.map { it.storageKey }.filter(NoteAssetSyncPayload::isSafeStorageKey)
             keys+=NoteAssetSyncPayload.referencedStorageKeys(note.markdown)
         }
-        return keys.mapNotNull { key -> assetHashes.inventory(noteAssetFile(key),key) }
+        return keys.mapNotNull { key -> noteAssetFile(key)?.let { assetHashes.inventory(it, key) } }
     }
 
     private suspend fun syncNoteAssets(
@@ -1847,7 +1850,7 @@ class PhoneBluetoothSyncManager(
     ) {
         for(asset in localAssets) {
             if(remoteAssets[asset.storageKey]==asset)continue
-            val file=noteAssetFile(asset.storageKey)
+            val file = checkNotNull(noteAssetFile(asset.storageKey)) { "笔记图片已变化，请重试" }
             check(assetHashes.inventory(file,asset.storageKey)==asset) { "笔记图片已变化，请重试" }
             val chunks=((asset.size+NoteAssetSyncPayload.CHUNK_BYTES-1)/NoteAssetSyncPayload.CHUNK_BYTES).toInt().coerceAtLeast(1)
             file.inputStream().buffered().use { input ->

@@ -234,7 +234,7 @@ class B2RoomIntegrationTest {
             val repository = SyncV2BodyRepository(reader.openHelper.readableDatabase, rig.root)
             val selected = org.json.JSONObject().put("assetId", key).put("deleted", false)
             val export = NoteImportExportService(context, NoteRepository(reader.noteDao(), "phone")) { storageKey ->
-                NoteAssetFiles.current(reader.openHelper.readableDatabase, rig.root, storageKey)
+                NoteAssetFiles.readable(reader.openHelper.readableDatabase, rig.root, storageKey)
             }
             suspend fun archivedAsset() = MarkdownNoteArchive.read(export.exportZip())
                 .singleOrNull { it.path == "notes/assets/$key" }
@@ -269,9 +269,42 @@ class B2RoomIntegrationTest {
             assertEquals("APPLIED", rig.apply(receiver, epoch).o("result").s("state"))
             assertArrayEquals(rig.bytes, requireNotNull(repository.original("asset", key, selected)).raw)
             assertArrayEquals(rig.bytes, requireNotNull(archivedAsset()).bytes)
+            NoteAssetFiles.current(reader.openHelper.readableDatabase, rig.root, key)
+                .writeBytes(rig.bytes.copyOf().apply { this[0] = (this[0].toInt() xor 1).toByte() })
+            assertNull(repository.original("asset", key, selected))
+            assertNull(archivedAsset())
         } finally {
             release.countDown()
             reader.close()
+            db.close()
+            rig.root.deleteRecursively()
+        }
+    }
+
+    @Test fun b2DoesNotRefillMissingBytesOfAnotherCommittedAssetKeyBeforeCommit() = runBlocking<Unit> {
+        val rig = ReceiverRig()
+        val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java)
+            .allowMainThreadQueries().build()
+        try {
+            val store = B2RoomStore(db)
+            val sql = db.openHelper.writableDatabase
+            val other = "previously-committed.png"
+            val digest = rig.descriptor.s("sha256")
+            val revision = com.lightningstudio.watchrss.phone.data.book.BookPackageFiles.Revision(digest, rig.bytes.size.toLong())
+            store.exclusive { store.transaction { NoteAssetFiles.publish(sql, other, revision) } }
+            val previous = NoteAssetFiles.current(sql, rig.root, other)
+            assertFalse(previous.exists())
+            val auth = B2Authorization(rig.account, "phone", "watch", rig.snapshot, rig.snapshot, listOf(rig.binding)) { true }
+            val receiver = B2Receiver(store, rig.files, auth,
+                B2NoteAssetBusiness(store, rig.account, File(rig.root, "notes/assets")) {})
+            val epoch = rig.begin(receiver)
+            rig.manifest(receiver, epoch)
+            rig.put(receiver, epoch)
+            assertEquals("RECEIPT_CONFLICT", (runCatching { rig.apply(receiver, epoch) }.exceptionOrNull() as B2Exception).code)
+            assertFalse(previous.exists())
+            assertNull(NoteAssetFiles.reference(sql, "picture.png"))
+            assertTrue(store.list(rig.account, "object").single().second.nil("receipt"))
+        } finally {
             db.close()
             rig.root.deleteRecursively()
         }

@@ -765,7 +765,8 @@ private fun currentNoteAsset(context: android.content.Context, path: String): Fi
     val file = produceState<File?>(null, context, key, publication.value) {
         value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             val app = context.applicationContext as? PhoneCompanionApplication
-            app?.container?.noteAssetFile(key) ?: File(context.filesDir, "notes/assets/$key")
+            if (app != null) app.container.noteAssetFile(key)
+            else com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles.legacy(context.filesDir, key)
         }
     }
     return file.value

@@ -9,6 +9,7 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.binaryDescriptor
 import com.lightningstudio.watchrss.phone.connection.bluetooth.binaryFileHashes
 import com.lightningstudio.watchrss.phone.data.book.BookChapterEntity
 import com.lightningstudio.watchrss.phone.data.book.BookEntity
+import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.book.BookSync
 import com.lightningstudio.watchrss.phone.data.book.ImportedBookStore
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
@@ -17,7 +18,13 @@ import com.lightningstudio.watchrss.phone.data.db.PhoneRssSourceEntity
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
+import com.lightningstudio.watchrss.phone.syncv2.SyncV2BodyRepository
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -27,6 +34,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.SQLiteMode
 import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
@@ -204,6 +212,88 @@ class B2BooksRoomTest {
                 db.close()
                 root.deleteRecursively()
             }
+        }
+    }
+
+    @Test
+    @Config(sdk = [35])
+    @SQLiteMode(SQLiteMode.Mode.NATIVE)
+    fun independentCloudReaderWaitsForSameRevisionBookCommit() = runBlocking<Unit> {
+        val fixture = JSONObject(requireNotNull(javaClass.getResource("/book/cli-single-txt-book.json")).readText())
+        val raw = fixture.getString("packageUtf8")
+        val id = fixture.getString("bookId")
+        val root = java.nio.file.Files.createTempDirectory("b2-book-publication").toFile()
+        fun database() = Room.databaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java,
+            File(root, "publication.db").absolutePath)
+            .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
+            .allowMainThreadQueries().build()
+        val writer = database()
+        val reader = database()
+        try {
+            val directory = File(root, "imported_books")
+            val books = ImportedBookStore(writer, directory, FileArticleContentStore(File(root, "text")), "phone")
+            val legacy = File(root, "legacy").apply { writeText(raw) }
+            assertTrue(books.receivePackage(id, legacy) > 0)
+            val row = requireNotNull(writer.bookDao().get(id))
+            val revision = BookPackageFiles.Revision(row.packageSha256, row.packageBytes)
+            val state = JSONObject(row.stateJson)
+            val ledger = B2RoomStore(writer)
+            val receipts = B2RoomStore(reader)
+            val originals = SyncV2BodyRepository(reader.openHelper.readableDatabase, root)
+            assertTrue(requireNotNull(books.packageFile(id)).delete())
+            assertNull(originals.original("book", id, state))
+            val scratch = books.binaryImportDirectory()
+
+            suspend fun attempt(key: String, rollback: Boolean) = coroutineScope {
+                val staged = CompletableDeferred<Unit>()
+                val release = java.util.concurrent.CountDownLatch(1)
+                val incoming = File(root, "incoming-$key").apply { writeText(raw) }
+                val assembly = requireNotNull(BookPackageFiles.verify(incoming, revision) {})
+                val prepared = books.prepareBinaryPackage(id, assembly, {})
+                assertNull(prepared.currentOriginal)
+                val result = async(Dispatchers.IO) {
+                    runCatching {
+                        ledger.exclusive { ledger.transaction {
+                            assertEquals("merged", books.installBinaryPackage(id, fixture.getString("fingerprint"),
+                                state, prepared, scratch) {})
+                            ledger.put("book-test", "receipt", key, obj("state" to "APPLIED"))
+                            staged.complete(Unit)
+                            check(release.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                            if (rollback) throw B2Exception("LOCAL_IO")
+                        } }
+                    }
+                }
+                try {
+                    withTimeout(5_000) { staged.await() }
+                    assertNull(receipts.get("book-test", "receipt", key))
+                    assertNull("uncommitted same-revision book was visible to the cloud reader",
+                        originals.original("book", id, state))
+                    assertNull("uncommitted same-revision book was visible to recovery",
+                        originals.committedBook(id, state))
+                } finally {
+                    release.countDown()
+                }
+                if (rollback) {
+                    assertEquals("LOCAL_IO", (result.await().exceptionOrNull() as B2Exception).code)
+                    assertNull(receipts.get("book-test", "receipt", key))
+                    assertNull(originals.original("book", id, state))
+                    assertNull(originals.committedBook(id, state))
+                } else {
+                    result.await().getOrThrow()
+                    assertEquals("APPLIED", receipts.get("book-test", "receipt", key)?.s("state"))
+                    assertArrayEquals(raw.toByteArray(), requireNotNull(originals.original("book", id, state)).raw)
+                    assertEquals(raw, requireNotNull(originals.committedBook(id, state)).file.readText())
+                }
+            }
+            attempt("legacy-rollback", rollback = true)
+            attempt("first-commit", rollback = false)
+            assertTrue(requireNotNull(books.packageFile(id)).delete())
+            attempt("same-b2-rollback", rollback = true)
+            attempt("same-b2-commit", rollback = false)
+        } finally {
+            reader.close()
+            writer.close()
+            root.deleteRecursively()
         }
     }
 
@@ -543,7 +633,9 @@ class B2BooksRoomTest {
             } }
             val article = db.phoneArticleDao().getById(BookSync.articleId(id, 1))!!
             assertEquals(BookSync.normalized(text), content.loadText(article.contentText))
-            val binary = books.binaryPackage(id, hashes.sha256)
+            val binary = requireNotNull(books.packageFile(id))
+            val published = requireNotNull(BookPackageFiles.publication(db.openHelper.readableDatabase, id))
+            assertEquals("b2-$id-${hashes.sha256}-${published.slot}.jsonl", binary.name)
             assertEquals(hashes.sha256, binaryFileHashes(binary).sha256)
             assertEquals(binary, books.packageFile(id))
             assertEquals("APPLIED", dbStore.get(scope, "testReceipt", job)!!.s("status"))

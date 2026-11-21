@@ -19,7 +19,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
     private val business: B2InheritedKinds, private val retentionGeneration: String? = null,
     private val onBookIssue: (BookSyncIssue) -> Unit = {},
     val accountFence: B2AccountFence? = null,
-    private val assetFile: (String) -> File = { File(assetDirectory, it) },
+    private val assetFile: (String) -> File? = { File(assetDirectory, it) },
     private val captureWindow: (() -> B2CommitWindow)? = null
 ) {
     private val files = B2Files(directory, business.bookImportRoot())
@@ -222,7 +222,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             val scratch = lease.file
             if (B2_NOTE_ASSET in route.send) for (asset in assets.sortedBy { it.storageKey }) {
                 authorize()
-                val source = assetFile(asset.storageKey)
+                val source = assetFile(asset.storageKey) ?: throw B2Exception("SOURCE_CHANGED")
                 val hashes = binaryFileHashes(source, preparing)
                 if (hashes.size != asset.size || hashes.sha256 != asset.sha256) throw B2Exception("SOURCE_CHANGED")
                 val metadata = JSONObject().put("storageKey", asset.storageKey)

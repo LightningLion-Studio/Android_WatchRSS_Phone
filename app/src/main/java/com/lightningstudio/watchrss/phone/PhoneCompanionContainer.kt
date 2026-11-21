@@ -66,8 +66,8 @@ class PhoneCompanionContainer(context: Context) {
         AccountEnvironment.active(appContext)
     }
 
-    internal fun noteAssetFile(key: String): java.io.File =
-        com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles.current(database.openHelper.writableDatabase, appContext.filesDir, key)
+    internal fun noteAssetFile(key: String): java.io.File? =
+        com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles.readable(database.openHelper.readableDatabase, appContext.filesDir, key)
 
     private val database: PhoneCompanionDatabase by lazy {
         Room.databaseBuilder(

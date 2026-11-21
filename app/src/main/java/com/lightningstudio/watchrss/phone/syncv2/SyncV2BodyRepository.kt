@@ -34,26 +34,17 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     }
 
     fun read(kind: String, id: String): ByteArray? {
-        val target = file(kind, id)
-        val limit = SyncV2BodyCodec.limit(kind)
-        if (kind == "book") {
-            val revision = BookPackageFiles.revision(db, id) ?: return null
-            if (revision.bytes > limit) SyncV2Codec.fail("object_too_large")
-            val original = BookPackageFiles.resolve(bookDirectory, id, revision) ?: return null
-            val raw = ByteArray(revision.bytes.toInt())
-            DataInputStream(original.inputStream()).use { input ->
-                input.readFully(raw)
-                if (input.read() != -1 || SyncV2BodyCodec.hash(raw) != revision.sha256)
-                    SyncV2Codec.fail("body_revision_changed")
+        val selected = if (kind == "book") {
+            db.controlQuery("SELECT stateJson FROM imported_books WHERE bookId=?", arrayOf(id)).use {
+                if (!it.moveToFirst()) return null
+                JSONObject(it.getString(0))
             }
-            return raw
-        }
-        if (!target.isFile) return null
-        if (target.length() > limit) SyncV2Codec.fail("object_too_large")
-        return target.readBytes().also { if (it.size > limit) SyncV2Codec.fail("object_too_large") }
+        } else JSONObject().put("assetId", id).put("deleted", false)
+        return original(kind, id, selected)?.raw
     }
     internal sealed interface Reference
-    private data class BookReference(val revision: BookPackageFiles.Revision, val identity: String) : Reference
+    private data class BookReference(val revision: BookPackageFiles.Revision, val identity: String,
+        val publication: BookPackageFiles.Publication?) : Reference
     private data class AssetReference(val owners: Set<String>, val revisions: Set<BookPackageFiles.Revision>,
         val published: BookPackageFiles.Revision?) : Reference
 
@@ -130,11 +121,12 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             if (!row.moveToFirst()) return@use null
             val current = SyncV2Codec.canonical(org.json.JSONArray(row.getString(2)))
             if (current != bookIdentity(selected)) SyncV2Codec.fail("body_revision_changed")
-            BookReference(BookPackageFiles.Revision(row.getString(0), row.getLong(1)), current)
+            BookReference(BookPackageFiles.Revision(row.getString(0), row.getLong(1)), current,
+                BookPackageFiles.publication(db, id))
         }
 
     private fun resolveBook(id: String, current: BookReference, onRead: (Int) -> Unit = {}): BookPackageFiles.Original? =
-        BookPackageFiles.resolveOriginal(bookDirectory, id, current.revision, onRead)
+        BookPackageFiles.resolveOriginal(bookDirectory, id, current.revision, current.publication, onRead)
 
     /** Recovery and cloud proof use the same current Room identity and physical original. */
     fun committedBook(id: String, selected: JSONObject, maxBytes: Long? = null,

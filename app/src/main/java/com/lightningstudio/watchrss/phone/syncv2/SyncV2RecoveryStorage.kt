@@ -36,28 +36,35 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
         fun read(offset: Long, n: Int): ByteArray
     }
     private fun byteSource(bytes:ByteArray)=object:Source {override val size=bytes.size.toLong();override fun read(offset:Long,n:Int)=bytes.copyOfRange(offset.toInt(),offset.toInt()+n)}
-    private fun fileSource(file: File, expected: String? = null, maxBytes: Long? = null,
-        book: BookPackageFiles.Original? = null): Source {
+    private fun fileSource(original: BookPackageFiles.Original): Source {
+        val file = original.file
         val path = file.toPath()
         fun stat() = Files.readAttributes(path, BasicFileAttributes::class.java)
         if (!file.isFile) SyncV2Codec.fail("closure_incomplete")
         val selected = stat()
         val size = selected.size()
-        if (book != null && (size != book.revision.bytes || !book.isCurrent())) SyncV2Codec.fail("choice_stale")
-        if (maxBytes != null && size > maxBytes) SyncV2Codec.fail("quota_exceeded")
-        if(expected!=null && file.inputStream().use{input->val d=MessageDigest.getInstance("SHA-256");val b=ByteArray(65536);while(true){val n=input.read(b);if(n<0)break;sourceReads?.file(n);d.update(b,0,n)};SyncV2Codec.hex(d.digest())}!=expected)SyncV2Codec.fail("closure_incomplete")
+        if (size != original.revision.bytes || !original.isCurrent()) SyncV2Codec.fail("choice_stale")
         return object : Source {
             override val size = size
-            override val expectedSha256 = book?.revision?.sha256 ?: expected
+            override val expectedSha256 = original.revision.sha256
             override fun read(offset: Long, n: Int): ByteArray {
                 val current = stat()
-                if (book?.isCurrent() == false || !current.isRegularFile || current.fileKey() != selected.fileKey() || current.size() != size ||
+                if (!original.isCurrent() || !current.isRegularFile || current.fileKey() != selected.fileKey() || current.size() != size ||
                     current.lastModifiedTime() != selected.lastModifiedTime()) SyncV2Codec.fail("choice_stale")
                 return ByteArray(n).also { out ->
                     RandomAccessFile(file, "r").use { it.seek(offset); it.readFully(out); sourceReads?.file(n) }
                 }
             }
         }
+    }
+    private fun assetOriginal(key: String, maxBytes: Long? = null): BookPackageFiles.Original? {
+        if (!NoteAssetFiles.isSafe(key)) return null
+        val revisions = db.query("SELECT sha256,byteCount FROM note_assets WHERE storageKey=? AND deleted=0", arrayOf(key)).use { rows ->
+            buildSet { while (rows.moveToNext()) add(BookPackageFiles.Revision(rows.getString(0), rows.getLong(1))) }
+        }
+        val expected = revisions.singleOrNull() ?: return null
+        if (maxBytes != null && expected.bytes > maxBytes) SyncV2Codec.fail("quota_exceeded")
+        return NoteAssetFiles.verifiedOriginal(db, files, key, expected) { sourceReads?.file(it) }
     }
     private fun sources(record:JSONObject,maxBytes:Long?=null):List<Pair<String,Source>> {
         val m=record.getJSONObject("meta");val id=m.getString("logicalId");val value=record.getJSONObject("value")
@@ -87,12 +94,11 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             "book" -> {
                 val original = originals.committedBook(id, value, maxBytes) { sourceReads?.file(it) }
                     ?: SyncV2Codec.fail("closure_incomplete")
-                listOf("book" to fileSource(original.file, maxBytes = maxBytes, book = original))
+                listOf("book" to fileSource(original))
             }
-            "asset"->db.query("SELECT storageKey,sha256 FROM note_assets WHERE storageKey=?",arrayOf(id)).use{c->
-                if(!c.moveToFirst())SyncV2Codec.fail("closure_incomplete")
-                val name=c.getString(0);if(!com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.isSafeStorageKey(name))SyncV2Codec.fail("closure_incomplete")
-                listOf("asset/$name" to fileSource(NoteAssetFiles.current(db, files, name),c.getString(1),maxBytes))
+            "asset" -> {
+                val original = assetOriginal(id, maxBytes) ?: SyncV2Codec.fail("closure_incomplete")
+                listOf("asset/$id" to fileSource(original))
             }
             "note"->{
                 val texts=mutableListOf(value.getString("markdown"),value.getString("baseMarkdown"));SyncV2NoteConflicts.declared(value)?.getJSONArray("records")?.let { conflicts ->
@@ -100,9 +106,8 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                 }
                 val keys=texts.flatMap{com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.referencedStorageKeys(it)}.toSortedSet()
                 keys.map {name->
-                    val hashes=db.query("SELECT sha256 FROM note_assets WHERE storageKey=?",arrayOf(name)).use{c->buildSet{while(c.moveToNext())add(c.getString(0))}}
-                    if(hashes.size!=1)SyncV2Codec.fail("closure_incomplete")
-                    "asset/$name" to fileSource(NoteAssetFiles.current(db, files, name),hashes.single(),maxBytes)
+                    val original = assetOriginal(name, maxBytes) ?: SyncV2Codec.fail("closure_incomplete")
+                    "asset/$name" to fileSource(original)
                 }
             }
             else->emptyList()
@@ -114,7 +119,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
         return when(m.getString("kind")) {
             "article"->db.query("SELECT length(CAST(contentText AS BLOB))+COALESCE(length(CAST(contentHtml AS BLOB)),0) FROM phone_articles WHERE articleId=?",arrayOf(id)).use{it.moveToFirst() && it.getLong(0)>0}
             "book" -> originals.committedBook(id, record.getJSONObject("value")) { sourceReads?.file(it) } != null
-            "asset"->db.query("SELECT storageKey FROM note_assets WHERE storageKey=?",arrayOf(id)).use{c->c.moveToFirst() && com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.isSafeStorageKey(c.getString(0)) && NoteAssetFiles.current(db, files, c.getString(0)).isFile}
+            "asset" -> assetOriginal(id) != null
             else->false
         }
     }
@@ -127,9 +132,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
         val metadata = B2Metadata.validate(descriptor)
         val id = metadata.getString("storageKey")
         val revision = BookPackageFiles.Revision(metadata.getString("sha256"), metadata.getLong("size"))
-        val actual = NoteAssetFiles.current(db, files, id)
-        return NoteAssetFiles.ownerKeys(db, id).isNotEmpty() && NoteAssetFiles.winnerAllows(db, id, revision) &&
-            BookPackageFiles.verify(actual, revision) {} != null
+        return NoteAssetFiles.verifiedOriginal(db, files, id, revision) != null
     }
 
     private fun guardedBookAlreadyPresent(link: JSONObject, descriptor: JSONObject): Boolean {

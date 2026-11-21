@@ -4,11 +4,13 @@ import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload
+import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.importer.LocalFileImportTarget
 import com.lightningstudio.watchrss.phone.data.importer.classifyLocalFileImport
 import com.lightningstudio.watchrss.phone.data.importer.isMarkdownFileName
 import com.lightningstudio.watchrss.phone.data.importer.markdownTitleFromFileName
 import java.io.File
+import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -16,11 +18,11 @@ import java.util.UUID
 class NoteImportExportService internal constructor(
     private val context: Context,
     private val repository: NoteRepository,
-    private val assetFile: (String) -> File
+    private val assetFile: (String) -> File?
 ) {
     constructor(context: Context, repository: NoteRepository) : this(context, repository, { key ->
         val app = context.applicationContext as? com.lightningstudio.watchrss.phone.PhoneCompanionApplication
-        app?.container?.noteAssetFile(key) ?: NoteAssetFiles.legacy(context.filesDir, key)
+        if (app != null) app.container.noteAssetFile(key) else NoteAssetFiles.legacy(context.filesDir, key)
     })
 
     suspend fun exportZip(): ByteArray {
@@ -29,9 +31,15 @@ class NoteImportExportService internal constructor(
             entries += MarkdownArchiveEntry("notes/${note.noteId}.md", MarkdownNoteCodec.export(note).toByteArray())
             // Cloud hydration can restore referenced image files before local asset rows exist.
             val keys=repository.assets(note.noteId).map{it.storageKey}.toSet()+NoteAssetSyncPayload.referencedStorageKeys(note.markdown)
-            keys.filter(NoteAssetFiles::isSafe).forEach { key ->
-                val source = assetFile(key)
-                if (source.isFile) entries += MarkdownArchiveEntry("notes/assets/$key", source.readBytes())
+            keys.filter(NoteAssetFiles::isSafe).forEach asset@ { key ->
+                val source = assetFile(key) ?: return@asset
+                val raw = try {
+                    val identity = BookPackageFiles.fileIdentity(source) ?: return@asset
+                    source.readBytes().takeIf { BookPackageFiles.fileIdentity(source) == identity }
+                } catch (_: IOException) {
+                    null
+                } ?: return@asset
+                if (assetFile(key) == source) entries += MarkdownArchiveEntry("notes/assets/$key", raw)
             }
         }
         return MarkdownNoteArchive.write(entries.distinctBy{it.path})

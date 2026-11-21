@@ -39,13 +39,14 @@ class LibraryDiagnostics(private val db:DiagnosticQuery,private val directory:Fi
                 if(state==null||DiagnosticFields.id(id)==null)reason="metadata_invalid"
                 else {
                     val revision = BookPackageFiles.Revision(sha, bytes)
-                    val candidates = BookPackageFiles.candidates(directory, id, revision).filter { it.isFile }
+                    val publication = BookPackageFiles.publication(id, db::query)
+                    val candidates = BookPackageFiles.candidates(directory, id, revision, publication).filter { it.isFile }
                     reason = when {
                         candidates.isEmpty() -> "package_missing"
                         candidates.none { it.length() == bytes } -> "package_hash_mismatch"
                         bytes > hashBudget -> "hash_budget_exceeded"
                         else -> try {
-                            val original = BookPackageFiles.resolve(directory, id, revision) { read ->
+                            val original = BookPackageFiles.resolve(directory, id, revision, publication) { read ->
                                 active()
                                 hashBudget -= read
                                 if (hashBudget < 0) throw HashBudgetExceeded()

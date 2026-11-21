@@ -22,7 +22,6 @@ import org.json.*
 import java.io.*
 import java.security.MessageDigest
 import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 
 /** A complete peer item was received, but its package is invalid. Never wrap IO/owner/cancellation failures. */
 internal class InvalidBookPackageException(val reason:String="package_invalid") : IllegalArgumentException("book_package_invalid")
@@ -212,8 +211,14 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
     internal fun binaryPackage(id: String, hash: String): File = BookPackageFiles.binary(directory, id, hash)
     internal suspend fun resolvePackage(
         id: String, revision: BookPackageFiles.Revision, work: () -> Unit
-    ): BookPackageFiles.Original? = withContext(Dispatchers.IO) {
-        BookPackageFiles.resolveOriginal(directory, id, revision) { ensureActive(); work() }
+    ): BookPackageFiles.Original? {
+        val sql = db.openHelper.readableDatabase
+        val transaction = sql.inTransaction()
+        val publication = if (transaction) BookPackageFiles.publication(sql, id) else null
+        return withContext(Dispatchers.IO) {
+            val selected = if (transaction) publication else BookPackageFiles.publication(sql, id)
+            BookPackageFiles.resolveOriginal(directory, id, revision, selected) { ensureActive(); work() }
+        }
     }
 
     private fun BookEntity.packageRevision() = BookPackageFiles.Revision(packageSha256, packageBytes)
@@ -659,14 +664,7 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         if (retain) return if (!retired && current.packageSha256 == hash && current.packageBytes == bytes)
             "alreadyPresent" else "retainedLocal"
         check()
-        val target = binaryPackage(id, hash)
-        // A resumed commit may already have its immutable original in either public layout.
-        if (combined != target && combined != file(id)) {
-            Files.move(combined.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-            for (parent in setOf(combined.parentFile, directory)) {
-                java.nio.channels.FileChannel.open(parent.toPath(), java.nio.file.StandardOpenOption.READ).use { it.force(true) }
-            }
-        }
+        if (combined != file(id)) BookPackageFiles.publish(db.openHelper.writableDatabase, directory, id, assembly)
         dao.put(current.copy(packageSha256 = hash, packageBytes = bytes))
         return "merged"
     }
@@ -896,6 +894,18 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
         db.syncChangeLogDao().insert(SyncChangeLogEntity(kind="article",entityId=row.articleId,changedAt=maxOf(row.updatedAt,row.deletedAt,row.readingPositionChangedAt),
             originDeviceId=row.sourceDeviceId,reason="bookState",createdAt=System.currentTimeMillis()))
     }
-    suspend fun clear(){db.withTransaction {dao.clear();readingJournal.clear()};directory.listFiles()?.filter{it.isFile}?.forEach{file->val expected=com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.digest(file);com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile.delete(file,expected)};directory.delete();migrationWarnings.clear()}
+    suspend fun clear() {
+        db.withTransaction {
+            dao.clear()
+            readingJournal.clear()
+            BookPackageFiles.clearPublications(db.openHelper.writableDatabase)
+        }
+        directory.listFiles()?.filter { it.isFile }?.forEach { file ->
+            val expected = ConditionalBodyFile.digest(file)
+            ConditionalBodyFile.delete(file, expected)
+        }
+        directory.delete()
+        migrationWarnings.clear()
+    }
     private fun sha(file:File):String {val digest=MessageDigest.getInstance("SHA-256");file.inputStream().buffered().use{input->val b=ByteArray(65536);while(true){val n=input.read(b);if(n<0)break;digest.update(b,0,n)}};return digest.digest().joinToString(""){"%02x".format(it)}}
 }

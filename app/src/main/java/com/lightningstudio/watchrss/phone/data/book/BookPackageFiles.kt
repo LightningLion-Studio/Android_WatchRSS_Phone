@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.data.book
 
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.lightningstudio.watchrss.phone.data.local.syncDirectory
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
@@ -11,6 +12,7 @@ import java.security.MessageDigest
 /** Resolve the original named by the current Room row, across both storage layouts. */
 internal object BookPackageFiles {
     data class Revision(val sha256: String, val bytes: Long)
+    data class Publication(val revision: Revision, val slot: Int)
 
     class Original internal constructor(val file: File, val revision: Revision, private val identity: FileIdentity) {
         fun isCurrent(): Boolean = try {
@@ -30,6 +32,7 @@ internal object BookPackageFiles {
     private data class Verification(val revision: Revision, val identity: FileIdentity, val matches: Boolean)
 
     private const val CACHE_CAPACITY = 512
+    private const val PUBLICATIONS = "b2_book_file_references"
     private val verified = LinkedHashMap<File, Verification>(CACHE_CAPACITY, 0.75f, true)
     private val hex = Regex("[0-9a-f]{64}")
 
@@ -42,17 +45,59 @@ internal object BookPackageFiles {
 
     fun binary(directory: File, id: String, hash: String): File = File(directory, "b2-$id-$hash.jsonl")
 
-    fun candidates(directory: File, id: String, revision: Revision): List<File> {
-        if (!hex.matches(id)) return emptyList()
-        val legacy = legacy(directory, id)
-        return if (hex.matches(revision.sha256)) listOf(legacy, binary(directory, id, revision.sha256)) else listOf(legacy)
+    private fun binary(directory: File, id: String, publication: Publication): File =
+        File(directory, "b2-$id-${publication.revision.sha256}-${publication.slot}.jsonl")
+
+    fun publication(db: SupportSQLiteDatabase, id: String): Publication? =
+        publication(id) { sql, args -> db.query(sql, args) }
+
+    private fun hasPublicationTable(query: (String, Array<String>) -> android.database.Cursor): Boolean =
+        query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", arrayOf(PUBLICATIONS)).use { it.moveToFirst() }
+
+    fun publication(id: String, query: (String, Array<String>) -> android.database.Cursor): Publication? {
+        if (!hasPublicationTable(query)) return null
+        return query("SELECT sha256,size,slot FROM $PUBLICATIONS WHERE book_id=?", arrayOf(id)).use {
+            if (it.moveToFirst()) Publication(Revision(it.getString(0), it.getLong(1)), it.getInt(2)) else null
+        }
     }
 
-    fun resolve(directory: File, id: String, revision: Revision, onRead: (Int) -> Unit = {}): File? =
-        resolveOriginal(directory, id, revision, onRead)?.file
+    fun clearPublications(db: SupportSQLiteDatabase) {
+        check(db.inTransaction())
+        if (hasPublicationTable { sql, args -> db.query(sql, args) }) db.execSQL("DELETE FROM $PUBLICATIONS")
+    }
 
-    fun resolveOriginal(directory: File, id: String, revision: Revision, onRead: (Int) -> Unit = {}): Original? =
-        candidates(directory, id, revision).firstNotNullOfOrNull { verify(it, revision, onRead) }
+    /** Keep the assembly available for retry and switch the selected file with the Room commit. */
+    fun publish(db: SupportSQLiteDatabase, directory: File, id: String, original: Original) {
+        check(db.inTransaction())
+        require(hex.matches(id) && hex.matches(original.revision.sha256))
+        val previous = publication(db, id)
+        val selected = Publication(original.revision, if (previous?.slot == 0) 1 else 0)
+        val target = binary(directory, id, selected)
+        // A same-revision repair must never repopulate the path an independent reader can already select.
+        Files.deleteIfExists(target.toPath())
+        Files.createLink(target.toPath(), original.file.toPath())
+        syncDirectory(directory)
+        db.execSQL("CREATE TABLE IF NOT EXISTS $PUBLICATIONS (book_id TEXT PRIMARY KEY, sha256 TEXT NOT NULL, size INTEGER NOT NULL, slot INTEGER NOT NULL CHECK(slot IN (0,1)))")
+        db.execSQL("INSERT OR REPLACE INTO $PUBLICATIONS VALUES(?,?,?,?)",
+            arrayOf(id, selected.revision.sha256, selected.revision.bytes, selected.slot))
+    }
+
+    fun candidates(directory: File, id: String, revision: Revision, publication: Publication? = null): List<File> {
+        if (!hex.matches(id)) return emptyList()
+        val legacy = legacy(directory, id)
+        if (!hex.matches(revision.sha256)) return listOf(legacy)
+        val binary = if (publication?.revision == revision) binary(directory, id, publication)
+            else binary(directory, id, revision.sha256)
+        return listOf(legacy, binary)
+    }
+
+    fun resolve(directory: File, id: String, revision: Revision, publication: Publication? = null,
+        onRead: (Int) -> Unit = {}): File? =
+        resolveOriginal(directory, id, revision, publication, onRead)?.file
+
+    fun resolveOriginal(directory: File, id: String, revision: Revision, publication: Publication? = null,
+        onRead: (Int) -> Unit = {}): Original? =
+        candidates(directory, id, revision, publication).firstNotNullOfOrNull { verify(it, revision, onRead) }
 
     fun verify(file: File, revision: Revision, onRead: (Int) -> Unit): Original? {
         if (!hex.matches(revision.sha256) || revision.bytes <= 0) return null

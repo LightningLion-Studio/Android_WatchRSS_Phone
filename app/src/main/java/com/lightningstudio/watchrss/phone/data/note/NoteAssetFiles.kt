@@ -60,6 +60,24 @@ internal object NoteAssetFiles {
         return candidate(files, reference.sha256)
     }
 
+    fun verifiedOriginal(db: SupportSQLiteDatabase, files: File, key: String,
+        expected: BookPackageFiles.Revision, onRead: (Int) -> Unit = {}): BookPackageFiles.Original? {
+        val published = reference(db, key)
+        if ((published != null && published != expected) || ownerKeys(db, key).isEmpty() ||
+            !winnerAllows(db, key, expected)) return null
+        val selected = current(db, files, key)
+        val original = BookPackageFiles.verify(selected, expected, onRead) ?: return null
+        return original.takeIf { reference(db, key) == published && current(db, files, key) == selected &&
+            ownerKeys(db, key).isNotEmpty() && winnerAllows(db, key, expected) && it.isCurrent() }
+    }
+
+    /** The editor also displays unpublished images imported into a local draft. */
+    fun readable(db: SupportSQLiteDatabase, files: File, key: String): File? {
+        val published = reference(db, key)
+        if (published != null) return verifiedOriginal(db, files, key, published)?.file
+        return current(db, files, key).takeIf { reference(db, key) == null }
+    }
+
     fun publish(db: SupportSQLiteDatabase, key: String, revision: BookPackageFiles.Revision) {
         check(db.inTransaction())
         db.execSQL("INSERT OR REPLACE INTO $TABLE VALUES(?,?,?)",

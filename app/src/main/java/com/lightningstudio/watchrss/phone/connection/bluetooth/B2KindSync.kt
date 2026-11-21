@@ -18,7 +18,9 @@ internal class B2KindSync(private val store: B2Persistence, private val director
     private val route: B2KindRoute,
     private val business: B2InheritedKinds, private val retentionGeneration: String? = null,
     private val onBookIssue: (BookSyncIssue) -> Unit = {},
-    val accountFence: B2AccountFence? = null
+    val accountFence: B2AccountFence? = null,
+    private val assetFile: (String) -> File = { File(assetDirectory, it) },
+    private val captureWindow: (() -> B2CommitWindow)? = null
 ) {
     private val files = B2Files(directory, business.bookImportRoot())
     private val monotonic = android.os.SystemClock::elapsedRealtime
@@ -220,7 +222,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             val scratch = lease.file
             if (B2_NOTE_ASSET in route.send) for (asset in assets.sortedBy { it.storageKey }) {
                 authorize()
-                val source = File(assetDirectory, asset.storageKey)
+                val source = assetFile(asset.storageKey)
                 val hashes = binaryFileHashes(source, preparing)
                 if (hashes.size != asset.size || hashes.sha256 != asset.sha256) throw B2Exception("SOURCE_CHANGED")
                 val metadata = JSONObject().put("storageKey", asset.storageKey)
@@ -268,7 +270,27 @@ internal class B2KindSync(private val store: B2Persistence, private val director
     suspend fun run(input: InputStream, output: OutputStream, probe: JSONObject,
         assets: List<NoteAssetInventoryEntry>, close: () -> Unit) = supervisorScope {
         authorize()
+        val window = if (probe.optInt("guardedLibraryVersion") == 1) {
+            captureWindow?.invoke() ?: fail("ACCOUNT_REQUIRED")
+        } else null
         val a = createOrResume(probe, assets)
+        if (window != null) {
+            val binding = window.bindingId
+            val original = a.optString("guardedHead")
+            if (original.isNotEmpty() && original != binding || original.isEmpty() && a.a("bindings").length() != 0) {
+                // A stale attempt ends here. A new user operation can freeze a new
+                // plan while the original job keeps its independent retention window.
+                store.exclusive {
+                    store.transaction {
+                        authorize()
+                        a.put("state", "STALE")
+                        store.put(account, "attempt", key, a)
+                    }
+                }
+                fail("BUSINESS_REJECTED")
+            }
+            a.put("guardedHead", binding)
+        }
         val retiring = a.getString("state") in setOf("RETIRING", "CANCELLED")
         val stopped = a.optBoolean("retireStopped")
         if (retiring && !stopped) {
@@ -291,7 +313,10 @@ internal class B2KindSync(private val store: B2Persistence, private val director
         }
         val retiringDirection = pendingRetirements.firstOrNull()?.s("direction")
         val session = B2Session(input, output, this, close, authorize = authorize)
-        val client = B2Client(store, snapshots, session::exchange, authorize, session, progress)
+        val client = B2Client(store, snapshots, session::exchange, authorize, session, progress).apply {
+            commitWindow = window
+            accountCommitFence = accountFence?.commitFence
+        }
         if (!client.acceptProbe(probe)) throw B2Exception("CAPABILITY_MISMATCH")
         session.switch(probe.getJSONObject("libraryBinary"), true)
         files.onProgress = session::workProgress
@@ -314,6 +339,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             try {
                 client.confirm(bindings) { auth ->
                     auth.accountCommitFence = accountFence?.commitFence
+                    auth.commitWindow = window
                     val receiver = B2Receiver(store, files, auth, business,
                         monotonic = monotonic, progress = progress,
                         retentionGeneration = retentionGeneration)

@@ -75,6 +75,14 @@ internal class B2InheritedKinds(
         }
     }
 
+    override suspend fun receiptWitness(
+        context: B2ApplyContext?, descriptor: JSONObject, metadata: JSONObject, prior: JSONObject?
+    ): JSONObject? = when (descriptor.s("kind")) {
+        in B2Wire.bookKinds -> books?.receiptWitness(context, descriptor, metadata, prior)
+        B2_NOTE_ASSET -> noteAssets.receiptWitness(context, descriptor, metadata, prior)
+        else -> null
+    }
+
     override fun validatePlan(objects: List<JSONObject>) = validateBinaryRssDependencies(objects)
 
     override fun applicationScratchBytes(objects: List<JSONObject>): Long =
@@ -85,6 +93,7 @@ internal class B2InheritedKinds(
         if (descriptor.getString("kind") == B2Wire.BOOK_COMMIT) {
             (books ?: throw B2Exception("UNSUPPORTED_KIND")).prepareCommit(context, metadata, applyWork)
         }
+        if (descriptor.s("kind") == B2_NOTE_ASSET && context.guarded) noteAssets.prepare(context, metadata)
     }
 
     override suspend fun applyFile(context: B2ApplyContext, descriptor: JSONObject, metadata: JSONObject,

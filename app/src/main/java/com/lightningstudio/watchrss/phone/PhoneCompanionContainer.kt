@@ -66,6 +66,9 @@ class PhoneCompanionContainer(context: Context) {
         AccountEnvironment.active(appContext)
     }
 
+    internal fun noteAssetFile(key: String): java.io.File =
+        com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles.current(database.openHelper.writableDatabase, appContext.filesDir, key)
+
     private val database: PhoneCompanionDatabase by lazy {
         Room.databaseBuilder(
             appContext,
@@ -441,7 +444,10 @@ class PhoneCompanionContainer(context: Context) {
             }
         ).also { manager ->
             manager.b2AccountFence = { accountRepository.b2AccountFence }
-            if (BuildConfig.SYNC_V2) manager.bookRollbackWindow = cloudSyncService::syncV2BookRollbackWindow
+            if (BuildConfig.SYNC_V2) {
+                manager.bookRollbackWindow = cloudSyncService::syncV2BookRollbackWindow
+                manager.captureBinaryWindow = cloudSyncService::captureSyncV2BluetoothWindow
+            }
             if(BuildConfig.SYNC_V2 || BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION)manager.recordLegacyProjection={peer,version,cursor,payload ->
                 if(BuildConfig.SYNC_V2)cloudSyncService.captureSyncV2Legacy(peer,version,cursor,payload)
                 else localSyncV2Projection.captureLegacyMetadata(peer,version,cursor,payload)

@@ -3,6 +3,8 @@ package com.lightningstudio.watchrss.phone.syncv2
 import android.content.Context
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2CommitWindow
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
 import com.lightningstudio.watchrss.phone.data.local.ARTICLE_CONTENT_MARKER_PREFIX
 import com.lightningstudio.watchrss.phone.data.local.ArticleContentStore
@@ -81,8 +83,30 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         if (syncV2 == null && announcement != null) release()
     }
 
-    internal fun legacyRollbackWindow(): String? = runtime?.projection?.let {
-        it.scope + ":" + it.legacyRollbackGeneration()
+    internal fun captureBluetoothWindow(owner: String): B2CommitWindow? {
+        val live = runtime?.takeIf { it.account.userId == owner } ?: return null
+        val inbox = SyncV2BluetoothInbox(live.projection, context.filesDir)
+        return B2CommitWindow(prepareInbox = inbox::prepare, prepareLegacy = inbox::prepareLegacy,
+            currentHead = live.projection::bluetoothHeadIsCurrent) {
+            if (runtime !== live || current()?.owner() != live.account.owner()) {
+                throw B2Exception("AUTH_REVOKED")
+            }
+            try {
+                live.projection.bluetoothVersion()
+            } catch (_: IllegalStateException) {
+                throw B2Exception("BUSINESS_REJECTED")
+            }
+        }
+    }
+
+    internal fun legacyRollbackWindow(): String? {
+        val live = runtime ?: return null
+        return try {
+            val head = live.projection.bluetoothVersion().head
+            SyncV2Codec.hash(org.json.JSONArray().put(head.scope).put(head.oid).put(head.revision).put(head.rollbackGeneration))
+        } catch (_: IllegalStateException) {
+            null
+        }
     }
 
     fun captureLegacyMetadata(peer:String,version:Int,cursor:String,payload:JSONObject) {

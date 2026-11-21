@@ -16,5 +16,8 @@ internal class B2CommitFence(private val account: B2CommitFence? = null) {
     // Call at the end of the transaction body. An admitted SQLite commit can
     // finish after STOP; the store's writer lane delays cancellation and new epochs.
     // Never hold this monitor during SQLite or file I/O.
-    fun admitCommit() = synchronized(monitor) { check() }
+    fun admitCommit(validate: () -> Unit = {}) = synchronized(monitor) {
+        check()
+        validate()
+    }
 }

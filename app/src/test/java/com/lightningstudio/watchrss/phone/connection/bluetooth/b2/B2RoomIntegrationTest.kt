@@ -8,6 +8,8 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.B2NoteAssetBusine
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryTransferRecovery
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryTransportFailure
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
+import com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles
+import com.lightningstudio.watchrss.phone.data.note.NoteEntity
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -202,6 +204,58 @@ class B2RoomIntegrationTest {
         } finally { db.close(); x.root.deleteRecursively() }
         Unit
     }
+    @Test fun guardedAssetIsVisibleOnlyThroughCommitAndReplayChecksTheCurrentBytes() = runBlocking<Unit> {
+        val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java)
+            .allowMainThreadQueries().build()
+        val rig = ReceiverRig()
+        try {
+            val sql = db.openHelper.writableDatabase
+            val markdown = "![picture](assets/picture.png)"
+            db.noteDao().upsertNotes(listOf(NoteEntity("note", null, "pictures", markdown, "", "one",
+                "one", markdown, false, 1, 1, "phone")))
+            val store = B2RoomStore(db)
+            val business = B2NoteAssetBusiness(store, rig.account, File(rig.root, "notes/assets")) {}
+            business.database = { sql }
+            val version = B2CommitWindow.Version(B2CommitWindow.Head("scope", "head", "1", "0"), "1", "business")
+            fun receiver(intent: String, beforeCommit: () -> Unit = {}): B2Receiver {
+                val auth = B2Authorization(rig.account, "phone", "watch", rig.snapshot, rig.snapshot,
+                    listOf(rig.binding.put("intent", intent))) { true }
+                auth.commitWindow = B2CommitWindow { version }
+                return B2Receiver(store, rig.files, auth, business, fault = { if (it == "beforeApplyCommit") beforeCommit() })
+            }
+            val key = "picture.png"
+            val candidate = NoteAssetFiles.candidate(rig.root, rig.descriptor.s("sha256"))
+            var deny = true
+            val first = receiver("create") {
+                assertTrue(candidate.isFile)
+                assertFalse(NoteAssetFiles.legacy(rig.root, key).exists())
+                if (deny) throw B2Exception("LOCAL_IO")
+            }
+            val epoch = rig.begin(first)
+            rig.manifest(first, epoch)
+            rig.put(first, epoch)
+            assertEquals("LOCAL_IO", (runCatching { rig.apply(first, epoch) }.exceptionOrNull() as B2Exception).code)
+            assertNull(NoteAssetFiles.reference(sql, key))
+            assertFalse(NoteAssetFiles.current(sql, rig.root, key).exists())
+            deny = false
+            val original = rig.apply(first, epoch).o("result").o("receipt")
+            assertArrayEquals(rig.bytes, NoteAssetFiles.current(sql, rig.root, key).readBytes())
+            first.fenceNow()
+            val second = receiver("resume")
+            val resumed = rig.begin(second, "resume")
+            assertTrue(resumed > epoch)
+            val alternate = B2Wire.request("apply", rig.job, rig.plan, resumed,
+                obj("objectId" to rig.descriptor.s("objectId")), "a".repeat(32))
+            assertEquals(original.toString(), second.handle(alternate).o("result").o("receipt").toString())
+            candidate.writeBytes(ByteArray(rig.bytes.size))
+            val stale = runCatching { rig.missing(second, resumed) }.exceptionOrNull() as B2Exception
+            assertEquals("RECEIPT_CONFLICT", stale.code)
+        } finally {
+            db.close()
+            rig.root.deleteRecursively()
+        }
+    }
+
     @Test fun rollbackPreservesAttachmentPublishedByAnotherWriter() = runBlocking<Unit> {
         val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()
         val rig = ReceiverRig()

@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 
+import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.book.ImportedBookStore
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
@@ -20,6 +21,9 @@ interface B2BusinessPort {
     suspend fun prepareFile(context: B2ApplyContext, descriptor: JSONObject, metadata: JSONObject) {}
     suspend fun applyFile(context: B2ApplyContext, descriptor: JSONObject, metadata: JSONObject, staged: B2FileRef): String =
         apply(descriptor, metadata, staged.file)
+    suspend fun receiptWitness(
+        context: B2ApplyContext?, descriptor: JSONObject, metadata: JSONObject, prior: JSONObject?
+    ): JSONObject? = null
     fun validatePlan(objects: List<JSONObject>) {}
     fun applicationScratchBytes(objects: List<JSONObject>): Long = 0L
     fun canCommitRange(description: JSONObject): Boolean = false
@@ -32,10 +36,14 @@ class B2ApplyContext internal constructor(
     internal val check: () -> Unit,
     internal val assembly: File? = null,
     internal val publishAssembly: suspend (File, List<String>) -> Unit = { _, _ -> },
-    internal val assemblyReady: suspend () -> Boolean = { false }
+    internal val assemblyReady: suspend () -> Boolean = { false },
+    internal val guarded: Boolean = false,
+    internal val stagedFile: File? = null
 ) {
     internal var preparedBook: ImportedBookStore.PreparedBinaryPackage? = null
     internal var finishAsset: ((committed: Boolean) -> Unit)? = null
+    internal var readingIndices: List<Int> = emptyList()
+    internal var preparedAsset: com.lightningstudio.watchrss.phone.connection.bluetooth.B2NoteAssetBusiness.Prepared? = null
 }
 
 /** Construct only after LOCAL consent + current account/peer verification + successful
@@ -49,6 +57,7 @@ class B2Authorization(
     internal val watchSnapshot = copy(watchSnapshot)
     internal val bindings = bindings.map(::copy)
     internal var accountCommitFence: B2CommitFence? = null
+    internal var commitWindow: B2CommitWindow? = null
     internal fun check() { if (!current()) fail("AUTH_REVOKED") }
 }
 
@@ -87,22 +96,40 @@ class B2Receiver(
     private val scope get() = auth.accountScope
     private fun check() { commitFence.check(); auth.check() }
 
-    private suspend fun <T> receiveTransaction(block: suspend () -> T): T = store.transaction {
-        check()
-        val result = block()
+    private suspend fun <T> receiveTransaction(
+        businessWrite: Boolean = false, checkWindow: Boolean = businessWrite, block: suspend () -> T
+    ): T {
+        val window = auth.commitWindow
+        var committedVersion: B2CommitWindow.Version? = null
+        val result = store.transaction {
+            check()
+            if (checkWindow) window?.check()
+            val value = block()
+            if (businessWrite) committedVersion = window?.afterBusinessWrite()
+            commitFence.admitCommit {
+                auth.check()
+                if (checkWindow) window?.checkHead()
+            }
+            value
+        }
+        committedVersion?.let { window?.committed(it) }
+        return result
+    }
+
+    internal fun admitResponse(send: () -> Unit) = commitFence.admitCommit {
         auth.check()
-        commitFence.admitCommit()
-        result
+        auth.commitWindow?.checkHead()
+        send()
     }
 
     private suspend fun applyTransaction(kind: String, context: B2ApplyContext, block: suspend () -> JSONObject): JSONObject {
-        if (kind != "noteAsset") return receiveTransaction(block)
+        if (kind != "noteAsset") return receiveTransaction(businessWrite = true, block = block)
         val caller = currentCoroutineContext()
         // Preserve the transaction outcome across cancellation so rollback never unlinks an
         // admitted commit. The caller and account are still checked before commit admission.
         return withContext(NonCancellable) {
             val result = try {
-                receiveTransaction {
+                receiveTransaction(businessWrite = true) {
                     caller.ensureActive()
                     block().also { caller.ensureActive() }
                 }
@@ -173,7 +200,8 @@ class B2Receiver(
     suspend fun handle(frame: JSONObject, data: ByteArray? = null): JSONObject = try { store.exclusive {
         val r = B2Wire.envelope(B2Json.parse(B2Json.utf8(frame.toString()))).also { B2Wire.retainSize(it, B2Wire.frameBytes(frame)) }
         if (r.s("type") != "request" || r.s("phase") == "prepare") fail()
-        val now = receiveTransaction { retention.clock() }
+        val replyIncludesBusiness = r.s("phase") in setOf("begin", "apply", "missing", "complete", "putChunk")
+        val now = receiveTransaction(checkWindow = replyIncludesBusiness) { retention.clock() }
         if (r.s("phase") == "begin") return@exclusive begin(r, now)
         val j = job(r.s("jobId")); fence(j, r)
         if (B2Wire.frameBytes(r) > lim(j).n("maxFrameBytes") || B2Wire.frameBytes(r) - 12 > lim(j).n("maxControlHeaderBytes")) fail("LIMIT_EXCEEDED")
@@ -197,6 +225,9 @@ class B2Receiver(
             "cancel" -> cancel(j, r)
             else -> fail()
         }
+        if (replyIncludesBusiness && auth.commitWindow != null) {
+            receiveTransaction(checkWindow = true) { fence(j, r) }
+        }
         check()
         light[j.s("jobId")] = copy(j)
         B2Results.answer(r, result, j.n("epoch"))
@@ -216,6 +247,9 @@ class B2Receiver(
         store.transaction { j.put("state", result.s("state")); store.put(scope, "job", j.s("jobId"), j); bind(j, r, result) }
         B2Results.answer(r, result, r.n("epoch"))
     }
+    internal fun canFastHeartbeat(job: String): Boolean =
+        auth.commitWindow == null || light[job]?.optString("state") != "COMPLETE"
+
     /** PLANNING exception: committed snapshot only; no DB lane, data scan or admission. */
     fun heartbeat(r: JSONObject): JSONObject {
         B2Wire.envelope(r)
@@ -318,7 +352,7 @@ class B2Receiver(
         val outcomes = group.map { chunk ->
             val oid = chunk.request.o("payload").s("objectId")
             val row = rows.getOrPut(oid) { objectRow(j.s("jobId"), oid) }
-            if (receipt(j, row) != null) return@map CommittedChunk(chunk, 2)
+            if (verifiedReceipt(j, row) != null) return@map CommittedChunk(chunk, 2)
             if (terminal(j)) fail("JOB_CANCELLED")
             val descriptor = row.o("descriptor")
             runnable(j, descriptor)
@@ -335,7 +369,7 @@ class B2Receiver(
         }
         files.publishChunks(staged) { fence(j, group.first().request) }
         if (staged.isNotEmpty()) fault("afterChunkDurable")
-        receiveTransaction {
+        receiveTransaction(checkWindow = outcomes.any { it.disposition == 2 }) {
             for ((chunk, disposition) in outcomes) {
                 fence(j, chunk.request)
                 val p = chunk.request.o("payload")
@@ -393,6 +427,8 @@ class B2Receiver(
         if (old != null) {
             if (old.n("expiresAtMillis") < now) fail("EXPIRED")
             if (old.s("planDigest") != r.s("planDigest") || description(old).a("pageObjectCounts").toString() != p.a("pageObjectCounts").toString()) fail("JOB_CONFLICT")
+            auth.commitWindow?.let { if (old.optString("guardedHead") != it.bindingId) fail("BUSINESS_REJECTED") }
+            if (old.s("state") == "COMPLETE") verifyCompletion(old)
             // No eager GC: retained records remain resumable beyond their minimum 24h.
             // This also preserves heartbeats/local work across conservative process clocks.
             if (p.s("intent") == "create" && (terminal(old) || old.s("connection") != connection)) fail("JOB_CONFLICT")
@@ -421,6 +457,7 @@ class B2Receiver(
         val epoch = if (sameLease) old!!.n("epoch") else (old?.n("epoch") ?: 0) + 1
         if (epoch > B2Json.MAX_SAFE) fail("JOURNAL_CORRUPT")
         val j = old ?: obj("jobId" to id, "bindingVersion" to 2, "planDigest" to r.s("planDigest"), "description" to copy(p), "state" to if (p.n("objectCount") == 0L) "READY" else "PLANNING", "nextManifestPage" to 0, "completion" to null, "reservation" to reservation, "expiresAtMillis" to now + B2Wire.RETENTION)
+        auth.commitWindow?.let { j.put("guardedHead", it.bindingId) }
         if (cancelBeforeBegin) j.put("state", "CANCELLED")
         if (old == null) {
             // Record ownership separately so a rolled-back begin can retain
@@ -429,7 +466,7 @@ class B2Receiver(
                 store.put(scope, "nativeOwner", id, obj("expiresAtMillis" to now + B2Wire.RETENTION))
             }
         }
-        receiveTransaction {
+        receiveTransaction(checkWindow = true) {
             check(); j.put("connection", connection).put("epoch", epoch)
             bind(j, r); touch(j, now)
         }
@@ -460,7 +497,7 @@ class B2Receiver(
             light[id] = copy(j)
         }
         begun.add(id)
-        cleanupApplied(j)
+        if (auth.commitWindow == null) cleanupApplied(j)
         return B2Results.answer(r, obj("disposition" to if (old == null && !cancelBeforeBegin) "CREATED" else "RESUMED", "selectionDigest" to p.s("selectionDigest"), "state" to j.s("state"), "expiresAtMillis" to j.n("expiresAtMillis"), "nextManifestPage" to j.n("nextManifestPage"), "completion" to j.get("completion")), epoch)
     }
     private suspend fun manifest(j: JSONObject, r: JSONObject): JSONObject {
@@ -519,7 +556,11 @@ class B2Receiver(
         val keep = d.s("kind") == B2Wire.BOOK_SEGMENT && j.s("state") != "COMPLETE" &&
             store.get(scope, "bookAssembly", key(id, B2Metadata.validate(d).s("bookId"))) == null
         files.release(scope, id, d, keepObject = keep)
-        if (d.s("kind") == B2Wire.BOOK_COMMIT) files.assembly(scope, id, d.s("objectId")).delete()
+        if (d.s("kind") == B2Wire.BOOK_COMMIT) {
+            val retained = auth.commitWindow != null &&
+                objectRow(id, d.s("objectId")).o("receipt").s("outcome") == "retainedLocal"
+            if (!retained) files.assembly(scope, id, d.s("objectId")).delete()
+        }
     }
 
     private fun receipt(j: JSONObject, row: JSONObject): JSONObject? {
@@ -528,6 +569,57 @@ class B2Receiver(
         if (r.s("jobId") != j.s("jobId") || r.s("planDigest") != j.s("planDigest") || r.s("receiverDeviceId") != (if (receiveDirection == "watchToPhone") auth.phoneDeviceId else auth.watchDeviceId) || r.s("objectId") != row.o("descriptor").s("objectId")) fail("RECEIPT_CONFLICT")
         return r
     }
+    private suspend fun verifiedReceipt(j: JSONObject, row: JSONObject): JSONObject? {
+        val value = receipt(j, row) ?: return null
+        val window = auth.commitWindow ?: return value
+        if (j.optString("guardedHead") != window.bindingId) fail("BUSINESS_REJECTED")
+        val job = j.s("jobId")
+        val descriptor = row.o("descriptor")
+        val oid = descriptor.s("objectId")
+        val source = store.get(scope, "request", key(job, sourcePeer, value.s("applyRequestId")))
+            ?: fail("RECEIPT_CONFLICT")
+        val digest = B2Digests.request(job, j.s("planDigest"), "apply", obj("objectId" to oid))
+        if (source.s("digest") != digest || source.optJSONObject("result")?.optJSONObject("receipt")?.toString() != value.toString()) {
+            fail("RECEIPT_CONFLICT")
+        }
+        val witness = row.optJSONObject("witness") ?: fail("RECEIPT_CONFLICT")
+        val metadata = B2Metadata.validate(descriptor)
+        if (descriptor.s("kind") == B2Wire.BOOK_SEGMENT) {
+            if (!verifyHiddenSegment(job, descriptor, metadata)) fail("RECEIPT_CONFLICT")
+        } else if (business.receiptWitness(null, descriptor, metadata, witness)?.toString() != witness.toString()) {
+            fail("RECEIPT_CONFLICT")
+        }
+        check()
+        return value
+    }
+
+    private suspend fun verifyHiddenSegment(job: String, descriptor: JSONObject, metadata: JSONObject): Boolean {
+        val staged = files.composed(scope, job, descriptor.s("objectId"))
+        val revision = BookPackageFiles.Revision(descriptor.s("sha256"), descriptor.n("size"))
+        if (BookPackageFiles.verify(staged, revision) { check() } != null) return true
+        val objectId = store.get(scope, "bookAssembly", key(job, metadata.s("bookId")))?.s("objectId")
+            ?: return false
+        val commit = objectRow(job, objectId)
+        val commitDescriptor = commit.o("descriptor")
+        if (descriptor.s("objectId") !in B2Metadata.validate(commitDescriptor).a("segmentObjectIds").strings()) return false
+        val assembled = files.assembly(scope, job, objectId)
+        val packageRevision = BookPackageFiles.Revision(metadata.s("packageSha256"), metadata.n("packageBytes"))
+        if (BookPackageFiles.verify(assembled, packageRevision) { check() } != null) return true
+        if (commit.nil("receipt")) return false
+        val witness = commit.optJSONObject("witness") ?: return false
+        return witness.optString("packageSha256") == packageRevision.sha256 &&
+            business.receiptWitness(null, commitDescriptor, B2Metadata.validate(commitDescriptor), witness)?.toString() ==
+            witness.toString()
+    }
+
+    private suspend fun verifyCompletion(j: JSONObject) {
+        if (auth.commitWindow == null) return
+        val receipts = objects(j.s("jobId")).map { verifiedReceipt(j, it) ?: fail("RECEIPT_CONFLICT") }
+        val completion = j.o("completion")
+        if (receipts.size.toLong() != completion.n("objectCount") ||
+            B2Digests.receipts(receipts) != completion.s("receiptsRoot")) fail("RECEIPT_CONFLICT")
+    }
+
     /** The durable receipt plus immutable descriptor is the cleanup retry record.
      * Only our disposable chunk/compose paths are removed. Failure leaves that record
      * intact, never rolls back APPLIED, and is retried on observation or admission. */
@@ -536,8 +628,8 @@ class B2Receiver(
             releaseApplied(j, row.o("descriptor"))
         }
     }
-    private suspend fun status(j: JSONObject, row: JSONObject): Pair<String, List<Int>> {
-        if (receipt(j, row) != null) {
+    private suspend fun status(j: JSONObject, row: JSONObject, appliedReceipt: JSONObject?): Pair<String, List<Int>> {
+        if (appliedReceipt != null) {
             releaseApplied(j, row.o("descriptor"))
             return "APPLIED" to emptyList()
         }
@@ -564,12 +656,13 @@ class B2Receiver(
         return (if (staged) "STAGED" else if (missing.size < d.a("chunkHashes").length()) "PARTIAL" else "PENDING") to missing
     }
     private suspend fun missing(j: JSONObject, p: JSONObject): JSONObject {
+        if (j.s("state") == "COMPLETE") verifyCompletion(j)
         val base = obj("state" to j.s("state"), "nextManifestPage" to j.n("nextManifestPage"), "expiresAtMillis" to j.n("expiresAtMillis"), "completion" to j.get("completion"))
         val items = JSONArray(); var next: JSONObject? = null
         if (p.n("limit") == 0L || j.s("state") == "CANCELLED") return base.put("items", items).put("next", JSONObject.NULL).put("done", true)
         if (j.s("state") == "PLANNING") fail("MANIFEST_INCOMPLETE")
         if (p.n("limit") > lim(j).n("maxResultsPerPage")) fail()
-        cleanupApplied(j)
+        if (auth.commitWindow == null) cleanupApplied(j)
         val all = objects(j.s("jobId")); var start = 0; var from = 0
         if (!p.nil("afterObjectId")) {
             val index = all.indexOfFirst { it.o("descriptor").s("objectId") == p.s("afterObjectId") }; if (index < 0) fail()
@@ -578,11 +671,14 @@ class B2Receiver(
         var remaining = lim(j).n("maxRangesPerPage").toInt()
         for (i in start until all.size) {
             if (items.length().toLong() >= p.n("limit")) break
-            val row = all[i]; val d = row.o("descriptor"); val (state, indices) = status(j, row)
+            val row = all[i]
+            val d = row.o("descriptor")
+            val rc = verifiedReceipt(j, row)
+            val (state, indices) = status(j, row, rc)
             val ranges = mutableListOf<MutableList<Int>>()
             indices.filter { it >= from }.forEach { n -> if (ranges.lastOrNull()?.get(1) == n) ranges.last()[1] = n + 1 else ranges.add(mutableListOf(n, n + 1)) }; from = 0
             val take = ranges.take(remaining); remaining -= take.size
-            items.put(obj("objectId" to d.s("objectId"), "state" to state, "missingRanges" to JSONArray(take), "receipt" to receipt(j, row)))
+            items.put(obj("objectId" to d.s("objectId"), "state" to state, "missingRanges" to JSONArray(take), "receipt" to rc))
             if (take.size < ranges.size) { next = obj("afterObjectId" to d.s("objectId"), "afterChunkIndex" to take.lastOrNull()?.get(1)); if (take.isEmpty()) { items.remove(items.length() - 1); next.put("afterChunkIndex", ranges[0][0]) }; break }
             next = if (i + 1 < all.size) obj("afterObjectId" to d.s("objectId"), "afterChunkIndex" to null) else null
             if (remaining == 0) break
@@ -633,7 +729,7 @@ class B2Receiver(
     }
     private suspend fun put(j: JSONObject, r: JSONObject, bytes: ByteArray): JSONObject {
         if (j.s("state") == "PLANNING") fail("MANIFEST_INCOMPLETE")
-        val p = r.o("payload"); val row = objectRow(j.s("jobId"), p.s("objectId")); val d = row.o("descriptor"); val rc = receipt(j, row)
+        val p = r.o("payload"); val row = objectRow(j.s("jobId"), p.s("objectId")); val d = row.o("descriptor"); val rc = verifiedReceipt(j, row)
         if (rc != null) {
             releaseApplied(j, d)
             return obj("objectId" to d.s("objectId"), "chunkIndex" to p.n("chunkIndex"), "chunkState" to null, "objectState" to "APPLIED", "receipt" to rc)
@@ -653,7 +749,7 @@ class B2Receiver(
     private suspend fun apply(j: JSONObject, r: JSONObject): JSONObject {
         if (j.s("state") == "PLANNING") fail("MANIFEST_INCOMPLETE")
         val row = objectRow(j.s("jobId"), r.o("payload").s("objectId")); val d = row.o("descriptor")
-        receipt(j, row)?.let {
+        verifiedReceipt(j, row)?.let {
             releaseApplied(j, d)
             return obj("state" to "APPLIED", "receipt" to it)
         }
@@ -662,6 +758,13 @@ class B2Receiver(
         val metadata = B2Metadata.validate(d)
         val budget = stagingLimit(j)
         val staged = files.working(j.s("jobId")) { files.finalize(scope, j.s("jobId"), d, budget) }; fault("afterObjectDurable")
+        leases[j.s("jobId")] = monotonic() + B2Wire.LEASE
+        val inbox = auth.commitWindow?.prepareInbox(
+            B2CommitWindow.InboxInput(sourcePeer, receiveDirection, j.s("jobId"), j.s("planDigest"), d, staged)
+        ) {
+            fence(j, r)
+        }
+        if (inbox != null) rejectToInbox(j, r, inbox)
         // The writer lane keeps GC and new epochs out during local work.
         // Extend the in-use lease. Revocation can still fence commit admission.
         leases[j.s("jobId")] = monotonic() + B2Wire.LEASE
@@ -674,7 +777,8 @@ class B2Receiver(
             val segment = dep.o("descriptor")
             if (receipt(j, dep) == null || segment.s("kind") != B2Wire.BOOK_SEGMENT) fail("DEPENDENCIES_PENDING")
             B2FileRef(files.composed(scope, jobId, oid), 0, segment.n("size"))
-        }, check = ::check, assembly = assembly, publishAssembly = { temp, segments ->
+        }, check = ::check, guarded = auth.commitWindow != null, stagedFile = staged,
+            assembly = assembly, publishAssembly = { temp, segments ->
             if (assembly == null || segments != metadata.a("segmentObjectIds").strings()) fail("PLAN_CONFLICT")
             check()
             files.publishAssembly(temp, assembly)
@@ -687,7 +791,12 @@ class B2Receiver(
         }, assemblyReady = {
             isBookCommit && store.get(scope, "bookAssembly", assemblyKey)?.s("objectId") == d.s("objectId")
         })
-        business.prepareFile(context, copy(d), metadata)
+        try {
+            business.prepareFile(context, copy(d), metadata)
+        } catch (failure: Throwable) {
+            runCatching { context.finishAsset?.invoke(false) }.onFailure(failure::addSuppressed)
+            throw failure
+        }
         leases[jobId] = monotonic() + B2Wire.LEASE
         val result = applyTransaction(d.s("kind"), context) {
             fence(j, r)
@@ -696,6 +805,11 @@ class B2Receiver(
             check()
             touch(j, retention.clock())
             val rc = B2Digests.receipt(r, d.s("objectId"), if (receiveDirection == "watchToPhone") auth.phoneDeviceId else auth.watchDeviceId, outcome)
+            if (auth.commitWindow != null) {
+                val witness = if (d.s("kind") == B2Wire.BOOK_SEGMENT) obj("sha256" to d.s("sha256"))
+                    else business.receiptWitness(context, d, metadata, null) ?: fail("BUSINESS_REJECTED")
+                row.put("witness", witness)
+            }
             row.put("receipt", rc); store.put(scope, "object", objectKey(j.s("jobId"), d.s("objectId")), row)
             if (objects(j.s("jobId")).all { !it.nil("receipt") }) j.put("state", "APPLIED") else j.put("state", "TRANSFERRING")
             store.put(scope, "job", j.s("jobId"), j)
@@ -713,16 +827,40 @@ class B2Receiver(
         }
         return result
     }
+    private suspend fun rejectToInbox(j: JSONObject, r: JSONObject, inbox: B2CommitWindow.PendingInbox): Nothing {
+        val caller = currentCoroutineContext()
+        withContext(NonCancellable) {
+            var committed = false
+            try {
+                receiveTransaction(checkWindow = true) {
+                    caller.ensureActive()
+                    fence(j, r)
+                    inbox.commit()
+                    caller.ensureActive()
+                }
+                committed = true
+            } finally {
+                inbox.finish(committed)
+            }
+        }
+        fail("BUSINESS_REJECTED")
+    }
+
     private suspend fun complete(j: JSONObject, r: JSONObject): JSONObject {
         if (j.s("state") == "CANCELLED") fail("JOB_CANCELLED")
         val p = r.o("payload"); val ds = description(j)
         if (p.n("objectCount") != ds.n("objectCount") || p.n("ackToInclusive") != ds.o(if (receiveDirection == "watchToPhone") "watchSnapshot" else "phoneSnapshot").n("toInclusive")) fail("PLAN_CONFLICT")
-        if (j.s("state") == "COMPLETE") { val c = j.o("completion"); if (p.s("receiptsRoot") != c.s("receiptsRoot")) fail("RECEIPT_CONFLICT"); return c }
+        if (j.s("state") == "COMPLETE") {
+            verifyCompletion(j)
+            val c = j.o("completion")
+            if (p.s("receiptsRoot") != c.s("receiptsRoot")) fail("RECEIPT_CONFLICT")
+            return c
+        }
         if (j.s("state") == "PLANNING") fail("MANIFEST_INCOMPLETE")
-        val rs = objects(j.s("jobId")).map { receipt(j, it) ?: fail("CHUNKS_MISSING") }
+        val rs = objects(j.s("jobId")).map { verifiedReceipt(j, it) ?: fail("CHUNKS_MISSING") }
         val root = B2Digests.receipts(rs); if (root != p.s("receiptsRoot")) fail("RECEIPT_CONFLICT")
         val c = B2Digests.completion(j.s("jobId"), j.s("planDigest"), ds.n("objectCount"), root, p.n("ackToInclusive"))
-        receiveTransaction {
+        receiveTransaction(businessWrite = true) {
             fence(j, r); business.complete(copy(ds), copy(c)); check(); touch(j, retention.clock())
             j.put("state", "COMPLETE").put("completion", c); store.put(scope, "job", j.s("jobId"), j); bind(j, r, c)
         }; fault("afterCompleteCommit"); return c

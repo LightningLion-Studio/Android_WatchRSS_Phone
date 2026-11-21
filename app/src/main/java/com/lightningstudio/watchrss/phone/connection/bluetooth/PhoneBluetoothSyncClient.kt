@@ -246,6 +246,7 @@ internal class PhoneSyncSession internal constructor(
         @Volatile private var closed = false
         @Volatile private var binaryRevoked = false
         @Volatile private var binaryAccountFence: B2AccountFence? = null
+        @Volatile internal var legacyResponseAdmission: (() -> Unit)? = null
 
         fun bindBinaryAuthorization(authorize: () -> Unit, fence: B2AccountFence?): Closeable? {
             binaryAccountFence = fence
@@ -312,6 +313,12 @@ internal class PhoneSyncSession internal constructor(
         }
 
 
+        @Synchronized
+        internal fun admitLegacyCommit(check: () -> Unit) {
+            if (closed) throw B2Exception("STALE_EPOCH")
+            check()
+        }
+
         val isClosed: Boolean
             get() = closed
 
@@ -334,7 +341,7 @@ internal class PhoneSyncSession internal constructor(
     suspend fun exchange(request: JSONObject, sessionId: String): BluetoothSyncExchange =
         client.exchangeInSession(this, request, sessionId)
 
-    internal suspend fun exchangeApplied(request:JSONObject,sessionId:String,validate:(JSONObject)->Unit):BluetoothSyncExchange =
+    internal suspend fun exchangeApplied(request:JSONObject,sessionId:String,validate:suspend (JSONObject)->Unit):BluetoothSyncExchange =
         client.exchangeAppliedInSession(this,request,sessionId,validate)
 
     suspend fun exchangeLibrary(
@@ -872,7 +879,7 @@ class PhoneBluetoothSyncClient(
 
     /** R46 windows are connection-bound. Never transparently replay or ACK invalid commit data. */
     internal suspend fun exchangeAppliedInSession(session:PhoneSyncSession,request:JSONObject,sessionId:String,
-        validate:(JSONObject)->Unit):BluetoothSyncExchange {
+        validate:suspend (JSONObject)->Unit):BluetoothSyncExchange {
         check(!session.legacyFallback && session.isPersistent){"阅读增量需要持久同步连接"}
         return executeSessionOperation(session,sessionId,request.optString("action"),allowTransparentReplay=false) {
             connectionMutex.withLock {
@@ -881,6 +888,7 @@ class PhoneBluetoothSyncClient(
                 val response=readFrameLogged(transport.inputStream,sessionId,"sessionResponse")
                 val acked=try {
                     validateAndWriteAppliedAck(response,validate) {
+                        transport.legacyResponseAdmission?.invoke()
                         writeResponseAck(transport.outputStream,sessionId,success=true,applied=true)
                     }
                 } catch(failure:Throwable) {
@@ -967,6 +975,7 @@ class PhoneBluetoothSyncClient(
                     "手表返回了错误的同步会话结束响应"
                 }
                 require(response.optString("phase") == phase) { "手表同步会话结束阶段不匹配" }
+                if (phase == BluetoothSyncProtocol.SESSION_PHASE_COMPLETE) transport.legacyResponseAdmission?.invoke()
                 writeResponseAck(transport.outputStream, sessionId, success = true, applied = true)
                 session.recordNegotiation(response)
             }
@@ -1910,6 +1919,7 @@ class PhoneBluetoothSyncClient(
         }
         try {
             applyResponse(exchange)
+            transport.legacyResponseAdmission?.invoke()
             writeResponseAck(
                 transport.outputStream,
                 sessionId,

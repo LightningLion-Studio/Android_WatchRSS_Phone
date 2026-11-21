@@ -181,6 +181,7 @@ class PhoneCloudSyncService(
     internal val usesSyncV2 get() = syncV2Database != null && syncV2Product.productEnabled
     internal val syncV2UiPort get()=syncV2Product.uiPort
     internal fun syncV2BookRollbackWindow() = syncV2Product.legacyRollbackWindow()
+    internal fun captureSyncV2BluetoothWindow(owner: String) = syncV2Product.captureBluetoothWindow(owner)
     internal fun captureSyncV2Legacy(peer:String,version:Int,cursor:String,payload:JSONObject)=syncV2Product.captureLegacyMetadata(peer,version,cursor,payload)
 
     private val approvalMutex = Mutex()
@@ -2159,7 +2160,11 @@ class PhoneCloudSyncService(
             if(legacyHeads.any{m->m.objects.any{it.name==NOTES_STATE_OBJECT || it.name==NOTES_ARCHIVE_OBJECT}} &&
                 noteRepository.allNotes().filterNot{it.deleted}.any{note->
                     com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.referencedStorageKeys(note.markdown)
-                        .any{!java.io.File(appContext.filesDir,"notes/assets/$it").isFile}
+                        .any {
+                            !com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles.current(
+                                syncV2Database?.invoke()?.openHelper?.writableDatabase, appContext.filesDir, it
+                            ).isFile
+                        }
                 })return upgradePending()
         }
         val privateObservation=CloudExportFileWitness.observePrivate(appContext.filesDir)

@@ -4,6 +4,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile
 import com.lightningstudio.watchrss.phone.data.book.BookSync
+import com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles
 import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.File
@@ -24,7 +25,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     }
 
     fun read(kind: String, id: String): ByteArray? {
-        val target = file(kind, id)
+        val target = if (kind == "asset") NoteAssetFiles.current(db, files, id) else file(kind, id)
         val limit = SyncV2BodyCodec.limit(kind)
         if (kind == "book") {
             val revision = BookPackageFiles.revision(db, id) ?: return null
@@ -175,7 +176,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
 
     /** The reference is the committed local business selection; the digest always comes from readable bytes. */
     fun original(kind: String, id: String, selected: JSONObject): Original? {
-        val target = file(kind, id)
+        val target = if (kind == "asset") NoteAssetFiles.current(db, files, id) else file(kind, id)
         val before = reference(kind, id, selected) ?: return null
         val limit = SyncV2BodyCodec.limit(kind)
         val source = if (before is BookReference) {
@@ -195,7 +196,8 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         }
         validate(kind, id, selected, raw)
         val original = Original(raw, hash, before) {
-            reference(kind, id, selected) == before && sameFile(source, observed, hash)
+            reference(kind, id, selected) == before && sameFile(source, observed, hash) &&
+                (kind != "asset" || NoteAssetFiles.current(db, files, id) == source)
         }
         original.requireCurrent()
         return original

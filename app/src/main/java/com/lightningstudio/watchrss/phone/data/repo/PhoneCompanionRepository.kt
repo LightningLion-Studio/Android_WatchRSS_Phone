@@ -1931,7 +1931,8 @@ class PhoneCompanionRepository(
      */
     suspend fun finalizeAuthoritativeLibrarySnapshot(
         retainedArticleIds: Collection<String>,
-        retainedSourceUrls: Collection<String>
+        retainedSourceUrls: Collection<String>,
+        prune: Boolean = true
     ) = withContext(Dispatchers.IO) {
         articleProvenance?.requireExportable()
         val articleIds = retainedArticleIds.toHashSet()
@@ -1952,7 +1953,7 @@ class PhoneCompanionRepository(
         }
         savedItemDao.deleteAll()
         syncPeerStateDao.deleteAll()
-        pruneUnreferencedArticleContent()
+        if (prune) pruneUnreferencedArticleContent()
         removedArticles to removedSources
     }
 

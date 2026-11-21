@@ -8,7 +8,7 @@ import org.json.JSONObject
 import java.io.IOException
 
 /** The strict transport path calls this before reporting a successful applied ACK. */
-internal suspend fun validateAndWriteAppliedAck(response:JSONObject,validate:(JSONObject)->Unit,write:()->Throwable?):Boolean {
+internal suspend fun validateAndWriteAppliedAck(response:JSONObject,validate:suspend (JSONObject)->Unit,write:()->Throwable?):Boolean {
     currentCoroutineContext().ensureActive()
     validate(response)
     currentCoroutineContext().ensureActive()

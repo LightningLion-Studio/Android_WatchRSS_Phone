@@ -188,6 +188,9 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
     }
     internal suspend fun binaryReadingPage(id: String, after: Int) = dao.binaryReadingPage(id, after)
     internal suspend fun binaryState(id: String) = dao.get(id)?.stateJson?.let(::JSONObject)
+    internal suspend fun binaryPackageRevision(id: String) = dao.get(id)?.packageRevision()
+    internal suspend fun binaryReadingWitness(id: String, indices: List<Int>): List<String> =
+        dao.readingBatch(id, indices).sortedBy { it.chapterIndex }.map { it.stateJson }
 
     suspend fun availableBooks(): List<Pair<JSONObject, File>> {
         ensureRegistered()

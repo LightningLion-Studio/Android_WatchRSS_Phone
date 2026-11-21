@@ -74,6 +74,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -191,7 +193,7 @@ internal fun NoteEditor(
     val configuration = LocalConfiguration.current
     val density = LocalDensity.current
     val imageStore = remember(context) { NoteAssetStore(context) }
-    val imageLoader = remember(context) { NoteImageLoader(context.filesDir) }
+    val imageLoader = remember(context) { NoteImageLoader(context) }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) scope.launch {
             val asset = imageStore.importImage(editorNoteId, uri, keepOriginal)
@@ -754,13 +756,25 @@ private fun NotePreviewToolbar(
     }
 }
 
-private class NoteImageLoader(private val filesDir: File) : ImageLoader {
+@Composable
+private fun currentNoteAsset(context: android.content.Context, path: String): File? {
+    val key = path.removePrefix("assets/").takeIf {
+        path.startsWith("assets/") && com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles.isSafe(it)
+    } ?: return null
+    val publication = com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles.publication.collectAsState()
+    val file = produceState<File?>(null, context, key, publication.value) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val app = context.applicationContext as? PhoneCompanionApplication
+            app?.container?.noteAssetFile(key) ?: File(context.filesDir, "notes/assets/$key")
+        }
+    }
+    return file.value
+}
+
+private class NoteImageLoader(private val context: android.content.Context) : ImageLoader {
     @Composable
     override fun load(model: Any): ImageData {
-        val resolved = (model as? String)
-            ?.takeIf { it.startsWith("assets/") }
-            ?.let { File(filesDir, "notes/$it") }
-            ?: model
+        val resolved = (model as? String)?.let { currentNoteAsset(context, it) } ?: model
         return ImageData(
             painter = rememberAsyncImagePainter(resolved),
             contentDescription = null
@@ -1271,7 +1285,7 @@ private fun markdownFenceMarker(line: String): MarkdownFence? {
 @Composable
 internal fun ReadOnlyMarkdown(markup: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val imageLoader = remember(context) { NoteImageLoader(context.filesDir) }
+    val imageLoader = remember(context) { NoteImageLoader(context) }
     var viewerImage by remember { mutableStateOf<NotePreviewBlock.Image?>(null) }
     NoteMarkdownPreview(
         markup = markup,
@@ -1380,13 +1394,12 @@ private fun NoteImagePreviewBlock(
         return
     }
     val context = LocalContext.current
-    val aspectRatio = remember(image.path, image.widthSp, image.heightSp) {
+    val file = currentNoteAsset(context, image.path)
+    val aspectRatio = remember(file, image.widthSp, image.heightSp) {
         noteImageAspectRatio(
             storedWidth = image.widthSp,
             storedHeight = image.heightSp,
-            file = image.path
-                .takeIf { it.startsWith("assets/") }
-                ?.let { File(context.filesDir, "notes/$it") }
+            file = file
         )
     }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {

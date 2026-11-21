@@ -19,6 +19,8 @@ class B2Client(
     private val sourceBegins = java.util.concurrent.ConcurrentHashMap<String, CompletableDeferred<Unit>>()
     private val cancelledSources = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     @Volatile private var generation = 0L
+    internal var commitWindow: B2CommitWindow? = null
+    internal var accountCommitFence: B2CommitFence? = null
     private var echoed: JSONObject? = null
     private var offer: JSONObject? = null
     private var offerReply: JSONObject? = null

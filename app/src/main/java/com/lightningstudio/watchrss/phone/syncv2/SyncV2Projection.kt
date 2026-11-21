@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.syncv2
 import android.database.Cursor
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.lightningstudio.watchrss.phone.BuildConfig
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2CommitWindow
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -19,6 +20,7 @@ internal class SyncV2Projection(
     private val sequenceAllocator:((String)->String)?=null
 ):AutoCloseable {
     @Volatile private var closed=false
+    private val observedBluetoothHead = java.util.concurrent.atomic.AtomicReference<B2CommitWindow.Head?>()
     override fun close() {
         closed=true;key.fill(0)
         // Delete the credential copy, retaining encrypted edits and public identity mappings.
@@ -77,11 +79,71 @@ internal class SyncV2Projection(
     private fun readState():State = db.controlQuery("SELECT state_version,local_revision,body FROM syncv2_state WHERE scope=?",arrayOf(scope)).use { c ->
         check(c.moveToFirst());State(c.getString(0),c.getString(1),open("state",c.getBlob(2)))
     }
-    // May run in the caller's Room writer. Keep this read on the pinned SQLite
-    // connection and avoid the lifetime monitor (cloud writers take it before Room).
     internal fun legacyRollbackGeneration(): String {
         ensureActive()
         return readState().body.getString("rollbackGeneration")
+    }
+    internal fun bluetoothHeadIsCurrent(head: B2CommitWindow.Head): Boolean =
+        !closed && observedBluetoothHead.get()?.let { it == head } != false
+
+    /** Also used inside the B2 Room writer. Do not repair the witness or enter
+     * the lifetime monitor here: projection workers acquire it before SQLite. */
+    internal fun bluetoothVersion(): B2CommitWindow.Version {
+        ensureActive()
+        val state = readState()
+        if (state.body.optString("headerAuthentication") != SyncV2HeadPins.schema) SyncV2Codec.fail("authentication_required")
+        val account = current(state)
+        val witness = SyncV2BusinessWitness.peek(db) ?: SyncV2Codec.fail("business_witness_unavailable")
+        val head = B2CommitWindow.Head(
+            scope, account.getString("oid"), account.getString("revision"), account.getString("generation")
+        )
+        if (!bluetoothHeadIsCurrent(head)) SyncV2Codec.fail("choice_stale")
+        val choice = state.body.optJSONObject("pendingChoice")
+        val action = state.body.optJSONObject("pendingAccountAction")
+        val selection = SyncV2Codec.hash(JSONArray().put(choice ?: JSONObject.NULL)
+            .put(action?.optString("id") ?: JSONObject.NULL))
+        return B2CommitWindow.Version(head, selection, witness.encoded())
+    }
+    /** After a rollback, a verified no-op tree change is disjoint for every entity.
+     * A missing predecessor or unknown closure is never inferred from local rows. */
+    internal fun bluetoothNeedsInbox(descriptor: JSONObject? = null): Boolean {
+        ensureActive()
+        val state = readState()
+        val account = current(state)
+        val generation = account.getString("generation")
+        if (generation == "0") return false
+        val impact = state.body.optJSONObject("bluetoothRollbackImpact")
+        if (descriptor != null && impact?.optString("accountOid") == account.getString("oid")) {
+            val stable = impact.getJSONArray("stable").let { array ->
+                (0 until array.length()).map(array::getString).toSet()
+            }
+            val business = descriptor.getString("businessId")
+            val kind = descriptor.getString("kind")
+            val metadata = com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Metadata.validate(descriptor)
+            val required = when (kind) {
+                "bookState", "bookPackageSegment", "bookPackageCommit", "bookReading" ->
+                    setOf(identity.entity("book", metadata.getString("bookId")))
+                "noteAsset" -> buildSet {
+                    add(identity.entity("asset", business))
+                    val owners = com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles.ownerKeys(db, business)
+                    if (owners.isEmpty()) return true
+                    for (owner in owners) {
+                        if (!owner.startsWith("note:")) return true
+                        add(identity.entity("note", owner.removePrefix("note:")))
+                    }
+                }
+                else -> emptySet()
+            }
+            if (required.isNotEmpty() && stable.containsAll(required)) return false
+        }
+        val headers = state.body.optJSONArray("knownControlHeaders") ?: return true
+        val bodies = (0 until headers.length()).map { headers.getJSONObject(it).getJSONObject("body") }
+        val head = bodies.firstOrNull { SyncV2Codec.oid("commit", it) == account.getString("oid") } ?: return true
+        val rollback = bodies.singleOrNull {
+            it.optString("rollbackGeneration") == generation && it.optJSONObject("operation")?.optString("kind") == "rollback"
+        } ?: return true
+        val parent = bodies.firstOrNull { SyncV2Codec.oid("commit", it) == rollback.optString("accountParent") } ?: return true
+        return parent.optString("treeRoot") != head.getString("treeRoot")
     }
     fun state():State=guarded { stateLocal() }
     private fun stateLocal(): State {
@@ -162,6 +224,10 @@ internal class SyncV2Projection(
             verifyHeader,{oid->accountCatalog.header(oid)?.getJSONObject("header")?:readHeader?.invoke(oid)?:SyncV2Codec.fail("object_missing")},if(upgraded)before.body.optJSONObject("knownAuthors")?:JSONObject()else JSONObject(),known)
         val previous=before.body.optJSONObject("account")
         if(!upgraded && previous!=null && (0 until proof.path.length()).none{proof.path.getJSONObject(it).getString("oid")==previous.getString("oid")})SyncV2Codec.fail("replay_detected")
+        val observedHead = B2CommitWindow.Head(scope, observed.getString("oid"), observed.getString("revision"), observed.getString("generation"))
+        observedBluetoothHead.updateAndGet { saved ->
+            if (saved == null || SyncV2Codec.d64(saved.revision) <= SyncV2Codec.d64(observedHead.revision)) observedHead else saved
+        }
         return proof
     }
     private fun retainControlHeaders(body:JSONObject,proof:SyncV2HeadPins.Proof) {
@@ -230,8 +296,23 @@ internal class SyncV2Projection(
         requireWorkerContext();val observed=validAccount(window);val before=state()
         if(verified.commitOid!=observed.getString("oid"))SyncV2Codec.fail("hash_mismatch")
         val proof=authenticateHeads(observed,headers,before,verifyHeader,readHeader)
+        val prior = before.body.optJSONObject("account")
+        val metadata = before.body.optJSONObject("metadataAccount")
+        val latest = proof.path.optJSONObject(0)?.getJSONObject("header")?.getJSONObject("body")
+        val stable = if (prior != null && metadata?.getString("oid") == prior.getString("oid") &&
+            before.body.optString("metadataSchema") == SyncV2HeadPins.schema &&
+            latest?.optJSONObject("operation")?.optString("kind") == "rollback" &&
+            latest.optString("accountParent") == prior.getString("oid")) {
+            val oldRows = cloudRows()
+            if (oldRows.size != before.body.optInt("metadataRows", -1)) null
+            else SyncV2BluetoothImpact.stableEntities(identity, oldRows, verified.rows)
+        } else null
         writer(before.version) { st ->
             observeInto(st,observed,proof.path);retainControlHeaders(st.body,proof)
+            if (stable != null) st.body.put("bluetoothRollbackImpact",
+                JSONObject().put("accountOid", observed.getString("oid")).put("stable", JSONArray(stable.sorted())))
+            else if (st.body.optJSONObject("bluetoothRollbackImpact")?.optString("accountOid") != observed.getString("oid"))
+                st.body.remove("bluetoothRollbackImpact")
             accountReplaceMetadata(st,observed,verified.rows,verified.objects,serverRevision?:st.body.optString("metadataServerRevision","0"))
             // pendingChoice and all local edits remain; P1 product apply gate is not relaxed here.
             fault("cloud-index-ready")
@@ -917,6 +998,23 @@ internal class SyncV2Projection(
         return nonce+SyncV2Codec.encrypt(key,nonce,SyncV2Codec.utf8("wrss.sync.v2/local/legacy/$scope"),SyncV2Codec.utf8(SyncV2LocalJson.canonical(value)))
     }
     private fun openLegacy(bytes:ByteArray):JSONObject=open("legacy",bytes).let{if(it.length()==1 && it.opt("json") is String)JSONObject(it.getString("json"))else it}
+    internal fun firstPendingLegacyKey(): String? = db.controlQuery(
+        "SELECT peer,version,cursor FROM syncv2_legacy_inbox WHERE scope=? AND route='pendingChoice' AND applied=0 ORDER BY arrival,rowid LIMIT 1",
+        arrayOf(scope)
+    ).use {
+        if (it.moveToFirst()) SyncV2Codec.canonical(JSONArray().put(it.getString(0)).put(it.getInt(1)).put(it.getString(2)))
+        else null
+    }
+    internal fun checkLegacySelection(selected: JSONArray) {
+        if (selected.length() == 0) return
+        val hashes = (0 until selected.length()).associate { index ->
+            val item = selected.getJSONObject(index)
+            item.getString("key") to item.getString("hash")
+        }
+        if (hashes.size != selected.length()) SyncV2Codec.fail("choice_stale")
+        val current = accountLegacyEntries(hashes.keys)
+        if (current.any { hashes[it.getString("key")] != it.getString("hash") }) SyncV2Codec.fail("choice_stale")
+    }
     internal fun accountLegacyEntries(selected:Set<String>?=null):List<JSONObject> {
         val out=mutableListOf<JSONObject>()
         db.controlQuery("SELECT peer,version,cursor,body_hash,body,arrival FROM syncv2_legacy_inbox WHERE scope=? AND route='pendingChoice' AND applied=0 ORDER BY arrival,rowid",arrayOf(scope)).use{c->while(c.moveToNext()) {
@@ -937,6 +1035,7 @@ internal class SyncV2Projection(
             if(old.first!=item.getString("hash") || old.second!="pendingChoice" || old.third!=0)SyncV2Codec.fail("choice_stale")
             val discard=choice=="cloud";val route=if(discard)"discarded-cloud"else"resolve-$choice"
             val marker=JSONObject().put("resolved",true).put("bodyHash",old.first).put("selection",choice)
+            item.optJSONObject("guarded")?.let { marker.put("archiveId", it.getString("archiveId")) }
             db.execSQL("UPDATE syncv2_legacy_inbox SET route=?,applied=?,body=? WHERE scope=? AND peer=? AND version=? AND cursor=?",arrayOf(route,if(discard)0 else 1,sealLegacy(marker),scope,peer,version,cursor))
             if(!discard)streams.add(peer to version)
         }
@@ -951,6 +1050,18 @@ internal class SyncV2Projection(
         }
         refreshPending(st.body)
     }
+    internal fun resolvedGuardedArchives(): List<String> = db.controlQuery(
+        "SELECT body FROM syncv2_legacy_inbox WHERE scope=? AND route IN ('discarded-cloud','resolve-local','resolve-merge')",
+        arrayOf(scope)
+    ).use { rows ->
+        buildList {
+            while (rows.moveToNext()) {
+                val id = openLegacy(rows.getBlob(0)).optString("archiveId")
+                if (id.length == 64 && id.all { it in '0'..'9' || it in 'a'..'f' }) add(id)
+            }
+        }
+    }
+
     private fun pending(body: JSONObject,generation: String) {
         val keys=body.optJSONObject("pendingChoice")?.optJSONArray("inboxKeys")?:JSONArray()
         body.put("pendingChoice",JSONObject().put("generation",generation).put("inboxKeys",keys))
@@ -965,6 +1076,39 @@ internal class SyncV2Projection(
     }
     data class LegacyInput(val peer: String,val version: Int,val cursor: String,val body: JSONObject,val removed: List<String> = emptyList(),val bodyRefs: JSONObject = JSONObject())
     /** Receives a local projection copy only. Never acknowledges business apply or changes the BLE cursor. */
+    internal fun recordGuardedBluetooth(peer: String, version: Int, cursor: String, input: JSONObject): Boolean {
+        check(db.inTransaction())
+        check(version == 13 || version == 14)
+        ensureActive()
+        val st = readState()
+        val intent = JSONObject().put("body", JSONObject().put("guarded-transfer", input))
+            .put("removed", JSONArray()).put("bodyRefsByEntity", JSONObject())
+        val hash = legacyHash(intent)
+        val prior = db.controlQuery(
+            "SELECT body_hash,route FROM syncv2_legacy_inbox WHERE scope=? AND peer=? AND version=? AND cursor=?",
+            arrayOf<Any>(scope, peer, version, cursor)
+        ).use { if (it.moveToFirst()) it.getString(0) to it.getString(1) else null }
+        if (prior != null) {
+            if (prior.first != hash) SyncV2Codec.fail("idempotency_conflict")
+            return prior.second == "pendingChoice"
+        }
+        val arrival = db.controlQuery(
+            "SELECT COALESCE(MAX(arrival),0)+1 FROM syncv2_legacy_inbox WHERE scope=? AND peer=? AND version=?",
+            arrayOf(scope, peer, version)
+        ).use { it.moveToFirst(); it.getLong(0) }
+        fault("before-inbox")
+        db.execSQL("INSERT INTO syncv2_legacy_inbox VALUES(?,?,?,?,?,?,?,?,0)",
+            arrayOf<Any>(scope, peer, version, cursor, arrival, hash, sealLegacy(intent), "pendingChoice"))
+        val stream = SyncV2Codec.canonical(JSONArray().put(peer).put(version))
+        st.body.getJSONObject("received").put(stream, cursor)
+        refreshPending(st.body)
+        db.execSQL("UPDATE syncv2_state SET state_version=?,local_revision=?,body=? WHERE scope=? AND state_version=?",
+            arrayOf(SyncV2Codec.next(st.version), SyncV2Codec.next(st.revision), seal("state", st.body), scope, st.version))
+        if (db.controlQuery("SELECT changes()").use { it.moveToFirst(); it.getInt(0) } != 1) SyncV2Codec.fail("choice_stale")
+        fault("after-inbox")
+        return true
+    }
+
     fun receiveLegacy(input: LegacyInput, affected: Set<String>?, rollbackKnown: Boolean): String {
         requireWorkerContext();ensureActive()
         if(input.version !in setOf(13,14) || input.peer.isEmpty() || input.cursor.isEmpty() || input.removed.distinct()!=input.removed || input.removed.any(input.body::has)) SyncV2Codec.fail("invalid_schema")

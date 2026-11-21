@@ -222,7 +222,8 @@ class B2Session(private val input: InputStream, private val output: OutputStream
                             controls.take()
                             val r = frame.value
                             if (r.s("type") == "response") acceptResponse(r)
-                            else if (r.s("phase") == "missing" && r.o("payload").n("limit") == 0L) {
+                            else if (r.s("phase") == "missing" && r.o("payload").n("limit") == 0L &&
+                                receiver?.canFastHeartbeat(r.s("jobId")) != false) {
                                 if (receiveEpochs[r.s("jobId")] != r.n("epoch")) fail("STALE_EPOCH")
                                 if (!inboundHeartbeats.add(r.s("jobId"))) fail("INVALID_FRAME")
                                 // Separate lightweight IO work; neither DB work nor its mutex
@@ -371,9 +372,13 @@ class B2Session(private val input: InputStream, private val output: OutputStream
                     waiter?.start = clock()
                 }
             }
-            starting()
-            writingSince = clock()
-            lastWrite = writingSince
+            val admit = {
+                starting()
+                writingSince = clock()
+                lastWrite = writingSince
+            }
+            if (isReceiverReply(frame)) receiver?.admitResponse(admit) ?: admit()
+            else admit()
         }
         B2Frames.write(object : OutputStream() {
             override fun write(b: Int) { checkOpen(); output.write(b); lastWrite = clock() }
@@ -383,19 +388,33 @@ class B2Session(private val input: InputStream, private val output: OutputStream
         writingSince = 0
     }
 
+    internal fun admitSourceCommit(authorize: () -> Unit, account: B2CommitFence?) = synchronized(lifecycle) {
+        checkOpen()
+        if (account == null) authorize() else account.admitCommit(authorize)
+    }
+
+    private fun isReceiverReply(frame: B2Frame): Boolean =
+        frame is B2Frame.Ack || frame is B2Frame.Control && frame.value.s("type") == "response" &&
+            frame.value.s("phase") !in setOf("prepare", "cancel") && frame.value.getBoolean("success")
+
     private fun enqueue(frame: B2Frame, priority: Boolean) = enqueue(Outgoing.Frame(frame), priority)
     private fun enqueue(frame: Outgoing, priority: Boolean) = synchronized(lifecycle) {
         checkOpen()
-        outstandingWrites.incrementAndGet()
-        val queue = when {
-            frame is Outgoing.Durable -> durable
-            priority -> high
-            else -> normal
+        val submit = {
+            outstandingWrites.incrementAndGet()
+            val queue = when {
+                frame is Outgoing.Durable -> durable
+                priority -> high
+                else -> normal
+            }
+            if (!queue.trySend(frame).isSuccess) {
+                outstandingWrites.decrementAndGet()
+                fail("LIMIT_EXCEEDED")
+            }
         }
-        if (!queue.trySend(frame).isSuccess) {
-            outstandingWrites.decrementAndGet()
-            fail("LIMIT_EXCEEDED")
-        }
+        if (frame is Outgoing.Durable || frame is Outgoing.Frame && isReceiverReply(frame.frame)) {
+            receiver?.admitResponse(submit) ?: submit()
+        } else submit()
     }
     private fun acceptResponse(r: JSONObject) {
         val id = r.s("requestId")

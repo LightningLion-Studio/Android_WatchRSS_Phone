@@ -221,6 +221,7 @@ internal class B2BookBusiness(
                     bitmap[bit / 8] = (bitmap[bit / 8].toInt() or mask).toByte()
                     previous = index
                 }
+                context.readingIndices = rows.map { it.getInt("chapterIndex") }
                 persistence.put(scope, "bookReadingIndices", key, obj("jobId" to context.jobId, "bits" to B2Frames.hex(bitmap)))
                 if (books.mergeReadingBatch(rows, check, binary = true) > 0) "merged" else "retainedLocal"
             }
@@ -234,6 +235,29 @@ internal class B2BookBusiness(
         fail("BUSINESS_REJECTED")
     } catch (_: org.json.JSONException) {
         fail("BUSINESS_REJECTED")
+    }
+
+    suspend fun receiptWitness(context: B2ApplyContext?, descriptor: JSONObject, metadata: JSONObject, prior: JSONObject?): JSONObject? {
+        val id = metadata.s("bookId")
+        val state = books.binaryState(id) ?: return null
+        val witness = obj("state" to B2Digests.hash(B2Json.utf8(BookSync.canonical(state))))
+        when (descriptor.s("kind")) {
+            BOOK_COMMIT -> {
+                val revision = books.binaryPackageRevision(id)
+                if (revision != null) {
+                    if (context == null && books.packageForSync(id)?.second != revision.sha256) return null
+                    witness.put("packageSha256", revision.sha256).put("packageBytes", revision.bytes)
+                }
+            }
+            BOOK_READING -> {
+                val indices = context?.readingIndices ?: prior?.a("indices")?.values()?.map { B2Json.integer(it).toInt() }
+                    ?: return null
+                val records = books.binaryReadingWitness(id, indices)
+                if (indices.size != records.size) return null
+                witness.put("indices", JSONArray(indices)).put("reading", B2Digests.hash(B2Json.utf8(JSONArray(records).toString())))
+            }
+        }
+        return witness
     }
 
     private fun <T> readJson(staged: B2FileRef, integersOnly: Boolean, maxNodes: Int, work: () -> Unit,

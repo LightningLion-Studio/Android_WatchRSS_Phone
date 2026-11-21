@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 import androidx.room.withTransaction
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.*
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
+import com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
@@ -32,6 +33,7 @@ internal class B2RoomStore(private val db: PhoneCompanionDatabase) : B2Persisten
                 } }
                 sql.execSQL("INSERT INTO library_binary_budget(singleton,used,ceiling) VALUES(1,?,?)", arrayOf(used, ceiling))
             }
+            NoteAssetFiles.initialize(sql)
             sql.setTransactionSuccessful()
         } finally { sql.endTransaction() }
         initialized = true

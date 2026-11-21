@@ -16,12 +16,13 @@ import java.util.UUID
 class NoteImportExportService(private val context: Context, private val repository: NoteRepository) {
     suspend fun exportZip(): ByteArray {
         val entries = mutableListOf<MarkdownArchiveEntry>()
+        val app = context.applicationContext as? com.lightningstudio.watchrss.phone.PhoneCompanionApplication
         repository.allNotes().filterNot { it.deleted }.forEach { note ->
             entries += MarkdownArchiveEntry("notes/${note.noteId}.md", MarkdownNoteCodec.export(note).toByteArray())
             // Cloud hydration can restore referenced image files before local asset rows exist.
             val keys=repository.assets(note.noteId).map{it.storageKey}.toSet()+NoteAssetSyncPayload.referencedStorageKeys(note.markdown)
-            keys.forEach { key ->
-                val source = File(context.filesDir, "notes/assets/$key")
+            keys.filter(NoteAssetFiles::isSafe).forEach { key ->
+                val source = app?.container?.noteAssetFile(key) ?: NoteAssetFiles.legacy(context.filesDir, key)
                 if (source.isFile) entries += MarkdownArchiveEntry("notes/assets/$key", source.readBytes())
             }
         }

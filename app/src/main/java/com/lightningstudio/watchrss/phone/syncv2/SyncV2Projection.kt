@@ -43,6 +43,7 @@ internal class SyncV2Projection(
         requireWorkerContext();gate(); SyncV2Schema.install(db)
         db.beginTransaction()
         try {
+            SyncV2UnconfirmedWrite.requireSettled(db)
             val prior=db.controlQuery("SELECT descriptor_pin,account_id,identity FROM syncv2_state WHERE scope=?",arrayOf(scope)).use { c ->
                 if(c.moveToFirst()) Triple(c.getString(0),c.getString(1),c.getBlob(2)) else null
             }
@@ -86,11 +87,16 @@ internal class SyncV2Projection(
     fun state():State=guarded { stateLocal() }
     private fun stateLocal(): State {
         requireWorkerContext();ensureActive()
+        SyncV2UnconfirmedWrite.recover(db)
         val stamp=SyncV2BusinessWitness.read(db)
         val old=readState()
-        if(old.body.optString("businessStamp")==stamp.encoded())return old
+        if(old.body.optString("businessStamp")==stamp.encoded()) {
+            SyncV2UnconfirmedWrite.requireSettled(db)
+            return old
+        }
         db.beginTransaction()
         try {
+            SyncV2UnconfirmedWrite.requireSettled(db)
             synchronizeBusinessInTransaction(readState(),SyncV2BusinessWitness.read(db))
             db.setTransactionSuccessful()
         } finally {db.endTransaction()}
@@ -117,30 +123,29 @@ internal class SyncV2Projection(
         db.execSQL("UPDATE syncv2_state SET state_version=?,local_revision=?,body=? WHERE scope=? AND state_version=?",arrayOf(following,revision,seal("state",st.body),scope,st.version))
         if(db.controlQuery("SELECT changes()").use{it.moveToFirst();it.getInt(0)}!=1)SyncV2Codec.fail("choice_stale")
     }
-    private fun <T> writer(expected:String?=null,body:(State)->T):T=guarded {writerLocal(expected,body)}
-    private fun <T> writerLocal(expected: String?, body: (State)->T): T {
+    private fun <T> writer(expected:String?=null,body:(State)->T):T=guarded {writerLocal(expected,body=body)}
+    private fun <T> writerLocal(expected: String?, staged: SyncV2UnconfirmedWrite? = null, body: (State)->T): T {
         state() // Consume only the small business witness, outside the projection transaction.
         db.beginTransaction() // Android uses an immediate/exclusive SQLite writer, never a read-deferred txn.
         var started=false;var ended=false;var failure:Throwable?=null
         try {
+            SyncV2UnconfirmedWrite.requireSettled(db)
             val old=readState(); val following=SyncV2Codec.next(old.version) // before callbacks and fault hooks
             if(expected!=null && old.version!=expected) SyncV2Codec.fail("choice_stale")
             if(old.body.optString("businessStamp")!=SyncV2BusinessWitness.read(db).encoded())SyncV2Codec.fail("choice_stale")
-            accountCatalog.begin(old.body)
+            if (staged == null) accountCatalog.begin(old.body) else staged.begin(following)
             started=true
             fault("begin")
             val result=body(old)
-            accountCatalog.finish(old.body)
+            if (staged == null) accountCatalog.finish(old.body)
             fault("before-state")
             db.execSQL("UPDATE syncv2_state SET state_version=?,body=? WHERE scope=? AND state_version=?",arrayOf(following,seal("state",old.body),scope,old.version))
             if(db.controlQuery("SELECT changes()").use { it.moveToFirst(); it.getInt(0) }!=1) SyncV2Codec.fail("choice_stale")
             fault("before-commit")
-            val commit = {
-                db.setTransactionSuccessful()
-                ended = true
-                db.endTransaction()
-            }
-            if (lifetime == null) commit() else lifetime.commit(commit)
+            lifetime?.check()
+            db.setTransactionSuccessful()
+            ended = true
+            db.endTransaction()
             return result
         } catch(e:Throwable) {
             val primary=if(e is android.database.sqlite.SQLiteFullException)IllegalStateException("storage_pressure",e)else e
@@ -565,6 +570,35 @@ internal class SyncV2Projection(
     internal fun <T> accountWriter(expected:String,action:(State)->T):T=try{writer(expected,action)}
         catch(_:android.database.sqlite.SQLiteFullException){SyncV2Codec.fail("storage_pressure")}
         catch(_:android.database.sqlite.SQLiteDiskIOException){SyncV2Codec.fail("storage_pressure")}
+
+    internal fun accountStageWriter(expected: String, id: String,
+        write: (State, SyncV2UnconfirmedWrite) -> Set<String>) = guarded {
+        val stage = SyncV2UnconfirmedWrite(db,scope,id)
+        stage.verify(
+            checkOwner = { lifetime?.check() },
+            write = {
+                writerLocal(expected,stage) { state ->
+                    val assets = write(state,stage)
+                    assets to SyncV2BusinessWitness.read(db).encoded()
+                }
+            },
+            finalize = { (assets, witness) ->
+                // Staging is already committed and validated. Only its derived asset
+                // cache remains. Keep the staged action's expected state version.
+                if (assets.isNotEmpty()) {
+                    val state = readState()
+                    if (state.version != SyncV2Codec.next(expected) || SyncV2BusinessWitness.read(db).encoded() != witness) {
+                        SyncV2Codec.fail("choice_stale")
+                    }
+                    accountCatalog.begin(state.body)
+                    accountProjectRegisteredNoteAssets(state,assets)
+                    accountCatalog.finish(state.body)
+                    db.execSQL("UPDATE syncv2_state SET body=? WHERE scope=?",arrayOf(seal("state",state.body),scope))
+                }
+            }
+        )
+        Unit
+    }
     internal fun accountCapture(requirePending:Boolean=true):ChoiceCapture {
         val st=state();val a=current(st)
         if(requirePending && st.body.isNull("pendingChoice"))SyncV2Codec.fail("choice_stale")
@@ -577,20 +611,29 @@ internal class SyncV2Projection(
     }
     internal fun accountCheckOwner() = guarded { ensureActive() }
 
+    private val assetDomain = SyncV2Schema.domains.single { it.kind == "asset" }
+
+    private fun storedNoteAsset(storageKey: String): JSONObject = db.controlQuery(
+        "SELECT storageKey AS projection_key,${columns(assetDomain)} FROM ${sourceTable(assetDomain)} WHERE storageKey=?",
+        arrayOf(storageKey)
+    ).use {
+        if (!it.moveToFirst()) SyncV2Codec.fail("closure_incomplete")
+        readStoredRecord(assetDomain,it)
+    }
+
+    /** Build the signed target without exposing unconfirmed registrations in the local catalog. */
+    internal fun accountStagedNoteAssets(storageKeys: Set<String>): List<JSONObject> = storageKeys.map { key ->
+        val entity = identity.entity("asset",key)
+        val pair = SyncV2Business.project("asset",key,entity,storedNoteAsset(key),null)
+        accountBinding(entity)?.optJSONObject("meta")?.optString("addedAtSource")
+            ?.takeIf { it in setOf("original","unknown") }?.let { pair.meta.put("addedAtSource",it) }
+        JSONObject().put("meta",pair.meta).put("state",pair.state)
+            .put("value",SyncV2Business.join("asset",pair.meta,pair.state))
+    }
+
     /** The choice writer starts at a reconciled capture and adds only these asset rows. */
-    internal fun accountProjectRegisteredNoteAssets(st: State, storageKeys: Set<String>): List<JSONObject> {
-        check(db.inTransaction())
-        val domain = SyncV2Schema.domains.single { it.kind == "asset" }
-        for (key in storageKeys) {
-            val value = db.controlQuery(
-                "SELECT storageKey AS projection_key,${columns(domain)} FROM ${sourceTable(domain)} WHERE storageKey=?",
-                arrayOf(key)
-            ).use {
-                if (!it.moveToFirst()) SyncV2Codec.fail("closure_incomplete")
-                readStoredRecord(domain, it)
-            }
-            project(domain, key, value, st.revision, ownerBody=st.body)
-        }
+    private fun accountProjectRegisteredNoteAssets(st: State, storageKeys: Set<String>) {
+        for (key in storageKeys) project(assetDomain,key,storedNoteAsset(key),st.revision,ownerBody=st.body)
         val previous = st.body.getString("businessStamp")
         val stamp = SyncV2BusinessWitness.read(db).encoded()
         st.body.put("businessStamp", stamp)
@@ -600,9 +643,6 @@ internal class SyncV2Projection(
                 "UPDATE syncv2_scan SET business_stamp=? WHERE scope=? AND complete=1 AND business_stamp=?",
                 arrayOf(stamp, scope, previous)
             )
-        }
-        return storageKeys.map { identity.entity("asset", it) }.chunked(64).flatMap { ids ->
-            accountLocalRows(ids.toSet())
         }
     }
     /** Values are always from the current local projection, never a browsable old cloud cache. */

@@ -168,18 +168,18 @@ class PhoneCloudSyncService(
     private val syncV2Product by lazy {
         SyncV2PhoneProduct(appContext,{requireNotNull(syncV2Database).invoke()},keyManager,
             current={
-                val session=accountRepository.session.value
+                val authentication=accountRepository.cloudAuthentication()
+                val session=authentication.session
                 val bootstrap=trustedBootstrap
                 val generation= session?.let{client.knownContentGeneration(it)}
                 if(session==null || accountRepository.cloudSessionChanging || !session.isUsableForAuthentication || bootstrap==null || generation==null)null
-                else client.syncV2Account(session,bootstrap.libraryEpoch,generation)
+                else client.syncV2Account(session,bootstrap.libraryEpoch,generation).copy(sessionGeneration=authentication.generation)
             },
             verifyKeys={account,keys->val bootstrap=trustedBootstrap?:error("authentication_required")
                 CloudKeyTrust.validate(account.userId,bootstrap.libraryEpoch,bootstrap.keyVersionFloor,bootstrap.keyCommitments,keys)},
             approved={id->val session=accountRepository.session.value;val bootstrap=trustedBootstrap
                 session!=null && bootstrap!=null && bootstrap.devices.any{it.deviceId==id && it.revokedAt==null && deviceAuthenticated(session,bootstrap,it)}},
-            onAuthenticationResponse=accountRepository::recordAuthenticationResponse,
-            sessionCommitLock=accountRepository.cloudSessionCommitLock)
+            onAuthenticationResponse=accountRepository::recordAuthenticationResponse)
     }
     internal val usesSyncV2 get() = syncV2Database != null && syncV2Product.productEnabled
     internal val syncV2UiPort get()=syncV2Product.uiPort

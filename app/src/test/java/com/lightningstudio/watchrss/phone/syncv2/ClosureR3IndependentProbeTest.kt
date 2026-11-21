@@ -33,7 +33,7 @@ class ClosureR3IndependentProbeTest {
     }
 
     @Test
-    fun releaseAfterLastCheckWaitsForSqliteCommit() {
+    fun releaseAfterLastCheckCompensatesCommittedStage() {
         val generation = SyncV2Lifetime.Generation()
         val current = generation.current()
         val releaseStarted = CountDownLatch(1)
@@ -65,12 +65,12 @@ class ClosureR3IndependentProbeTest {
                                 lifetime.close()
                             }
                             assertTrue(releaseStarted.await(5, TimeUnit.SECONDS))
-                            assertFalse("release advanced during commit", invalidated.await(200, TimeUnit.MILLISECONDS))
+                            assertTrue("release waited for SQLite", invalidated.await(5, TimeUnit.SECONDS))
                         }
                         try {
                             method.invoke(sql, *(args ?: emptyArray())).also {
                                 if (intercepted && !committed && method.name == "endTransaction") {
-                                    assertEquals(current, generation.current())
+                                    assertTrue(generation.current() > current)
                                     committed = true
                                 }
                             }
@@ -81,9 +81,6 @@ class ClosureR3IndependentProbeTest {
                     val projection = SyncV2Projection(adapter, w.identity, SyncV2Fixtures.localKey, true,
                         fault = { point ->
                             if (point == "before-commit" && prepared && !intercepted) armed = true
-                            if (point == "after-transaction" && committed) {
-                                assertTrue("release must proceed after commit", invalidated.await(5, TimeUnit.SECONDS))
-                            }
                         }, lifetime = lifetime)
                     projection.install()
                     SyncV2AccountActions(w.f.client(), w.identity, projection, w.f.signer, { w.key },
@@ -97,8 +94,7 @@ class ClosureR3IndependentProbeTest {
                         val counts = listOf("note_assets", "syncv2_p5_objects", "syncv2_p5_rows").map { table ->
                             sql.query("SELECT COUNT(*) FROM $table").use { assertTrue(it.moveToFirst()); it.getInt(0) }
                         }
-                        assertEquals(1, counts[0])
-                        assertTrue(counts[1] > 0 && counts[2] > 0)
+                        assertEquals(listOf(0,0,0),counts)
                     }
                 }
             }

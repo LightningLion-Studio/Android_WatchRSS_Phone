@@ -570,16 +570,17 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         if (registrations.isEmpty()) {
             stageChoice(c, choice, keyVersion, context, plan, target, remote, captured, bundles)
         } else {
+            val requestId = id()
             fileGuard(plan.files) {
-                projection.accountWriter(c.stateVersion) { st ->
+                projection.accountStageWriter(c.stateVersion,requestId) { st, stage ->
                     projection.accountCheck(st,c)
                     if (!st.body.isNull("pendingAccountAction") || !st.body.isNull("pendingPublish")) SyncV2Codec.fail("choice_pending")
                     val storageKeys = linkedSetOf<String>()
                     for (asset in registrations.values) {
-                        storageKeys.add(bodyRepository.registerNoteAsset(asset, now()))
+                        storageKeys.add(bodyRepository.registerNoteAsset(asset, now(),stage))
                         storageKeys.add(asset.storageKey)
                     }
-                    val assets = projection.accountProjectRegisteredNoteAssets(st, storageKeys)
+                    val assets = projection.accountStagedNoteAssets(storageKeys)
                     val assetIds = assets.indexRows().keys
                     val expandedIds = plan.scopeIds + assetIds
                     val full = plan.root != null && expandedIds.size > 64
@@ -594,9 +595,10 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                     val selected = untouched.plusRows(target.filterRows { it.getJSONObject("meta").getString("entityKey") !in assetIds }).plusRows(assets)
                     val captureRows = actual.filterRows { it.getJSONObject("meta").getString("entityKey") !in assetIds }.plusRows(assets)
                     val expanded = plan.copy(root=if (full) null else plan.root, scopeIds=expandedIds)
-                    stageChoice(c, choice, keyVersion, context, expanded, selected, cloud, captureRows, bundles, st)
+                    stageChoice(c, choice, keyVersion, context, expanded, selected, cloud, captureRows, bundles, st,requestId)
                     for (asset in registrations.values) asset.requireCurrent()
                     projection.accountCheckOwner()
+                    storageKeys
                 }
             }
         }
@@ -605,8 +607,8 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
 
     private fun stageChoice(c: ChoiceCapture, choice: String, keyVersion: Long, context: Context, plan: Plan,
         target: List<JSONObject>, remote: List<JSONObject>, captured: List<JSONObject>?,
-        bundles: List<SyncV2RecoveryStorage.Bundle>, writerState: SyncV2Projection.State? = null) {
-        val requestId=id();val action=JSONObject().put("id",requestId).put("kind",choice).put("capture",c.json()).put("serverTime",now()).put("fileCapture",plan.files).put("legacySelected",JSONArray(plan.legacySelected))
+        bundles: List<SyncV2RecoveryStorage.Bundle>, writerState: SyncV2Projection.State? = null, requestId: String = id()) {
+        val action=JSONObject().put("id",requestId).put("kind",choice).put("capture",c.json()).put("serverTime",now()).put("fileCapture",plan.files).put("legacySelected",JSONArray(plan.legacySelected))
         if(plan.root!=null)action.put("sparseBaseRoot",plan.root).put("sparseIds",JSONArray(plan.scopeIds.sorted()))
         val index=if(choice=="cloud")null else wireIndex(target,keyVersion,remote,plan.root,plan.scopeIds,context.authors)
         if(index!=null && plan.root!=null)action.put("retiredTrees",JSONArray(index.retiredTrees.sorted()))
@@ -698,7 +700,12 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             if(action.has("sequence"))st.body.put("reservedDeviceSequence",action.getString("sequence"))
             action.put("expectedStateVersion",SyncV2Codec.next(st.version));st.body.put("pendingAccountAction",action)
         }
-        if (writerState == null) fileGuard(action.getJSONObject("fileCapture")){projection.accountWriter(c.stateVersion,write)}
+        if (writerState == null) fileGuard(action.getJSONObject("fileCapture")) {
+            projection.accountStageWriter(c.stateVersion,action.getString("id")) { state,_ ->
+                write(state)
+                emptySet()
+            }
+        }
         else write(writerState)
         } finally {prepared.close()}
     }

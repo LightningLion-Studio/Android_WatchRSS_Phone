@@ -14,9 +14,17 @@ internal object SyncV2NoteAssetNames {
             CREATE TABLE IF NOT EXISTS $aliases (
                 storageKey TEXT PRIMARY KEY NOT NULL, noteId TEXT NOT NULL, sha256 TEXT NOT NULL,
                 displayName TEXT NOT NULL, mimeType TEXT NOT NULL, byteCount INTEGER NOT NULL,
-                createdAt INTEGER NOT NULL, deleted INTEGER NOT NULL, deletedAt INTEGER NOT NULL
+                createdAt INTEGER NOT NULL, deleted INTEGER NOT NULL, deletedAt INTEGER NOT NULL,
+                registration_txn TEXT
             )
         """.trimIndent())
+        val hasRegistration = db.controlQuery("PRAGMA table_info($aliases)").use { rows ->
+            var found = false
+            while (rows.moveToNext()) if (rows.getString(1) == "registration_txn") found = true
+            found
+        }
+        if (!hasRegistration) db.execSQL("ALTER TABLE $aliases ADD COLUMN registration_txn TEXT")
+        db.execSQL("CREATE INDEX IF NOT EXISTS syncv2_note_asset_alias_registration ON $aliases(registration_txn)")
         db.execSQL("""
             CREATE VIEW IF NOT EXISTS $source AS
             SELECT assetId,noteId,sha256,displayName,mimeType,byteCount,storageKey,isOriginal,createdAt,deleted,deletedAt
@@ -76,7 +84,7 @@ internal object SyncV2NoteAssetNames {
                 FROM note_assets WHERE storageKey=?
                 ON CONFLICT(storageKey) DO UPDATE SET noteId=excluded.noteId,sha256=excluded.sha256,
                     displayName=excluded.displayName,mimeType=excluded.mimeType,byteCount=excluded.byteCount,
-                    createdAt=excluded.createdAt,deleted=excluded.deleted,deletedAt=excluded.deletedAt
+                    createdAt=excluded.createdAt,deleted=excluded.deleted,deletedAt=excluded.deletedAt,registration_txn=NULL
             """.trimIndent(), arrayOf<Any>(hash,bytes,storageKey))
             db.execSQL("DELETE FROM note_assets WHERE storageKey=?", arrayOf(storageKey))
         } else {

@@ -20,7 +20,7 @@ internal class SyncV2P5Fixture(private val lifetime:SyncV2Lifetime?=null):AutoCl
     private fun room()=Room.databaseBuilder(RuntimeEnvironment.getApplication(),PhoneCompanionDatabase::class.java,path.absolutePath).allowMainThreadQueries().build()
     val sql get()=room.openHelper.writableDatabase
     var projection=projection();private set
-    private fun projection()=SyncV2Projection(sql,identity,SyncV2Fixtures.localKey,true,lifetime=lifetime).also{it.install()}
+    private fun projection(lifetime:SyncV2Lifetime?=this.lifetime)=SyncV2Projection(sql,identity,SyncV2Fixtures.localKey,true,lifetime=lifetime).also{it.install()}
     val headers=linkedMapOf<String,JSONObject>();val refs=linkedMapOf<String,JSONObject>()
     val results=mutableMapOf<String,JSONObject>();val requests=mutableListOf<String>()
     var current=JSONObject();var deviceOid:String?=null;var deviceRevision="0"
@@ -126,7 +126,8 @@ internal class SyncV2P5Fixture(private val lifetime:SyncV2Lifetime?=null):AutoCl
     fun drain(){repeat(20){if(!projection.runWindow().paused)return};error("scan did not finish")}
     fun edit(text:String="offline\nline\n") {sql.execSQL("UPDATE notes SET markdown=?,plainText=?,updatedAt=updatedAt+1 WHERE noteId='note'",arrayOf(text,text));drain()}
     fun pending(){start();edit();rollbackRemote();actions().refresh();drain()}
-    fun reopen(){room.close();room=room();projection=projection()}
+    fun reopen() = reopen(lifetime)
+    fun reopen(lifetime:SyncV2Lifetime?){room.close();room=room();projection=projection(lifetime)}
     fun text()=sql.query("SELECT markdown FROM notes WHERE noteId='note'").use{check(it.moveToFirst());it.getString(0)}
     fun error(code:String,status:Int)=f.response(JSONObject().put("error",JSONObject().put("code",code).put("retryable",status==503).put("retryAfterMillis",if(status==503)1000 else JSONObject.NULL).put("details",JSONObject()))).setResponseCode(status)
     override fun close(){room.close();f.close();root.deleteRecursively()}

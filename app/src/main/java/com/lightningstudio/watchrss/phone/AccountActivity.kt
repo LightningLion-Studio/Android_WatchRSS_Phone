@@ -126,8 +126,11 @@ import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
 import com.lightningstudio.watchrss.phone.ui.SupportContactInlineFooter
 import com.lightningstudio.watchrss.phone.ui.generateQRCode
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -308,6 +311,7 @@ internal fun AccountScreen(
     var otpResendAvailableAt by rememberSaveable { mutableLongStateOf(0L) }
     var elapsedRealtime by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     var busy by remember { mutableStateOf(false) }
+    var loggingOut by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var registeredPasskeys by remember(session?.userId) {
@@ -1082,20 +1086,26 @@ internal fun AccountScreen(
             OutlinedButton(
                 onClick = {
                     val expected = session
+                    busy = true
+                    loggingOut = true
                     runAction {
-                        busy = true
-                        runCatching { accessCoordinator.logout(expected) }
-                            .onSuccess { released ->
-                                message = if (released) "已退出登录并释放名额" else "已在本机退出；名额将在联网后释放"
-                            }
-                            .onFailure { error = it.message ?: "退出失败" }
-                        busy = false
+                        try {
+                            val released = withContext(Dispatchers.IO) { accessCoordinator.logout(expected) }
+                            message = if (released) "已退出登录并释放名额" else "已在本机退出；名额将在联网后释放"
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (failure: Exception) {
+                            error = failure.message ?: "退出失败"
+                        } finally {
+                            loggingOut = false
+                            busy = false
+                        }
                     }
                 },
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("退出登录")
+                Text(if (loggingOut) "正在退出登录…" else "退出登录")
             }
             OutlinedButton(
                 onClick = {

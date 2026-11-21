@@ -26,8 +26,6 @@ class PhoneAccountRepository(
     private val sessionChanges = Mutex()
     // The old session stays published while secure storage suspends.
     internal val cloudSessionLock = Any()
-    // This lock spans the final Sync v2 commit; it never guards disposal of a lifetime.
-    internal val cloudSessionCommitLock = Any()
     @Volatile private var departingCloudOwner: String? = null
 
     internal val cloudSessionChanging: Boolean
@@ -39,17 +37,15 @@ class PhoneAccountRepository(
     }
 
     private suspend fun <T> withDepartingCloudOwner(owner: PhoneAccountSession?, change: suspend () -> T): T {
-        synchronized(cloudSessionLock) {
-            synchronized(cloudSessionCommitLock) { departingCloudOwner = owner?.userId }
-        }
+        synchronized(cloudSessionLock) { departingCloudOwner = owner?.userId }
         return try {
             change()
         } finally {
-            synchronized(cloudSessionLock) {
-                synchronized(cloudSessionCommitLock) { departingCloudOwner = null }
-            }
+            synchronized(cloudSessionLock) { departingCloudOwner = null }
         }
     }
+
+    internal fun cloudAuthentication() = sessionStore.cloudAuthentication()
 
     private suspend fun clearSession(owner: PhoneAccountSession) = sessionChanges.withLock {
         if (session.value?.userId != owner.userId) return@withLock

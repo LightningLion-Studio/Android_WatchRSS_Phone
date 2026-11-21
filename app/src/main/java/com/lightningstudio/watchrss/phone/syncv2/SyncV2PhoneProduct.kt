@@ -48,11 +48,10 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
     private val signals:()->SyncV2TransportSignals={SyncV2AndroidTransport.sample(context)},
     private val clock:()->Long=android.os.SystemClock::elapsedRealtime,
     private val contentEnabled:Boolean=true,
-    private val onAuthenticationResponse:(String,Int,String)->Unit={_,_,_->},
-    sessionCommitLock: Any = Any()) {
+    private val onAuthenticationResponse:(String,Int,String)->Unit={_,_,_->}) {
     data class Account(val userId:String,val backendBaseUrl:String,val legacyDeviceId:String,val epoch:String,val generation:String,
-        val bearer:String,val apiKey:String,val deviceAuthorization:String?) {
-        fun owner()=listOf(userId,backendBaseUrl,legacyDeviceId,epoch,generation)
+        val bearer:String,val apiKey:String,val deviceAuthorization:String?,val sessionGeneration:Long=0) {
+        fun owner()=listOf(userId,backendBaseUrl,legacyDeviceId,epoch,generation,sessionGeneration.toString())
         val accountId get()=userId.replace("-","").lowercase()
     }
     data class Result(
@@ -63,7 +62,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         val pendingBodies: Boolean = false
     )
     private val mutex=Mutex()
-    private val generation=SyncV2Lifetime.Generation(sessionCommitLock)
+    private val generation=SyncV2Lifetime.Generation()
     @Volatile private var opening:SyncV2Lifetime?=null
     @Volatile private var runtime:Runtime?=null
     @Volatile private var announcement:JSONObject?=null

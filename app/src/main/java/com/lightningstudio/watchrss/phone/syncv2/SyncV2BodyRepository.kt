@@ -219,17 +219,18 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         }
     }
 
-    fun registerNoteAsset(asset: NoteAssetRegistration, now: Long): String {
+    fun registerNoteAsset(asset: NoteAssetRegistration, now: Long, stage: SyncV2UnconfirmedWrite? = null): String {
         check(db.inTransaction())
         asset.requireCurrent()
         return try {
-            registerNoteAssetByDigest(asset.storageKey, asset.sha256, asset.byteCount, now)
+            registerNoteAssetByDigest(asset.storageKey, asset.sha256, asset.byteCount, now,stage)
         } catch (_: android.database.sqlite.SQLiteConstraintException) {
             SyncV2Codec.fail("closure_incomplete")
         }
     }
 
-    private fun registerNoteAssetByDigest(id: String, sha256: String, byteCount: Int, now: Long): String {
+    private fun registerNoteAssetByDigest(id: String, sha256: String, byteCount: Int, now: Long,
+        stage: SyncV2UnconfirmedWrite?): String {
         val existing = db.controlQuery("SELECT storageKey FROM note_assets WHERE sha256=? AND deleted=0", arrayOf(sha256)).use {
             if (it.moveToFirst()) it.getString(0) else null
         }
@@ -239,15 +240,19 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             .put("storageKey",id).put("mimeType",mime).put("displayName",id).put("sha256",sha256).put("byteCount",byteCount)
             .put("isOriginal",false).put("createdAt",now).put("deleted",false).put("deletedAt",0)
         if (existing != null) {
+            stage?.let { value.put("registration_txn",it.id) }
             SyncV2NoteAssetNames.saveAlias(db, value)
             return existing
         }
-        SyncV2PhoneApply(db).upsert("note_assets",listOf("assetId"),value.put("assetId",java.util.UUID.randomUUID().toString()))
+        val assetId = java.util.UUID.randomUUID().toString()
+        SyncV2PhoneApply(db).upsert("note_assets",listOf("assetId"),value.put("assetId",assetId))
+        stage?.recordNoteAsset(assetId)
         return id
     }
 
     /** Discover referenced originals omitted by older private-UUID metadata. Absence never deletes. */
-    fun refreshReferences(now:Long,lifetime:SyncV2Lifetime?=null,checkOwner:()->Unit):List<String> {
+    fun refreshReferences(now:Long,scope:String?=null,checkOwner:()->Unit):List<String> {
+        SyncV2UnconfirmedWrite.recover(db)
         val errors=linkedSetOf<String>()
         for(id in references(db))try {
             checkOwner()
@@ -255,21 +260,16 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             val target = file("asset", id)
             if (!target.isFile) SyncV2Codec.fail("cloud_note_asset_missing")
             val asset = prepareNoteAssetRegistration(id)
-            db.beginTransaction()
-            var ended = false
-            try {
-                checkOwner()
-                if(!SyncV2NoteAssetNames.exists(db,id))registerNoteAsset(asset,now)
-                val commit = {
-                    db.setTransactionSuccessful()
-                    ended = true
-                    db.endTransaction()
-                }
-                if (lifetime == null) {
+            val stage = scope?.let { SyncV2UnconfirmedWrite(db,it,SyncV2Codec.hex(SyncV2Codec.random(16))) }
+            val write = {
+                SyncV2UnconfirmedWrite.transaction(db) {
                     checkOwner()
-                    commit()
-                } else lifetime.commit(commit)
-            } finally { if (!ended) db.endTransaction() }
+                    stage?.begin()
+                    if (!SyncV2NoteAssetNames.exists(db,id)) registerNoteAsset(asset,now,stage)
+                    checkOwner()
+                }
+            }
+            if (stage == null) write() else stage.verify(checkOwner,write)
         }catch(e:Exception){checkOwner();errors.add(SyncV2BodyChannel.code(e))}
         return errors.toList()
     }

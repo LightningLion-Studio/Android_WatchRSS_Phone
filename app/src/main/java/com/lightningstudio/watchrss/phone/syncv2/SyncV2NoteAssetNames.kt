@@ -27,9 +27,14 @@ internal object SyncV2NoteAssetNames {
             WHERE NOT EXISTS (SELECT 1 FROM note_assets n WHERE n.storageKey=a.storageKey)
         """.trimIndent())
         // Only sync writes this table. Include its changes in the existing scan witness.
+        val triggers = db.controlQuery(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=?", arrayOf(aliases)
+        ).use { rows -> buildSet { while (rows.moveToNext()) add(rows.getString(0)) } }
         for (operation in listOf("INSERT", "UPDATE", "DELETE")) {
+            val name = "syncv2_note_asset_alias_${operation.lowercase()}"
+            if (name in triggers) continue
             db.execSQL("""
-                CREATE TRIGGER IF NOT EXISTS syncv2_note_asset_alias_${operation.lowercase()}
+                CREATE TRIGGER $name
                 AFTER $operation ON $aliases BEGIN
                     INSERT INTO cloud_local_change_counter(seq) VALUES(NULL);
                     DELETE FROM cloud_local_change_counter WHERE seq < last_insert_rowid();

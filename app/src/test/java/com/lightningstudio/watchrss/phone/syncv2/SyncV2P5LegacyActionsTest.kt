@@ -116,7 +116,8 @@ class SyncV2P5LegacyActionsTest {
             assertEquals(0, actions.recoveryCopies().length())
             val link = w.projection.accountLegacyEntries().single().getJSONObject("intent")
                 .getJSONObject("body").getJSONObject("guarded-transfer")
-            assertEquals(closure.toString(), link.getJSONObject("bookClosure").toString())
+            assertEquals(SyncV2Codec.canonical(closure),
+                SyncV2Codec.canonical(link.getJSONObject("bookClosure")))
             val stored = archive.read(link.getString("archiveId"), staged.length(), 0, staged.length().toInt())
             assertArrayEquals(staged.readBytes(), stored)
             val recovery = SyncV2RecoveryStorage(w.projection, w.identity, w.root)

@@ -1,5 +1,9 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncDevice
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncEvent
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncSession
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncTrigger
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -25,7 +29,12 @@ class B2SessionTest {
             val cap = B2Negotiation.capability(setOf("noteAsset"), setOf("noteAsset"), B2Wire.s2Limits())
             val selection = B2Negotiation.select(x.cap, cap, "phoneToWatch")!!
             val binding = obj("direction" to "phoneToWatch", "jobId" to x.job, "intent" to "create", "selection" to selection)
-            val phone = B2Session(phoneIn, phoneOut, this, close)
+            val events = mutableListOf<BtSyncEvent>()
+            val telemetry = BtSyncSession(
+                BtSyncDevice("install-0", "fixture", 121, "fixture", "fixture", "14", 34),
+                null, BtSyncTrigger.MANUAL, { events += it }, { 42L }, { 42L }
+            ).apply { binaryStarted() }
+            val phone = B2Session(phoneIn, phoneOut, this, close).also { it.transferObserver = telemetry }
             val watch = B2Session(watchIn, watchOut, this, close)
             var receiver: B2Receiver? = null
             val commits = AtomicInteger()
@@ -63,6 +72,15 @@ class B2SessionTest {
                 client.retire(x.job)
                 assertEquals("COMPLETE", x.store.get(x.account, "job", x.job)!!.s("state"))
                 assertEquals(1, commits.get())
+                telemetry.finishSuccess()
+                val event = events.single().data
+                val transfer = event.getJSONObject("transfer")
+                assertEquals("b2", event.getString("protocol"))
+                assertEquals(x.bytes.size, transfer.getInt("bytesEffective"))
+                assertTrue(transfer.getLong("bytesWire") > x.bytes.size)
+                assertEquals(1, transfer.getInt("objects"))
+                assertEquals(0, transfer.getInt("resentChunks"))
+                assertEquals(1, event.getJSONObject("kinds").getInt("noteAsset"))
             } finally { phone.close(); watch.close(); close(); sourceRoot.deleteRecursively(); x.root.deleteRecursively() }
         }
         Unit

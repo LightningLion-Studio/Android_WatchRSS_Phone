@@ -26,6 +26,14 @@ import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.account.B2AccountFence
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Routing
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncProtocol
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncSession
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncStage
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncTelemetry
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncTrigger
+import com.lightningstudio.watchrss.phone.rollout.ClientConfigRepository
+import com.lightningstudio.watchrss.phone.rollout.decideB2
+import com.lightningstudio.watchrss.phone.data.telemetry.runBtSync
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
@@ -142,6 +150,13 @@ class PhoneBluetoothSyncManager(
     private val syncDiagnostics=com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnostics.open(context.applicationContext)
     internal var b2AccountFence: () -> B2AccountFence? = { null }
     internal var bookRollbackWindow: () -> String? = { null }
+    internal var b2RolloutConfig: ClientConfigRepository? = null
+    internal var btSyncTelemetry: BtSyncTelemetry? = null
+
+    internal fun beginBtSync(trigger: BtSyncTrigger = BtSyncTrigger.MANUAL): BtSyncSession? {
+        b2RolloutConfig?.refreshIfStale()
+        return btSyncTelemetry?.begin(trigger)
+    }
     /** P1 optional local projection copy; null leaves the legacy path byte-for-byte unchanged. */
     internal var recordLegacyProjection:((peer:String,version:Int,cursor:String,payload:JSONObject)->Unit)?=null
     private val appContext = context.applicationContext
@@ -246,6 +261,7 @@ class PhoneBluetoothSyncManager(
         val probe=session?.takeIf{it.isPersistent}?.bindingProbe
         val result=if(probe!=null)BluetoothSyncExchange(session.device.name,session.device.address,LibrarySyncPayload.buildProbeRequest(deviceId),probe)
             else exchange(b2Probe(LibrarySyncPayload.buildProbeRequest(deviceId)),sessionId="$sessionId-binding",deviceAddress=address,syncSession=session)
+        currentCoroutineContext()[BtSyncSession]?.observePeer(result.response)
         requireSuccess(result.response)
         check(currentPhoneUserId()?.takeIf { it.isNotBlank() }==owner) { "手机账号已变化，请重新同步" }
         if(owner!=null && !(allowUnboundClear && result.response.optJSONObject("account")?.opt("bound")==false))requireWatchSyncBinding(result.response,owner)
@@ -484,9 +500,14 @@ class PhoneBluetoothSyncManager(
         resolveDeleteConflicts: suspend (List<PhoneSyncDeleteConflict>) -> Map<String, PhoneSyncConflictResolution> = {
             emptyMap()
         }
-    ): PhoneBluetoothSyncResult = withAccountOperation {
-        withContext(LibraryManifestRetry()) {
-            syncAllData(device, forceFull, mode, reusableSession, onProgress, resolveDeleteConflicts)
+    ): PhoneBluetoothSyncResult {
+        val telemetry = currentCoroutineContext()[BtSyncSession] ?: beginBtSync()
+        return telemetry.runBtSync {
+            withAccountOperation {
+                withContext(LibraryManifestRetry()) {
+                    syncAllData(device, forceFull, mode, reusableSession, onProgress, resolveDeleteConflicts)
+                }
+            }
         }
     }
 
@@ -500,14 +521,16 @@ class PhoneBluetoothSyncManager(
             emptyMap()
         }
     ): PhoneBluetoothSyncResult {
+        val telemetry = currentCoroutineContext()[BtSyncSession]
         val trace=syncDiagnostics.begin()
         val diagnosticClients=mutableSetOf<PhoneBluetoothSyncClient>()
         fun observeDiagnostics(session:PhoneSyncSession?) {
             val observed=session?.client?:client
             diagnosticClients+=observed
-            observed.diagnosticBytes={trace.bytes(it)}
+            observed.diagnosticBytes={trace.bytes(it);telemetry?.bytes(it)}
             var diagnosticRequest=JSONObject();val diagnosticTitles=linkedMapOf<String,String>()
             observed.diagnosticRequest={request->diagnosticRequest=request
+                telemetry?.legacyRequest(request)
                 if(request.optString("action")=="syncBooks"){val rows=request.optJSONArray("books");if(rows!=null)for(i in 0 until minOf(rows.length(),256)){val row=rows.optJSONObject(i)?:continue;val id=com.lightningstudio.watchrss.phone.diagnostics.DiagnosticFields.id(row.optString("bookId"))?:continue;val title=com.lightningstudio.watchrss.phone.diagnostics.DiagnosticFields.rejectionTitle(row.optString("title"))?:continue;if(id in diagnosticTitles||diagnosticTitles.size<256)diagnosticTitles[id]=title}}
             }
             observed.diagnosticResponse={response->com.lightningstudio.watchrss.phone.diagnostics.DiagnosticFields.recordResponse(trace,diagnosticRequest,response){diagnosticTitles[it]};diagnosticRequest=JSONObject()}
@@ -561,6 +584,7 @@ class PhoneBluetoothSyncManager(
         val expectedPeerId = reusableSession?.device?.remoteDeviceId.orEmpty().ifBlank { device.remoteDeviceId }
         val targetDevice = (reusableSession?.device ?: device).copy(remoteDeviceId = expectedPeerId)
         suspend fun connect() {
+            telemetry?.stage = BtSyncStage.CONNECT
             syncSession?.close()
             syncSession = null
             check(currentPhoneUserId() == owner) { "手机账号已变化，请重新同步" }
@@ -603,6 +627,7 @@ class PhoneBluetoothSyncManager(
                 if (confirmAccount) accountGate.ensure()
             },
             onInterrupted = { failure ->
+                telemetry?.disconnected()
                 if (syncSession?.transport?.owner?.startsWith("ip:") == true) bluetoothOnlyRecovery = true
                 syncSession?.close()
                 debugLog.appendEvent("library.connection.interrupted", sessionId, fields = failureFields(failure) +
@@ -636,6 +661,7 @@ class PhoneBluetoothSyncManager(
             return failure.message ?: fallback
         }
         accountGate = AccountSyncGate(syncAccount = {
+            telemetry?.stage = BtSyncStage.ACCOUNT
             requirePhoneLogin()
             check(syncSession?.isPersistent == true && syncSession?.legacyFallback == false) { "手表未支持账号资料会话，请升级手表端" }
             reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_ACCOUNT, 0)
@@ -647,17 +673,26 @@ class PhoneBluetoothSyncManager(
         }
         val completed = try {
             // Check login before opening a transport or sending any library request.
+            telemetry?.stage = BtSyncStage.ACCOUNT
             requirePhoneLogin()
             if (!opened) recovery.search(confirmAccount = false)
-            recovery.run {
+            val initialBinding = recovery.run {
+                telemetry?.stage = BtSyncStage.READY
                 syncSession = syncSession?.let { client.promoteLateIpSession(it, "$sessionId-ip-upgrade") }
                 observeDiagnostics(syncSession)
                 effectiveDevice = syncSession?.device ?: device
                 syncSession?.recoveryGate?.tryAcquire()
                 binding()
             }
-            val binaryRuntime = if (binaryRecovery != null) {
+            telemetry?.stage = BtSyncStage.NEGOTIATE
+            // ed3df08 has discovery only. D2 supplies the validated guarded offer at this seam.
+            val rollout = b2RolloutConfig?.decideB2(binaryMerge, guardedOffer = null)
+            if (rollout != null) telemetry?.decision = rollout
+            telemetry?.protocol = if (initialBinding.response.optBoolean("supportsAccountDataSpaces"))
+                BtSyncProtocol.COMPOSE else BtSyncProtocol.V1
+            val binaryRuntime = if (binaryRecovery != null && rollout?.enabled != false) {
                 val active = accountRecovery { binding() }
+                telemetry?.stage = BtSyncStage.NEGOTIATE
                 val route = B2KindRoute.select(active.response, includeNoteAssets = true,
                     libraryReady = b2Database() != null && repository.binaryArticleStorageReady(),
                     booksReady = b2Database() != null && repository.books?.binaryReady() == true)
@@ -747,6 +782,9 @@ class PhoneBluetoothSyncManager(
                     binaryRoute = binaryRoute,
                     resolveDeleteConflicts = resolveDeleteConflicts).also {
                         completedDomains.add("library")
+                        it.libraryStats?.let { stats ->
+                            telemetry?.legacyObjects(stats.sent + stats.received, stats.sourcesSent + stats.sourcesReceived, 0)
+                        }
                     }
             }
             var noteStats: NoteSyncStats? = null
@@ -770,6 +808,7 @@ class PhoneBluetoothSyncManager(
                         syncAssets = B2_NOTE_ASSET !in binaryRoute.send).also {
                             if (it.appliedOnWatch > 0) recovery.confirmedProgress()
                             completedDomains.add("notes")
+                            telemetry?.legacyObjects(0, 0, it.sent + it.received)
                         }
                 }
                 runCatching { accountRecovery { if(!skipped("usage")){syncLlmTokenUsage(effectiveDevice, syncSession, binding());completedDomains.add("usage")} } }
@@ -786,6 +825,7 @@ class PhoneBluetoothSyncManager(
             }
             accountRecovery {
                 binding()
+                telemetry?.stage = BtSyncStage.ACK
                 withTimeout(QUICK_EXCHANGE_TIMEOUT_MS) {
                     if(fastPath!=null) {
                         val ack=withContext(Dispatchers.IO){requireNotNull(syncSession).exchangeApplied(
@@ -1203,6 +1243,7 @@ class PhoneBluetoothSyncManager(
                     val window = syncWindow ?: error("同步窗口尚未准备")
                     reportProgress(onProgress, PhoneBluetoothSyncStage.VERIFYING, 90)
                     requireSuccess(exchange.response)
+                    currentCoroutineContext()[BtSyncSession]?.stage = BtSyncStage.COMMIT
                     if ((exchange.response.optJSONObject("stats")?.optInt("applied") ?: 0) > 0) {
                         currentCoroutineContext()[LibrarySyncRecovery]?.confirmedProgress()
                     }
@@ -1556,7 +1597,9 @@ class PhoneBluetoothSyncManager(
         route: B2KindRoute,
         runtime: B2KindSync
     ): LibrarySyncStats {
+        val telemetry = currentCoroutineContext()[BtSyncSession]
         val authorize = runtime.authorize
+        recovery.onDisconnect = { telemetry?.disconnected() }
         var session: PhoneSyncSession? = null
         var probe: JSONObject? = null
         var revocation: java.io.Closeable? = null
@@ -1571,6 +1614,7 @@ class PhoneBluetoothSyncManager(
         }
 
         suspend fun openReady() {
+            telemetry?.stage = BtSyncStage.CONNECT
             authorize()
             closeSession()
             val opened = try {
@@ -1597,11 +1641,14 @@ class PhoneBluetoothSyncManager(
                 revocation = transport.bindBinaryAuthorization(authorize, runtime.accountFence)
                 authorize()
                 recovery.observe(transport.generation)
+                telemetry?.stage = BtSyncStage.READY
                 val binding = bindingSnapshot(parent, opened.device.address, opened)
+                telemetry?.stage = BtSyncStage.NEGOTIATE
                 if (B2Routing.classify(binding.response, B2Routing.Ready(true, true, true)) != B2Routing.Peer.B2 ||
                     B2KindRoute.select(binding.response, route.hasBinaryAssets, route.hasBinaryLibrary, route.hasBinaryBooks) != route) {
                     throw B2Exception("CAPABILITY_MISMATCH")
                 }
+                telemetry?.stage = BtSyncStage.ACCOUNT
                 syncAccount(opened.device, opened, false, binding)
                 authorize()
                 if (opened.transport !== transport || transport.isClosed) {

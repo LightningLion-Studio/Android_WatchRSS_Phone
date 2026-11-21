@@ -27,7 +27,9 @@ import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetTransferService
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncTelemetry
 import com.lightningstudio.watchrss.phone.data.telemetry.PhoneUsageTelemetry
+import com.lightningstudio.watchrss.phone.rollout.ClientConfigRepository
 import com.lightningstudio.watchrss.phone.data.storage.AppStorageManager
 import com.lightningstudio.watchrss.phone.onboarding.OnboardingDraftStore
 import com.lightningstudio.watchrss.phone.onboarding.OnboardingProfileStore
@@ -182,6 +184,15 @@ class PhoneCompanionContainer(context: Context) {
                 appScope.launch { oppoPushCoordinator.retryPendingUpload() }
             }
         )
+    }
+
+    internal val clientConfig by lazy {
+        ClientConfigRepository(appContext, accountEnvironment, installationIdentity.installId, appScope)
+    }
+
+    internal val btSyncTelemetry by lazy {
+        BtSyncTelemetry(appContext, accountEnvironment, installationIdentity.installId,
+            currentAccount = { accountRepository.session.value })
     }
 
     val usageTelemetry: PhoneUsageTelemetry by lazy {
@@ -440,6 +451,8 @@ class PhoneCompanionContainer(context: Context) {
                 }
             }
         ).also { manager ->
+            manager.b2RolloutConfig = clientConfig
+            manager.btSyncTelemetry = btSyncTelemetry
             manager.b2AccountFence = { accountRepository.b2AccountFence }
             if (BuildConfig.SYNC_V2) manager.bookRollbackWindow = cloudSyncService::syncV2BookRollbackWindow
             if(BuildConfig.SYNC_V2 || BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION)manager.recordLegacyProjection={peer,version,cursor,payload ->

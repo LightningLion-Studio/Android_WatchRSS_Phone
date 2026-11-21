@@ -178,6 +178,9 @@ class B2Client(
         catch (e: B2Exception) { if (e.code == "SOURCE_CHANGED") cancel(job, plan, epoch, "SOURCE_CHANGED"); throw e }
         val objects = ds!!; sourceObjects = objects; B2Receiver.validateGraph(objects)
         if (B2Digests.objects(objects.map { it.s("objectId") }) != p.s("objectsRoot")) fail("SOURCE_CHANGED")
+        session.transferObserver?.let { observer ->
+            objects.forEach { observer.binaryDescriptor(it.s("objectId"), it.s("kind"), incoming = false) }
+        }
         var start = 0; var previous = "0".repeat(64)
         p.a("pageObjectCounts").values().forEachIndexed { index, n ->
             val count = B2Json.integer(n).toInt(); val entries = objects.subList(start, start + count)

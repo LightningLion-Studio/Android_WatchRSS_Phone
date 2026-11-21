@@ -16,14 +16,14 @@ internal data class B2RolloutDecision(
     val configVersion: Long,
     val configStale: Boolean = false
 ) {
-    constructor(decision: FeatureDecision, configVersion: Long) : this(decision.enabled, when (decision.source) {
+    constructor(decision: FeatureDecision, configVersion: Long, configStale: Boolean) : this(decision.enabled, when (decision.source) {
         RolloutSource.BUCKET -> if (decision.enabled) B2Cohort.ON else B2Cohort.OFF
         RolloutSource.INELIGIBLE -> B2Cohort.INELIGIBLE
         RolloutSource.FORCED_ON -> B2Cohort.FORCED_ON
         RolloutSource.FORCED_OFF -> B2Cohort.FORCED_OFF
         RolloutSource.DEBUG -> B2Cohort.DEBUG
         RolloutSource.STALE -> B2Cohort.OFF
-    }, configVersion, configStale = decision.source == RolloutSource.STALE)
+    }, configVersion, configStale)
 }
 
 /** Only a validated D2 offer is eligible. A v14 discovery response can advertise legacy B2. */
@@ -35,5 +35,5 @@ internal suspend fun ClientConfigRepository.decideB2(
     val eligible = buildAndModeEligible && (guardedVersion == 1 || guardedVersion == 1L) &&
         guardedOffer?.optJSONObject("libraryBinary") != null
     val config = if (eligible) snapshotForSession() else currentSnapshot()
-    return B2RolloutDecision(decide(config, FeatureRegistry.b2, eligible), config.version)
+    return B2RolloutDecision(decide(config, FeatureRegistry.b2, eligible), config.version, config.stale)
 }

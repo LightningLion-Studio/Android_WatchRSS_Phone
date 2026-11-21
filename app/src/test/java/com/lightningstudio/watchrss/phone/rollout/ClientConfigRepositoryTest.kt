@@ -116,7 +116,7 @@ class ClientConfigRepositoryTest {
     @Test
     fun oldServerTtlIsCappedAndOlderThanSevenDaysShutsOffUntilRefresh() = runBlocking {
         MockWebServer().use { server ->
-            server.enqueue(MockResponse().setBody(config(3, 100, "on")))
+            server.enqueue(MockResponse().setBody(config(3, 100, null)))
             val repo = repository(server)
             val offer = JSONObject().put("guardedLibraryVersion", 1).put("libraryBinary", JSONObject())
             assertEquals(600L, repo.snapshotForSession().ttlSeconds)
@@ -132,7 +132,6 @@ class ClientConfigRepositoryTest {
             clock += 7L * 24 * 60 * 60 * 1000 - 600_000
             assertFalse(repo.currentSnapshot().stale)
             clock++
-            repo.setDebugOverride(feature, FeatureOverride.ON)
             server.enqueue(MockResponse().setResponseCode(503))
             val expired = repo.decideB2(true, offer)
             assertEquals(B2RolloutDecision(false, B2Cohort.OFF, 3, configStale = true), expired)
@@ -140,9 +139,31 @@ class ClientConfigRepositoryTest {
             assertFalse(first.configStale)
             assertEquals(expired, repo.decideB2(false, null))
 
-            repo.setDebugOverride(feature, null)
             server.enqueue(MockResponse().setBody(config(4, 100, "on")))
             assertEquals(B2RolloutDecision(true, B2Cohort.FORCED_ON, 4), repo.decideB2(true, offer))
+        }
+    }
+
+    @Test
+    fun explicitOverridesSurviveExpirationAndZeroStillShutsDown() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(config(3, 1, "on")))
+            val repo = repository(server)
+            val offer = JSONObject().put("guardedLibraryVersion", 1).put("libraryBinary", JSONObject())
+            assertTrue(repo.decideB2(true, offer).enabled)
+            clock += 7L * 24 * 60 * 60 * 1000 + 1
+            server.enqueue(MockResponse().setResponseCode(503))
+            assertEquals(B2RolloutDecision(true, B2Cohort.FORCED_ON, 3, configStale = true),
+                repo.decideB2(true, offer))
+            if (BuildConfig.DEBUG) {
+                repo.setDebugOverride(feature, FeatureOverride.OFF)
+                server.enqueue(MockResponse().setResponseCode(503))
+                assertEquals(B2RolloutDecision(false, B2Cohort.DEBUG, 3, configStale = true),
+                    repo.decideB2(true, offer))
+                repo.setDebugOverride(feature, FeatureOverride.ON)
+            }
+            server.enqueue(MockResponse().setBody(config(4, 0, "on")))
+            assertEquals(B2RolloutDecision(false, B2Cohort.OFF, 4), repo.decideB2(true, offer))
         }
     }
 
@@ -172,9 +193,9 @@ class ClientConfigRepositoryTest {
         now = { clock }
     )
 
-    private fun config(version: Int, percent: Int, forced: String) = """
+    private fun config(version: Int, percent: Int, forced: String?) = """
         {"configVersion":$version,"ttlSeconds":3600,"features":{
-          "b2":{"percent":$percent,"salt":"b2-2026-11","minAppVersionCode":0,"maxAppVersionCode":null,"forced":"$forced"},
+          "b2":{"percent":$percent,"salt":"b2-2026-11","minAppVersionCode":0,"maxAppVersionCode":null,"forced":${forced?.let(JSONObject::quote) ?: "null"}},
           "other":{"unknownShape":true}
         }}
     """.trimIndent()

@@ -28,19 +28,23 @@ internal object FeatureRolloutPolicy {
         installId: String,
         eligible: Boolean,
         appVersionCode: Int,
-        debugOverride: FeatureOverride?
+        debugOverride: FeatureOverride?,
+        stale: Boolean = false
     ): FeatureDecision {
-        if (!eligible) return FeatureDecision(false, RolloutSource.INELIGIBLE)
+        fun off(source: RolloutSource) =
+            FeatureDecision(false, if (stale) RolloutSource.STALE else source)
+        if (!eligible) return off(RolloutSource.INELIGIBLE)
         if (rollout.percent == 0 ||
             appVersionCode !in rollout.minAppVersionCode..(rollout.maxAppVersionCode ?: Int.MAX_VALUE)) {
-            return FeatureDecision(false, RolloutSource.BUCKET)
+            return off(RolloutSource.BUCKET)
         }
         if (debugOverride != null) return FeatureDecision(debugOverride == FeatureOverride.ON, RolloutSource.DEBUG)
         // The server resolves overlapping forced lists to a single value, with off taking priority.
         return when (rollout.forced) {
             FeatureOverride.OFF -> FeatureDecision(false, RolloutSource.FORCED_OFF)
             FeatureOverride.ON -> FeatureDecision(true, RolloutSource.FORCED_ON)
-            null -> FeatureDecision(bucket(rollout.salt, installId) < rollout.percent, RolloutSource.BUCKET)
+            null -> if (stale) off(RolloutSource.BUCKET)
+                else FeatureDecision(bucket(rollout.salt, installId) < rollout.percent, RolloutSource.BUCKET)
         }
     }
 }

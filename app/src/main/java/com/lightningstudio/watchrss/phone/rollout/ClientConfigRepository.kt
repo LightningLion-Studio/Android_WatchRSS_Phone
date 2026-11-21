@@ -5,13 +5,11 @@ import androidx.core.content.edit
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
 import com.lightningstudio.watchrss.phone.features.EvaluateAt
-import com.lightningstudio.watchrss.phone.features.FeatureDecision
 import com.lightningstudio.watchrss.phone.features.FeatureOverride
 import com.lightningstudio.watchrss.phone.features.FeatureRegistry
 import com.lightningstudio.watchrss.phone.features.FeatureRollout
 import com.lightningstudio.watchrss.phone.features.FeatureRolloutPolicy
 import com.lightningstudio.watchrss.phone.features.RegisteredFeature
-import com.lightningstudio.watchrss.phone.features.RolloutSource
 import com.lightningstudio.watchrss.phone.network.withWatchRssAppVersionHeader
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -120,13 +118,9 @@ internal class ClientConfigRepository(
             else snapshot.config
     }
 
-    fun decide(config: ClientConfig, feature: RegisteredFeature, eligible: Boolean): FeatureDecision {
-        if (config.stale && feature.evaluateAt == EvaluateAt.SESSION) {
-            return FeatureDecision(false, RolloutSource.STALE)
-        }
-        return FeatureRolloutPolicy.decide(config.rollout(feature), installId, eligible,
-            BuildConfig.VERSION_CODE, debugOverride(feature))
-    }
+    fun decide(config: ClientConfig, feature: RegisteredFeature, eligible: Boolean) =
+        FeatureRolloutPolicy.decide(config.rollout(feature), installId, eligible,
+            BuildConfig.VERSION_CODE, debugOverride(feature), stale = config.stale && feature.evaluateAt == EvaluateAt.SESSION)
 
     private fun readCache(): Cached? = try {
         prefs.getString("last_config", null)?.takeIf { prefs.getString("install_id", null) == installId }?.let {

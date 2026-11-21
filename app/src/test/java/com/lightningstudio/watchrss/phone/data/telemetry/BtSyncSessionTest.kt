@@ -67,7 +67,7 @@ class BtSyncSessionTest {
         assertEquals("b2_on", json.getString("cohort"))
         assertEquals("on", json.getJSONObject("features").getString("b2"))
         assertEquals(3, json.getInt("configVersion"))
-        assertFalse(json.getBoolean("configStale"))
+        assertFalse(json.has("configStale"))
         assertEquals("phone", json.getString("platform"))
         assertEquals("watch", json.getJSONObject("peer").getString("platform"))
         assertEquals("Watch 4", json.getJSONObject("peer").getString("model"))

@@ -252,7 +252,7 @@ internal class BtSyncSession(
                     .put("sdkInt", device.sdkInt))
                 .put("peer", peer ?: JSONObject.NULL)
                 .put("configVersion", decision.configVersion)
-                .put("configStale", decision.configStale)
+                .apply { if (decision.configStale) put("configStale", true) }
                 .put("features", JSONObject().put(FeatureRegistry.b2.key, if (decision.enabled) "on" else "off"))
                 .put("cohort", decision.cohort.wire)
                 .put("protocol", protocol.wire)

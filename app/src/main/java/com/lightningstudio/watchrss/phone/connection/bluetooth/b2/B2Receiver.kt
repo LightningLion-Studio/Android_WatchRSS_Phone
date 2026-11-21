@@ -762,7 +762,15 @@ class B2Receiver(
         val staged = files.working(j.s("jobId")) { files.finalize(scope, j.s("jobId"), d, budget) }; fault("afterObjectDurable")
         leases[j.s("jobId")] = monotonic() + B2Wire.LEASE
         val inbox = auth.commitWindow?.prepareInbox(
-            B2CommitWindow.InboxInput(sourcePeer, receiveDirection, j.s("jobId"), j.s("planDigest"), d, staged)
+            B2CommitWindow.InboxInput(sourcePeer, receiveDirection, j.s("jobId"), j.s("planDigest"), d, staged) {
+                if (d.s("kind") == B2Wire.BOOK_STATE) {
+                    val dependents = objects(j.s("jobId")).map { it.o("descriptor") }
+                        .filter { d.s("objectId") in it.a("dependsOn").strings() }
+                    val commit = dependents.singleOrNull { it.s("kind") == B2Wire.BOOK_COMMIT }
+                    obj("requiredObjectIds" to JSONArray(dependents.map { it.s("objectId") }),
+                        "package" to commit?.let(B2Metadata::validate))
+                } else null
+            }
         ) {
             fence(j, r)
         }

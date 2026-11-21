@@ -1,9 +1,13 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
+import com.lightningstudio.watchrss.phone.connection.bluetooth.binaryDescriptor
+import com.lightningstudio.watchrss.phone.connection.bluetooth.binaryFileHashes
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2CommitWindow
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Wire
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.assetDescriptor
 import com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles
+import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import java.io.File
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -78,6 +82,54 @@ class SyncV2P5LegacyActionsTest {
             listOf(untouched, first), listOf(untouched, second)))
     }
 
+    @Test fun protectedBookStateRetainsItsFrozenPackageConstraintWithoutInventingBodyBytes(): Unit =
+        SyncV2P5Fixture().use { w ->
+            w.pending()
+            val fixture = JSONObject(requireNotNull(javaClass.getResource("/book/cli-single-txt-book.json")).readText())
+            val id = fixture.getString("bookId")
+            val raw = fixture.getString("packageUtf8").toByteArray()
+            val hash = SyncV2Codec.hex(SyncV2Codec.sha(raw))
+            val state = JSONObject().put("bookId", id).put("fingerprint", fixture.getString("fingerprint"))
+                .put("title", "Book waiting for its original").put("chapterCount", 1)
+                .put("deleted", false).put("deletedAt", 0).put("deletionClock", 0).put("deletedChapters", JSONArray())
+                .put("updatedAt", 1).put("sourceDeviceId", "watch").put("sourceUrl", fixture.getString("sourceUrl"))
+                .put("kind", "txt")
+            val staged = File(w.root, "book-state").apply { writeText(state.toString()) }
+            val desc = binaryDescriptor(B2Wire.BOOK_STATE, id, JSONObject().put("bookId", id), binaryFileHashes(staged))
+            val segment = "b".repeat(64)
+            val closure = JSONObject().put("requiredObjectIds", JSONArray().put(segment))
+                .put("package", JSONObject().put("bookId", id).put("fingerprint", fixture.getString("fingerprint"))
+                    .put("packageSha256", hash).put("packageBytes", raw.size).put("segmentObjectIds", JSONArray().put(segment)))
+            val input = B2CommitWindow.InboxInput("watch", "watchToPhone", "a".repeat(32), "c".repeat(64), desc, staged) { closure }
+            val archive = SyncV2BluetoothInbox(w.projection, w.root)
+            val pending = runBlocking { requireNotNull(archive.prepare(input) {}) }
+            w.sql.beginTransaction()
+            try {
+                pending.commit()
+                w.sql.setTransactionSuccessful()
+            } finally {
+                w.sql.endTransaction()
+            }
+            pending.finish(true)
+            val actions = w.actions()
+            code("closure_incomplete") { actions.choose(actions.preview(firstLegacyOnly = true), "cloud") }
+            assertEquals(0, actions.recoveryCopies().length())
+            val link = w.projection.accountLegacyEntries().single().getJSONObject("intent")
+                .getJSONObject("body").getJSONObject("guarded-transfer")
+            assertEquals(closure.toString(), link.getJSONObject("bookClosure").toString())
+            val stored = archive.read(link.getString("archiveId"), staged.length(), 0, staged.length().toInt())
+            assertArrayEquals(staged.readBytes(), stored)
+            val recovery = SyncV2RecoveryStorage(w.projection, w.identity, w.root)
+            assertFalse(recovery.guardedAlreadyPresent(link))
+            w.sql.execSQL("INSERT INTO imported_books VALUES(?,?,?,?)", arrayOf<Any>(id, state.toString(), hash, raw.size))
+            val original = BookPackageFiles.legacy(File(w.root, "imported_books"), id)
+            original.parentFile!!.mkdirs()
+            original.writeBytes(raw)
+            assertTrue(recovery.guardedAlreadyPresent(link))
+            original.writeBytes(raw.copyOf().apply { this[lastIndex] = 0 })
+            assertFalse(recovery.guardedAlreadyPresent(link))
+        }
+
     @Test fun cloudChoicePinsTheReceivedAttachmentAndLeavesItsOldReceiptRejected(): Unit = SyncV2P5Fixture().use { w ->
         w.pending()
         val key = "archive.png"
@@ -95,7 +147,7 @@ class SyncV2P5LegacyActionsTest {
         val descriptor = assetDescriptor(raw, key)
         val input = B2CommitWindow.InboxInput("watch", "watchToPhone", "a".repeat(32), "b".repeat(64), descriptor, original)
         val inbox = SyncV2BluetoothInbox(w.projection, w.root)
-        val pending = requireNotNull(inbox.prepare(input) {})
+        val pending = runBlocking { requireNotNull(inbox.prepare(input) {}) }
         w.sql.beginTransaction()
         try {
             pending.commit()

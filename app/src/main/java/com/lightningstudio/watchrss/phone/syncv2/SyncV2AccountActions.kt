@@ -574,10 +574,21 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             }
             for (link in guarded) {
                 val descriptor = link.getJSONObject("descriptor")
-                if (descriptor.optString("kind") != "noteAsset") SyncV2Codec.fail("closure_incomplete")
-                val entity = identity.entity("asset", descriptor.getString("businessId"))
-                val row = local.indexRows()[entity] ?: remote.indexRows()[entity] ?: SyncV2Codec.fail("closure_incomplete")
-                bundles.add(recovery.prepareGuardedAsset(row, link, base, c, now()))
+                val id = descriptor.getString("businessId")
+                when (descriptor.getString("kind")) {
+                    "bookState" -> {
+                        if (!recovery.guardedAlreadyPresent(link)) SyncV2Codec.fail("closure_incomplete")
+                        val entity = identity.entity("book", id)
+                        val actual = rows(plan.actual).indexRows()[entity] ?: SyncV2Codec.fail("closure_incomplete")
+                        prepare(listOf(actual), setOf(entity))
+                    }
+                    "noteAsset" -> {
+                        val entity = identity.entity("asset", id)
+                        val row = local.indexRows()[entity] ?: remote.indexRows()[entity] ?: SyncV2Codec.fail("closure_incomplete")
+                        bundles.add(recovery.prepareGuardedAsset(row, link, base, c, now()))
+                    }
+                    else -> SyncV2Codec.fail("closure_incomplete")
+                }
             }
             recovery.checkBundles(bundles)
         }

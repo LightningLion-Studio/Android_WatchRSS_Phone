@@ -20,7 +20,7 @@ internal class SyncV2BluetoothInbox(private val projection: SyncV2Projection, fi
     private val directory = File(files, "syncv2-guarded-inbox")
     private val quota = 1024L * 1024 * 1024
 
-    fun prepare(input: B2CommitWindow.InboxInput, check: () -> Unit): B2CommitWindow.PendingInbox? {
+    suspend fun prepare(input: B2CommitWindow.InboxInput, check: () -> Unit): B2CommitWindow.PendingInbox? {
         if (!projection.bluetoothNeedsInbox(input.descriptor)) return null
         check()
         val objectId = input.descriptor.getString("objectId")
@@ -31,6 +31,7 @@ internal class SyncV2BluetoothInbox(private val projection: SyncV2Projection, fi
         val id = SyncV2Codec.hash(org.json.JSONArray().put(projection.scope).put(peer).put(cursor).put(input.plan))
         val link = JSONObject().put("planDigest", input.plan).put("jobId", input.job)
             .put("direction", input.direction).put("descriptor", input.descriptor).put("archiveId", id)
+        input.bookClosure()?.let { link.put("bookClosure", it) }
         return archive(peer, 14, cursor, id, link, size, sha, input.file::inputStream, check)
     }
 

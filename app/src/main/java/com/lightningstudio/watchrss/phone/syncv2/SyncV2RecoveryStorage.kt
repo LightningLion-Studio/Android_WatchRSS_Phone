@@ -125,13 +125,42 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
     fun contentReady(record:JSONObject):Boolean=record.getJSONObject("state").getJSONObject("payload").optBoolean("deleted",false) || try {sources(record);true}catch(_:Exception){false}
     fun guardedAlreadyPresent(link: JSONObject): Boolean {
         val descriptor = link.getJSONObject("descriptor")
-        if (descriptor.optString("kind") != "noteAsset") return false
+        val kind = descriptor.optString("kind")
+        if (kind == "bookState") return guardedBookAlreadyPresent(link, descriptor)
+        if (kind != "noteAsset") return false
         val metadata = B2Metadata.validate(descriptor)
         val id = metadata.getString("storageKey")
         val revision = BookPackageFiles.Revision(metadata.getString("sha256"), metadata.getLong("size"))
         val actual = NoteAssetFiles.current(db, files, id)
         return NoteAssetFiles.ownerKeys(db, id).isNotEmpty() && NoteAssetFiles.winnerAllows(db, id, revision) &&
             BookPackageFiles.verify(actual, revision) {} != null
+    }
+
+    private fun guardedBookAlreadyPresent(link: JSONObject, descriptor: JSONObject): Boolean {
+        val archive = SyncV2BluetoothInbox(projection, files)
+        val id = B2Metadata.validate(descriptor).getString("bookId")
+        val closure = link.optJSONObject("bookClosure") ?: return false
+        val metadata = closure.optJSONObject("package") ?: return false
+        val size = descriptor.getLong("size")
+        if (size !in 1..com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Wire.MAX_OBJECT_BYTES) return false
+        val raw = ByteArray(size.toInt())
+        var offset = 0
+        while (offset < raw.size) {
+            val part = archive.read(link.getString("archiveId"), size, offset.toLong(), minOf(262144, raw.size - offset))
+            part.copyInto(raw, offset)
+            offset += part.size
+        }
+        if (SyncV2Codec.hex(SyncV2Codec.sha(raw)) != descriptor.getString("sha256")) return false
+        val incoming = JSONObject(raw.toString(Charsets.UTF_8)).apply { remove("contentAvailable") }
+        com.lightningstudio.watchrss.phone.data.book.BookSync.validateBinary(incoming)
+        if (incoming.getString("bookId") != id || incoming.getBoolean("deleted") ||
+            incoming.getString("fingerprint") != metadata.getString("fingerprint")) return false
+        val current = db.query("SELECT stateJson FROM imported_books WHERE bookId=?", arrayOf(id)).use {
+            if (it.moveToFirst()) JSONObject(it.getString(0)) else null
+        } ?: return false
+        if (SyncV2Codec.canonical(incoming) != SyncV2Codec.canonical(current)) return false
+        val revision = BookPackageFiles.Revision(metadata.getString("packageSha256"), metadata.getLong("packageBytes"))
+        return BookPackageFiles.revision(db, id) == revision && BookPackageFiles.resolve(bookDirectory, id, revision) != null
     }
 
     fun prepareGuardedAsset(record: JSONObject, link: JSONObject, base: JSONObject, capture: ChoiceCapture, now: Long): Bundle {

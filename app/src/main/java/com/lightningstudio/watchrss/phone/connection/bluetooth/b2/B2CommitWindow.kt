@@ -3,25 +3,26 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 /** The Room writer serializes commits and authenticated head changes. Capture on
  * Ready, check again on its pinned connection, and advance only for our own writes. */
 internal class B2CommitWindow(
-    private val prepareInbox: ((InboxInput, check: () -> Unit) -> PendingInbox?)? = null,
+    private val prepareInbox: (suspend (InboxInput, check: () -> Unit) -> PendingInbox?)? = null,
     private val prepareLegacy: ((LegacyInput, check: () -> Unit) -> PendingInbox?)? = null,
     private val currentHead: ((Head) -> Boolean)? = null,
     private val read: () -> Version
 ) {
     data class InboxInput(
         val peer: String, val direction: String, val job: String, val plan: String,
-        val descriptor: org.json.JSONObject, val file: java.io.File
+        val descriptor: org.json.JSONObject, val file: java.io.File,
+        val bookClosure: suspend () -> org.json.JSONObject? = { null }
     )
 
     data class LegacyInput(val peer: String, val version: Int, val action: String, val payload: org.json.JSONObject)
 
     class PendingInbox(val commit: () -> Unit, val finish: (Boolean) -> Unit)
 
-    fun prepareInbox(input: InboxInput, check: () -> Unit): PendingInbox? = prepareProtected { prepareInbox?.invoke(input, check) }
+    suspend fun prepareInbox(input: InboxInput, check: () -> Unit): PendingInbox? = prepareProtected { prepareInbox?.invoke(input, check) }
 
     fun prepareLegacy(input: LegacyInput, check: () -> Unit): PendingInbox? = prepareProtected { prepareLegacy?.invoke(input, check) }
 
-    private fun prepareProtected(block: () -> PendingInbox?): PendingInbox? = try {
+    private inline fun prepareProtected(block: () -> PendingInbox?): PendingInbox? = try {
         block()
     } catch (e: IllegalStateException) {
         val mapped = B2Exception("BUSINESS_REJECTED")

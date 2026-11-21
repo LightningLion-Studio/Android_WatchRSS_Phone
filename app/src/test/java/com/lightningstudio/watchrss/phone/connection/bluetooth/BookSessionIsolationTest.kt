@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import androidx.room.Room
+import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec
 import com.lightningstudio.watchrss.phone.data.book.ImportedBookStore
 import com.lightningstudio.watchrss.phone.data.ble.BleDomainStore
@@ -13,6 +14,7 @@ import kotlinx.coroutines.*
 import org.json.*
 import org.junit.*
 import org.junit.Assert.*
+import org.junit.Assume.assumeFalse
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
@@ -139,7 +141,7 @@ class BookSessionIsolationTest {
     }
 
     @Test fun reviewNormalV1TranscriptAndRoomProjection() = runBlocking<Unit> {
-        assertFalse(com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED)
+        assumeFalse("Requires the B2-off configuration", BuildConfig.B2_ENABLED)
         val result = runSession(false)
         val trace = frames.filter { it.optString("action") != "syncDomains" }.map {
             val copy = JSONObject(it.toString())

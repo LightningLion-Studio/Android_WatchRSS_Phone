@@ -2,6 +2,7 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import androidx.room.Room
 import androidx.room.withTransaction
+import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec
 import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.book.ImportedBookStore
@@ -12,6 +13,7 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.*
 import org.json.JSONObject
 import org.junit.Assert.*
+import org.junit.Assume.assumeFalse
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -100,7 +102,7 @@ class V1BookCommitTest {
     }
 
     @Test fun b2OffInputReplacementAfterSnapshotStillCommitsOneChapter() = runBlocking<Unit> {
-        assertFalse(com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED)
+        assumeFalse("Requires the B2-off configuration", BuildConfig.B2_ENABLED)
         val context = RuntimeEnvironment.getApplication()
         val root = File(context.cacheDir, "off-replacement-${System.nanoTime()}").apply { mkdirs() }
         val db = Room.inMemoryDatabaseBuilder(context, PhoneCompanionDatabase::class.java).allowMainThreadQueries().build()

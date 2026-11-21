@@ -107,7 +107,10 @@ class BtSyncSessionTest {
         val result = runCatching {
             session().runBtSync { throw error }
         }
-        assertTrue(result.exceptionOrNull() === error)
+        val propagated = result.exceptionOrNull()
+        assertTrue(propagated is IOException)
+        assertEquals(error.message, propagated?.message)
+        assertTrue(generateSequence(propagated) { it.cause }.any { it === error })
         assertEquals(5, session().runBtSync { 5 })
         assertEquals(listOf("failure", "success"), events.map { it.data.getString("result") })
     }

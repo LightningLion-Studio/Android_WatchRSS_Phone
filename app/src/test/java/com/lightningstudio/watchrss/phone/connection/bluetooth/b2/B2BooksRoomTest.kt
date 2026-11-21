@@ -322,7 +322,8 @@ class B2BooksRoomTest {
                     val partReceipt = apply(resumed, next, segment)
                     assertNull(books.packageFile(id))
                     val commitReceipt = apply(resumed, next, commit)
-                    val roots = B2Digests.receipts(listOf(stateReceipt, partReceipt, commitReceipt))
+                    val receipts = listOf(stateReceipt, partReceipt, commitReceipt).associateBy { it.s("objectId") }
+                    val roots = B2Digests.receipts(orderedForManifest.map { receipts.getValue(it.s("objectId")) })
                     val complete = resumed.handle(B2Wire.request("complete", job, plan, next,
                         obj("objectCount" to 3, "receiptsRoot" to roots, "ackToInclusive" to 0))).o("result")
                     assertEquals("COMPLETE", complete.s("state"))

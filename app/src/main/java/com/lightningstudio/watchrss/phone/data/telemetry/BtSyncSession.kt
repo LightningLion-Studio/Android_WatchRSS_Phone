@@ -179,6 +179,16 @@ internal class BtSyncSession(
     }
 
     @Synchronized
+    override fun confirmResumedOutboundChunk(objectId: String, index: Int, length: Int) {
+        val key = false to objectId
+        if (seenChunks[key]?.get(index) == true) {
+            chunk(objectId, index, incoming = false, length, accepted = true)
+        } else {
+            recordBinaryObject(key)
+        }
+    }
+
+    @Synchronized
     override fun binaryDescriptor(id: String, kind: String, incoming: Boolean) {
         if (kind !in BINARY_KINDS || id.isBlank()) return
         val key = incoming to id

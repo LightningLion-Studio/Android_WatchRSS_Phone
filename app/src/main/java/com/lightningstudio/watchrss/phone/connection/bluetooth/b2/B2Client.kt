@@ -218,8 +218,7 @@ class B2Client(
             cursor = copy(next).put("limit", cursor.n("limit"))
         }
         // The complete missing report confirms durable chunks even if the old ACK was lost.
-        // Feed the same session observer as ACK settlement; it deduplicates by direction,
-        // object and chunk across connections.
+        // The observer attributes recovered outbound chunks to the session that sent them.
         val resumeObserver = session.transferObserver.takeIf { p.s("intent") == "resume" }
         for (d in objects) {
             val id = d.s("objectId")
@@ -230,7 +229,7 @@ class B2Client(
                 if (ranges.any { (from, to) -> index in from until to }) continue
                 if (resumeObserver != null) {
                     val length = minOf(B2Wire.CHUNK.toLong(), d.n("size") - index * B2Wire.CHUNK.toLong())
-                    resumeObserver.chunk(id, index, incoming = false, length.toInt(), accepted = true)
+                    resumeObserver.confirmResumedOutboundChunk(id, index, length.toInt())
                 }
                 if (!alreadyApplied) progress("phoneToWatch:" + B2Progress.chunk(d, index))
             }

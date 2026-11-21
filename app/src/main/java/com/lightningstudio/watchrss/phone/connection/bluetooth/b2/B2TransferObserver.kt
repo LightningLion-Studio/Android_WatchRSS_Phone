@@ -9,6 +9,7 @@ internal interface B2TransferObserver {
     fun binaryRequest(request: JSONObject, incoming: Boolean)
     fun binaryDescriptor(id: String, kind: String, incoming: Boolean)
     fun chunk(objectId: String, index: Int, incoming: Boolean, length: Int, accepted: Boolean = false)
+    fun confirmResumedOutboundChunk(objectId: String, index: Int, length: Int)
     fun binaryApplied(request: JSONObject, incoming: Boolean)
 
     fun chunk(request: JSONObject, incoming: Boolean, length: Int, accepted: Boolean = false) {

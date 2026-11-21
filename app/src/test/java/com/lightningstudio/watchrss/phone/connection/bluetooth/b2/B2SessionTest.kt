@@ -21,8 +21,11 @@ class B2SessionTest {
     @Test fun resumeCountsDurableChunkWhoseAckWasLostWithoutCountingEarlierAckTwice() =
         runRawTransfer(dropAck = true)
 
+    @Test fun newSessionDoesNotCountBytesSentInAnEarlierSession() =
+        runRawTransfer(dropAck = true, newSession = true)
+
     /** A separate B2Receiver executes raw frames over host pipes on each connection. */
-    private fun runRawTransfer(dropAck: Boolean) = runBlocking<Unit> {
+    private fun runRawTransfer(dropAck: Boolean, newSession: Boolean = false) = runBlocking<Unit> {
         withTimeout(15000) {
             val x = ReceiverRig(ByteArray(2 * B2Wire.CHUNK + 19) { (it * 7).toByte() })
             val sourceStore = MemoryB2Store()
@@ -33,13 +36,14 @@ class B2SessionTest {
             val cap = B2Negotiation.capability(setOf("noteAsset"), setOf("noteAsset"), B2Wire.s2Limits())
             val selection = B2Negotiation.select(x.cap, cap, "phoneToWatch")!!
             val events = mutableListOf<BtSyncEvent>()
-            val telemetry = BtSyncSession(
+            fun newTelemetry() = BtSyncSession(
                 BtSyncDevice("install-0", "fixture", 121, "fixture", "fixture", "14", 34),
                 BtSyncTrigger.MANUAL, { events += it }, { 42L }, { 42L }
             ).apply {
                 decision = B2RolloutDecision(true, B2Cohort.ON, 0)
                 binaryStarted()
             }
+            var telemetry = newTelemetry()
             val commits = AtomicInteger()
             val lostAcks = AtomicInteger()
 
@@ -112,6 +116,10 @@ class B2SessionTest {
                     assertEquals(1, lostAcks.get())
                     assertEquals(2, x.store.list(x.account, "chunk").size)
                     assertEquals(0, commits.get())
+                    if (newSession) {
+                        telemetry.finishFailure(requireNotNull(failure))
+                        telemetry = newTelemetry()
+                    }
                 }
                 val complete = transfer(if (dropAck) "resume" else "create", interrupt = false)
                 assertEquals("COMPLETE", complete.s("state"))
@@ -119,11 +127,18 @@ class B2SessionTest {
                 assertEquals("COMPLETE", x.store.get(x.account, "job", x.job)!!.s("state"))
                 assertEquals(1, commits.get())
                 telemetry.finishSuccess()
-                val event = events.single().data
+                assertEquals(if (newSession) 2 else 1, events.size)
+                val event = events.last().data
                 val transfer = event.getJSONObject("transfer")
                 assertEquals("b2", event.getString("protocol"))
-                assertEquals(x.bytes.size, transfer.getInt("bytesEffective"))
-                assertTrue(transfer.getLong("bytesWire") > x.bytes.size)
+                val wire = transfer.getLong("bytesWire")
+                if (newSession) {
+                    assertTrue("Resumed connection sent only the tail. wire=$wire", wire < B2Wire.CHUNK)
+                    assertEquals("New session: wire=$wire", 19, transfer.getInt("bytesEffective"))
+                } else {
+                    assertEquals(x.bytes.size, transfer.getInt("bytesEffective"))
+                    assertTrue(wire > x.bytes.size)
+                }
                 assertEquals(1, transfer.getInt("objects"))
                 assertEquals(0, transfer.getInt("resentChunks"))
                 assertEquals(1, event.getJSONObject("kinds").getInt("noteAsset"))

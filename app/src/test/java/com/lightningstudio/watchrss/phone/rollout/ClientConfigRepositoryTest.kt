@@ -49,6 +49,12 @@ class ClientConfigRepositoryTest {
     private val installId = "install-1"
     private val feature = FeatureRegistry.b2
 
+    @org.junit.Before
+    fun setBootCount() {
+        val app = RuntimeEnvironment.getApplication()
+        Settings.Global.putInt(app.contentResolver, Settings.Global.BOOT_COUNT, 12)
+    }
+
     @org.junit.After
     fun stopRefreshes() { scope.cancel() }
 
@@ -111,7 +117,7 @@ class ClientConfigRepositoryTest {
     }
 
     @Test
-    fun sessionUsesDefaultsWhenIoCacheLoadExceedsItsBudget() = runBlocking {
+    fun sessionClosesSessionFeaturesWhenIoCacheLoadExceedsItsBudget() = runBlocking {
         val app = RuntimeEnvironment.getApplication()
         val prefs = app.getSharedPreferences("watchrss_client_config", Context.MODE_PRIVATE)
         check(prefs.edit()
@@ -137,7 +143,10 @@ class ClientConfigRepositoryTest {
             assertTrue(loadStarted.await(2, TimeUnit.SECONDS))
             val cold = repo.snapshotForSession()
             assertEquals(0L, cold.version)
-            assertEquals(feature.defaults, cold.rollout(feature))
+            assertFalse(cold.cacheLoaded)
+            assertEquals(0, cold.rollout(feature).percent)
+            val launchFeature = feature.copy(evaluateAt = EvaluateAt.LAUNCH)
+            assertEquals(feature.defaults, cold.rollout(launchFeature))
         } finally {
             releaseLoad.countDown()
         }
@@ -247,7 +256,7 @@ class ClientConfigRepositoryTest {
     }
 
     @Test
-    fun rebootUsesWallClockAndTreatsNegativeAgeAsExpired() = runBlocking {
+    fun rebootTreatsUnverifiedAgeAsExpiredUntilRefresh() = runBlocking {
         val context = RuntimeEnvironment.getApplication()
         Settings.Global.putInt(context.contentResolver, Settings.Global.BOOT_COUNT, 12)
         MockWebServer().use { server ->
@@ -262,13 +271,101 @@ class ClientConfigRepositoryTest {
             ShadowSystemClock.advanceBy(Duration.ofDays(8))
             clock += TimeUnit.DAYS.toMillis(1)
             server.enqueue(MockResponse().setResponseCode(503))
-            assertEquals(enabled, repository(server).decideB2(true, offer))
+            val expired = B2RolloutDecision(false, B2Cohort.OFF, 3, configStale = true)
+            assertEquals(expired, repository(server).decideB2(true, offer))
 
             Settings.Global.putInt(context.contentResolver, Settings.Global.BOOT_COUNT, 14)
             clock -= TimeUnit.DAYS.toMillis(8)
             server.enqueue(MockResponse().setResponseCode(503))
+            val after = repository(server)
+            assertEquals(expired, after.decideB2(true, offer))
+
+            server.enqueue(MockResponse().setBody(config(4, 42, null)))
+            assertEquals(B2RolloutDecision(true, B2Cohort.ON, 4), after.decideB2(true, offer))
+        }
+    }
+
+    @Test
+    fun rollbackAcrossDeviceBootDoesNotResurrectExpiredConfig() = runBlocking {
+        val app = RuntimeEnvironment.getApplication()
+        Settings.Global.putInt(app.contentResolver, Settings.Global.BOOT_COUNT, 12)
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(config(3, 100, null)))
+            val offer = JSONObject().put("guardedLibraryVersion", 1).put("libraryBinary", JSONObject())
+            val before = repository(server)
+            assertEquals(B2RolloutDecision(true, B2Cohort.ON, 3), before.decideB2(true, offer))
+
+            advanceClock(TimeUnit.DAYS.toMillis(8))
+            server.enqueue(MockResponse().setResponseCode(503))
+            val expired = B2RolloutDecision(false, B2Cohort.OFF, 3, configStale = true)
+            assertEquals(expired, before.decideB2(true, offer))
+
+            clock -= TimeUnit.DAYS.toMillis(7)
+            ShadowSystemClock.reset()
+            Settings.Global.putInt(app.contentResolver, Settings.Global.BOOT_COUNT, 13)
+            server.enqueue(MockResponse().setResponseCode(503))
+            val after = repository(server)
+            assertEquals(expired, after.decideB2(true, offer))
+        }
+    }
+
+    @Test
+    fun oldAnchorAndUnavailableBootCountDoNotProveCacheAge() = runBlocking {
+        val app = RuntimeEnvironment.getApplication()
+        val prefs = app.getSharedPreferences("watchrss_client_config", Context.MODE_PRIVATE)
+        check(prefs.edit()
+            .putString("install_id", installId)
+            .putString("last_config", config(3, 100, null))
+            .putLong("fetched_at", clock)
+            .putInt("fetched_boot", 12)
+            .putLong("fetched_elapsed", android.os.SystemClock.elapsedRealtime())
+            .commit())
+        val offer = JSONObject().put("guardedLibraryVersion", 1).put("libraryBinary", JSONObject())
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(503))
             assertEquals(B2RolloutDecision(false, B2Cohort.OFF, 3, configStale = true),
                 repository(server).decideB2(true, offer))
+
+            Settings.Global.putInt(app.contentResolver, Settings.Global.BOOT_COUNT, -1)
+            server.enqueue(MockResponse().setBody(config(4, 100, null)))
+            assertEquals(B2RolloutDecision(true, B2Cohort.ON, 4), repository(server).decideB2(true, offer))
+            server.enqueue(MockResponse().setResponseCode(503))
+            assertEquals(B2RolloutDecision(false, B2Cohort.OFF, 4, configStale = true),
+                repository(server).decideB2(true, offer))
+        }
+    }
+
+    @Test
+    fun coldCacheTimeoutDoesNotBypassPreviouslyFetchedZeroPercent() =
+        assertColdCacheTimesOutClosed(percent = 0, forced = null)
+
+    @Test
+    fun coldCacheTimeoutDoesNotBypassPreviouslyFetchedForcedOff() =
+        assertColdCacheTimesOutClosed(percent = 100, forced = "off")
+
+    private fun assertColdCacheTimesOutClosed(percent: Int, forced: String?) = runBlocking<Unit> {
+        val app = RuntimeEnvironment.getApplication()
+        val inDefaultBucket = "install-0" // Bucket 9 under the compiled 20% default.
+        Settings.Global.putInt(app.contentResolver, Settings.Global.BOOT_COUNT, 12)
+        val releaseLoad = CountDownLatch(1)
+        val delayedContext = object : ContextWrapper(app) {
+            override fun getApplicationContext(): Context = this
+            override fun getSharedPreferences(name: String, mode: Int): SharedPreferences {
+                check(releaseLoad.await(5, TimeUnit.SECONDS))
+                return super.getSharedPreferences(name, mode)
+            }
+        }
+        MockWebServer().use { server ->
+            val environment = AccountEnvironment(backendBaseUrl = server.url("/").toString().trimEnd('/'))
+            val before = ClientConfigRepository(app, environment, inDefaultBucket, scope, now = { clock })
+            val offer = JSONObject().put("guardedLibraryVersion", 1).put("libraryBinary", JSONObject())
+            val cachedOff = B2RolloutDecision(false, if (forced == null) B2Cohort.OFF else B2Cohort.FORCED_OFF, 3)
+            server.enqueue(MockResponse().setBody(config(3, percent, forced)))
+            assertEquals(cachedOff, before.decideB2(true, offer))
+            val repo = ClientConfigRepository(delayedContext, environment, inDefaultBucket, scope, now = { clock })
+            val decision = try { repo.decideB2(true, offer) } finally { releaseLoad.countDown() }
+            assertEquals(cachedOff, repo.decideB2(true, offer))
+            assertFalse("Previously fetched shutdown was bypassed: $decision", decision.enabled)
         }
     }
 

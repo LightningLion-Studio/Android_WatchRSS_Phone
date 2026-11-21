@@ -418,6 +418,7 @@ class PhoneCompanionContainer(context: Context) {
             canSyncAccount = { accountRepository.hasUsableSession },
             currentPhoneUserId = { accountRepository.session.value?.userId },
             b2Database = { database },
+            sessionInitScope = appScope,
             b2AccountScope = { accountRepository.session.value?.userId?.let { com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Digests.account(accountEnvironment.backendBaseUrl, it) }.orEmpty() },
             onSyncActiveChanged = {active->
                 cloudChangeScheduler.setBluetoothSyncActive(active);cloudSyncService.setBluetoothSyncActive(active)

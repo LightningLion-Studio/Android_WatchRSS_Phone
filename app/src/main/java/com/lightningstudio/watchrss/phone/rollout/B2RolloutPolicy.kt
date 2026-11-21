@@ -27,13 +27,22 @@ internal data class B2RolloutDecision(
 }
 
 /** Only a validated D2 offer is eligible. A v14 discovery response can advertise legacy B2. */
+internal fun isB2RolloutEligible(buildAndModeEligible: Boolean, guardedOffer: JSONObject?): Boolean {
+    val guardedVersion = guardedOffer?.opt("guardedLibraryVersion")
+    return buildAndModeEligible && (guardedVersion == 1 || guardedVersion == 1L) &&
+        guardedOffer?.optJSONObject("libraryBinary") != null
+}
+
+internal fun unavailableB2Rollout(eligible: Boolean) =
+    B2RolloutDecision(false, if (eligible) B2Cohort.OFF else B2Cohort.INELIGIBLE, 0)
+
+internal fun ClientConfigRepository.b2Decision(config: ClientConfig, eligible: Boolean) =
+    B2RolloutDecision(decide(config, FeatureRegistry.b2, eligible), config.version, config.stale)
+
 internal suspend fun ClientConfigRepository.decideB2(
     buildAndModeEligible: Boolean,
     guardedOffer: JSONObject?
 ): B2RolloutDecision {
-    val guardedVersion = guardedOffer?.opt("guardedLibraryVersion")
-    val eligible = buildAndModeEligible && (guardedVersion == 1 || guardedVersion == 1L) &&
-        guardedOffer?.optJSONObject("libraryBinary") != null
-    val config = snapshotForSession(waitForRefresh = eligible)
-    return B2RolloutDecision(decide(config, FeatureRegistry.b2, eligible), config.version, config.stale)
+    val eligible = isB2RolloutEligible(buildAndModeEligible, guardedOffer)
+    return b2Decision(snapshotForSession(waitForRefresh = eligible), eligible)
 }

@@ -31,17 +31,21 @@ import java.util.concurrent.TimeUnit
 
 private const val MAX_CONFIG_TTL_SECONDS = 600L
 private const val CONFIG_EXPIRATION_MS = 7L * 24 * 60 * 60 * 1000
-private const val SESSION_CONFIG_WAIT_MS = 1500L
-private const val FETCHED_ELAPSED = "fetched_elapsed"
-private const val FETCHED_BOOT = "fetched_boot"
+internal const val SESSION_CONFIG_WAIT_MS = 1500L
+// FIX1 could persist an elapsed anchor reconstructed from wall time.
+private const val FETCHED_ELAPSED = "fetched_elapsed_at_download"
+private const val FETCHED_BOOT = "fetched_boot_at_download"
 
 internal data class ClientConfig(
     val version: Long = 0,
     val ttlSeconds: Long = MAX_CONFIG_TTL_SECONDS,
     val features: Map<String, FeatureRollout> = emptyMap(),
-    val stale: Boolean = false
+    val stale: Boolean = false,
+    val cacheLoaded: Boolean = true
 ) {
-    fun rollout(feature: RegisteredFeature) = features[feature.key] ?: feature.defaults
+    fun rollout(feature: RegisteredFeature) =
+        if (!cacheLoaded && feature.evaluateAt == EvaluateAt.SESSION) feature.defaults.copy(percent = 0)
+        else features[feature.key] ?: feature.defaults
 }
 
 internal class ClientConfigRepository(
@@ -58,9 +62,11 @@ internal class ClientConfigRepository(
         ?.addQueryParameter("appVersionCode", BuildConfig.VERSION_CODE.toString())
         ?.addQueryParameter("installId", installId)
         ?.build()
-    private data class Cached(val config: ClientConfig, val elapsedAnchor: Long) {
-        fun age() = SystemClock.elapsedRealtime() - elapsedAnchor
-        fun isFresh() = age() in 0 until config.ttlSeconds * 1000L
+    private data class Cached(val config: ClientConfig, val elapsedAnchor: Long?) {
+        private fun age() = elapsedAnchor?.let { SystemClock.elapsedRealtime() - it }
+
+        fun isFresh() = age()?.let { it in 0 until config.ttlSeconds * 1000L } == true
+        fun isExpired() = age()?.let { it !in 0..CONFIG_EXPIRATION_MS } != false
     }
 
     private data class Storage(val prefs: SharedPreferences, val boot: Int)
@@ -144,16 +150,21 @@ internal class ClientConfigRepository(
         }.also { inFlight = it }
     }
 
-    suspend fun snapshotForSession(waitForRefresh: Boolean = true): ClientConfig {
+    // The caller owns the deadline so it can include repository initialization.
+    suspend fun awaitSessionConfig(waitForRefresh: Boolean) {
         val pending = if (waitForRefresh) refreshIfStale() ?: storage else storage
-        withTimeoutOrNull(SESSION_CONFIG_WAIT_MS) { pending.await() }
+        pending.await()
+    }
+
+    suspend fun snapshotForSession(waitForRefresh: Boolean = true): ClientConfig {
+        withTimeoutOrNull(SESSION_CONFIG_WAIT_MS) { awaitSessionConfig(waitForRefresh) }
         return currentSnapshot()
     }
 
     fun currentSnapshot(): ClientConfig {
-        val snapshot = cached ?: return ClientConfig()
-        return if (snapshot.age() in 0..CONFIG_EXPIRATION_MS) snapshot.config
-            else snapshot.config.copy(stale = true)
+        val snapshot = cached
+        if (snapshot == null) return ClientConfig(cacheLoaded = storage.isCompleted)
+        return if (snapshot.isExpired()) snapshot.config.copy(stale = true) else snapshot.config
     }
 
     fun decide(config: ClientConfig, feature: RegisteredFeature, eligible: Boolean) =
@@ -163,23 +174,10 @@ internal class ClientConfigRepository(
     private fun readCache(prefs: SharedPreferences, boot: Int): Cached? = try {
         prefs.getString("last_config", null)?.takeIf { prefs.getString("install_id", null) == installId }?.let {
             val config = parseClientConfig(JSONObject(it))
-            val elapsed = SystemClock.elapsedRealtime()
-            val savedAnchor = prefs.getLong(FETCHED_ELAPSED, Long.MIN_VALUE)
+            val savedAnchor = prefs.getLong(FETCHED_ELAPSED, -1L)
             val sameBoot = boot >= 0 && boot == prefs.getInt(FETCHED_BOOT, -1)
-            val anchor = if (sameBoot && savedAnchor != Long.MIN_VALUE && savedAnchor <= elapsed) {
-                savedAnchor
-            } else {
-                // A reboot or legacy cache has no usable elapsed anchor. Rebase its wall age
-                // onto this boot so subsequent wall adjustments do not extend the cache.
-                val wallAge = now() - prefs.getLong("fetched_at", 0L)
-                val age = if (wallAge < 0) CONFIG_EXPIRATION_MS + 1 else wallAge
-                (elapsed - age).also { rebased ->
-                    if (boot >= 0) prefs.edit {
-                        putLong(FETCHED_ELAPSED, rebased)
-                        putInt(FETCHED_BOOT, boot)
-                    }
-                }
-            }
+            // Once the boot changes there is no trustworthy elapsed age until a refresh.
+            val anchor = savedAnchor.takeIf { sameBoot && it in 0..SystemClock.elapsedRealtime() }
             Cached(config, anchor)
         }
     } catch (_: JSONException) {

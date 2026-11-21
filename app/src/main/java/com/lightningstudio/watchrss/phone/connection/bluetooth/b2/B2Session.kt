@@ -163,8 +163,9 @@ class B2Session(private val input: InputStream, private val output: OutputStream
                                     lastWrite = writingSince
                                     B2Frame.Data(h, outgoing.bytes)
                                 }
-                                writeFrame(frame)
-                                transferObserver?.chunk(outgoing.request, incoming = false, outgoing.bytes.size)
+                                writeFrame(frame, payloadWritten = {
+                                    transferObserver?.chunk(outgoing.request, incoming = false, outgoing.bytes.size)
+                                })
                             } catch (e: B2Exception) {
                                 if (e.code != "LEASE_EXPIRED") throw e
                                 outgoing.answer.completeExceptionally(e)
@@ -375,7 +376,12 @@ class B2Session(private val input: InputStream, private val output: OutputStream
         }
     }
 
-    private fun writeFrame(frame: B2Frame, heartbeatJob: String? = null, starting: () -> Unit = {}) {
+    private fun writeFrame(
+        frame: B2Frame,
+        heartbeatJob: String? = null,
+        payloadWritten: () -> Unit = {},
+        starting: () -> Unit = {}
+    ) {
         synchronized(lifecycle) {
             checkOpen()
             authorize()
@@ -413,7 +419,11 @@ class B2Session(private val input: InputStream, private val output: OutputStream
             override fun write(b: ByteArray, off: Int, len: Int) {
                 checkOpen(); output.write(b, off, len); lastWrite = clock(); transferObserver?.bytes(len.toLong())
             }
-            override fun flush() { checkOpen(); output.flush() }
+            override fun flush() {
+                payloadWritten()
+                checkOpen()
+                output.flush()
+            }
         }, frame)
         writingSince = 0
     }

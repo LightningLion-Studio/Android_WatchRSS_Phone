@@ -31,10 +31,18 @@ import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncSession
 import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncStage
 import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncTelemetry
 import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncTrigger
+import com.lightningstudio.watchrss.phone.rollout.B2RolloutDecision
 import com.lightningstudio.watchrss.phone.rollout.ClientConfigRepository
-import com.lightningstudio.watchrss.phone.rollout.decideB2
+import com.lightningstudio.watchrss.phone.rollout.SESSION_CONFIG_WAIT_MS
+import com.lightningstudio.watchrss.phone.rollout.b2Decision
+import com.lightningstudio.watchrss.phone.rollout.isB2RolloutEligible
+import com.lightningstudio.watchrss.phone.rollout.unavailableB2Rollout
 import com.lightningstudio.watchrss.phone.data.telemetry.runBtSync
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -145,7 +153,8 @@ class PhoneBluetoothSyncManager(
     private val prepareAccountDomain:suspend(String,String?)->Unit={_,_->},
     private val acknowledgeAccountDomain:suspend(String,String)->Unit={_,_->},
     private val b2Database: () -> com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase? = { null },
-    private val b2AccountScope: () -> String = { "" }
+    private val b2AccountScope: () -> String = { "" },
+    private val sessionInitScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 ) {
     private val syncDiagnostics=com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnostics.open(context.applicationContext)
     internal var b2AccountFence: () -> B2AccountFence? = { null }
@@ -153,15 +162,40 @@ class PhoneBluetoothSyncManager(
     internal var b2RolloutConfig: () -> ClientConfigRepository? = { null }
     internal var btSyncTelemetry: () -> BtSyncTelemetry? = { null }
 
-    /** The offer must come from the guarded probe after validation. */
-    internal suspend fun decideLibraryRollout(binaryMerge: Boolean, guardedOffer: JSONObject? = null) =
-        withContext(Dispatchers.IO) { b2RolloutConfig()?.decideB2(binaryMerge, guardedOffer) }
+    // Initialization can block in Android preferences. Its lifetime belongs to the
+    // application, so timing out a session can stop awaiting it immediately.
+    private val rolloutRepository = sessionInitScope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
+        b2RolloutConfig()
+    }
 
-    internal suspend fun beginBtSync(trigger: BtSyncTrigger = BtSyncTrigger.MANUAL): BtSyncSession? =
-        withContext(Dispatchers.IO) {
-            b2RolloutConfig()?.refreshIfStale()
-            btSyncTelemetry()?.begin(trigger)
+    /** The offer must come from the guarded probe after validation. */
+    internal suspend fun decideLibraryRollout(
+        binaryMerge: Boolean,
+        guardedOffer: JSONObject? = null
+    ): B2RolloutDecision? {
+        val eligible = isB2RolloutEligible(binaryMerge, guardedOffer)
+        var repository: ClientConfigRepository? = null
+        val completed = withTimeoutOrNull(SESSION_CONFIG_WAIT_MS) {
+            val loaded = rolloutRepository.await()
+            repository = loaded
+            loaded?.awaitSessionConfig(waitForRefresh = eligible)
+            true
         }
+        val loaded = repository
+        return if (loaded != null) loaded.b2Decision(loaded.currentSnapshot(), eligible)
+            else if (completed == null) unavailableB2Rollout(eligible)
+            else null
+    }
+
+    internal suspend fun beginBtSync(trigger: BtSyncTrigger = BtSyncTrigger.MANUAL): BtSyncSession? {
+        sessionInitScope.launch(Dispatchers.IO) { rolloutRepository.await()?.refreshIfStale() }
+        val telemetry = sessionInitScope.async(Dispatchers.IO) { btSyncTelemetry()?.begin(trigger) }
+        return try {
+            withTimeoutOrNull(SESSION_CONFIG_WAIT_MS) { telemetry.await() }
+        } finally {
+            telemetry.cancel()
+        }
+    }
     /** P1 optional local projection copy; null leaves the legacy path byte-for-byte unchanged. */
     internal var recordLegacyProjection:((peer:String,version:Int,cursor:String,payload:JSONObject)->Unit)?=null
     private val appContext = context.applicationContext

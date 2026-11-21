@@ -241,7 +241,7 @@ class B2PhonePreparationTest {
                         watch.soTimeout = 10_000
                         val peer = async(Dispatchers.IO) { receiveArticleWindow(watch, probe, text) }
                         val stats = requireNotNull(runtime).run(phone.getInputStream(), phone.getOutputStream(),
-                            probe, emptyList(), phone::close)
+                            probe, emptyList(), close = phone::close)
                         peer.await()
                         assertEquals(1, stats.sent)
                     }

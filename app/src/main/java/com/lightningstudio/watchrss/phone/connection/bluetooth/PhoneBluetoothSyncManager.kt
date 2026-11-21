@@ -142,6 +142,7 @@ class PhoneBluetoothSyncManager(
     private val syncDiagnostics=com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnostics.open(context.applicationContext)
     internal var b2AccountFence: () -> B2AccountFence? = { null }
     internal var bookRollbackWindow: () -> String? = { null }
+    internal var onDeferredBluetoothBody: () -> Unit = {}
     /** P1 optional local projection copy; null leaves the legacy path byte-for-byte unchanged. */
     internal var recordLegacyProjection:((peer:String,version:Int,cursor:String,payload:JSONObject)->Unit)?=null
     private val appContext = context.applicationContext
@@ -1687,7 +1688,9 @@ class PhoneBluetoothSyncManager(
                         val transport = requireNotNull(active.transport)
                         val inventory = binaryAssetInventory(route)
                         active.client.withBinaryTransport(active, transport.generation) { input, output, close ->
-                            runtime.run(input, output, requireNotNull(probe), inventory, close)
+                            scope?.let { B2BodyHandoff.open(appContext.filesDir, it, onDeferredBluetoothBody) }.use { handoff ->
+                                runtime.run(input, output, requireNotNull(probe), inventory, handoff, close)
+                            }
                         }
                     }
                 } catch (failure: B2Exception) {

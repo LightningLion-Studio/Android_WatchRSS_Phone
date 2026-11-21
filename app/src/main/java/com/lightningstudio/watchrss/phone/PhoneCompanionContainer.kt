@@ -441,6 +441,7 @@ class PhoneCompanionContainer(context: Context) {
             }
         ).also { manager ->
             manager.b2AccountFence = { accountRepository.b2AccountFence }
+            manager.onDeferredBluetoothBody = cloudSyncService::deferBluetoothBodyRetry
             if (BuildConfig.SYNC_V2) manager.bookRollbackWindow = cloudSyncService::syncV2BookRollbackWindow
             if(BuildConfig.SYNC_V2 || BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION)manager.recordLegacyProjection={peer,version,cursor,payload ->
                 if(BuildConfig.SYNC_V2)cloudSyncService.captureSyncV2Legacy(peer,version,cursor,payload)

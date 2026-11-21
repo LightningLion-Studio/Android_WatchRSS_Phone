@@ -1,8 +1,16 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
 import android.content.Context
+import androidx.room.withTransaction
+import com.lightningstudio.watchrss.phone.cloud.BluetoothAutomaticCloudFence
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
+import com.lightningstudio.watchrss.phone.connection.bluetooth.B2BodyHandoff
+import com.lightningstudio.watchrss.phone.connection.bluetooth.B2NoteAssetBusiness
+import com.lightningstudio.watchrss.phone.connection.bluetooth.B2RoomStore
 import com.lightningstudio.watchrss.phone.connection.bluetooth.BookBluetoothSync
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Metadata
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.assetDescriptor
+import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.book.BookSync
 import com.lightningstudio.watchrss.phone.data.book.ImportedBookStore
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
@@ -72,7 +80,11 @@ class SyncV2BodyTransportTest {
         val manager=CloudKeyManager(null,preferencesOverride=context.getSharedPreferences("body-${System.nanoTime()}",Context.MODE_PRIVATE)).also{it.bindBackend("http://synthetic");it.saveAccountKey("u",1,f.key,true)}
         return SyncV2ContentKeys.authenticated(manager,"u"){}
     }
-    @Test fun coldCacheAfterV1BookAndLinkedAssetUsesOnlyCarrierControl() = runBlocking<Unit> {
+    @Test fun coldCacheAfterV1BookAndLinkedAssetUsesOnlyCarrierControl() = coldCacheAfterBluetooth(binary = false)
+
+    @Test fun coldCacheAfterB2BookAndLinkedAssetUsesOnlyCarrierControl() = coldCacheAfterBluetooth(binary = true)
+
+    private fun coldCacheAfterBluetooth(binary: Boolean) = runBlocking<Unit> {
         SyncV2P5Fixture().use { f ->
             f.start()
             val backend = Backend(f)
@@ -114,8 +126,23 @@ class SyncV2BodyTransportTest {
                     else -> error("unexpected v1 phase")
                 }
             }
-            bluetooth.sync(syncReading = false)
-            assertEquals(128, chunksPulled)
+            if (binary) {
+                store.merge(state, {}, binary = true)
+                java.nio.file.Files.createDirectories(directory.toPath())
+                val staged = File(files, "b2-staged-book").apply { writeBytes(raw) }
+                val source = BookPackageFiles.verify(staged, BookPackageFiles.Revision(hash, raw.size.toLong())) {}
+                val prepared = store.prepareBinaryPackage(bookId, requireNotNull(source)) {}
+                assertNull(SyncV2BodyRepository(f.sql, files).original("book", bookId, state))
+                f.room.withTransaction {
+                    assertEquals("merged", store.installBinaryPackage(bookId, fingerprint, state, prepared,
+                        File(files, "b2-chapter-scratch").apply { mkdirs() }) {})
+                }
+                assertEquals("b2-$bookId-$hash.jsonl", store.packageFile(bookId)!!.name)
+                File(directory, "$bookId.jsonl").writeBytes(raw.copyOf().apply { this[lastIndex - 1] = 0 })
+            } else {
+                bluetooth.sync(syncReading = false)
+                assertEquals(128, chunksPulled)
+            }
             assertEquals(size, raw.size)
             assertEquals(hash, store.packageHash(bookId))
 
@@ -123,11 +150,25 @@ class SyncV2BodyTransportTest {
             val image = ByteArray(33009) { (it % 251).toByte() }
             f.edit("![D1](assets/$asset)\n")
             val repository = SyncV2BodyRepository(f.sql, files)
-            repository.file("asset", asset).apply { parentFile!!.mkdirs(); writeBytes(image) }
-            NoteRepository(f.room.noteDao(), "synthetic-phone").registerAsset(
-                NoteAssetEntity("private-d1-uuid", "note", SyncV2BodyCodec.hash(image), asset, "image/png",
-                    image.size.toLong(), asset, false, f.f.now)
-            )
+            val assetObject = assetDescriptor(image, asset)
+            if (binary) {
+                val room = B2RoomStore(f.room)
+                val account = "a".repeat(64)
+                val business = B2NoteAssetBusiness(room, account, File(files, "notes/assets")) {}
+                val staged = File(files, "b2-staged-asset").apply { writeBytes(image) }
+                room.exclusive { room.transaction {
+                    assertEquals("merged", business.apply(assetObject, B2Metadata.validate(assetObject), staged))
+                } }
+                assertEquals(emptyList<String>(), repository.refreshReferences(f.f.now, {}))
+                assertArrayEquals(image, repository.original("asset", asset,
+                    JSONObject().put("assetId", asset).put("deleted", false))!!.raw)
+            } else {
+                repository.file("asset", asset).apply { parentFile!!.mkdirs(); writeBytes(image) }
+                NoteRepository(f.room.noteDao(), "synthetic-phone").registerAsset(
+                    NoteAssetEntity("private-d1-uuid", "note", SyncV2BodyCodec.hash(image), asset, "image/png",
+                        image.size.toLong(), asset, false, f.f.now)
+                )
+            }
             // The real account worker observes file writes before choosing its publication revision.
             f.actions().state()
             f.drain()
@@ -209,7 +250,10 @@ class SyncV2BodyTransportTest {
             assertEquals(0, installs)
             assertEquals(2, backend.ready.size)
             assertEquals(1, f.room.bookDao().all().size)
-            assertEquals(1, f.room.noteDao().assets("note").size)
+            assertEquals(1, f.sql.query("SELECT count(*) FROM note_assets WHERE storageKey=?", arrayOf(asset)).use {
+                it.moveToFirst()
+                it.getInt(0)
+            })
 
             // Fresh cloud storage, with the same authenticated rows.
             backend.ready.clear()
@@ -535,6 +579,65 @@ class SyncV2BodyTransportTest {
                 File(f.root, "review-${attempt++}"), life, approved,
                 { SyncV2TransportSignals(wifi = true, internet = true) }, now)
         override fun close() { life.close(); ring.close(); client.close(); f.close() }
+    }
+
+    @Test fun verifiedB2PlanDefersOnlyTheMatchingAuthenticatedBodyAndReusesTheCommit() = runBlocking<Unit> {
+        ReviewAsset(SyncV2P5Fixture(), true).use { a ->
+            assertTrue(a.file.delete())
+            val scope = "${a.f.projection.scope}:${a.f.projection.legacyRollbackGeneration()}"
+            val descriptor = assetDescriptor(a.raw, a.id)
+            val otherRevision = assetDescriptor(a.changed, a.id)
+            val room = B2RoomStore(a.f.room)
+            val receiver = B2NoteAssetBusiness(room, "a".repeat(64), a.file.parentFile!!) {}
+            val staged = File(a.f.root, "fixture-b2-staged").apply { writeBytes(a.raw) }
+            val repo = SyncV2BodyRepository(a.f.sql, a.f.root)
+            val binding = SyncV2BodyCodec.Binding("asset", a.id, a.entity, a.rev)
+            val job = "a".repeat(32)
+            B2BodyHandoff.open(a.f.root, scope).use { pending ->
+                pending.verified(job, listOf(otherRevision))
+                assertFalse(repo.pendingBluetooth(binding, scope))
+                pending.verified(job, listOf(descriptor))
+                assertFalse(repo.pendingBluetooth(binding, "$scope-other"))
+                assertTrue(repo.pendingBluetooth(binding, scope))
+                assertEquals(SyncV2BodyChannel.Result(1, listOf("body_channel_pending")), a.channel().sync())
+                assertEquals(1, a.backend.listCalls)
+                assertFalse(a.file.exists())
+                assertEquals(0, a.backend.reads.size)
+                room.exclusive { room.transaction {
+                    assertEquals("merged", receiver.apply(descriptor, B2Metadata.validate(descriptor), staged))
+                } }
+                pending.applied(job, descriptor.getString("objectId"))
+                assertEquals(SyncV2BodyChannel.Result(0, emptyList()), a.channel().sync())
+            }
+            assertArrayEquals(a.raw, a.file.readBytes())
+            assertEquals(0, a.installs)
+            assertEquals(0, a.backend.reads.size)
+            assertEquals(0, a.backend.puts.size)
+        }
+    }
+
+    @Test fun interruptedB2PlanRequeuesDeferredCloudReadAfterBluetoothCloses() {
+        ReviewAsset(SyncV2P5Fixture(), true).use { a ->
+            assertTrue(a.file.delete())
+            val scope = "${a.f.projection.scope}:${a.f.projection.legacyRollbackGeneration()}"
+            val fence = BluetoothAutomaticCloudFence()
+            fence.setActive(true)
+            B2BodyHandoff.open(a.f.root, scope, fence::deferBodyRetry).use { connection ->
+                connection.verified("c".repeat(32), listOf(assetDescriptor(a.raw, a.id)))
+                assertEquals(SyncV2BodyChannel.Result(1, listOf("body_channel_pending")), a.channel().sync())
+                assertEquals(0, a.backend.reads.size)
+            }
+            assertFalse(fence.needsResume)
+            fence.setActive(false)
+            assertTrue(fence.needsResume)
+            fence.started(manual = false, job = null)
+            assertEquals(SyncV2BodyChannel.Result(0, emptyList()), a.channel().sync())
+            assertTrue(a.backend.reads.isNotEmpty())
+            assertEquals(1, a.installs)
+            assertEquals(0, a.backend.puts.size)
+            assertArrayEquals(a.raw, a.file.readBytes())
+            assertFalse(fence.needsResume)
+        }
     }
 
     @Test fun finalOriginalCheckRejectsReplacementDuringLastWindowCheck() {

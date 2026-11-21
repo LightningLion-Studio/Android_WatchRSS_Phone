@@ -266,7 +266,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
     }
 
     suspend fun run(input: InputStream, output: OutputStream, probe: JSONObject,
-        assets: List<NoteAssetInventoryEntry>, close: () -> Unit) = supervisorScope {
+        assets: List<NoteAssetInventoryEntry>, handoff: B2BodyHandoff.Connection? = null, close: () -> Unit) = supervisorScope {
         authorize()
         val a = createOrResume(probe, assets)
         val retiring = a.getString("state") in setOf("RETIRING", "CANCELLED")
@@ -317,6 +317,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
                     val receiver = B2Receiver(store, files, auth, business,
                         monotonic = monotonic, progress = progress,
                         retentionGeneration = retentionGeneration)
+                    receiver.onVerifiedPlan = handoff?.let { it::verified }
                     session.install(receiver) { request ->
                         val apply = request.getString("phase") == "apply"
                         if (apply) business.applyWork = { session.workProgress(request.getString("jobId")) }
@@ -326,6 +327,10 @@ internal class B2KindSync(private val store: B2Persistence, private val director
                             if (apply) business.applyWork = {}
                         }
                         answer.also {
+                            if (handoff != null && answer.getBoolean("success") && request.s("phase") in setOf("apply", "complete", "cancel")) {
+                                val job = request.s("jobId")
+                                if (apply) handoff.applied(job, request.o("payload").s("objectId")) else handoff.ended(job)
+                            }
                             if (request.getString("phase") == "complete" && answer.getBoolean("success")) { progress("complete:watchToPhone"); reverseDone.complete(Unit) }
                             if (request.s("phase") == "begin") {
                                 val state = answer.o("result").s("state")

@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.lightningstudio.watchrss.phone.connection.bluetooth.B2BodyHandoff
 import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile
 import com.lightningstudio.watchrss.phone.data.book.BookSync
@@ -16,6 +17,14 @@ import java.nio.file.NoSuchFileException
 /** Original bytes are the offline queue. Downloaded SHA values never change business clocks. */
 internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private val files:File,private val beforeInstall:(File)->Unit={}) {
     private val bookDirectory = File(files, "imported_books")
+
+    fun pendingBluetooth(kind: String, id: String, scope: String?): Boolean =
+        scope != null && B2BodyHandoff.hasPending(files, scope, kind, id)
+
+    fun pendingBluetooth(binding: SyncV2BodyCodec.Binding, scope: String, defer: Boolean = false): Boolean =
+        B2BodyHandoff.hasPending(files, scope, binding.kind, binding.logicalId, defer) {
+            SyncV2BodyCodec.revision(binding.kind, binding.entityKey, it) == binding.bodyRevision
+        }
 
     /** Destination for a verified cloud download. Local reads use the current package revision. */
     fun file(kind: String, id: String): File {
@@ -121,6 +130,18 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             BookReference(BookPackageFiles.Revision(row.getString(0), row.getLong(1)), current)
         }
 
+    private fun resolveBook(id: String, current: BookReference, onRead: (Int) -> Unit = {}): BookPackageFiles.Original? =
+        BookPackageFiles.resolveOriginal(bookDirectory, id, current.revision, onRead)
+
+    /** Recovery and cloud proof use the same current Room identity and physical original. */
+    fun committedBook(id: String, selected: JSONObject, maxBytes: Long? = null,
+        onRead: (Int) -> Unit = {}): BookPackageFiles.Original? {
+        val current = bookReference(id, selected) ?: return null
+        if (maxBytes != null && current.revision.bytes > maxBytes) SyncV2Codec.fail("quota_exceeded")
+        val original = resolveBook(id, current, onRead) ?: return null
+        return original.takeIf { bookReference(id, selected) == current && it.isCurrent() }
+    }
+
     private fun assetReference(id: String): AssetReference? {
         val owners = buildSet {
             val needle = "assets/$id"
@@ -180,7 +201,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         val limit = SyncV2BodyCodec.limit(kind)
         val source = if (before is BookReference) {
             if (before.revision.bytes > limit) SyncV2Codec.fail("object_too_large")
-            BookPackageFiles.resolve(bookDirectory, id, before.revision) ?: return null
+            resolveBook(id, before)?.file ?: return null
         } else {
             if (target.canonicalFile.parentFile != target.parentFile!!.canonicalFile) return null
             target
@@ -202,21 +223,26 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     }
 
     /** Discover referenced originals omitted by older private-UUID metadata. Absence never deletes. */
-    fun refreshReferences(now:Long,checkOwner:()->Unit):List<String> {
+    fun refreshReferences(now:Long, checkOwner:()->Unit, scope: String? = null):List<String> {
         val errors=linkedSetOf<String>()
         for(id in references(db))try {
             checkOwner()
             val exists=db.controlQuery("SELECT 1 FROM note_assets WHERE storageKey=?",arrayOf(id)).use{it.moveToFirst()}
             if(exists)continue
-            val raw=read("asset",id)?:SyncV2Codec.fail("cloud_note_asset_missing")
+            if (pendingBluetooth("asset", id, scope)) continue
+            val original = original("asset", id, JSONObject().put("assetId", id).put("deleted", false))
+                ?: SyncV2Codec.fail("cloud_note_asset_missing")
             val mime=when(id.substringAfterLast('.',"").lowercase()){ "png"->"image/png";"jpg","jpeg"->"image/jpeg";"webp"->"image/webp";"md"->"text/markdown";else->"application/octet-stream" }
             db.beginTransaction()
             try {
                 checkOwner()
-                if(!db.controlQuery("SELECT 1 FROM note_assets WHERE storageKey=?",arrayOf(id)).use{it.moveToFirst()})
+                if(!db.controlQuery("SELECT 1 FROM note_assets WHERE storageKey=?",arrayOf(id)).use{it.moveToFirst()}) {
+                    if (pendingBluetooth("asset", id, scope)) continue
+                    original.requireCurrent()
                     SyncV2PhoneApply(db).upsert("note_assets",listOf("assetId"),JSONObject().put("assetId",java.util.UUID.randomUUID().toString()).put("noteId","")
-                        .put("storageKey",id).put("mimeType",mime).put("displayName",id).put("sha256",SyncV2BodyCodec.hash(raw)).put("byteCount",raw.size)
+                        .put("storageKey",id).put("mimeType",mime).put("displayName",id).put("sha256",original.sha256).put("byteCount",original.raw.size)
                         .put("isOriginal",false).put("createdAt",now).put("deleted",false).put("deletedAt",0))
+                }
                 db.setTransactionSuccessful()
             }finally{db.endTransaction()}
         }catch(e:Exception){checkOwner();errors.add(SyncV2BodyChannel.code(e))}

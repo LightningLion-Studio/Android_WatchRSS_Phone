@@ -13,16 +13,24 @@ import java.security.MessageDigest
 import java.util.UUID
 
 /** Bridges the portable Markdown/ZIP format to app-private note asset storage. */
-class NoteImportExportService(private val context: Context, private val repository: NoteRepository) {
+class NoteImportExportService internal constructor(
+    private val context: Context,
+    private val repository: NoteRepository,
+    private val assetFile: (String) -> File
+) {
+    constructor(context: Context, repository: NoteRepository) : this(context, repository, { key ->
+        val app = context.applicationContext as? com.lightningstudio.watchrss.phone.PhoneCompanionApplication
+        app?.container?.noteAssetFile(key) ?: NoteAssetFiles.legacy(context.filesDir, key)
+    })
+
     suspend fun exportZip(): ByteArray {
         val entries = mutableListOf<MarkdownArchiveEntry>()
-        val app = context.applicationContext as? com.lightningstudio.watchrss.phone.PhoneCompanionApplication
         repository.allNotes().filterNot { it.deleted }.forEach { note ->
             entries += MarkdownArchiveEntry("notes/${note.noteId}.md", MarkdownNoteCodec.export(note).toByteArray())
             // Cloud hydration can restore referenced image files before local asset rows exist.
             val keys=repository.assets(note.noteId).map{it.storageKey}.toSet()+NoteAssetSyncPayload.referencedStorageKeys(note.markdown)
             keys.filter(NoteAssetFiles::isSafe).forEach { key ->
-                val source = app?.container?.noteAssetFile(key) ?: NoteAssetFiles.legacy(context.filesDir, key)
+                val source = assetFile(key)
                 if (source.isFile) entries += MarkdownArchiveEntry("notes/assets/$key", source.readBytes())
             }
         }

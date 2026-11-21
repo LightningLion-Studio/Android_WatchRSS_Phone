@@ -45,11 +45,12 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     }
     internal sealed interface Reference
     private data class BookReference(val revision: BookPackageFiles.Revision, val identity: String) : Reference
-    private data class AssetReference(val owners: Set<String>, val revisions: Set<BookPackageFiles.Revision>) : Reference
+    private data class AssetReference(val owners: Set<String>, val revisions: Set<BookPackageFiles.Revision>,
+        val published: BookPackageFiles.Revision?) : Reference
 
     internal class Original(val raw: ByteArray, val sha256: String, private val reference: Reference,
         private val stillCurrent: () -> Boolean) {
-        val hasRegisteredDigest = reference is BookReference || reference is AssetReference && reference.revisions.isNotEmpty()
+        val hasRegisteredDigest = reference is BookReference || reference is AssetReference && (reference.published != null || reference.revisions.isNotEmpty())
         fun matches(other: Original?): Boolean =
             other != null && reference == other.reference && sha256 == other.sha256 && raw.size == other.raw.size
         fun requireCurrent() {
@@ -155,7 +156,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             if (registered && !live) return null
             found
         }
-        return AssetReference(owners, revisions)
+        return AssetReference(owners, revisions, NoteAssetFiles.reference(db, id))
     }
 
     private fun stableRead(file: File, observed: FileIdentity, limit: Int): ByteArray? {
@@ -193,7 +194,8 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         val actual = BookPackageFiles.Revision(hash, raw.size.toLong())
         when (before) {
             is BookReference -> if (before.revision != actual) return null
-            is AssetReference -> if (before.revisions.isNotEmpty() && before.revisions != setOf(actual)) return null
+            is AssetReference -> if ((before.published != null && before.published != actual) ||
+                (before.revisions.isNotEmpty() && before.revisions != setOf(actual))) return null
         }
         validate(kind, id, selected, raw)
         val original = Original(raw, hash, before) {

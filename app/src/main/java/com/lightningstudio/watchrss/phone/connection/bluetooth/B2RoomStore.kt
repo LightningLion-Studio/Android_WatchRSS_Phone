@@ -14,6 +14,7 @@ internal class B2RoomStore(private val db: PhoneCompanionDatabase) : B2Persisten
     private var initialized = false
     private val lane = synchronized(lanes) { lanes.getOrPut(db) { Mutex() } }
     private val sql get() = db.openHelper.writableDatabase
+    internal val attachmentDatabase get() = sql
     private fun initialize() {
         if (initialized) return
         sql.execSQL("PRAGMA synchronous=FULL")

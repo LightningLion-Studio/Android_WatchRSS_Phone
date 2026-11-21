@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
-/** Guarded B2 durably stages originals in a private directory. Readers can find
+/** B2 durably stages originals in a private directory. Readers can find
  * them only through a committed reference. Existing local files use their old path. */
 internal object NoteAssetFiles {
     private const val TABLE = "note_asset_file_references"
@@ -51,6 +51,9 @@ internal object NoteAssetFiles {
             if (it.moveToFirst()) BookPackageFiles.Revision(it.getString(0), it.getLong(1)) else null
         }
     }
+
+    fun referencesDigest(db: SupportSQLiteDatabase, sha256: String): Boolean =
+        db.query("SELECT 1 FROM $TABLE WHERE sha256=? LIMIT 1", arrayOf(sha256)).use { it.moveToFirst() }
 
     fun current(db: SupportSQLiteDatabase?, files: File, key: String): File {
         val reference = reference(db, key) ?: return legacy(files, key)

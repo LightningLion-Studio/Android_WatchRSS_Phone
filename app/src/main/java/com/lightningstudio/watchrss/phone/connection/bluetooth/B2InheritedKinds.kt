@@ -93,7 +93,7 @@ internal class B2InheritedKinds(
         if (descriptor.getString("kind") == B2Wire.BOOK_COMMIT) {
             (books ?: throw B2Exception("UNSUPPORTED_KIND")).prepareCommit(context, metadata, applyWork)
         }
-        if (descriptor.s("kind") == B2_NOTE_ASSET && context.guarded) noteAssets.prepare(context, metadata)
+        if (descriptor.s("kind") == B2_NOTE_ASSET) noteAssets.prepareFile(context, descriptor, metadata)
     }
 
     override suspend fun applyFile(context: B2ApplyContext, descriptor: JSONObject, metadata: JSONObject,

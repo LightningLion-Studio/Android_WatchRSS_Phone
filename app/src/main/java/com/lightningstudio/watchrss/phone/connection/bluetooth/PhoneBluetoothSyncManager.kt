@@ -1649,7 +1649,7 @@ class PhoneBluetoothSyncManager(
         val identity = if (route.hasBinaryLibrary) repository.bluetoothIdentityProjection(capabilities.canonicalRssIds, readOnly = true)
             else BluetoothArticleIdentityProjection(emptyList(), emptyMap(), false)
         val business = B2InheritedKinds(db, repository, identity,
-            B2NoteAssetBusiness(store, scope, assets, authorize).apply { database = { db.openHelper.writableDatabase } },
+            B2NoteAssetBusiness(store, scope, assets, authorize),
             route.receive, capabilities.books || route.hasBinaryBooks, authorize,
             canonicalIds = capabilities.canonicalRssIds,
             books = if (route.hasBinaryBooks) B2BookBusiness(store, scope, requireNotNull(repository.books), authorize) else null)

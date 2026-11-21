@@ -8,7 +8,11 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.B2NoteAssetBusine
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryTransferRecovery
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryTransportFailure
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
+import com.lightningstudio.watchrss.phone.data.note.MarkdownNoteArchive
 import com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles
+import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
+import com.lightningstudio.watchrss.phone.data.note.NoteRepository
+import com.lightningstudio.watchrss.phone.syncv2.SyncV2BodyRepository
 import com.lightningstudio.watchrss.phone.data.note.NoteEntity
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -59,7 +63,7 @@ class B2RoomIntegrationTest {
             val auth = B2Authorization(rig.account, "phone", "watch", rig.snapshot, rig.snapshot, listOf(rig.binding)) {
                 true
             }.apply { accountCommitFence = account.commitFence }
-            val business = B2NoteAssetBusiness(store, rig.account, File(rig.root, "business-assets"), account::check)
+            val business = B2NoteAssetBusiness(store, rig.account, File(rig.root, "notes/assets"), account::check)
             val receiver = B2Receiver(pausedStore, rig.files, auth, business, fault = {
                 if (it == "beforeApplyCommit") {
                     if (commitFirst) pauseCommit = true else account.revoke()
@@ -81,7 +85,7 @@ class B2RoomIntegrationTest {
             assertEquals("AUTH_REVOKED", failure.code)
             assertEquals(commitFirst, store.get(rig.account, "assetReference", "picture.png") != null)
             assertEquals(commitFirst, !store.list(rig.account, "object").single().second.nil("receipt"))
-            val attachment = File(rig.root, "business-assets/picture.png")
+            val attachment = NoteAssetFiles.current(db.openHelper.readableDatabase, rig.root, "picture.png")
             assertEquals(commitFirst, attachment.isFile)
             if (commitFirst) assertArrayEquals(rig.bytes, attachment.readBytes())
         } finally {
@@ -178,7 +182,7 @@ class B2RoomIntegrationTest {
     @Test fun assetReferenceAndAppliedReceiptShareTheRealRoomTransaction() = runBlocking {
         val context = RuntimeEnvironment.getApplication() as Context
         val db = Room.inMemoryDatabaseBuilder(context, PhoneCompanionDatabase::class.java).allowMainThreadQueries().build()
-        val x = ReceiverRig(); val assets = File(x.root, "business-assets"); var fault = true
+        val x = ReceiverRig(); val assets = File(x.root, "notes/assets"); var fault = true
         try {
             val store = B2RoomStore(db)
             val business = B2NoteAssetBusiness(store, x.account, assets) { }
@@ -193,17 +197,86 @@ class B2RoomIntegrationTest {
             x.apply(receiver, epoch)
             assertEquals(x.descriptor.s("sha256"), store.get(x.account, "assetReference", "picture.png")!!.s("sha256"))
             assertFalse(store.list(x.account, "object").single().second.nil("receipt"))
-            assertArrayEquals(x.bytes, File(assets, "picture.png").readBytes())
+            assertArrayEquals(x.bytes, NoteAssetFiles.current(db.openHelper.readableDatabase, x.root, "picture.png").readBytes())
             // Concurrent local content must survive a different incoming version.
-            val local = File(assets, "picture.png"); local.writeText("new local content")
+            val local = NoteAssetFiles.legacy(x.root, "independent.png").apply {
+                parentFile!!.mkdirs()
+                writeText("new local content")
+            }
+            val incoming = assetDescriptor(x.bytes, local.name)
             val staged = File(x.root, "incoming").apply { writeBytes(x.bytes) }
             store.exclusive { store.transaction {
-                assertEquals("retainedLocal", business.apply(x.descriptor, B2Metadata.validate(x.descriptor), staged))
+                assertEquals("retainedLocal", business.apply(incoming, B2Metadata.validate(incoming), staged))
             } }
             assertEquals("new local content", local.readText())
         } finally { db.close(); x.root.deleteRecursively() }
         Unit
     }
+    @Test fun independentCloudAndArchiveReadersCannotSeeUncommittedB2Asset() = runBlocking<Unit> {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val rig = ReceiverRig()
+        fun database() = Room.databaseBuilder(context, PhoneCompanionDatabase::class.java,
+            File(rig.root, "publication.db").absolutePath)
+            .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
+            .allowMainThreadQueries().build()
+        val db = database()
+        val reader = database()
+        val staged = CompletableDeferred<Unit>()
+        val release = java.util.concurrent.CountDownLatch(1)
+        try {
+            val key = "picture.png"
+            val digest = rig.descriptor.s("sha256")
+            val markdown = "![picture](assets/$key)"
+            db.noteDao().upsertNotes(listOf(NoteEntity("note", null, "pictures", markdown, "", "one",
+                "one", markdown, false, 1, 1, "phone")))
+            db.openHelper.writableDatabase.execSQL("INSERT INTO note_assets VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                arrayOf<Any>("asset", "note", digest, key, "image/png", rig.bytes.size, key, true, 1L, false, 0L))
+            val repository = SyncV2BodyRepository(reader.openHelper.readableDatabase, rig.root)
+            val selected = org.json.JSONObject().put("assetId", key).put("deleted", false)
+            val export = NoteImportExportService(context, NoteRepository(reader.noteDao(), "phone")) { storageKey ->
+                NoteAssetFiles.current(reader.openHelper.readableDatabase, rig.root, storageKey)
+            }
+            suspend fun archivedAsset() = MarkdownNoteArchive.read(export.exportZip())
+                .singleOrNull { it.path == "notes/assets/$key" }
+            val store = B2RoomStore(db)
+            val business = B2NoteAssetBusiness(store, rig.account, File(rig.root, "notes/assets")) {}
+            val auth = B2Authorization(rig.account, "phone", "watch", rig.snapshot, rig.snapshot, listOf(rig.binding)) { true }
+            var fail = true
+            val receiver = B2Receiver(store, rig.files, auth, business, fault = {
+                if (it == "beforeApplyCommit" && fail) {
+                    staged.complete(Unit)
+                    check(release.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                    throw B2Exception("LOCAL_IO")
+                }
+            })
+            val epoch = rig.begin(receiver)
+            rig.manifest(receiver, epoch)
+            rig.put(receiver, epoch)
+            val apply = async(Dispatchers.IO) { runCatching { rig.apply(receiver, epoch) } }
+            try {
+                withTimeout(5_000) { staged.await() }
+                val cloudVisible = withTimeout(5_000) { repository.original("asset", key, selected) != null }
+                val archiveVisible = withTimeout(5_000) { archivedAsset() != null }
+                assertEquals("cloud/archive visibility before Room commit", listOf(false, false), listOf(cloudVisible, archiveVisible))
+            } finally {
+                release.countDown()
+            }
+            assertEquals("LOCAL_IO", (apply.await().exceptionOrNull() as B2Exception).code)
+            assertNull(repository.original("asset", key, selected))
+            assertNull(archivedAsset())
+            assertTrue(store.list(rig.account, "object").single().second.nil("receipt"))
+            fail = false
+            assertEquals("APPLIED", rig.apply(receiver, epoch).o("result").s("state"))
+            assertArrayEquals(rig.bytes, requireNotNull(repository.original("asset", key, selected)).raw)
+            assertArrayEquals(rig.bytes, requireNotNull(archivedAsset()).bytes)
+        } finally {
+            release.countDown()
+            reader.close()
+            db.close()
+            rig.root.deleteRecursively()
+        }
+    }
+
     @Test fun guardedAssetIsVisibleOnlyThroughCommitAndReplayChecksTheCurrentBytes() = runBlocking<Unit> {
         val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java)
             .allowMainThreadQueries().build()
@@ -215,7 +288,6 @@ class B2RoomIntegrationTest {
                 "one", markdown, false, 1, 1, "phone")))
             val store = B2RoomStore(db)
             val business = B2NoteAssetBusiness(store, rig.account, File(rig.root, "notes/assets")) {}
-            business.database = { sql }
             val version = B2CommitWindow.Version(B2CommitWindow.Head("scope", "head", "1", "0"), "1", "business")
             fun receiver(intent: String, beforeCommit: () -> Unit = {}): B2Receiver {
                 val auth = B2Authorization(rig.account, "phone", "watch", rig.snapshot, rig.snapshot,
@@ -262,7 +334,7 @@ class B2RoomIntegrationTest {
         val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java).build()
         val rig = ReceiverRig()
         try {
-            val assets = File(rig.root, "notes/assets")
+            val assets = File(rig.root, "notes/assets").apply { mkdirs() }
             val target = File(assets, "picture.png")
             val store = B2RoomStore(db)
             val auth = B2Authorization(rig.account, "phone", "watch", rig.snapshot, rig.snapshot, listOf(rig.binding)) { true }

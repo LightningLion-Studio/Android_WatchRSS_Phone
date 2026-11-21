@@ -300,7 +300,7 @@ class BookSyncRegressionTest {
             val manifest=LibrarySyncPayload.buildManifestRequestFromEntries("watch",emptyList(),emptyList()).put("success",true)
                 .put("supportsReaderPresets",false).put("supportsNoteManifestV2",false).put("supportsNoteAssetInventory",false).put("supportsBookSyncV1",modern)
             val frames=buildList {
-                add(ok("syncLibrary").put("supportsBookSyncV1",modern))
+                add(ok("syncLibrary").asLegacyPodJsProbe().put("supportsBookSyncV1",modern))
                 add(ok("syncAccount").put("boundUserId","owner"))
                 if(modern){add(reply("manifest").put("books",JSONArray().put(copy(state).put("contentAvailable",true))).put("missingBookIds",JSONArray()));add(readingReply())}
                 add(ok("syncLibrary","cursor"));add(manifest);add(ok("syncLibrary","complete").put("articles",JSONArray()))

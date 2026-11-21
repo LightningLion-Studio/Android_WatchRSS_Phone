@@ -43,7 +43,7 @@ class LibraryFatalResponseTest {
     private fun ok(phase:String)=JSONObject().put("success",true).put("action","syncLibrary").put("phase",phase).put("version",14).put("deviceId","watch")
     private fun manifest()=LibrarySyncPayload.buildManifestResponse("watch",emptyList()).put("supportsReaderPresets",false)
         .put("supportsNoteManifestV2",false).put("supportsNoteAssetInventory",false)
-    private fun binding()=ok("probe").put("account",JSONObject().put("bound",true).put("userIdHash",CloudSnapshotCodec.sha256("owner".toByteArray())))
+    private fun binding()=ok("probe").asLegacyPodJsProbe().put("account",JSONObject().put("bound",true).put("userIdHash",CloudSnapshotCodec.sha256("owner".toByteArray())))
     private fun fatal()=JSONObject("""{"success":false,"action":"syncLibrary","version":14,"message":"Library changed repeatedly while preparing sync","errorCode":"library_exchange_failed","fatalSession":true}""")
     private fun wire(responses:List<JSONObject>)=ByteArrayOutputStream().also{out->responses.forEach{BluetoothSyncProtocol.writeFrame(out,it)}}.toByteArray()
     private fun frames(out:ByteArrayOutputStream):List<JSONObject> = buildList {

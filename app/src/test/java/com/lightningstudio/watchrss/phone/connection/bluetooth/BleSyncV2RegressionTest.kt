@@ -350,7 +350,7 @@ class BleSyncV2RegressionTest {
             val manifest=LibrarySyncPayload.buildManifestRequestFromEntries("watch",repo.getArticleManifestsForSync(),emptyList()).put("success",true)
                 .put("supportsNoteManifestV2",modern).put("supportsNoteAssetInventory",false).put("supportsTokenUsageCursor",modern).put("supportsReaderPresets",false).put("supportsRssCanonicalIds",false)
             return buildList {
-                add(ok("syncLibrary").put("supportsTokenUsageCursor",modern));add(ok("syncAccount"));add(ok("syncLibrary","cursor").put("supportsTokenUsageCursor",modern));add(manifest);add(ok("syncLibrary","complete").put("articles",JSONArray()))
+                add(ok("syncLibrary").asLegacyPodJsProbe().put("supportsTokenUsageCursor",modern));add(ok("syncAccount"));add(ok("syncLibrary","cursor").put("supportsTokenUsageCursor",modern));add(manifest);add(ok("syncLibrary","complete").put("articles",JSONArray()))
                 if(modern)add(ok("syncNotes","manifest").put("noteManifest",NoteSyncPayload.summaries(listOf(note))))
                 add(noteResponse(if(modern)"delta" else null,if(modern)emptyList() else listOf(note)))
                 add(if(modern)usage("epoch",200) else ok("syncLlmTokenUsage").put("records",events))
@@ -410,7 +410,7 @@ class BleSyncV2RegressionTest {
     }
 
     private suspend fun syncAllResponses(note:NoteEntity?=null):PhoneSyncSession {
-        val binding=ok("syncLibrary").put("account",JSONObject().put("bound",true).put("userIdHash",CloudSnapshotCodec.sha256("owner".toByteArray())))
+        val binding=ok("syncLibrary").asLegacyPodJsProbe().put("account",JSONObject().put("bound",true).put("userIdHash",CloudSnapshotCodec.sha256("owner".toByteArray())))
         val cursor=ok("syncLibrary","cursor")
         val manifest=LibrarySyncPayload.buildManifestRequestFromEntries("watch",emptyList(),emptyList()).put("success",true).put("supportsReaderPresets",true).put("supportsNoteManifestV2",false).put("supportsNoteAssetInventory",false)
         val articleResponse=ok("syncLibrary","complete").put("articles",JSONArray())
@@ -484,7 +484,7 @@ class BleSyncV2RegressionTest {
         val parsed=LibrarySyncPayload.parseRssSources(JSONArray().put(source)).single()
         assertNull(parsed.siteUrl);assertNull(parsed.imageUrl)
     }
-    private fun bindingResponse() = ok("syncLibrary").put("account", JSONObject().put("bound", true)
+    private fun bindingResponse() = ok("syncLibrary").asLegacyPodJsProbe().put("account", JSONObject().put("bound", true)
         .put("userIdHash", CloudSnapshotCodec.sha256("owner".toByteArray())))
     private fun emptyManifest() = LibrarySyncPayload.buildManifestRequestFromEntries("watch", emptyList(), emptyList())
         .put("success", true).put("supportsReaderPresets", false).put("supportsNoteManifestV2", false).put("supportsNoteAssetInventory", false)

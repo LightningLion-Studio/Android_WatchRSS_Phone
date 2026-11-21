@@ -60,7 +60,7 @@ class DomainFastPathSessionTest {
                 val action=request.getString("action");val phase=request.getString("phase")
                 if(stopAtCursor && action=="syncLibrary" && phase=="cursor")throw IllegalArgumentException("original cursor reached")
                 val answer=when(action) {
-                    "syncLibrary"->response(action,phase).put("supportsPersistentSession",true).put("persistentSessionAccepted",true).put("account",JSONObject().put("bound",true).put("userIdHash",BleDomainStore.hash("owner"))).advertiseBleSyncV2().apply {if(legacyOnly){remove("supportsDomainFastPathV2");put("supportsDomainFastPathV1",true)}}
+                    "syncLibrary"->response(action,phase).apply { if(phase=="probe")asLegacyPodJsProbe() }.put("supportsPersistentSession",true).put("persistentSessionAccepted",true).put("account",JSONObject().put("bound",true).put("userIdHash",BleDomainStore.hash("owner"))).advertiseBleSyncV2().apply {if(legacyOnly){remove("supportsDomainFastPathV2");put("supportsDomainFastPathV1",true)}}
                     "syncAccount"->{if(accountApplyFixture)accountWitness="installed-grant";response(action,phase).apply{if(accountApplyFixture)put("accountStateRoot","c".repeat(64))}}
                     "syncDomains"->response(action,phase).put("windowId","window").put("roots",JSONObject(remote)).put("projectionVersions",JSONObject().apply { store.projectionVersions().forEach{(d,p)->put(d,p.json())} }).apply {
                         if(phase=="summary")put("skipDomains",JSONArray(request.getJSONObject("known").keys().asSequence().toList()))

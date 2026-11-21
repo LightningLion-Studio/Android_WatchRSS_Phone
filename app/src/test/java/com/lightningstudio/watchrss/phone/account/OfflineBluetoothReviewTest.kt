@@ -129,7 +129,7 @@ class OfflineBluetoothReviewTest {
             if(action=="ack")return
             val answer=when(action) {
                 "syncLibrary"->when(phase) {
-                    "probe"->response(action,phase).put("supportsPersistentSession",true).put("persistentSessionAccepted",true)
+                    "probe"->response(action,phase).asLegacyPodJsProbe().put("supportsPersistentSession",true).put("persistentSessionAccepted",true)
                         .put("account",JSONObject().put("bound",peerBound).put("userIdHash",BleDomainStore.hash(peerOwner))).advertiseBleSyncV2().put("supportsDomainFastPathV2",peerFastPath)
                     "cursor"->LibrarySyncPayload.buildCursorResponse("watch",LibrarySyncCursor(0,0,0))
                     "manifest"->LibrarySyncPayload.buildManifestResponse("watch",emptyList()).put("supportsReaderPresets",false).put("supportsNoteManifestV2",false).put("supportsNoteAssetInventory",false)

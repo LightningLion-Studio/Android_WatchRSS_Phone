@@ -70,7 +70,7 @@ class AccountSyncGateSessionTest {
             val a=when(action){
                 "syncAccount"->{accountCount++;answer(action).put("boundUserId","owner")}
                 "syncLibrary"->when(phase){
-                    "probe"->answer(action,phase).put("supportsPersistentSession",true).put("persistentSessionAccepted",true).apply { if(unbound)put("account",JSONObject().put("bound",false)) }
+                    "probe"->answer(action,phase).asLegacyPodJsProbe().put("supportsPersistentSession",true).put("persistentSessionAccepted",true).apply { if(unbound)put("account",JSONObject().put("bound",false)) }
                     "cursor"->{if(failFirstCursor){failFirstCursor=false;throw IOException("synthetic disconnect")};cursorCount++;if(cursorCount<=rejectCount)answer(action,phase).put("success",false)
                         .put("message","请重新连接并同步账号后再同步资料").apply {rejectionCode?.let {put("errorCode",it)}}
                         else LibrarySyncPayload.buildCursorResponse("watch",LibrarySyncCursor(0,0,0)).put("supportsAuthoritativeLibraryReplace",true)}

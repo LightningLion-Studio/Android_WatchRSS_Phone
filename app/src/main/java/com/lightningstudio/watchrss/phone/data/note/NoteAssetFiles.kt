@@ -210,10 +210,7 @@ internal object NoteAssetFiles {
     }
 
     fun winnerAllows(db: SupportSQLiteDatabase, key: String, winner: BookPackageFiles.Revision): Boolean {
-        val source = SyncV2NoteAssetNames.source
-        val hasAliases = db.query("SELECT 1 FROM sqlite_master WHERE type='view' AND name=?", arrayOf(source))
-            .use { it.moveToFirst() }
-        val metadata = if (hasAliases) source else "note_assets"
+        val metadata = SyncV2NoteAssetNames.metadataSource(db)
         return db.query("SELECT sha256,byteCount,deleted FROM $metadata WHERE storageKey=?", arrayOf(key)).use {
             var seen = false
             while (it.moveToNext()) {

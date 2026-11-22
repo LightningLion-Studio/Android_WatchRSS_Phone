@@ -9,6 +9,14 @@ internal object SyncV2NoteAssetNames {
     const val source = "syncv2_note_asset_names"
     private val digest = Regex("[0-9a-f]{64}")
 
+    /** The regular Room reader can open before Sync v2 installs its alias view. */
+    fun metadataSource(db: SupportSQLiteDatabase): String {
+        val hasAliases = db.controlQuery(
+            "SELECT 1 FROM sqlite_master WHERE type='view' AND name=?", arrayOf(source)
+        ).use { it.moveToFirst() }
+        return if (hasAliases) source else "note_assets"
+    }
+
     fun install(db: SupportSQLiteDatabase) {
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS $aliases (

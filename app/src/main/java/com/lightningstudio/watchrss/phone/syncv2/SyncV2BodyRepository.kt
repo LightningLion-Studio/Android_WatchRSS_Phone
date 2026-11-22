@@ -154,7 +154,8 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             }
         }
         if (owners.isEmpty()) return null
-        val revisions = db.controlQuery("SELECT sha256,byteCount,deleted FROM ${SyncV2NoteAssetNames.source} WHERE storageKey=?", arrayOf(id)).use { row ->
+        val metadata = SyncV2NoteAssetNames.metadataSource(db)
+        val revisions = db.controlQuery("SELECT sha256,byteCount,deleted FROM $metadata WHERE storageKey=?", arrayOf(id)).use { row ->
             var registered = false
             var live = false
             val found = buildSet {

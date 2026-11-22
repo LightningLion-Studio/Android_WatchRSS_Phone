@@ -48,6 +48,7 @@ internal object NoteAssetFiles {
         Reference(revision, UUID.randomUUID().toString().replace("-", ""))
 
     fun ensureCandidateDirectory(files: File): File {
+        if (files.mkdirs()) files.parentFile?.let(::syncDirectory)
         val notes = File(files, "notes")
         if (notes.mkdir()) syncDirectory(files)
         val originals = File(notes, ".b2-originals")

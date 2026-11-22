@@ -177,23 +177,29 @@ class PhoneBluetoothRolloutRoutingTest {
     }
 
     @Test fun ordinaryDiscoveryOmitsB2WhenRolloutIsOff() = runBlocking<Unit> {
+        assertDiscoveryOmitsB2(percent = 0, forced = null, cohort = "b2_off")
+    }
+
+    @Test fun ordinaryDiscoveryOmitsB2ForBucketMiss() = runBlocking<Unit> {
+        assertDiscoveryOmitsB2(percent = 1, forced = null, cohort = "b2_off")
+    }
+
+    @Test fun ordinaryDiscoveryOmitsB2WhenForcedOff() = runBlocking<Unit> {
+        assertDiscoveryOmitsB2(percent = 100, forced = "off", cohort = "forced_off")
+    }
+
+    private suspend fun assertDiscoveryOmitsB2(percent: Int, forced: String?, cohort: String) {
+        installRollout(percent, forced, expired = false)
         val discovery = probe(oldPeer = false)
         manager.probeDevices = { _, _, _ ->
             assertLegacyProbe(directProbe(discovery), persistent = true)
             PhoneBluetoothWatchProbeBatch(listOf(PhoneBluetoothWatchProbeResult(watch, true)))
         }
-        for ((percent, forced, cohort) in listOf(
-            Triple(0, null, "b2_off"),
-            Triple(1, null, "b2_off"),
-            Triple(100, "off", "forced_off")
-        )) {
-            installRollout(percent, forced, expired = false)
-            val targets = manager.probeLibrarySyncTargets(libraryMode = LibrarySyncMode.MERGE)
-            assertEquals(listOf(watch), targets.devices)
-            val rollout = requireNotNull(targets.rollout)
-            assertFalse(rollout.enabled)
-            assertEquals(if (BuildConfig.B2_ENABLED) cohort else "ineligible", rollout.cohort.wire)
-        }
+        val targets = manager.probeLibrarySyncTargets(libraryMode = LibrarySyncMode.MERGE)
+        assertEquals(listOf(watch), targets.devices)
+        val rollout = requireNotNull(targets.rollout)
+        assertFalse(rollout.enabled)
+        assertEquals(if (BuildConfig.B2_ENABLED) cohort else "ineligible", rollout.cohort.wire)
     }
 
     @Test fun ordinaryDiscoveryOffersBareB2OnlyWhenEnabledWithoutSyncV2() = runBlocking<Unit> {

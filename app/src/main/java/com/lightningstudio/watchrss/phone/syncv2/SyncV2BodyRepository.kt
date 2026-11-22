@@ -46,7 +46,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     private data class BookReference(val revision: BookPackageFiles.Revision, val identity: String,
         val publication: BookPackageFiles.Publication?) : Reference
     private data class AssetReference(val owners: Set<String>, val revisions: Set<BookPackageFiles.Revision>,
-        val published: BookPackageFiles.Revision?) : Reference
+        val published: NoteAssetFiles.Reference?) : Reference
 
     internal class Original(val raw: ByteArray, val sha256: String, private val reference: Reference,
         private val stillCurrent: () -> Boolean) {
@@ -169,7 +169,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             if (registered && !live) return null
             found
         }
-        return AssetReference(owners, revisions, NoteAssetFiles.reference(db, id))
+        return AssetReference(owners, revisions, NoteAssetFiles.selection(db, id))
     }
 
     private fun stableRead(file: File, observed: FileIdentity, limit: Int): ByteArray? {
@@ -207,7 +207,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         val actual = BookPackageFiles.Revision(hash, raw.size.toLong())
         when (before) {
             is BookReference -> if (before.revision != actual) return null
-            is AssetReference -> if ((before.published != null && before.published != actual) ||
+            is AssetReference -> if ((before.published != null && before.published.revision != actual) ||
                 (before.revisions.isNotEmpty() && before.revisions != setOf(actual))) return null
         }
         validate(kind, id, selected, raw)
@@ -327,9 +327,12 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         check(db.inTransaction())
         val current = file(kind, id)
         val hash = SyncV2BodyCodec.hash(raw)
-        val published = if (kind == "asset") NoteAssetFiles.reference(db, id) else null
-        val newReference = published?.takeIf { it.sha256 != hash }
-        val target = if (newReference == null) current else NoteAssetFiles.candidate(files, hash)
+        val published = if (kind == "asset") NoteAssetFiles.selection(db, id) else null
+        val newReference = published?.let {
+            NoteAssetFiles.ensureCandidateDirectory(files)
+            NoteAssetFiles.replacement(BookPackageFiles.Revision(hash, raw.size.toLong()))
+        }
+        val target = if (newReference == null) current else NoteAssetFiles.candidate(files, newReference)
         val expected = if (target == current) {
             if (repair == null) hash else repair.expectedSha256
         } else hash
@@ -347,7 +350,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         )
         if(kind=="asset") {
             if (newReference != null) {
-                NoteAssetFiles.publish(db, id, BookPackageFiles.Revision(hash, raw.size.toLong()))
+                NoteAssetFiles.publish(db, id, newReference)
             }
             SyncV2NoteAssetNames.recordDownload(db, id, hash, raw.size)
         } else {

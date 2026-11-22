@@ -16,6 +16,9 @@ import com.lightningstudio.watchrss.phone.data.book.ImportedBookStore
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
 import com.lightningstudio.watchrss.phone.data.note.NoteAssetEntity
 import com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles
+import com.lightningstudio.watchrss.phone.data.note.MarkdownArchiveEntry
+import com.lightningstudio.watchrss.phone.data.note.MarkdownNoteArchive
+import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
 import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
@@ -584,10 +587,80 @@ class SyncV2BodyTransportTest {
         override fun close() { life.close(); ring.close(); client.close(); f.close() }
     }
 
+    private fun ReviewAsset.bluetoothWindowKey(): String {
+        val account = f.projection.state().body.getJSONObject("account")
+        return SyncV2Codec.hash(JSONArray().put(f.projection.scope).put(account.getString("oid"))
+            .put(account.getString("revision")).put(account.getString("generation")))
+    }
+
+    @Test fun matchingPlanInTheProductionHeadWindowDefersCloudBodyAndRequeuesOnClose() {
+        ReviewAsset(SyncV2P5Fixture(), true).use { a ->
+            assertTrue(a.file.delete())
+            val writerKey = a.bluetoothWindowKey()
+            var retries = 0
+            B2BodyHandoff.open(a.f.root, writerKey) { retries++ }.use { connection ->
+                connection.verified("c".repeat(32), listOf(assetDescriptor(a.raw, a.id)))
+                assertTrue(B2BodyHandoff.hasPending(a.f.root, writerKey, "asset", a.id))
+                assertEquals(SyncV2BodyChannel.Result(1, listOf("body_channel_pending")), a.channel().sync())
+                assertEquals(1, a.backend.listCalls)
+                assertEquals(0, a.backend.reads.size)
+                assertEquals(0, a.backend.puts.size)
+                assertEquals(0, a.installs)
+                assertFalse(a.file.exists())
+            }
+            assertEquals(1, retries)
+        }
+    }
+
+    private suspend fun publishFixtureAttachment(a: ReviewAsset): String {
+        val room = B2RoomStore(a.f.room)
+        val receiver = B2NoteAssetBusiness(room, "a".repeat(64), a.file.parentFile!!) {}
+        val descriptor = assetDescriptor(a.raw, a.id)
+        val staged = File(a.f.root, "b2-fixture-repair-input").apply { writeBytes(a.raw) }
+        return room.exclusive { room.transaction {
+            receiver.apply(descriptor, B2Metadata.validate(descriptor), staged)
+        } }
+    }
+
+    @Test fun sameRevisionB2TransferRestoresMissingCommittedAttachment() = runBlocking<Unit> {
+        ReviewAsset(SyncV2P5Fixture(), false).use { a ->
+            assertTrue(a.file.delete())
+            assertEquals("merged", publishFixtureAttachment(a))
+            assertTrue(NoteAssetFiles.current(a.f.sql, a.f.root, a.id).delete())
+            assertEquals("merged", publishFixtureAttachment(a))
+            val current = requireNotNull(NoteAssetFiles.readable(a.f.sql, a.f.root, a.id))
+            assertArrayEquals(a.raw, current.readBytes())
+            assertFalse(a.file.exists())
+        }
+    }
+
+    @Test fun zipRestoresTheCurrentB2ReferenceRatherThanTheLegacyPath() = runBlocking<Unit> {
+        ReviewAsset(SyncV2P5Fixture(), false).use { a ->
+            assertTrue(a.file.delete())
+            assertEquals("merged", publishFixtureAttachment(a))
+            val context = object : android.content.ContextWrapper(RuntimeEnvironment.getApplication()) {
+                override fun getFilesDir(): File = a.f.root
+            }
+            val service = NoteImportExportService(context, NoteRepository(a.f.room.noteDao(), "phone"),
+                assetDatabase = { a.f.sql }) { key -> NoteAssetFiles.readable(a.f.sql, a.f.root, key) }
+            val zip = service.exportZip()
+            assertArrayEquals(a.raw, MarkdownNoteArchive.read(zip).single { it.path == "notes/assets/${a.id}" }.bytes)
+            assertTrue(NoteAssetFiles.current(a.f.sql, a.f.root, a.id).delete())
+            val corrupt = a.raw.copyOf().apply { this[0] = (this[0].toInt() xor 1).toByte() }
+            service.restoreAssetsZip(MarkdownNoteArchive.write(listOf(MarkdownArchiveEntry("notes/assets/${a.id}", corrupt))))
+            assertNull(NoteAssetFiles.readable(a.f.sql, a.f.root, a.id))
+            service.restoreAssetsZip(zip)
+            val current = requireNotNull(NoteAssetFiles.readable(a.f.sql, a.f.root, a.id))
+            assertArrayEquals(a.raw, current.readBytes())
+            assertFalse(a.file.exists())
+            assertArrayEquals(a.raw, MarkdownNoteArchive.read(service.exportZip()).single { it.path == "notes/assets/${a.id}" }.bytes)
+        }
+    }
+
     @Test fun verifiedB2PlanDefersOnlyTheMatchingAuthenticatedBodyAndReusesTheCommit() = runBlocking<Unit> {
         ReviewAsset(SyncV2P5Fixture(), true).use { a ->
             assertTrue(a.file.delete())
-            val scope = "${a.f.projection.scope}:${a.f.projection.legacyRollbackGeneration()}"
+            val scope = a.bluetoothWindowKey()
             val descriptor = assetDescriptor(a.raw, a.id)
             val otherRevision = assetDescriptor(a.changed, a.id)
             val room = B2RoomStore(a.f.room)
@@ -622,7 +695,7 @@ class SyncV2BodyTransportTest {
     @Test fun interruptedB2PlanRequeuesDeferredCloudReadAfterBluetoothCloses() {
         ReviewAsset(SyncV2P5Fixture(), true).use { a ->
             assertTrue(a.file.delete())
-            val scope = "${a.f.projection.scope}:${a.f.projection.legacyRollbackGeneration()}"
+            val scope = a.bluetoothWindowKey()
             val fence = BluetoothAutomaticCloudFence()
             fence.setActive(true)
             B2BodyHandoff.open(a.f.root, scope, fence::deferBodyRetry).use { connection ->

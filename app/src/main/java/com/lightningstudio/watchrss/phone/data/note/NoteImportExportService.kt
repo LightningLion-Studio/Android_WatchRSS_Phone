@@ -3,12 +3,15 @@ package com.lightningstudio.watchrss.phone.data.note
 import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
+import androidx.sqlite.db.SupportSQLiteDatabase
+import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload
 import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.importer.LocalFileImportTarget
 import com.lightningstudio.watchrss.phone.data.importer.classifyLocalFileImport
 import com.lightningstudio.watchrss.phone.data.importer.isMarkdownFileName
 import com.lightningstudio.watchrss.phone.data.importer.markdownTitleFromFileName
+import com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness
 import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
@@ -18,12 +21,18 @@ import java.util.UUID
 class NoteImportExportService internal constructor(
     private val context: Context,
     private val repository: NoteRepository,
+    private val assetDatabase: () -> SupportSQLiteDatabase? = { null },
     private val assetFile: (String) -> File?
 ) {
-    constructor(context: Context, repository: NoteRepository) : this(context, repository, { key ->
-        val app = context.applicationContext as? com.lightningstudio.watchrss.phone.PhoneCompanionApplication
-        if (app != null) app.container.noteAssetFile(key) else NoteAssetFiles.legacy(context.filesDir, key)
-    })
+    constructor(context: Context, repository: NoteRepository) : this(
+        context,
+        repository,
+        assetDatabase = { (context.applicationContext as? PhoneCompanionApplication)?.container?.noteAssetDatabase() },
+        assetFile = { key ->
+            val app = context.applicationContext as? PhoneCompanionApplication
+            if (app != null) app.container.noteAssetFile(key) else NoteAssetFiles.legacy(context.filesDir, key)
+        }
+    )
 
     suspend fun exportZip(): ByteArray {
         val entries = mutableListOf<MarkdownArchiveEntry>()
@@ -64,8 +73,7 @@ class NoteImportExportService internal constructor(
             .filter { it.path.startsWith("notes/assets/") }
             .forEach { entry ->
                 val key = MarkdownNoteArchive.safePath(entry.path.removePrefix("notes/assets/")).substringAfterLast('/')
-                val target = File(context.filesDir, "notes/assets/$key").also { it.parentFile?.mkdirs() }
-                if (!target.exists()) com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.writeBytes(target,entry.bytes,expectedSha=null)
+                restoreArchiveAsset(key, entry.bytes)
             }
     }
 
@@ -98,7 +106,7 @@ class NoteImportExportService internal constructor(
                 markdownTitleFromFileName(notePath)
             )
             // Markdown points at assets/<key>; only restore names that the note actually references.
-            Regex("!\\[[^]]*]\\(assets/([^)]*)\\)").findAll(note.markdown).forEach { image ->
+            Regex("!\\[[^]]*]\\(assets/([^)]*)\\)").findAll(note.markdown).forEach asset@ { image ->
                 val relativeAssetPath = MarkdownNoteArchive.safePath("assets/${image.groupValues[1]}")
                 val noteDirectory = notePath.substringBeforeLast('/', missingDelimiterValue = "")
                 val archiveAssetPath = if (noteDirectory.isEmpty()) {
@@ -106,10 +114,9 @@ class NoteImportExportService internal constructor(
                 } else {
                     "$noteDirectory/$relativeAssetPath"
                 }
-                val source = entriesByPath[archiveAssetPath] ?: return@forEach
+                val source = entriesByPath[archiveAssetPath] ?: return@asset
                 val safeKey = relativeAssetPath.substringAfterLast('/')
-                val target = File(context.filesDir, "notes/assets/$safeKey").also { it.parentFile?.mkdirs() }
-                if (!target.exists()) com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.writeBytes(target,source.bytes,expectedSha=null)
+                val target = restoreArchiveAsset(safeKey, source.bytes) ?: return@asset
                 repository.registerAsset(NoteAssetEntity(
                     assetId = UUID.randomUUID().toString(), noteId = note.noteId,
                     sha256 = sha256(target.readBytes()),
@@ -120,6 +127,17 @@ class NoteImportExportService internal constructor(
             count++
         }
         return count
+    }
+
+    private fun restoreArchiveAsset(key: String, bytes: ByteArray): File? {
+        val files = context.filesDir
+        val db = assetDatabase()
+        if (db != null && NoteAssetFiles.isSafe(key) && NoteAssetFiles.restoreReferenced(db, files, key, bytes)) {
+            return NoteAssetFiles.readable(db, files, key)
+        }
+        val target = File(files, "notes/assets/$key").also { it.parentFile?.mkdirs() }
+        if (!target.exists()) CloudExportFileWitness.writeBytes(target, bytes, expectedSha = null)
+        return target
     }
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")

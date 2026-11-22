@@ -2,6 +2,8 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import androidx.room.Room
 import com.lightningstudio.watchrss.phone.BuildConfig
+import com.lightningstudio.watchrss.phone.account.B2AccountFence
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2CommitWindow
 import com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec
 import com.lightningstudio.watchrss.phone.data.book.ImportedBookStore
 import com.lightningstudio.watchrss.phone.data.ble.BleDomainStore
@@ -15,6 +17,7 @@ import org.json.*
 import org.junit.*
 import org.junit.Assert.*
 import org.junit.Assume.assumeFalse
+import org.junit.Assume.assumeTrue
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
@@ -41,7 +44,8 @@ class BookSessionIsolationTest {
         .put("sourceUrl",fixture.getString("sourceUrl")).put("kind","txt").put("deletedChapters",JSONArray()).put("deletionClock",0).put("deleted",false).put("deletedAt",0).put("updatedAt",1).put("sourceDeviceId","cli").put("contentAvailable",true)
     private fun reply(action:String,phase:String)=JSONObject().put("success",true).put("action",action).put("phase",phase).put("version",if(action=="syncDomains")2 else if(action=="syncBooks")1 else 14).put("deviceId","watch")
     @After fun close(){scope.cancel();db.close();root.deleteRecursively()}
-    private suspend fun runSession(invalid:Boolean,fatalLibrary:Boolean=false,onPull:()->Unit={},owner:()->String?={"owner"}):PhoneBluetoothSyncResult {
+    private suspend fun runSession(invalid:Boolean,fatalLibrary:Boolean=false,onPull:()->Unit={},owner:()->String?={"owner"},
+        transportOwner: String = "test", configure: (PhoneBluetoothSyncManager) -> Unit = {}):PhoneBluetoothSyncResult {
         books.manifests()
         repo.markLibrarySyncSuccess("watch",0,0,14,true,true,domains.libraryDefinition())
         val initial=domains.roots("account");val remote=BleDomainStore.DOMAINS.associateWith{"b".repeat(64)}
@@ -88,11 +92,50 @@ class BookSessionIsolationTest {
             }
         }
         val input=object:InputStream(){override fun read()=if(incoming.isEmpty())-1 else incoming.removeFirst().toInt() and 255}
-        val session=PhoneSyncSession(PhoneBluetoothSyncClient(context,log),device,"phone",PhoneSyncSession.Transport(input,output,"test",false,{}),true,false,false)
+        val session=PhoneSyncSession(PhoneBluetoothSyncClient(context,log),device,"phone",PhoneSyncSession.Transport(input,output,transportOwner,false,{}),true,false,false)
         val manager=PhoneBluetoothSyncManager(context,repo,NoteRepository(db.noteDao(),"phone"),ReaderPresetRepository(context,db,db.readerPresetDao(),"phone",scope),PhoneLlmTokenUsageRepository(db.llmTokenUsageDao()),"phone",log,
-            canSyncAccount={true},buildAccountSyncRequest={_,_,_->JSONObject().put("action","syncAccount")},currentPhoneUserId=owner,domainScope={"scope"},accountDomainWitness={"account"})
+            canSyncAccount={true},buildAccountSyncRequest={_,_,_->JSONObject().put("action","syncAccount")},currentPhoneUserId=owner,domainScope={"scope"},accountDomainWitness={"account"},
+            b2Database={db},b2AccountScope={"a".repeat(64)})
         manager.reconnectDelay={};manager.reconnectSession={_,_->error("must not reconnect for invalid items")}
+        configure(manager)
         return manager.syncAll(device,reusableSession=session)
+    }
+
+    @Test fun legacyPeerNeedsNoAuthenticatedProjectionWindow() = runBlocking<Unit> {
+        var windowCalls = 0
+        runSession(false) { manager ->
+            manager.b2AccountFence = { B2AccountFence() }
+            manager.captureBinaryWindow = { windowCalls++; null }
+        }
+        assertEquals(0, windowCalls)
+        assertLegacyBookAcks()
+    }
+
+    @Test fun legacyPeerWithAProjectionKeepsTheOriginalAppliedBookAck() = runBlocking<Unit> {
+        val version = B2CommitWindow.Version(B2CommitWindow.Head("scope", "head", "1", "0"), "1", "business")
+        runSession(false) { manager ->
+            manager.b2AccountFence = { B2AccountFence() }
+            manager.captureBinaryWindow = { B2CommitWindow { version } }
+        }
+        assertLegacyBookAcks()
+    }
+
+    @Test fun localBinaryReadinessDoesNotReplaceAnOldPeerIpSession() = runBlocking<Unit> {
+        assumeTrue(BuildConfig.B2_ENABLED)
+        runSession(false, transportOwner = "ip:legacy-fixture") { manager ->
+            manager.binaryWindowKey = { "authenticated-window" }
+        }
+        assertFalse(frames.any { it.has("supportedGuardedLibraryVersions") || it.optString("action") == "syncLibraryBinary" })
+        assertLegacyBookAcks()
+    }
+
+    private fun assertLegacyBookAcks() {
+        val replies = frames.zipWithNext().filter { (request, _) -> request.optString("action") == "syncBooks" }
+        assertTrue("fixture must exchange v1 book data", replies.isNotEmpty())
+        for ((_, ack) in replies) {
+            assertEquals("ack", ack.optString("action"))
+            assertTrue("ed3df08 ACKs v1 book replies as applied", ack.getBoolean("applied"))
+        }
     }
     @Test fun invalidBookContinuesLibraryNotesAndFinalAckWithoutABooksDomainReceipt()=runBlocking<Unit> {
         val result=runSession(true)

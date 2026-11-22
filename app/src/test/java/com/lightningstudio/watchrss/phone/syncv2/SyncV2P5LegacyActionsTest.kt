@@ -1,6 +1,9 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
+import androidx.room.Room
+import androidx.room.RoomDatabase
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
+import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
 import com.lightningstudio.watchrss.phone.connection.bluetooth.binaryDescriptor
 import com.lightningstudio.watchrss.phone.connection.bluetooth.binaryFileHashes
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2CommitWindow
@@ -16,6 +19,7 @@ import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
 
@@ -183,6 +187,88 @@ class SyncV2P5LegacyActionsTest {
         val recipe = (0 until bodyRefs.length()).map(bodyRefs::getString).single { it.startsWith("recipe:") }
         assertArrayEquals(raw, actions.recoveryBodyPart(restored, recipe, 0, raw.size))
         code("choice_stale") { actions.restoreRecovery(restored) }
+    }
+
+    @Test fun sevenDaySameDigestRestoreIsInvisibleUntilTheAuthorizedCommit(): Unit = SyncV2P5Fixture().use { w ->
+        w.pending()
+        val key = "restore.png"
+        val other = "other.png"
+        val raw = "guarded original".toByteArray()
+        val legacy = NoteAssetFiles.legacy(w.root, key).apply {
+            parentFile!!.mkdirs()
+            writeText("independent local image")
+        }
+        w.edit("![picture](assets/$key)")
+        w.sql.execSQL("INSERT INTO note_assets VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            arrayOf("local-asset", "note", SyncV2Codec.hex(SyncV2Codec.sha(legacy.readBytes())), key, "image/png",
+                legacy.length(), key, true, w.f.now, false, 0L))
+        w.drain()
+        val descriptor = assetDescriptor(raw, key)
+        val revision = BookPackageFiles.Revision(descriptor.getString("sha256"), raw.size.toLong())
+        val incoming = File(w.root, "restore-original").apply { writeBytes(raw) }
+        val inbox = SyncV2BluetoothInbox(w.projection, w.root)
+        val input = B2CommitWindow.InboxInput("watch", "watchToPhone", "d".repeat(32), "e".repeat(64), descriptor, incoming)
+        val pending = runBlocking { requireNotNull(inbox.prepare(input) {}) }
+        w.sql.beginTransaction()
+        try {
+            pending.commit()
+            w.sql.setTransactionSuccessful()
+        } finally {
+            w.sql.endTransaction()
+        }
+        pending.finish(true)
+        val actions = w.actions()
+        actions.choose(actions.preview(firstLegacyOnly = true), "cloud")
+        val copyId = actions.recoveryCopies().let { copies ->
+            (0 until copies.length()).map { copies.getJSONObject(it).getString("copyId") }
+        }.single { id ->
+            val changes = actions.recoveryDelta(id).getJSONArray("changes")
+            changes.length() == 1 && changes.getJSONObject(0).optJSONObject("value")?.has("guardedAsset") == true
+        }
+        val delta = actions.recoveryDelta(copyId)
+        w.edit("![restored](assets/$key) ![independent](assets/$other)")
+        w.sql.execSQL("UPDATE note_assets SET sha256=?,byteCount=? WHERE storageKey=?",
+            arrayOf(revision.sha256, revision.bytes, key))
+        w.drain()
+        w.sql.beginTransaction()
+        try {
+            NoteAssetFiles.initialize(w.sql)
+            NoteAssetFiles.publish(w.sql, key, revision)
+            NoteAssetFiles.publish(w.sql, other, revision)
+            w.sql.setTransactionSuccessful()
+        } finally {
+            w.sql.endTransaction()
+        }
+        w.room.openHelper.setWriteAheadLoggingEnabled(true)
+        val reader = Room.databaseBuilder(RuntimeEnvironment.getApplication(), PhoneCompanionDatabase::class.java,
+            File(w.root, "phone.db").absolutePath).setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
+            .allowMainThreadQueries().build()
+        try {
+            val read = reader.openHelper.readableDatabase
+            val old = NoteAssetFiles.current(read, w.root, key)
+            assertEquals(old, NoteAssetFiles.current(read, w.root, other))
+            assertFalse(old.exists())
+            var stop = true
+            var checkpoints = 0
+            val projection = SyncV2Projection(w.sql, w.identity, SyncV2Fixtures.localKey, true, fault = { phase ->
+                if (phase == "before-commit") {
+                    checkpoints++
+                    assertEquals(old, NoteAssetFiles.current(read, w.root, key))
+                    assertFalse("WAL reader saw missing original before the authorized restore committed", old.exists())
+                    if (stop) SyncV2Codec.fail("choice_stale")
+                }
+            })
+            val storage = SyncV2RecoveryStorage(projection, w.identity, w.root)
+            code("choice_stale") { storage.restoreGuardedAsset(copyId, delta, w.f.now) }
+            assertFalse(old.exists())
+            stop = false
+            assertTrue(storage.restoreGuardedAsset(copyId, delta, w.f.now))
+            assertEquals(2, checkpoints)
+            assertArrayEquals(raw, NoteAssetFiles.current(read, w.root, key).readBytes())
+            assertFalse(NoteAssetFiles.current(read, w.root, other).exists())
+        } finally {
+            reader.close()
+        }
     }
 
     @Test fun capturedFirstChoiceCannotApplyTheNewFirstEntry(): Unit = SyncV2P5Fixture().use { w ->

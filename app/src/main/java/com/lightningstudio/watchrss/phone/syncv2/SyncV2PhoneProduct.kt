@@ -98,11 +98,14 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         }
     }
 
-    internal fun legacyRollbackWindow(): String? {
+    internal fun legacyRollbackWindow(): String? = runtime?.projection?.let {
+        it.scope + ":" + it.legacyRollbackGeneration()
+    }
+
+    internal fun binaryWindowKey(): String? {
         val live = runtime ?: return null
         return try {
-            val head = live.projection.bluetoothVersion().head
-            SyncV2Codec.hash(org.json.JSONArray().put(head.scope).put(head.oid).put(head.revision).put(head.rollbackGeneration))
+            bluetoothBodyHandoffKey(live.projection.bluetoothVersion().head)
         } catch (_: IllegalStateException) {
             null
         }

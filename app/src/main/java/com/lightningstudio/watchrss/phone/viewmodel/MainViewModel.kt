@@ -14,6 +14,7 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClear
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClearPhase
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClearOperation
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClearException
+import com.lightningstudio.watchrss.phone.rollout.B2RolloutDecision
 import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncSession
 import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncStage
 import kotlinx.coroutines.CancellationException
@@ -943,7 +944,7 @@ class MainViewModel(
                     conflictPrompt = null
                 )
                 val probeTargets = runCatching {
-                    bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress)
+                    bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress, libraryMode = mode)
                 }.getOrElse { throwable ->
                     telemetry?.finishFailure(throwable)
                     clearSmoothedSyncProgress()
@@ -989,7 +990,7 @@ class MainViewModel(
                         sessionState.value = sessionState.value.copy(
                             syncTransportLabel = transportLabel(device.address)
                         )
-                        runLibrarySync(device.toUi(), probeTargets.sessionLease, forceFull, mode, telemetry)
+                        runLibrarySync(device.toUi(), probeTargets.sessionLease, forceFull, mode, telemetry, probeTargets.rollout)
                     }
                     else -> {
                         clearSmoothedSyncProgress()
@@ -1021,7 +1022,7 @@ class MainViewModel(
                         } finally {
                             if (librarySyncSelection === selection) librarySyncSelection = null
                         }
-                        if (selected != null) runLibrarySync(selected, forceFull = forceFull, mode = mode, telemetry = telemetry)
+                        if (selected != null) runLibrarySync(selected, forceFull = forceFull, mode = mode, telemetry = telemetry, rollout = probeTargets.rollout)
                     }
                 }
             } catch (failure: Throwable) {
@@ -1253,7 +1254,8 @@ class MainViewModel(
         reusableSession: PhoneSyncSession? = null,
         forceFull: Boolean = false,
         mode: LibrarySyncMode = LibrarySyncMode.MERGE,
-        telemetry: BtSyncSession? = null
+        telemetry: BtSyncSession? = null,
+        rollout: B2RolloutDecision? = null
     ) {
         beginSmoothedSyncProgress(MainSyncProgressUi(phase = "建立连接中", percent = 0))
         sessionState.value = sessionState.value.copy(
@@ -1276,6 +1278,7 @@ class MainViewModel(
                         supportsPersistentSession = device.supportsPersistentSession
                     ),
                     reusableSession = reusableSession,
+                    sessionRollout = rollout,
                     forceFull = forceFull,
                     mode = mode,
                     onProgress = ::updateLibrarySyncProgress,

@@ -73,7 +73,7 @@ class PhoneBluetoothRolloutRoutingTest {
         canSyncAccount = { true }, currentPhoneUserId = { "owner" },
         b2Database = { db }, b2AccountScope = { "scope" }, sessionInitScope = scope
     ).apply {
-        bookRollbackWindow = { "scope:0" }
+        binaryWindowKey = { "scope:0" }
     }
 
     @After fun close() {
@@ -125,20 +125,27 @@ class PhoneBluetoothRolloutRoutingTest {
         assertNoGuardedOffer()
     }
 
-    @Test fun hundredPercentMovesFromIpToRfcommBeforeGuardedOffer() = runBlocking {
-        runRoute(Start.IP, percent = 100, expectedCohort = "b2_on")
+    @Test fun hundredPercentKeepsRfcommForAValidatedOfferBeforeLateIpUpgrade() = runBlocking {
+        runRoute(Start.LATE_IP, percent = 100, expectedCohort = "b2_on")
         val enabled = BuildConfig.B2_ENABLED
         assertEquals(if (enabled) listOf("rfcomm") else listOf("ip"), businessTransports())
-        assertEquals(if (enabled) listOf(false) else emptyList<Boolean>(), opens)
+        assertTrue(opens.isEmpty())
         val offers = seen.filter { it.request.has("supportedGuardedLibraryVersions") }
         assertEquals(if (enabled) listOf("rfcomm") else emptyList<String>(), offers.map { it.transport })
         if (enabled) assertEquals("probe", seen.first().request.getString("phase"))
     }
 
+    @Test fun hundredPercentKeepsAnAlreadyLeasedIpSessionOnV1() = runBlocking {
+        runRoute(Start.IP, percent = 100, expectedCohort = "ineligible")
+        assertEquals(listOf("ip"), businessTransports())
+        assertTrue(opens.isEmpty())
+        assertNoGuardedOffer()
+    }
+
     @Test fun olderWatchWithoutGuardedCapabilityUsesLegacyBusinessFrame() = runBlocking {
         runRoute(Start.OPEN, percent = 100, oldPeer = true, expectedCohort = "ineligible")
         assertEquals(listOf("rfcomm"), businessTransports())
-        assertEquals(listOf(!BuildConfig.B2_ENABLED), opens)
+        assertEquals(listOf(true), opens)
         assertEquals(if (BuildConfig.B2_ENABLED) 1 else 0,
             seen.count { it.request.has("supportedGuardedLibraryVersions") })
     }
@@ -147,10 +154,13 @@ class PhoneBluetoothRolloutRoutingTest {
         expired: Boolean = false, oldPeer: Boolean = false, expectedCohort: String) {
         installRollout(percent, forced, expired)
         val discovery = probe(oldPeer)
-        manager.openLibrarySession = { _, _, allowIpUpgrade ->
+        manager.openLibrarySession = { _, _, allowIpUpgrade, keepRfcomm ->
             opens += allowIpUpgrade
-            val transport = if (start == Start.OPEN && allowIpUpgrade && !oldPeer) "ip:fixture" else "rfcomm"
-            session(transport, discovery)
+            val rfcomm = session("rfcomm", discovery)
+            if (start == Start.OPEN && allowIpUpgrade && !oldPeer && keepRfcomm?.invoke(rfcomm, "fixture") != true) {
+                rfcomm.close()
+                session("ip:fixture", discovery)
+            } else rfcomm
         }
         manager.reconnectDelay = {}
         val reusable = when (start) {

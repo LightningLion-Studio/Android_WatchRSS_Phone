@@ -367,12 +367,16 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             ?: SyncV2Codec.fail("closure_incomplete")
         val capture = projection.accountCapture(false)
         val before = NoteAssetFiles.current(db, files, id)
+        val hasOriginal = before.exists()
         val ownerKeys = NoteAssetFiles.ownerKeys(db, id)
         if (ownerKeys.isEmpty() || !NoteAssetFiles.winnerAllows(db, id, revision)) SyncV2Codec.fail("choice_stale")
-        if (before.isFile && BookPackageFiles.verify(before, revision) {} == null) SyncV2Codec.fail("choice_stale")
-        val previousReference = NoteAssetFiles.reference(db, id)
-        if (previousReference != null && previousReference != revision) SyncV2Codec.fail("choice_stale")
-        val candidate = NoteAssetFiles.candidate(files, revision.sha256)
+        val existing = if (hasOriginal) {
+            BookPackageFiles.verify(before, revision) {} ?: SyncV2Codec.fail("choice_stale")
+        } else null
+        val previousReference = NoteAssetFiles.selection(db, id)
+        if (previousReference != null && previousReference.revision != revision) SyncV2Codec.fail("choice_stale")
+        val next = NoteAssetFiles.replacement(revision)
+        val candidate = NoteAssetFiles.candidate(files, next)
         val parent = NoteAssetFiles.ensureCandidateDirectory(files)
         val staged = File.createTempFile("restore-", ".part", parent)
         var linked = false
@@ -389,22 +393,18 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                 }
                 output.fd.sync()
             }
-            if (BookPackageFiles.verify(staged, revision) {} == null) SyncV2Codec.fail("hash_mismatch")
-            if (!before.isFile) {
-                linked = ConditionalBodyFile.linkIfAbsent(candidate, staged)
-                if (linked) syncDirectory(parent)
-            }
-            val selected = if (before.isFile) before else candidate
-            val verified = BookPackageFiles.verify(selected, revision) {} ?: SyncV2Codec.fail("choice_stale")
+            val verified = BookPackageFiles.verify(staged, revision) {} ?: SyncV2Codec.fail("hash_mismatch")
             projection.accountWriter(capture.stateVersion) { st ->
                 projection.accountCheck(st, capture, false)
                 if (!verified.isCurrent() || NoteAssetFiles.current(db, files, id) != before ||
-                    NoteAssetFiles.reference(db, id) != previousReference || NoteAssetFiles.ownerKeys(db, id) != ownerKeys ||
+                    NoteAssetFiles.selection(db, id) != previousReference || NoteAssetFiles.ownerKeys(db, id) != ownerKeys ||
                     !NoteAssetFiles.winnerAllows(db, id, revision) ||
-                    (selected == candidate && before != candidate && before.exists())) SyncV2Codec.fail("choice_stale")
-                if (selected == candidate && previousReference == null) {
-                    NoteAssetFiles.initialize(db)
-                    NoteAssetFiles.publish(db, id, revision)
+                    before.exists() != hasOriginal || existing?.isCurrent() == false) SyncV2Codec.fail("choice_stale")
+                if (!hasOriginal) {
+                    linked = ConditionalBodyFile.linkIfAbsent(candidate, staged)
+                    if (!linked) SyncV2Codec.fail("choice_stale")
+                    syncDirectory(parent)
+                    NoteAssetFiles.publish(db, id, next)
                 }
                 val matched = db.query("SELECT assetId,createdAt FROM note_assets WHERE storageKey=? AND deleted=0 AND sha256=?",
                     arrayOf(id, revision.sha256)).use { if (it.moveToFirst()) it.getString(0) to it.getLong(1) else null }
@@ -422,8 +422,11 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             NoteAssetFiles.published()
             return true
         } finally {
-            if (!committed && linked) ConditionalBodyFile.unlinkPublication(candidate, staged)
-            staged.delete()
+            try {
+                if (!committed && linked) NoteAssetFiles.discardUnreferenced(db, files, next, staged)
+            } finally {
+                staged.delete()
+            }
         }
     }
 

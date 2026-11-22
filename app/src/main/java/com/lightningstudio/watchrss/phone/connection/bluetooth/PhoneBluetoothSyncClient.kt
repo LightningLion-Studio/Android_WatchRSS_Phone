@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSession
 import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSessionRegistry
 import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
@@ -248,6 +249,8 @@ internal class PhoneSyncSession internal constructor(
         @Volatile private var binaryRevoked = false
         @Volatile private var binaryAccountFence: B2AccountFence? = null
         @Volatile internal var legacyResponseAdmission: (() -> Unit)? = null
+        @Volatile internal var guardedLibraryProbeResponse: JSONObject? = null
+        @Volatile internal var guardedLibrarySelected = false
 
         fun bindBinaryAuthorization(authorize: () -> Unit, fence: B2AccountFence?): Closeable? {
             binaryAccountFence = fence
@@ -522,6 +525,7 @@ class PhoneBluetoothSyncClient(
         sessionId: String = BluetoothDebugLog.newSessionId("bt-library-probe"),
         perDeviceTimeoutMs: Long = DEFAULT_DEVICE_PROBE_TIMEOUT_MS,
         allowIpUpgrade: Boolean = true,
+        keepRfcomm: (suspend (PhoneSyncSession, String) -> Boolean)? = null,
         onProbe: (completed: Int, total: Int, result: PhoneBluetoothWatchProbeResult) -> Unit = { _, _, _ -> }
     ): PhoneBluetoothWatchProbeBatch {
         val startedAt = SystemClock.elapsedRealtime()
@@ -624,7 +628,8 @@ class PhoneBluetoothSyncClient(
                 sessionId = "$sessionId-${index + 1}",
                 timeoutMs = perDeviceTimeoutMs,
                 retainSession = retainSession,
-                allowIpUpgrade = allowIpUpgrade
+                allowIpUpgrade = allowIpUpgrade,
+                keepRfcomm = keepRfcomm
             )
             val result = probed.result
             results += result
@@ -700,7 +705,8 @@ class PhoneBluetoothSyncClient(
         device: PhoneBluetoothWatchDevice,
         localDeviceId: String,
         sessionId: String = BluetoothDebugLog.newSessionId("sync-session-open"),
-        allowIpUpgrade:Boolean=true
+        allowIpUpgrade: Boolean = true,
+        keepRfcomm: (suspend (PhoneSyncSession, String) -> Boolean)? = null
     ): PhoneSyncSession? {
         if (!device.supportsPersistentSession) return null
         requireBluetoothConnectPermission()
@@ -725,8 +731,14 @@ class PhoneBluetoothSyncClient(
             )
         } ?: return null
         val rfcommSession = identity.session ?: return null
-        val ipSession = identity.takeIf { allowIpUpgrade && it.ipUpgradeAccepted && it.deviceId.isNotBlank() }
-            ?.let { awaitIpSession(it.deviceId, IP_UPGRADE_WAIT_MS) }
+        val ipSession = try {
+            identity.takeIf { allowIpUpgrade && it.ipUpgradeAccepted && it.deviceId.isNotBlank() &&
+                keepRfcomm?.invoke(rfcommSession, sessionId) != true }
+                ?.let { awaitIpSession(it.deviceId, IP_UPGRADE_WAIT_MS) }
+        } catch (failure: Throwable) {
+            rfcommSession.close()
+            throw failure
+        }
         val session = if (ipSession != null) {
             runCatching { rfcommSession.complete("$sessionId-rfcomm-upgrade") }
             rfcommSession.close()
@@ -854,7 +866,8 @@ class PhoneBluetoothSyncClient(
                 val wireRequest = session.requestForExchange(request)
                 writeFrameLogged(transport.outputStream, sessionId, "sessionRequest", wireRequest)
                 val response = readFrameLogged(transport.inputStream, sessionId, "sessionResponse")
-                val guardedBook = action == "syncBooks" && transport.legacyResponseAdmission != null
+                val guardedBook = BuildConfig.B2_ENABLED && transport.guardedLibrarySelected &&
+                    action == "syncBooks" && transport.legacyResponseAdmission != null
                 if (guardedBook) transport.legacyResponseAdmission?.invoke()
                 val ackFailure = writeResponseAck(
                     transport.outputStream,
@@ -1962,7 +1975,8 @@ class PhoneBluetoothSyncClient(
         sessionId: String,
         timeoutMs: Long,
         retainSession: Boolean,
-        allowIpUpgrade: Boolean = true
+        allowIpUpgrade: Boolean = true,
+        keepRfcomm: (suspend (PhoneSyncSession, String) -> Boolean)? = null
     ): ProbedWatch {
         debugLog.appendEvent(
             event = "bt.library.probe.device.start",
@@ -1985,7 +1999,8 @@ class PhoneBluetoothSyncClient(
         var handedOff = false
         try {
         ipSession = identity
-            ?.takeIf { it.ipUpgradeAccepted && it.deviceId.isNotBlank() }
+            ?.takeIf { it.ipUpgradeAccepted && it.deviceId.isNotBlank() &&
+                !(retainSession && sessionLease?.let { lease -> keepRfcomm?.invoke(lease, sessionId) } == true) }
             ?.let { awaitIpSession(it.deviceId, IP_UPGRADE_WAIT_MS) }
         if (ipSession != null && sessionLease != null) {
             runCatching { sessionLease.complete("$sessionId-rfcomm-upgrade") }

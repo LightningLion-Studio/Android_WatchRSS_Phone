@@ -2,9 +2,14 @@ package com.lightningstudio.watchrss.phone.syncv2
 
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2BodyHandoff
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2CommitWindow
 import kotlinx.coroutines.CancellationException
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+
+internal fun bluetoothBodyHandoffKey(head: B2CommitWindow.Head): String =
+    SyncV2Codec.hash(JSONArray().put(head.scope).put(head.oid).put(head.revision).put(head.rollbackGeneration))
 
 /** Runs after metadata. Originals and exact signed ciphertext form a restart-safe offline queue. */
 internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private val identity:SyncV2Identity,
@@ -66,8 +71,14 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
     }
     private fun anchor(account:JSONObject)=JSONObject().put("commitOid",account.getString("oid")).put("revision",account.getString("revision")).put("rollbackGeneration",account.getString("generation"))
     private fun candidates():List<Pair<String,String>> = projection.accountDatabase.controlQuery("SELECT kind,logical_id FROM syncv2_candidates WHERE scope=? AND kind IN ('asset','book') ORDER BY entity_key",arrayOf(projection.scope)).use{c->buildList{while(c.moveToNext())add(c.getString(0) to c.getString(1))}}
-    private fun localBluetoothScope(): String? = if (BuildConfig.B2_ENABLED)
-        "${projection.scope}:${projection.legacyRollbackGeneration()}" else null
+    private fun localBluetoothScope(): String? {
+        if (!BuildConfig.B2_ENABLED) return null
+        return try {
+            bluetoothBodyHandoffKey(projection.bluetoothVersion().head)
+        } catch (_: IllegalStateException) {
+            null
+        }
+    }
 
     fun refreshReferences(): List<String> {
         projection.migrateBodyAssetCandidates()
@@ -155,7 +166,10 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
     }
 
     private fun incoming(binding: SyncV2BodyCodec.Binding, anchor: JSONObject, defer: Boolean = false): Boolean =
-        repository.pendingBluetooth(binding, "${projection.scope}:${anchor.getString("rollbackGeneration")}", defer)
+        repository.pendingBluetooth(binding, bluetoothBodyHandoffKey(B2CommitWindow.Head(
+            projection.scope, anchor.getString("commitOid"), anchor.getString("revision"),
+            anchor.getString("rollbackGeneration")
+        )), defer)
 
     private fun checkIncoming(binding: SyncV2BodyCodec.Binding, anchor: JSONObject) {
         if (incoming(binding, anchor, defer = true)) SyncV2Codec.fail("body_channel_pending")

@@ -135,11 +135,11 @@ class PhoneBluetoothRolloutRoutingTest {
         assertNoGuardedOffer()
     }
 
-    @Test fun hundredPercentKeepsRfcommForAValidatedOfferBeforeLateIpUpgrade() = runBlocking<Unit> {
-        runRoute(Start.LATE_IP, percent = 100, expectedCohort = "b2_on")
+    @Test fun hundredPercentKeepsRfcommForAValidatedOfferWhenIpIsAvailable() = runBlocking<Unit> {
+        runRoute(Start.OPEN, percent = 100, expectedCohort = "b2_on")
         val enabled = BuildConfig.B2_ENABLED
         assertEquals(if (enabled) listOf("rfcomm") else listOf("ip"), businessTransports())
-        assertTrue(opens.isEmpty())
+        assertEquals(listOf(true), opens)
         val offers = seen.filter { it.request.has("supportedGuardedLibraryVersions") }
         assertEquals(if (enabled) listOf("rfcomm") else emptyList<String>(), offers.map { it.transport })
         if (enabled) assertEquals("probe", seen.first().request.getString("phase"))

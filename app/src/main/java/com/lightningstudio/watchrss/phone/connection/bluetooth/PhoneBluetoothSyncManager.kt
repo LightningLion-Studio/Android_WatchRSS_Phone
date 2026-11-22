@@ -695,15 +695,15 @@ class PhoneBluetoothSyncManager(
         requirePhoneLogin()
         val binaryMerge = BuildConfig.B2_ENABLED && mode == LibrarySyncMode.MERGE
         val guardedBinary = binaryMerge && BuildConfig.SYNC_V2
-        // An existing IP lease carries v1. Guarded offers are bound to their own RFCOMM transport.
-        val guardedScope = if (guardedBinary && reusableSession?.transport?.owner?.startsWith("ip:") != true)
-            currentBinaryScope() else null
+        val guardedScope = if (guardedBinary) currentBinaryScope() else null
         val binaryAssetsReady = binaryMerge && b2Database() != null &&
             (!guardedBinary || guardedScope != null && b2AccountScope().isNotBlank())
         val rollout = sessionRollout ?: loadLibraryRollout(binaryAssetsReady &&
             reusableSession?.bindingProbe?.let(::knownLegacyLibraryPeer) != true)
         telemetry?.decision = rollout
-        val binaryAllowed = rollout.enabled && binaryAssetsReady
+        // Keep the sampled cohort for an existing IP lease, whose transport stays on v1.
+        val leasedIp = reusableSession?.transport?.owner?.startsWith("ip:") == true
+        val binaryAllowed = rollout.enabled && binaryAssetsReady && !(guardedBinary && leasedIp)
         val guardedTransport = guardedBinary && binaryAllowed
         val binaryLibraryReady = binaryAllowed && repository.binaryArticleStorageReady()
         val binaryBooksReady = binaryAllowed && repository.books?.binaryReady() == true
@@ -820,10 +820,11 @@ class PhoneBluetoothSyncManager(
             val initialBinding = recovery.run {
                 telemetry?.stage = BtSyncStage.READY
                 val initial = syncSession
-                if (guardedTransport && initial?.transport?.owner?.startsWith("ip:") == false) {
-                    binding()
-                }
-                if (initial?.transport?.guardedLibrarySelected != true) {
+                // A previously negotiated guarded route stays on its RFCOMM transport.
+                // Otherwise let the late IP upgrade finish before sending any extra probe on RFCOMM.
+                val keepGuardedRfcomm = guardedTransport &&
+                    initial?.transport?.guardedLibraryProbeResponse?.let { !selectBinary(it).isEmpty } == true
+                if (!keepGuardedRfcomm) {
                     syncSession = initial?.let { client.promoteLateIpSession(it, "$sessionId-ip-upgrade") }
                     if (syncSession !== initial) {
                         sharedBinding = null
@@ -839,7 +840,7 @@ class PhoneBluetoothSyncManager(
             telemetry?.protocol = if (initialBinding.response.optBoolean("supportsAccountDataSpaces"))
                 BtSyncProtocol.COMPOSE else BtSyncProtocol.V1
             if (!binaryAssetsReady || knownLegacyLibraryPeer(initialBinding.response) ||
-                (binaryAllowed && guardedBinary && !isB2RolloutEligible(true, binaryProbe))) {
+                (rollout.enabled && guardedBinary && !isB2RolloutEligible(true, binaryProbe))) {
                 telemetry?.decision = rollout.copy(enabled = false, cohort = B2Cohort.INELIGIBLE)
             }
             val binaryRuntimes = if (binaryRecovery != null) {

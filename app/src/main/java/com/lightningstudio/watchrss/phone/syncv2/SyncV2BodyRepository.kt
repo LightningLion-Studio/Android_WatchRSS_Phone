@@ -227,14 +227,20 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     }
 
     fun prepareNoteAssetRegistration(id: String): NoteAssetRegistration {
+        val selected = NoteAssetFiles.selection(db, id)
         val target = file("asset", id)
+        if (target.canonicalFile.parentFile != target.parentFile!!.canonicalFile) SyncV2Codec.fail("closure_incomplete")
         val observed = identity(target) ?: SyncV2Codec.fail("closure_incomplete")
-        val selected = JSONObject().put("assetId", id).put("deleted", false)
-        val original = original("asset", id, selected) ?: SyncV2Codec.fail("closure_incomplete")
-        val sha = original.sha256
-        val registration = NoteAssetRegistration(id, sha, original.raw.size) {
-            file("asset", id) == target && target.canonicalFile.parentFile == target.parentFile!!.canonicalFile &&
-                NoteAssetFiles.ownerKeys(db, id).isNotEmpty() && sameFile(target, observed, sha)
+        val raw = stableRead(target, observed, SyncV2BodyCodec.limit("asset")) ?: SyncV2Codec.fail("closure_incomplete")
+        val sha = SyncV2BodyCodec.hash(raw)
+        if (selected != null && selected.revision != BookPackageFiles.Revision(sha, raw.size.toLong())) {
+            SyncV2Codec.fail("closure_incomplete")
+        }
+        val registration = NoteAssetRegistration(id, sha, raw.size) {
+            NoteAssetFiles.selection(db, id) == selected && file("asset", id) == target &&
+                target.canonicalFile.parentFile == target.parentFile!!.canonicalFile &&
+                (selected == null || NoteAssetFiles.ownerKeys(db, id).isNotEmpty()) &&
+                sameFile(target, observed, sha)
         }
         registration.requireCurrent()
         return registration

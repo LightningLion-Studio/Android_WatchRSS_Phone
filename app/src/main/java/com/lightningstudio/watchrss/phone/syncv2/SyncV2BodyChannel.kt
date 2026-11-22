@@ -266,23 +266,27 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         current(entry, anchor, expires)
         val b = binding(entry)
         val selected = value(entry)
-        var handoffGeneration = B2BodyHandoff.generation
         checkIncoming(b, anchor)
         val repair = capturedTarget ?: repository.repairTarget(b.kind, b.logicalId, selected)
+        var checkedHandoffGeneration: Long? = null
+        fun checkHandoff() {
+            val generation = B2BodyHandoff.generation
+            if (generation == checkedHandoffGeneration) return
+            // The first check also covers a plan that already committed and left the registry.
+            checkIncoming(b, anchor)
+            matchingOriginal(b, selected)?.let {
+                current(entry, anchor, expires)
+                it.requireCurrent()
+                throw OriginalCommitted()
+            }
+            checkedHandoffGeneration = generation
+        }
         val raw = try {
             SyncV2BodyCodec.open(descriptor, identity.scope, b, carrierPublicKey(descriptor), keys::read) { hash, size ->
+                checkHandoff()
                 http.download(descriptor.getJSONObject("body").getString("carrierId"), hash, size, dir) {
                     checkWindow(anchor, expires)
-                    val generation = B2BodyHandoff.generation
-                    if (generation != handoffGeneration) {
-                        handoffGeneration = generation
-                        checkIncoming(b, anchor)
-                        matchingOriginal(b, selected)?.let {
-                            current(entry, anchor, expires)
-                            it.requireCurrent()
-                            throw OriginalCommitted()
-                        }
-                    }
+                    checkHandoff()
                 }
             }
         } catch (_: OriginalCommitted) {

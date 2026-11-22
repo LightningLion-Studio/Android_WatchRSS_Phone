@@ -96,6 +96,7 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
             if(meta.getString("kind")=="rss-state")continue
             val d=SyncV2Schema.domains.single{it.kind==meta.getString("kind")};val id=meta.getString("logicalId")
             db.execSQL("DELETE FROM `${d.table}` WHERE (${d.key})=?",arrayOf(id))
+            if(d.kind=="asset")db.execSQL("DELETE FROM ${SyncV2NoteAssetNames.aliases} WHERE storageKey=?",arrayOf(id))
             if(d.kind=="note")db.execSQL("DELETE FROM note_conflicts WHERE noteId=?",arrayOf(id))
             if(d.kind=="book")db.execSQL("DELETE FROM imported_book_chapters WHERE bookId=?",arrayOf(id))
         }
@@ -143,12 +144,19 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
                 "asset"->{
                     val storage=v.getString("assetId");SyncV2BodyCodec.name("asset",storage)
                     val old=scalar("note_assets","storageKey",storage)
-                    val linked=notes.firstOrNull{r->SyncV2BodyRepository.noteReferences(r.getJSONObject("value")).contains(storage)}
+                    val alias=if(old==null)scalar(SyncV2NoteAssetNames.aliases,"storageKey",storage)else null
                     val row=JSONObject().put("assetId",old?.getString("assetId")?:java.util.UUID.randomUUID().toString())
                         .put("mimeType",v.get("mime")).put("displayName",v.get("originalFilename"))
                         .put("createdAt",v.get("updatedAt")).put("deleted",v.get("deleted")).put("deletedAt",v.get("deletedAt"))
-                    if(old==null)row.put("noteId",linked?.getJSONObject("value")?.getString("noteId")?:"").put("storageKey",storage)
-                        .put("sha256","syncv2:${meta.getString("entityKey")}").put("byteCount",0).put("isOriginal",false)
+                    if(alias!=null) {
+                        SyncV2NoteAssetNames.saveAlias(db,row.put("storageKey",storage))
+                        continue
+                    }
+                    if(old==null) {
+                        val linked=notes.firstOrNull{r->SyncV2BodyRepository.noteReferences(r.getJSONObject("value")).contains(storage)}
+                        row.put("noteId",linked?.getJSONObject("value")?.getString("noteId")?:"").put("storageKey",storage)
+                            .put("sha256","syncv2:${meta.getString("entityKey")}").put("byteCount",0).put("isOriginal",false)
+                    }
                     upsert("note_assets",listOf("assetId"),row)
                 }
             }

@@ -59,14 +59,14 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
     }
     private fun assetOriginal(key: String, maxBytes: Long? = null): BookPackageFiles.Original? {
         if (!NoteAssetFiles.isSafe(key)) return null
-        val revisions = db.query("SELECT sha256,byteCount FROM note_assets WHERE storageKey=? AND deleted=0", arrayOf(key)).use { rows ->
+        val revisions = db.query("SELECT sha256,byteCount FROM ${SyncV2NoteAssetNames.source} WHERE storageKey=? AND deleted=0", arrayOf(key)).use { rows ->
             buildSet { while (rows.moveToNext()) add(BookPackageFiles.Revision(rows.getString(0), rows.getLong(1))) }
         }
         val expected = revisions.singleOrNull() ?: return null
         if (maxBytes != null && expected.bytes > maxBytes) SyncV2Codec.fail("quota_exceeded")
         return NoteAssetFiles.verifiedOriginal(db, files, key, expected) { sourceReads?.file(it) }
     }
-    private fun sources(record:JSONObject,maxBytes:Long?=null):List<Pair<String,Source>> {
+    private fun sources(record:JSONObject,maxBytes:Long?=null,onUnregisteredNoteAsset:((String)->Unit)?=null):List<Pair<String,Source>> {
         val m=record.getJSONObject("meta");val id=m.getString("logicalId");val value=record.getJSONObject("value")
         if(SyncV2Business.logicalId(m.getString("kind"),value)!=id || identity.entity(m.getString("kind"),id)!=m.getString("entityKey"))SyncV2Codec.fail("identity_conflict")
         return when(m.getString("kind")) {
@@ -105,7 +105,11 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                     for(i in 0 until conflicts.length())for(field in listOf("baseMarkdown","localMarkdown","remoteMarkdown"))texts.add(conflicts.getJSONObject(i).getString(field))
                 }
                 val keys=texts.flatMap{com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.referencedStorageKeys(it)}.toSortedSet()
-                keys.map {name->
+                keys.mapNotNull {name->
+                    if (!SyncV2NoteAssetNames.exists(db, name) && onUnregisteredNoteAsset != null) {
+                        onUnregisteredNoteAsset(name)
+                        return@mapNotNull null
+                    }
                     val original = assetOriginal(name, maxBytes) ?: SyncV2Codec.fail("closure_incomplete")
                     "asset/$name" to fileSource(original)
                 }
@@ -123,7 +127,11 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             else->false
         }
     }
-    fun contentReady(record:JSONObject):Boolean=record.getJSONObject("state").getJSONObject("payload").optBoolean("deleted",false) || try {sources(record);true}catch(_:Exception){false}
+    fun contentReady(record:JSONObject,onUnregisteredNoteAsset:((String)->Unit)?=null):Boolean =
+        record.getJSONObject("state").getJSONObject("payload").optBoolean("deleted",false) || try {
+            sources(record,onUnregisteredNoteAsset=onUnregisteredNoteAsset)
+            true
+        } catch(_:Exception) { false }
     fun guardedAlreadyPresent(link: JSONObject): Boolean {
         val descriptor = link.getJSONObject("descriptor")
         val kind = descriptor.optString("kind")

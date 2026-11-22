@@ -71,7 +71,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
 
     fun refreshReferences(): List<String> {
         projection.migrateBodyAssetCandidates()
-        return repository.refreshReferences(now(), life::check, localBluetoothScope())
+        return repository.refreshReferences(now(), projection.scope, localBluetoothScope(), life::check)
     }
     /** Random old placeholders with originals must be republished even without metadata edits. */
     fun needsPublication():Boolean {

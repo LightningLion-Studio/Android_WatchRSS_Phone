@@ -45,6 +45,8 @@ class PhoneAccountRepository(
         }
     }
 
+    internal fun cloudAuthentication() = sessionStore.cloudAuthentication()
+
     private suspend fun clearSession(owner: PhoneAccountSession) = sessionChanges.withLock {
         if (session.value?.userId != owner.userId) return@withLock
         retireCloudSession(owner) {

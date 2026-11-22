@@ -26,7 +26,10 @@ internal object SyncV2Schema {
         try {
             beforeBusinessOpen(db)
             if(BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION)install(db)
-            else if(hasColumn(db,"syncv2_control","enabled"))db.execSQL("UPDATE syncv2_control SET enabled=0 WHERE enabled!=0")
+            else {
+                SyncV2UnconfirmedWrite.recoverExisting(db)
+                if(hasColumn(db,"syncv2_control","enabled"))db.execSQL("UPDATE syncv2_control SET enabled=0 WHERE enabled!=0")
+            }
         } catch(_:Exception) {
             // Isolate projection setup/closing faults from the original Room business open.
             runCatching {db.execSQL("UPDATE syncv2_control SET enabled=0,failure_code='projection_setup_failed' WHERE id=1")}
@@ -84,6 +87,8 @@ internal object SyncV2Schema {
             if(!hasColumn(db,"syncv2_scan","business_stamp"))db.execSQL("ALTER TABLE syncv2_scan ADD COLUMN business_stamp TEXT NOT NULL DEFAULT ''")
             beforeBusinessOpen(db)
             SyncV2BusinessWitness.install(db)
+            SyncV2NoteAssetNames.install(db)
+            SyncV2UnconfirmedWrite.install(db)
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
     }

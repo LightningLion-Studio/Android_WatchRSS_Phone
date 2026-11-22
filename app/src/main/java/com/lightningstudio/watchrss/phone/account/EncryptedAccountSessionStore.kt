@@ -63,6 +63,13 @@ class EncryptedAccountSessionStore(
 
     private val purchaseGeneration = MutableStateFlow(0L)
     private var logoutsInProgress = 0
+    private var cloudAuthenticationGeneration = 0L
+
+    internal data class CloudAuthentication(val session: PhoneAccountSession?, val generation: Long)
+
+    internal fun cloudAuthentication() = synchronized(sessionLock) {
+        CloudAuthentication(_session.value.takeIf { logoutsInProgress == 0 }, cloudAuthenticationGeneration)
+    }
 
     internal class PurchaseSession(
         val session: PhoneAccountSession?,
@@ -73,6 +80,7 @@ class EncryptedAccountSessionStore(
     internal fun beginLogout(): PhoneAccountSession? = synchronized(sessionLock) {
         logoutsInProgress++
         purchaseGeneration.value++
+        cloudAuthenticationGeneration++
         _session.value
     }
 
@@ -112,6 +120,9 @@ class EncryptedAccountSessionStore(
         val previous = _session.value
         val changed = !previous.hasSameSessionCredentials(next) || previous?.expiresAtMillis != next?.expiresAtMillis ||
             previous?.authenticationPaused != next?.authenticationPaused
+        if (previous?.userId != next?.userId || previous?.authenticationPaused != next?.authenticationPaused) {
+            cloudAuthenticationGeneration++
+        }
         if (changed) {
             b2AccountFence.revoke()
             purchaseGeneration.value++

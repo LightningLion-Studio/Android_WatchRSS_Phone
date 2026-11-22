@@ -37,7 +37,7 @@ import java.util.Base64
 @Config(sdk=[35])
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 class SyncV2BodyTransportTest {
-    private class Backend(val f:SyncV2P5Fixture) {
+    internal class Backend(val f:SyncV2P5Fixture) {
         val descriptors=linkedMapOf<String,JSONObject>();val objects=mutableMapOf<String,ByteArray>();val ready=mutableSetOf<String>()
         val puts=mutableListOf<Pair<String,Int>>();val reads=mutableListOf<Int>();var writeError:String?=null;var status=503;var delay:Long?=null;var retryable:Boolean?=null
         var losePart=false;var loseRead=false;var bodyRequests=0;var reserveCalls=0;var beforeRead:(()->Unit)?=null
@@ -162,7 +162,7 @@ class SyncV2BodyTransportTest {
                 room.exclusive { room.transaction {
                     assertEquals("merged", business.apply(assetObject, B2Metadata.validate(assetObject), staged))
                 } }
-                assertEquals(emptyList<String>(), repository.refreshReferences(f.f.now, {}))
+                assertEquals(emptyList<String>(), repository.refreshReferences(f.f.now) {})
                 assertArrayEquals(image, repository.original("asset", asset,
                     JSONObject().put("assetId", asset).put("deleted", false))!!.raw)
             } else {

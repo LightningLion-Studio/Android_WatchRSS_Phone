@@ -38,10 +38,10 @@ internal object SyncV2NoteBudget {
             for(i in 0 until records.length())for(field in listOf("baseMarkdown","localMarkdown","remoteMarkdown"))collect(records.getJSONObject(i).getString(field))
         }
         // Keep the existing conservative charge for owned attachment rows as well.
-        if(id!=null)db.query("SELECT storageKey FROM note_assets WHERE noteId=?",arrayOf(id)).use{c->while(c.moveToNext())keys.add(c.getString(0))}
+        if(id!=null)db.query("SELECT storageKey FROM ${SyncV2NoteAssetNames.source} WHERE noteId=?",arrayOf(id)).use{c->while(c.moveToNext())keys.add(c.getString(0))}
         var attachments=0L
         for(storageKey in keys) {
-            val size=db.query("SELECT MAX(byteCount) FROM note_assets WHERE storageKey=?",arrayOf(storageKey)).use{c->
+            val size=db.query("SELECT MAX(byteCount) FROM ${SyncV2NoteAssetNames.source} WHERE storageKey=?",arrayOf(storageKey)).use{c->
                 if(!c.moveToFirst()||c.isNull(0))SyncV2Codec.fail("closure_incomplete")
                 c.getLong(0)
             }

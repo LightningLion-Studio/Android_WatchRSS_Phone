@@ -22,7 +22,6 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONObject
 import java.io.File
 import java.io.InterruptedIOException
-import java.util.concurrent.atomic.AtomicLong
 
 private const val MAX_ARTICLE_MARKER_BYTES = 256
 
@@ -53,8 +52,8 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
     private val contentEnabled:Boolean=true,
     private val onAuthenticationResponse:(String,Int,String)->Unit={_,_,_->}) {
     data class Account(val userId:String,val backendBaseUrl:String,val legacyDeviceId:String,val epoch:String,val generation:String,
-        val bearer:String,val apiKey:String,val deviceAuthorization:String?) {
-        fun owner()=listOf(userId,backendBaseUrl,legacyDeviceId,epoch,generation)
+        val bearer:String,val apiKey:String,val deviceAuthorization:String?,val sessionGeneration:Long=0) {
+        fun owner()=listOf(userId,backendBaseUrl,legacyDeviceId,epoch,generation,sessionGeneration.toString())
         val accountId get()=userId.replace("-","").lowercase()
     }
     data class Result(
@@ -65,7 +64,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         val pendingBodies: Boolean = false
     )
     private val mutex=Mutex()
-    private val generation=AtomicLong()
+    private val generation=SyncV2Lifetime.Generation()
     @Volatile private var opening:SyncV2Lifetime?=null
     @Volatile private var runtime:Runtime?=null
     @Volatile private var announcement:JSONObject?=null
@@ -75,7 +74,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
 
     /** Called before v1 credential deletion, even while start is waiting for HTTP. */
     fun release() {
-        generation.incrementAndGet()
+        generation.invalidate()
         opening?.close();runtime?.life?.close()
         opening=null;runtime=null;announcement=null;_uiPort.value=null
     }
@@ -177,9 +176,8 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         }
     }
     private fun open(account:Account,syncV2:JSONObject,allowCreate:Boolean):Runtime {
-        val gen=generation.get()
         val owner=account.owner();val serviceAnnouncement=SyncV2Codec.canonical(syncV2)
-        val life=SyncV2Lifetime {generation.get()==gen && enabled() && announcement?.let{SyncV2Codec.canonical(it)}==serviceAnnouncement && current()?.owner()==owner}
+        val life=SyncV2Lifetime(generation) {enabled() && announcement?.let{SyncV2Codec.canonical(it)}==serviceAnnouncement && current()?.owner()==owner}
         opening=life
         try {
             life.own(keys.onAccountRelease(account.userId){release()})

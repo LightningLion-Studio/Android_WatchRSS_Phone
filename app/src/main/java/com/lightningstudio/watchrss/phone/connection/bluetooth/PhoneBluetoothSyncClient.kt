@@ -51,6 +51,8 @@ import java.io.EOFException
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.resume
 
 data class BluetoothSyncExchange(
@@ -431,10 +433,16 @@ internal class PhoneSyncSession internal constructor(
     }
 }
 
-internal fun b2Probe(request: JSONObject): JSONObject =
+/** The sampled library sync decision follows discovery, IP refresh and reconnect. */
+internal class LibraryB2ProbeOffer(val enabled: Boolean) : AbstractCoroutineContextElement(Key) {
+    companion object Key : CoroutineContext.Key<LibraryB2ProbeOffer>
+}
+
+internal suspend fun b2Probe(request: JSONObject): JSONObject =
     B2Routing.probe(
         request, com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED &&
-            !com.lightningstudio.watchrss.phone.BuildConfig.SYNC_V2
+            !com.lightningstudio.watchrss.phone.BuildConfig.SYNC_V2 &&
+            currentCoroutineContext()[LibraryB2ProbeOffer]?.enabled == true
     )
 
 class PhoneBluetoothSyncClient(
@@ -446,7 +454,7 @@ class PhoneBluetoothSyncClient(
     private val capabilitiesByAddress = mutableMapOf<String, PhoneWatchCapabilities>()
     private val connectionMutex = Mutex()
 
-    private fun withSyncObjectsProbe(original:JSONObject):JSONObject {
+    private suspend fun withSyncObjectsProbe(original:JSONObject):JSONObject {
         val request = b2Probe(original)
         if(!com.lightningstudio.watchrss.phone.BuildConfig.SYNC_OBJECTS_V2_LOCAL_OBJECTS)return request
         val capability=syncObjectsCapability?.invoke()?:return request

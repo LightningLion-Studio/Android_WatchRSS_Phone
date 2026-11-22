@@ -379,7 +379,7 @@ class PhoneBluetoothSyncManager(
             if (rollout != null) currentCoroutineContext()[BtSyncSession]?.decision = rollout
             val keepRfcomm = if (rollout?.enabled == true && BuildConfig.SYNC_V2) ::keepGuardedRfcomm else null
             withTimeout(LIBRARY_PROBE_TIMEOUT_MS) {
-                withContext(Dispatchers.IO) {
+                withContext(Dispatchers.IO + LibraryB2ProbeOffer(rollout?.enabled == true)) {
                     val batch = probeDevices?.invoke(sessionId, allowIpUpgrade, onProbe)
                         ?: client.probeLibrarySyncDevices(deviceId, sessionId, allowIpUpgrade = allowIpUpgrade,
                             keepRfcomm = keepRfcomm, onProbe = { done, total, _ -> onProbe(done, total) })
@@ -810,7 +810,7 @@ class PhoneBluetoothSyncManager(
         suspend fun <T> accountRecovery(block: suspend () -> T): T = recovery.run {
             accountGate.run { withContext(AccountDataSession(requireNotNull(syncSession) { "手表未支持账号资料会话，请升级手表端" })) { block() } }
         }
-        val completed = try {
+        suspend fun syncLibraryTransport(): PhoneBluetoothSyncResult = try {
             if (!opened) recovery.search(confirmAccount = false)
             val initialBinding = recovery.run {
                 telemetry?.stage = BtSyncStage.READY
@@ -1043,6 +1043,7 @@ class PhoneBluetoothSyncManager(
             syncSession = null
             debugLog.appendEvent("sync.session.closed", sessionId)
         }
+        val completed = withContext(LibraryB2ProbeOffer(binaryAllowed)) { syncLibraryTransport() }
         onSyncActiveChanged(false) // The physical session is closed before any asynchronous cloud enqueue.
         val changed = completed.hasActualLibraryChanges() || locallyApplied || booksApplied > 0
         debugLog.appendEvent("sync.cloud.decision", sessionId, mapOf("actualChanges" to changed,"articlesMerged" to (completed.libraryStats?.merged?:0),"sourcesMerged" to (completed.libraryStats?.sourcesMerged?:0),"booksApplied" to booksApplied,"localApplied" to locallyApplied,"notesPhone" to (completed.noteStats?.appliedOnPhone?:0),"notesWatch" to (completed.noteStats?.appliedOnWatch?:0)))

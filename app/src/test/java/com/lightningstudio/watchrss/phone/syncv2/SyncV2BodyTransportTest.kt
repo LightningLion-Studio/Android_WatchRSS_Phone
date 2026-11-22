@@ -612,6 +612,36 @@ class SyncV2BodyTransportTest {
         }
     }
 
+    @Test fun b2CommitBeforeFirstBodyRequestAvoidsDuplicateGet() {
+        ReviewAsset(SyncV2P5Fixture(), true).use { a ->
+            assertTrue(a.file.delete())
+            val inbound = assetDescriptor(a.raw, a.id)
+            val job = "b".repeat(32)
+            var committed = false
+            val result = a.channel(now = {
+                val stack = Thread.currentThread().stackTrace
+                if (!committed && stack.any {
+                        it.className == SyncV2BodyChannel::class.java.name && it.methodName.startsWith("receive")
+                    }) {
+                    assertEquals(0, a.backend.reads.size)
+                    committed = true
+                    B2BodyHandoff.open(a.f.root, a.bluetoothWindowKey()).use { connection ->
+                        connection.verified(job, listOf(inbound))
+                        runBlocking { assertEquals("merged", publishFixtureAttachment(a)) }
+                        connection.applied(job, inbound.getString("objectId"))
+                    }
+                    assertArrayEquals(a.raw, NoteAssetFiles.current(a.f.sql, a.f.root, a.id).readBytes())
+                }
+                a.clock.get()
+            }).sync()
+            println("commit before first cloud request: committed=$committed result=$result GET=${a.backend.reads.size} install=${a.installs}")
+            assertTrue(committed)
+            assertEquals(SyncV2BodyChannel.Result(0, emptyList()), result)
+            assertEquals(0, a.installs)
+            assertEquals("same-version original had already committed before the first cloud request", 0, a.backend.reads.size)
+        }
+    }
+
     private suspend fun publishFixtureAttachment(a: ReviewAsset): String {
         val room = B2RoomStore(a.f.room)
         val receiver = B2NoteAssetBusiness(room, "a".repeat(64), a.file.parentFile!!) {}

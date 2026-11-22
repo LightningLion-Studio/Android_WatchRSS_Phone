@@ -78,7 +78,8 @@ internal class SyncV2CloudClient(
         val s = JSONObject(owner[4]); if(includeScope)for (k in listOf("repoId", "libraryEpoch", "contentGeneration")) builder.addQueryParameter(k,s.getString(k))
         query.forEach { (k,v) -> builder.addQueryParameter(k,v) }; return builder.build()
     }
-    private fun bytes(method: String, path: String, body: ByteArray? = null, headers: Map<String,String> = emptyMap(), query: Map<String,String> = emptyMap(), raw: Boolean = false, bodyChannel:Boolean=false): Pair<ByteArray,Map<String,String>> {
+    private fun bytes(method: String, path: String, body: ByteArray? = null, headers: Map<String,String> = emptyMap(), query: Map<String,String> = emptyMap(), raw: Boolean = false, bodyChannel:Boolean=false,
+        beforeRequest: () -> Unit = {}): Pair<ByteArray,Map<String,String>> {
         val s = active()
         if(path!="capabilities" && !capabilitiesChecked)SyncV2Codec.fail("authentication_required")
         val builder = Request.Builder().url(url(path,query,bodyChannel,!bodyChannel || method=="GET")).header("Authorization", "Bearer ${s.bearer}")
@@ -97,6 +98,7 @@ internal class SyncV2CloudClient(
         calls.add(call)
         try {
             active()
+            beforeRequest()
             return execute(call) { response ->
                 if (response.code in setOf(401, 403)) onAuthenticationResponse(s.userId, response.code, "")
                 if(response.code in 300..399)SyncV2Codec.fail("isolated_backend_required")
@@ -130,8 +132,9 @@ internal class SyncV2CloudClient(
     }
 
     /** Same authenticated origin, ownership fence, cancellation and deadline; separate byte namespace. */
-    internal fun bodyBytes(method:String,path:String,body:ByteArray?=null,headers:Map<String,String> = emptyMap(),query:Map<String,String> = emptyMap(),raw:Boolean=false)=
-        bytes(method,path,body,headers,query,raw,bodyChannel=true)
+    internal fun bodyBytes(method:String,path:String,body:ByteArray?=null,headers:Map<String,String> = emptyMap(),query:Map<String,String> = emptyMap(),raw:Boolean=false,
+        beforeRequest: () -> Unit = {}) =
+        bytes(method,path,body,headers,query,raw,bodyChannel=true,beforeRequest=beforeRequest)
     private fun get(path: String, query: Map<String,String> = emptyMap()): JSONObject = check(SyncV2Wire.parse(bytes("GET",path,query=query).first))
     private fun post(path: String, value: JSONObject): JSONObject {
         val request=JSONObject(value.toString())

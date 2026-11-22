@@ -52,7 +52,10 @@ internal class SyncV2BodyHttp(private val client:SyncV2CloudClient,private val c
         if(target.isFile && target.length()==size.toLong())target.readBytes().let{if(SyncV2BodyCodec.hash(it)==hash){removeCompletedPart(partial);return it}}
         if(partial.length()>size)atomic(partial,byteArrayOf())
         var at=partial.length().toInt()
-        while(at<size) {check();beforeTransfer();val (bytes,headers)=client.bodyBytes("GET","carriers/$id/objects/$hash",query=mapOf("offset" to at.toString()),raw=true)
+        while(at<size) {
+            check()
+            val (bytes, headers) = client.bodyBytes("GET", "carriers/$id/objects/$hash",
+                query = mapOf("offset" to at.toString()), raw = true, beforeRequest = beforeTransfer)
             fun header(k:String)=headers.entries.firstOrNull{it.key.equals(k,true)}?.value
             if(header("x-watchrss-body-total-bytes")!=size.toString() || header("x-watchrss-body-offset")!=at.toString() || bytes.size!=minOf(65536,size-at))SyncV2Codec.fail("invalid_range")
             FileOutputStream(partial,true).use{it.write(bytes);it.fd.sync()};at+=bytes.size

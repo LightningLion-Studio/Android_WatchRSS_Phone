@@ -728,10 +728,11 @@ class PhoneBluetoothSyncManager(
             if (!opened) recovery.search(confirmAccount = false)
             recovery.run {
                 val initial = syncSession
-                if (guardedBinary && binaryAssetsReady && initial?.transport?.owner?.startsWith("ip:") == false) {
-                    binding()
-                }
-                if (initial?.transport?.guardedLibrarySelected != true) {
+                // A previously negotiated guarded route stays on its RFCOMM transport.
+                // Otherwise let the late IP upgrade finish before sending any extra probe on RFCOMM.
+                val keepGuardedRfcomm = guardedBinary && binaryAssetsReady &&
+                    initial?.transport?.guardedLibraryProbeResponse?.let { !selectBinary(it).isEmpty } == true
+                if (!keepGuardedRfcomm) {
                     syncSession = initial?.let { client.promoteLateIpSession(it, "$sessionId-ip-upgrade") }
                     if (syncSession !== initial) {
                         sharedBinding = null

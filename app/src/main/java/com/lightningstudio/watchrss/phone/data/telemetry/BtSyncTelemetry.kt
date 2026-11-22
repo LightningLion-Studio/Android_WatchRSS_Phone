@@ -17,9 +17,13 @@ import com.lightningstudio.watchrss.phone.account.AccountEnvironment
 import com.lightningstudio.watchrss.phone.network.CloudCallCancellation
 import com.lightningstudio.watchrss.phone.network.withWatchRssAppVersionHeader
 import com.lightningstudio.watchrss.phone.privacy.PhonePrivacyConsentStore
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -44,19 +48,15 @@ internal class BtSyncTelemetry(
         File(context.noBackupFilesDir, "bt_sync_events${environment.storageSuffix}.json")
     )
 
-    fun begin(trigger: BtSyncTrigger): BtSyncSession? {
-        if (!consent.hasRequiredConsent()) return null
-        val device = BtSyncDevice(installId, BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE,
-            Build.MANUFACTURER, Build.MODEL, Build.VERSION.RELEASE, Build.VERSION.SDK_INT)
-        return BtSyncSession(device, trigger, ::record,
-            System::currentTimeMillis, SystemClock::elapsedRealtime)
-    }
+    fun begin(trigger: BtSyncTrigger): BtSyncSession? =
+        if (consent.hasRequiredConsent()) newSession(trigger, installId, ::record) else null
 
     private suspend fun record(event: BtSyncEvent) {
         withContext(NonCancellable + Dispatchers.IO) {
             if (!consent.hasRequiredConsent()) return@withContext
             // Telemetry storage or scheduler failure must not change the sync result.
             runCatching {
+                event.data.put("installId", installId)
                 queue.append(event)
                 if (endpoint != null) scheduleUpload(ExistingWorkPolicy.APPEND_OR_REPLACE)
             }
@@ -93,6 +93,38 @@ internal class BtSyncTelemetry(
         }
         queue.clear()
         true
+    }
+    companion object {
+        suspend fun beginWithBudget(
+            context: Context,
+            scope: CoroutineScope,
+            trigger: BtSyncTrigger,
+            waitMillis: Long,
+            initialize: () -> BtSyncTelemetry?
+        ): BtSyncSession? {
+            val pending = scope.async(Dispatchers.IO) {
+                if (PhonePrivacyConsentStore(context).hasRequiredConsent()) initialize() else null
+            }
+            if (withTimeoutOrNull(waitMillis) { pending.join() } != null) {
+                return pending.await()?.let { newSession(trigger, it.installId, it::record) }
+            }
+
+            // Preserve the terminal event at the time of failure. Only the IO job
+            // waits for the recorder and adds the real install ID before enqueueing.
+            return newSession(trigger, installId = "") { event ->
+                scope.launch(Dispatchers.IO) { pending.await()?.record(event) }
+            }
+        }
+
+        private fun newSession(
+            trigger: BtSyncTrigger,
+            installId: String,
+            record: suspend (BtSyncEvent) -> Unit
+        ): BtSyncSession {
+            val device = BtSyncDevice(installId, BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE,
+                Build.MANUFACTURER, Build.MODEL, Build.VERSION.RELEASE, Build.VERSION.SDK_INT)
+            return BtSyncSession(device, trigger, record, System::currentTimeMillis, SystemClock::elapsedRealtime)
+        }
     }
 }
 

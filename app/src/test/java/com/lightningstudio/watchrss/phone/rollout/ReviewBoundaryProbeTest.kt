@@ -8,13 +8,12 @@ import android.os.SystemClock
 import android.provider.Settings
 import com.lightningstudio.watchrss.phone.PhoneCompanionContainer
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
-import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired
 import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncEventQueue
-import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncStage
 import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncTelemetry
 import com.lightningstudio.watchrss.phone.features.FeatureRegistry
 import com.lightningstudio.watchrss.phone.features.FeatureRolloutPolicy
 import com.lightningstudio.watchrss.phone.privacy.PhonePrivacyConsentStore
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -22,9 +21,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -99,21 +99,22 @@ class ReviewBoundaryProbeTest {
     }
 
     @Test
-    fun slowTelemetryInitializationPreservesTheFirstLoginFailure() = runBlocking {
+    fun slowTelemetryInitializationDropsTheFirstEventWithoutWaiting() = runBlocking {
         val app = RuntimeEnvironment.getApplication()
         PhonePrivacyConsentStore(app).acceptRequiredPolicies()
         val manager = PhoneCompanionContainer(app).bluetoothSyncManager
         val caller = Thread.currentThread()
         val loadStarted = CountDownLatch(1)
         val finishLoad = CountDownLatch(1)
-        val scheduled = CountDownLatch(1)
+        val scheduled = CompletableDeferred<Unit>()
+        val before = BtSyncTelemetry.droppedInitializationEvents
         manager.b2RolloutConfig = { null }
         manager.btSyncTelemetry = {
             check(Thread.currentThread() != caller)
             loadStarted.countDown()
             check(finishLoad.await(5, TimeUnit.SECONDS))
             BtSyncTelemetry(app, AccountEnvironment(backendBaseUrl = "http://127.0.0.1:1"), "review-install",
-                scheduleUpload = { scheduled.countDown() })
+                scheduleUpload = { scheduled.complete(Unit) })
         }
         try {
             val start = System.nanoTime()
@@ -121,23 +122,14 @@ class ReviewBoundaryProbeTest {
             val waited = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)
             assertTrue("Telemetry start took $waited ms", waited < 2_000L)
             assertEquals("The slow initializer was exercised", 0L, loadStarted.count)
-            assertNotNull("First consented start has no session to record a terminal event", first)
-            val session = requireNotNull(first)
-            session.stage = BtSyncStage.ACCOUNT
-            withTimeout(1_000L) {
-                session.finishFailure(PhoneLoginRequired())
-                session.finishCancelledIfOpen()
-            }
-            assertEquals("The recorder is still initializing", 1L, scheduled.count)
+            assertNull(first)
+            assertEquals(before + 1, BtSyncTelemetry.droppedInitializationEvents)
         } finally {
             finishLoad.countDown()
         }
 
-        assertTrue("The terminal event was not queued", scheduled.await(3, TimeUnit.SECONDS))
-        val rows = BtSyncEventQueue(File(app.noBackupFilesDir, "bt_sync_events.json")).batch()
-        val event = rows.single().data
-        assertEquals("review-install", event.getString("installId"))
-        assertEquals("failure", event.getString("result"))
-        assertEquals("account", event.getString("failureStage"))
+        assertNull("The timed-out event scheduled an upload", withTimeoutOrNull(250) { scheduled.await() })
+        assertTrue(BtSyncEventQueue(File(app.noBackupFilesDir, "bt_sync_events.json")).batch().isEmpty())
+        assertEquals(before + 1, BtSyncTelemetry.droppedInitializationEvents)
     }
 }

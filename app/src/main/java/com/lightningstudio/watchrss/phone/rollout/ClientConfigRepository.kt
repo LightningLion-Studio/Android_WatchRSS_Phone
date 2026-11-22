@@ -70,7 +70,9 @@ internal class ClientConfigRepository(
     }
 
     private data class Storage(val prefs: SharedPreferences, val boot: Int)
-    @Volatile private var cached: Cached? = null
+    private data class CacheSnapshot(val loaded: Boolean, val cached: Cached? = null)
+
+    @Volatile private var cache = CacheSnapshot(loaded = false)
     @Volatile private var debugOverrides = emptyMap<String, FeatureOverride>()
     private var inFlight: Deferred<Unit>? = null
     private val storage = scope.async(Dispatchers.IO) {
@@ -85,7 +87,7 @@ internal class ClientConfigRepository(
             val wire = prefs.getString("debug_override_${feature.key}", null)
             FeatureOverride.entries.firstOrNull { it.wire == wire }?.let { feature.key to it }
         }.toMap()
-        cached = readCache(prefs, boot)
+        cache = CacheSnapshot(loaded = true, cached = readCache(prefs, boot))
         Storage(prefs, boot)
     }
 
@@ -114,11 +116,11 @@ internal class ClientConfigRepository(
     @Synchronized
     fun refreshIfStale(): Deferred<Unit>? {
         val url = endpoint ?: return null
-        if (cached?.isFresh() == true) return null
+        if (cache.cached?.isFresh() == true) return null
         inFlight?.takeIf { !it.isCompleted }?.let { return it }
         return scope.async(Dispatchers.IO) {
             val (prefs, boot) = storage.await()
-            if (cached?.isFresh() == true) return@async
+            if (cache.cached?.isFresh() == true) return@async
             try {
                 val request = Request.Builder().url(url).withWatchRssAppVersionHeader().build()
                 http.newCall(request).execute().use { response ->
@@ -127,7 +129,7 @@ internal class ClientConfigRepository(
                     if (body.length > 16_384) return@use
                     val json = JSONObject(body)
                     val config = parseClientConfig(json)
-                    if (config.version < (cached?.config?.version ?: 0)) return@use
+                    if (config.version < (cache.cached?.config?.version ?: 0)) return@use
                     val fetchedAt = now()
                     val elapsed = SystemClock.elapsedRealtime()
                     prefs.edit {
@@ -137,7 +139,7 @@ internal class ClientConfigRepository(
                         putLong(FETCHED_ELAPSED, elapsed)
                         putInt(FETCHED_BOOT, boot)
                     }
-                    cached = Cached(config, elapsed)
+                    cache = CacheSnapshot(loaded = true, cached = Cached(config, elapsed))
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -162,8 +164,8 @@ internal class ClientConfigRepository(
     }
 
     fun currentSnapshot(): ClientConfig {
-        val snapshot = cached
-        if (snapshot == null) return ClientConfig(cacheLoaded = storage.isCompleted)
+        val observed = cache
+        val snapshot = observed.cached ?: return ClientConfig(cacheLoaded = observed.loaded)
         return if (snapshot.isExpired()) snapshot.config.copy(stale = true) else snapshot.config
     }
 

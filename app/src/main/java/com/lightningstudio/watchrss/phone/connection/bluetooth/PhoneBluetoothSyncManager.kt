@@ -195,12 +195,7 @@ class PhoneBluetoothSyncManager(
 
     internal suspend fun beginBtSync(trigger: BtSyncTrigger = BtSyncTrigger.MANUAL): BtSyncSession? {
         sessionInitScope.launch(Dispatchers.IO) { rolloutRepository.await()?.refreshIfStale() }
-        val telemetry = sessionInitScope.async(Dispatchers.IO) { btSyncTelemetry()?.begin(trigger) }
-        return try {
-            withTimeoutOrNull(SESSION_CONFIG_WAIT_MS) { telemetry.await() }
-        } finally {
-            telemetry.cancel()
-        }
+        return BtSyncTelemetry.beginWithBudget(appContext, sessionInitScope, trigger, SESSION_CONFIG_WAIT_MS, btSyncTelemetry)
     }
     /** P1 optional local projection copy; null leaves the legacy path byte-for-byte unchanged. */
     internal var recordLegacyProjection:((peer:String,version:Int,cursor:String,payload:JSONObject)->Unit)?=null

@@ -145,6 +145,7 @@ class PhoneBluetoothSyncManager(
     private val syncDiagnostics=com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnostics.open(context.applicationContext)
     internal var b2AccountFence: () -> B2AccountFence? = { null }
     internal var bookRollbackWindow: () -> String? = { null }
+    internal var binaryWindowKey: () -> String? = { null }
     internal var captureBinaryWindow: ((String) -> B2CommitWindow?)? = null
     internal var onDeferredBluetoothBody: () -> Unit = {}
     /** P1 optional local projection copy; null leaves the legacy path byte-for-byte unchanged. */
@@ -153,9 +154,7 @@ class PhoneBluetoothSyncManager(
     private val assetHashes=NoteAssetHashCache(appContext.getSharedPreferences("watchrss_ble_asset_hashes",android.content.Context.MODE_PRIVATE))
     private val client = PhoneBluetoothSyncClient(appContext, debugLog)
     // Radio boundary; production discovery and cancellation still run inside the manager IO deadline.
-    internal var probeDevices: suspend (String, Boolean, (Int, Int) -> Unit) -> PhoneBluetoothWatchProbeBatch = { id, ip, progress ->
-        client.probeLibrarySyncDevices(deviceId, id, allowIpUpgrade = ip, onProbe = { done, total, _ -> progress(done, total) })
-    }
+    internal var probeDevices: (suspend (String, Boolean, (Int, Int) -> Unit) -> PhoneBluetoothWatchProbeBatch)? = null
     private val watchBackgroundTranscoder =
         WatchBackgroundTranscoder(context.applicationContext, readerPresetRepository)
 
@@ -281,9 +280,24 @@ class PhoneBluetoothSyncManager(
         }
     }
 
+    private suspend fun guardedOfferForSession(binding: BleSyncBindingSnapshot, sessionId: String): JSONObject? {
+        val transport = binding.session?.transport ?: return null
+        return transport.guardedLibraryProbeResponse ?: guardedLibraryProbe(binding, sessionId)?.also {
+            transport.guardedLibraryProbeResponse = it
+        }
+    }
+
+    private suspend fun keepGuardedRfcomm(session: PhoneSyncSession, sessionId: String): Boolean {
+        val binding = bindingSnapshot(sessionId, session.device.address, session)
+        val offer = guardedOfferForSession(binding, sessionId) ?: return false
+        return !B2KindRoute.select(offer, includeNoteAssets = true, libraryReady = repository.binaryArticleStorageReady(),
+            booksReady = repository.books?.binaryReady() == true, guarded = true).isEmpty
+    }
+
     internal suspend fun probeLibrarySyncTargets(
         onProbe: (completed: Int, total: Int) -> Unit = { _, _ -> },
-        allowIpUpgrade: Boolean = true
+        allowIpUpgrade: Boolean = true,
+        guardedLibrarySync: Boolean = false
     ): PhoneBluetoothProbeTargets {
         val sessionId = BluetoothDebugLog.newSessionId("syncLibraryProbe")
         debugLog.appendEvent(
@@ -295,7 +309,13 @@ class PhoneBluetoothSyncManager(
         return runCatching {
             withTimeout(LIBRARY_PROBE_TIMEOUT_MS) {
                 withContext(Dispatchers.IO) {
-                    probeDevices(sessionId, allowIpUpgrade, onProbe).also { batch ->
+                    val keepRfcomm = if (guardedLibrarySync && BuildConfig.B2_ENABLED && BuildConfig.SYNC_V2 &&
+                        currentBinaryScope() != null && b2AccountScope().isNotBlank() && b2Database() != null
+                    ) ::keepGuardedRfcomm else null
+                    val batch = probeDevices?.invoke(sessionId, allowIpUpgrade, onProbe)
+                        ?: client.probeLibrarySyncDevices(deviceId, sessionId, allowIpUpgrade = allowIpUpgrade,
+                            keepRfcomm = keepRfcomm, onProbe = { done, total, _ -> onProbe(done, total) })
+                    batch.also {
                         batch.sessionLease?.bindCancellation(owner)
                         currentCoroutineContext().ensureActive()
                     }
@@ -422,8 +442,7 @@ class PhoneBluetoothSyncManager(
         device: PhoneBluetoothWatchDevice,
         reusableSession: PhoneSyncSession? = null,
         finishSession: Boolean = true,
-        binding: BleSyncBindingSnapshot? = null,
-        allowDomainSummary: Boolean = true
+        binding: BleSyncBindingSnapshot? = null
     ): PhoneBluetoothSyncResult {
         val sessionId = BluetoothDebugLog.newSessionId("syncAccount")
         var syncSession = reusableSession ?: client.openPersistentSession(
@@ -449,7 +468,7 @@ class PhoneBluetoothSyncManager(
         )
         val result = runCatching {
             val activeBinding = bindingSnapshot(sessionId,effectiveDevice.address,syncSession,binding)
-            prepareAccountGrant(watchDeviceId, activeBinding.response, allowDomainSummary && syncSession?.isPersistent == true) { request ->
+            prepareAccountGrant(watchDeviceId, activeBinding.response, syncSession?.isPersistent == true) { request ->
                 exchange(request, deviceAddress = effectiveDevice.address,
                     sessionId = "$sessionId-account-state", syncSession = syncSession).response
             }
@@ -503,6 +522,11 @@ class PhoneBluetoothSyncManager(
             syncSession.close()
         }
         return result.getOrThrow()
+    }
+
+    internal suspend fun confirmBinaryAccount(binding: BleSyncBindingSnapshot): AccountSyncResult? {
+        val session = requireNotNull(binding.session)
+        return syncAccount(session.device, session, false, binding).accountSync
     }
 
     internal suspend fun syncAll(
@@ -584,7 +608,9 @@ class PhoneBluetoothSyncManager(
         var bookSyncIssues:List<BookSyncIssue> = emptyList()
         val binaryMerge = BuildConfig.B2_ENABLED && mode == LibrarySyncMode.MERGE
         val guardedBinary = binaryMerge && BuildConfig.SYNC_V2
-        val guardedScope = if (guardedBinary) currentBinaryScope() else null
+        // An existing IP lease carries v1. Guarded offers are bound to their own RFCOMM transport.
+        val guardedScope = if (guardedBinary && reusableSession?.transport?.owner?.startsWith("ip:") != true)
+            currentBinaryScope() else null
         val binaryAssetsReady = binaryMerge && b2Database() != null &&
             (!guardedBinary || guardedScope != null && b2AccountScope().isNotBlank())
         val binaryLibraryReady = binaryAssetsReady && repository.binaryArticleStorageReady()
@@ -607,7 +633,8 @@ class PhoneBluetoothSyncManager(
             val open = reconnectSession
             val replacement = (if (open != null) open(targetDevice, "$sessionId-open")
                 else client.openPersistentSession(targetDevice, deviceId, "$sessionId-open",
-                    allowIpUpgrade = !bluetoothOnlyRecovery && !(guardedBinary && binaryAssetsReady)))
+                    allowIpUpgrade = !bluetoothOnlyRecovery && !(guardedBinary && !binaryRoute.isEmpty),
+                    keepRfcomm = if (guardedBinary && binaryAssetsReady) ::keepGuardedRfcomm else null))
                 ?: throw IOException("未找到可重新连接的原手表")
             if (expectedPeerId.isNotBlank() && replacement.device.remoteDeviceId != expectedPeerId) {
                 replacement.close()
@@ -631,14 +658,16 @@ class PhoneBluetoothSyncManager(
             return sharedBinding ?: bindingSnapshot(sessionId, effectiveDevice.address, syncSession).also { active ->
                 binaryProbe = when {
                     !guardedBinary -> active.response
-                    binaryAssetsReady && (!binaryRouteChosen || binaryRoute.hasBinaryLibrary) ->
-                        guardedLibraryProbe(active, sessionId)
+                    binaryAssetsReady && (!binaryRouteChosen || !binaryRoute.isEmpty) ->
+                        guardedOfferForSession(active, sessionId)
                     else -> null
                 }
-                if ((!guardedBinary && !binaryRoute.isEmpty || guardedBinary && binaryRoute.hasBinaryLibrary) &&
+                if (!binaryRoute.isEmpty &&
                     binaryProbe?.let { selectBinary(it).contains(binaryRoute) } != true) {
                     throw B2Exception("CAPABILITY_MISMATCH")
                 }
+                active.session?.transport?.guardedLibrarySelected =
+                    guardedBinary && binaryProbe?.let { !selectBinary(it).isEmpty } == true
                 sharedBinding = active
             }
         }
@@ -698,10 +727,16 @@ class PhoneBluetoothSyncManager(
             requirePhoneLogin()
             if (!opened) recovery.search(confirmAccount = false)
             recovery.run {
-                if (guardedBinary && binaryAssetsReady && syncSession?.transport?.owner?.startsWith("ip:") == true) {
-                    connect()
-                } else if (!guardedBinary || !binaryAssetsReady) {
-                    syncSession = syncSession?.let { client.promoteLateIpSession(it, "$sessionId-ip-upgrade") }
+                val initial = syncSession
+                if (guardedBinary && binaryAssetsReady && initial?.transport?.owner?.startsWith("ip:") == false) {
+                    binding()
+                }
+                if (initial?.transport?.guardedLibrarySelected != true) {
+                    syncSession = initial?.let { client.promoteLateIpSession(it, "$sessionId-ip-upgrade") }
+                    if (syncSession !== initial) {
+                        sharedBinding = null
+                        binaryProbe = null
+                    }
                 }
                 observeDiagnostics(syncSession)
                 effectiveDevice = syncSession?.device ?: device
@@ -1633,11 +1668,13 @@ class PhoneBluetoothSyncManager(
     }
 
     private fun captureLegacyCommit(session: PhoneSyncSession): LegacyCommit? {
+        if (!BuildConfig.B2_ENABLED) return null
+        val transport = session.transport ?: return null
+        if (!transport.guardedLibrarySelected) return null
         val capture = captureBinaryWindow ?: return null
         val fence = b2AccountFence() ?: throw B2Exception("ACCOUNT_REQUIRED")
         val owner = currentPhoneUserId() ?: throw B2Exception("ACCOUNT_REQUIRED")
         val (_, authorize) = binaryAuthorization(fence)
-        val transport = session.transport ?: throw B2Exception("STALE_EPOCH")
         authorize()
         val window = capture(owner) ?: throw B2Exception("ACCOUNT_REQUIRED")
         val db = b2Database() ?: throw B2Exception("LOCAL_IO")
@@ -1725,7 +1762,7 @@ class PhoneBluetoothSyncManager(
             })
     }
 
-    private suspend fun currentBinaryScope(): String? = withContext(Dispatchers.IO) { bookRollbackWindow() }
+    private suspend fun currentBinaryScope(): String? = withContext(Dispatchers.IO) { binaryWindowKey() }
 
     private suspend fun syncBinaryKinds(
         device: PhoneBluetoothWatchDevice,
@@ -1786,7 +1823,7 @@ class PhoneBluetoothSyncManager(
                 if (!available.contains(route)) {
                     throw B2Exception("CAPABILITY_MISMATCH")
                 }
-                val ready = syncAccount(opened.device, opened, false, binding, allowDomainSummary = !guarded).accountSync
+                val ready = confirmBinaryAccount(binding)
                 if (guarded && (ready == null || ready.boundUserId != binding.owner || ready.watchDeviceId != device.remoteDeviceId)) {
                     throw B2Exception("AUTH_REVOKED")
                 }

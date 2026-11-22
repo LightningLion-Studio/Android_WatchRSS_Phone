@@ -12,7 +12,8 @@ internal suspend fun runDebugBluetoothSyncAction(
     val result = when (action) {
         BluetoothSyncProtocol.ACTION_SYNC_LIBRARY, BluetoothSyncProtocol.ACTION_CLEAR_LIBRARY -> {
             if (action != BluetoothSyncProtocol.ACTION_CLEAR_LIBRARY) manager.requirePhoneLogin()
-            val targets = manager.probeLibrarySyncTargets(allowIpUpgrade = action != BluetoothSyncProtocol.ACTION_CLEAR_LIBRARY)
+            val syncLibrary = action != BluetoothSyncProtocol.ACTION_CLEAR_LIBRARY
+            val targets = manager.probeLibrarySyncTargets(allowIpUpgrade = syncLibrary, guardedLibrarySync = syncLibrary)
             val target = targets.devices.singleOrNull { deviceAddress == null || it.address == deviceAddress }
                 ?: run { targets.sessionLease?.close(); error("请指定一块可同步手表") }
             if (action == BluetoothSyncProtocol.ACTION_CLEAR_LIBRARY) manager.clearWatchLibrary(target.address, targets.sessionLease)

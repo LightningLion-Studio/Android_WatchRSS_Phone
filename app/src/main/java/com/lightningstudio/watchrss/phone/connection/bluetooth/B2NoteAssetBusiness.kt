@@ -15,8 +15,8 @@ internal class B2NoteAssetBusiness(private val store: B2RoomStore, private val a
     private val files = requireNotNull(requireNotNull(assets.parentFile).parentFile)
     private val db: SupportSQLiteDatabase get() = store.attachmentDatabase
 
-    internal data class Prepared(val original: BookPackageFiles.Original, val old: BookPackageFiles.Revision?,
-        val previous: File, val publish: Boolean, val owners: List<String>)
+    internal data class Prepared(val original: BookPackageFiles.Original, val old: NoteAssetFiles.Reference?,
+        val previous: File, val publication: NoteAssetFiles.Reference?, val owners: List<String>)
     override val kinds = setOf("noteAsset")
 
     override suspend fun apply(descriptor: JSONObject, metadata: JSONObject, staged: File): String {
@@ -40,31 +40,36 @@ internal class B2NoteAssetBusiness(private val store: B2RoomStore, private val a
         val requested = BookPackageFiles.Revision(metadata.s("sha256"), metadata.n("size"))
         val owners = if (context.guarded) NoteAssetFiles.ownerKeys(db, key) else emptyList()
         if (context.guarded && owners.isEmpty()) fail("BUSINESS_REJECTED")
-        val old = NoteAssetFiles.reference(db, key)
+        val old = NoteAssetFiles.selection(db, key)
         val previous = NoteAssetFiles.current(db, files, key)
-        val publish = old == null && !previous.exists()
-        val selected = if (publish) {
+        val publication = if (previous.exists()) null else when {
+            old == null -> NoteAssetFiles.Reference(requested)
+            old.revision == requested -> NoteAssetFiles.replacement(requested)
+            else -> fail("RECEIPT_CONFLICT")
+        }
+        val selected = if (publication != null) {
             if (context.guarded && !NoteAssetFiles.winnerAllows(db, key, requested)) fail("BUSINESS_REJECTED")
             val staged = context.stagedFile ?: fail("LOCAL_IO")
-            val candidate = NoteAssetFiles.candidate(files, requested.sha256)
+            val candidate = NoteAssetFiles.candidate(files, publication)
             val parent = NoteAssetFiles.ensureCandidateDirectory(files)
             // A different committed key can already point at this digest. Restoring its
             // missing bytes here would expose this attempt before this transaction commits.
-            if (!candidate.exists() && NoteAssetFiles.referencesDigest(db, requested.sha256)) fail("RECEIPT_CONFLICT")
+            if (publication.slot == null && !candidate.exists() &&
+                NoteAssetFiles.referencesDigest(db, requested.sha256)) fail("RECEIPT_CONFLICT")
             val linked = ConditionalBodyFile.linkIfAbsent(candidate, staged)
             context.finishAsset = { committed ->
                 if (committed) NoteAssetFiles.published()
-                else if (linked) discardUnreferencedCandidate(candidate, staged, requested.sha256)
+                else if (linked) NoteAssetFiles.discardUnreferenced(db, files, publication, staged)
             }
             if (linked) syncDirectory(parent)
             BookPackageFiles.verify(candidate, requested) { context.check() } ?: fail("HASH_MISMATCH")
         } else {
-            val digest = if (previous == NoteAssetFiles.legacy(files, key)) ConditionalBodyFile.digest(previous) else old?.sha256
-            val revision = BookPackageFiles.Revision(digest ?: fail("RECEIPT_CONFLICT"), previous.length())
+            val revision = old?.revision ?: BookPackageFiles.Revision(
+                ConditionalBodyFile.digest(previous) ?: fail("RECEIPT_CONFLICT"), previous.length())
             BookPackageFiles.verify(previous, revision) { context.check() } ?: fail("RECEIPT_CONFLICT")
         }
         if (context.guarded && !NoteAssetFiles.winnerAllows(db, key, selected.revision)) fail("BUSINESS_REJECTED")
-        context.preparedAsset = Prepared(selected, old, previous, publish, owners)
+        context.preparedAsset = Prepared(selected, old, previous, publication, owners)
     }
 
     private suspend fun publish(context: B2ApplyContext, metadata: JSONObject): String {
@@ -72,17 +77,17 @@ internal class B2NoteAssetBusiness(private val store: B2RoomStore, private val a
         val prepared = context.preparedAsset ?: fail("JOURNAL_CORRUPT")
         val key = metadata.s("storageKey")
         val value = prepared.original.revision
-        if (NoteAssetFiles.reference(db, key) != prepared.old ||
+        if (NoteAssetFiles.selection(db, key) != prepared.old ||
             NoteAssetFiles.current(db, files, key) != prepared.previous ||
-            (prepared.publish && prepared.previous.exists()) ||
+            (prepared.publication != null && prepared.previous.exists()) ||
             !prepared.original.isCurrent()) fail("BUSINESS_REJECTED")
         if (context.guarded && (NoteAssetFiles.ownerKeys(db, key) != prepared.owners ||
             !NoteAssetFiles.winnerAllows(db, key, value))) fail("BUSINESS_REJECTED")
-        if (prepared.publish) NoteAssetFiles.publish(db, key, value)
+        prepared.publication?.let { NoteAssetFiles.publish(db, key, it) }
         store.put(account, "assetReference", key,
             obj("storageKey" to key, "sha256" to value.sha256, "size" to value.bytes))
         return when {
-            prepared.publish -> "merged"
+            prepared.publication != null -> "merged"
             value.sha256 == metadata.s("sha256") -> "alreadyPresent"
             else -> "retainedLocal"
         }
@@ -107,16 +112,4 @@ internal class B2NoteAssetBusiness(private val store: B2RoomStore, private val a
             "owners" to org.json.JSONArray(owners))
     }
 
-    private fun discardUnreferencedCandidate(candidate: File, staged: File, digest: String) {
-        // Other writers can adopt the same immutable hash while this attempt rolls back.
-        db.beginTransactionNonExclusive()
-        try {
-            if (!NoteAssetFiles.referencesDigest(db, digest)) {
-                ConditionalBodyFile.unlinkPublication(candidate, staged)
-            }
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
-    }
 }

@@ -150,6 +150,20 @@ class OfflineBluetoothR2ReviewTest {
         return PhoneSyncSession(PhoneBluetoothSyncClient(context,log),device,"phone",PhoneSyncSession.Transport(input,output,"rfcomm",false,{}),true,false,false)
     }
     private suspend fun sync()=manager().syncAll(device,reusableSession=session(),onProgress={progress+=it})
+
+    @Test fun dedicatedBinaryReadyRetainsMatchingOfflineAccountGrant() = runBlocking<Unit> {
+        seedCache()
+        session().use { transport ->
+            val request = LibrarySyncPayload.buildProbeRequest("phone")
+            val discovered = transport.exchange(request, "binary-account-discovery").response
+            val binding = BleSyncBindingSnapshot(device.address, "owner", transport, discovered)
+            val ready = manager().confirmBinaryAccount(binding)
+            assertEquals("owner", ready?.boundUserId)
+            assertTrue("the matching grant must survive Ready", repo.cachedBluetoothAccount("watch", System.currentTimeMillis()) != null)
+            val actions = frames.map { it.optString("action") }.filter { it != "ack" }
+            assertEquals(listOf("syncLibrary", "syncDomains", "syncAccount"), actions)
+        }
+    }
     private fun noDataOrReconnect() {
         assertEquals(0,reconnects);assertFalse(progress.any{it.stage==PhoneBluetoothSyncStage.RECONNECTING})
         assertFalse(log.snapshot().contains("event=sync.reconnect"))

@@ -69,6 +69,9 @@ class PhoneCompanionContainer(context: Context) {
     internal fun noteAssetFile(key: String): java.io.File? =
         com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles.readable(database.openHelper.readableDatabase, appContext.filesDir, key)
 
+    internal fun noteAssetDatabase(): androidx.sqlite.db.SupportSQLiteDatabase =
+        database.openHelper.writableDatabase
+
     private val database: PhoneCompanionDatabase by lazy {
         Room.databaseBuilder(
             appContext,
@@ -447,7 +450,10 @@ class PhoneCompanionContainer(context: Context) {
             manager.onDeferredBluetoothBody = cloudSyncService::deferBluetoothBodyRetry
             if (BuildConfig.SYNC_V2) {
                 manager.bookRollbackWindow = cloudSyncService::syncV2BookRollbackWindow
-                manager.captureBinaryWindow = cloudSyncService::captureSyncV2BluetoothWindow
+                if (BuildConfig.B2_ENABLED) {
+                    manager.binaryWindowKey = cloudSyncService::syncV2BinaryWindowKey
+                    manager.captureBinaryWindow = cloudSyncService::captureSyncV2BluetoothWindow
+                }
             }
             if(BuildConfig.SYNC_V2 || BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION)manager.recordLegacyProjection={peer,version,cursor,payload ->
                 if(BuildConfig.SYNC_V2)cloudSyncService.captureSyncV2Legacy(peer,version,cursor,payload)

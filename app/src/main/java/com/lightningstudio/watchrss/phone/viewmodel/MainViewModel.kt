@@ -926,7 +926,9 @@ class MainViewModel(
                 conflictPrompt = null
             )
             val probeTargets = runCatching {
-                bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress)
+                bluetoothSyncManager.probeLibrarySyncTargets(
+                    ::updateBluetoothProbeProgress, guardedLibrarySync = mode == LibrarySyncMode.MERGE
+                )
             }.getOrElse { throwable ->
                 clearSmoothedSyncProgress()
                 sessionState.value = sessionState.value.copy(

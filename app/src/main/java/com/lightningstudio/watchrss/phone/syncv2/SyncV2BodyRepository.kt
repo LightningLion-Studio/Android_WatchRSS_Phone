@@ -227,16 +227,17 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     }
 
     fun prepareNoteAssetRegistration(id: String): NoteAssetRegistration {
+        val target = file("asset", id)
+        val observed = identity(target) ?: SyncV2Codec.fail("closure_incomplete")
         val selected = JSONObject().put("assetId", id).put("deleted", false)
         val original = original("asset", id, selected) ?: SyncV2Codec.fail("closure_incomplete")
-        return NoteAssetRegistration(id, original.sha256, original.raw.size) {
-            try {
-                original.requireCurrent()
-                true
-            } catch (_: Exception) {
-                false
-            }
+        val sha = original.sha256
+        val registration = NoteAssetRegistration(id, sha, original.raw.size) {
+            file("asset", id) == target && target.canonicalFile.parentFile == target.parentFile!!.canonicalFile &&
+                NoteAssetFiles.ownerKeys(db, id).isNotEmpty() && sameFile(target, observed, sha)
         }
+        registration.requireCurrent()
+        return registration
     }
 
     fun registerNoteAsset(asset: NoteAssetRegistration, now: Long, stage: SyncV2UnconfirmedWrite? = null): String {

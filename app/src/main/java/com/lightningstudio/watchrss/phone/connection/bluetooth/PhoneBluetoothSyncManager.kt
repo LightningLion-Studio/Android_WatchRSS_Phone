@@ -273,6 +273,12 @@ class PhoneBluetoothSyncManager(
 
     // Injectable radio/scheduler boundary; production uses the paired device and cancellable delay.
     internal var reconnectSession: (suspend (PhoneBluetoothWatchDevice, String) -> PhoneSyncSession?)? = null
+    internal var openLibrarySession: suspend (PhoneBluetoothWatchDevice, String, Boolean) -> PhoneSyncSession? =
+        { watch, id, allowIpUpgrade ->
+            val fixture = reconnectSession
+            if (fixture != null) fixture(watch, id)
+            else client.openPersistentSession(watch, deviceId, id, allowIpUpgrade = allowIpUpgrade)
+        }
     internal var reconnectDelay: suspend (Long) -> Unit = { delay(it) }
 
     /** No sync-binding gate here: an unbound watch is precisely the target of this optional action. */
@@ -682,10 +688,8 @@ class PhoneBluetoothSyncManager(
             syncSession?.close()
             syncSession = null
             check(currentPhoneUserId() == owner) { "手机账号已变化，请重新同步" }
-            val open = reconnectSession
-            val replacement = (if (open != null) open(targetDevice, "$sessionId-open")
-                else client.openPersistentSession(targetDevice, deviceId, "$sessionId-open",
-                    allowIpUpgrade = !bluetoothOnlyRecovery && !guardedTransport))
+            val replacement = openLibrarySession(targetDevice, "$sessionId-open",
+                !bluetoothOnlyRecovery && !guardedTransport)
                 ?: throw IOException("未找到可重新连接的原手表")
             if (expectedPeerId.isNotBlank() && replacement.device.remoteDeviceId != expectedPeerId) {
                 replacement.close()
@@ -1860,9 +1864,7 @@ class PhoneBluetoothSyncManager(
             if (guarded && (scope == null || currentBinaryScope() != scope)) throw B2Exception("AUTH_REVOKED")
             closeSession()
             val opened = try {
-                val open = reconnectSession
-                (if (open != null) open(device, "$parent-open")
-                else client.openPersistentSession(device, deviceId, "$parent-open", allowIpUpgrade = false))
+                openLibrarySession(device, "$parent-open", false)
                     ?: throw LibraryBinaryOpenFailure()
             } catch (failure: TimeoutCancellationException) {
                 currentCoroutineContext().ensureActive()

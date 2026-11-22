@@ -1,5 +1,8 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
+import com.lightningstudio.watchrss.phone.data.note.NoteEntity
+import kotlinx.coroutines.runBlocking
+
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -31,7 +34,16 @@ class SyncV2P5SparseReadTest {
         assertEquals(0L,reads.fileBytes)
         val literal=JSONObject(asset.toString()).put("assetId","asset.bin")
         val body=SyncV2Business.split("asset","asset.bin",w.identity.entity("asset","asset.bin"),literal,null)
-        assertTrue(storage.contentReady(JSONObject().put("meta",body.meta).put("state",body.state).put("value",literal)));assertEquals(bytes.size.toLong(),reads.fileBytes)
+        val linked=JSONObject().put("meta",body.meta).put("state",body.state).put("value",literal)
+        assertFalse(storage.contentReady(linked))
+        assertEquals(0L,reads.fileBytes)
+        val markdown="![archive fixture](assets/asset.bin)"
+        runBlocking {
+            w.room.noteDao().upsertNotes(listOf(NoteEntity("note",null,"fixture",markdown,"","one",
+                "one",markdown,false,1,1,"phone")))
+        }
+        assertTrue(storage.contentReady(linked))
+        assertEquals(bytes.size.toLong(),reads.fileBytes)
     }
     private class Reads {
         val calls=linkedMapOf<String,Long>();val rows=linkedMapOf<String,Long>();val blobBytes=linkedMapOf<String,Long>();val stringBytes=linkedMapOf<String,Long>()

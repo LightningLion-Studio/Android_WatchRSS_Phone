@@ -620,9 +620,9 @@ class PhoneBluetoothSyncManager(
         observeDiagnostics(null);observeDiagnostics(reusableSession)
         var diagnosticSuccess=false
         onSyncActiveChanged(true)
+        var syncSession = reusableSession
         try {
         val sessionId = BluetoothDebugLog.newSessionId("syncAll")
-        var syncSession = reusableSession
         var effectiveDevice = device
         trace.channel(reusableSession?.transport?.owner?.startsWith("ip:")==true)
         var diagnosticConnections=if(reusableSession!=null)1 else 0
@@ -999,6 +999,7 @@ class PhoneBluetoothSyncManager(
             throw failure
         } finally {
             syncSession?.close()
+            syncSession = null
             debugLog.appendEvent("sync.session.closed", sessionId)
         }
         onSyncActiveChanged(false) // The physical session is closed before any asynchronous cloud enqueue.
@@ -1012,7 +1013,12 @@ class PhoneBluetoothSyncManager(
         if(completed.accountSyncWarning!=null)trace.item("account",null,"rejected","unknown")
         diagnosticSuccess=true
         return completed
-        } finally {trace.finish(diagnosticSuccess);diagnosticClients.forEach{it.diagnosticBytes={};it.diagnosticRequest={};it.diagnosticResponse={}};onSyncActiveChanged(false)}
+        } finally {
+            syncSession?.close()
+            trace.finish(diagnosticSuccess)
+            diagnosticClients.forEach { it.diagnosticBytes = {}; it.diagnosticRequest = {}; it.diagnosticResponse = {} }
+            onSyncActiveChanged(false)
+        }
     }
 
     suspend fun syncSavedItems(type: PhoneSavedItemType, deviceAddress: String? = null): PhoneBluetoothSyncResult {

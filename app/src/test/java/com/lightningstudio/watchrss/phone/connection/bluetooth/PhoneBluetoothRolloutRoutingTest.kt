@@ -84,21 +84,21 @@ class PhoneBluetoothRolloutRoutingTest {
         db.close()
     }
 
-    @Test fun zeroPercentKeepsReusedIp() = runBlocking {
+    @Test fun zeroPercentKeepsReusedIp() = runBlocking<Unit> {
         runRoute(Start.IP, percent = 0, expectedCohort = "b2_off")
         assertEquals(listOf("ip"), businessTransports())
         assertTrue(opens.isEmpty())
         assertNoGuardedOffer()
     }
 
-    @Test fun zeroPercentAllowsIpOnInitialOpen() = runBlocking {
+    @Test fun zeroPercentAllowsIpOnInitialOpen() = runBlocking<Unit> {
         runRoute(Start.OPEN, percent = 0, expectedCohort = "b2_off")
         assertEquals(listOf(true), opens)
         assertEquals(listOf("ip"), businessTransports())
         assertNoGuardedOffer()
     }
 
-    @Test fun zeroPercentAllowsLateIpUpgrade() = runBlocking {
+    @Test fun zeroPercentAllowsLateIpUpgrade() = runBlocking<Unit> {
         runRoute(Start.LATE_IP, percent = 0, expectedCohort = "b2_off")
         assertEquals(listOf("ip"), businessTransports())
         assertTrue(opens.isEmpty())
@@ -106,35 +106,35 @@ class PhoneBluetoothRolloutRoutingTest {
         assertNoGuardedOffer()
     }
 
-    @Test fun zeroPercentKeepsBaselineReconnectAfterIpLoss() = runBlocking {
+    @Test fun zeroPercentKeepsBaselineReconnectAfterIpLoss() = runBlocking<Unit> {
         runRoute(Start.RECONNECT, percent = 0, expectedCohort = "b2_off")
         assertEquals(listOf("ip", "rfcomm"), businessTransports())
         assertEquals(listOf(false), opens)
         assertNoGuardedOffer()
     }
 
-    @Test fun discoveryCohortSurvivesConfigChangeAndReconnect() = runBlocking {
+    @Test fun discoveryCohortSurvivesConfigChangeAndReconnect() = runBlocking<Unit> {
         runRoute(Start.RECONNECT, percent = 1, expectedCohort = "b2_off", changeAfterDiscovery = true)
         assertEquals(listOf("ip", "rfcomm"), businessTransports())
         assertEquals(listOf(false), opens)
         assertNoGuardedOffer()
     }
 
-    @Test fun forcedOffAtHundredPercentReusesIp() = runBlocking {
+    @Test fun forcedOffAtHundredPercentReusesIp() = runBlocking<Unit> {
         runRoute(Start.IP, percent = 100, forced = "off", expectedCohort = "forced_off")
         assertEquals(listOf("ip"), businessTransports())
         assertTrue(opens.isEmpty())
         assertNoGuardedOffer()
     }
 
-    @Test fun expiredHundredPercentReusesIp() = runBlocking {
+    @Test fun expiredHundredPercentReusesIp() = runBlocking<Unit> {
         runRoute(Start.IP, percent = 100, expired = true, expectedCohort = "b2_off")
         assertEquals(listOf("ip"), businessTransports())
         assertTrue(opens.isEmpty())
         assertNoGuardedOffer()
     }
 
-    @Test fun hundredPercentKeepsRfcommForAValidatedOfferBeforeLateIpUpgrade() = runBlocking {
+    @Test fun hundredPercentKeepsRfcommForAValidatedOfferBeforeLateIpUpgrade() = runBlocking<Unit> {
         runRoute(Start.LATE_IP, percent = 100, expectedCohort = "b2_on")
         val enabled = BuildConfig.B2_ENABLED
         assertEquals(if (enabled) listOf("rfcomm") else listOf("ip"), businessTransports())
@@ -144,14 +144,14 @@ class PhoneBluetoothRolloutRoutingTest {
         if (enabled) assertEquals("probe", seen.first().request.getString("phase"))
     }
 
-    @Test fun hundredPercentKeepsAnAlreadyLeasedIpSessionOnV1() = runBlocking {
+    @Test fun hundredPercentKeepsAnAlreadyLeasedIpSessionOnV1() = runBlocking<Unit> {
         runRoute(Start.IP, percent = 100, expectedCohort = "ineligible")
         assertEquals(listOf("ip"), businessTransports())
         assertTrue(opens.isEmpty())
         assertNoGuardedOffer()
     }
 
-    @Test fun olderWatchWithoutGuardedCapabilityUsesLegacyBusinessFrame() = runBlocking {
+    @Test fun olderWatchWithoutGuardedCapabilityUsesLegacyBusinessFrame() = runBlocking<Unit> {
         runRoute(Start.OPEN, percent = 100, oldPeer = true, expectedCohort = "ineligible")
         assertEquals(listOf("rfcomm"), businessTransports())
         assertEquals(listOf(true), opens)

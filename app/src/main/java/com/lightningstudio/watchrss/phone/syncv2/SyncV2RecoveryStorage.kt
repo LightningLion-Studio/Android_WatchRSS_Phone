@@ -410,10 +410,24 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                     arrayOf(id, revision.sha256)).use { if (it.moveToFirst()) it.getString(0) to it.getLong(1) else null }
                 if (matched == null) {
                     val asset = meta.getJSONObject("payload")
-                    db.execSQL("INSERT INTO note_assets VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                        arrayOf<Any>(java.util.UUID.randomUUID().toString(), "", revision.sha256,
-                            asset.optString("originalFilename", id), asset.getString("mime"), revision.bytes,
-                            id, true, now, false, 0L))
+                    val displayName = asset.optString("originalFilename", id)
+                    val mime = asset.getString("mime")
+                    val aliasCreated = db.query(
+                        "SELECT createdAt FROM ${SyncV2NoteAssetNames.aliases} WHERE storageKey=?", arrayOf(id)
+                    ).use { if (it.moveToFirst()) it.getLong(0) else null }
+                    val digestRegistered = db.query("SELECT 1 FROM note_assets WHERE sha256=?",
+                        arrayOf(revision.sha256)).use { it.moveToFirst() }
+                    if (aliasCreated != null || digestRegistered) {
+                        SyncV2NoteAssetNames.saveAlias(db, JSONObject().put("storageKey", id).put("noteId", "")
+                            .put("sha256", revision.sha256).put("byteCount", revision.bytes)
+                            .put("displayName", displayName).put("mimeType", mime)
+                            .put("createdAt", maxOf(now, (aliasCreated ?: 0L) + 1))
+                            .put("deleted", false).put("deletedAt", 0L))
+                    } else {
+                        db.execSQL("INSERT INTO note_assets VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                            arrayOf<Any>(java.util.UUID.randomUUID().toString(), "", revision.sha256,
+                                displayName, mime, revision.bytes, id, true, now, false, 0L))
+                    }
                 } else {
                     db.execSQL("UPDATE note_assets SET createdAt=? WHERE assetId=?", arrayOf(maxOf(now, matched.second + 1), matched.first))
                 }

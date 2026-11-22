@@ -944,7 +944,9 @@ class MainViewModel(
                     conflictPrompt = null
                 )
                 val probeTargets = runCatching {
-                    bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress, libraryMode = mode)
+                    withContext(telemetry ?: EmptyCoroutineContext) {
+                        bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress, libraryMode = mode)
+                    }
                 }.getOrElse { throwable ->
                     telemetry?.finishFailure(throwable)
                     clearSmoothedSyncProgress()

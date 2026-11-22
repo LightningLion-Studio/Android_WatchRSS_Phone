@@ -381,6 +381,7 @@ class PhoneBluetoothSyncManager(
                 requirePhoneLogin()
                 loadLibraryRollout(binaryLibraryAvailable(it))
             }
+            if (rollout != null) currentCoroutineContext()[BtSyncSession]?.decision = rollout
             val keepRfcomm = if (rollout?.enabled == true && BuildConfig.SYNC_V2) ::keepGuardedRfcomm else null
             withTimeout(LIBRARY_PROBE_TIMEOUT_MS) {
                 withContext(Dispatchers.IO) {

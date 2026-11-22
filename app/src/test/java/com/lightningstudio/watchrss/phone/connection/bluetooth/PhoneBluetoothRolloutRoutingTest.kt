@@ -21,6 +21,8 @@ import com.lightningstudio.watchrss.phone.data.repo.PhoneCompanionRepository
 import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncDevice
 import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncSession
 import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncTrigger
+import com.lightningstudio.watchrss.phone.features.FeatureOverride
+import com.lightningstudio.watchrss.phone.features.FeatureRegistry
 import com.lightningstudio.watchrss.phone.rollout.ClientConfigRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -111,6 +113,13 @@ class PhoneBluetoothRolloutRoutingTest {
         assertNoGuardedOffer()
     }
 
+    @Test fun discoveryCohortSurvivesConfigChangeAndReconnect() = runBlocking {
+        runRoute(Start.RECONNECT, percent = 1, expectedCohort = "b2_off", changeAfterDiscovery = true)
+        assertEquals(listOf("ip", "rfcomm"), businessTransports())
+        assertEquals(listOf(false), opens)
+        assertNoGuardedOffer()
+    }
+
     @Test fun forcedOffAtHundredPercentReusesIp() = runBlocking {
         runRoute(Start.IP, percent = 100, forced = "off", expectedCohort = "forced_off")
         assertEquals(listOf("ip"), businessTransports())
@@ -151,8 +160,9 @@ class PhoneBluetoothRolloutRoutingTest {
     }
 
     private suspend fun runRoute(start: Start, percent: Int, forced: String? = null,
-        expired: Boolean = false, oldPeer: Boolean = false, expectedCohort: String) {
-        installRollout(percent, forced, expired)
+        expired: Boolean = false, oldPeer: Boolean = false, expectedCohort: String,
+        changeAfterDiscovery: Boolean = false) {
+        val config = installRollout(percent, forced, expired)
         val discovery = probe(oldPeer)
         manager.openLibrarySession = { _, _, allowIpUpgrade, keepRfcomm ->
             opens += allowIpUpgrade
@@ -175,8 +185,16 @@ class PhoneBluetoothRolloutRoutingTest {
             BtSyncDevice("rollout-fixture", "fixture", 121, "fixture", "fixture", "15", 35),
             BtSyncTrigger.MANUAL, { events += it.data }, { 42L }, { 42L }
         )
+        val rollout = if (changeAfterDiscovery) {
+            manager.probeDevices = { _, _, _ ->
+                PhoneBluetoothWatchProbeBatch(listOf(PhoneBluetoothWatchProbeResult(watch, true)), reusable)
+            }
+            manager.probeLibrarySyncTargets(libraryMode = LibrarySyncMode.MERGE).rollout.also {
+                config.setDebugOverride(FeatureRegistry.b2, FeatureOverride.ON)
+            }
+        } else null
         val failure = runCatching {
-            withContext(telemetry) { manager.syncAll(watch, reusableSession = reusable) }
+            withContext(telemetry) { manager.syncAll(watch, reusableSession = reusable, sessionRollout = rollout) }
         }.exceptionOrNull()
         assertTrue("Unexpected exit: $failure", failure is BusinessFrameReached)
         assertTrue(businessFrames().isNotEmpty())
@@ -196,7 +214,7 @@ class PhoneBluetoothRolloutRoutingTest {
         assertFalse(seen.any { it.request.has("supportedGuardedLibraryVersions") })
     }
 
-    private fun installRollout(percent: Int, forced: String?, expired: Boolean) {
+    private fun installRollout(percent: Int, forced: String?, expired: Boolean): ClientConfigRepository {
         val environment = AccountEnvironment.active(context)
         val boot = 12
         val config = JSONObject().put("configVersion", 42).put("ttlSeconds", 600)
@@ -209,7 +227,9 @@ class PhoneBluetoothRolloutRoutingTest {
             .putLong("fetched_at", System.currentTimeMillis())
             .putLong("fetched_elapsed_at_download", SystemClock.elapsedRealtime())
             .putInt("fetched_boot_at_download", if (expired) boot - 1 else boot).commit()
-        manager.b2RolloutConfig = { ClientConfigRepository(context, environment, "rollout-fixture", scope) }
+        val repository = ClientConfigRepository(context, environment, "rollout-fixture", scope)
+        manager.b2RolloutConfig = { repository }
+        return repository
     }
 
     private fun response(action: String, phase: String) = JSONObject().put("success", true)

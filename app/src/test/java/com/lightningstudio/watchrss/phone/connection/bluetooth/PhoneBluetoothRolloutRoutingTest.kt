@@ -14,6 +14,7 @@ import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSession
 import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSessionRegistry
 import com.lightningstudio.watchrss.phone.data.ble.BleDomainStore
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
+import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageRepository
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
 import com.lightningstudio.watchrss.phone.data.note.NoteRepository
 import com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository

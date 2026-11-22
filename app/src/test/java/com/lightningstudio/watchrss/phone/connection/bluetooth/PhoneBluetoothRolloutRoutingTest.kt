@@ -1,6 +1,8 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import android.app.Application
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.os.SystemClock
 import android.provider.Settings
@@ -41,14 +43,28 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.Implementation
+import org.robolectric.annotation.Implements
+import org.robolectric.shadow.api.Shadow
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 
 @RunWith(RobolectricTestRunner::class)
-@Config(application = Application::class, sdk = [35])
+@Config(application = Application::class, sdk = [35],
+    shadows = [PhoneBluetoothRolloutRoutingTest.ProbeSocket::class])
 class PhoneBluetoothRolloutRoutingTest {
+    @Implements(BluetoothSocket::class)
+    class ProbeSocket {
+        lateinit var input: InputStream
+        val output = ByteArrayOutputStream()
+        @Implementation fun connect() = Unit
+        @Implementation fun getInputStream() = input
+        @Implementation fun getOutputStream() = output
+        @Implementation fun close() = Unit
+    }
+
     private class BusinessFrameReached : IllegalArgumentException("fixture reached first business frame")
     private enum class Start { IP, LATE_IP, RECONNECT, OPEN }
     private data class Seen(val transport: String, val request: JSONObject)
@@ -160,14 +176,81 @@ class PhoneBluetoothRolloutRoutingTest {
             seen.count { it.request.has("supportedGuardedLibraryVersions") })
     }
 
+    @Test fun ordinaryDiscoveryOmitsB2WhenRolloutIsOff() = runBlocking<Unit> {
+        val discovery = probe(oldPeer = false)
+        manager.probeDevices = { _, _, _ ->
+            assertLegacyProbe(directProbe(discovery), persistent = true)
+            PhoneBluetoothWatchProbeBatch(listOf(PhoneBluetoothWatchProbeResult(watch, true)))
+        }
+        for ((percent, forced, cohort) in listOf(
+            Triple(0, null, "b2_off"),
+            Triple(1, null, "b2_off"),
+            Triple(100, "off", "forced_off")
+        )) {
+            installRollout(percent, forced, expired = false)
+            val targets = manager.probeLibrarySyncTargets(libraryMode = LibrarySyncMode.MERGE)
+            assertEquals(listOf(watch), targets.devices)
+            val rollout = requireNotNull(targets.rollout)
+            assertFalse(rollout.enabled)
+            assertEquals(if (BuildConfig.B2_ENABLED) cohort else "ineligible", rollout.cohort.wire)
+        }
+    }
+
+    @Test fun ordinaryDiscoveryOffersBareB2OnlyWhenEnabledWithoutSyncV2() = runBlocking<Unit> {
+        installRollout(100, forced = null, expired = false)
+        val discovery = probe(oldPeer = false)
+        manager.probeDevices = { _, _, _ ->
+            val request = directProbe(discovery)
+            val versions = request.remove("supportedLibraryBinaryVersions")
+            assertEquals(if (BuildConfig.B2_ENABLED && !BuildConfig.SYNC_V2) "[2]" else null,
+                versions?.toString())
+            assertLegacyProbe(request, persistent = true)
+            PhoneBluetoothWatchProbeBatch(listOf(PhoneBluetoothWatchProbeResult(watch, true)))
+        }
+        val targets = manager.probeLibrarySyncTargets(libraryMode = LibrarySyncMode.MERGE)
+        assertEquals(listOf(watch), targets.devices)
+        assertEquals(BuildConfig.B2_ENABLED, requireNotNull(targets.rollout).enabled)
+    }
+
+    @Test fun ordinaryReconnectAndUncachedBindingKeepTheDiscoveryMiss() = runBlocking<Unit> {
+        runRoute(Start.RECONNECT, percent = 1, expectedCohort = "b2_off", changeAfterDiscovery = true,
+            verifyOrdinaryProbes = true)
+        assertEquals(listOf("ip", "rfcomm"), businessTransports())
+        assertEquals(listOf(false), opens)
+        assertLegacyProbe(seen.single { it.request.optString("phase") == "probe" }.request, persistent = false)
+    }
+
+    private suspend fun directProbe(discovery: JSONObject): JSONObject {
+        val device = BluetoothAdapter.getDefaultAdapter().getRemoteDevice(watch.address)
+        val socket = Shadow.newInstanceOf(BluetoothSocket::class.java)
+        val io = Shadow.extract<ProbeSocket>(socket)
+        val response = ByteArrayOutputStream().also { BluetoothSyncProtocol.writeFrame(it, discovery) }
+        io.input = ByteArrayInputStream(response.toByteArray())
+        client.probeSocketFactory = { socket }
+        requireNotNull(client.probeDirectPersistentOnce(device, "phone", "fixture", allowIpUpgrade = false))
+            .session?.close()
+        return BluetoothSyncProtocol.readFrame(ByteArrayInputStream(io.output.toByteArray()))
+    }
+
+    private fun assertLegacyProbe(actual: JSONObject, persistent: Boolean) {
+        val legacy = LibrarySyncPayload.buildProbeRequest("phone")
+        val expected = if (persistent) BluetoothSyncProtocol.withPersistentSessionRequest(legacy) else legacy
+        expected.put("sentAt", actual.getLong("sentAt"))
+        assertEquals(expected.toString(), actual.toString())
+    }
+
     private suspend fun runRoute(start: Start, percent: Int, forced: String? = null,
         expired: Boolean = false, oldPeer: Boolean = false, expectedCohort: String,
-        changeAfterDiscovery: Boolean = false) {
+        changeAfterDiscovery: Boolean = false, verifyOrdinaryProbes: Boolean = false) {
         val config = installRollout(percent, forced, expired)
         val discovery = probe(oldPeer)
         manager.openLibrarySession = { _, _, allowIpUpgrade, keepRfcomm ->
             opens += allowIpUpgrade
             val rfcomm = session("rfcomm", discovery)
+            if (verifyOrdinaryProbes) {
+                rfcomm.bindingProbe = null
+                assertLegacyProbe(directProbe(discovery), persistent = true)
+            }
             if (start == Start.OPEN && allowIpUpgrade && !oldPeer && keepRfcomm?.invoke(rfcomm, "fixture") != true) {
                 rfcomm.close()
                 session("ip:fixture", discovery)
@@ -188,6 +271,7 @@ class PhoneBluetoothRolloutRoutingTest {
         )
         val rollout = if (changeAfterDiscovery) {
             manager.probeDevices = { _, _, _ ->
+                if (verifyOrdinaryProbes) assertLegacyProbe(directProbe(discovery), persistent = true)
                 PhoneBluetoothWatchProbeBatch(listOf(PhoneBluetoothWatchProbeResult(watch, true)), reusable)
             }
             manager.probeLibrarySyncTargets(libraryMode = LibrarySyncMode.MERGE).rollout.also {
@@ -205,8 +289,10 @@ class PhoneBluetoothRolloutRoutingTest {
         assertEquals("v1", event.getString("protocol"))
         assertEquals(expired, event.optBoolean("configStale"))
         if (start == Start.RECONNECT) assertEquals(1, event.getJSONObject("transfer").getInt("disconnects"))
-        println("RC_WIRE ${start.name}/$percent/${forced.orEmpty()}/$expired/$oldPeer " +
-            seen.joinToString(" ") { "${it.transport}:${it.request}" })
+        if (!verifyOrdinaryProbes) {
+            println("RC_WIRE ${start.name}/$percent/${forced.orEmpty()}/$expired/$oldPeer " +
+                seen.joinToString(" ") { "${it.transport}:${it.request}" })
+        }
     }
 
     private fun businessFrames() = seen.filter { it.request.optString("action") == "syncAccount" }

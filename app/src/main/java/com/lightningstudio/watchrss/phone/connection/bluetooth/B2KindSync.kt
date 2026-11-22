@@ -2,6 +2,8 @@ package com.lightningstudio.watchrss.phone.connection.bluetooth
 
 import com.lightningstudio.watchrss.phone.account.B2AccountFence
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.*
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncSession
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncStage
 import kotlinx.coroutines.*
 import kotlinx.coroutines.selects.select
 import org.json.JSONArray
@@ -312,13 +314,18 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             throw B2Exception("PLAN_RETIRED")
         }
         val retiringDirection = pendingRetirements.firstOrNull()?.s("direction")
-        val session = B2Session(input, output, this, close, authorize = authorize)
+        val telemetry = coroutineContext[BtSyncSession]
+        val session = B2Session(input, output, this, close, authorize = authorize).also {
+            it.transferObserver = telemetry
+        }
         val client = B2Client(store, snapshots, session::exchange, authorize, session, progress).apply {
             commitWindow = window
             accountCommitFence = accountFence?.commitFence
         }
         if (!client.acceptProbe(probe)) throw B2Exception("CAPABILITY_MISMATCH")
+        telemetry?.stage = BtSyncStage.NEGOTIATE
         session.switch(probe.getJSONObject("libraryBinary"), true)
+        telemetry?.binaryStarted()
         files.onProgress = session::workProgress
         session.start()
         val reverseDone = CompletableDeferred<Unit>()
@@ -361,6 +368,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
                                 val job = request.s("jobId")
                                 if (apply) handoff.applied(job, request.o("payload").s("objectId")) else handoff.ended(job)
                             }
+                            if (apply && answer.getBoolean("success")) telemetry?.binaryApplied(request, incoming = true)
                             if (request.getString("phase") == "complete" && answer.getBoolean("success")) { progress("complete:watchToPhone"); reverseDone.complete(Unit) }
                             if (request.s("phase") == "begin") {
                                 val state = answer.o("result").s("state")

@@ -199,6 +199,9 @@ class B2Client(
         catch (e: B2Exception) { if (e.code == "SOURCE_CHANGED") cancel(job, plan, epoch, "SOURCE_CHANGED"); throw e }
         val objects = ds!!; sourceObjects = objects; B2Receiver.validateGraph(objects)
         if (B2Digests.objects(objects.map { it.s("objectId") }) != p.s("objectsRoot")) fail("SOURCE_CHANGED")
+        session.transferObserver?.let { observer ->
+            objects.forEach { observer.binaryDescriptor(it.s("objectId"), it.s("kind"), incoming = false) }
+        }
         var start = 0; var previous = "0".repeat(64)
         p.a("pageObjectCounts").values().forEachIndexed { index, n ->
             val count = B2Json.integer(n).toInt(); val entries = objects.subList(start, start + count)
@@ -235,12 +238,22 @@ class B2Client(
             }
             cursor = copy(next).put("limit", cursor.n("limit"))
         }
-        // missing() is a fresh verified observation. Only newly seen semantic blocks
-        // count in the shared recovery controller; repeated observations cannot reset it.
-        for (d in objects) if (d.s("objectId") !in applied) {
-            val ranges = observed[d.s("objectId")] ?: fail("RECEIPT_CONFLICT")
-            for (index in 0 until d.a("chunkHashes").length()) if (ranges.none { index >= it.first && index < it.second })
-                progress("phoneToWatch:" + B2Progress.chunk(d, index))
+        // The complete missing report confirms durable chunks even if the old ACK was lost.
+        // The observer attributes recovered outbound chunks to the session that sent them.
+        val resumeObserver = session.transferObserver.takeIf { p.s("intent") == "resume" }
+        for (d in objects) {
+            val id = d.s("objectId")
+            val alreadyApplied = id in applied
+            if (alreadyApplied && resumeObserver == null) continue
+            val ranges = observed[id] ?: fail("RECEIPT_CONFLICT")
+            for (index in 0 until d.a("chunkHashes").length()) {
+                if (ranges.any { (from, to) -> index in from until to }) continue
+                if (resumeObserver != null) {
+                    val length = minOf(B2Wire.CHUNK.toLong(), d.n("size") - index * B2Wire.CHUNK.toLong())
+                    resumeObserver.confirmResumedOutboundChunk(id, index, length.toInt())
+                }
+                if (!alreadyApplied) progress("phoneToWatch:" + B2Progress.chunk(d, index))
+            }
         }
         while (applied.size < objects.size) {
             val m = b.o("selection").o("limits").n("maxInFlightObjects").toInt()

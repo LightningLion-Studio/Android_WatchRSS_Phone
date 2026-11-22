@@ -56,7 +56,7 @@ android {
         versionCode = 121
         versionName = "1.4.0-13"
         // P1 is local-only and opt-in. This flag never enables cloud/apply/GC.
-        // Local opt-in. Release and debug default to the legacy protocol.
+        // Debug defaults keep the legacy protocol available for comparison.
         buildConfigField("boolean", "B2_ENABLED", providers.gradleProperty("b2Enabled").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("boolean", "SYNC_V2", providers.gradleProperty("syncV2").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_CONTENT", providers.gradleProperty("syncObjectsV2Content").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
@@ -137,6 +137,8 @@ android {
         }
 
         release {
+            buildConfigField("boolean", "B2_ENABLED", providers.gradleProperty("b2Enabled").orNull?.toBooleanStrictOrNull()?.toString() ?: "true")
+            buildConfigField("boolean", "SYNC_V2", providers.gradleProperty("syncV2").orNull?.toBooleanStrictOrNull()?.toString() ?: "true")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

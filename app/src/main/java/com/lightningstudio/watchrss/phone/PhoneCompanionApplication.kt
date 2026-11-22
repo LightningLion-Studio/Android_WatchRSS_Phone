@@ -39,6 +39,7 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
     val supportViewModel by lazy { com.lightningstudio.watchrss.phone.support.SupportViewModel(this) }
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastForegroundSyncAt = 0L
+    private var startedActivities = 0
     @Volatile private var resumedActivity: Activity? = null
     private var resumedAtMillis = 0L
     private val recoveryClipboard = lazy {
@@ -157,7 +158,9 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
             }
 
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
-            override fun onActivityStarted(activity: Activity) = Unit
+            override fun onActivityStarted(activity: Activity) {
+                if (startedActivities++ == 0) refreshClientConfig()
+            }
             override fun onActivityPaused(activity: Activity) {
                 if (resumedActivity === activity) cloudApprovalPrompts.pause()
                 supportOverlay.onPaused(activity)
@@ -168,10 +171,12 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
                 }
                 if (resumedActivity === activity) resumedActivity = null
             }
-            override fun onActivityStopped(activity: Activity) = Unit
+            override fun onActivityStopped(activity: Activity) { startedActivities-- }
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
             override fun onActivityDestroyed(activity: Activity) = Unit
         })
+        refreshClientConfig()
+        appScope.launch { container.btSyncTelemetry.onAppEntry() }
         appScope.launch {
             container.accountRepository.initialize()
             accountInitialization.complete(Unit)
@@ -182,7 +187,16 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
     }
 
     fun onPrivacyConsentGranted() {
+        refreshClientConfig()
         startConsentDependentServices()
+    }
+
+    private fun refreshClientConfig() {
+        appScope.launch {
+            if (PhonePrivacyConsentStore(this@PhoneCompanionApplication).hasRequiredConsent()) {
+                container.clientConfig.refreshIfStale()
+            }
+        }
     }
 
     private fun startConsentDependentServices() {

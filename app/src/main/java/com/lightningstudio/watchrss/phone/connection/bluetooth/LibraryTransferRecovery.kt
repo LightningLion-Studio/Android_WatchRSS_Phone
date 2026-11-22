@@ -24,6 +24,7 @@ internal class LibraryTransferRecovery(
     private var readyAfterDisconnect = false
     private var progressSinceReady = false
     private var noProgress = 0
+    var onDisconnect: () -> Unit = {}
 
     @Synchronized
     fun confirmedProgress(identity: String) {
@@ -42,6 +43,7 @@ internal class LibraryTransferRecovery(
     private fun disconnected(failure: LibraryTransportFailure): Boolean {
         if (failure.generation != generation || generation == lastDisconnect) return false
         lastDisconnect = generation
+        onDisconnect()
         val at = now()
         while (disconnectTimes.isNotEmpty() && at - disconnectTimes.first() > 10_000L) {
             disconnectTimes.removeFirst()

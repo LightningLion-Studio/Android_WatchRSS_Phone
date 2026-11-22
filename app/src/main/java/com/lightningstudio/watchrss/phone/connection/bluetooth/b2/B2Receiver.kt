@@ -342,6 +342,8 @@ class B2Receiver(
      * Canonical files and the single FULL journal transaction belong to this grant. */
     internal data class CommittedChunk(val chunk: WrittenChunk, val disposition: Int, val progressKey: String? = null)
 
+    internal var transferObserver: B2TransferObserver? = null
+
     internal fun reportChunkProgress(key: String) { progress(key) }
 
     internal suspend fun commitChunks(group: List<WrittenChunk>): List<CommittedChunk> = store.exclusive {
@@ -357,6 +359,7 @@ class B2Receiver(
             if (verifiedReceipt(j, row) != null) return@map CommittedChunk(chunk, 2)
             if (terminal(j)) fail("JOB_CANCELLED")
             val descriptor = row.o("descriptor")
+            transferObserver?.binaryDescriptor(oid, descriptor.s("kind"), incoming = true)
             runnable(j, descriptor)
             staged.add(chunk.temp.file to files.chunk(scope, j.s("jobId"), oid, chunk.header.index))
             CommittedChunk(chunk, 1, receiveDirection + ":" + B2Progress.chunk(descriptor, chunk.header.index))
@@ -814,6 +817,7 @@ class B2Receiver(
             throw failure
         }
         leases[jobId] = monotonic() + B2Wire.LEASE
+        transferObserver?.binaryDescriptor(d.s("objectId"), d.s("kind"), incoming = true)
         val result = try {
             applyTransaction(d.s("kind"), context) {
                 fence(j, r)

@@ -14,7 +14,11 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClear
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClearPhase
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClearOperation
 import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchLibraryClearException
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncSession
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncStage
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.EmptyCoroutineContext
 import com.lightningstudio.watchrss.phone.connection.ip.PhoneIpSyncSessionRegistry
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncConflictResolution
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneSyncDeleteConflict
@@ -44,6 +48,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageDailyPojo
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageRepository
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageStatisticsPojo
@@ -205,6 +210,7 @@ class MainViewModel(
     fun openWatchPairing() = watchBindingPrompts.openWatchPairing()
 
     private val sessionState = MutableStateFlow(MainUiState())
+    private var librarySyncSelection: CompletableDeferred<MainBluetoothDeviceUi?>? = null
     private var clearWatchJob: Job? = null
     private var clearWatchSelection: CompletableDeferred<PhoneBluetoothWatchDevice?>? = null
     private var clearWatchCandidates: List<PhoneBluetoothWatchDevice> = emptyList()
@@ -904,51 +910,42 @@ class MainViewModel(
     ) {
         viewModelScope.launch {
             if (sessionState.value.isBusy) return@launch
-            runCatching { bluetoothSyncManager.requirePhoneLogin() }.exceptionOrNull()?.let {
-                handleWatchSyncBindingFailure(it)
-                return@launch
+            sessionState.value = sessionState.value.copy(isBusy = true)
+            val telemetry = try {
+                bluetoothSyncManager.beginBtSync()
+            } finally {
+                sessionState.value = sessionState.value.copy(isBusy = false)
             }
-            bluetoothSyncManager.foregroundSyncStarted()
+            var active = false
             try {
-            val startMessage = when (mode) {
-                LibrarySyncMode.PHONE_TO_WATCH_REPLACE -> "正在准备让手机覆盖手表"
-                LibrarySyncMode.WATCH_TO_PHONE_REPLACE -> "正在准备让手表覆盖手机"
-                LibrarySyncMode.MERGE -> if (forceFull) "正在强制全量同步，可能需要更久" else "探测手表中"
-            }
-            beginSmoothedSyncProgress(MainSyncProgressUi(phase = "探测手表中", percent = 0))
-            sessionState.value = sessionState.value.copy(
-                isBusy = true,
-                message = startMessage,
-                syncStatusMessage = startMessage,
-                syncStatusError = null,
-                error = null,
-                bluetoothDevicePrompt = null,
-                conflictPrompt = null
-            )
-            val probeTargets = runCatching {
-                bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress)
-            }.getOrElse { throwable ->
-                clearSmoothedSyncProgress()
+                telemetry?.stage = BtSyncStage.ACCOUNT
+                runCatching { bluetoothSyncManager.requirePhoneLogin() }.exceptionOrNull()?.let {
+                    telemetry?.finishFailure(it)
+                    handleWatchSyncBindingFailure(it)
+                    return@launch
+                }
+                bluetoothSyncManager.foregroundSyncStarted()
+                active = true
+                telemetry?.stage = BtSyncStage.DISCOVER
+                val startMessage = when (mode) {
+                    LibrarySyncMode.PHONE_TO_WATCH_REPLACE -> "正在准备让手机覆盖手表"
+                    LibrarySyncMode.WATCH_TO_PHONE_REPLACE -> "正在准备让手表覆盖手机"
+                    LibrarySyncMode.MERGE -> if (forceFull) "正在强制全量同步，可能需要更久" else "探测手表中"
+                }
+                beginSmoothedSyncProgress(MainSyncProgressUi(phase = "探测手表中", percent = 0))
                 sessionState.value = sessionState.value.copy(
-                    isBusy = false,
-                    message = null,
-                    syncStatusMessage = null,
+                    isBusy = true,
+                    message = startMessage,
+                    syncStatusMessage = startMessage,
                     syncStatusError = null,
                     error = null,
                     bluetoothDevicePrompt = null,
                     conflictPrompt = null
                 )
-                _toastEvent.tryEmit(throwable.message ?: "操作失败")
-                showSupportAlert(
-                    title = "同步失败",
-                    message = "探测手表时出错，请检查蓝牙是否开启、手表端是否已打开应用。",
-                    errorDetails = throwable.message
-                )
-                return@launch
-            }
-            val reachableDevices = probeTargets.devices
-            when (reachableDevices.size) {
-                0 -> {
+                val probeTargets = runCatching {
+                    bluetoothSyncManager.probeLibrarySyncTargets(::updateBluetoothProbeProgress)
+                }.getOrElse { throwable ->
+                    telemetry?.finishFailure(throwable)
                     clearSmoothedSyncProgress()
                     sessionState.value = sessionState.value.copy(
                         isBusy = false,
@@ -956,32 +953,49 @@ class MainViewModel(
                         syncStatusMessage = null,
                         syncStatusError = null,
                         error = null,
-                        bluetoothDevicePrompt = null
+                        bluetoothDevicePrompt = null,
+                        conflictPrompt = null
                     )
-                    _toastEvent.tryEmit("未找到已打开 WatchRSS 的已配对手表，请在手表端打开应用并保持亮屏后重试")
+                    _toastEvent.tryEmit(throwable.message ?: "操作失败")
                     showSupportAlert(
-                        title = "未找到可同步手表",
-                        message = "未找到已打开 WatchRSS 的已配对手表。请确认手表端已打开应用并保持亮屏，然后重试。",
-                        errorDetails = "未找到已打开 WatchRSS 的已配对手表"
+                        title = "同步失败",
+                        message = "探测手表时出错，请检查蓝牙是否开启、手表端是否已打开应用。",
+                        errorDetails = throwable.message
                     )
+                    return@launch
                 }
-                1 -> {
-                    val device = reachableDevices.single()
-                    sessionState.value = sessionState.value.copy(
-                        syncTransportLabel = transportLabel(device.address)
-                    )
-                    runLibrarySync(device.toUi(), probeTargets.sessionLease, forceFull, mode)
-                }
-                else -> {
-                    clearSmoothedSyncProgress()
-                    val message = "发现 ${reachableDevices.size} 块可同步手表"
-                    sessionState.value = sessionState.value.copy(
-                        isBusy = false,
-                        message = message,
-                        syncStatusMessage = message,
-                        syncStatusError = null,
-                        error = null,
-                        bluetoothDevicePrompt = MainBluetoothDevicePromptUi(
+                val reachableDevices = probeTargets.devices
+                when (reachableDevices.size) {
+                    0 -> {
+                        telemetry?.finishDiscoveryFailure(probeTargets.failureCode)
+                        clearSmoothedSyncProgress()
+                        sessionState.value = sessionState.value.copy(
+                            isBusy = false,
+                            message = null,
+                            syncStatusMessage = null,
+                            syncStatusError = null,
+                            error = null,
+                            bluetoothDevicePrompt = null
+                        )
+                        _toastEvent.tryEmit("未找到已打开 WatchRSS 的已配对手表，请在手表端打开应用并保持亮屏后重试")
+                        showSupportAlert(
+                            title = "未找到可同步手表",
+                            message = "未找到已打开 WatchRSS 的已配对手表。请确认手表端已打开应用并保持亮屏，然后重试。",
+                            errorDetails = "未找到已打开 WatchRSS 的已配对手表"
+                        )
+                    }
+                    1 -> {
+                        val device = reachableDevices.single()
+                        sessionState.value = sessionState.value.copy(
+                            syncTransportLabel = transportLabel(device.address)
+                        )
+                        runLibrarySync(device.toUi(), probeTargets.sessionLease, forceFull, mode, telemetry)
+                    }
+                    else -> {
+                        clearSmoothedSyncProgress()
+                        val message = "发现 ${reachableDevices.size} 块可同步手表"
+                        val selection = CompletableDeferred<MainBluetoothDeviceUi?>()
+                        val prompt = MainBluetoothDevicePromptUi(
                             devices = reachableDevices.map { it.toUi() },
                             purpose = when (mode) {
                                 LibrarySyncMode.PHONE_TO_WATCH_REPLACE -> MainBluetoothDevicePromptPurpose.PHONE_TO_WATCH_REPLACE
@@ -989,10 +1003,34 @@ class MainViewModel(
                                 LibrarySyncMode.MERGE -> if (forceFull) MainBluetoothDevicePromptPurpose.LIBRARY_FORCE_FULL else MainBluetoothDevicePromptPurpose.LIBRARY
                             }
                         )
-                    )
+                        librarySyncSelection?.complete(null)
+                        librarySyncSelection = selection
+                        sessionState.value = sessionState.value.copy(
+                            isBusy = false,
+                            message = message,
+                            syncStatusMessage = message,
+                            syncStatusError = null,
+                            error = null,
+                            bluetoothDevicePrompt = prompt
+                        )
+                        bluetoothSyncManager.foregroundSyncFinished()
+                        active = false
+                        val selected = try {
+                            sessionState.first { it.bluetoothDevicePrompt !== prompt }
+                            if (selection.isCompleted) selection.await() else null
+                        } finally {
+                            if (librarySyncSelection === selection) librarySyncSelection = null
+                        }
+                        if (selected != null) runLibrarySync(selected, forceFull = forceFull, mode = mode, telemetry = telemetry)
+                    }
                 }
+            } catch (failure: Throwable) {
+                telemetry?.finishFailure(failure)
+                throw failure
+            } finally {
+                if (active) bluetoothSyncManager.foregroundSyncFinished()
+                telemetry?.finishCancelledIfOpen()
             }
-            } finally {bluetoothSyncManager.foregroundSyncFinished()}
         }
     }
 
@@ -1180,7 +1218,11 @@ class MainViewModel(
 
     fun chooseBluetoothDeviceForSync(device: MainBluetoothDeviceUi) {
         viewModelScope.launch {
-            val purpose = sessionState.value.bluetoothDevicePrompt?.purpose
+            val purpose = sessionState.value.bluetoothDevicePrompt?.purpose ?: return@launch
+            if (purpose != MainBluetoothDevicePromptPurpose.ACCOUNT &&
+                purpose != MainBluetoothDevicePromptPurpose.CLEAR_WATCH_LIBRARY) {
+                librarySyncSelection?.complete(device)
+            }
             sessionState.value = sessionState.value.copy(
                 bluetoothDevicePrompt = null,
                 syncTransportLabel = device.transportLabel
@@ -1189,22 +1231,12 @@ class MainViewModel(
                 runAccountSync(device)
             } else if (purpose == MainBluetoothDevicePromptPurpose.CLEAR_WATCH_LIBRARY) {
                 clearWatchSelection?.complete(clearWatchCandidates.firstOrNull { it.address == device.address })
-            } else {
-                val mode = when (purpose) {
-                    MainBluetoothDevicePromptPurpose.PHONE_TO_WATCH_REPLACE -> LibrarySyncMode.PHONE_TO_WATCH_REPLACE
-                    MainBluetoothDevicePromptPurpose.WATCH_TO_PHONE_REPLACE -> LibrarySyncMode.WATCH_TO_PHONE_REPLACE
-                    else -> LibrarySyncMode.MERGE
-                }
-                runLibrarySync(
-                    device,
-                    forceFull = purpose != MainBluetoothDevicePromptPurpose.LIBRARY,
-                    mode = mode
-                )
             }
         }
     }
 
     fun dismissBluetoothDevicePrompt() {
+        librarySyncSelection?.complete(null)
         if (sessionState.value.bluetoothDevicePrompt?.purpose == MainBluetoothDevicePromptPurpose.CLEAR_WATCH_LIBRARY)
             clearWatchSelection?.complete(null)
         clearSmoothedSyncProgress()
@@ -1220,7 +1252,8 @@ class MainViewModel(
         device: MainBluetoothDeviceUi,
         reusableSession: PhoneSyncSession? = null,
         forceFull: Boolean = false,
-        mode: LibrarySyncMode = LibrarySyncMode.MERGE
+        mode: LibrarySyncMode = LibrarySyncMode.MERGE,
+        telemetry: BtSyncSession? = null
     ) {
         beginSmoothedSyncProgress(MainSyncProgressUi(phase = "建立连接中", percent = 0))
         sessionState.value = sessionState.value.copy(
@@ -1232,21 +1265,23 @@ class MainViewModel(
             bluetoothDevicePrompt = null
         )
         runCatching {
-            val result = bluetoothSyncManager.syncAll(
-                device = PhoneBluetoothWatchDevice(
-                    name = device.name,
-                    address = device.address,
-                    uuidCount = 0,
-                    remoteDeviceId = device.remoteDeviceId,
-                    bluetoothAddress = device.bluetoothAddress,
-                    supportsPersistentSession = device.supportsPersistentSession
-                ),
-                reusableSession = reusableSession,
-                forceFull = forceFull,
-                mode = mode,
-                onProgress = ::updateLibrarySyncProgress,
-                resolveDeleteConflicts = ::resolveDeleteConflicts
-            )
+            val result = withContext(telemetry ?: EmptyCoroutineContext) {
+                bluetoothSyncManager.syncAll(
+                    device = PhoneBluetoothWatchDevice(
+                        name = device.name,
+                        address = device.address,
+                        uuidCount = 0,
+                        remoteDeviceId = device.remoteDeviceId,
+                        bluetoothAddress = device.bluetoothAddress,
+                        supportsPersistentSession = device.supportsPersistentSession
+                    ),
+                    reusableSession = reusableSession,
+                    forceFull = forceFull,
+                    mode = mode,
+                    onProgress = ::updateLibrarySyncProgress,
+                    resolveDeleteConflicts = ::resolveDeleteConflicts
+                )
+            }
             val stats = result.libraryStats
             val noteStats = result.noteStats
             val deviceName = result.deviceName.ifBlank { "手表" }

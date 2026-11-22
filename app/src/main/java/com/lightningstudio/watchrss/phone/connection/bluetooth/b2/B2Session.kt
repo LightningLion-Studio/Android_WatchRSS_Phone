@@ -15,6 +15,7 @@ class B2Session(private val input: InputStream, private val output: OutputStream
     parent: CoroutineScope, private val closeTransport: () -> Unit,
     private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
     private val authorize: () -> Unit = {}) : AutoCloseable {
+    internal var transferObserver: B2TransferObserver? = null
     private class DiscardedOldData : Exception()
     private val lifecycle = Any()
     private val job = SupervisorJob(parent.coroutineContext[Job])
@@ -76,6 +77,7 @@ class B2Session(private val input: InputStream, private val output: OutputStream
     fun install(receiver: B2Receiver, handler: suspend (JSONObject) -> JSONObject) {
         pipeline?.close()
         this.receiver = receiver
+        receiver.transferObserver = transferObserver
         this.pipeline = B2ReceivePipeline(scope, receiver, clock, { replies ->
             enqueue(Outgoing.Durable(replies), true)
         }, ::abort)
@@ -116,7 +118,17 @@ class B2Session(private val input: InputStream, private val output: OutputStream
         check(!started); checkOpen()
         val done = CompletableDeferred<Unit>()
         val timer = scope.launch { delay(30000); val e = B2NetworkTimeout("B2 switch deadline"); done.completeExceptionally(e); abort(e) }
-        scope.launch { try { B2Switch.perform(input, output, capability, enabled); done.complete(Unit) } catch (e: Throwable) { done.completeExceptionally(e); abort(e) } }
+        scope.launch {
+            try {
+                val observer = transferObserver
+                if (observer == null) B2Switch.perform(input, output, capability, enabled)
+                else B2Switch.perform(observer.counting(input), observer.counting(output), capability, enabled)
+                done.complete(Unit)
+            } catch (e: Throwable) {
+                done.completeExceptionally(e)
+                abort(e)
+            }
+        }
         try { done.await() } finally { timer.cancel() }
     }
     fun start() {
@@ -151,7 +163,9 @@ class B2Session(private val input: InputStream, private val output: OutputStream
                                     lastWrite = writingSince
                                     B2Frame.Data(h, outgoing.bytes)
                                 }
-                                writeFrame(frame)
+                                writeFrame(frame, payloadWritten = {
+                                    transferObserver?.chunk(outgoing.request, incoming = false, outgoing.bytes.size)
+                                })
                             } catch (e: B2Exception) {
                                 if (e.code != "LEASE_EXPIRED") throw e
                                 outgoing.answer.completeExceptionally(e)
@@ -164,8 +178,14 @@ class B2Session(private val input: InputStream, private val output: OutputStream
         }
         scope.launch {
             val tracked = object : InputStream() {
-                override fun read(): Int { val b = input.read(); if (b >= 0) { if (readingSince == 0L) readingSince = clock(); lastRead = clock() }; return b }
-                override fun read(b: ByteArray, off: Int, len: Int): Int { val n = input.read(b, off, len); if (n > 0) { if (readingSince == 0L) readingSince = clock(); lastRead = clock() }; return n }
+                private fun received(count: Int) {
+                    if (count <= 0) return
+                    if (readingSince == 0L) readingSince = clock()
+                    lastRead = clock()
+                    transferObserver?.bytes(count.toLong())
+                }
+                override fun read(): Int = input.read().also { if (it >= 0) received(1) }
+                override fun read(b: ByteArray, off: Int, len: Int): Int = input.read(b, off, len).also(::received)
             }
             try {
                 while (isActive) {
@@ -211,16 +231,22 @@ class B2Session(private val input: InputStream, private val output: OutputStream
                             val settled = sendFlows.getValue(frame.stream).settle(frame)
                             if (settled.isEmpty()) staleAcks.take()
                             else for ((entry, row) in frame.entries.zip(settled)) {
-                                dataWait.remove(row.header.requestId)?.answer?.complete(entry.disposition) ?: fail()
+                                val wait = dataWait.remove(row.header.requestId) ?: fail()
+                                if (entry.disposition == 1) {
+                                    transferObserver?.chunk(wait.request, incoming = false, row.header.length, accepted = true)
+                                }
+                                wait.answer.complete(entry.disposition)
                             }
                         }
                         is B2Frame.Data -> {
                             val (request, hash) = binding ?: fail()
+                            transferObserver?.chunk(request, incoming = true, frame.header.length)
                             (pipeline ?: fail("AUTH_REVOKED")).submit(frame, request, hash)
                         }
                         is B2Frame.Control -> {
                             controls.take()
                             val r = frame.value
+                            if (r.s("type") == "request") transferObserver?.binaryRequest(r, incoming = true)
                             if (r.s("type") == "response") acceptResponse(r)
                             else if (r.s("phase") == "missing" && r.o("payload").n("limit") == 0L &&
                                 receiver?.canFastHeartbeat(r.s("jobId")) != false) {
@@ -334,7 +360,12 @@ class B2Session(private val input: InputStream, private val output: OutputStream
         val h = replies.first().header
         val target = receiver ?: fail("AUTH_REVOKED")
         if (!target.current(h.stream, h.epoch)) return
-        val entries = replies.filter { it.error == null }.map { B2AckEntry(it.header.seq, it.disposition) }
+        val entries = replies.filter { it.error == null }.map { reply ->
+            if (reply.disposition == 1) {
+                transferObserver?.chunk(reply.request, incoming = true, reply.header.length, accepted = true)
+            }
+            B2AckEntry(reply.header.seq, reply.disposition)
+        }
         if (entries.isNotEmpty()) {
             val ack = target.ack(h.stream, h.epoch, entries) ?: return
             writeFrame(ack) { replies.filter { it.error == null }.forEach { pipeline?.release(it.header) } }
@@ -346,7 +377,12 @@ class B2Session(private val input: InputStream, private val output: OutputStream
         }
     }
 
-    private fun writeFrame(frame: B2Frame, heartbeatJob: String? = null, starting: () -> Unit = {}) {
+    private fun writeFrame(
+        frame: B2Frame,
+        heartbeatJob: String? = null,
+        payloadWritten: () -> Unit = {},
+        starting: () -> Unit = {}
+    ) {
         synchronized(lifecycle) {
             checkOpen()
             authorize()
@@ -361,6 +397,7 @@ class B2Session(private val input: InputStream, private val output: OutputStream
                     receiver?.let { it.current(it.streamFor(r.s("jobId")), r.n("epoch")) } != true) return
                 if (r.s("type") == "request") {
                     val waiter = pending[r.s("requestId")]
+                    transferObserver?.binaryRequest(r, incoming = false)
                     if (r.s("phase") == "missing" && r.o("payload").n("limit") == 0L) {
                         val grant = sourceBindings[r.s("jobId")]
                         if (grant != null && grant.epoch != r.n("epoch")) {
@@ -381,9 +418,17 @@ class B2Session(private val input: InputStream, private val output: OutputStream
             else admit()
         }
         B2Frames.write(object : OutputStream() {
-            override fun write(b: Int) { checkOpen(); output.write(b); lastWrite = clock() }
-            override fun write(b: ByteArray, off: Int, len: Int) { checkOpen(); output.write(b, off, len); lastWrite = clock() }
-            override fun flush() { checkOpen(); output.flush() }
+            override fun write(b: Int) {
+                checkOpen(); output.write(b); lastWrite = clock(); transferObserver?.bytes(1)
+            }
+            override fun write(b: ByteArray, off: Int, len: Int) {
+                checkOpen(); output.write(b, off, len); lastWrite = clock(); transferObserver?.bytes(len.toLong())
+            }
+            override fun flush() {
+                payloadWritten()
+                checkOpen()
+                output.flush()
+            }
         }, frame)
         writingSince = 0
     }
@@ -447,6 +492,9 @@ class B2Session(private val input: InputStream, private val output: OutputStream
                 abort(failure)
                 return
             }
+        }
+        if (r.s("phase") == "apply" && r.getBoolean("success")) {
+            transferObserver?.binaryApplied(w.request, incoming = false)
         }
         if (!w.answer.complete(r)) fail("REQUEST_CONFLICT")
     }

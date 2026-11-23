@@ -19,6 +19,8 @@ internal class SyncV2Projection(
     private val sequenceAllocator:((String)->String)?=null
 ):AutoCloseable {
     @Volatile private var closed=false
+    @Volatile private var hasWatchSBleCache = false
+    @Volatile private var hasWatchSBleArticles = false
     override fun close() {
         closed=true;key.fill(0)
         // Delete the credential copy, retaining encrypted edits and public identity mappings.
@@ -64,6 +66,12 @@ internal class SyncV2Projection(
                 val unknown=edits.getBoolean("unknownV2Base")
                 body.put("bootstrapEdits",edits).put("unknownEditBase",unknown).put("businessStamp",SyncV2BusinessWitness.read(db).encoded())
                 db.execSQL("INSERT INTO syncv2_state VALUES(?,?,?,?,?,?,?)",arrayOf(scope,"0",if(unknown)"1"else"0",seal("state",body),identity.encryptedRecord(key),identity.descriptorOid,identity.accountId))
+            }
+            if (BuildConfig.WATCH_S_BLE_SYNC) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS syncv2_watchs_cache (oid TEXT NOT NULL, scope TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(scope,oid))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS syncv2_watchs_articles (scope TEXT NOT NULL, entity_key TEXT NOT NULL, PRIMARY KEY(scope,entity_key))")
+                hasWatchSBleCache = hasWatchSBleRows("syncv2_watchs_cache")
+                hasWatchSBleArticles = hasWatchSBleRows("syncv2_watchs_articles")
             }
             synchronizeBusinessInTransaction(readState(),SyncV2BusinessWitness.read(db))
             db.execSQL("UPDATE syncv2_control SET enabled=1,active_scope=?,failure_code=NULL WHERE id=1",arrayOf(scope))
@@ -537,6 +545,131 @@ internal class SyncV2Projection(
         if(c.stateVersion!=st.version || c.localChangeRevision!=st.revision || c.accountOid!=a.getString("oid") || c.accountRevision!=a.getString("revision") || c.generation!=a.getString("generation"))SyncV2Codec.fail("choice_stale")
         if(requirePending && st.body.optJSONObject("pendingChoice")?.optString("generation")!=c.generation)SyncV2Codec.fail("choice_stale")
     }
+    private fun hasWatchSBleRows(table: String): Boolean = db.controlQuery(
+        "SELECT 1 FROM $table WHERE scope=? LIMIT 1", arrayOf(scope)
+    ).use { it.moveToFirst() }
+
+    internal fun watchSBleCachedObject(oid: String): ByteArray? {
+        if (!hasWatchSBleCache || !WatchSBleRows.metadataOid(oid)) return null
+        return db.controlQuery("SELECT body FROM syncv2_watchs_cache WHERE scope=? AND oid=?", arrayOf(scope, oid)).use {
+            if (it.moveToFirst()) it.getBlob(0).takeIf { bytes -> WatchSBleRows.matchesOid(bytes, oid) } else null
+        }
+    }
+
+    internal fun watchSBleObject(head: String, oid: String): ByteArray? {
+        checkWatchSBleHead(head)
+        if (!WatchSBleRows.metadataOid(oid)) SyncV2Codec.fail("invalid_schema")
+        return watchSBleCachedObject(oid) ?: db.controlQuery(
+            "SELECT body FROM syncv2_cloud_objects WHERE scope=? AND oid=? AND length(body)<=?",
+            arrayOf(scope, oid, WatchSBleRows.MAX_OBJECT_BYTES.toString())
+        ).use {
+            if (it.moveToFirst()) it.getBlob(0).takeIf { bytes -> WatchSBleRows.matchesOid(bytes, oid) } else null
+        }
+    }
+
+    internal fun watchSBleCacheObject(head: String, oid: String, bytes: ByteArray, authorize: (State) -> Unit) {
+        if (!BuildConfig.WATCH_S_BLE_SYNC || !WatchSBleRows.matchesOid(bytes, oid)) SyncV2Codec.fail("hash_mismatch")
+        val st = state()
+        accountWriter(st.version) { current ->
+            requireWatchSBleHead(current, head)
+            authorize(current)
+            db.execSQL("INSERT OR REPLACE INTO syncv2_watchs_cache(oid,scope,body) VALUES(?,?,?)",
+                arrayOf(oid, scope, bytes))
+            // Cache is expendable. Cap the entire database, including previously used scopes.
+            db.execSQL("DELETE FROM syncv2_watchs_cache WHERE rowid NOT IN (SELECT rowid FROM syncv2_watchs_cache ORDER BY rowid DESC LIMIT 64)")
+            authorize(current)
+        }
+        hasWatchSBleCache = true
+    }
+
+    private fun requireWatchSBleHead(st: State, expected: String): JSONObject {
+        val account = current(st)
+        if (SyncV2Codec.canonical(account) != expected ||
+            SyncV2Codec.canonical(st.body.optJSONObject("appliedAccount")) != expected ||
+            !st.body.isNull("pendingChoice") || !st.body.isNull("pendingAccountAction") ||
+            st.body.optBoolean("unknownEditBase") ||
+            st.body.optJSONObject("editBase")?.let { it.getString("accountOid") != account.getString("oid") } == true
+        ) SyncV2Codec.fail("choice_stale")
+        return account
+    }
+
+    internal fun checkWatchSBleHead(expected: String): String =
+        SyncV2Codec.canonical(requireWatchSBleHead(state(), expected))
+
+    private fun watchSBleScan(head: String): State {
+        checkWatchSBleHead(head)
+        val deadline = android.os.SystemClock.elapsedRealtime() + 3000
+        repeat(12) {
+            val remaining = deadline - android.os.SystemClock.elapsedRealtime()
+            if (remaining <= 0) SyncV2Codec.fail("budget_paused")
+            if (!runWindow(maxPages = 16, budgetMillis = remaining).paused) {
+                return state().also { requireWatchSBleHead(it, head) }
+            }
+        }
+        SyncV2Codec.fail("budget_paused")
+    }
+
+    internal fun watchSBleNext(head: String, after: String): JSONObject? {
+        watchSBleScan(head)
+        var cursor = after
+        while (true) {
+            val entity = db.controlQuery(
+                "SELECT entity_key FROM syncv2_candidates WHERE scope=? AND entity_key>? AND kind IN ('source','article','rss-state') ORDER BY entity_key LIMIT 1",
+                arrayOf(scope, cursor)
+            ).use { if (it.moveToFirst()) it.getString(0) else return null }
+            cursor = entity
+            val record = accountLocalRows(setOf(entity)).singleOrNull() ?: continue
+            val meta = record.getJSONObject("meta")
+            val value = record.getJSONObject("value")
+            val allowed = when (meta.getString("kind")) {
+                "source" -> runCatching { WatchSBleRows.rssSourceKey(value.getString("url")) }.isSuccess
+                "article" -> WatchSBleRows.portableArticle(value) && !watchSBleBookChapter(meta.getString("logicalId"))
+                else -> true
+            }
+            if (allowed) return WatchSBleRows.encode(record)
+        }
+    }
+
+    private fun watchSBleBookChapter(id: String): Boolean = db.controlQuery(
+        "SELECT 1 FROM imported_book_chapters WHERE articleId=? LIMIT 1", arrayOf(id)
+    ).use { it.moveToFirst() }
+
+    internal fun watchSBlePut(head: String, row: JSONObject, authorize: (State) -> Unit) {
+        val incoming = WatchSBleRows.decode(identity, row)
+        val meta = incoming.getJSONObject("meta")
+        val kind = meta.getString("kind")
+        val entity = meta.getString("entityKey")
+        val logical = meta.getString("logicalId")
+        val st = watchSBleScan(head)
+        accountWriter(st.version) { current ->
+            val account = requireWatchSBleHead(current, head)
+            authorize(current)
+            if (kind == "article" && (watchSBleBookChapter(logical) ||
+                db.controlQuery("SELECT 1 FROM article_register_provenance WHERE articleId=? AND (raw!='' OR pending IS NOT NULL)",
+                    arrayOf(logical)).use { it.moveToFirst() })) SyncV2Codec.fail("unsupported_feature")
+            val before = accountLocalRows(setOf(entity))
+            val old = before.singleOrNull()?.getJSONObject("value")
+            val value = WatchSBleRows.merge(kind, old, incoming.getJSONObject("value"))
+            if (SyncV2LocalJson.canonical(value) == SyncV2LocalJson.canonical(old)) return@accountWriter
+            val next = WatchSBleRows.record(kind, logical, entity, value)
+            SyncV2PhoneApply(db).apply(before, listOf(next))
+            val domain = SyncV2Schema.domains.firstOrNull { it.kind == kind }
+                ?: SyncV2Schema.Domain("p5-public-state", "rss-state", "logical_id")
+            val revision = SyncV2Codec.next(current.revision)
+            if (BuildConfig.WATCH_S_BLE_SYNC && kind == "article") db.execSQL(
+                "INSERT OR IGNORE INTO syncv2_watchs_articles(scope,entity_key) VALUES(?,?)", arrayOf(scope, entity)
+            )
+            project(domain, logical, value, revision, account, ownerBody = current.body)
+            val stamp = SyncV2BusinessWitness.read(db)
+            current.body.put("businessStamp", stamp.encoded())
+            if (current.body.isNull("editBase")) current.body.put("editBase", JSONObject()
+                .put("accountOid", account.getString("oid")).put("generation", account.getString("generation")))
+            db.execSQL("UPDATE syncv2_state SET local_revision=? WHERE scope=?", arrayOf(revision, scope))
+            authorize(current)
+        }
+        if (BuildConfig.WATCH_S_BLE_SYNC && kind == "article") hasWatchSBleArticles = true
+    }
+
     /** Values are always from the current local projection, never a browsable old cloud cache. */
     internal fun accountLocalRows(ids:Set<String>?=null):List<JSONObject> {
         if(!db.inTransaction())state();val selected=selection(ids)
@@ -1212,13 +1345,26 @@ internal class SyncV2Projection(
         else -> SyncV2Codec.fail("unsupported_feature")
     }
     private fun readRecord(d:SyncV2Schema.Domain,c:Cursor):JSONObject {
-        val raw=readStoredRecord(d,c);val id=c.getString(0)
-        val binding=db.controlQuery("SELECT body FROM syncv2_p5_bindings WHERE scope=? AND entity_key=?",arrayOf(scope,identity.entity(d.kind,id))).use{if(it.moveToFirst())accountOpen("binding",it.getBlob(0))else null}?:return raw
-        val footprint=binding.optJSONObject("localValue")?:return raw
-        val value=JSONObject(binding.getJSONObject("value").toString())
-        for(field in raw.keys())if(SyncV2LocalJson.canonical(raw.opt(field))!=SyncV2LocalJson.canonical(footprint.opt(field)))value.put(field,raw.get(field))
+        val raw = readStoredRecord(d, c)
+        val id = c.getString(0)
+        val binding = accountBinding(identity.entity(d.kind, id))
+        val footprint = binding?.optJSONObject("localValue")
+        val value = if (footprint == null) raw else JSONObject(binding.getJSONObject("value").toString()).also {
+            for (field in raw.keys()) if (SyncV2LocalJson.canonical(raw.opt(field)) !=
+                SyncV2LocalJson.canonical(footprint.opt(field))) it.put(field, raw.get(field))
+        }
+        if (hasWatchSBleArticles && d.kind == "article" && db.controlQuery(
+                "SELECT 1 FROM syncv2_watchs_articles WHERE scope=? AND entity_key=?",
+                arrayOf(scope, identity.entity(d.kind, id))
+            ).use { it.moveToFirst() }) {
+            val previous = candidate(d.kind, id)
+            if (previous != null && !previous.second.has("projectionRemoved")) {
+                return WatchSBleRows.carryArticleState(value, SyncV2Business.join(d.kind, previous.first, previous.second))
+            }
+        }
         return value
     }
+
     private fun readStoredRecord(d: SyncV2Schema.Domain,c: Cursor): JSONObject {
         if(d.table=="imported_books" || d.table=="imported_book_reading") return JSONObject(c.getString(c.getColumnIndexOrThrow("stateJson")))
         val out=JSONObject()

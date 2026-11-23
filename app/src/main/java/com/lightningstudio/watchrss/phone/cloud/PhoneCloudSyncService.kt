@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.cloud
 
+import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.pairing.*
 import com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness
 import kotlinx.coroutines.flow.map
@@ -138,7 +139,7 @@ class PhoneCloudSyncService(
     val pairingChanges: kotlinx.coroutines.flow.Flow<Unit> = merge(keyManager.changes.map { Unit }, pairingEpochState.map { Unit })
     fun pairingEpoch(): String? = accountRepository.session.value?.let { client.knownEpoch(it) }
     val pairingBackendBaseUrl: String get() = client.backendBaseUrl
-    private var trustedBootstrap: CloudBootstrap? = null
+    @Volatile private var trustedBootstrap: CloudBootstrap? = null
     private val syncV2Product by lazy {
         com.lightningstudio.watchrss.phone.syncv2.SyncV2PhoneProduct(appContext,{requireNotNull(syncV2Database).invoke()},keyManager,
             current={
@@ -154,6 +155,13 @@ class PhoneCloudSyncService(
                 session!=null && bootstrap!=null && bootstrap.devices.any{it.deviceId==id && it.revokedAt==null && deviceAuthenticated(session,bootstrap,it)}})
     }
     internal val syncV2UiPort get()=syncV2Product.uiPort
+    internal fun watchSBleAvailable(): Boolean =
+        BuildConfig.WATCH_S_BLE_SYNC && syncV2Database != null &&
+            accountRepository.session.value?.isExpired == false &&
+            trustedBootstrap?.syncV2?.opt("watchSBleSync") == true && syncV2Product.watchSBleAvailable
+
+    internal fun watchSBleEndpoint(alive: () -> Boolean) =
+        com.lightningstudio.watchrss.phone.connection.watchs.WatchSBleEndpoint(syncV2Product, alive)
     internal fun captureSyncV2Legacy(peer:String,version:Int,cursor:String,payload:JSONObject)=syncV2Product.captureLegacyMetadata(peer,version,cursor,payload)
 
     private val approvalMutex = Mutex()
@@ -438,7 +446,7 @@ class PhoneCloudSyncService(
         client.useEpoch(session, bootstrap.libraryEpoch)
         pairingEpochState.value = bootstrap.libraryEpoch
         if (changed) throw CloudTrustException()
-        if (syncV2Database != null) syncV2Product.observeBootstrap(bootstrap.syncV2)
+        if (syncV2Database != null && bootstrap.syncV2 == null) syncV2Product.observeBootstrap(null)
         val keys = localKeys(session)
         val remoteDevice = bootstrap.devices.firstOrNull { it.deviceId == deviceId }
         clearRevokedCloudDeviceIdentity(bootstrap, deviceId) { keyManager.clearDeviceKey(session.userId, deviceId) }
@@ -464,6 +472,7 @@ class PhoneCloudSyncService(
             }
         } finally { keys.values.forEach { it.fill(0) } }
         trustedBootstrap = bootstrap
+        if (syncV2Database != null) syncV2Product.observeBootstrap(bootstrap.syncV2)
         _needsReapproval.value = if (keyManager.hasAccountKey(session.userId)) bootstrap.devices.filter { it.revokedAt == null && !it.deviceId.startsWith("reader-migration-") && !deviceAuthenticated(session, bootstrap, it) } else emptyList()
     }
     private suspend fun validatedBootstrap(session: PhoneAccountSession, requireV2Announcement: Boolean = false): CloudBootstrap {

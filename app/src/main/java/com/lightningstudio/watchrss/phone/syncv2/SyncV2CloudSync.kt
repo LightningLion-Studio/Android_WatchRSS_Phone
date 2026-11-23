@@ -71,7 +71,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             if(next!=at || page.get("complete")!=(at==pin))SyncV2Codec.fail("ref_continuity_unavailable")
         }
         val closure=SyncV2ControlClosure(identity,authors,contentKey,client.noteSegmentsRead())
-        val verified=projection.verifyCloud(closure,headers.first(),{oid->client.raw(oid,id)},{ parent ->
+        val verified=projection.verifyCloud(closure,headers.first(),{oid->projection.watchSBleCachedObject(oid) ?: client.raw(oid,id)},{ parent ->
             client.reference(parent,id).let { JSONObject(it.toString()).apply { remove("version") } }
         })
         verified.use {

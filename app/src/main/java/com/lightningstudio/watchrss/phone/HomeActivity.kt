@@ -29,6 +29,8 @@ import androidx.compose.ui.unit.dp
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_EXTENSION
@@ -58,7 +60,10 @@ import com.lightningstudio.watchrss.phone.update.PhoneStoreVersionRepository
 import com.lightningstudio.watchrss.phone.update.OppoMarketLauncher
 import com.lightningstudio.watchrss.phone.update.shouldOfferStoreUpdate
 import com.lightningstudio.watchrss.phone.review.ReviewMoment
+import com.lightningstudio.watchrss.phone.connection.watchs.WatchSBleGattServer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -164,6 +169,7 @@ class HomeActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        startWatchSBle()
         pendingSupportDestination.value = intent.getStringExtra(EXTRA_SUPPORT_DESTINATION)
         val container = (application as PhoneCompanionApplication).container
 
@@ -448,6 +454,26 @@ class HomeActivity : ComponentActivity() {
                     "软件商店不可用，未能获取可用的 APK 更新",
                     Toast.LENGTH_LONG
                 ).show()
+            }
+        }
+    }
+
+    private fun startWatchSBle() {
+        if (!BuildConfig.WATCH_S_BLE_SYNC) return
+        val cloud = (application as PhoneCompanionApplication).container.cloudSyncService
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                while (isActive) {
+                    if (cloud.watchSBleAvailable()) {
+                        WatchSBleGattServer(this@HomeActivity, this, cloud::watchSBleAvailable,
+                            cloud::watchSBleEndpoint).use { server ->
+                            if (server.start()) {
+                                while (cloud.watchSBleAvailable() && server.radioAvailable()) delay(1000)
+                            }
+                        }
+                    }
+                    delay(1000)
+                }
             }
         }
     }

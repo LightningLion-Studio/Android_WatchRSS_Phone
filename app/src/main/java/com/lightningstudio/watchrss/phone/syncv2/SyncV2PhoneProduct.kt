@@ -34,6 +34,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
     @Volatile private var opening:SyncV2Lifetime?=null
     @Volatile private var runtime:Runtime?=null
     @Volatile private var announcement:JSONObject?=null
+    @Volatile private var watchSBleAnnounced = false
     private val _uiPort=MutableStateFlow<SyncV2PhoneUiPort?>(null)
     val uiPort:StateFlow<SyncV2PhoneUiPort?> = _uiPort
     val productEnabled: Boolean get() = enabled()
@@ -41,10 +42,16 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
     /** Called before v1 credential deletion, even while start is waiting for HTTP. */
     fun release() {
         generation.incrementAndGet()
+        watchSBleAnnounced = false
         opening?.close();runtime?.life?.close()
         opening=null;runtime=null;announcement=null;_uiPort.value=null
     }
+    private fun serviceIdentity(value: JSONObject) = SyncV2Codec.canonical(
+        if (value.has("watchSBleSync")) JSONObject(value.toString()).apply { remove("watchSBleSync") } else value
+    )
+
     fun observeBootstrap(syncV2: JSONObject?) {
+        watchSBleAnnounced = syncV2?.opt("watchSBleSync") == true
         if (syncV2 == null && announcement != null) release()
     }
 
@@ -60,14 +67,15 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             release()
             return@withContext Result(false,if(!enabled())"feature_disabled"else"not_announced")
         }
+        observeBootstrap(syncV2)
         announcement=JSONObject(syncV2.toString())
         try { mutex.withLock {
             val account=current()?:SyncV2Codec.fail("authentication_required")
             val old=runtime
             if(old!=null && old.account.owner()!=account.owner()) {
-                release();announcement=JSONObject(syncV2.toString())
+                release();observeBootstrap(syncV2);announcement=JSONObject(syncV2.toString())
             }
-            if(runtime?.serviceAnnouncement?.let{it!=SyncV2Codec.canonical(syncV2)}==true) {
+            if(runtime?.serviceAnnouncement?.let{it!=serviceIdentity(syncV2)}==true) {
                 val error=SyncV2CloudError("service_key_changed");_uiPort.value?.failed(error);throw error
             }
             val live=runtime?:open(account,syncV2)
@@ -86,15 +94,15 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
     }
     private fun open(account:Account,syncV2:JSONObject):Runtime {
         val gen=generation.get()
-        val owner=account.owner();val serviceAnnouncement=SyncV2Codec.canonical(syncV2)
-        val life=SyncV2Lifetime {generation.get()==gen && enabled() && announcement?.let{SyncV2Codec.canonical(it)}==serviceAnnouncement && current()?.owner()==owner}
+        val owner=account.owner();val serviceAnnouncement=serviceIdentity(syncV2)
+        val life=SyncV2Lifetime {generation.get()==gen && enabled() && announcement?.let(::serviceIdentity)==serviceAnnouncement && current()?.owner()==owner}
         opening=life
         try {
             life.own(keys.onAccountRelease(account.userId){release()})
             val ring=life.guard {life.own(SyncV2ContentKeys.authenticated(keys,account.userId){verifyKeys(account,it)})}
             val store=SyncV2AccountStore(keys,account.userId,life)
             val aliases=SyncV2DeviceAlias(store,account.accountId,account.legacyDeviceId,account.epoch,account.generation)
-            val trust=SyncV2ServiceTrust.fromBootstrap(account.accountId,syncV2,store.read("service-pin")){store.write("service-pin",it)}
+            val trust=SyncV2ServiceTrust.fromBootstrap(account.accountId,JSONObject(serviceAnnouncement),store.read("service-pin")){store.write("service-pin",it)}
             val time=life.own(SyncV2TrustedTime(clock))
             val base=SyncV2Origin.endpoint(account.backendBaseUrl)
             fun client(scope:JSONObject,deviceId:String):SyncV2CloudClient=life.own(SyncV2CloudClient(base,{
@@ -180,7 +188,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 }
             })
             val articles=signer?.let{SyncV2ArticlePublisher(projection,identity,ring,it,contentClient,content,worker,context.filesDir,life::check,clock)}
-            val result=Runtime(account.copy(bearer="",apiKey="",deviceAuthorization=null),life,ring,identity,vault,projection,cloud,actions,control,articles,time,contentEnabled,serviceAnnouncement)
+            val result=Runtime(account.copy(bearer="",apiKey="",deviceAuthorization=null),life,ring,identity,vault,projection,cloud,actions,control,articles,time,contentEnabled,serviceAnnouncement,trust,approved)
             life.guard {
                 val port=SyncV2PhoneUiPort(this,result)
                 life.own(AutoCloseable{port.disabled()})
@@ -197,9 +205,34 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             try {run(live).also{port.refresh()}}catch(e:Throwable){port.failed(e);throw e}
         }
     }
+    internal val watchSBleAvailable: Boolean get() = BuildConfig.WATCH_S_BLE_SYNC &&
+        watchSBleAnnounced && runtime != null
+
+    internal suspend fun <T> watchSBleAction(run: (Runtime) -> T): T = withContext(Dispatchers.IO) {
+        if (!mutex.tryLock()) SyncV2Codec.fail("budget_paused")
+        try {
+            check(watchSBleAvailable)
+            val live = checkNotNull(runtime)
+            live.life.guard { run(live).also { check(watchSBleAvailable) } }
+        } finally {
+            mutex.unlock()
+        }
+    }
+
     internal class Runtime(val account:Account,val life:SyncV2Lifetime,val keys:SyncV2ContentKeys,val identity:SyncV2Identity,
         val vault:SyncV2SigningVault,val projection:SyncV2Projection,val cloud:SyncV2CloudSync,val actions:SyncV2AccountActions,
-        val client:SyncV2CloudClient,val articles:SyncV2ArticlePublisher?,val time:SyncV2TrustedTime,val contentEnabled:Boolean,val serviceAnnouncement:String) {
+        val client:SyncV2CloudClient,val articles:SyncV2ArticlePublisher?,val time:SyncV2TrustedTime,val contentEnabled:Boolean,val serviceAnnouncement:String,
+        private val trust: SyncV2ServiceTrust, private val approved: (String) -> Boolean) {
+        fun checkWatchSBleHead(head: String): String = projection.checkWatchSBleHead(head)
+
+        fun watchSBlePublicKey(device: String, state: SyncV2Projection.State = projection.state()): String {
+            val bindings = state.body.optJSONArray("signingBindings") ?: SyncV2Codec.fail("authentication_required")
+            val binding = (0 until bindings.length()).asSequence().map(bindings::getJSONObject)
+                .singleOrNull { it.getJSONObject("body").getString("deviceId") == device }
+                ?: SyncV2Codec.fail("authentication_required")
+            return SyncV2Authors(identity, trust, approved).apply { restorePinned(binding) }.publicKey(device)
+        }
+
         var lastSyncedAt:Long?=null
         fun signingDeviceId():String? {
             life.check();val signer=vault.signerOrNull()?:return null

@@ -169,6 +169,21 @@ class SyncV2P6ProductTest {
             assertEquals(beforeStorage,SyncV2Codec.hex(SyncV2Codec.sha(h.prefs.all.toString().toByteArray())))
         }}
     }
+    @Test fun watchSBleRequiresBooleanCloudOptInWithoutChangingServiceTrust() {
+        Server().use { server -> Host(server, "a").use { host ->
+            host.note()
+            val announced = JSONObject(server.announcement.toString()).put("watchSBleSync", true)
+            assertFalse(host.product.watchSBleAvailable)
+            assertTrue(runBlocking { host.product.sync(announced) }.enabled)
+            assertEquals(com.lightningstudio.watchrss.phone.BuildConfig.WATCH_S_BLE_SYNC, host.product.watchSBleAvailable)
+            host.product.observeBootstrap(JSONObject(server.announcement.toString()).put("watchSBleSync", "true"))
+            assertFalse(host.product.watchSBleAvailable)
+            host.product.observeBootstrap(announced)
+            assertEquals(com.lightningstudio.watchrss.phone.BuildConfig.WATCH_S_BLE_SYNC, host.product.watchSBleAvailable)
+            host.product.release()
+            assertFalse(host.product.watchSBleAvailable)
+        } }
+    }
     @Test fun p6jPendingCreatorOnlyUpgradesAndRegisters()=legacyAliasUpgrade(pending=true,signer=false)
     @Test fun p6jInstalledCreatorOnlyRecoversServerAlias()=legacyAliasUpgrade(pending=false,signer=false)
     @Test fun p6jTwoPersistedAliasesWithPendingUpgradeWithoutReplacingKey()=legacyAliasUpgrade(pending=true,signer=true)

@@ -58,6 +58,7 @@ android {
         buildConfigField("boolean", "B2_ENABLED", providers.gradleProperty("b2Enabled").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         // P1 is local-only and opt-in. This flag never enables cloud/apply/GC.
         buildConfigField("boolean", "SYNC_V2", providers.gradleProperty("syncV2").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
+        buildConfigField("boolean", "WATCH_S_BLE_SYNC", providers.gradleProperty("watchSBleSync").orNull?.toBooleanStrictOrNull()?.toString() ?: "true")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_CONTENT", providers.gradleProperty("syncObjectsV2Content").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_CLOUD_INDEX", providers.gradleProperty("syncObjectsV2CloudIndex").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
         buildConfigField("boolean", "SYNC_OBJECTS_V2_LOCAL_PROJECTION", providers.gradleProperty("syncObjectsV2LocalProjection").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")

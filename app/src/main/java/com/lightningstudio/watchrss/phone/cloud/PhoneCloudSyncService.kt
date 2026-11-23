@@ -11,6 +11,8 @@ import kotlinx.coroutines.sync.withPermit
 
 import android.content.Context
 import android.os.Build
+import com.lightningstudio.watchrss.phone.connection.watchs.WatchSBleEndpoint
+import com.lightningstudio.watchrss.phone.connection.watchs.WatchSBlePairings
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.account.PhoneAccountSession
 import com.lightningstudio.watchrss.phone.data.backup.CloudRestoreWarning
@@ -160,8 +162,26 @@ class PhoneCloudSyncService(
             accountRepository.session.value?.isExpired == false &&
             trustedBootstrap?.syncV2?.opt("watchSBleSync") == true && syncV2Product.watchSBleAvailable
 
-    internal fun watchSBleEndpoint(alive: () -> Boolean) =
-        com.lightningstudio.watchrss.phone.connection.watchs.WatchSBleEndpoint(syncV2Product, alive)
+    private val watchSPairings by lazy { WatchSBlePairings.android(appContext) }
+    internal val watchSBlePairingStatus get() = watchSPairings.ui
+
+    internal suspend fun watchSBleRefreshPairing() = syncV2Product.watchSBleAction {
+        watchSPairings.refresh(it.watchSBleOwner)
+    }
+
+    internal suspend fun watchSBleBeginPairing(foreground: () -> Boolean) = syncV2Product.watchSBleAction {
+        watchSPairings.begin(it.watchSBleOwner) { foreground() && watchSBleAvailable() }
+    }
+
+    internal suspend fun watchSBleForgetPairing() = withContext(Dispatchers.IO) { watchSPairings.revoke() }
+
+    internal fun watchSBleCancelPairing() = watchSPairings.cancel()
+
+    internal fun watchSBleEndpoint(alive: () -> Boolean) = WatchSBleEndpoint(
+        syncV2Product, watchSPairings,
+        onLocalChanges = { PhoneCloudSyncWorker.scheduleFollowUp(appContext) },
+        alive = alive
+    )
     internal fun captureSyncV2Legacy(peer:String,version:Int,cursor:String,payload:JSONObject)=syncV2Product.captureLegacyMetadata(peer,version,cursor,payload)
 
     private val approvalMutex = Mutex()
@@ -369,6 +389,7 @@ class PhoneCloudSyncService(
     }
     internal suspend fun releaseCloudAuthorization(session: PhoneAccountSession) {
         syncV2Product.release()
+        if (BuildConfig.WATCH_S_BLE_SYNC) runCatching { watchSBleForgetPairing() }
         releaseCloudDevice(
         revokeRemote = {
             val bootstrap = runCatching { client.bootstrap(session) }.getOrNull()
@@ -407,6 +428,7 @@ class PhoneCloudSyncService(
     }
     private fun clearCloudScope(session: PhoneAccountSession) {
         syncV2Product.release()
+        if (BuildConfig.WATCH_S_BLE_SYNC) runCatching { watchSPairings.revoke() }
         currentMigration=null
         _migrationState.value=CloudMigrationUiState("unavailable",errorCode="migration_scope_changed")
         settings.bindScope(client.backendBaseUrl, session.userId)

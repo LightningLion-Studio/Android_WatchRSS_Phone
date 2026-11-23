@@ -31,6 +31,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.withResumed
 import androidx.lifecycle.lifecycleScope
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_EXTENSION
@@ -61,6 +62,7 @@ import com.lightningstudio.watchrss.phone.update.OppoMarketLauncher
 import com.lightningstudio.watchrss.phone.update.shouldOfferStoreUpdate
 import com.lightningstudio.watchrss.phone.review.ReviewMoment
 import com.lightningstudio.watchrss.phone.connection.watchs.WatchSBleGattServer
+import com.lightningstudio.watchrss.phone.connection.watchs.WatchSBlePairingDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -84,6 +86,9 @@ class HomeActivity : ComponentActivity() {
         }
     }
 
+    @Volatile private var watchSForeground = false
+    private val watchSBleReady = mutableStateOf(false)
+    private val watchSPairingOpen = mutableStateOf(false)
     private val pendingSupportDestination = mutableStateOf<String?>(null)
 
     private val viewModel: MainViewModel by viewModels {
@@ -189,6 +194,20 @@ class HomeActivity : ComponentActivity() {
         setContent {
             WatchRssPhoneTheme {
                 WatchSyncBindingHost(viewModel)
+                if (watchSPairingOpen.value && watchSBleReady.value) {
+                    val cloud = container.cloudSyncService
+                    val status by cloud.watchSBlePairingStatus.collectAsState()
+                    WatchSBlePairingDialog(
+                        status = status,
+                        begin = { cloud.watchSBleBeginPairing { watchSForeground } },
+                        forget = cloud::watchSBleForgetPairing,
+                        cancelCode = cloud::watchSBleCancelPairing,
+                        dismiss = {
+                            cloud.watchSBleCancelPairing()
+                            watchSPairingOpen.value = false
+                        }
+                    )
+                }
                 ProvideReaderPreset(container.readerPresetRepository) {
                     val state by viewModel.uiState.collectAsState()
                     val updateState by appUpdateDownloader.state.collectAsState()
@@ -208,6 +227,7 @@ class HomeActivity : ComponentActivity() {
                         MainScreen(
                         uiState = state,
                         supportDestination = pendingSupportDestination.value,
+                        onWatchSPairing = if (watchSBleReady.value) ::openWatchSPairing else null,
                         onSupportDestinationConsumed = {
                             pendingSupportDestination.value = null
                             intent.removeExtra(EXTRA_SUPPORT_DESTINATION)
@@ -464,13 +484,17 @@ class HomeActivity : ComponentActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 while (isActive) {
-                    if (cloud.watchSBleAvailable()) {
-                        WatchSBleGattServer(this@HomeActivity, this, cloud::watchSBleAvailable,
+                    watchSBleReady.value = cloud.watchSBleAvailable()
+                    if (watchSBleReady.value) {
+                        WatchSBleGattServer(this@HomeActivity, this, { watchSForeground && cloud.watchSBleAvailable() },
                             cloud::watchSBleEndpoint).use { server ->
                             if (server.start()) {
                                 while (cloud.watchSBleAvailable() && server.radioAvailable()) delay(1000)
                             }
                         }
+                    } else if (watchSPairingOpen.value) {
+                        watchSPairingOpen.value = false
+                        cloud.watchSBleCancelPairing()
                     }
                     delay(1000)
                 }
@@ -478,8 +502,24 @@ class HomeActivity : ComponentActivity() {
         }
     }
 
+    private fun openWatchSPairing() = ensureBluetoothPermissions {
+        val cloud = (application as PhoneCompanionApplication).container.cloudSyncService
+        lifecycleScope.launch {
+            try {
+                lifecycle.withResumed { Unit }
+                cloud.watchSBleRefreshPairing()
+                if (watchSForeground) watchSPairingOpen.value = true
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                viewModel.showContentError("Watch S 配对暂不可用，请重试")
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
+        watchSForeground = true
         val manager = (application as PhoneCompanionApplication).container.appStorageManager
         lifecycleScope.launch {
             runCatching { manager.calculate().totalBytes }
@@ -502,6 +542,12 @@ class HomeActivity : ComponentActivity() {
         .trim()
 
     override fun onPause() {
+        watchSForeground = false
+        if (BuildConfig.WATCH_S_BLE_SYNC) {
+            watchSPairingOpen.value = false
+            watchSBleReady.value = false
+            (application as PhoneCompanionApplication).container.cloudSyncService.watchSBleCancelPairing()
+        }
         super.onPause()
         val startedAt = homeScreenStartedAt
         if (startedAt > 0L) {

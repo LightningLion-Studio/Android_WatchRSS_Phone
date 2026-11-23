@@ -19,7 +19,6 @@ internal class SyncV2Projection(
     private val sequenceAllocator:((String)->String)?=null
 ):AutoCloseable {
     @Volatile private var closed=false
-    @Volatile private var hasWatchSBleCache = false
     @Volatile private var hasWatchSBleArticles = false
     override fun close() {
         closed=true;key.fill(0)
@@ -68,9 +67,8 @@ internal class SyncV2Projection(
                 db.execSQL("INSERT INTO syncv2_state VALUES(?,?,?,?,?,?,?)",arrayOf(scope,"0",if(unknown)"1"else"0",seal("state",body),identity.encryptedRecord(key),identity.descriptorOid,identity.accountId))
             }
             if (BuildConfig.WATCH_S_BLE_SYNC) {
-                db.execSQL("CREATE TABLE IF NOT EXISTS syncv2_watchs_cache (oid TEXT NOT NULL, scope TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(scope,oid))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS syncv2_watchs_scan ON syncv2_candidates(scope,kind,logical_id)")
                 db.execSQL("CREATE TABLE IF NOT EXISTS syncv2_watchs_articles (scope TEXT NOT NULL, entity_key TEXT NOT NULL, PRIMARY KEY(scope,entity_key))")
-                hasWatchSBleCache = hasWatchSBleRows("syncv2_watchs_cache")
                 hasWatchSBleArticles = hasWatchSBleRows("syncv2_watchs_articles")
             }
             synchronizeBusinessInTransaction(readState(),SyncV2BusinessWitness.read(db))
@@ -549,39 +547,6 @@ internal class SyncV2Projection(
         "SELECT 1 FROM $table WHERE scope=? LIMIT 1", arrayOf(scope)
     ).use { it.moveToFirst() }
 
-    internal fun watchSBleCachedObject(oid: String): ByteArray? {
-        if (!hasWatchSBleCache || !WatchSBleRows.metadataOid(oid)) return null
-        return db.controlQuery("SELECT body FROM syncv2_watchs_cache WHERE scope=? AND oid=?", arrayOf(scope, oid)).use {
-            if (it.moveToFirst()) it.getBlob(0).takeIf { bytes -> WatchSBleRows.matchesOid(bytes, oid) } else null
-        }
-    }
-
-    internal fun watchSBleObject(head: String, oid: String): ByteArray? {
-        checkWatchSBleHead(head)
-        if (!WatchSBleRows.metadataOid(oid)) SyncV2Codec.fail("invalid_schema")
-        return watchSBleCachedObject(oid) ?: db.controlQuery(
-            "SELECT body FROM syncv2_cloud_objects WHERE scope=? AND oid=? AND length(body)<=?",
-            arrayOf(scope, oid, WatchSBleRows.MAX_OBJECT_BYTES.toString())
-        ).use {
-            if (it.moveToFirst()) it.getBlob(0).takeIf { bytes -> WatchSBleRows.matchesOid(bytes, oid) } else null
-        }
-    }
-
-    internal fun watchSBleCacheObject(head: String, oid: String, bytes: ByteArray, authorize: (State) -> Unit) {
-        if (!BuildConfig.WATCH_S_BLE_SYNC || !WatchSBleRows.matchesOid(bytes, oid)) SyncV2Codec.fail("hash_mismatch")
-        val st = state()
-        accountWriter(st.version) { current ->
-            requireWatchSBleHead(current, head)
-            authorize(current)
-            db.execSQL("INSERT OR REPLACE INTO syncv2_watchs_cache(oid,scope,body) VALUES(?,?,?)",
-                arrayOf(oid, scope, bytes))
-            // Cache is expendable. Cap the entire database, including previously used scopes.
-            db.execSQL("DELETE FROM syncv2_watchs_cache WHERE rowid NOT IN (SELECT rowid FROM syncv2_watchs_cache ORDER BY rowid DESC LIMIT 64)")
-            authorize(current)
-        }
-        hasWatchSBleCache = true
-    }
-
     private fun requireWatchSBleHead(st: State, expected: String): JSONObject {
         val account = current(st)
         if (SyncV2Codec.canonical(account) != expected ||
@@ -593,11 +558,15 @@ internal class SyncV2Projection(
         return account
     }
 
-    internal fun checkWatchSBleHead(expected: String): String =
-        SyncV2Codec.canonical(requireWatchSBleHead(state(), expected))
+    internal fun watchSBleHead(): String {
+        val state = state()
+        val head = SyncV2Codec.canonical(state.body.optJSONObject("appliedAccount"))
+        requireWatchSBleHead(state, head)
+        return head
+    }
 
     private fun watchSBleScan(head: String): State {
-        checkWatchSBleHead(head)
+        requireWatchSBleHead(state(), head)
         val deadline = android.os.SystemClock.elapsedRealtime() + 3000
         repeat(12) {
             val remaining = deadline - android.os.SystemClock.elapsedRealtime()
@@ -609,24 +578,34 @@ internal class SyncV2Projection(
         SyncV2Codec.fail("budget_paused")
     }
 
-    internal fun watchSBleNext(head: String, after: String): JSONObject? {
+    internal data class WatchSBleResult(val cursor: String, val row: JSONObject)
+
+    internal fun watchSBleNext(head: String, after: String): WatchSBleResult? {
+        SyncV2Codec.text(after, 8202)
+        var kind = after.substringBefore(':')
+        var logical = after.substringAfter(':', "")
+        if (after.isNotEmpty() && (kind !in WatchSBleRows.kinds || ':' !in after)) {
+            SyncV2Codec.fail("invalid_schema")
+        }
         watchSBleScan(head)
-        var cursor = after
         while (true) {
-            val entity = db.controlQuery(
-                "SELECT entity_key FROM syncv2_candidates WHERE scope=? AND entity_key>? AND kind IN ('source','article','rss-state') ORDER BY entity_key LIMIT 1",
-                arrayOf(scope, cursor)
-            ).use { if (it.moveToFirst()) it.getString(0) else return null }
-            cursor = entity
+            val selected = db.controlQuery(
+                """SELECT entity_key,kind,logical_id FROM syncv2_candidates
+                    WHERE scope=? AND (kind,logical_id)>(?,?) AND kind IN ('source','article','rss-state')
+                    ORDER BY kind,logical_id LIMIT 1""",
+                arrayOf(scope, kind, logical)
+            ).use { if (it.moveToFirst()) Triple(it.getString(0), it.getString(1), it.getString(2)) else return null }
+            val (entity, nextKind, nextLogical) = selected
+            kind = nextKind
+            logical = nextLogical
             val record = accountLocalRows(setOf(entity)).singleOrNull() ?: continue
-            val meta = record.getJSONObject("meta")
             val value = record.getJSONObject("value")
-            val allowed = when (meta.getString("kind")) {
+            val allowed = when (kind) {
                 "source" -> runCatching { WatchSBleRows.rssSourceKey(value.getString("url")) }.isSuccess
-                "article" -> WatchSBleRows.portableArticle(value) && !watchSBleBookChapter(meta.getString("logicalId"))
+                "article" -> WatchSBleRows.portableArticle(value) && !watchSBleBookChapter(logical)
                 else -> true
             }
-            if (allowed) return WatchSBleRows.encode(record)
+            if (allowed) return WatchSBleResult("$kind:$logical", WatchSBleRows.encode(record))
         }
     }
 
@@ -634,23 +613,23 @@ internal class SyncV2Projection(
         "SELECT 1 FROM imported_book_chapters WHERE articleId=? LIMIT 1", arrayOf(id)
     ).use { it.moveToFirst() }
 
-    internal fun watchSBlePut(head: String, row: JSONObject, authorize: (State) -> Unit) {
+    internal fun watchSBlePut(head: String, row: JSONObject, authorize: () -> Unit): Boolean {
         val incoming = WatchSBleRows.decode(identity, row)
         val meta = incoming.getJSONObject("meta")
         val kind = meta.getString("kind")
         val entity = meta.getString("entityKey")
         val logical = meta.getString("logicalId")
         val st = watchSBleScan(head)
-        accountWriter(st.version) { current ->
+        val changed = accountWriter(st.version) { current ->
             val account = requireWatchSBleHead(current, head)
-            authorize(current)
+            authorize()
             if (kind == "article" && (watchSBleBookChapter(logical) ||
                 db.controlQuery("SELECT 1 FROM article_register_provenance WHERE articleId=? AND (raw!='' OR pending IS NOT NULL)",
                     arrayOf(logical)).use { it.moveToFirst() })) SyncV2Codec.fail("unsupported_feature")
             val before = accountLocalRows(setOf(entity))
             val old = before.singleOrNull()?.getJSONObject("value")
             val value = WatchSBleRows.merge(kind, old, incoming.getJSONObject("value"))
-            if (SyncV2LocalJson.canonical(value) == SyncV2LocalJson.canonical(old)) return@accountWriter
+            if (SyncV2LocalJson.canonical(value) == SyncV2LocalJson.canonical(old)) return@accountWriter false
             val next = WatchSBleRows.record(kind, logical, entity, value)
             SyncV2PhoneApply(db).apply(before, listOf(next))
             val domain = SyncV2Schema.domains.firstOrNull { it.kind == kind }
@@ -665,9 +644,11 @@ internal class SyncV2Projection(
             if (current.body.isNull("editBase")) current.body.put("editBase", JSONObject()
                 .put("accountOid", account.getString("oid")).put("generation", account.getString("generation")))
             db.execSQL("UPDATE syncv2_state SET local_revision=? WHERE scope=?", arrayOf(revision, scope))
-            authorize(current)
+            authorize()
+            true
         }
-        if (BuildConfig.WATCH_S_BLE_SYNC && kind == "article") hasWatchSBleArticles = true
+        if (changed && BuildConfig.WATCH_S_BLE_SYNC && kind == "article") hasWatchSBleArticles = true
+        return changed
     }
 
     /** Values are always from the current local projection, never a browsable old cloud cache. */

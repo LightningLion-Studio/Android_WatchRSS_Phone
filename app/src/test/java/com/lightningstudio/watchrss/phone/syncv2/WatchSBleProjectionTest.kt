@@ -1,9 +1,7 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
-import com.lightningstudio.watchrss.phone.BuildConfig
 import org.json.JSONObject
 import org.junit.Assert.*
-import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -16,12 +14,12 @@ import org.robolectric.annotation.SQLiteMode
 class WatchSBleProjectionTest {
     @Test fun committedRowsResumeAfterReopenAndReplayDoesNotWrite(): Unit = SyncV2P5Fixture().use { fixture ->
         fixture.start()
-        val head = SyncV2Codec.canonical(fixture.projection.state().body.getJSONObject("appliedAccount"))
+        val head = fixture.projection.watchSBleHead()
         val url = "https://example.com/watchs-feed.xml"
         val value = JSONObject().put("url", url).put("title", "Test feed").put("updatedAt", 20)
         val key = fixture.identity.entity("source", url)
         val source = WatchSBleRows.encode(WatchSBleRows.record("source", url, key, value))
-        fixture.projection.watchSBlePut(head, source) {}
+        assertTrue(fixture.projection.watchSBlePut(head, source) {})
 
         val sourceId = WatchSBleRows.rssSourceKey(url)
         val hash = "12".repeat(32)
@@ -31,46 +29,48 @@ class WatchSBleProjectionTest {
             .put("favoriteSaved", true).put("favoriteChangedAt", 30)
             .put("readingProgress", 0.625).put("readingPositionChangedAt", 10)
         val rss = WatchSBleRows.encode(WatchSBleRows.record("rss-state", logical, stateKey, state))
-        fixture.projection.watchSBlePut(head, rss) {}
+        assertTrue(fixture.projection.watchSBlePut(head, rss) {})
         assertEquals("Test feed", fixture.sql.query("SELECT title FROM phone_rss_sources WHERE url=?", arrayOf(url))
             .use { assertTrue(it.moveToFirst()); it.getString(0) })
         fixture.reopen()
-        val ordered = listOf(key, stateKey).sorted()
         val first = fixture.projection.watchSBleNext(head, "")!!
-        assertEquals(ordered[0], first.getString("entityKey"))
-        val second = fixture.projection.watchSBleNext(head, ordered[0])!!
-        assertEquals(ordered[1], second.getString("entityKey"))
-        assertNull(fixture.projection.watchSBleNext(head, ordered[1]))
+        assertEquals("rss-state:$logical", first.cursor)
+        assertEquals(rss.getString("entityKey"), first.row.getString("entityKey"))
+        assertEquals(625000, first.row.getJSONObject("value").getInt("readingProgressMicros"))
+        val second = fixture.projection.watchSBleNext(head, first.cursor)!!
+        assertEquals("source:$url", second.cursor)
+        assertEquals(source.getString("entityKey"), second.row.getString("entityKey"))
+        assertNotEquals(key, second.row.getString("entityKey"))
+        assertNull(fixture.projection.watchSBleNext(head, second.cursor))
         val revision = fixture.projection.state().revision
-        fixture.projection.watchSBlePut(head, rss) {}
+        assertFalse(fixture.projection.watchSBlePut(head, rss) {})
         assertEquals(revision, fixture.projection.state().revision)
         assertThrows(IllegalStateException::class.java) {
             fixture.projection.watchSBlePut("{}", source) {}
         }
     }
 
-    @Test fun cloudClosureReusesExactBleEnvelopeAndRejectsDamagedCache() = SyncV2P5Fixture().use { fixture ->
-        assumeTrue(BuildConfig.WATCH_S_BLE_SYNC)
+    @Test fun rejectsCloudEntityKeyAndRollsBackIfPairIsInvalidatedDuringWrite(): Unit = SyncV2P5Fixture().use { fixture ->
         fixture.start()
-        val head = SyncV2Codec.canonical(fixture.projection.state().body.getJSONObject("appliedAccount"))
-        val before = fixture.f.objects.keys.toSet()
-        val next = fixture.commit(listOf(fixture.note("Next")), fixture.initial, "0", "normal", null)
-        val newObjects = fixture.f.objects.keys - before
-        val meta = newObjects.single { it.startsWith("meta:") }
-        val state = newObjects.single { it.startsWith("state:") }
-        val bytes = fixture.f.objects.getValue(meta)
-        fixture.projection.watchSBleCacheObject(head, meta, bytes) {}
-        fixture.projection.watchSBleCacheObject(head, state, fixture.f.objects.getValue(state)) {}
-        fixture.sql.execSQL("UPDATE syncv2_watchs_cache SET body=zeroblob(length(body)) WHERE oid=?", arrayOf(state))
-        fixture.reopen()
-        assertArrayEquals(bytes, fixture.projection.watchSBleCachedObject(meta))
-        assertNull(fixture.projection.watchSBleCachedObject(state))
-        fixture.setCurrent(next, "3")
-        fixture.requests.clear()
-        fixture.actions().refresh()
-        assertFalse(fixture.requests.any { it == "objects/$meta" })
-        assertTrue(fixture.requests.any { it == "objects/$state" })
-        assertEquals(next, fixture.projection.state().body.getJSONObject("account").getString("oid"))
+        val head = fixture.projection.watchSBleHead()
+        val revision = fixture.projection.state().revision
+        val url = "https://example.com/watchs-test.xml"
+        val value = JSONObject().put("url", url).put("title", "Test feed").put("updatedAt", 20)
+        val cloudKey = fixture.identity.entity("source", url)
+        val wire = WatchSBleRows.encode(WatchSBleRows.record("source", url, cloudKey, value))
+        val forged = JSONObject(wire.toString()).put("entityKey", cloudKey)
+        assertEquals("identity_conflict", assertThrows(IllegalStateException::class.java) {
+            fixture.projection.watchSBlePut(head, forged) {}
+        }.message)
+        var checks = 0
+        assertThrows(IllegalStateException::class.java) {
+            fixture.projection.watchSBlePut(head, wire) { check(++checks == 1) }
+        }
+        assertEquals(2, checks)
+        assertEquals(revision, fixture.projection.state().revision)
+        fixture.sql.query("SELECT 1 FROM phone_rss_sources WHERE url=?", arrayOf(url)).use {
+            assertFalse(it.moveToFirst())
+        }
     }
 
     @Test fun articleRegistersMergeIndependently() {

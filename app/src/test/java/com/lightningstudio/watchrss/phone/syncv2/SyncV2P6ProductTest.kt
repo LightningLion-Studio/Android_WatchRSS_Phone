@@ -3,7 +3,13 @@ package com.lightningstudio.watchrss.phone.syncv2
 import android.content.Context
 import android.content.ContextWrapper
 import androidx.room.Room
+import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
+import com.lightningstudio.watchrss.phone.connection.watchs.WatchSBleCipher
+import com.lightningstudio.watchrss.phone.connection.watchs.WatchSBleDirection
+import com.lightningstudio.watchrss.phone.connection.watchs.WatchSBleEndpoint
+import com.lightningstudio.watchrss.phone.connection.watchs.WatchSBlePairings
+import com.lightningstudio.watchrss.phone.connection.watchs.WatchSBleSecurity
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.*
@@ -16,6 +22,7 @@ import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -184,6 +191,76 @@ class SyncV2P6ProductTest {
             assertFalse(host.product.watchSBleAvailable)
         } }
     }
+    @Test fun watchSBlePublishesAppliedWatchStateOnlyThroughPhoneSync() {
+        assumeTrue(BuildConfig.WATCH_S_BLE_SYNC)
+        Server().use { server -> Host(server, "a").use { host -> runBlocking {
+            val announcement = JSONObject(server.announcement.toString()).put("watchSBleSync", true)
+            host.note()
+            assertTrue(host.product.sync(announcement).enabled)
+            val before = server.publishes
+            var stored = "{}"
+            val pairings = WatchSBlePairings({ 0 }, { JSONObject(stored) }, { stored = it.toString() })
+            host.product.watchSBleAction { pairings.begin(it.watchSBleOwner) }
+            val code = (pairings.ui.value as WatchSBlePairings.Status.Code).text.replace(" ", "").lowercase()
+            val key = WatchSBleSecurity.pairKey(SyncV2Codec.unhex(code, 16))
+            val id = WatchSBleSecurity.pairId(key)
+            var scheduled = 0
+            val source = "https://example.com/ble-v2.xml"
+            val row = WatchSBleRows.encode(WatchSBleRows.record("source", source, "unused",
+                JSONObject().put("url", source).put("title", "Paired feed").put("updatedAt", 1)))
+
+            suspend fun connect(endpoint: WatchSBleEndpoint, counter: String, secret: ByteArray, mode: String): WatchSBleCipher {
+                fun json(value: JSONObject) = SyncV2Codec.utf8(SyncV2Codec.canonical(value))
+                val hello = json(JSONObject().put("op", "hello").put("version", 2).put("pairId", id)
+                    .put("counter", counter).put("mtu", 247))
+                val challenge = SyncV2Wire.parse(endpoint.exchange(1, 1, 247, hello).bytes)
+                assertEquals(mode, challenge.getString("mode"))
+                val nonce = SyncV2Codec.unhex(challenge.getString("nonce"), 16)
+                val hash = WatchSBleSecurity.transcript(id, counter, nonce, 247, 247, mode)
+                assertTrue(WatchSBleSecurity.matches(WatchSBleSecurity.proof(secret, hash, WatchSBleDirection.PHONE),
+                    challenge.getString("proof")))
+                val proof = SyncV2Codec.hex(WatchSBleSecurity.proof(secret, hash, WatchSBleDirection.WATCH))
+                val auth = json(JSONObject().put("op", "auth").put("proof", proof))
+                val cipher = WatchSBleCipher(secret, hash, WatchSBleDirection.WATCH)
+                val ready = SyncV2Wire.parse(cipher.open(2, endpoint.exchange(2, 2, 247, auth).bytes))
+                assertEquals(if (mode == "sync") "ready" else "reset", ready.getString("op"))
+                return cipher
+            }
+
+            WatchSBleEndpoint(host.product, pairings, { scheduled++ }, { true }).use { endpoint ->
+                connect(endpoint, "0000000000000001", key, "sync").use { cipher ->
+                    val request = SyncV2Codec.utf8(SyncV2Codec.canonical(JSONObject().put("op", "put").put("row", row)))
+                    val reply = endpoint.exchange(3, 3, 247, cipher.seal(3, request))
+                    val applied = SyncV2Wire.parse(cipher.open(3, reply.bytes))
+                    assertEquals("applied", applied.getString("op"))
+                    assertEquals(row.getString("entityKey"), applied.getString("entityKey"))
+                    assertEquals(SyncV2Codec.hash(row), applied.getString("sha256"))
+
+                    val next = endpoint.exchange(4, 4, 247, cipher.seal(4, """{"after":"","op":"next"}""".toByteArray()))
+                    val down = SyncV2Wire.parse(cipher.open(4, next.bytes))
+                    assertEquals("source:$source", down.getString("after"))
+                    assertEquals(row.getString("entityKey"), down.getJSONObject("row").getString("entityKey"))
+                }
+            }
+            assertEquals(1, scheduled)
+            assertEquals(before, server.publishes)
+            assertTrue(host.product.sync(announcement).enabled)
+            assertEquals(before + 1, server.publishes)
+            assertEquals("Paired feed", server.values().single { it.optString("url") == source }.getString("title"))
+
+            pairings.revoke()
+            WatchSBleEndpoint(host.product, pairings, { fail("reset cannot schedule sync") }, { true }).use { endpoint ->
+                connect(endpoint, "0000000000000002", WatchSBleSecurity.resetKey(key), "reset").use { cipher ->
+                    val resetAck = cipher.seal(3, """{"op":"reset-applied"}""".toByteArray())
+                    val reply = endpoint.exchange(3, 3, 247, resetAck)
+                    assertEquals("forgotten", SyncV2Wire.parse(cipher.open(3, reply.bytes)).getString("op"))
+                    assertTrue(reply.disconnect)
+                }
+            }
+            assertEquals(WatchSBlePairings.Status.Idle, pairings.ui.value)
+        } } }
+    }
+
     @Test fun p6jPendingCreatorOnlyUpgradesAndRegisters()=legacyAliasUpgrade(pending=true,signer=false)
     @Test fun p6jInstalledCreatorOnlyRecoversServerAlias()=legacyAliasUpgrade(pending=false,signer=false)
     @Test fun p6jTwoPersistedAliasesWithPendingUpgradeWithoutReplacingKey()=legacyAliasUpgrade(pending=true,signer=true)

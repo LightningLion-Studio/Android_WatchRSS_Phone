@@ -4,14 +4,6 @@ import com.lightningstudio.watchrss.phone.cloud.CloudRssSourceIdentity
 import org.json.JSONObject
 
 internal object WatchSBleRows {
-    const val MAX_OBJECT_BYTES = 192000
-    private val objectId = Regex("(meta|state):sha256:[0-9a-f]{64}")
-
-    fun metadataOid(oid: String): Boolean = objectId.matches(oid)
-
-    fun matchesOid(bytes: ByteArray, oid: String): Boolean = metadataOid(oid) &&
-        bytes.size in 24..MAX_OBJECT_BYTES && oid.substringAfterLast(':') == SyncV2Codec.hex(SyncV2Codec.sha(bytes))
-
     val kinds = setOf("source", "article", "rss-state")
     private val reading = listOf("isRead", "readingPositionBytes", "readingProgress", "readingPositionContentHash")
     private val metadata = listOf("url", "title", "siteName", "excerpt", "imageUrl", "contentHash", "importedAt",
@@ -40,7 +32,7 @@ internal object WatchSBleRows {
         SyncV2Business.validate(kind, value)
         val logical = SyncV2Business.logicalId(kind, value)
         val key = SyncV2Wire.string(row, "entityKey")
-        if (identity.entity(kind, logical) != key) SyncV2Codec.fail("identity_conflict")
+        if (entityKey(kind, logical) != key) SyncV2Codec.fail("identity_conflict")
         when (kind) {
             "rss-state" -> {
                 SyncV2Codec.unhex(value.getString("sourceId"), 32)
@@ -56,7 +48,7 @@ internal object WatchSBleRows {
                 }
             }
         }
-        return record(kind, logical, key, value)
+        return record(kind, logical, identity.entity(kind, logical), value)
     }
 
     fun record(kind: String, logical: String, key: String, value: JSONObject): JSONObject {
@@ -69,8 +61,14 @@ internal object WatchSBleRows {
         val payload = JSONObject(meta.getJSONObject("payload").toString())
         val state = record.getJSONObject("state").getJSONObject("payload")
         for (key in state.keys()) payload.put(key, state.get(key))
-        return JSONObject().put("kind", meta.getString("kind")).put("entityKey", meta.getString("entityKey")).put("value", payload)
+        val kind = meta.getString("kind")
+        return JSONObject().put("kind", kind).put("entityKey", entityKey(kind, meta.getString("logicalId")))
+            .put("value", payload)
     }
+
+    private fun entityKey(kind: String, logical: String) = SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.lp(
+        "wrss.watchs.ble.v2/entity".toByteArray(), SyncV2Codec.utf8(kind), SyncV2Codec.utf8(logical)
+    )))
 
     fun portableArticle(value: JSONObject): Boolean {
         val url = value.optString("url")

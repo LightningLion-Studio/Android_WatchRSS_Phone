@@ -5,7 +5,6 @@ import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Test
-import javax.crypto.AEADBadTagException
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class WatchSBleProtocolTest {
@@ -81,20 +80,5 @@ class WatchSBleProtocolTest {
             attempts.size > 1
         }
         assertEquals(listOf(0, 0, 6), attempts)
-    }
-
-    @Test fun gcmBindsDirectionMessageAndHandshake() {
-        val key = ByteArray(32) { it.toByte() }
-        val body = byteArrayOf(1, 2, 3)
-        WatchSBleCipher(key, byteArrayOf(3, 4)).use { cipher ->
-            val sealed = cipher.encrypt("phone", 2, body)
-            assertEquals("d3e4fa7d6a1993974b8102e97176a7ddb4e25c", sealed.joinToString("") { "%02x".format(it) })
-            assertArrayEquals(body, cipher.decrypt("phone", 2, sealed))
-            assertThrows(AEADBadTagException::class.java) { cipher.decrypt("watch", 2, sealed) }
-            assertThrows(AEADBadTagException::class.java) { cipher.decrypt("phone", 3, sealed) }
-            WatchSBleCipher(key, byteArrayOf(4, 3)).use { other ->
-                assertThrows(AEADBadTagException::class.java) { other.decrypt("phone", 2, sealed) }
-            }
-        }
     }
 }

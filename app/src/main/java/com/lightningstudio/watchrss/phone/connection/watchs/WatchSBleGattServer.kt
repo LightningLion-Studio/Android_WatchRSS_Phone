@@ -208,11 +208,15 @@ internal class WatchSBleGattServer(
                 notify(link, WatchSBleFrames.encode(accepted.ack))
                 val message = accepted.message ?: continue
                 val reply = endpoint.exchange(frame.id, responseId, link.mtu, message)
-                WatchSBleFrames.send(responseId, reply.bytes, mtu, { notify(link, it) }) { id, offset, timeout ->
+                WatchSBleFrames.send(responseId, reply.bytes, mtu, {
+                    check(endpoint.canSend())
+                    notify(link, it)
+                }) { id, offset, timeout ->
                     withTimeoutOrNull(timeout) {
                         awaitAck(link, mtu, receiver, id, offset)
                     } == true
                 }
+                if (reply.disconnect) break
                 mtu = reply.nextMtu ?: mtu
                 responseId++
             }
@@ -221,8 +225,7 @@ internal class WatchSBleGattServer(
         } catch (_: Exception) {
             Log.i(TAG, "session_ended")
         } finally {
-            endpoint.close()
-            disconnect(link)
+            try { endpoint.close() } finally { disconnect(link) }
         }
     }
 

@@ -188,7 +188,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 }
             })
             val articles=signer?.let{SyncV2ArticlePublisher(projection,identity,ring,it,contentClient,content,worker,context.filesDir,life::check,clock)}
-            val result=Runtime(account.copy(bearer="",apiKey="",deviceAuthorization=null),life,ring,identity,vault,projection,cloud,actions,control,articles,time,contentEnabled,serviceAnnouncement,trust,approved)
+            val result=Runtime(account.copy(bearer="",apiKey="",deviceAuthorization=null),life,ring,identity,vault,projection,cloud,actions,control,articles,time,contentEnabled,serviceAnnouncement)
             life.guard {
                 val port=SyncV2PhoneUiPort(this,result)
                 life.own(AutoCloseable{port.disabled()})
@@ -221,17 +221,10 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
 
     internal class Runtime(val account:Account,val life:SyncV2Lifetime,val keys:SyncV2ContentKeys,val identity:SyncV2Identity,
         val vault:SyncV2SigningVault,val projection:SyncV2Projection,val cloud:SyncV2CloudSync,val actions:SyncV2AccountActions,
-        val client:SyncV2CloudClient,val articles:SyncV2ArticlePublisher?,val time:SyncV2TrustedTime,val contentEnabled:Boolean,val serviceAnnouncement:String,
-        private val trust: SyncV2ServiceTrust, private val approved: (String) -> Boolean) {
-        fun checkWatchSBleHead(head: String): String = projection.checkWatchSBleHead(head)
-
-        fun watchSBlePublicKey(device: String, state: SyncV2Projection.State = projection.state()): String {
-            val bindings = state.body.optJSONArray("signingBindings") ?: SyncV2Codec.fail("authentication_required")
-            val binding = (0 until bindings.length()).asSequence().map(bindings::getJSONObject)
-                .singleOrNull { it.getJSONObject("body").getString("deviceId") == device }
-                ?: SyncV2Codec.fail("authentication_required")
-            return SyncV2Authors(identity, trust, approved).apply { restorePinned(binding) }.publicKey(device)
-        }
+        val client:SyncV2CloudClient,val articles:SyncV2ArticlePublisher?,val time:SyncV2TrustedTime,val contentEnabled:Boolean,val serviceAnnouncement:String) {
+        val watchSBleOwner = SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.lp(
+            *(account.owner() + identity.scopeJson).map(SyncV2Codec::utf8).toTypedArray()
+        )))
 
         var lastSyncedAt:Long?=null
         fun signingDeviceId():String? {

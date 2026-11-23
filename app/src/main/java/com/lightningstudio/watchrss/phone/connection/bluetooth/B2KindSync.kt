@@ -138,17 +138,21 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             }
         }
     } }
-    suspend fun prepare(probe: JSONObject, assets: List<NoteAssetInventoryEntry>) {
-        createOrResume(probe, assets)
+    suspend fun prepare(probe: JSONObject, assets: List<NoteAssetInventoryEntry>,
+        peerPackages: Map<String, JSONObject> = emptyMap()) {
+        createOrResume(probe, assets, peerPackages)
     }
 
-    private suspend fun createOrResume(probe: JSONObject, assets: List<NoteAssetInventoryEntry>): JSONObject = try {
+    suspend fun exchangeBookState(session: PhoneSyncSession, parent: String): Map<String, JSONObject> =
+        B2BookState.exchange(session, parent, business.committedBookPackages())
+
+    private suspend fun createOrResume(probe: JSONObject, assets: List<NoteAssetInventoryEntry>, peerPackages: Map<String, JSONObject>): JSONObject = try {
         B2LocalWork.run { unit ->
             preparing = unit
             files.onProgress = { unit() }
             try {
                 store.exclusive { retention.collect(retention.clock()) }
-                freeze(probe, assets)
+                freeze(probe, assets, peerPackages)
             } finally { preparing = {} }
         }
     } catch (_: java.io.IOException) {
@@ -157,7 +161,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
         throw B2Exception("LOCAL_IO")
     }
 
-    private suspend fun freeze(probe: JSONObject, assets: List<NoteAssetInventoryEntry>): JSONObject {
+    private suspend fun freeze(probe: JSONObject, assets: List<NoteAssetInventoryEntry>, peerPackages: Map<String, JSONObject>): JSONObject {
         val selection = B2Negotiation.select(capability, probe.getJSONObject("libraryBinary"), "phoneToWatch")
         val budget = selection?.getJSONObject("limits")?.let(::B2WatchReceiveBudget)
         val attempt = store.exclusive { store.get(account, "attempt", key) }
@@ -175,7 +179,9 @@ internal class B2KindSync(private val store: B2Persistence, private val director
                 return attempt
             }
             if (oversized) discardBookSource(attempt)
-            val needsRefreeze = oversized || try {
+            val staleProofs = bindings.length() == 0 && B2BookState.read(attempt.optJSONArray("omittedBookPackages"))
+                .any { (id, proof) -> !B2BookState.same(proof, peerPackages[id]) }
+            val needsRefreeze = oversized || staleProofs || try {
                 validateBinaryRssDependencies(frozen, preparing)
                 false
             } catch (failure: B2Exception) {
@@ -203,10 +209,13 @@ internal class B2KindSync(private val store: B2Persistence, private val director
                 resetPlan()
                 return attempt.put("state", "RETIRING")
             }
+            store.exclusive { authorize(); store.delete(account, "attempt", key) }
+            discardBookSource(attempt)
         }
         val rejected = store.exclusive { store.list(account, rejectionNamespace).mapTo(mutableSetOf()) { it.first } }
         val descriptors = mutableListOf<JSONObject>()
         val sources = mutableMapOf<String, File>()
+        val omitted = JSONArray()
         fun add(descriptor: JSONObject, source: File) {
             if (rejected.isEmpty()) (budget ?: fail("CAPABILITY_MISMATCH")).add(descriptor)
             descriptors += descriptor
@@ -225,7 +234,9 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             }
             business.freeze(route.send, scratch, preparing, { descriptor ->
                 (rejectionKey(descriptor) !in rejected).also { if (!it) warnRejected(descriptor) }
-            }, ::warn, ::add)
+            }, ::warn, omitPackage = { proof ->
+                B2BookState.same(proof, peerPackages[proof.s("bookId")]).also { if (it) omitted.put(proof) }
+            }, add = ::add)
             omitRejected(descriptors, rejected)
             if (rejected.isNotEmpty()) {
                 for (descriptor in descriptors) (budget ?: fail("CAPABILITY_MISMATCH")).add(descriptor)
@@ -240,6 +251,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
         }
         return JSONObject().put("state", "PREPARED").put("phoneSnapshot", witness)
             .put("bookMetadataVersion", B2BookMetadataLimits.VERSION)
+            .put("omittedBookPackages", omitted)
             .put("watchSnapshot", JSONObject.NULL).put("bindings", JSONArray()).also { attempt ->
                 store.exclusive { authorize(); store.budget(B2Json.utf8(attempt.toString()).size.toLong() + 1024)
                     store.put(account, "attempt", key, attempt) }
@@ -262,9 +274,9 @@ internal class B2KindSync(private val store: B2Persistence, private val director
     }
 
     suspend fun run(input: InputStream, output: OutputStream, probe: JSONObject,
-        assets: List<NoteAssetInventoryEntry>, close: () -> Unit) = supervisorScope {
+        assets: List<NoteAssetInventoryEntry>, peerPackages: Map<String, JSONObject> = emptyMap(), close: () -> Unit) = supervisorScope {
         authorize()
-        val a = createOrResume(probe, assets)
+        val a = createOrResume(probe, assets, peerPackages)
         val retiring = a.getString("state") in setOf("RETIRING", "CANCELLED")
         val stopped = a.optBoolean("retireStopped")
         if (retiring && !stopped) {

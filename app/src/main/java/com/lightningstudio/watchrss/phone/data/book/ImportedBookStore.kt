@@ -171,6 +171,29 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             }
         }
     }
+    internal suspend fun visitCommittedBinaryPackages(
+        limit: Int, hash: (File) -> String, visit: (BookEntity) -> Unit
+    ) {
+        var after = ""
+        repeat(limit) {
+            val row = dao.nextBinaryBook(after) ?: return
+            after = row.bookId
+            if (!JSONObject(row.stateJson).getBoolean("deleted") && available(row)) {
+                val file = packageFor(row)
+                try {
+                    val before = java.nio.file.Files.readAttributes(file.toPath(), java.nio.file.attribute.BasicFileAttributes::class.java)
+                    if (hash(file) == row.packageSha256 && dao.get(row.bookId) == row && packageFor(row) == file) {
+                        val current = java.nio.file.Files.readAttributes(file.toPath(), java.nio.file.attribute.BasicFileAttributes::class.java)
+                        if (before.size() == row.packageBytes && current.size() == before.size() &&
+                            current.fileKey() == before.fileKey() && current.lastModifiedTime() == before.lastModifiedTime()) visit(row)
+                    }
+                } catch (_: java.io.IOException) {
+                    // No stable proof for this row.
+                }
+            }
+        }
+    }
+
     internal suspend fun binaryReadingPage(id: String, after: Int) = dao.binaryReadingPage(id, after)
     internal suspend fun binaryState(id: String) = dao.get(id)?.stateJson?.let(::JSONObject)
 

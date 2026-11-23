@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 
+import com.lightningstudio.watchrss.phone.connection.bluetooth.B2BookState
 import org.json.JSONObject
 
 object B2Routing {
@@ -8,7 +9,7 @@ object B2Routing {
     private val bits = setOf("supportsManifestBatches", "supportsReaderPresets", "supportsReaderAssets", "supportsResourceChunkAck", "supportsReaderPresetPreview", "supportsPersistentSession", "supportsTransferByteProgress")
     private val extensions = setOf("supportsAutomaticAccountSync", "supportsDomainFastPathV2", "supportsBookSyncV1", "supportsBookReadingDeltaV1", "supportsNoteManifestV2", "supportsNoteAssetInventory", "supportsRssCanonicalIds", "supportsFullMetadataOnlyArticles", "supportsMetadataOnlyArticles", "supportsTokenUsageCursor", "persistentSessionAccepted")
     private val dynamic = setOf("deviceId", "sentAt", "account", "accountMatchesRequest", "ipUpgradeAccepted", "watchCapabilities")
-    private val special = setOf("libraryPeer", "libraryBinary", "libraryResume", "supportedLibraryResumeVersions", "supportedLibraryBinaryVersions")
+    private val special = setOf(B2BookState.VERSION, "libraryPeer", "libraryBinary", "libraryResume", "supportedLibraryResumeVersions", "supportedLibraryBinaryVersions")
     fun classify(p: JSONObject, ready: Ready): Peer = try { classifyChecked(p, ready) } catch (e: B2Exception) {
         if (e.code in setOf("INVALID_FRAME", "UNSUPPORTED_VERSION", "UNSUPPORTED_KIND", "PLAN_CONFLICT")) fail("CAPABILITY_MISMATCH") else throw e
     }

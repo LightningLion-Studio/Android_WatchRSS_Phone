@@ -610,7 +610,12 @@ class PhoneBluetoothSyncManager(
                             syncAccount(effectiveDevice, syncSession, false, active)
                             binaryAccountGeneration = generation
                         }
-                        val (selected, runtime) = prepareBinaryRoute(route, active.response, effectiveDevice) {
+                        val bookSession = syncSession
+                        val peerPackages = if (route.hasBinaryBooks && bookSession?.isPersistent == true &&
+                            B2BookState.negotiated(active.response)) {
+                            B2BookState.exchange(bookSession, sessionId)
+                        } else emptyMap()
+                        val (selected, runtime) = prepareBinaryRoute(route, active.response, effectiveDevice, peerPackages) {
                             recovery.confirmedProgress("b2", it)
                         }
                         if (!selected.isEmpty && (binaryAccountGeneration == null || binaryAccountGeneration != generation)) {
@@ -1467,6 +1472,7 @@ class PhoneBluetoothSyncManager(
         requested: B2KindRoute,
         probe: JSONObject,
         device: PhoneBluetoothWatchDevice,
+        peerPackages: Map<String, JSONObject> = emptyMap(),
         progress: (String) -> Unit = {}
     ): Pair<B2KindRoute, B2KindSync?> {
         if (requested.isEmpty) return B2KindRoute.legacy to null
@@ -1481,7 +1487,7 @@ class PhoneBluetoothSyncManager(
             if (route.isEmpty) break
             val runtime = createBinaryRuntime(database, device, capabilities, route, progress)
             try {
-                runtime.prepare(probe, binaryAssetInventory(route))
+                runtime.prepare(probe, binaryAssetInventory(route), peerPackages)
                 return route to runtime
             } catch (failure: B2Exception) {
                 if (failure.code != "LIMIT_EXCEEDED" || route.hasBinaryBooks && !route.hasBinaryLibrary) throw failure
@@ -1579,8 +1585,12 @@ class PhoneBluetoothSyncManager(
                     return recovery.handoff("libraryBinary", openReady = ::openReady,
                         connected = { session?.transport?.isClosed == false }) {
                         val active = requireNotNull(session)
+                        val response = requireNotNull(probe)
+                        val peerPackages = if (route.hasBinaryBooks && B2BookState.negotiated(response)) {
+                            runtime.exchangeBookState(active, parent)
+                        } else emptyMap()
                         client.withBinaryTransport(active, parent, recovery.policy.generation) { input, output, close ->
-                            runtime.run(input, output, requireNotNull(probe), binaryAssetInventory(route), close)
+                            runtime.run(input, output, response, binaryAssetInventory(route), peerPackages, close)
                         }
                     }
                 } catch (failure: B2Exception) {

@@ -23,8 +23,18 @@ internal class B2BookBusiness(
 ) {
     fun importRoot(): File = books.binaryImportDirectory()
 
+    suspend fun committedPackages(): JSONArray = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val result = JSONArray()
+        books.visitCommittedBinaryPackages(B2BookState.MAX_PROOFS, { file -> hashFile(file, authorize) }) { row ->
+            authorize()
+            result.put(B2BookState.proof(JSONObject(row.stateJson), row.packageSha256, row.packageBytes))
+        }
+        result
+    }
+
     suspend fun freeze(directory: File, work: () -> Unit,
         allow: (JSONObject) -> Boolean = { true }, warn: (BookSyncIssue) -> Unit = {},
+        omitPackage: (JSONObject) -> Boolean = { false },
         add: (JSONObject, File) -> Unit) {
         val staging = B2Files(requireNotNull(directory.absoluteFile.parentFile), importRoot())
         val empty = File(directory, "empty").apply { createNewFile() }
@@ -62,7 +72,8 @@ internal class B2BookBusiness(
             }
             add(stateObject, stateFile)
             val stateId = stateObject.s("objectId")
-            if (packageFile != null && !state.getBoolean("deleted")) {
+            if (packageFile != null && !state.getBoolean("deleted") &&
+                !omitPackage(B2BookState.proof(state, row.packageSha256, row.packageBytes))) {
                 val size = row.packageBytes
                 if (size !in 1..B2Wire.BOOK_MAX_BYTES) fail("LIMIT_EXCEEDED")
                 reserve(size)

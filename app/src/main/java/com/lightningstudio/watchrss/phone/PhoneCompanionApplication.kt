@@ -46,6 +46,7 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
     }
     internal val recoveryWordClipboard by recoveryClipboard
     private val accountInitialization = CompletableDeferred<Unit>()
+    internal suspend fun awaitAccountInitialization() = accountInitialization.await()
     private val consentServicesStarted = AtomicBoolean(false)
     private val ipSyncService: WatchIpSyncService by lazy {
         WatchIpSyncService(this, PhoneDeviceIdentity(this).deviceId)

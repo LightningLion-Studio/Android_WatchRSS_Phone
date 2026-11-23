@@ -208,6 +208,9 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
     internal val watchSBleAvailable: Boolean get() = BuildConfig.WATCH_S_BLE_SYNC &&
         watchSBleAnnounced && runtime != null
 
+    internal fun watchSBleOwner(userId: String): String? =
+        runtime?.takeIf { watchSBleAvailable && it.account.userId == userId }?.watchSBleOwner
+
     internal suspend fun <T> watchSBleAction(run: (Runtime) -> T): T = withContext(Dispatchers.IO) {
         if (!mutex.tryLock()) SyncV2Codec.fail("budget_paused")
         try {

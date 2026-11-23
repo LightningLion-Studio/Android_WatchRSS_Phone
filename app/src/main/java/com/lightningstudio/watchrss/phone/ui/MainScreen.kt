@@ -366,7 +366,7 @@ fun MainScreen(
     tipSuppression: TipSuppressionState? = null,
     supportDestination: String? = null,
     onSupportDestinationConsumed: () -> Unit = {},
-    onWatchSPairing: (() -> Unit)? = null
+    onWatchS: (() -> Unit)? = null
 ) {
     var selectedContentChannelKey by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedReaderArticleId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -1263,7 +1263,7 @@ fun MainScreen(
                                     storageUsedBytes = storageUsedBytes,
                                     onOpenStorage = onOpenStorage,
                                     onExportBluetoothLog = onExportBluetoothLog,
-                                    onWatchSPairing = onWatchSPairing,
+                                    onWatchS = onWatchS,
                                     onOpenImports = {
                                         navigateToTopLevelPage(
                                             MainPage.IMPORTS,
@@ -1372,7 +1372,7 @@ fun MainScreen(
                                 storageUsedBytes = storageUsedBytes,
                                 onOpenStorage = onOpenStorage,
                                 onExportBluetoothLog = onExportBluetoothLog,
-                                onWatchSPairing = onWatchSPairing,
+                                onWatchS = onWatchS,
                                 onOpenImports = {
                                     navigateToTopLevelPage(
                                         MainPage.IMPORTS,
@@ -1436,7 +1436,7 @@ fun MainScreen(
                                 storageUsedBytes = storageUsedBytes,
                                 onOpenStorage = onOpenStorage,
                                 onExportBluetoothLog = onExportBluetoothLog,
-                                onWatchSPairing = onWatchSPairing,
+                                onWatchS = onWatchS,
                                 onOpenImports = {
                                     navigateToTopLevelPage(
                                         MainPage.IMPORTS,
@@ -2919,7 +2919,7 @@ private fun DashboardPage(
     storageUsedBytes: Long,
     onOpenStorage: () -> Unit,
     onExportBluetoothLog: () -> Unit,
-    onWatchSPairing: (() -> Unit)?,
+    onWatchS: (() -> Unit)?,
     onOpenImports: () -> Unit,
     onOpenRss: () -> Unit,
     onOpenFavorites: () -> Unit,
@@ -2993,8 +2993,8 @@ private fun DashboardPage(
                                     onExportBluetoothLog = onExportBluetoothLog,
                                     onDismissMessage = onDismissMessage
                                 )
-                                onWatchSPairing?.let { openPairing ->
-                                    TextButton(onClick = openPairing) { Text("Watch S 配对") }
+                                onWatchS?.let { openWatchS ->
+                                    TextButton(onClick = openWatchS) { Text("Watch S") }
                                 }
                                 DashboardCloudSyncBanner()
                                 DashboardImportCard(onClick = onOpenImports)
@@ -3035,8 +3035,8 @@ private fun DashboardPage(
                             onDismissMessage = onDismissMessage
                         )
                     }
-                    if (onWatchSPairing != null) {
-                        item { TextButton(onClick = onWatchSPairing) { Text("Watch S 配对") } }
+                    if (onWatchS != null) {
+                        item { TextButton(onClick = onWatchS) { Text("Watch S") } }
                     }
                     item { DashboardCloudSyncBanner() }
                     item {

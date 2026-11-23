@@ -28,6 +28,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
@@ -207,18 +208,18 @@ internal class WatchSBleGattServer(
                 val accepted = receiver.accept(frame) ?: continue
                 notify(link, WatchSBleFrames.encode(accepted.ack))
                 val message = accepted.message ?: continue
-                val reply = endpoint.exchange(frame.id, responseId, link.mtu, message)
-                WatchSBleFrames.send(responseId, reply.bytes, mtu, {
-                    check(endpoint.canSend())
-                    notify(link, it)
-                }) { id, offset, timeout ->
-                    withTimeoutOrNull(timeout) {
-                        awaitAck(link, mtu, receiver, id, offset)
-                    } == true
-                }
+                val reply = endpoint.exchange(frame.id, link.mtu, message)
+                sendReply(link, endpoint, receiver, frame.id, responseId++, mtu, reply)
                 if (reply.disconnect) break
                 mtu = reply.nextMtu ?: mtu
-                responseId++
+                reply.pending?.let { request ->
+                    val allowed = withTimeoutOrNull(endpoint.pendingRemaining(request)) {
+                        awaitDecision(link, mtu, receiver, request)
+                    }
+                    val decision = endpoint.completePending(request, allowed)
+                    sendReply(link, endpoint, receiver, frame.id, responseId++, mtu, decision)
+                    if (decision.disconnect) return
+                }
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
@@ -229,8 +230,42 @@ internal class WatchSBleGattServer(
         }
     }
 
+    private suspend fun sendReply(
+        link: Link, endpoint: WatchSBleEndpoint, receiver: WatchSBleFrames.Receiver,
+        requestId: Long, responseId: Long, mtu: Int, reply: WatchSBleEndpoint.Reply
+    ) {
+        WatchSBleFrames.send(responseId, reply.bytes, mtu, {
+            check(endpoint.canSend())
+            notify(link, it)
+        }) { id, offset, timeout ->
+            withTimeoutOrNull(timeout) { awaitAck(link, mtu, receiver, requestId, id, offset) } == true
+        }
+    }
+
+    private suspend fun awaitDecision(
+        link: Link, mtu: Int, receiver: WatchSBleFrames.Receiver, request: WatchSBleBindings.Request
+    ): Boolean {
+        while (true) {
+            val outcome = select<Boolean?> {
+                request.decision.onAwait { it }
+                link.packets.onReceive { packet ->
+                    val frame = runCatching { WatchSBleFrames.decode(packet, mtu) }.getOrNull()
+                    if (frame != null && frame.id == 1L && frame.type != WatchSBleFrames.ACK) {
+                        val repeat = receiver.accept(frame)
+                        if (repeat != null) {
+                            check(repeat.message == null)
+                            notify(link, WatchSBleFrames.encode(repeat.ack))
+                        }
+                    }
+                    null
+                }
+            }
+            if (outcome != null) return outcome
+        }
+    }
+
     private suspend fun awaitAck(
-        link: Link, mtu: Int, receiver: WatchSBleFrames.Receiver, id: Long, offset: Int
+        link: Link, mtu: Int, receiver: WatchSBleFrames.Receiver, requestId: Long, id: Long, offset: Int
     ): Boolean {
         while (true) {
             val frame = receive(link, mtu)
@@ -238,6 +273,7 @@ internal class WatchSBleGattServer(
                 if (frame.id == id && frame.offset == offset) return true
                 continue
             }
+            if (frame.id != requestId) continue
             val repeat = receiver.accept(frame) ?: continue
             check(repeat.message == null)
             notify(link, WatchSBleFrames.encode(repeat.ack))

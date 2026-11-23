@@ -10,6 +10,8 @@
     <exclude domain="sharedpref" path="watchrss_onboarding_draft.xml" />
     <exclude domain="sharedpref" path="watchrss_cloud_keys.xml" />
     <exclude domain="sharedpref" path="watchrss-watchs-pairings.xml" />
+    <exclude domain="sharedpref" path="watchrss-watchs-bindings.xml" />
+    <exclude domain="sharedpref" path="watchrss-watchs-flags.xml" />
     <exclude domain="sharedpref" path="watchrss_cloud_keys_test.xml" />
     <exclude domain="sharedpref" path="watchrss_cloud_state.xml" />
     <exclude domain="sharedpref" path="watchrss_cloud_migrations.xml" />

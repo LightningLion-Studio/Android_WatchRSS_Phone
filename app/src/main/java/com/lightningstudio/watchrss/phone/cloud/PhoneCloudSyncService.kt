@@ -11,8 +11,10 @@ import kotlinx.coroutines.sync.withPermit
 
 import android.content.Context
 import android.os.Build
+import androidx.core.content.edit
 import com.lightningstudio.watchrss.phone.connection.watchs.WatchSBleEndpoint
-import com.lightningstudio.watchrss.phone.connection.watchs.WatchSBlePairings
+import com.lightningstudio.watchrss.phone.connection.watchs.WatchSBleBindings
+import com.lightningstudio.watchrss.phone.syncv2.WatchSBleLocalLibrary
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.account.PhoneAccountSession
 import com.lightningstudio.watchrss.phone.data.backup.CloudRestoreWarning
@@ -157,29 +159,78 @@ class PhoneCloudSyncService(
                 session!=null && bootstrap!=null && bootstrap.devices.any{it.deviceId==id && it.revokedAt==null && deviceAuthenticated(session,bootstrap,it)}})
     }
     internal val syncV2UiPort get()=syncV2Product.uiPort
-    internal fun watchSBleAvailable(): Boolean =
-        BuildConfig.WATCH_S_BLE_SYNC && syncV2Database != null &&
-            accountRepository.session.value?.isExpired == false &&
-            trustedBootstrap?.syncV2?.opt("watchSBleSync") == true && syncV2Product.watchSBleAvailable
+    private val watchSFlags by lazy {
+        appContext.getSharedPreferences("watchrss-watchs-flags", Context.MODE_PRIVATE)
+    }
+    private val watchSFlagKey get() = "enabled:${client.backendBaseUrl}"
+    private val watchSBindings by lazy { WatchSBleBindings.android(appContext) }
+    internal val watchSBleBindingStatus get() = watchSBindings.ui
 
-    private val watchSPairings by lazy { WatchSBlePairings.android(appContext) }
-    internal val watchSBlePairingStatus get() = watchSPairings.ui
-
-    internal suspend fun watchSBleRefreshPairing() = syncV2Product.watchSBleAction {
-        watchSPairings.refresh(it.watchSBleOwner)
+    private fun watchSBleOwner(): String? {
+        if (!BuildConfig.WATCH_S_BLE_SYNC || syncV2Database == null) return null
+        val session = accountRepository.session.value
+        if (session == null) {
+            // The bootstrap endpoint requires login. Keep the last trusted opt-in for the local library.
+            return "local".takeIf { watchSFlags.getBoolean(watchSFlagKey, false) }
+        }
+        if (session.isExpired || trustedBootstrap?.syncV2?.opt("watchSBleSync") != true) return null
+        return syncV2Product.watchSBleOwner(session.userId)
     }
 
-    internal suspend fun watchSBleBeginPairing(foreground: () -> Boolean) = syncV2Product.watchSBleAction {
-        watchSPairings.begin(it.watchSBleOwner) { foreground() && watchSBleAvailable() }
+    internal fun watchSBleAvailable() = watchSBleOwner() != null
+
+    internal suspend fun watchSBleRefreshBindings(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val owner = watchSBleOwner()
+            if (owner == null) {
+                // Initialize storage so upgrades delete the old credentials even with cloud opt-in off.
+                watchSBindings.initialize()
+                watchSBindings.cancel()
+                false
+            } else {
+                watchSBindings.refresh(owner)
+                true
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            watchSBindings.cancel()
+            android.util.Log.w("WatchSBleSync", "binding_store_unavailable")
+            false
+        }
     }
 
-    internal suspend fun watchSBleForgetPairing() = withContext(Dispatchers.IO) { watchSPairings.revoke() }
+    internal suspend fun watchSBleBeginBinding(foreground: () -> Boolean) = withContext(Dispatchers.IO) {
+        val owner = checkNotNull(watchSBleOwner())
+        watchSBindings.begin(owner) { foreground() && watchSBleOwner() == owner }
+    }
 
-    internal fun watchSBleCancelPairing() = watchSPairings.cancel()
+    internal suspend fun watchSBleDecide(
+        request: WatchSBleBindings.Request, allow: Boolean, foreground: () -> Boolean
+    ) = withContext(Dispatchers.IO) {
+        val owner = watchSBleOwner()
+        watchSBindings.decide(request, allow, owner) { foreground() && watchSBleOwner() == owner }
+    }
+
+    internal suspend fun watchSBleUnbind() = withContext(Dispatchers.IO) { watchSBindings.revoke() }
+
+    internal fun watchSBleCancelBinding() = watchSBindings.cancel()
 
     internal fun watchSBleEndpoint(alive: () -> Boolean) = WatchSBleEndpoint(
-        syncV2Product, watchSPairings,
-        onLocalChanges = { PhoneCloudSyncWorker.scheduleFollowUp(appContext) },
+        bindings = watchSBindings,
+        owner = ::watchSBleOwner,
+        access = { run ->
+            if (watchSBleOwner() == "local") withContext(Dispatchers.IO) {
+                check(alive() && watchSBleOwner() == "local")
+                val database = requireNotNull(syncV2Database).invoke()
+                run(WatchSBleLocalLibrary(database.openHelper.writableDatabase)).also {
+                    if (it.opt("op") == "applied") database.invalidationTracker.refreshVersionsAsync()
+                }
+            } else syncV2Product.watchSBleAction { run(it.projection) }
+        },
+        onLocalChanges = {
+            if (accountRepository.session.value?.isExpired == false) PhoneCloudSyncWorker.scheduleFollowUp(appContext)
+        },
         alive = alive
     )
     internal fun captureSyncV2Legacy(peer:String,version:Int,cursor:String,payload:JSONObject)=syncV2Product.captureLegacyMetadata(peer,version,cursor,payload)
@@ -389,7 +440,7 @@ class PhoneCloudSyncService(
     }
     internal suspend fun releaseCloudAuthorization(session: PhoneAccountSession) {
         syncV2Product.release()
-        if (BuildConfig.WATCH_S_BLE_SYNC) runCatching { watchSBleForgetPairing() }
+        if (BuildConfig.WATCH_S_BLE_SYNC) runCatching { watchSBleUnbind() }
         releaseCloudDevice(
         revokeRemote = {
             val bootstrap = runCatching { client.bootstrap(session) }.getOrNull()
@@ -428,7 +479,7 @@ class PhoneCloudSyncService(
     }
     private fun clearCloudScope(session: PhoneAccountSession) {
         syncV2Product.release()
-        if (BuildConfig.WATCH_S_BLE_SYNC) runCatching { watchSPairings.revoke() }
+        if (BuildConfig.WATCH_S_BLE_SYNC) runCatching { watchSBindings.revoke() }
         currentMigration=null
         _migrationState.value=CloudMigrationUiState("unavailable",errorCode="migration_scope_changed")
         settings.bindScope(client.backendBaseUrl, session.userId)
@@ -495,6 +546,11 @@ class PhoneCloudSyncService(
         } finally { keys.values.forEach { it.fill(0) } }
         trustedBootstrap = bootstrap
         if (syncV2Database != null) syncV2Product.observeBootstrap(bootstrap.syncV2)
+        if (BuildConfig.WATCH_S_BLE_SYNC) {
+            watchSFlags.edit {
+                putBoolean(watchSFlagKey, bootstrap.syncV2?.opt("watchSBleSync") == true)
+            }
+        }
         _needsReapproval.value = if (keyManager.hasAccountKey(session.userId)) bootstrap.devices.filter { it.revokedAt == null && !it.deviceId.startsWith("reader-migration-") && !deviceAuthenticated(session, bootstrap, it) } else emptyList()
     }
     private suspend fun validatedBootstrap(session: PhoneAccountSession, requireV2Announcement: Boolean = false): CloudBootstrap {

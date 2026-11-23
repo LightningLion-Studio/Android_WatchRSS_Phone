@@ -17,7 +17,7 @@ internal class SyncV2Projection(
     private val noteSegments: Boolean = BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,
     private val lifetime:SyncV2Lifetime?=null,
     private val sequenceAllocator:((String)->String)?=null
-):AutoCloseable {
+):AutoCloseable, WatchSBleLibrary {
     @Volatile private var closed=false
     @Volatile private var hasWatchSBleArticles = false
     override fun close() {
@@ -558,7 +558,7 @@ internal class SyncV2Projection(
         return account
     }
 
-    internal fun watchSBleHead(): String {
+    override fun watchSBleHead(): String {
         val state = state()
         val head = SyncV2Codec.canonical(state.body.optJSONObject("appliedAccount"))
         requireWatchSBleHead(state, head)
@@ -578,9 +578,7 @@ internal class SyncV2Projection(
         SyncV2Codec.fail("budget_paused")
     }
 
-    internal data class WatchSBleResult(val cursor: String, val row: JSONObject)
-
-    internal fun watchSBleNext(head: String, after: String): WatchSBleResult? {
+    override fun watchSBleNext(head: String, after: String): WatchSBleLibrary.Row? {
         SyncV2Codec.text(after, 8202)
         var kind = after.substringBefore(':')
         var logical = after.substringAfter(':', "")
@@ -605,7 +603,7 @@ internal class SyncV2Projection(
                 "article" -> WatchSBleRows.portableArticle(value) && !watchSBleBookChapter(logical)
                 else -> true
             }
-            if (allowed) return WatchSBleResult("$kind:$logical", WatchSBleRows.encode(record))
+            if (allowed) return WatchSBleLibrary.Row("$kind:$logical", WatchSBleRows.encode(record))
         }
     }
 
@@ -613,7 +611,7 @@ internal class SyncV2Projection(
         "SELECT 1 FROM imported_book_chapters WHERE articleId=? LIMIT 1", arrayOf(id)
     ).use { it.moveToFirst() }
 
-    internal fun watchSBlePut(head: String, row: JSONObject, authorize: () -> Unit): Boolean {
+    override fun watchSBlePut(head: String, row: JSONObject, authorize: () -> Unit): Boolean {
         val incoming = WatchSBleRows.decode(identity, row)
         val meta = incoming.getJSONObject("meta")
         val kind = meta.getString("kind")

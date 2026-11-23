@@ -73,6 +73,42 @@ class WatchSBleProjectionTest {
         }
     }
 
+    @Test fun signedOutLibraryReadsAndWritesWithoutOpeningCloudProjection(): Unit = SyncV2P5Fixture().use { fixture ->
+        val sql = fixture.sql
+        val local = WatchSBleLocalLibrary(sql)
+        val head = local.watchSBleHead()
+        assertEquals("null", head)
+        val url = "https://example.com/local.xml"
+        fun wire(kind: String, id: String, value: JSONObject) =
+            WatchSBleRows.encode(WatchSBleRows.record(kind, id, WatchSBleRows.entityKey(kind, id), value))
+        val source = wire("source", url, JSONObject().put("url", url).put("title", "Local feed").put("updatedAt", 1))
+        assertTrue(local.watchSBlePut(head, source) {})
+        assertFalse(local.watchSBlePut(head, source) {})
+        val sourceId = WatchSBleRows.rssSourceKey(url)
+        val articleHash = "12".repeat(32)
+        val rssId = "$sourceId:$articleHash"
+        val rss = wire("rss-state", rssId, JSONObject().put("sourceId", sourceId).put("articleIdHash", articleHash)
+            .put("isRead", true).put("readingPositionChangedAt", 30))
+        assertTrue(local.watchSBlePut(head, rss) {})
+        assertFalse(local.watchSBlePut(head, rss) {})
+        val reopened = WatchSBleLocalLibrary(sql)
+        val next = checkNotNull(reopened.watchSBleNext(head, ""))
+        assertEquals("rss-state:$rssId", next.cursor)
+        assertEquals(rss.getString("entityKey"), next.row.getString("entityKey"))
+        val second = checkNotNull(reopened.watchSBleNext(head, next.cursor))
+        assertEquals("source:$url", second.cursor)
+        assertEquals("Local feed", second.row.getJSONObject("value").getString("title"))
+        assertNull(reopened.watchSBleNext(head, second.cursor))
+        var checks = 0
+        val other = "https://example.com/canceled.xml"
+        assertThrows(IllegalStateException::class.java) {
+            local.watchSBlePut(head, wire("source", other, JSONObject().put("url", other))) {
+                check(++checks == 1)
+            }
+        }
+        sql.query("SELECT 1 FROM phone_rss_sources WHERE url=?", arrayOf(other)).use { assertFalse(it.moveToFirst()) }
+    }
+
     @Test fun articleRegistersMergeIndependently() {
         val local = JSONObject().put("articleId", "a").put("url", "https://example.com")
             .put("sourceDeviceId", "phone").put("updatedAt", 20).put("title", "Phone title")

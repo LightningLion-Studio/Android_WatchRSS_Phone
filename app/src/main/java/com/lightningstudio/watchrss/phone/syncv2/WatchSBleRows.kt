@@ -18,7 +18,9 @@ internal object WatchSBleRows {
             Register(it, "${it}ChangedAt", listOf("${it}Saved", "${it}SortOrder"))
         }
 
-    fun decode(identity: SyncV2Identity, row: JSONObject): JSONObject {
+    fun decode(identity: SyncV2Identity, row: JSONObject): JSONObject = decode(row, identity::entity)
+
+    fun decode(row: JSONObject, localKey: (String, String) -> String = ::entityKey): JSONObject {
         SyncV2Codec.exact(row, setOf("kind", "entityKey", "value"))
         val kind = SyncV2Wire.string(row, "kind")
         if (kind !in kinds) SyncV2Codec.fail("unsupported_feature")
@@ -48,7 +50,7 @@ internal object WatchSBleRows {
                 }
             }
         }
-        return record(kind, logical, identity.entity(kind, logical), value)
+        return record(kind, logical, localKey(kind, logical), value)
     }
 
     fun record(kind: String, logical: String, key: String, value: JSONObject): JSONObject {
@@ -66,7 +68,18 @@ internal object WatchSBleRows {
             .put("value", payload)
     }
 
-    private fun entityKey(kind: String, logical: String) = SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.lp(
+    fun encode(kind: String, logical: String, value: JSONObject): JSONObject {
+        SyncV2Business.validate(kind, value)
+        val payload = JSONObject(value.toString())
+        if (payload.has("readingProgress")) {
+            val micros = kotlin.math.floor(payload.getDouble("readingProgress") * 1_000_000 + 0.5).toLong()
+            payload.remove("readingProgress")
+            payload.put("readingProgressMicros", micros)
+        }
+        return JSONObject().put("kind", kind).put("entityKey", entityKey(kind, logical)).put("value", payload)
+    }
+
+    fun entityKey(kind: String, logical: String) = SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.lp(
         "wrss.watchs.ble.v2/entity".toByteArray(), SyncV2Codec.utf8(kind), SyncV2Codec.utf8(logical)
     )))
 

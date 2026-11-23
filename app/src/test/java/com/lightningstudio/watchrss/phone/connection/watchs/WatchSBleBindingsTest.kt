@@ -190,4 +190,30 @@ class WatchSBleBindingsTest {
         assertFalse(bindings.ui.value.hasResets)
         assertNull(bindings.ui.value.boundName)
     }
+
+    @Test fun retiredWatchStillResetsAfterNewWatchIsBound() = runBlocking {
+        val bindings = open()
+        suspend fun bind(id: String) {
+            bindings.begin(owner)
+            bindings.endpoint().use { endpoint ->
+                val request = checkNotNull(endpoint.hello(id).pending)
+                bindings.decide(request, true, owner)
+                endpoint.completePending(request, true)
+            }
+        }
+        bind(first)
+        bindings.revoke()
+        bind(second)
+        bindings.endpoint().use { endpoint ->
+            assertEquals("reset", endpoint.hello(first).json().getString("mode"))
+            val reply = endpoint.exchange(2, 185, """{"op":"reset-applied"}""".toByteArray())
+            assertEquals("forgotten", reply.json().getString("op"))
+        }
+        bindings.endpoint().use { endpoint ->
+            assertEquals("rejected", endpoint.hello(first).json().getString("mode"))
+        }
+        open().endpoint().use { endpoint ->
+            assertEquals("sync", endpoint.hello(second).json().getString("mode"))
+        }
+    }
 }

@@ -60,11 +60,10 @@ internal class WatchSBleBindings(
     fun hello(owner: String, watchId: String, name: String): Hello {
         val state = forOwner(owner)
         val active = state.optJSONObject("active")
-        if (active != null) {
-            return if (active.getString("watchId") == watchId) Hello(Mode.SYNC, revision)
-            else Hello(Mode.REJECTED, revision, otherBound = true)
-        }
+        if (active?.getString("watchId") == watchId) return Hello(Mode.SYNC, revision)
+        // A retired watch must still learn to wipe itself after a new watch is bound.
         if (resets(state).contains(watchId)) return Hello(Mode.RESET, revision)
+        if (active != null) return Hello(Mode.REJECTED, revision, otherBound = true)
         if (window == null) return Hello(Mode.REJECTED, revision)
         window = null
         val candidate = Request(watchId, name, owner, now() + WINDOW_MS)
@@ -124,7 +123,7 @@ internal class WatchSBleBindings(
             }
             Mode.RESET -> {
                 val ids = resets(state)
-                check(state.optJSONObject("active") == null && watchId in ids)
+                check(watchId in ids)
                 state.put("resets", JSONArray(ids - watchId))
             }
             else -> error("invalid_mode")

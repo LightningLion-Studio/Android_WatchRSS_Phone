@@ -21,12 +21,14 @@ internal class B2InheritedKinds(
 ) : B2BusinessPort {
     private val binary = db.b2ArticleDao()
     fun bookImportRoot(): File? = repository.books?.binaryImportDirectory()
+    suspend fun committedBookPackages(): JSONArray = books?.committedPackages() ?: JSONArray()
     @Volatile var applyWork: () -> Unit = {}
 
     suspend fun freeze(sendKinds: Set<String>, scratch: File, work: () -> Unit,
         allowBook: (JSONObject) -> Boolean = { true }, warn: (BookSyncIssue) -> Unit = {},
+        omitPackage: (JSONObject) -> Boolean = { false },
         add: (JSONObject, File) -> Unit) {
-        books?.freeze(scratch, work, allowBook, warn, add)
+        books?.freeze(scratch, work, allowBook, warn, omitPackage, add)
         val exclusions = repository.books?.takeIf { excludeBooks }?.bluetoothExclusions()
         val empty = File(scratch, "empty").apply { createNewFile() }
         val emptyHashes = binaryFileHashes(empty)

@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 
+import com.lightningstudio.watchrss.phone.connection.bluetooth.B2BookState
 import org.json.JSONObject
 import org.json.JSONArray
 
@@ -45,7 +46,7 @@ object B2Routing {
             if (p.has("supportsAccountDataSpaces")) fail("CAPABILITY_MISMATCH")
         }
         val allowed = bits + extensions + dynamic + special + setOf("supportsAccountDataSpaces", "success", "version", "action", "phase") +
-            if (guardedOffered) setOf(GUARDED_SELECTION) else emptySet()
+            if (guardedOffered) setOf(GUARDED_SELECTION, B2BookState.VERSION) else emptySet()
         if (p.keys().asSequence().any { it !in allowed }) fail("PEER_IMPLEMENTATION_UNKNOWN")
         if (peer != null) {
             if (peer.s("implementation") != "podjs") fail("PEER_IMPLEMENTATION_UNKNOWN")

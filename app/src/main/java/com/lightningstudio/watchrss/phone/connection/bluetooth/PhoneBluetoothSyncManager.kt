@@ -860,8 +860,13 @@ class PhoneBluetoothSyncManager(
                     if (!route.isEmpty && guardedBinary && currentBinaryScope() != guardedScope) {
                         throw B2Exception("AUTH_REVOKED")
                     }
+                    val bookSession = active.session
+                    val peerPackages = if (route.hasBinaryBooks && bookSession?.isPersistent == true &&
+                        B2BookState.negotiated(probe)) {
+                        B2BookState.exchange(bookSession, sessionId)
+                    } else emptyMap()
                     route.plans().mapNotNull { plan ->
-                        val (selected, runtime) = prepareBinaryRoute(plan, probe, effectiveDevice,
+                        val (selected, runtime) = prepareBinaryRoute(plan, probe, effectiveDevice, peerPackages,
                             binaryRecovery::confirmedProgress)
                         if (runtime == null) null else (selected to runtime).also { binaryRoute += selected }
                     }
@@ -1817,6 +1822,7 @@ class PhoneBluetoothSyncManager(
         requested: B2KindRoute,
         probe: JSONObject,
         device: PhoneBluetoothWatchDevice,
+        peerPackages: Map<String, JSONObject> = emptyMap(),
         progress: (String) -> Unit = {}
     ): Pair<B2KindRoute, B2KindSync?> {
         if (requested.isEmpty) return B2KindRoute.legacy to null
@@ -1831,7 +1837,7 @@ class PhoneBluetoothSyncManager(
             if (route.isEmpty) break
             val runtime = createBinaryRuntime(database, device, capabilities, route, progress)
             try {
-                runtime.prepare(probe, binaryAssetInventory(route))
+                runtime.prepare(probe, binaryAssetInventory(route), peerPackages)
                 return route to runtime
             } catch (failure: B2Exception) {
                 if (failure.code != "LIMIT_EXCEEDED" || route.hasBinaryBooks && !route.hasBinaryLibrary) throw failure
@@ -1974,9 +1980,13 @@ class PhoneBluetoothSyncManager(
                         val active = requireNotNull(session)
                         val transport = requireNotNull(active.transport)
                         val inventory = binaryAssetInventory(route)
+                        val response = requireNotNull(probe)
+                        val peerPackages = if (route.hasBinaryBooks && B2BookState.negotiated(response)) {
+                            runtime.exchangeBookState(active, parent)
+                        } else emptyMap()
                         active.client.withBinaryTransport(active, transport.generation) { input, output, close ->
                             scope?.let { B2BodyHandoff.open(appContext.filesDir, it, onDeferredBluetoothBody) }.use { handoff ->
-                                runtime.run(input, output, requireNotNull(probe), inventory, handoff, close)
+                                runtime.run(input, output, response, inventory, handoff, peerPackages, close)
                             }
                         }
                     }

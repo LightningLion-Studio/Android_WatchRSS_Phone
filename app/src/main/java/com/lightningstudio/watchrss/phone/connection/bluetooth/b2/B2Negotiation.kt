@@ -1,13 +1,17 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 
+import com.lightningstudio.watchrss.phone.connection.bluetooth.B2BookState
 import org.json.JSONArray
 import org.json.JSONObject
 
 object B2Negotiation {
     /** Explicit integration seam. Does not enable C or modify the legacy ACK loop. */
     fun propose(probe: JSONObject, ready: Boolean): JSONObject = copy(probe).also {
-        if (ready) it.put("supportedLibraryBinaryVersions", JSONArray(listOf(2)))
-        else it.remove("supportedLibraryBinaryVersions")
+        if (ready) it.put("supportedLibraryBinaryVersions", JSONArray(listOf(2))).put(B2BookState.VERSION, 1)
+        else {
+            it.remove("supportedLibraryBinaryVersions")
+            it.remove(B2BookState.VERSION)
+        }
     }
     fun echoed(probe: JSONObject): JSONObject? {
         if (!probe.has("libraryBinary")) return null

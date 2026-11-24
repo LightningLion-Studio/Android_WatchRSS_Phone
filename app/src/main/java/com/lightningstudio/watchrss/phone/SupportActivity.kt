@@ -25,7 +25,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.lightningstudio.watchrss.phone.data.ai.AiDisclosureFeature
 import com.lightningstudio.watchrss.phone.support.*
+import com.lightningstudio.watchrss.phone.ui.AiDisclosureText
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import org.json.JSONArray
 
@@ -65,12 +67,17 @@ internal fun SupportScreen(state: SupportState, vm: SupportViewModel, back: () -
     Scaffold(
         modifier = Modifier.imePadding(),
         topBar = {
-            TopAppBar(title = { Text("AI 客服") }, navigationIcon = {
-                IconButton(onClick = back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
-            }, actions = {
-                if(state.accepted) TextButton(onClick = vm::newConversation, enabled = !state.busy) { Text("新对话") }
-                TextButton(onClick = openHuman) { Text("人工客服") }
-            })
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                TopAppBar(title = { Text("AI 客服") }, navigationIcon = {
+                    IconButton(onClick = back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
+                }, actions = {
+                    if(state.accepted) TextButton(onClick = vm::newConversation, enabled = !state.busy) { Text("新对话") }
+                    TextButton(onClick = openHuman) { Text("人工客服") }
+                })
+                Box(Modifier.widthIn(max = 720.dp)) {
+                    AiDisclosureText(AiDisclosureFeature.SUPPORT)
+                }
+            }
         }
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {

@@ -1,5 +1,6 @@
 """Run the release production settings gate using only synthetic Gradle inputs."""
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -12,6 +13,14 @@ URL = "WATCHRSS_BACKEND_BASE_URL"
 KEY = "WATCHRSS_SUPABASE_ANON_KEY"
 VALID_URL = "https://example.invalid/test"
 VALID_KEY = "synthetic-test-key"
+SNAPSHOT = "ai-disclosure-default.json"
+VALID_ENTRY = {
+    "displayText": "Synthetic model\nRegistration: TEST-001",
+    "modelName": "Synthetic model",
+    "providerName": None,
+    "filingNumber": None,
+    "launchNumber": "TEST-001",
+}
 
 
 def check(project, label, local, gradle, environment, invalid, task="preReleaseBuild"):
@@ -59,6 +68,19 @@ def main():
         (project / "gradle").mkdir()
         shutil.copyfile(PROJECT / "gradle/libs.versions.toml", project / "gradle/libs.versions.toml")
 
+        assets = project / "app/src/main/assets"
+        assets.mkdir(parents=True)
+        snapshot = assets / SNAPSHOT
+        valid = {
+            "revision": 3,
+            "updatedAt": 1795000000000,
+            "features": {
+                "ai_support": [VALID_ENTRY.copy()],
+                "article_summary": [VALID_ENTRY.copy()],
+            },
+        }
+        shutil.copyfile(PROJECT / "app/src/main/assets" / SNAPSHOT, snapshot)
+
         check(project, "missing settings", {}, {}, {}, [URL, KEY])
         check(project, "blank settings", {URL: " ", KEY: " "}, {}, {}, [URL, KEY])
         for malformed in ("http://example.invalid", "https:///path", "https://bad host", "https://example.invalid:99999"):
@@ -73,7 +95,21 @@ def main():
             project, "nonblank local has priority", {URL: VALID_URL, KEY: VALID_KEY},
             {URL: "invalid"}, {URL: "invalid"}, [],
         )
-        check(project, "debug accepts missing settings", {}, {}, {}, [], "preDebugBuild")
+        local = {URL: VALID_URL, KEY: VALID_KEY}
+        valid["features"]["ai_support"][0]["launchNumber"] = "TEST-VALUE __FILL_BEFORE_RELEASE__"
+        valid["features"]["ai_support"][0]["displayText"] = "  "
+        valid["features"]["article_summary"] = []
+        snapshot.write_text(json.dumps(valid), encoding="utf-8")
+        check(project, "debug accepts missing settings and invalid disclosure", {}, {}, {}, [], "preDebugBuild")
+        check(project, "release rejects placeholder, blank field and empty feature", local, {}, {}, [
+            "features.ai_support[0].displayText",
+            "features.ai_support[0].launchNumber",
+            "features.article_summary",
+        ])
+        snapshot.write_text("", encoding="utf-8")
+        check(project, "release rejects an empty snapshot", local, {}, {}, [SNAPSHOT])
+        snapshot.unlink()
+        check(project, "release rejects a missing snapshot", local, {}, {}, [SNAPSHOT])
 
 
 if __name__ == "__main__":

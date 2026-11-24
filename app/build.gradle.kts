@@ -1,3 +1,4 @@
+import groovy.json.JsonSlurper
 import java.net.URI
 import java.net.URISyntaxException
 import java.util.Properties
@@ -63,10 +64,49 @@ val invalidProductionSettings = buildList {
     }
 }
 
+fun invalidAiDisclosureFields(snapshotFile: File): List<String> {
+    val snapshot = runCatching { JsonSlurper().parse(snapshotFile) as? Map<*, *> }.getOrNull()
+        ?: return listOf(snapshotFile.name)
+    val features = snapshot["features"] as? Map<*, *> ?: return listOf("features")
+    val requiredTextFields = listOf("displayText", "modelName")
+    val nullableTextFields = listOf("providerName", "filingNumber", "launchNumber")
+    fun isFilled(value: Any?): Boolean =
+        value is String && value.isNotBlank() && "__FILL_BEFORE_RELEASE__" !in value
+    return buildList {
+        for (field in listOf("revision", "updatedAt")) {
+            val value = snapshot[field]
+            if (value !is Int && value !is Long) add(field)
+        }
+        for (feature in listOf("ai_support", "article_summary")) {
+            val path = "features.$feature"
+            val entries = features[feature] as? List<*>
+            if (entries.isNullOrEmpty()) {
+                add(path)
+                continue
+            }
+            entries.forEachIndexed { index, raw ->
+                val entry = raw as? Map<*, *>
+                if (entry == null) {
+                    add("$path[$index]")
+                } else {
+                    for (field in requiredTextFields + nullableTextFields) {
+                        val value = entry[field]
+                        if ((field in requiredTextFields || value != null) && !isFilled(value)) {
+                            add("$path[$index].$field")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+val bundledAiDisclosure = layout.projectDirectory.file("src/main/assets/ai-disclosure-default.json")
 val validateReleaseProductionSettings by tasks.registering {
     doLast {
-        if (invalidProductionSettings.isNotEmpty()) {
-            throw GradleException(invalidProductionSettings.joinToString(", "))
+        val invalidFields = invalidProductionSettings + invalidAiDisclosureFields(bundledAiDisclosure.asFile)
+        if (invalidFields.isNotEmpty()) {
+            throw GradleException(invalidFields.joinToString(", "))
         }
     }
 }
@@ -85,8 +125,8 @@ android {
         applicationId = "com.lightningstudio.watchrss.phone"
         minSdk = 30
         targetSdk = 36
-        versionCode = 122
-        versionName = "1.4.1-2"
+        versionCode = 123
+        versionName = "1.4.1-3"
         // P1 is local-only and opt-in. This flag never enables cloud/apply/GC.
         // Debug defaults keep the legacy protocol available for comparison.
         buildConfigField("boolean", "B2_ENABLED", providers.gradleProperty("b2Enabled").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")

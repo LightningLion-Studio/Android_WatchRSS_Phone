@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import com.lightningstudio.watchrss.phone.support.*
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import org.json.JSONArray
+import com.lightningstudio.watchrss.phone.ui.releaseSmokeError
 
 class SupportActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -145,7 +146,7 @@ internal fun SupportScreen(state: SupportState, vm: SupportViewModel, back: () -
                     }
                 }
                 state.error?.let { error ->
-                    Text(error, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 8.dp))
+                    Text(error, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 8.dp).releaseSmokeError())
                     if(!state.busy) TextButton(onClick = vm::refresh) { Text("重新加载") }
                 }
             }

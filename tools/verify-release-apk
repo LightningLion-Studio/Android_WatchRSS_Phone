@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Compare a signed WatchRSS Phone candidate with the previous official APK."""
+
+import argparse
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+from urllib.parse import urlsplit
+import xml.etree.ElementTree as ET
+
+PACKAGE = "com.lightningstudio.watchrss.phone"
+ANDROID = "{http://schemas.android.com/apk/res/android}"
+URL_FIELD = "WATCHRSS_PRODUCTION_BACKEND_BASE_URL"
+KEY_FIELD = "WATCHRSS_PRODUCTION_SUPABASE_ANON_KEY"
+FIELDS = (URL_FIELD, KEY_FIELD)
+JAVA_STRING = r'"(?:[^"\\]|\\.)*"'
+DEFAULTS = {
+    URL_FIELD: r"\(\w+ & 2\) != 0 \?\s*(?:[\w.]+\(\s*)?(?P<value>{})(?=\s*[,):])",
+    KEY_FIELD: r"\(\w+ & 4\) != 0 \?\s*(?P<value>{})(?=\s*:)",
+}
+
+
+def sdk_tool(name):
+    installed = shutil.which(name)
+    if installed:
+        return installed
+    sdk = Path(os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+               or Path.home() / "Android/Sdk")
+    if name == "apkanalyzer":
+        return str(sdk / "cmdline-tools/latest/bin/apkanalyzer")
+    versions = sorted(
+        (path for path in (sdk / "build-tools").glob("*/apksigner")
+         if re.fullmatch(r"\d+(?:\.\d+)+", path.parent.name)),
+        key=lambda path: tuple(map(int, path.parent.name.split("."))),
+    )
+    return str(versions[-1]) if versions else name
+
+
+def capture(cmd, timeout=120):
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout)
+        return result.stdout
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return None
+
+
+def decompile(apk, cls, output):
+    # The protected temporary directory and captured subprocess output can contain secrets.
+    if capture(["jadx", "--quiet", "--no-res", "--single-class", f"{PACKAGE}.{cls}",
+                "--single-class-output", str(output), str(apk)]) is None:
+        return ""
+    try:
+        return output.read_text()
+    except (OSError, UnicodeError):
+        return ""
+
+
+def java_literal(value):
+    try:
+        return json.loads(value)
+    except ValueError:
+        return None
+
+
+def config(apk, directory):
+    build_config = decompile(apk, "BuildConfig", directory / "BuildConfig.java")
+    account = decompile(apk, "account.AccountEnvironment", directory / "AccountEnvironment.java")
+    values = {
+        "debuggable": bool(re.search(r"\bstatic final boolean DEBUG\s*=\s*false\s*;", build_config))
+    }
+    for field in FIELDS:
+        declared = re.findall(rf"\bstatic final String {field}\s*=\s*({JAVA_STRING})\s*;", build_config)
+        if len(declared) != 1:
+            continue
+        value = java_literal(declared[0])
+        expression = rf'{JAVA_STRING}|BuildConfig\.{field}\b'
+        defaults = re.findall(DEFAULTS[field].format(expression), account)
+        if len(defaults) != 1 or value is None:
+            continue
+        actual = value if defaults[0] == f"BuildConfig.{field}" else java_literal(defaults[0])
+        if field == URL_FIELD and actual in (value, value.rstrip("/")):
+            values[field] = https_host(value)
+        if field == KEY_FIELD:
+            digest = anon_digest(value)
+            if digest is not None and anon_digest(actual) == digest:
+                values[field] = digest
+    return values
+
+
+def https_host(value):
+    if not value or re.search(r"[\s\x00-\x1f\x7f\\?#]|%(?![0-9a-fA-F]{2})", value):
+        return None
+    try:
+        url = urlsplit(value)
+        port = url.port
+        host = url.hostname
+        if (url.scheme != "https" or not host or url.username is not None
+                or url.netloc.endswith(":") or port == 0 or re.search(r'[<>"{}|^`\[\]]', url.path)):
+            return None
+        if ":" in host:
+            address = ipaddress.IPv6Address(host)
+            if re.fullmatch(r"\[[0-9a-f:]+\](?::[0-9]+)?", url.netloc, re.IGNORECASE):
+                return str(address)
+            return None
+        if not re.fullmatch(r"[a-z0-9.-]+(?::[0-9]+)?", url.netloc, re.IGNORECASE):
+            return None
+        if all(part.isdigit() for part in host.split(".")):
+            return str(ipaddress.IPv4Address(host))
+        labels = host.removesuffix(".").split(".")
+        if all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label) for label in labels):
+            return host
+    except ValueError:
+        pass
+    return None
+
+
+def anon_digest(value):
+    try:
+        return hashlib.sha256(value.encode()).digest() if value and value.strip() else None
+    except UnicodeError:
+        return None
+
+
+def manifest(apk):
+    output = capture([sdk_tool("apkanalyzer"), "manifest", "print", str(apk)])
+    try:
+        root = ET.fromstring(output or "")
+        app = root.find("application")
+        code = int(root.attrib[ANDROID + "versionCode"], 0)
+        major = int(root.get(ANDROID + "versionCodeMajor", "0"), 0)
+        debuggable = app.get(ANDROID + "debuggable", "false") if app is not None else None
+        version = (major << 32) + code if 0 < code < 2**32 and 0 <= major < 2**31 else None
+        return root.get("package"), debuggable, version
+    except (ET.ParseError, KeyError, ValueError):
+        return None, None, None
+
+
+def certificates(apk):
+    output = capture([sdk_tool("apksigner"), "verify", "--print-certs", str(apk)])
+    return set(re.findall(r"^Signer #\d+ certificate SHA-256 digest: ([a-fA-F0-9]{64})\s*$",
+                          output or "", re.MULTILINE))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("candidate", type=lambda path: Path(path).resolve())
+    parser.add_argument("previous", type=lambda path: Path(path).resolve())
+    args = parser.parse_args()
+    with tempfile.TemporaryDirectory(prefix="watchrss-apk-") as tmp:
+        directory = Path(tmp)
+        candidate_dir = directory / "candidate"
+        previous_dir = directory / "previous"
+        candidate_dir.mkdir()
+        previous_dir.mkdir()
+        candidate_config = config(args.candidate, candidate_dir)
+        previous_config = config(args.previous, previous_dir)
+
+    current_host = candidate_config.get(URL_FIELD)
+    previous_host = previous_config.get(URL_FIELD)
+    current_key = candidate_config.get(KEY_FIELD)
+    previous_key = previous_config.get(KEY_FIELD)
+    current_package, debuggable, current_version = manifest(args.candidate)
+    previous_package, _, previous_version = manifest(args.previous)
+    current_certs = certificates(args.candidate)
+    previous_certs = certificates(args.previous)
+
+    checks = {
+        URL_FIELD: current_host is not None and current_host == previous_host,
+        KEY_FIELD: current_key is not None and current_key == previous_key,
+        "applicationId": current_package == previous_package == PACKAGE,
+        "debuggable": debuggable == "false" and candidate_config["debuggable"],
+        "versionCode": current_version is not None and previous_version is not None
+        and current_version > previous_version,
+        "signingCertificate": bool(current_certs) and current_certs == previous_certs,
+    }
+    for name, passed in checks.items():
+        print(f"{name} {'PASS' if passed else 'FAIL'}")
+    return 0 if all(checks.values()) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

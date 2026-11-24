@@ -1,4 +1,5 @@
 import java.util.Properties
+import watchrss.build.ReleaseConfiguration
 
 plugins {
     alias(libs.plugins.android.application)
@@ -21,21 +22,38 @@ if (localPropertiesFile.exists()) {
     localPropertiesFile.inputStream().use { localProperties.load(it) }
 }
 
-fun productionSetting(name: String): String =
-    localProperties.getProperty(name)
-        ?: providers.gradleProperty(name).orNull
-        ?: providers.environmentVariable(name).orNull
-        ?: when (name) {
-            "WATCHRSS_APP_ACCESS_PUBLIC_KEY" -> "config/app_access_public_key.pem"
+fun productionSetting(name: String): String = ReleaseConfiguration.firstNonBlank(
+    { localProperties.getProperty(name) },
+    { providers.gradleProperty(name).orNull },
+    { providers.environmentVariable(name).orNull },
+    {
+        when (name) {
+            ReleaseConfiguration.APP_ACCESS_KEY -> "config/app_access_public_key.pem"
             "WATCHRSS_TEST_APP_ACCESS_PUBLIC_KEY" -> "config/app_access_test_public_key.pem"
             else -> null
-        }?.let { relativePath ->
-            rootProject.file(relativePath)
-                .takeIf { it.isFile }
-                ?.readText()
-                ?.trim()
+        }?.let { path -> rootProject.file(path).takeIf { it.isFile }?.readText() }
+    }
+)
+
+val productionBackendUrl = productionSetting(ReleaseConfiguration.BACKEND_URL)
+val productionAnonKey = productionSetting(ReleaseConfiguration.ANON_KEY)
+val productionAppAccessKey = productionSetting(ReleaseConfiguration.APP_ACCESS_KEY)
+val invalidReleaseFields = ReleaseConfiguration.invalidFields(
+    productionBackendUrl, productionAnonKey, productionAppAccessKey
+)
+val verifyReleaseConfiguration by tasks.registering {
+    doLast {
+        if (invalidReleaseFields.isNotEmpty()) {
+            throw GradleException(invalidReleaseFields.joinToString("\n"))
         }
-        ?: ""
+    }
+}
+
+androidComponents.onVariants(androidComponents.selector().withBuildType("release")) { variant ->
+    variant.lifecycleTasks.registerPreBuild(verifyReleaseConfiguration)
+    tasks.matching { it.name == variant.computeTaskName("generate", "BuildConfig") }
+        .configureEach { dependsOn(verifyReleaseConfiguration) }
+}
 
 fun String.asBuildConfigString(): String =
     "\"${replace("\\", "\\\\")
@@ -75,18 +93,18 @@ android {
         buildConfigField(
             "String",
             "WATCHRSS_PRODUCTION_BACKEND_BASE_URL",
-            productionSetting("WATCHRSS_BACKEND_BASE_URL").asBuildConfigString()
+            productionBackendUrl.asBuildConfigString()
         )
         buildConfigField(
             "String",
             "WATCHRSS_PRODUCTION_SUPABASE_ANON_KEY",
-            productionSetting("WATCHRSS_SUPABASE_ANON_KEY").asBuildConfigString()
+            productionAnonKey.asBuildConfigString()
         )
         buildConfigField("String", "WATCHRSS_TEST_SUPABASE_ANON_KEY", "\"\"")
         buildConfigField(
             "String",
             "WATCHRSS_APP_ACCESS_PUBLIC_KEY",
-            productionSetting("WATCHRSS_APP_ACCESS_PUBLIC_KEY").asBuildConfigString()
+            productionAppAccessKey.asBuildConfigString()
         )
         buildConfigField("String", "WATCHRSS_TEST_APP_ACCESS_PUBLIC_KEY", "\"\"")
         buildConfigField(

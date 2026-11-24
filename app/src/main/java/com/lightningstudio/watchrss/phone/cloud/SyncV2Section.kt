@@ -43,6 +43,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import com.lightningstudio.watchrss.phone.ui.releaseSmokeError
 
 private fun codeOf(error: Throwable): String =
     (error as? SyncV2CloudError)?.code ?: error.message?.takeIf { Regex("[a-z][a-z0-9_]{0,63}").matches(it) } ?: "temporarily_unavailable"
@@ -73,7 +74,17 @@ internal fun SyncV2Section(service: PhoneCloudSyncService) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(notice.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = accent)
+                        Text(
+                            notice.title,
+                            modifier = if (notice.tone == SyncV2View.Tone.ERROR) {
+                                Modifier.releaseSmokeError()
+                            } else {
+                                Modifier
+                            },
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = accent
+                        )
                         Text(notice.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Spacer(Modifier.width(12.dp))

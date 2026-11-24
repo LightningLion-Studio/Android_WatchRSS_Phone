@@ -1,3 +1,5 @@
+import java.net.URI
+import java.net.URISyntaxException
 import java.util.Properties
 
 plugins {
@@ -22,9 +24,9 @@ if (localPropertiesFile.exists()) {
 }
 
 fun productionSetting(name: String): String =
-    localProperties.getProperty(name)
-        ?: providers.gradleProperty(name).orNull
-        ?: providers.environmentVariable(name).orNull
+    localProperties.getProperty(name)?.takeIf { it.isNotBlank() }
+        ?: providers.gradleProperty(name).orNull?.takeIf { it.isNotBlank() }
+        ?: providers.environmentVariable(name).orNull?.takeIf { it.isNotBlank() }
         ?: when (name) {
             "WATCHRSS_APP_ACCESS_PUBLIC_KEY" -> "config/app_access_public_key.pem"
             "WATCHRSS_TEST_APP_ACCESS_PUBLIC_KEY" -> "config/app_access_test_public_key.pem"
@@ -43,6 +45,36 @@ fun String.asBuildConfigString(): String =
         .replace("\r", "\\r")
         .replace("\n", "\\n")}\""
 
+val productionBackendBaseUrl = productionSetting("WATCHRSS_BACKEND_BASE_URL")
+val productionSupabaseAnonKey = productionSetting("WATCHRSS_SUPABASE_ANON_KEY")
+val invalidProductionSettings = buildList {
+    val backendUri = try {
+        URI(productionBackendBaseUrl)
+    } catch (_: URISyntaxException) {
+        null
+    }
+    if (backendUri == null || !backendUri.scheme.equals("https", ignoreCase = true) ||
+        backendUri.host.isNullOrBlank() || backendUri.port > 65535
+    ) {
+        add("WATCHRSS_BACKEND_BASE_URL")
+    }
+    if (productionSupabaseAnonKey.isBlank()) {
+        add("WATCHRSS_SUPABASE_ANON_KEY")
+    }
+}
+
+val validateReleaseProductionSettings by tasks.registering {
+    doLast {
+        if (invalidProductionSettings.isNotEmpty()) {
+            throw GradleException(invalidProductionSettings.joinToString(", "))
+        }
+    }
+}
+
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    dependsOn(validateReleaseProductionSettings)
+}
+
 android {
     testOptions { unitTests.isIncludeAndroidResources = true }
     namespace = "com.lightningstudio.watchrss.phone"
@@ -53,8 +85,8 @@ android {
         applicationId = "com.lightningstudio.watchrss.phone"
         minSdk = 30
         targetSdk = 36
-        versionCode = 121
-        versionName = "1.4.1-1"
+        versionCode = 122
+        versionName = "1.4.1-2"
         // P1 is local-only and opt-in. This flag never enables cloud/apply/GC.
         // Debug defaults keep the legacy protocol available for comparison.
         buildConfigField("boolean", "B2_ENABLED", providers.gradleProperty("b2Enabled").orNull?.toBooleanStrictOrNull()?.toString() ?: "false")
@@ -76,12 +108,12 @@ android {
         buildConfigField(
             "String",
             "WATCHRSS_PRODUCTION_BACKEND_BASE_URL",
-            productionSetting("WATCHRSS_BACKEND_BASE_URL").asBuildConfigString()
+            productionBackendBaseUrl.asBuildConfigString()
         )
         buildConfigField(
             "String",
             "WATCHRSS_PRODUCTION_SUPABASE_ANON_KEY",
-            productionSetting("WATCHRSS_SUPABASE_ANON_KEY").asBuildConfigString()
+            productionSupabaseAnonKey.asBuildConfigString()
         )
         buildConfigField("String", "WATCHRSS_TEST_SUPABASE_ANON_KEY", "\"\"")
         buildConfigField(

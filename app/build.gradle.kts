@@ -41,10 +41,16 @@ val productionAppAccessKey = productionSetting(ReleaseConfiguration.APP_ACCESS_K
 val invalidReleaseFields = ReleaseConfiguration.invalidFields(
     productionBackendUrl, productionAnonKey, productionAppAccessKey
 )
+val bundledAiDisclosure = layout.projectDirectory.file(
+    "src/main/assets/${ReleaseConfiguration.AI_DISCLOSURE_ASSET}"
+)
 val verifyReleaseConfiguration by tasks.registering {
     doLast {
-        if (invalidReleaseFields.isNotEmpty()) {
-            throw GradleException(invalidReleaseFields.joinToString("\n"))
+        val invalidFields = invalidReleaseFields + ReleaseConfiguration.invalidAiDisclosureFields(
+            runCatching { bundledAiDisclosure.asFile.readText() }.getOrNull()
+        )
+        if (invalidFields.isNotEmpty()) {
+            throw GradleException(invalidFields.joinToString("\n"))
         }
     }
 }

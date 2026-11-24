@@ -1,0 +1,24 @@
+{
+  "revision": 1,
+  "updatedAt": 1795478400000,
+  "features": {
+    "ai_support": [
+      {
+        "displayText": "所用模型：DeepSeek-V4.1-Flash\n备案号：网信算备330105747635301240017号",
+        "modelName": "DeepSeek-V4.1-Flash",
+        "providerName": "百度智能云千帆",
+        "filingNumber": "网信算备330105747635301240017号",
+        "launchNumber": null
+      }
+    ],
+    "article_summary": [
+      {
+        "displayText": "所用模型：DeepSeek-V4.1-Flash\n备案号：网信算备330105747635301240017号",
+        "modelName": "DeepSeek-V4.1-Flash",
+        "providerName": "百度智能云千帆",
+        "filingNumber": "网信算备330105747635301240017号",
+        "launchNumber": null
+      }
+    ]
+  }
+}

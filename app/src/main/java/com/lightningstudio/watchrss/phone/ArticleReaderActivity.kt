@@ -135,6 +135,7 @@ import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
+import com.lightningstudio.watchrss.phone.data.ai.AiDisclosureFeature
 import com.lightningstudio.watchrss.phone.data.ai.PhoneAiSummaryResult
 import com.lightningstudio.watchrss.phone.data.importer.WebArticleImporter
 import com.lightningstudio.watchrss.phone.data.local.ARTICLE_TEXT_CHUNK_BYTES
@@ -142,6 +143,7 @@ import com.lightningstudio.watchrss.phone.data.local.isArticleContentMarker
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.repo.PhoneImportedTextReader
 import com.lightningstudio.watchrss.phone.data.reader.ReaderTypographyRole
+import com.lightningstudio.watchrss.phone.ui.AiDisclosureText
 import com.lightningstudio.watchrss.phone.ui.reader.ProvideReaderPreset
 import com.lightningstudio.watchrss.phone.ui.reader.LocalReaderPresetRuntime
 import com.lightningstudio.watchrss.phone.ui.reader.ReaderBackgroundSurface
@@ -1211,38 +1213,45 @@ internal fun ArticleReaderScreen(
                     shape = RoundedCornerShape(20.dp),
                     color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f)
                 ) {
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp)
-                            .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.fillMaxWidth().padding(vertical = 16.dp)) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Text("AI 总结", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                             GlassButton(onClick = { showAiSummary = false }) { Text("关闭") }
                         }
-                        when {
-                            aiLoading -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                CircularProgressIndicator(Modifier.size(20.dp))
-                                Text("正在处理长正文…")
-                            }
-                            aiError != null -> {
-                                Text(aiError.orEmpty(), color = MaterialTheme.colorScheme.error)
-                                GlassButton(onClick = ::startAiSummary) { Text("重试") }
-                            }
-                            aiResult != null -> {
-                                SelectionContainer {
-                                    Text(aiResult!!.text, style = readerTextStyle(ReaderTextRole.BODY))
+                        AiDisclosureText(AiDisclosureFeature.ARTICLE_SUMMARY)
+                        Column(
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .fillMaxWidth()
+                                .verticalScroll(rememberScrollState())
+                                .padding(horizontal = 16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            when {
+                                aiLoading -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    CircularProgressIndicator(Modifier.size(20.dp))
+                                    Text("正在处理长正文…")
                                 }
-                                if (aiConfig.showTokenUsage) {
-                                    Text(
-                                        "词元：输入 ${aiResult!!.promptTokens ?: 0} · 输出 ${aiResult!!.completionTokens ?: 0} · 合计 ${aiResult!!.totalTokens ?: 0}",
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
+                                aiError != null -> {
+                                    Text(aiError.orEmpty(), color = MaterialTheme.colorScheme.error)
+                                    GlassButton(onClick = ::startAiSummary) { Text("重试") }
                                 }
+                                aiResult != null -> {
+                                    SelectionContainer {
+                                        Text(aiResult!!.text, style = readerTextStyle(ReaderTextRole.BODY))
+                                    }
+                                    if (aiConfig.showTokenUsage) {
+                                        Text(
+                                            "词元：输入 ${aiResult!!.promptTokens ?: 0} · 输出 ${aiResult!!.completionTokens ?: 0} · 合计 ${aiResult!!.totalTokens ?: 0}",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                                else -> GlassButton(onClick = ::startAiSummary) { Text("开始总结") }
                             }
-                            else -> GlassButton(onClick = ::startAiSummary) { Text("开始总结") }
                         }
                     }
                 }

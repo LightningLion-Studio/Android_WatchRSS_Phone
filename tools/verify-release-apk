@@ -13,12 +13,15 @@ import subprocess
 import tempfile
 from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
+import zipfile
 
 PACKAGE = "com.lightningstudio.watchrss.phone"
 ANDROID = "{http://schemas.android.com/apk/res/android}"
 URL_FIELD = "WATCHRSS_PRODUCTION_BACKEND_BASE_URL"
 KEY_FIELD = "WATCHRSS_PRODUCTION_SUPABASE_ANON_KEY"
 FIELDS = (URL_FIELD, KEY_FIELD)
+AI_DISCLOSURE_ASSET = "assets/ai-disclosure-default.json"
+AI_DISCLOSURE_PLACEHOLDER = "__FILL_BEFORE_RELEASE__"
 JAVA_STRING = r'"(?:[^"\\]|\\.)*"'
 DEFAULTS = {
     URL_FIELD: r"\(\w+ & 2\) != 0 \?\s*(?:[\w.]+\(\s*)?(?P<value>{})(?=\s*[,):])",
@@ -147,6 +150,43 @@ def certificates(apk):
                           output or "", re.MULTILINE))
 
 
+def valid_disclosure_text(value):
+    return isinstance(value, str) and bool(value.strip()) and AI_DISCLOSURE_PLACEHOLDER not in value
+
+
+def valid_ai_disclosure(apk):
+    try:
+        with zipfile.ZipFile(apk) as archive:
+            if archive.namelist().count(AI_DISCLOSURE_ASSET) != 1:
+                return False
+            source = archive.read(AI_DISCLOSURE_ASSET).decode("utf-8")
+            snapshot = json.loads(source)
+    except (OSError, ValueError, RuntimeError, zipfile.BadZipFile):
+        return False
+    if not isinstance(snapshot, dict) or AI_DISCLOSURE_PLACEHOLDER in source:
+        return False
+    for field in ("revision", "updatedAt"):
+        if type(snapshot.get(field)) is not int or not -(2**63) <= snapshot[field] < 2**63:
+            return False
+    features = snapshot.get("features")
+    if not isinstance(features, dict):
+        return False
+    for feature in ("ai_support", "article_summary"):
+        entries = features.get(feature)
+        if not isinstance(entries, list) or not entries:
+            return False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                return False
+            if any(not valid_disclosure_text(entry.get(field)) for field in ("displayText", "modelName")):
+                return False
+            for field in ("providerName", "filingNumber", "launchNumber"):
+                value = entry.get(field)
+                if value is not None and not valid_disclosure_text(value):
+                    return False
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("candidate", type=lambda path: Path(path).resolve())
@@ -178,6 +218,7 @@ def main():
         "versionCode": current_version is not None and previous_version is not None
         and current_version > previous_version,
         "signingCertificate": bool(current_certs) and current_certs == previous_certs,
+        AI_DISCLOSURE_ASSET: valid_ai_disclosure(args.candidate),
     }
     for name, passed in checks.items():
         print(f"{name} {'PASS' if passed else 'FAIL'}")

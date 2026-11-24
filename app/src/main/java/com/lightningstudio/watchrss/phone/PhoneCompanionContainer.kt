@@ -6,6 +6,7 @@ import com.lightningstudio.watchrss.phone.account.AccountEnvironment
 import com.lightningstudio.watchrss.phone.account.EncryptedAccountSessionStore
 import com.lightningstudio.watchrss.phone.account.PhoneAccountClient
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
+import com.lightningstudio.watchrss.phone.data.about.AboutSectionRepository
 import com.lightningstudio.watchrss.phone.data.ai.AiDisclosureRepository
 import com.lightningstudio.watchrss.phone.data.ai.PhoneAiSettingsStore
 import com.lightningstudio.watchrss.phone.data.ai.PhoneAiSummaryService
@@ -253,6 +254,7 @@ class PhoneCompanionContainer(context: Context) {
         ReaderPresetTransferService(appContext, readerPresetRepository)
     }
 
+    internal val aboutSectionRepository by lazy { AboutSectionRepository.create(appContext) }
     internal val aiDisclosureRepository by lazy { AiDisclosureRepository.create(appContext) }
 
     val aiSettingsStore: PhoneAiSettingsStore by lazy {

@@ -13,6 +13,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -24,6 +25,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lightningstudio.watchrss.phone.data.about.AboutSectionItem
 import com.lightningstudio.watchrss.phone.ui.AdaptiveContentFrame
 import com.lightningstudio.watchrss.phone.ui.AdaptiveWindowScope
 import com.lightningstudio.watchrss.phone.ui.adaptiveContentWidth
@@ -70,6 +72,10 @@ fun AboutScreen(
     onOpenPrivacyPolicy: () -> Unit,
     onBeianClick: () -> Unit
 ) {
+    val app = LocalContext.current.applicationContext as PhoneCompanionApplication
+    val remoteItems by produceState(emptyList<AboutSectionItem>(), app) {
+        value = app.container.aboutSectionRepository.load()
+    }
     var visible by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
@@ -131,6 +137,9 @@ fun AboutScreen(
                                 description = "查看账号、同步、统计分析及第三方服务的数据处理说明",
                                 onClick = onOpenPrivacyPolicy
                             )
+                            if (remoteItems.isNotEmpty()) {
+                                RemoteAboutSection(remoteItems)
+                            }
                             Spacer(modifier = Modifier.height(64.dp))
                         }
                     }
@@ -151,6 +160,34 @@ fun AboutScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     BeianNumberText(onClick = onBeianClick)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RemoteAboutSection(items: List<AboutSectionItem>) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            for (item in items) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    item.title?.takeIf(String::isNotBlank)?.let { title ->
+                        Text(title, style = MaterialTheme.typography.titleSmall)
+                    }
+                    SelectionContainer {
+                        Text(
+                            text = item.body,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }

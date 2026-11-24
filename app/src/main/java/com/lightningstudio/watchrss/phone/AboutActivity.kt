@@ -213,7 +213,7 @@ fun AboutSection() {
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "版本 1.0.1",
+                text = "版本 ${BuildConfig.VERSION_NAME}",
                 fontSize = 14.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
 import com.lightningstudio.watchrss.phone.BuildConfig
+import com.lightningstudio.watchrss.phone.cloud.CloudHeadReply
 import com.lightningstudio.watchrss.phone.network.CloudCallCancellation
 import com.lightningstudio.watchrss.phone.network.limitToDeadline
 import okhttp3.HttpUrl
@@ -82,11 +83,7 @@ internal class SyncV2CloudClient(
         beforeRequest: () -> Unit = {}): Pair<ByteArray,Map<String,String>> {
         val s = active()
         if(path!="capabilities" && !capabilitiesChecked)SyncV2Codec.fail("authentication_required")
-        val builder = Request.Builder().url(url(path,query,bodyChannel,!bodyChannel || method=="GET")).header("Authorization", "Bearer ${s.bearer}")
-            .header("apikey",s.apiKey).header("x-watchrss-cloud-device-id",s.legacyDeviceId)
-            .header("x-watchrss-library-epoch",s.legacyEpoch).header("x-watchrss-content-generation",s.legacyGeneration)
-            .header("Accept",if(raw)"application/octet-stream" else "application/json")
-        s.deviceAuthorization?.let { builder.header("x-watchrss-device-authorization",it) }
+        val builder = authenticatedRequest(s, url(path, query, bodyChannel, !bodyChannel || method == "GET"), raw)
         headers.forEach { (k,v) -> builder.header(k,v) }
         val request = builder.method(method, body?.toRequestBody((if(raw || method=="PUT")"application/octet-stream" else "application/json").toMediaType())).build()
         val call=http.newCall(request)
@@ -126,6 +123,67 @@ internal class SyncV2CloudClient(
             }
         } finally {calls.remove(call)}
     }
+    private fun authenticatedRequest(session: Session, url: HttpUrl, raw: Boolean = false) =
+        Request.Builder().url(url)
+            .header("Authorization", "Bearer ${session.bearer}")
+            .header("apikey", session.apiKey)
+            .header("x-watchrss-cloud-device-id", session.legacyDeviceId)
+            .header("x-watchrss-library-epoch", session.legacyEpoch)
+            .header("x-watchrss-content-generation", session.legacyGeneration)
+            .header("Accept", if (raw) "application/octet-stream" else "application/json")
+            .apply { session.deviceAuthorization?.let { header("x-watchrss-device-authorization", it) } }
+
+    /** This probe does not negotiate a window or report authentication errors to the UI. */
+    suspend fun accountHead(etag: String?): CloudHeadReply = runCancellable {
+        val request = authenticatedRequest(active(), url("account/head"))
+            .apply { etag?.let { header("If-None-Match", it) } }
+            .get().build()
+        val call = http.newCall(request)
+        calls.add(call)
+        try {
+            active()
+            execute(call) { response ->
+                active()
+                when (response.code) {
+                    304 -> CloudHeadReply.Unchanged
+                    404 -> CloudHeadReply.Unsupported
+                    429 -> {
+                        val retry = response.header("Retry-After")?.toLongOrNull()
+                            ?.takeIf { it >= 0 }?.coerceAtMost(300)?.times(1_000)
+                            ?: response.headers.getDate("Retry-After")?.let {
+                                (it.time - System.currentTimeMillis()).coerceAtLeast(0)
+                            }
+                            ?: runCatching { headResponseJson(response).pollAfterMillis() }.getOrNull()
+                        CloudHeadReply.RateLimited(retry)
+                    }
+                    200 -> {
+                        val json = headResponseJson(response)
+                        val tag = response.header("ETag")
+                        if (tag == null || tag.length !in 3..256 || !tag.startsWith('"') ||
+                            !tag.endsWith('"') || tag.removeSurrounding("\"") != json.optString("etag").removeSurrounding("\"")
+                        ) throw IOException("Invalid account head ETag")
+                        CloudHeadReply.Head(tag, json.pollAfterMillis())
+                    }
+                    else -> throw IOException("Account head HTTP ${response.code}")
+                }
+            }
+        } finally {
+            calls.remove(call)
+        }
+    }
+
+    private fun headResponseJson(response: okhttp3.Response): JSONObject {
+        val bytes = response.peekBody(4_097).bytes()
+        if (bytes.size > 4_096) throw IOException("Account head response too large")
+        return try {
+            JSONObject(String(bytes, Charsets.UTF_8))
+        } catch (error: org.json.JSONException) {
+            throw IOException("Invalid account head response", error)
+        }
+    }
+
+    private fun JSONObject.pollAfterMillis(): Long? = optLong("pollAfterMs", 0).takeIf { it > 0 }
+
     private fun <T> execute(call: okhttp3.Call, read: (okhttp3.Response) -> T): T {
         val round = roundCancellation.get()
         return if (round != null) round.execute(call, read) else call.execute().use(read)

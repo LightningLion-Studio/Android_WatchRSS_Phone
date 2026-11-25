@@ -84,6 +84,28 @@ class ClientConfigRepositoryTest {
     }
 
     @Test
+    fun syncHeadPollDefaultsOnAndCanBeDisabledRemotely() = runBlocking {
+        MockWebServer().use { server ->
+            val repo = repository(server)
+            val head = FeatureRegistry.syncHeadPoll
+            val oldConfig = JSONObject(config(1, 20, null))
+            server.enqueue(MockResponse().setBody(oldConfig.toString()))
+            assertTrue(repo.decide(repo.snapshotForSession(), head, eligible = true).enabled)
+
+            advanceClock(601_000)
+            oldConfig.put("configVersion", 2)
+            oldConfig.getJSONObject("features").put("sync_head_poll_v1", JSONObject()
+                .put("percent", 100).put("salt", "head-poll")
+                .put("minAppVersionCode", 0).put("maxAppVersionCode", JSONObject.NULL)
+                .put("forced", "off"))
+            server.enqueue(MockResponse().setBody(oldConfig.toString()))
+            val disabled = repo.snapshotForSession()
+            assertEquals(2L, disabled.version)
+            assertFalse(repo.decide(disabled, head, eligible = true).enabled)
+        }
+    }
+
+    @Test
     fun invalidOrUnavailableFirstResponseUsesBuildDefaults() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(503))

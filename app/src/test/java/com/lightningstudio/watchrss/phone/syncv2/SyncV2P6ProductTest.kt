@@ -5,7 +5,11 @@ import android.content.ContextWrapper
 import android.content.SharedPreferences
 import androidx.room.Room
 import com.lightningstudio.watchrss.phone.PhoneCompanionContainer
+import com.lightningstudio.watchrss.phone.cloud.CloudHeadReply
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
+import com.lightningstudio.watchrss.phone.cloud.CloudProtocolV2
+import com.lightningstudio.watchrss.phone.cloud.PhoneCloudHeadPoller
+import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncResult
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
 import com.lightningstudio.watchrss.phone.account.LoginProgress
 import com.lightningstudio.watchrss.phone.cloud.CloudSyncPhase
@@ -72,6 +76,8 @@ class SyncV2P6ProductTest {
         var negotiateStepMillis=0L;var timeOffsetMillis=0L;var expiredNegotiate=false;var checkpoints=0
         var account=JSONObject().put("commitOid",JSONObject.NULL).put("revision","0").put("rollbackGeneration","0")
         var closedBodyChannel=false;var bodyRequests=0
+        var headResponse: () -> MockResponse = { MockResponse().setResponseCode(404) }
+        val headRequests = java.util.concurrent.CopyOnWriteArrayList<RecordedRequest>()
         var blockBodyList = false
         var publishes=0;var acks=0;var inits=0;var queries=0;var dropPublish=false;var failQuery=false
         var block:String?=null;val entered=CountDownLatch(1);val unblock=CountDownLatch(1)
@@ -100,6 +106,10 @@ class SyncV2P6ProductTest {
                         return response(JSONObject().put("version",1).put("purpose",SyncV2BodyCodec.PURPOSE).put("scope",scope()).put("carriers",JSONArray()).put("nextAfter",JSONObject.NULL))
                     }
                     val route=r.requestUrl!!.encodedPath.removePrefix(SyncV2Origin.path)
+                    if (route == "account/head") {
+                        headRequests += r
+                        return headResponse()
+                    }
                     if(route==block){block=null;entered.countDown();assertTrue(unblock.await(10,TimeUnit.SECONDS))}
                     val s=JSONObject().put("repoId",r.requestUrl!!.queryParameter("repoId")).put("libraryEpoch",r.requestUrl!!.queryParameter("libraryEpoch")).put("contentGeneration",r.requestUrl!!.queryParameter("contentGeneration"))
                     if(!readGate && route!="capabilities")return error("feature_disabled")
@@ -714,6 +724,16 @@ class SyncV2P6ProductTest {
         val settings=com.lightningstudio.watchrss.phone.cloud.PhoneCloudStateStore(preferences)
         var announced=true;var failAuthentication=false;var unsupported=false;var legacyCalls=0;var bootstraps=0
         var bootstrapTimesOut = false
+        var approvedForHead = false
+        private fun approvedDevices(owner: String): JSONArray {
+            if (!approvedForHead) return JSONArray()
+            val publicKey = "head-poll-fixture".toByteArray()
+            return JSONArray().put(JSONObject()
+                .put("deviceId", h.id).put("platform", "phone")
+                .put("publicKeySpki", java.util.Base64.getEncoder().encodeToString(publicKey))
+                .put("attestationKeyVersion", 1)
+                .put("attestation", CloudProtocolV2.attestation(h.server.wrap, owner, epoch, h.id, publicKey)))
+        }
         var memberReadable = true
         var onBootstrapRequest: (() -> Unit)? = null
         var onRevokeRequest: (() -> Unit)? = null
@@ -750,7 +770,7 @@ class SyncV2P6ProductTest {
             val body=if(status==200)JSONObject().put("libraryEpoch",epoch).put("contentGeneration",generation).put("contentEmpty",false)
                 .put("member",memberJson())
                 .put("keyVersionFloor",0).put("keyCommitments",JSONArray().put(JSONObject().put("keyVersion",1).put("commitment",com.lightningstudio.watchrss.phone.cloud.CloudProtocolV2.commitment(h.server.wrap,owner,epoch,1))))
-                .put("keyEnvelopes",JSONArray()).put("devices",JSONArray()).also{if(announced)it.put("syncV2",h.server.announcement)}
+                .put("keyEnvelopes",JSONArray()).put("devices",approvedDevices(owner)).also{if(announced)it.put("syncV2",h.server.announcement)}
                 else JSONObject().put("error",if(unsupported)"client_upgrade_required"else if(failAuthentication)"invalid_token"else JSONObject().put("code","upgrade_required").put("details",JSONObject().put("requiredFeatures",JSONArray().put("sync-objects.v2"))))
                     status to body
                 }
@@ -793,6 +813,97 @@ class SyncV2P6ProductTest {
             }
         override fun close(){scope.coroutineContext[kotlinx.coroutines.Job]?.cancel();service.javaClass.getDeclaredField("recordStore").apply{isAccessible=true}.get(service).let{(it as com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordStore).close()}}
     }
+    @Test fun headPoll200RunsAFullRoundAnd304OnlyReadsHead() = runBlocking {
+        Server().use { server -> Host(server, "head").use { host -> ServiceEntry(host).use { entry ->
+            entry.approvedForHead = true
+            host.note()
+            assertTrue(entry.service.syncNow().completed)
+            val poller = PhoneCloudHeadPoller({ 0 }, { 0 })
+            val head = "\"first-head\""
+            server.headResponse = {
+                server.response(JSONObject().put("etag", "first-head")
+                    .put("head", server.account.get("commitOid")).put("epoch", "1")
+                    .put("signingKeysRev", "1").put("pollAfterMs", 20_000))
+                    .setHeader("ETag", head)
+            }
+            entry.service.setBluetoothSyncActive(true)
+            assertFalse(entry.service.pollCloudHead(poller) { true })
+            assertEquals(0, server.headRequests.size)
+            entry.service.setBluetoothSyncActive(false)
+            val before = entry.service.state.value
+            val bootstraps = entry.bootstraps
+            val checkpoints = server.checkpoints
+            assertTrue(entry.service.pollCloudHead(poller) { true })
+            assertTrue(entry.service.state.value.lastCompletedAt > before.lastCompletedAt)
+            assertTrue(server.checkpoints > checkpoints)
+            assertEquals(bootstraps + 1, entry.bootstraps)
+            assertNull(server.headRequests.single().getHeader("If-None-Match"))
+
+            server.headResponse = { MockResponse().setResponseCode(304) }
+            val state = entry.service.state.value
+            val ui = host.product.uiPort.value!!.state.value
+            val total = server.http.requestCount
+            assertTrue(entry.service.pollCloudHead(poller) { true })
+            assertEquals(total + 1, server.http.requestCount)
+            assertEquals(bootstraps + 1, entry.bootstraps)
+            val probe = server.headRequests.last()
+            assertEquals("GET", probe.method)
+            assertEquals("/functions/v1/sync/v2/account/head", probe.requestUrl!!.encodedPath)
+            assertEquals(head, probe.getHeader("If-None-Match"))
+            assertEquals(state, entry.service.state.value)
+            assertEquals(ui, host.product.uiPort.value!!.state.value)
+        } } }
+    }
+
+    @Test fun headPoll404MatchesLegacySyncAndAddsNoPrompt() = runBlocking {
+        data class LegacyResult(val sync: PhoneCloudSyncResult, val markdown: String, val requests: Int)
+        suspend fun runAgainstOldBackend(enabled: Boolean): LegacyResult =
+            Server().use { server -> Host(server, "legacy-head").use { host -> ServiceEntry(host).use { entry ->
+                entry.approvedForHead = true
+                host.note()
+                assertTrue(entry.service.syncNow().completed)
+                val poller = PhoneCloudHeadPoller({ 0 }, { 0 })
+                val state = entry.service.state.value
+                val ui = host.product.uiPort.value!!.state.value
+                val bootstraps = entry.bootstraps
+                val toastCount = org.robolectric.shadows.ShadowToast.shownToastCount()
+                assertEquals(enabled, entry.service.pollCloudHead(poller) { enabled })
+                repeat(3) { assertFalse(entry.service.pollCloudHead(poller) { enabled }) }
+                assertEquals(if (enabled) 1 else 0, server.headRequests.size)
+                assertFalse(poller.available.value)
+                assertEquals(state, entry.service.state.value)
+                assertEquals(ui, host.product.uiPort.value!!.state.value)
+                assertEquals(bootstraps, entry.bootstraps)
+                assertEquals(toastCount, org.robolectric.shadows.ShadowToast.shownToastCount())
+
+                host.note("legacy follow-up")
+                val before = server.http.requestCount
+                val result = entry.service.syncDebouncedChanges(fast = poller.available.value)
+                assertTrue(result.completed)
+                assertEquals(toastCount, org.robolectric.shadows.ShadowToast.shownToastCount())
+                LegacyResult(result.copy(outcome = result.outcome?.copy(lastCompletedAt = 0)),
+                    server.values().single().getString("markdown"), server.http.requestCount - before)
+            } } }
+
+        assertEquals(runAgainstOldBackend(false), runAgainstOldBackend(true))
+    }
+
+    @Test fun headPoll429ReadsRetryAfterAndServerDelayWithoutUpdatingSyncState() = runBlocking {
+        Server().use { server -> Host(server, "head-rate").use { host ->
+            host.note()
+            assertTrue(host.product.sync(server.announcement).enabled)
+            val owner = requireNotNull(host.product.headOwner(user))
+            server.headResponse = {
+                MockResponse().setResponseCode(429).setHeader("Retry-After", 13)
+                    .setBody("""{"pollAfterMs":29000}""")
+            }
+            assertEquals(CloudHeadReply.RateLimited(13_000), host.product.probeHead(owner, null))
+            server.headResponse = { MockResponse().setResponseCode(429).setBody("""{"pollAfterMs":29000}""") }
+            assertEquals(CloudHeadReply.RateLimited(29_000), host.product.probeHead(owner, null))
+            assertEquals(2, server.headRequests.size)
+        } }
+    }
+
     @Test fun formalEntrySelectsAuthenticatedV2BeforeLegacyAndForwardsManualBodyConsent() {
         Server().use{server->Host(server,"entry").use{h->ServiceEntry(h).use{entry->
             server.closedBodyChannel=true;h.wifi=false;h.note("![a](assets/entry.png)")

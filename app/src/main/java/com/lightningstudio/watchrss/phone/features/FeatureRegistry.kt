@@ -14,5 +14,6 @@ internal data class RegisteredFeature(
 
 internal object FeatureRegistry {
     val b2 = RegisteredFeature("b2", 20, "b2-2026-11", EvaluateAt.SESSION)
-    val entries = listOf(b2)
+    val syncHeadPoll = RegisteredFeature("sync_head_poll_v1", 100, "sync-head-poll-v1", EvaluateAt.LAUNCH)
+    val entries = listOf(b2, syncHeadPoll)
 }

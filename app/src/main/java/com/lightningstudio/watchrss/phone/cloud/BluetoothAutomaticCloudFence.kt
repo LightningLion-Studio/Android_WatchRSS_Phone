@@ -9,14 +9,25 @@ import java.util.concurrent.atomic.AtomicReference
 internal class BluetoothAutomaticCloudFence {
     private val foreground=AtomicBoolean(false)
     private val automatic=AtomicReference<Job?>(null)
+    private val headProbe = AtomicReference<Job?>(null)
     private val pending=AtomicBoolean(false)
     val active get()=foreground.get()
     val needsResume get()=!active&&pending.get()
     fun deferBodyRetry() { pending.set(true) }
     fun setActive(value:Boolean) {
         foreground.set(value)
+        if (value) cancelHeadProbe()
         if(value)automatic.get()?.takeIf{it.isActive}?.let {pending.set(true);it.cancel(CancellationException("foreground Bluetooth sync"))}
     }
+    fun startHeadProbe(job: Job): Boolean {
+        headProbe.set(job)
+        if (!active) return true
+        finishHeadProbe(job)
+        return false
+    }
+    fun finishHeadProbe(job: Job) { headProbe.compareAndSet(job, null) }
+    fun cancelHeadProbe() { headProbe.get()?.cancel() }
+
     fun started(manual:Boolean,job:Job?) {
         pending.set(false)
         if(!manual) {

@@ -5,8 +5,15 @@ import com.lightningstudio.watchrss.phone.data.db.CloudLocalChanges
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.transformLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
@@ -15,33 +22,58 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import java.util.concurrent.atomic.AtomicLong
 
-class PhoneCloudChangeScheduler(
+internal class PhoneCloudChangeScheduler(
     database: PhoneCompanionDatabase,
     private val cloudSyncService: PhoneCloudSyncService,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    private val fastMode: Flow<Boolean>,
+    private val fastEnabled: () -> Boolean
 ) {
     private val changes=CloudLocalChanges(database)
     private var job: Job? = null
     private val bluetoothGate=BluetoothCloudChangeGate()
     fun setBluetoothSyncActive(active:Boolean) {bluetoothGate.setActive(active)}
     suspend fun acknowledgeBluetoothChanges() = withContext(Dispatchers.IO) {bluetoothGate.acknowledge(changes.sequence())}
-    @OptIn(FlowPreview::class)
     fun start() {
         if (job != null) return
         job = scope.launch {
-            changes.observeSequence()
-                .drop(1)
-                .debounce(10 * 60 * 1000L)
-                .collect { sequence ->
-                    if(!bluetoothGate.awaitAutomaticSync(sequence))return@collect
+            debounceCloudChanges(changes.observeSequence().drop(1), fastMode, android.os.SystemClock::elapsedRealtime)
+                .collect { (sequence, observedAt) ->
+                    if (!bluetoothGate.awaitAutomaticSync(sequence)) return@collect
+                    if (!fastEnabled()) {
+                        delay((observedAt + LEGACY_CHANGE_INTERVAL_MS - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                        if (!bluetoothGate.awaitAutomaticSync(sequence)) return@collect
+                    }
                     android.util.Log.i("WatchRSSCloud", "sync.origin=changeLogDebounce")
-                    runCatching { cloudSyncService.syncNow() }
+                    try {
+                        cloudSyncService.syncDebouncedChanges(fastEnabled())
+                    } catch (_: Exception) {
+                        currentCoroutineContext().ensureActive()
+                    }
                 }
         }
     }
 
     fun stop() { job?.cancel(); job = null }
 }
+
+private const val LEGACY_CHANGE_INTERVAL_MS = 10 * 60 * 1_000L
+private const val FAST_CHANGE_INTERVAL_MS = 3_000L
+
+@OptIn(ExperimentalCoroutinesApi::class)
+internal fun debounceCloudChanges(
+    changes: Flow<Long>,
+    fastMode: Flow<Boolean>,
+    elapsed: () -> Long
+): Flow<Pair<Long, Long>> = changes
+    .map { sequence -> sequence to elapsed() }
+    .combine(fastMode.distinctUntilChanged()) { change, fast -> change to fast }
+    .transformLatest { (change, fast) ->
+        val interval = if (fast) FAST_CHANGE_INTERVAL_MS else LEGACY_CHANGE_INTERVAL_MS
+        delay((change.second + interval - elapsed()).coerceAtLeast(0))
+        emit(change)
+    }
+    .distinctUntilChanged()
 
 /** Keeps the independent debounce from racing a long Bluetooth merge or its completion callback. */
 internal class BluetoothCloudChangeGate {

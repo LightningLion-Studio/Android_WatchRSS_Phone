@@ -3,9 +3,11 @@ package com.lightningstudio.watchrss.phone.account
 import android.app.Application
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.lightningstudio.watchrss.phone.refundConsequenceText
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -70,4 +72,44 @@ class MembershipPaymentHttpTest {
             assertNull(legacy.qrPayload)
         }
     }
+
+    @Test
+    fun sharedOrderRequestsOptIntoMembershipRefundsAndDescribeTheirEffects() = runBlocking {
+        MockWebServer().use { server ->
+            val context = ApplicationProvider.getApplicationContext<Context>()
+            val environment = AccountEnvironment(
+                backendBaseUrl = server.url("/").toString().trimEnd('/'),
+                supabaseAnonKey = "synthetic-key"
+            )
+            val client = PhoneAccountClient(environment, LicenseDeviceIdentity(context))
+            val session = PhoneAccountSession("owner", "masked", "fixture-bearer", "", Long.MAX_VALUE)
+            val membership = JSONObject()
+                .put("orderId", "membership")
+                .put("provider", "xunhupay")
+                .put("product", JSONObject().put("productId", "watchrss_cloud_month"))
+                .put("status", "paid")
+                .put("refundable", true)
+            val device = JSONObject()
+                .put("orderId", "device")
+                .put("product", JSONObject().put("productId", "watchrss_phone_device_authorization"))
+            server.enqueue(MockResponse().setBody(JSONObject().put("orders", JSONArray(listOf(membership, device))).toString()))
+            server.enqueue(MockResponse().setBody(membership.toString()))
+            server.enqueue(MockResponse().setBody(JSONObject(membership.toString()).put("status", "refunded").toString()))
+
+            val orders = client.paymentOrders(session)
+            assertTrue(orders[0].refundable)
+            assertEquals("退款成功后，只回收本订单剩余的云会员时长。退款不可撤销。", refundConsequenceText(orders[0]))
+            assertTrue(refundConsequenceText(orders[1]).contains("3 台手机容量"))
+            assertTrue(client.paymentOrder(session, "membership").refundable)
+            assertEquals("refunded", client.refundPaymentOrder(session, "membership", "fixture-verification", "refund-key").status)
+
+            listOf("/functions/v1/payments/orders", "/functions/v1/payments/orders/membership",
+                "/functions/v1/payments/orders/membership/refund").forEach { path ->
+                val request = server.takeRequest()
+                assertEquals(path, request.path)
+                assertEquals("1", request.getHeader("X-WatchRSS-Xunhu-Membership-Refund"))
+            }
+        }
+    }
+
 }

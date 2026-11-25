@@ -119,6 +119,7 @@ class WeChatPurchaseNavigationTest {
 
     private fun startPurchase() {
         compose.onNodeWithText("购买云同步会员").performScrollTo().performClick()
+        compose.onNodeWithText("跳转微信").performClick()
         assertTrue("No handoff request received", issueStarted.await(2, TimeUnit.SECONDS))
     }
 

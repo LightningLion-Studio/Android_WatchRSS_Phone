@@ -1873,13 +1873,7 @@ internal fun AccountScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("订单 ${refundOrder.merchantOrderId} 将全额原路退回 ¥${refundOrder.amountFen / 100}。")
-                    Text(
-                        if (refundOrder.isCloudMembership) {
-                            "退款成功后，系统将回收本订单剩余的云会员时长。该操作不可撤销。"
-                        } else {
-                            "退款成功后立即减少 3 台手机容量；若设备超额，系统会自动撤销最早激活的设备。该操作不可撤销。"
-                        }
-                    )
+                    Text(refundConsequenceText(refundOrder))
                 }
             },
             confirmButton = {
@@ -2520,3 +2514,11 @@ internal fun shouldShowAccountLogin(
 
 /** The real login-completion callback always runs device authorization reconciliation. */
 internal suspend fun completePhoneAccountAuthentication(coordinator: com.lightningstudio.watchrss.phone.account.AppAccessCoordinator) = coordinator.reconcile()
+
+
+internal fun refundConsequenceText(order: AppPaymentOrder): String =
+    if (order.isCloudMembership) {
+        "退款成功后，只回收本订单剩余的云会员时长。退款不可撤销。"
+    } else {
+        "退款成功后立即减少 3 台手机容量；若设备超额，系统会自动撤销最早激活的设备。该操作不可撤销。"
+    }

@@ -105,7 +105,11 @@ internal fun <Page : Any> MembershipPurchaseDialogs(
         MembershipPurchaseState.Step.Plans -> {
             if (ownerId == null) return
             MembershipPlanDialog(
-                onSelect = { state.show(request.page, MembershipPurchaseState.Step.Buy(it)) },
+                onSelect = { plan ->
+                    if (state.request === request) {
+                        state.show(request.page, MembershipPurchaseState.Step.Buy(plan))
+                    }
+                },
                 onDismiss = dismiss
             )
         }

@@ -362,12 +362,20 @@ class PhoneAccountClient(
         }
     }
 
-    private suspend fun post(path: String, body: JSONObject, bearerToken: String?): okhttp3.Response {
+    private suspend fun post(
+        path: String,
+        body: JSONObject,
+        bearerToken: String?,
+        supportsMembershipRefund: Boolean = false
+    ): okhttp3.Response {
         val request = Request.Builder()
             .url(environment.backendBaseUrl + path)
             .addHeader("apikey", environment.supabaseAnonKey)
             .addHeader("content-type", JSON_MEDIA_TYPE.toString())
             .apply {
+                if (supportsMembershipRefund) {
+                    addHeader("X-WatchRSS-Xunhu-Membership-Refund", "1")
+                }
                 if (!bearerToken.isNullOrBlank()) {
                     addHeader("authorization", "Bearer $bearerToken")
                 }
@@ -404,11 +412,18 @@ class PhoneAccountClient(
         return execute(request)
     }
 
-    private suspend fun get(path: String, bearerToken: String?): okhttp3.Response {
+    private suspend fun get(
+        path: String,
+        bearerToken: String?,
+        supportsMembershipRefund: Boolean = false
+    ): okhttp3.Response {
         val request = Request.Builder()
             .url(environment.backendBaseUrl + path)
             .addHeader("apikey", environment.supabaseAnonKey)
             .apply {
+                if (supportsMembershipRefund) {
+                    addHeader("X-WatchRSS-Xunhu-Membership-Refund", "1")
+                }
                 if (!bearerToken.isNullOrBlank()) {
                     addHeader("authorization", "Bearer $bearerToken")
                 }
@@ -798,11 +813,11 @@ class PhoneAccountClient(
     }
 
     suspend fun paymentOrder(session: PhoneAccountSession, orderId: String): AppPaymentOrder = withContext(Dispatchers.IO) {
-        get("/functions/v1/payments/orders/$orderId", session.accessToken).use { it.jsonBody().toPaymentOrder() }
+        get("/functions/v1/payments/orders/$orderId", session.accessToken, supportsMembershipRefund = true).use { it.jsonBody().toPaymentOrder() }
     }
 
     suspend fun paymentOrders(session: PhoneAccountSession): List<AppPaymentOrder> = withContext(Dispatchers.IO) {
-        get("/functions/v1/payments/orders", session.accessToken).use { response ->
+        get("/functions/v1/payments/orders", session.accessToken, supportsMembershipRefund = true).use { response ->
             val items = response.jsonBody().optJSONArray("orders") ?: JSONArray()
             buildList {
                 for (index in 0 until items.length()) {
@@ -824,7 +839,8 @@ class PhoneAccountClient(
                 put("verificationToken", verificationToken)
                 put("idempotencyKey", idempotencyKey)
             },
-            bearerToken = session.accessToken
+            bearerToken = session.accessToken,
+            supportsMembershipRefund = true
         ).use { it.jsonBody().toPaymentOrder() }
     }
 

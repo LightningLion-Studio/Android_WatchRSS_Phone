@@ -421,8 +421,13 @@ internal fun AccountScreen(
         }
         repeat(120) {
             delay(5_000)
-            val refreshed = paymentOrders.map { order ->
-                if (order.status == "refund_pending") {
+            val snapshot = if (paymentOrders.any { it.status == "refund_pending" && it.provider == "xunhupay" }) {
+                runCatching { accountRepository.paymentOrders() }.getOrDefault(paymentOrders)
+            } else {
+                paymentOrders
+            }
+            val refreshed = snapshot.map { order ->
+                if (order.status == "refund_pending" && order.provider != "xunhupay") {
                     runCatching { accountRepository.paymentOrder(order.orderId) }.getOrDefault(order)
                 } else {
                     order
@@ -2045,8 +2050,22 @@ internal fun AccountScreen(
                             Modifier.padding(16.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Text("订单与退款", fontWeight = FontWeight.SemiBold,
-                                modifier = if (initialSection == AccountSection.ORDERS) sectionAnchor else Modifier)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "订单与退款",
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.weight(1f).then(
+                                        if (initialSection == AccountSection.ORDERS) sectionAnchor else Modifier
+                                    )
+                                )
+                                TextButton(
+                                    onClick = { paymentOrdersRevision++ },
+                                    enabled = !paymentOrdersLoading
+                                ) { Text("刷新订单") }
+                            }
                             Text(
                                 "查看手机版设备授权包和云会员的订单。",
                                 style = MaterialTheme.typography.bodySmall,

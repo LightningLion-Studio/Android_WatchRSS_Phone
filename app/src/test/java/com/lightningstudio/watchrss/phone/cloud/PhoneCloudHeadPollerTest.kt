@@ -107,6 +107,39 @@ class PhoneCloudHeadPollerTest {
         }
     }
 
+    @Test fun serverDisableFallsBackAfterAnAcceptedHeadAndResumesWithAFreshTag() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val owner = Owner()
+            owner.lifecycle.currentState = Lifecycle.State.STARTED
+            val poller = PhoneCloudHeadPoller({ testScheduler.currentTime }, { 0 })
+            val tags = mutableListOf<String?>()
+            val job = backgroundScope.launch {
+                poller.run(owner.lifecycle, flowOf(true)) {
+                    poller.check(listOf("account"), {
+                        tags += it
+                        if (tags.size == 2) CloudHeadReply.Disabled else CloudHeadReply.Head("tag", null)
+                    }, { true }, { false })
+                }
+            }
+            runCurrent()
+            assertTrue(poller.available.value)
+            advanceTimeBy(20_000)
+            runCurrent()
+            assertFalse(poller.available.value)
+            advanceTimeBy(599_999)
+            assertEquals(listOf(null, "tag"), tags)
+            advanceTimeBy(1)
+            runCurrent()
+            assertEquals(listOf(null, "tag", null), tags)
+            assertTrue(poller.available.value)
+            owner.lifecycle.currentState = Lifecycle.State.DESTROYED
+            job.join()
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     @Test fun failedRoundDoesNotAcknowledgeNewTagAndTagIsAccountScoped() = runTest {
         val poller = PhoneCloudHeadPoller({ 0 }, { 0 })
         suspend fun check(account: String, expectedTag: String?, completed: Boolean) =

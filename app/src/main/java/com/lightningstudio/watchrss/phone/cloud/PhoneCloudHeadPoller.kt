@@ -17,6 +17,7 @@ internal sealed interface CloudHeadReply {
     data class Head(val etag: String, val pollAfterMs: Long?) : CloudHeadReply
     data object Unchanged : CloudHeadReply
     data object Unsupported : CloudHeadReply
+    data object Disabled : CloudHeadReply
     data class RateLimited(val retryAfterMs: Long?) : CloudHeadReply
 }
 
@@ -71,6 +72,13 @@ internal class PhoneCloudHeadPoller(
                 support = Support.UNSUPPORTED
                 _available.value = false
             }
+            CloudHeadReply.Disabled -> {
+                support = Support.UNKNOWN
+                _available.value = false
+                acknowledged = null
+                retryMs = 0
+                nextAttemptAt = elapsed() + DISABLED_RECHECK_MS
+            }
             is CloudHeadReply.RateLimited -> backOff(reply.retryAfterMs)
             CloudHeadReply.Unchanged -> {
                 accept(intervalMs)
@@ -100,6 +108,7 @@ internal class PhoneCloudHeadPoller(
     }
 
     private companion object {
+        const val DISABLED_RECHECK_MS = 600_000L
         const val DEFAULT_INTERVAL_MS = 20_000L
         const val MAX_RETRY_MS = 300_000L
     }

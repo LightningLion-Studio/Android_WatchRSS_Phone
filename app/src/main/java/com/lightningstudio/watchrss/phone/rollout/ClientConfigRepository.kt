@@ -19,6 +19,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.withContext
@@ -153,6 +157,16 @@ internal class ClientConfigRepository(
             }
             Unit
         }.also { inFlight = it }
+    }
+
+    suspend fun refreshWhileForeground(foreground: Flow<Boolean>) {
+        foreground.distinctUntilChanged().collectLatest { active ->
+            if (!active) return@collectLatest
+            while (true) {
+                refreshIfStale()?.await()
+                delay(60_000)
+            }
+        }
     }
 
     // The caller owns the deadline so it can include repository initialization.

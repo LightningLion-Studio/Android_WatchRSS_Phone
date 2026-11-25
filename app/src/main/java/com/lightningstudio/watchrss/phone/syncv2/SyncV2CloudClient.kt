@@ -146,15 +146,23 @@ internal class SyncV2CloudClient(
                 active()
                 when (response.code) {
                     304 -> CloudHeadReply.Unchanged
-                    404 -> CloudHeadReply.Unsupported
+                    404, 405 -> CloudHeadReply.Unsupported
+                    400, 403 -> {
+                        val code = headResponseJson(response).optJSONObject("error")?.optString("code")
+                        when {
+                            response.code == 400 && code == "invalid_schema" -> CloudHeadReply.Unsupported
+                            response.code == 403 && code == "head_poll_disabled" -> CloudHeadReply.Disabled
+                            else -> throw IOException("Account head HTTP ${response.code}")
+                        }
+                    }
                     429 -> {
                         val retry = response.header("Retry-After")?.toLongOrNull()
                             ?.takeIf { it >= 0 }?.coerceAtMost(300)?.times(1_000)
                             ?: response.headers.getDate("Retry-After")?.let {
                                 (it.time - System.currentTimeMillis()).coerceAtLeast(0)
                             }
-                            ?: runCatching { headResponseJson(response).pollAfterMillis() }.getOrNull()
-                        CloudHeadReply.RateLimited(retry)
+                        val pollAfter = runCatching { headResponseJson(response).pollAfterMillis() }.getOrNull()
+                        CloudHeadReply.RateLimited(listOfNotNull(retry, pollAfter).maxOrNull())
                     }
                     200 -> {
                         val json = headResponseJson(response)

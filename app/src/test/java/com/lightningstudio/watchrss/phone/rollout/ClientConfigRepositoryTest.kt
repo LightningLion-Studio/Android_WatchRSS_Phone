@@ -21,6 +21,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
@@ -102,6 +111,44 @@ class ClientConfigRepositoryTest {
             val disabled = repo.snapshotForSession()
             assertEquals(2L, disabled.version)
             assertFalse(repo.decide(disabled, head, eligible = true).enabled)
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun syncHeadPollRefreshesStaleConfigDuringTheSameForegroundSession() = runTest {
+        MockWebServer().use { server ->
+            val config = JSONObject(config(1, 20, null))
+            server.enqueue(MockResponse().setBody(config.toString()))
+            val repo = repository(server)
+            assertEquals(1L, withContext(Dispatchers.IO) { repo.snapshotForSession().version })
+            val active = MutableStateFlow(true)
+            val job = backgroundScope.launch { repo.refreshWhileForeground(active) }
+            runCurrent()
+            assertEquals(1, server.requestCount)
+
+            advanceClock(601_000)
+            config.put("configVersion", 2)
+            config.getJSONObject("features").put("sync_head_poll_v1", JSONObject()
+                .put("percent", 0).put("salt", "head-poll")
+                .put("minAppVersionCode", 0).put("maxAppVersionCode", JSONObject.NULL)
+                .put("forced", JSONObject.NULL))
+            server.enqueue(MockResponse().setBody(config.toString()))
+            advanceTimeBy(60_000)
+            runCurrent()
+            withContext(Dispatchers.IO) {
+                withTimeout(5_000) {
+                    repo.changes.first { repo.currentSnapshot().version == 2L }
+                }
+            }
+            assertFalse(repo.decide(repo.currentSnapshot(), FeatureRegistry.syncHeadPoll, eligible = true).enabled)
+
+            active.value = false
+            runCurrent()
+            advanceClock(601_000)
+            advanceTimeBy(600_000)
+            assertEquals(2, server.requestCount)
+            job.cancel()
         }
     }
 

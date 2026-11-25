@@ -855,11 +855,14 @@ class SyncV2P6ProductTest {
         } } }
     }
 
-    @Test fun headPoll404MatchesLegacySyncAndAddsNoPrompt() = runBlocking {
+    @Test fun headPollUnsupportedMatchesLegacySyncAndAddsNoPrompt() = runBlocking {
         data class LegacyResult(val sync: PhoneCloudSyncResult, val markdown: String, val requests: Int)
-        suspend fun runAgainstOldBackend(enabled: Boolean): LegacyResult =
+        suspend fun runAgainstOldBackend(enabled: Boolean, status: Int = 404): LegacyResult =
             Server().use { server -> Host(server, "legacy-head").use { host -> ServiceEntry(host).use { entry ->
                 entry.approvedForHead = true
+                server.headResponse = {
+                    MockResponse().setResponseCode(status).setBody("""{"error":{"code":"invalid_schema"}}""")
+                }
                 host.note()
                 assertTrue(entry.service.syncNow().completed)
                 val poller = PhoneCloudHeadPoller({ 0 }, { 0 })
@@ -885,7 +888,10 @@ class SyncV2P6ProductTest {
                     server.values().single().getString("markdown"), server.http.requestCount - before)
             } } }
 
-        assertEquals(runAgainstOldBackend(false), runAgainstOldBackend(true))
+        val legacy = runAgainstOldBackend(false)
+        for (status in listOf(404, 405, 400)) {
+            assertEquals(legacy, runAgainstOldBackend(true, status))
+        }
     }
 
     @Test fun headPoll429ReadsRetryAfterAndServerDelayWithoutUpdatingSyncState() = runBlocking {
@@ -897,10 +903,18 @@ class SyncV2P6ProductTest {
                 MockResponse().setResponseCode(429).setHeader("Retry-After", 13)
                     .setBody("""{"pollAfterMs":29000}""")
             }
-            assertEquals(CloudHeadReply.RateLimited(13_000), host.product.probeHead(owner, null))
+            assertEquals(CloudHeadReply.RateLimited(29_000), host.product.probeHead(owner, null))
             server.headResponse = { MockResponse().setResponseCode(429).setBody("""{"pollAfterMs":29000}""") }
             assertEquals(CloudHeadReply.RateLimited(29_000), host.product.probeHead(owner, null))
-            assertEquals(2, server.headRequests.size)
+            server.headResponse = {
+                MockResponse().setResponseCode(403).setBody("""{"error":{"code":"head_poll_disabled"}}""")
+            }
+            assertEquals(CloudHeadReply.Disabled, host.product.probeHead(owner, null))
+            server.headResponse = {
+                MockResponse().setResponseCode(503).setBody("""{"error":{"code":"temporarily_unavailable"}}""")
+            }
+            assertTrue(runCatching { host.product.probeHead(owner, null) }.exceptionOrNull() is java.io.IOException)
+            assertEquals(4, server.headRequests.size)
         } }
     }
 

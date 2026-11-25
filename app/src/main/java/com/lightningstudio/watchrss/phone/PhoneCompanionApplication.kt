@@ -14,8 +14,10 @@ import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.ImageDecoderDecoder
@@ -218,6 +220,12 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
         if (!consentServicesStarted.compareAndSet(false, true)) return
         container.oppoPushCoordinator.init()
         startForegroundCloudPolling()
+        val lifecycle = ProcessLifecycleOwner.get().lifecycle
+        ProcessLifecycleOwner.get().lifecycleScope.launch {
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                container.clientConfig.refreshWhileForeground(hasStartedActivity)
+            }
+        }
         appScope.launch {
             accountInitialization.await()
             container.oppoPushCoordinator.ensurePushState()

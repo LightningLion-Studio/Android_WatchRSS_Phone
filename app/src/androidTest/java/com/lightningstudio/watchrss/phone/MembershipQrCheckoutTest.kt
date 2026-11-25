@@ -27,6 +27,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.lightningstudio.watchrss.phone.account.AppAccessProductInfo
 import com.lightningstudio.watchrss.phone.account.AppPaymentOrder
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
+import kotlinx.coroutines.CompletableDeferred
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -41,10 +42,11 @@ class MembershipQrCheckoutTest {
     val compose = createAndroidComposeRule<ContactDeveloperActivity>()
 
     @Test
-    fun purchaseAndResumeOrderWithLocalQr() {
+    fun continuingPaymentHidesCachedQrUntilServerReplacesExpiredOrder() {
         val paid = AtomicBoolean(false)
         val created = AtomicInteger(0)
         val refreshed = AtomicInteger(0)
+        val recheck = CompletableDeferred<Unit>()
         val miniProgramLaunch = AtomicInteger(0)
         val order = AppPaymentOrder(
             product = AppAccessProductInfo(
@@ -60,6 +62,10 @@ class MembershipQrCheckoutTest {
             paymentUrl = null,
             provider = "xunhupay",
             qrPayload = "weixin://wxpay/bizpayurl?pr=synthetic-test"
+        )
+        val replacement = order.copy(
+            orderId = "replacement-order",
+            qrPayload = "weixin://wxpay/bizpayurl?pr=synthetic-replacement"
         )
         compose.activityRule.scenario.onActivity { activity ->
             activity.setContent {
@@ -97,16 +103,28 @@ class MembershipQrCheckoutTest {
                             onDismiss = { step = "membership" }
                         )
                         "checkout" -> MembershipQrCheckout(
-                            initialOrder = initialOrder,
+                            resumeOrderId = initialOrder?.orderId,
                             createOrder = { idempotencyKey ->
                                 check(idempotencyKey.isNotBlank())
-                                created.incrementAndGet()
-                                order
+                                if (created.incrementAndGet() == 1) order else replacement
                             },
                             readOrder = { orderId ->
-                                assertEquals(order.orderId, orderId)
-                                if (paid.get()) order.copy(status = "paid", qrPayload = null) else order
+                                when (orderId) {
+                                    order.orderId -> {
+                                        if (initialOrder != null) {
+                                            recheck.await()
+                                            order.copy(status = "closed", qrPayload = null)
+                                        } else {
+                                            order
+                                        }
+                                    }
+                                    replacement.orderId ->
+                                        if (paid.get()) replacement.copy(status = "paid", qrPayload = null)
+                                        else replacement
+                                    else -> error("Unexpected order lookup")
+                                }
                             },
+                            recoverOrderQr = { error("Closed order must use a new checkout") },
                             onPaid = { refreshed.incrementAndGet() },
                             onDismiss = { step = "membership" }
                         )
@@ -132,8 +150,12 @@ class MembershipQrCheckoutTest {
         screenshot("02-payment-qr.png")
         compose.onNodeWithText("关闭").performClick()
         compose.onNodeWithText("继续支付").performClick()
-        compose.onNodeWithContentDescription("微信付款二维码").assertIsDisplayed()
+        compose.onNodeWithText("正在核对订单…").assertIsDisplayed()
+        compose.onNodeWithContentDescription("微信付款二维码").assertDoesNotExist()
         assertEquals(1, created.get())
+        recheck.complete(Unit)
+        compose.waitUntil { created.get() == 2 }
+        compose.onNodeWithContentDescription("微信付款二维码").assertIsDisplayed()
 
         paid.set(true)
         compose.waitUntil(timeoutMillis = 15_000) {

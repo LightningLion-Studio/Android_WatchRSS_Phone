@@ -13,6 +13,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -116,24 +117,24 @@ internal fun <Page : Any> MembershipPurchaseDialogs(
         is MembershipPurchaseState.Step.Buy, is MembershipPurchaseState.Step.Resume -> {
             if (ownerId == null) return
             val pending = (step as? MembershipPurchaseState.Step.Resume)?.order
-            MembershipQrCheckout(
-                initialOrder = pending,
-                createOrder = { key ->
-                    when (step) {
-                        is MembershipPurchaseState.Step.Buy ->
-                            repository.createMembershipPaymentOrder(ownerId, step.plan.productId, key)
-                        is MembershipPurchaseState.Step.Resume ->
-                            repository.resumeMembershipPaymentOrder(ownerId, step.order.orderId)
-                        else -> error("Payment order missing")
+            val productId = when (step) {
+                is MembershipPurchaseState.Step.Buy -> step.plan.productId
+                is MembershipPurchaseState.Step.Resume -> step.order.product.productId
+                else -> error("Payment product missing")
+            }
+            key(ownerId, request) {
+                MembershipQrCheckout(
+                    resumeOrderId = pending?.orderId,
+                    createOrder = { key -> repository.createMembershipPaymentOrder(ownerId, productId, key) },
+                    readOrder = { repository.membershipPaymentOrder(ownerId, it) },
+                    recoverOrderQr = { repository.resumeMembershipPaymentOrder(ownerId, it) },
+                    onPaid = { onPaid(ownerId) },
+                    onDismiss = {
+                        dismiss()
+                        onCheckoutClosed()
                     }
-                },
-                readOrder = { repository.membershipPaymentOrder(ownerId, it) },
-                onPaid = { onPaid(ownerId) },
-                onDismiss = {
-                    dismiss()
-                    onCheckoutClosed()
-                }
-            )
+                )
+            }
         }
     }
 }
@@ -166,29 +167,51 @@ internal fun MembershipPlanDialog(onSelect: (MembershipScanPlan) -> Unit, onDism
     )
 }
 
+internal suspend fun loadMembershipCheckout(
+    resumeOrderId: String?,
+    createOrder: suspend () -> AppPaymentOrder,
+    readOrder: suspend (String) -> AppPaymentOrder,
+    recoverOrderQr: suspend (String) -> AppPaymentOrder
+): AppPaymentOrder {
+    if (resumeOrderId == null) return createOrder()
+
+    // Details reconcile the payment and omit QR payloads past the server's deadline.
+    var current = readOrder(resumeOrderId)
+    if (current.status == "pending" && current.qrPayload == null) {
+        current = recoverOrderQr(resumeOrderId)
+    }
+    return if (current.status == "closed") createOrder() else current
+}
+
 @Composable
 internal fun MembershipQrCheckout(
-    initialOrder: AppPaymentOrder?,
+    resumeOrderId: String?,
     createOrder: suspend (String) -> AppPaymentOrder,
     readOrder: suspend (String) -> AppPaymentOrder,
+    recoverOrderQr: suspend (String) -> AppPaymentOrder,
     onPaid: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val idempotencyKey = remember { "xunhu-cloud-${UUID.randomUUID()}" }
     var createAttempt by remember { mutableIntStateOf(0) }
-    var order by remember { mutableStateOf(initialOrder) }
+    var order by remember { mutableStateOf<AppPaymentOrder?>(null) }
     var creationFailed by remember { mutableStateOf(false) }
     var timedOut by remember { mutableStateOf(false) }
     val create by rememberUpdatedState(createOrder)
     val read by rememberUpdatedState(readOrder)
+    val recover by rememberUpdatedState(recoverOrderQr)
     val paid by rememberUpdatedState(onPaid)
     val lifecycle = LocalLifecycleOwner.current.lifecycle
 
     LaunchedEffect(createAttempt) {
-        if (order?.qrPayload != null || order?.status?.let { it != "pending" } == true) return@LaunchedEffect
         creationFailed = false
         try {
-            order = create(idempotencyKey).also { created ->
+            order = loadMembershipCheckout(
+                resumeOrderId,
+                createOrder = { create(idempotencyKey) },
+                readOrder = { read(it) },
+                recoverOrderQr = { recover(it) }
+            ).also { created ->
                 check(created.status != "pending" || created.qrPayload != null)
             }
         } catch (cancelled: CancellationException) {
@@ -199,7 +222,7 @@ internal fun MembershipQrCheckout(
     }
 
     val current = order
-    val payload = current?.qrPayload
+    val payload = current?.takeIf { it.status == "pending" }?.qrPayload
     LaunchedEffect(current?.orderId, current?.status, payload, lifecycle) {
         when {
             current?.status == "paid" -> paid()
@@ -264,6 +287,8 @@ internal fun MembershipQrCheckout(
                         Text("用微信扫码付款，付款后自动开通", style = MaterialTheme.typography.bodySmall)
                     }
                     payload != null -> Text("无法显示付款二维码，请返回订单页重试。")
+                    current != null -> Text("付款二维码已失效，可以从订单页继续。")
+                    resumeOrderId != null -> Text("正在核对订单…")
                     else -> Text("正在获取付款二维码…")
                 }
             }

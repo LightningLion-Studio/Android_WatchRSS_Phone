@@ -1883,22 +1883,30 @@ internal fun AccountScreen(
                             busy = true
                             runCatching {
                                 accountRepository.refundPaymentOrder(
-                                    refundOrder.orderId,
-                                    refundToken,
-                                    "refund-${refundOrder.orderId}"
+                                    refundOrder,
+                                    refundToken
                                 )
                             }.onSuccess { updated ->
-                                paymentOrders = accountRepository.paymentOrders()
-                                accessCoordinator.reconcile()
+                                pendingRefundOrder = null
+                                refundVerificationToken = null
+                                paymentOrders = paymentOrders.map { order ->
+                                    if (order.orderId == updated.orderId) updated else order
+                                }
+                                paymentOrdersRevision++
                                 message = when (updated.status) {
                                     "refunded" -> if (refundOrder.isCloudMembership) "退款成功，云会员权益已回收"
                                     else "退款成功，授权容量已回收"
                                     "refund_pending" -> "退款申请已提交，正在等待支付渠道处理"
                                     else -> "退款未完成，请稍后重试"
                                 }
+                                runCatching { accessCoordinator.reconcile() }
+                                    .onFailure { error = it.message ?: "权益刷新失败" }
+                            }.onFailure {
                                 pendingRefundOrder = null
                                 refundVerificationToken = null
-                            }.onFailure { error = it.message ?: "退款失败" }
+                                paymentOrdersRevision++
+                                error = it.message ?: "退款失败"
+                            }
                             busy = false
                         }
                     },

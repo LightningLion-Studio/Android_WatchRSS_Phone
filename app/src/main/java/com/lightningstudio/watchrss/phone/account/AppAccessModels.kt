@@ -56,7 +56,8 @@ data class AppPaymentOrder(
     val refundEligibleUntilMillis: Long? = null,
     val refundable: Boolean = false,
     val provider: String? = null,
-    val qrPayload: String? = null
+    val qrPayload: String? = null,
+    val refundRequestKey: String? = null
 ) {
     val isCloudMembership: Boolean
         get() = product.productId == "watchrss_cloud_month" || product.productId == "watchrss_cloud_year"

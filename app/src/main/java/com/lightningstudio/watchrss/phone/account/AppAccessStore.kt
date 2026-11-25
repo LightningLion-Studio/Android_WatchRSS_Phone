@@ -214,7 +214,8 @@ internal fun JSONObject.toPaymentOrder() = AppPaymentOrder(
     refundEligibleUntilMillis = optLong("refundEligibleUntil").takeIf { it > 0L },
     refundable = optBoolean("refundable", false),
     provider = optString("provider").takeIf { !isNull("provider") && it.isNotBlank() },
-    qrPayload = optString("qrPayload").takeIf { !isNull("qrPayload") && it.isNotBlank() }
+    qrPayload = optString("qrPayload").takeIf { !isNull("qrPayload") && it.isNotBlank() },
+    refundRequestKey = optString("refundRequestKey").takeIf { !isNull("refundRequestKey") && it.isNotBlank() }
 )
 
 internal fun JSONObject.toPaymentOrderForUser(userId: String): AppPaymentOrder? =

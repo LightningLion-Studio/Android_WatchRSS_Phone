@@ -112,4 +112,31 @@ class MembershipPaymentHttpTest {
         }
     }
 
+    @Test
+    fun onlyConfirmedFailureSuppliesANewRefundRequestKey() = runBlocking {
+        MockWebServer().use { server ->
+            val context = ApplicationProvider.getApplicationContext<Context>()
+            val client = PhoneAccountClient(
+                AccountEnvironment(backendBaseUrl = server.url("/").toString().trimEnd('/'), supabaseAnonKey = "synthetic-key"),
+                LicenseDeviceIdentity(context)
+            )
+            val session = PhoneAccountSession("owner", "masked", "fixture-bearer", "", Long.MAX_VALUE)
+            val order = JSONObject()
+                .put("orderId", "membership")
+                .put("provider", "xunhupay")
+                .put("product", JSONObject().put("productId", "watchrss_cloud_month"))
+            val attempts = listOf(
+                Triple("paid", null, "refund-membership"),
+                Triple("refund_failed", "refund-retry", "refund-retry"),
+                Triple("refund_failed", "refund-retry", "refund-retry"),
+                Triple("refund_pending", "refund-retry", "refund-retry")
+            )
+            for ((status, key, expected) in attempts) {
+                order.put("status", status).put("refundRequestKey", key)
+                server.enqueue(MockResponse().setBody(order.toString()))
+                client.refundPaymentOrder(session, order.toPaymentOrder(), "fixture-verification")
+                assertEquals(expected, JSONObject(server.takeRequest().body.readUtf8()).getString("idempotencyKey"))
+            }
+        }
+    }
 }

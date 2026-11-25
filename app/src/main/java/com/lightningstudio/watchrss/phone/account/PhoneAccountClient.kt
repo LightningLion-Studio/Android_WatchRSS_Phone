@@ -829,6 +829,17 @@ class PhoneAccountClient(
 
     suspend fun refundPaymentOrder(
         session: PhoneAccountSession,
+        order: AppPaymentOrder,
+        verificationToken: String
+    ): AppPaymentOrder = refundPaymentOrder(
+        session,
+        order.orderId,
+        verificationToken,
+        order.refundRequestKey ?: "refund-${order.orderId}"
+    )
+
+    suspend fun refundPaymentOrder(
+        session: PhoneAccountSession,
         orderId: String,
         verificationToken: String,
         idempotencyKey: String

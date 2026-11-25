@@ -403,14 +403,12 @@ class PhoneAccountRepository(
         accountClient.paymentOrders(requireSession())
 
     suspend fun refundPaymentOrder(
-        orderId: String,
-        verificationToken: String,
-        idempotencyKey: String
+        order: AppPaymentOrder,
+        verificationToken: String
     ): AppPaymentOrder = accountClient.refundPaymentOrder(
         requireSession(),
-        orderId,
-        verificationToken,
-        idempotencyKey
+        order,
+        verificationToken
     )
 
     suspend fun deleteAccount(verificationToken: String): AccountDeletionResult {

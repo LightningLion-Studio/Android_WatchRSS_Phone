@@ -359,6 +359,9 @@ internal fun AccountScreen(
     var paymentOrdersLoading by remember(session?.userId) { mutableStateOf(session != null) }
     var showPaymentAgreement by remember { mutableStateOf(false) }
     var showCloudPurchaseHelp by remember { mutableStateOf(false) }
+    val membershipPurchase = remember(session?.userId) { MembershipPurchaseState<AccountPage>() }
+    var membershipRefreshRevision by remember(session?.userId) { mutableStateOf(0) }
+    var paymentOrdersRevision by remember(session?.userId) { mutableStateOf(0) }
     var pendingRefundOrder by remember { mutableStateOf<AppPaymentOrder?>(null) }
     var refundVerificationToken by remember { mutableStateOf<String?>(null) }
     var deleteVerificationToken by remember { mutableStateOf<String?>(null) }
@@ -399,7 +402,7 @@ internal fun AccountScreen(
         passkeysLoading = false
     }
 
-    LaunchedEffect(session?.userId) {
+    LaunchedEffect(session?.userId, paymentOrdersRevision) {
         if (session == null) {
             paymentOrders = emptyList()
             paymentOrdersLoading = false
@@ -1808,6 +1811,24 @@ internal fun AccountScreen(
         )
     }
 
+    MembershipPurchaseDialogs(
+        state = membershipPurchase,
+        visiblePage = page.takeIf { isAccountPageActive() },
+        ownerId = session?.userId?.takeIf { accountRepository.hasUsableSession },
+        repository = accountRepository,
+        onWeChat = { source -> openCloudMembership(source, authenticated = accountRepository.hasUsableSession) },
+        onPaid = { ownerId ->
+            membershipRefreshRevision++
+            paymentOrdersRevision++
+            if (page != AccountPage.CLOUD_SYNC) {
+                coroutineScope.launch {
+                    runCatching { cloudSyncService.loadMembership(ownerId) }
+                }
+            }
+        },
+        onCheckoutClosed = { paymentOrdersRevision++ }
+    )
+
     if (showCloudPurchaseHelp) {
         WeChatPurchaseFallbackDialog(onDismiss = { showCloudPurchaseHelp = false })
     }
@@ -1852,7 +1873,13 @@ internal fun AccountScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("订单 ${refundOrder.merchantOrderId} 将全额原路退回 ¥${refundOrder.amountFen / 100}。")
-                    Text("退款成功后立即减少 3 台手机容量；若设备超额，系统会自动撤销最早激活的设备。该操作不可撤销。")
+                    Text(
+                        if (refundOrder.isCloudMembership) {
+                            "退款成功后，系统将回收本订单剩余的云会员时长。该操作不可撤销。"
+                        } else {
+                            "退款成功后立即减少 3 台手机容量；若设备超额，系统会自动撤销最早激活的设备。该操作不可撤销。"
+                        }
+                    )
                 }
             },
             confirmButton = {
@@ -1870,7 +1897,8 @@ internal fun AccountScreen(
                                 paymentOrders = accountRepository.paymentOrders()
                                 accessCoordinator.reconcile()
                                 message = when (updated.status) {
-                                    "refunded" -> "退款成功，授权容量已回收"
+                                    "refunded" -> if (refundOrder.isCloudMembership) "退款成功，云会员权益已回收"
+                                    else "退款成功，授权容量已回收"
                                     "refund_pending" -> "退款申请已提交，正在等待支付渠道处理"
                                     else -> "退款未完成，请稍后重试"
                                 }
@@ -2018,7 +2046,7 @@ internal fun AccountScreen(
                             Text("订单与退款", fontWeight = FontWeight.SemiBold,
                                 modifier = if (initialSection == AccountSection.ORDERS) sectionAnchor else Modifier)
                             Text(
-                                "订单对应的是手机版设备授权包，不是哔哩哔哩、抖音或WatchRSS云会员。",
+                                "查看手机版设备授权包和云会员的订单。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -2033,6 +2061,14 @@ internal fun AccountScreen(
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
+                                        if (order.isXunhuMembership && order.status == "pending") {
+                                            TextButton(
+                                                onClick = {
+                                                    membershipPurchase.resume(AccountPage.ROOT, order)
+                                                },
+                                                enabled = !busy && accountRepository.hasUsableSession
+                                            ) { Text("继续支付") }
+                                        }
                                         if (order.refundable) {
                                             TextButton(
                                                 onClick = {
@@ -2058,7 +2094,7 @@ internal fun AccountScreen(
                 accountControls(::openCloudSync)
                 if (page == AccountPage.ROOT && !accountRepository.hasUsableSession) {
                     CloudMembershipPurchaseButton(enabled = !busy && purchaseLauncher?.busy == false) {
-                        openCloudMembership(AccountPage.ROOT, authenticated = false)
+                        membershipPurchase.open(AccountPage.ROOT)
                     }
                 }
                 if (page == AccountPage.ROOT) {
@@ -2084,7 +2120,7 @@ internal fun AccountScreen(
                         Text("登录后可管理云同步。")
                         if (!showCloudInventory) {
                             CloudMembershipPurchaseButton(enabled = !busy && purchaseLauncher?.busy == false) {
-                                openCloudMembership(AccountPage.CLOUD_SYNC, authenticated = false)
+                                membershipPurchase.open(AccountPage.CLOUD_SYNC)
                             }
                         }
                     } else if (showCloudInventory) {
@@ -2099,9 +2135,9 @@ internal fun AccountScreen(
                                 purchaseLauncher?.cancelPending()
                                 showCloudInventory = true
                             },
-                            purchaseReturnRevision = purchaseLauncher?.returnRevision ?: 0,
+                            purchaseReturnRevision = (purchaseLauncher?.returnRevision ?: 0) + membershipRefreshRevision,
                             purchaseEnabled = purchaseLauncher?.busy == false,
-                            onPurchase = { openCloudMembership(AccountPage.CLOUD_SYNC, authenticated = true) },
+                            onPurchase = { membershipPurchase.open(AccountPage.CLOUD_SYNC) },
                             userId = activeSession.userId,
                             refreshActive = page == AccountPage.CLOUD_SYNC,
                             busy = busy,

@@ -363,6 +363,42 @@ class PhoneAccountRepository(
     suspend fun paymentOrder(orderId: String): AppPaymentOrder =
         accountClient.paymentOrder(requireSession(), orderId)
 
+    internal suspend fun createMembershipPaymentOrder(
+        expectedUserId: String,
+        productId: String,
+        idempotencyKey: String
+    ): AppPaymentOrder = withMembershipPaymentOwner(expectedUserId) {
+        accountClient.createMembershipPaymentOrder(it, productId, idempotencyKey).also { order ->
+            check(order.product.productId == productId) { "订单商品不匹配" }
+        }
+    }
+
+    internal suspend fun resumeMembershipPaymentOrder(expectedUserId: String, orderId: String): AppPaymentOrder =
+        withMembershipPaymentOwner(expectedUserId) {
+            accountClient.resumeMembershipPaymentOrder(it, orderId).also { order ->
+                check(order.orderId == orderId) { "订单号不匹配" }
+            }
+        }
+
+    internal suspend fun membershipPaymentOrder(expectedUserId: String, orderId: String): AppPaymentOrder =
+        withMembershipPaymentOwner(expectedUserId) {
+            accountClient.paymentOrder(it, orderId).also { order ->
+                check(order.orderId == orderId) { "订单号不匹配" }
+            }
+        }
+
+    private suspend fun withMembershipPaymentOwner(
+        expectedUserId: String,
+        action: suspend (PhoneAccountSession) -> AppPaymentOrder
+    ): AppPaymentOrder {
+        val owner = requireSession()
+        check(owner.userId == expectedUserId && hasUsableSession) { "请先登录当前账号" }
+        val order = action(owner)
+        check(requireSession().userId == expectedUserId && hasUsableSession) { "账号已切换" }
+        check(order.isXunhuMembership) { "订单商品与支付方式不匹配" }
+        return order
+    }
+
     suspend fun paymentOrders(): List<AppPaymentOrder> =
         accountClient.paymentOrders(requireSession())
 

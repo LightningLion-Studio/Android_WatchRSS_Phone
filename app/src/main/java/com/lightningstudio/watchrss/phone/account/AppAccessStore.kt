@@ -208,11 +208,13 @@ private fun JSONObject.optStringList(key: String): List<String> {
 internal fun JSONObject.toPaymentOrder() = AppPaymentOrder(
     product = optJSONObject("product")?.toAccessProduct() ?: AppAccessProductInfo(),
     orderId = getString("orderId"), merchantOrderId = optString("merchantOrderId"), amountFen = optInt("amountFen"),
-    status = optString("status"), paymentUrl = optString("paymentUrl").takeIf { it.isNotBlank() },
+    status = optString("status"), paymentUrl = optString("paymentUrl").takeIf { !isNull("paymentUrl") && it.isNotBlank() },
     paidAtMillis = optLong("paidAt").takeIf { it > 0L },
     refundedAtMillis = optLong("refundedAt").takeIf { it > 0L },
     refundEligibleUntilMillis = optLong("refundEligibleUntil").takeIf { it > 0L },
-    refundable = optBoolean("refundable", false)
+    refundable = optBoolean("refundable", false),
+    provider = optString("provider").takeIf { !isNull("provider") && it.isNotBlank() },
+    qrPayload = optString("qrPayload").takeIf { !isNull("qrPayload") && it.isNotBlank() }
 )
 
 internal fun JSONObject.toPaymentOrderForUser(userId: String): AppPaymentOrder? =

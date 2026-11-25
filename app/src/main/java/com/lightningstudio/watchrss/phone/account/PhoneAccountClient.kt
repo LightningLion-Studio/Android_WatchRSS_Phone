@@ -771,6 +771,32 @@ class PhoneAccountClient(
         ).use { it.jsonBody().toPaymentOrder() }
     }
 
+    internal suspend fun createMembershipPaymentOrder(
+        session: PhoneAccountSession,
+        productId: String,
+        idempotencyKey: String
+    ): AppPaymentOrder = withContext(Dispatchers.IO) {
+        post(
+            path = "/functions/v1/payments/xunhupay/membership-orders",
+            body = JSONObject().apply {
+                put("productId", productId)
+                put("idempotencyKey", idempotencyKey)
+            },
+            bearerToken = session.accessToken
+        ).use { it.jsonBody().toPaymentOrder() }
+    }
+
+    internal suspend fun resumeMembershipPaymentOrder(
+        session: PhoneAccountSession,
+        orderId: String
+    ): AppPaymentOrder = withContext(Dispatchers.IO) {
+        post(
+            path = "/functions/v1/payments/xunhupay/membership-orders/$orderId/resume",
+            body = JSONObject(),
+            bearerToken = session.accessToken
+        ).use { it.jsonBody().toPaymentOrder() }
+    }
+
     suspend fun paymentOrder(session: PhoneAccountSession, orderId: String): AppPaymentOrder = withContext(Dispatchers.IO) {
         get("/functions/v1/payments/orders/$orderId", session.accessToken).use { it.jsonBody().toPaymentOrder() }
     }

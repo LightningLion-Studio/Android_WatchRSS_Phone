@@ -54,8 +54,16 @@ data class AppPaymentOrder(
     val paidAtMillis: Long? = null,
     val refundedAtMillis: Long? = null,
     val refundEligibleUntilMillis: Long? = null,
-    val refundable: Boolean = false
-)
+    val refundable: Boolean = false,
+    val provider: String? = null,
+    val qrPayload: String? = null
+) {
+    val isCloudMembership: Boolean
+        get() = product.productId == "watchrss_cloud_month" || product.productId == "watchrss_cloud_year"
+
+    val isXunhuMembership: Boolean
+        get() = provider == "xunhupay" && isCloudMembership
+}
 
 data class AccountDeletionResult(
     val storageCleanupPending: Boolean,

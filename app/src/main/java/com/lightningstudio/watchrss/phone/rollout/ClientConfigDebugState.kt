@@ -1,5 +1,7 @@
 package com.lightningstudio.watchrss.phone.rollout
 
+import com.lightningstudio.watchrss.phone.features.FeatureDecision
+import com.lightningstudio.watchrss.phone.features.RolloutSource
 import com.lightningstudio.watchrss.phone.features.FeatureOverride
 import com.lightningstudio.watchrss.phone.features.FeatureRollout
 
@@ -21,23 +23,37 @@ internal data class ClientConfigDebugSnapshot(
 internal data class ClientFeatureDebugState(
     val key: String,
     val remote: FeatureRollout?,
-    val bucketHit: Boolean?,
-    val remoteEnabled: Boolean?,
+    val cloudDecision: FeatureDecision?,
     val override: FeatureOverride?,
-    val enabled: Boolean
+    val effective: FeatureDecision,
+    val accessRetained: Boolean = false
 ) {
+    val enabled: Boolean get() = accessRetained || effective.enabled
+    val remoteEnabled: Boolean? get() = cloudDecision?.enabled
+
     val status: String
+        get() = if (accessRetained) "已启用账号 · $policyStatus" else policyStatus
+
+    private val policyStatus: String
         get() {
-            val rollout = remote ?: return if (override == null) "包内默认" else "本机强制 · 云端值未取到"
-            val hit = if (bucketHit == true) "命中" else "未命中"
-            val rolloutStatus = "放量 ${rollout.percent}% · $hit"
-            val source = when (rollout.forced) {
-                FeatureOverride.ON -> "云端强制开"
-                FeatureOverride.OFF -> "云端强制关"
-                null -> rolloutStatus
+            val local = effective.source == RolloutSource.DEBUG
+            val rollout = remote
+            val cloud = cloudDecision
+            if (rollout == null || cloud == null) {
+                return if (local) "本机强制 · 云端值未取到" else "包内默认"
             }
-            if (override == null) return if (rollout.forced == null) "云控 · $source" else source
-            val cloudEnabled = if (remoteEnabled == true) "开" else "关"
-            return "本机强制 · 云端为 $cloudEnabled（$source）"
+            val hit = if (cloud.enabled) "命中" else "未命中"
+            val source = when (cloud.source) {
+                RolloutSource.FORCED_ON -> "云端强制开"
+                RolloutSource.FORCED_OFF -> "云端强制关"
+                RolloutSource.INELIGIBLE -> "未满足启用条件"
+                RolloutSource.STALE -> "云端配置已过期"
+                else -> "放量 ${rollout.percent}% · $hit"
+            }
+            if (local) {
+                val cloudEnabled = if (cloud.enabled) "开" else "关"
+                return "本机强制 · 云端为 $cloudEnabled（$source）"
+            }
+            return if (cloud.source == RolloutSource.BUCKET) "云控 · $source" else source
         }
 }

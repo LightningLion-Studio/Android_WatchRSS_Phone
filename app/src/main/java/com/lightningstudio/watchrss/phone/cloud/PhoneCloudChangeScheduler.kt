@@ -31,6 +31,7 @@ internal class PhoneCloudChangeScheduler(
 ) {
     private val changes=CloudLocalChanges(database)
     private var job: Job? = null
+    val isRunning: Boolean get() = job?.isActive == true
     private val bluetoothGate=BluetoothCloudChangeGate()
     fun setBluetoothSyncActive(active:Boolean) {bluetoothGate.setActive(active)}
     suspend fun acknowledgeBluetoothChanges() = withContext(Dispatchers.IO) {bluetoothGate.acknowledge(changes.sequence())}

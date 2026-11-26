@@ -462,7 +462,7 @@ class OfflineBluetoothReviewTest {
             AccountEnvironment(backendBaseUrl = origin, supabaseAnonKey = "synthetic"),
             deviceAccessToken = { coordinator.deviceAccessToken },
             refreshDeviceSession = coordinator::refreshRejectedDeviceSession,
-            deviceSessionRequest = coordinator
+            deviceSessionRequest = { coordinator }
         )
         suspend fun rejectedHead() = client.withAccountHeadSession("owner") { token ->
             throw com.lightningstudio.watchrss.phone.cloud.CloudHeadDeviceSessionRejected(token)

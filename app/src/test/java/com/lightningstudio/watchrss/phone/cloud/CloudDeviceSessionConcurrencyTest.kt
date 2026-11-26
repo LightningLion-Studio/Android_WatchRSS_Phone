@@ -69,10 +69,10 @@ class CloudDeviceSessionConcurrencyTest {
             AccountEnvironment(backendBaseUrl = "https://test.invalid"),
             deviceAccessToken = { cached.get().deviceAccessToken }, http = http,
             refreshDeviceSession = { rejected, owner -> gate.refresh(owner, rejected); true },
-            deviceSessionRequest = object : CloudDeviceSessionRequest {
+            deviceSessionRequest = { object : CloudDeviceSessionRequest {
                 override suspend fun <T> withDeviceSession(expectedUserId: String, request: suspend (String?) -> T): T =
                     gate.withSession(expectedUserId, request)
-            }
+            } }
         )
         val clients = listOf(client(), client())
         withTimeout(15_000) {

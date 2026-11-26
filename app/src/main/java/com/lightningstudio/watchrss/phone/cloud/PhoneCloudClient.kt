@@ -34,7 +34,7 @@ class PhoneCloudClient(
     private val http: OkHttpClient = defaultHttpClient(),
     private val refreshDeviceSession: suspend (String, String) -> Boolean = { _, _ -> false },
     private val downloadBackoff: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
-    private val deviceSessionRequest: CloudDeviceSessionRequest? = null
+    private val deviceSessionRequest: (() -> CloudDeviceSessionRequest)? = null
 ) {
     internal var allowR48Writes:()->Boolean = { CloudFormatR48.writeV1 }
     val backendBaseUrl: String get() = environment.backendBaseUrl.trimEnd('/')
@@ -45,7 +45,7 @@ class PhoneCloudClient(
             deviceAccessToken()?.takeIf{it.isNotBlank()}?.let{"Bearer $it"})
     }
     private suspend fun <T> withDeviceSession(userId: String, request: suspend (String?) -> T): T {
-        val gate = deviceSessionRequest
+        val gate = deviceSessionRequest?.invoke()
         return if (gate != null) gate.withDeviceSession(userId, request) else request(deviceAccessToken())
     }
 

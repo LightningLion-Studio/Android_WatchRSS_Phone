@@ -769,9 +769,11 @@ class PhoneCloudSyncService(
         // the epoch and commitments before using any key.
         accountRepository.session.value?.let { keyManager.hasAccountKey(it.userId) } == true
 
-    internal fun canOpenCloudSync(): Boolean = accountRepository.session.value?.let { session ->
+    internal fun hasCloudEntryAccess(): Boolean = accountRepository.session.value?.let { session ->
         settings.wasCloudSyncEnabled(client.scopeId(session)) || keyManager.hasAccountKey(session.userId)
-    } == true || cloudEntryEnabled()
+    } == true
+
+    internal fun canOpenCloudSync(): Boolean = hasCloudEntryAccess() || cloudEntryEnabled()
 
     private fun CloudBootstrap.hasCloudActivationHistory(): Boolean = libraryEpoch.isNotBlank() &&
         (keyCommitments.isNotEmpty() || keyEnvelopes.isNotEmpty() || legacyKeyVersions.isNotEmpty() || keyVersionFloor > 0)

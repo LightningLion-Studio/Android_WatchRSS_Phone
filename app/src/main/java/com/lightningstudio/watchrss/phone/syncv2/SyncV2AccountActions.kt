@@ -14,7 +14,8 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     recoveryReads:SyncV2RecoveryStorage.SourceReads?=null,private val fault:(String)->Unit={},
     private val noteSegmentsRead:Boolean=BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,
     private val networkNow:()->Long=System::currentTimeMillis,
-    private val currentKeyVersion:()->Long={1}):AutoCloseable {
+    private val currentKeyVersion:()->Long={1},
+    private val onBusinessApplied: () -> Unit = {}):AutoCloseable {
     private val signing=signer
     private val signer:SyncV2Signing get()=signing?:SyncV2Codec.fail("signing_state_unavailable")
     private val db get()=projection.accountDatabase
@@ -104,8 +105,17 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     }
     /** Read metadata, then scan R0+tail without ever replacing original business rows.
      * Repeated host windows finish a large rebuild; the return value exposes continuation. */
-    fun refresh(maxPages:Int=16,budgetMillis:Long=290000):JSONObject {
-        gate();syncFiles();val status=cloud.readCurrent();trustedNow()?.let{projection.accountContact(it)};val progress=projection.runWindow(maxPages,budgetMillis)
+    fun refresh(
+        maxPages: Int = 16,
+        budgetMillis: Long = 290_000,
+        beforeApply: (String) -> Unit = {}
+    ): JSONObject {
+        gate()
+        syncFiles()
+        val status = cloud.readCurrent()
+        beforeApply(status)
+        trustedNow()?.let { projection.accountContact(it) }
+        val progress = projection.runWindow(maxPages, budgetMillis)
         recovery.purge(trustedNow())
         if(!progress.paused)applyObserved()
         return state().put("status",status).put("projectionPaused",progress.paused)
@@ -139,6 +149,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             if(signing!=null)current.body.put("pendingAppliedAck",JSONObject().put("requestId",id()).put("commitOid",a.getString("oid")).put("deviceId",signer.deviceId).put("refRevision",a.getString("revision")).put("rollbackGeneration",a.getString("generation")))
         }
         }
+        onBusinessApplied()
         runCatching{flushAppliedAck()};return true
     }
     fun state():JSONObject {

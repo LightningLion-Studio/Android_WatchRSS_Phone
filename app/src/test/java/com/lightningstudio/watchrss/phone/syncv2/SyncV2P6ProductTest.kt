@@ -29,6 +29,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -358,6 +359,36 @@ class SyncV2P6ProductTest {
             }finally{life.close()}
         }}
     }
+    @Test fun receivingNotesRefreshesAnExistingRoomObserverAfterOneCheckpoint() = runBlocking {
+        Server().use { server ->
+            Host(server, "sender", bodyChannel = false).use { sender ->
+                sender.note("before")
+                sender.sync()
+                Host(server, "receiver", bodyChannel = false).use { receiver ->
+                    receiver.sync()
+                    val initial = CompletableDeferred<Unit>()
+                    val updated = async {
+                        withTimeout(10_000) {
+                            receiver.room.noteDao().observeNotes().first { notes ->
+                                if (notes.any { it.markdown == "before" }) initial.complete(Unit)
+                                notes.any { it.markdown == "after" }
+                            }
+                        }
+                    }
+                    withTimeout(10_000) { initial.await() }
+
+                    sender.note("after")
+                    sender.sync()
+                    val checkpoints = server.checkpoints
+                    receiver.sync()
+
+                    assertEquals(checkpoints + 1, server.checkpoints)
+                    assertEquals("after", updated.await().single().markdown)
+                }
+            }
+        }
+    }
+
     @Test fun realCreateScanPublishRoomApplyReceiverAndSubsequentSchedule() {
         Server().use {server->Host(server,"a").use{a->
             a.note();assertTrue(a.sync().enabled);assertEquals(1,server.publishes);assertEquals("local",server.values().single().getString("markdown"));assertTrue(server.acks>0)

@@ -504,7 +504,7 @@ class ClientConfigRepositoryTest {
             )
             server.enqueue(remote(1, bucket))
             repo.refreshNow()
-            assertEquals(false, repo.debugSnapshot().features.single { it.key == feature.key }.bucketHit)
+            assertEquals(false, repo.debugSnapshot().features.single { it.key == feature.key }.remoteEnabled)
             assertFalse(repo.cloudSyncEntryAllowed(alreadyEnabled = false))
 
             server.enqueue(remote(2, bucket + 1))
@@ -512,7 +512,7 @@ class ClientConfigRepositoryTest {
             val debug = repo.debugSnapshot()
             assertEquals(2L, debug.config.version)
             assertEquals(clock, debug.fetchedAt)
-            assertEquals(true, debug.features.single { it.key == feature.key }.bucketHit)
+            assertEquals(true, debug.features.single { it.key == feature.key }.remoteEnabled)
             assertEquals("云控 · 放量 ${bucket + 1}% · 命中", debug.features.single { it.key == feature.key }.status)
             assertTrue(repo.cloudSyncEntryAllowed(alreadyEnabled = false))
 
@@ -538,6 +538,48 @@ class ClientConfigRepositoryTest {
             assertTrue(restarted.cloudSyncEntryAllowed(alreadyEnabled = false))
             restarted.setDebugOverride(FeatureRegistry.b2, FeatureOverride.ON)
             assertTrue(restarted.b2BuildEligible())
+        }
+    }
+
+    @Test
+    fun debugSourceUsesEffectiveCloudDecisionAndShowsRetainedAccess() = runBlocking {
+        MockWebServer().use { server ->
+            val feature = FeatureRegistry.cloudSyncEntry
+            val repo = repository(server)
+            fun state(retained: Boolean = false) =
+                repo.debugSnapshot(retained).features.single { it.key == feature.key }
+            suspend fun refresh(version: Int, percent: Int, forced: String) {
+                server.enqueue(MockResponse().setBody(
+                    """{"configVersion":$version,"ttlSeconds":300,"features":{
+                        "${feature.key}":{"percent":$percent,"salt":"fixture","minAppVersionCode":0,"forced":"$forced"}
+                    }}"""
+                ))
+                repo.refreshNow()
+            }
+
+            refresh(1, 0, "on")
+            assertEquals(FeatureOverride.ON, state().remote?.forced)
+            assertFalse(state().enabled)
+            assertEquals("云控 · 放量 0% · 未命中", state().status)
+            assertTrue(state(retained = true).enabled)
+            assertEquals("已启用账号 · 云控 · 放量 0% · 未命中", state(retained = true).status)
+
+            repo.setDebugOverride(feature, FeatureOverride.ON)
+            assertTrue(state().enabled)
+            assertEquals("本机强制 · 云端为 关（放量 0% · 未命中）", state().status)
+            repo.setDebugOverride(feature, null)
+
+            refresh(2, 100, "on")
+            assertTrue(state().enabled)
+            assertEquals("云端强制开", state().status)
+            repo.setDebugOverride(feature, FeatureOverride.OFF)
+            assertFalse(state().enabled)
+            assertEquals("本机强制 · 云端为 开（云端强制开）", state().status)
+
+            repo.setDebugOverride(feature, null)
+            refresh(3, 100, "off")
+            assertFalse(state().enabled)
+            assertEquals("云端强制关", state().status)
         }
     }
 

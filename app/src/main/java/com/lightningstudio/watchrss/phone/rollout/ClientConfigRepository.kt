@@ -204,15 +204,24 @@ internal class ClientConfigRepository(
     }
 
     fun decide(config: ClientConfig, feature: RegisteredFeature, eligible: Boolean) =
-        FeatureRolloutPolicy.decide(config.rollout(feature), installId, eligible,
-            BuildConfig.VERSION_CODE, debugOverride(feature), stale = config.stale && feature.evaluateAt == EvaluateAt.SESSION)
+        decide(config, feature, eligible, debugOverride(feature))
+
+    private fun decide(
+        config: ClientConfig,
+        feature: RegisteredFeature,
+        eligible: Boolean,
+        override: FeatureOverride?
+    ) = FeatureRolloutPolicy.decide(
+        config.rollout(feature), installId, eligible, BuildConfig.VERSION_CODE, override,
+        stale = config.stale && feature.evaluateAt == EvaluateAt.SESSION
+    )
 
     fun cloudSyncEntryAllowed(alreadyEnabled: Boolean): Boolean =
         alreadyEnabled || decide(currentSnapshot(), FeatureRegistry.cloudSyncEntry, eligible = true).enabled
 
     fun b2BuildEligible() = BuildConfig.B2_ENABLED || debugOverride(FeatureRegistry.b2) == FeatureOverride.ON
 
-    fun debugSnapshot(): ClientConfigDebugSnapshot {
+    fun debugSnapshot(cloudEntryAlreadyEnabled: Boolean = false): ClientConfigDebugSnapshot {
         val snapshot = currentSnapshot()
         return ClientConfigDebugSnapshot(
             config = snapshot,
@@ -221,11 +230,14 @@ internal class ClientConfigRepository(
             features = FeatureRegistry.entries.map { feature ->
                 val remote = snapshot.features[feature.key]
                 val override = debugOverride(feature)
-                val effective = decide(snapshot, feature, eligible = feature != FeatureRegistry.b2 || b2BuildEligible())
+                val cloudEligible = feature != FeatureRegistry.b2 || BuildConfig.B2_ENABLED
+                val effective = decide(snapshot, feature,
+                    cloudEligible || override == FeatureOverride.ON, override)
                 ClientFeatureDebugState(
-                    feature.key, remote, remote?.let { FeatureRolloutPolicy.bucket(it.salt, installId) < it.percent },
-                    remote?.let { FeatureRolloutPolicy.decide(it, installId, true, BuildConfig.VERSION_CODE, null).enabled },
-                    override, effective.enabled
+                    feature.key, remote,
+                    remote?.let { decide(snapshot, feature, cloudEligible, override = null) },
+                    override, effective,
+                    accessRetained = feature == FeatureRegistry.cloudSyncEntry && cloudEntryAlreadyEnabled
                 )
             }
         )

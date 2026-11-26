@@ -41,6 +41,36 @@ class PhoneDeviceReauthenticationFlowTest {
     private val appStore=AppAccessStore(context,preferencesOverride=context.getSharedPreferences("device-flow-access",Context.MODE_PRIVATE))
     private val cloudState=context.getSharedPreferences("device-flow-cloud",Context.MODE_PRIVATE)
     private val root=ByteArray(32){it.toByte()}
+    private lateinit var identity: LicenseDeviceIdentity
+    private val leaseKeys = java.security.KeyPairGenerator.getInstance("EC").apply {
+        initialize(256)
+    }.generateKeyPair()
+    private val publicPem = "-----BEGIN PUBLIC KEY-----" +
+        java.util.Base64.getEncoder().encodeToString(leaseKeys.public.encoded) +
+        "-----END PUBLIC KEY-----"
+
+    private fun validLease(): String {
+        fun base64Url(bytes: ByteArray) = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+        val payload = JSONObject()
+            .put("licenseDeviceId", identity.deviceId)
+            .put("expiresAt", System.currentTimeMillis() / 1000 + 3600)
+        val signed = base64Url("""{"alg":"ES256"}""".toByteArray()) + "." +
+            base64Url(payload.toString().toByteArray())
+        val der = java.security.Signature.getInstance("SHA256withECDSA").run {
+            initSign(leaseKeys.private)
+            update(signed.toByteArray())
+            sign()
+        }
+        // A P-256 JWS uses two fixed-width coordinates in place of the DER integers.
+        fun coordinate(start: Int, size: Int): ByteArray {
+            val bytes = der.copyOfRange(start, start + size).takeLast(32).toByteArray()
+            return ByteArray(32 - bytes.size) + bytes
+        }
+        val rLength = der[3].toInt() and 255
+        val sLength = der[5 + rLength].toInt() and 255
+        return "$signed.${base64Url(coordinate(4, rLength) + coordinate(6 + rLength, sLength))}"
+    }
+
     private val requests=java.util.concurrent.CopyOnWriteArrayList<String>()
     private lateinit var repo:PhoneAccountRepository
     private lateinit var coordinator:AppAccessCoordinator
@@ -66,13 +96,13 @@ class PhoneDeviceReauthenticationFlowTest {
                 path.endsWith("/account/login/start")->"""{"transactionId":"login","requiredFactorCount":1,"completedFactors":[],"complete":false}"""
                 path.endsWith("/account/app-access")->"""{"accessMode":"paid","deviceStatus":"authorized"}"""
                 path.endsWith("/phone-authorizations/challenge")->JSONObject().put("challengeId","challenge").put("nonce","nonce").put("expiresAt",System.currentTimeMillis()+60000).toString()
-                path.endsWith("/phone-authorizations/claim")->JSONObject().put("deviceAccessToken","new-device").put("deviceAccessTokenExpiresAt",Long.MAX_VALUE).put("lease","synthetic-lease").put("leaseExpiresAt",Long.MAX_VALUE).put("serverTime",System.currentTimeMillis()).put("access",JSONObject().put("accessMode","paid").put("deviceStatus","authorized")).toString()
+                path.endsWith("/phone-authorizations/claim")->JSONObject().put("deviceAccessToken","new-device").put("deviceAccessTokenExpiresAt",Long.MAX_VALUE).put("lease",validLease()).put("leaseExpiresAt",Long.MAX_VALUE).put("serverTime",System.currentTimeMillis()).put("access",JSONObject().put("accessMode","paid").put("deviceStatus","authorized")).toString()
                 else->"{}"
             }
             return MockResponse().setBody(body)
         }}
-        server.start();val environment=AccountEnvironment(backendBaseUrl=server.url("/").toString().trimEnd('/'),supabaseAnonKey="synthetic")
-        val identity=LicenseDeviceIdentity(context);val install=PhoneInstallationIdentity(context)
+        server.start();val environment=AccountEnvironment(backendBaseUrl=server.url("/").toString().trimEnd('/'),supabaseAnonKey="synthetic",appAccessPublicKey=publicPem)
+        identity=LicenseDeviceIdentity(context);val install=PhoneInstallationIdentity(context)
         repo=PhoneAccountRepository(environment,store,install,PhoneAccountClient(environment,identity),"phone")
         store.save(PhoneAccountSession("owner","phone","old-account","",Long.MAX_VALUE))
         repo.onClearCloudState={error("same-account flow must preserve cloud custody")}

@@ -499,8 +499,11 @@ internal class SyncV2Projection(
     data class WireIndex(val tree:SyncV2Index.Tree,val objects:Map<String,ByteArray>,val refs:List<JSONObject>,val reused:Set<String> = emptySet(),val retiredTrees:Set<String> = emptySet(),val noteMetadata:Map<String,JSONObject> = emptyMap(),val reservations:List<AutoCloseable> = emptyList()):AutoCloseable {
         override fun close(){reservations.forEach{it.close()};(objects as? AutoCloseable)?.close()}
     }
-    fun prepareWireIndex(signer:SyncV2Signing,contentKey:ByteArray,keyVersion:Long):WireIndex {
-        val before=state();val rows=mutableListOf<JSONObject>();val objects=SyncV2Spool(db);val refs=mutableListOf<JSONObject>();val reservations=mutableListOf<AutoCloseable>();val prepared=SyncV2Spool(db)
+    fun prepareWireIndex(signer:SyncV2Signing,contentKey:ByteArray,keyVersion:Long,resetAdditions:Boolean=false):WireIndex {
+        val before=state()
+        if (resetAdditions && (resetSources?.complete() != true || !before.body.isNull("appliedAccount") ||
+                before.body.optString("rollbackGeneration") != "0")) SyncV2Codec.fail("source_changed")
+        val rows=mutableListOf<JSONObject>();val objects=SyncV2Spool(db);val refs=mutableListOf<JSONObject>();val reservations=mutableListOf<AutoCloseable>();val prepared=SyncV2Spool(db)
         try {
         // At most one candidate is decrypted at a time. No article/book body SELECT occurs here.
         val candidates=db.controlQuery("SELECT entity_key FROM syncv2_candidates WHERE scope=? ORDER BY entity_key",arrayOf(scope)).use{c->buildList{while(c.moveToNext())add(c.getString(0))}}
@@ -509,7 +512,9 @@ internal class SyncV2Projection(
         val currentRefs=mutableMapOf<String,JSONObject>().also{refsByState->for(oid in currentObjects.keys)if(oid.startsWith("state-refs:")){val ref=SyncV2Wire.parse(currentObjects.getValue(oid),262144,true);refsByState[ref.getJSONObject("body").getString("stateOid")]=ref}}
         for(candidateId in candidates) {
             val c=db.controlQuery("SELECT entity_key,kind,logical_id,meta,state,source_hash FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,candidateId)).use{c->c.moveToFirst();arrayOf<Any>(c.getString(0),c.getString(1),c.getString(2),c.getBlob(3),c.getBlob(4),c.getString(5))}
-            val entity=c[0] as String;val hash=c[5] as String
+            val entity=c[0] as String
+            val kind=c[1] as String
+            val id=c[2] as String
             val remote=current[entity]
             if(c[1]=="note"&&remote?.has(SyncV2NoteWiring.ISOLATED_KEY)==true) {
                 val row=remote.getJSONObject("row");rows.add(row)
@@ -524,10 +529,23 @@ internal class SyncV2Projection(
                 }
                 continue
             }
-            val meta=open("meta",c[3] as ByteArray);val state=open("candidate-state",c[4] as ByteArray)
-            if(state.has("projectionRemoved"))SyncV2Codec.fail("unsupported_feature")
+            val localMeta=open("meta",c[3] as ByteArray)
+            val localState=open("candidate-state",c[4] as ByteArray)
+            if(localState.has("projectionRemoved"))SyncV2Codec.fail("unsupported_feature")
             // Revalidate persisted candidates before reusing a pre-upgrade sealed cache.
-            val projected=SyncV2Business.join(c[1] as String,meta,state)
+            val projected=SyncV2Business.join(kind,localMeta,localState)
+            val resetMerge = resetAdditions && kind != "note" && remote != null
+            val (meta, state) = if (resetMerge) {
+                val remoteMeta = remote!!.getJSONObject("meta")
+                val remoteState = remote.getJSONObject("state")
+                val localBody = requireNotNull(resetSources).hasLocalBody(kind, id)
+                val merged = SyncV2ResetMerge.merge(kind, projected, SyncV2Business.join(kind, remoteMeta, remoteState), localBody)
+                SyncV2Business.split(kind, id, entity, merged, null).also {
+                    it.meta.put("addedAtSource", remoteMeta.getString("addedAtSource"))
+                }
+            } else SyncV2Business.PairObjects(localMeta, localState)
+            val hash = if (resetMerge) SyncV2Codec.hash(JSONObject().put("local", c[5])
+                .put("meta", meta).put("state", state).put("remote", remote!!.getJSONObject("row"))) else c[5] as String
             val undeclared=c[1]=="note" && !projected.has("noteConflicts")
             // A candidate with no conflict channel can only reuse the authenticated wire row.
             if(undeclared &&
@@ -584,8 +602,10 @@ internal class SyncV2Projection(
                     .put("promiseId",if(body)SyncV2Codec.hex(SyncV2Codec.random(16))else JSONObject.NULL).put("recipeOid",JSONObject.NULL)
                     .put("opaqueContentId",JSONObject.NULL).put("contentBytes",JSONObject.NULL).put("requiredFeatures",JSONArray())
                 val bodySource=when {
-                    c[1] in setOf("book","asset") && SyncV2BodyIdentity.same(meta,remote)->remote!!.getJSONObject("row")
-                    prior?.optString("bodyBinding")==bodyBinding->prior.getJSONObject("row")
+                    (c[1] in setOf("book","asset") || resetMerge && kind == "article") &&
+                        SyncV2BodyIdentity.same(meta,remote)->remote!!.getJSONObject("row")
+                    prior?.optString("bodyBinding")==bodyBinding &&
+                        (!resetMerge || prior.getString("sourceHash") == hash)->prior.getJSONObject("row")
                     else->null
                 }
                 if(bodySource!=null)SyncV2BodyIdentity.carry(row,bodySource)
@@ -1411,7 +1431,7 @@ internal class SyncV2Projection(
 
     /**
      * The retired account is never a merge base. Before the first apply in the new
-     * scope, publish only additions and keep every authenticated remote row.
+     * scope, publish additions and merge same-ID rows against the authenticated head.
      */
     internal fun prepareResetPublication(): Boolean {
         val migration = resetSources ?: return false
@@ -1424,10 +1444,7 @@ internal class SyncV2Projection(
         val collisions = accountLocalRows().filterRows { local ->
             val meta = local.getJSONObject("meta")
             val cloud = remote[meta.getString("entityKey")] ?: return@filterRows false
-            migration.requiresSeparateCopy(local, cloud)
-        }
-        if (collisions.any { it.getJSONObject("meta").getString("kind") != "note" }) {
-            SyncV2Codec.fail("reset_record_conflict")
+            meta.getString("kind") == "note" && migration.requiresSeparateCopy(local, cloud)
         }
         if (collisions.isEmpty() && before.body.isNull("pendingChoice")) return true
 

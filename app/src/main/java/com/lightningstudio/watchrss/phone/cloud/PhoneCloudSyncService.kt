@@ -422,6 +422,14 @@ class PhoneCloudSyncService(
                 }
             }
         }
+        client.onDeviceAuthorizationRejected = { session, generation ->
+            synchronized(syncStateLock) {
+                if (!accountRepository.cloudSessionChanging && generation == accountGeneration &&
+                    accountRepository.session.value?.userId == session.userId) {
+                    invalidateEpoch(session, "device_session_authorization")
+                }
+            }
+        }
         client.onBootstrap = { session, bootstrap -> observeBootstrap(session, bootstrap) }
         client.onContentMetadata = { session, metadata ->
             synchronized(syncStateLock) {
@@ -503,14 +511,22 @@ class PhoneCloudSyncService(
         _migrationState.value=CloudMigrationUiState("unavailable",errorCode="migration_scope_changed")
         settings.bindScope(client.backendBaseUrl, session.userId)
         settings.claimLegacyOwner(session.userId)
-        if (pendingCloudReset(session.userId) != null || cloudResetPaused(session) ||
-            settings.resetReady(client.scopeId(session)) != null) {
+        val scope = client.scopeId(session)
+        val releaseAuthorization = reason in setOf("account_release", "cloud_device_revoked",
+            "device_session_authorization", "device_reregistration")
+        if (!releaseAuthorization && (pendingCloudReset(session.userId) != null || cloudResetPaused(session))) {
             keyManager.archiveCloudResetKeys(session.userId, settings.libraryEpoch)
         } else {
-            keyManager.clearAccountKeys(session.userId); settings.clearScope()
-            recordStore.clear(client.scopeId(session)); cache.clear(client.scopeId(session))
+            settings.clearResetAuthorization(scope)
+            keyManager.clearAccountKeys(session.userId, clearResetArchives = releaseAuthorization)
+            settings.clearScope()
+            recordStore.clear(scope); cache.clear(scope)
             recordStore.clear(session.userId); cache.clear(session.userId)
-            uploader.clearScope(client.scopeId(session))
+            uploader.clearScope(scope)
+        }
+        if (releaseAuthorization && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            keyManager.clearDeviceKey(session.userId, deviceId)
+            legacyDeviceId?.takeIf { it != deviceId }?.let { keyManager.clearDeviceKey(session.userId, it) }
         }
         synchronized(readingManifests) { readingManifests.clear() }
         synchronized(ownPublicationManifests) { ownPublicationManifests.clear() }
@@ -542,9 +558,19 @@ class PhoneCloudSyncService(
     private fun observeBootstrap(session: PhoneAccountSession, bootstrap: CloudBootstrap) = synchronized(syncStateLock) {
         bindScope(session)
         require(bootstrap.libraryEpoch.isNotBlank()) { "云服务需要升级到同步协议 v2" }
+        val ownRevoked = bootstrap.devices.any { it.deviceId == deviceId && it.revokedAt != null }
+        if (ownRevoked && (keyManager.hasAccountKey(session.userId) ||
+                settings.resetReady(client.scopeId(session)) != null || settings.appliedResetEpoch != null)) {
+            invalidateEpoch(session, "cloud_device_revoked")
+            throw CloudTrustException()
+        }
+        if (ownRevoked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) keyManager.clearDeviceKey(session.userId, deviceId)
         if (bootstrap.syncV2ResetScope != null && usesSyncV2) observeResetBootstrap(session, bootstrap)
-        if (bootstrap.syncV2ResetScope == null && settings.resetReady(client.scopeId(session)) != null &&
-            settings.libraryEpoch != null && settings.libraryEpoch != bootstrap.libraryEpoch) throw CloudTrustException()
+        if (bootstrap.syncV2ResetScope == null && settings.libraryEpoch != null &&
+            settings.libraryEpoch != bootstrap.libraryEpoch &&
+            (settings.resetReady(client.scopeId(session)) != null || settings.appliedResetEpoch != null)) {
+            throw CloudTrustException()
+        }
         if (bootstrap.hasCloudActivationHistory()) rememberCloudActivation(session)
         val changed = settings.observeEpoch(bootstrap.libraryEpoch) { invalidateEpoch(session,"observed_epoch_change") }
         client.useEpoch(session, bootstrap.libraryEpoch)
@@ -552,11 +578,6 @@ class PhoneCloudSyncService(
         if (changed) throw CloudTrustException()
         if (syncV2Database != null) syncV2Product.observeBootstrap(bootstrap.syncV2)
         val keys = localKeys(session)
-        val remoteDevice = bootstrap.devices.firstOrNull { it.deviceId == deviceId }
-        if (bootstrap.syncV2ResetScope == null) clearRevokedCloudDeviceIdentity(bootstrap, deviceId) { keyManager.clearDeviceKey(session.userId, deviceId) }
-        if (bootstrap.syncV2ResetScope == null && keys.isNotEmpty() && remoteDevice?.revokedAt != null) {
-            keys.values.forEach { it.fill(0) }; invalidateEpoch(session,"cloud_device_revoked"); throw CloudTrustException()
-        }
         try {
             if (keys.isNotEmpty() && bootstrap.keyCommitments.isNotEmpty()) {
                 val verified = CloudKeyTrust.verifiedSubset(session.userId, bootstrap.libraryEpoch,
@@ -1007,9 +1028,12 @@ class PhoneCloudSyncService(
         cloudResetEntry(bootstrap, hasLocalAccountKey(),
             usesSyncV2 && canOpenCloudSync() && cloudResetAllowed() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S,
             !accountRepository.hasUsableSession || accountRepository.session.value?.userId != userId ||
-                pendingCloudReset(userId) != null || accountRepository.session.value?.let {
-                    settings.resetPause(client.scopeId(it)) == RESET_BLUETOOTH
-                } == true)
+                pendingCloudReset(userId) != null || cloudResetBluetoothPaused(userId))
+
+    internal fun cloudResetBluetoothPaused(userId: String): Boolean =
+        accountRepository.session.value?.takeIf { it.userId == userId }?.let {
+            settings.resetPause(client.scopeId(it)) == RESET_BLUETOOTH
+        } == true
 
     internal fun prepareCloudStorageReset(userId: String): RecoveryKeySetup =
         keyManager.createRecoverySetup(requireSession(userId).userId, keyVersion = 1)
@@ -1044,8 +1068,8 @@ class PhoneCloudSyncService(
         val resetScope = bootstrap.syncV2ResetScope ?: return
         require(!bootstrap.cloudResetAt.isNullOrBlank() && !bootstrap.contentGeneration.isNullOrBlank())
         com.lightningstudio.watchrss.phone.syncv2.SyncV2Codec.scope(resetScope)
-        if (settings.resetReady(client.scopeId(session)) != bootstrap.libraryEpoch ||
-            settings.libraryEpoch != bootstrap.libraryEpoch || cloudResetPaused(session)) {
+        val initialized = settings.isResetInitialized(client.scopeId(session), bootstrap.libraryEpoch)
+        if (!initialized || settings.libraryEpoch != bootstrap.libraryEpoch || cloudResetPaused(session)) {
             stopForCloudReset(session, upgrade = false)
             keyManager.archiveCloudResetKeys(session.userId, settings.libraryEpoch)
             settings.libraryEpoch = bootstrap.libraryEpoch
@@ -1069,6 +1093,9 @@ class PhoneCloudSyncService(
                 settings.setResetReady(client.scopeId(session), bootstrap.libraryEpoch)
                 settings.setResetPause(client.scopeId(session), null)
             }
+        } catch (error: SyncV2CloudError) {
+            if (error.code == "device_revoked") invalidateEpoch(session, "cloud_device_revoked")
+            throw error
         } catch (error: IllegalStateException) {
             if (error.message != "reset_bluetooth_pending") throw error
             synchronized(syncStateLock) {
@@ -1326,7 +1353,7 @@ class PhoneCloudSyncService(
         keyManager.saveAccountKey(session.userId, version, key, true)
         key.fill(0); pendingSetup = null
     }
-    suspend fun recoverWithWords(words: List<String>) = approvalMutex.withLock {
+    internal suspend fun recoverWithEntropy(entropy: ByteArray) = approvalMutex.withLock {
         requireCloudSyncEntry()
         val session = requireSession(); val bootstrap = client.bootstrap(session)
         if (pendingCloudReset(session.userId)?.oldEpoch == bootstrap.libraryEpoch) {
@@ -1334,7 +1361,6 @@ class PhoneCloudSyncService(
         }
         val recovery = bootstrap.keyEnvelopes.filter { it.recipientType == "recovery" }.map { it.envelope }
         if (bootstrap.keyCommitments.isEmpty()) {
-            val entropy = RecoveryWords.decode(words)
             val recovered = linkedMapOf<Int, ByteArray>()
             try {
                 recovery.sortedBy { it.keyVersion }.forEach { recovered[it.keyVersion] = CloudKeyEnvelopeCodec.unwrapRecoveryEnvelope(it, session.userId, entropy) }
@@ -1348,8 +1374,12 @@ class PhoneCloudSyncService(
                 storeLegacyCommitments(client, session, deviceId, rows, bootstrap.libraryEpoch)
                 val current = client.bootstrap(session); verifyKeys(session, current, recovered); checkApprovalOwner(session)
                 keyManager.saveVerifiedKeys(session.userId, recovered)
-            } finally { entropy.fill(0); recovered.values.forEach { it.fill(0) } }
-        } else keyManager.recoverWithWords(session.userId, words, recovery) { verifyKeys(session, bootstrap, it); checkApprovalOwner(session) }
+            } finally { recovered.values.forEach { it.fill(0) } }
+        } else keyManager.recoverWithEntropy(session.userId, entropy, recovery) {
+            verifyKeys(session, bootstrap, it)
+            checkApprovalOwner(session)
+        }
+        entropy.fill(0)
         checkCloudEpoch(session, bootstrap.libraryEpoch)
         if (bootstrap.syncV2ResetScope != null) {
             syncMutex.withLock { finishCloudResetRecovery(session, bootstrap) }
@@ -1477,7 +1507,6 @@ class PhoneCloudSyncService(
             replaceIdentity = {
                 synchronized(syncStateLock) {
                     checkCloudEpoch(session, expectedEpoch)
-                    keyManager.clearDeviceKey(session.userId, deviceId)
                     clearCloudScope(session, "device_reregistration")
                 }
             },
@@ -1652,7 +1681,7 @@ class PhoneCloudSyncService(
                     syncV2Product.headOwner(session.userId) == owner
                 poller.check(
                     owner = owner,
-                    probe = { etag ->
+                    probe = headProbe@{ etag ->
                         try {
                             withContext(kotlinx.coroutines.CoroutineName("Cloud head request")) probe@{
                                 val job = currentCoroutineContext()[kotlinx.coroutines.Job]!!
@@ -1669,6 +1698,10 @@ class PhoneCloudSyncService(
                                 }
                             }
                         } catch (error: SyncV2CloudError) {
+                            if (error.code == "device_revoked" && eligible()) {
+                                invalidateEpoch(session, "cloud_device_revoked")
+                                return@headProbe null
+                            }
                             if (!cloudResetPaused(session)) throw error
                             syncV2Product.release()
                             null
@@ -1764,7 +1797,7 @@ class PhoneCloudSyncService(
                     return@retryDiscardedCloudTransfer empty
                 }
                 if (cloudResetPaused(session) || pendingCloudReset(session.userId)?.let {
-                    settings.resetReady(client.scopeId(session)) != it.nextEpoch
+                    !settings.isResetInitialized(client.scopeId(session), it.nextEpoch)
                 } == true) {
                     val text = when {
                         settings.resetPause(client.scopeId(session)) == RESET_BLUETOOTH -> CLOUD_RESET_BLUETOOTH_PENDING
@@ -1805,6 +1838,11 @@ class PhoneCloudSyncService(
                 update(if (paused.value) CloudSyncPhase.PAUSED else CloudSyncPhase.IDLE, "等待继续同步")
                 throw error
             }
+            if (error is SyncV2CloudError && error.code == "device_revoked") {
+                invalidateEpoch(session, "cloud_device_revoked")
+                throw error
+            }
+            if (error is CloudDeviceAuthorizationException) throw error
             if (cloudResetPaused(session)) {
                 syncV2Product.release()
                 return PhoneCloudSyncResult(0, 0, 0, false, 0, _state.value)
@@ -1824,9 +1862,6 @@ class PhoneCloudSyncService(
             } else if (transientRebuildFailure || error is CloudHttpException && (discardedCloudTransfer(error) || cloudErrorCode(error) == "cloud_storage_cleanup_pending")) {
                 update(CloudSyncPhase.IDLE, "云端内容正在重建，已排队重试；本机资料已保留")
                 PhoneCloudSyncWorker.scheduleFollowUp(appContext)
-            } else if (error is CloudDeviceAuthorizationException && _state.value.phase != CloudSyncPhase.NEEDS_RECOVERY) {
-                invalidateEpoch(session,"device_session_authorization")
-                update(CloudSyncPhase.NEEDS_RECOVERY, "设备身份需要重新验证")
             } else if (_state.value.phase !in setOf(CloudSyncPhase.NEEDS_RECOVERY,CloudSyncPhase.ERROR)) {
                 val code = when {
                     error is SyncV2CloudError -> error.code
@@ -1866,7 +1901,12 @@ class PhoneCloudSyncService(
                     val ready = if (bootstrap.syncV2 != null) prepareCloudSyncKeys(session, bootstrap) else bootstrap
                     memberRead = ready.member
                     checkApprovalOwner(session)
-                    product.sync(ready.syncV2, manual, restoreCurrent, expectedUserId = session.userId) to ready.member
+                    val result = product.sync(ready.syncV2, manual, restoreCurrent, expectedUserId = session.userId)
+                    if (result.appliedHead && ready.syncV2ResetScope != null) synchronized(syncStateLock) {
+                        checkCloudEpoch(session, ready.libraryEpoch)
+                        settings.completeResetSync(client.scopeId(session), ready.libraryEpoch)
+                    }
+                    result to ready.member
                 }
             }
         } catch (error: Exception) {
@@ -2200,10 +2240,7 @@ class PhoneCloudSyncService(
                 traceSync("failure:${error.javaClass.simpleName}:status=${(error as? CloudHttpException)?.status ?: (error as? CloudObjectUploadException)?.status}:${error.stackTrace.firstOrNull { it.className.startsWith("com.lightningstudio.watchrss.phone") }}")
                 if (com.lightningstudio.watchrss.phone.BuildConfig.DEBUG) android.util.Log.w("WatchRssCloud", "sync failed phase=${_state.value.phase} type=${error.javaClass.simpleName} at=${error.stackTrace.firstOrNull { it.className.startsWith("com.lightningstudio.watchrss.phone") }}" + if (error is CloudHttpException) " status=${error.status}" else "")
                 if (error is CloudHttpException && discardedCloudTransfer(error)) throw error
-                if (error is CloudDeviceAuthorizationException) {
-                    invalidateEpoch(requireSession(),"device_session_authorization")
-                    update(CloudSyncPhase.NEEDS_RECOVERY, "设备身份需要重新验证")
-                } else if (_state.value.phase != CloudSyncPhase.NEEDS_RECOVERY) {
+                if (error !is CloudDeviceAuthorizationException && _state.value.phase != CloudSyncPhase.NEEDS_RECOVERY) {
                     update(CloudSyncPhase.ERROR, if (error is CloudHttpException && error.status == 413) {
                         "云空间不足，同步尚未完成。请释放云空间后重试，本机内容已保留。"
                     } else error.message ?: "云同步失败")
@@ -2883,8 +2920,14 @@ class PhoneCloudSyncService(
         val key = keyManager.getAccountKey(session.userId, version)
         try {
             if (key != null) verifyLocalKeys(session, bootstrap)
-            client.registerDevice(session, deviceId, "手机 · ${Build.MODEL}", spki, version,
-                key?.let { CloudProtocolV2.attestation(it, session.userId, bootstrap.libraryEpoch, deviceId, spki.base64Bytes()) }, if (key == null) null else version, operationEpoch)
+            val label = "手机 · ${Build.MODEL}"
+            if (key != null && bootstrap.devices.any { it.deviceId == deviceId && it.revokedAt != null }) {
+                client.registerDevice(session, deviceId, label, spki, version, expectedEpoch = operationEpoch)
+                checkCloudEpoch(session, operationEpoch)
+            }
+            client.registerDevice(session, deviceId, label, spki, version,
+                key?.let { CloudProtocolV2.attestation(it, session.userId, bootstrap.libraryEpoch, deviceId, spki.base64Bytes()) },
+                if (key == null) null else version, operationEpoch)
         } finally { key?.fill(0) }
     }
     private suspend fun storeEnvelopeForCurrentDevice(session: PhoneAccountSession, expectedEpoch: String? = client.knownEpoch(session)) {

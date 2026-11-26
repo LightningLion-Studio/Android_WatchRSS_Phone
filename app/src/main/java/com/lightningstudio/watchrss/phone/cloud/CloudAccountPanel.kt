@@ -74,7 +74,8 @@ fun CloudAccountPanel(
     var bootstrap by remember(userId) { mutableStateOf<CloudBootstrap?>(null) }
     var setup by remember(userId) { mutableStateOf<RecoveryKeySetup?>(null) }
     var showApprovalDialog by rememberSaveable(userId) { mutableStateOf(false) }
-    var recoveryInput by remember(userId) { mutableStateOf("") }
+    val recoveryDraft = remember(userId) { RecoveryInputDraft() }
+    var recoveryInput by recoveryDraft.text
     var estimate by remember { mutableStateOf<CloudTransferEstimate?>(null) }
     var showHistory by remember(userId) { mutableStateOf(false) }
     var snapshotHeads by remember(userId) { mutableStateOf<List<CloudSnapshotHead>>(emptyList()) }
@@ -326,20 +327,22 @@ fun CloudAccountPanel(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             val application = LocalContext.current.applicationContext as PhoneCompanionApplication
-                            RecoveryWordsDisplay(
-                                words = setup!!.words,
-                                clipboard = application.recoveryWordClipboard,
-                                enabled = !busy && !activationInFlight
-                            )
-                            RecoveryInputPrivacy {
-                                OutlinedTextField(
-                                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
-                                    value = recoveryInput,
-                                    onValueChange = { recoveryInput = it },
-                                    label = { Text("重新输入全部 24 词进行确认") },
-                                    minLines = 3,
-                                    modifier = Modifier.fillMaxWidth()
+                            RecoveryDraftPrivacy(recoveryDraft, refreshActive) {
+                                RecoveryWordsDisplay(
+                                    words = setup!!.words,
+                                    clipboard = application.recoveryWordClipboard,
+                                    enabled = !busy && !activationInFlight
                                 )
+                                RecoveryInputPrivacy {
+                                    OutlinedTextField(
+                                        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
+                                        value = recoveryInput,
+                                        onValueChange = { recoveryInput = it },
+                                        label = { Text("重新输入全部 24 词进行确认") },
+                                        minLines = 3,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
                             }
                             Button(
                                 onClick = activate@{
@@ -389,33 +392,40 @@ fun CloudAccountPanel(
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("请已登录的设备批准") }
-                RecoveryInputPrivacy {
-                    OutlinedTextField(
-                        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
-                        value = recoveryInput,
-                        onValueChange = { recoveryInput = it },
-                        label = { Text("24词恢复密钥") },
-                        minLines = 3,
+                val bluetoothPaused = service.cloudResetBluetoothPaused(userId)
+                RecoveryDraftPrivacy(recoveryDraft, refreshActive, bluetoothPaused) {
+                    RecoveryInputPrivacy {
+                        OutlinedTextField(
+                            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
+                            value = recoveryInput,
+                            onValueChange = { recoveryInput = it },
+                            label = { Text("24词恢复密钥") },
+                            minLines = 3,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            runAction {
+                                onBusyChange(true)
+                                try {
+                                    val entropy = recoveryDraft.consumeEntropy()
+                                    try { service.recoverWithEntropy(entropy) } finally { entropy.fill(0) }
+                                    bootstrap = service.loadBootstrap()
+                                    onMessage("当前手机已获得解密能力")
+                                } catch (error: CancellationException) {
+                                    throw error
+                                } catch (error: Exception) {
+                                    onError(error.message ?: "恢复失败")
+                                } finally {
+                                    onBusyChange(false)
+                                }
+                            }
+                        },
+                        enabled = !busy && RecoveryWords.parse(recoveryInput).size == 24,
                         modifier = Modifier.fillMaxWidth()
-                    )
+                    ) { Text("使用恢复词授权此手机") }
                 }
-                Button(
-                    onClick = {
-                        runAction {
-                            onBusyChange(true)
-                            runCatching {
-                                service.recoverWithWords(RecoveryWords.parse(recoveryInput))
-                                bootstrap = service.loadBootstrap()
-                            }.onSuccess {
-                                recoveryInput = ""
-                                onMessage("当前手机已获得解密能力")
-                            }.onFailure { onError(it.message ?: "恢复失败") }
-                            onBusyChange(false)
-                        }
-                    },
-                    enabled = !busy && RecoveryWords.parse(recoveryInput).size == 24,
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("使用恢复词授权此手机") }
                 if (service.cloudResetEntryAvailable(bootstrap, userId)) {
                     TextButton(enabled = !busy, onClick = onOpenCloudReset) {
                         Text("重置云存储", color = MaterialTheme.colorScheme.error)
@@ -478,15 +488,17 @@ fun CloudAccountPanel(
                         enabled = !busy,
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("频道云库存 ›") }
-                    RecoveryInputPrivacy {
-                        OutlinedTextField(
-                            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
-                            value = recoveryInput,
-                            onValueChange = { recoveryInput = it },
-                            label = { Text("轮换密钥前输入原24词恢复密钥") },
-                            minLines = 2,
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                    RecoveryDraftPrivacy(recoveryDraft, refreshActive) {
+                        RecoveryInputPrivacy {
+                            OutlinedTextField(
+                                keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
+                                value = recoveryInput,
+                                onValueChange = { recoveryInput = it },
+                                label = { Text("轮换密钥前输入原24词恢复密钥") },
+                                minLines = 2,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
                     }
                     OutlinedButton(
                         onClick = {

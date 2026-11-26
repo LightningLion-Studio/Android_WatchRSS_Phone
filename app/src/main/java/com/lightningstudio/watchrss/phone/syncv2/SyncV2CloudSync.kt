@@ -143,7 +143,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val account=window.getJSONObject("account");val accepted=st.body.optJSONObject("account")
         if(!account.isNull("commitOid") && (accepted==null || accepted.getString("oid")!=account.getString("commitOid") || accepted.getString("generation")!=account.getString("rollbackGeneration")))throw SyncV2CloudError("ref_conflict",true)
         if(!account.isNull("commitOid") && st.body.optJSONObject("metadataAccount")?.optString("oid")!=account.getString("commitOid"))SyncV2Codec.fail("closure_incomplete")
-        val localIndex=projection.prepareWireIndex(signer,contentKey,keyVersion)
+        val localIndex=projection.prepareWireIndex(signer,contentKey,keyVersion,resetAdditions)
         try {
         // Without an authenticated operation base, a differing local row cannot overwrite a cloud row.
         // Missing local rows are retained from cloud, never interpreted as deletions.
@@ -160,6 +160,10 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
                 continue
             }
             val remoteState=cloud.getJSONObject("state");val row=cloud.getJSONObject("row")
+            if (resetAdditions && meta.getString("kind") != "note" && entity in mergedRows) {
+                // The planned wire row already merges this candidate with this authenticated head.
+                continue
+            }
             val candidate=projection.candidate(meta.getString("kind"),meta.getString("logicalId"))
             var preservesConflictFacts=false
             var localEdit=false

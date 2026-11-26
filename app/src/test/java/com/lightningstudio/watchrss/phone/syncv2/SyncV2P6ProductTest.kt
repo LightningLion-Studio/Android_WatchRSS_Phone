@@ -7,6 +7,7 @@ import androidx.room.Room
 import com.lightningstudio.watchrss.phone.PhoneCompanionContainer
 import com.lightningstudio.watchrss.phone.cloud.CloudHeadReply
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
+import com.lightningstudio.watchrss.phone.cloud.wireJson
 import com.lightningstudio.watchrss.phone.cloud.CloudProtocolV2
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudHeadPoller
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncResult
@@ -46,7 +47,9 @@ import org.bouncycastle.asn1.x509.AlgorithmIdentifier
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo
 import org.json.JSONArray
 import org.json.JSONObject
+import org.junit.After
 import org.junit.Assert.*
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -761,7 +764,20 @@ class SyncV2P6ProductTest {
         var announced=true;var failAuthentication=false;var unsupported=false;var legacyCalls=0;var bootstraps=0
         var bootstrapTimesOut = false
         var approvedForHead = false
+        private var resetScope: JSONObject? = null
+        private var resetSpki: String? = null
+        private var resetAttestation: String? = null
+        var resetDeviceRevoked = false
+        var resetDeviceRegistrations = 0
+        private val resetEntropy = ByteArray(32) { 22 }
         private fun approvedDevices(owner: String): JSONArray {
+            resetSpki?.let { spki ->
+                return JSONArray().put(JSONObject().put("deviceId", h.id).put("platform", "phone")
+                    .put("publicKeySpki", spki).apply {
+                        if (resetDeviceRevoked) put("revokedAt", "2026-01-01T00:00:00Z")
+                        resetAttestation?.let { put("attestationKeyVersion", 1).put("attestation", it) }
+                    })
+            }
             if (!approvedForHead) return JSONArray()
             val publicKey = "head-poll-fixture".toByteArray()
             return JSONArray().put(JSONObject()
@@ -799,6 +815,15 @@ class SyncV2P6ProductTest {
             val owner = if (request.header("Authorization") == "Bearer other-session") nextOwner else user
             val (status, body) = when {
                 path.endsWith("/entitlement") -> 200 to memberJson()
+                resetScope != null && path.endsWith("/devices/register") -> {
+                    val payload = okio.Buffer().also { request.body!!.writeTo(it) }.readUtf8().let(::JSONObject)
+                    resetSpki = payload.getString("publicKeySpki")
+                    resetAttestation = if (resetDeviceRevoked || payload.isNull("attestation")) null else payload.getString("attestation")
+                    resetDeviceRevoked = false
+                    resetDeviceRegistrations++
+                    200 to JSONObject()
+                }
+                resetScope != null && path.endsWith("/key-envelopes") -> 200 to JSONObject()
                 path.endsWith("/revoke") && onRevokeRequest != null -> {
                     onRevokeRequest?.invoke()
                     409 to JSONObject().put("error", "library_epoch_mismatch")
@@ -812,7 +837,17 @@ class SyncV2P6ProductTest {
                 .put("keyVersionFloor",0).put("keyCommitments",JSONArray().apply {
                     if (hasCloudCommitments) put(JSONObject().put("keyVersion",1).put("commitment",CloudProtocolV2.commitment(h.server.wrap,owner,epoch,1)))
                 })
-                .put("keyEnvelopes",JSONArray()).put("devices",approvedDevices(owner)).also{if(announced)it.put("syncV2",h.server.announcement)}
+                .put("keyEnvelopes", JSONArray()).put("devices", approvedDevices(owner)).apply {
+                    if (announced) put("syncV2", h.server.announcement)
+                    resetScope?.let {
+                        put("cloudResetAt", "2026-01-01T00:00:00Z")
+                        put("syncV2ResetScope", it)
+                        val envelope = com.lightningstudio.watchrss.phone.cloud.CloudKeyEnvelopeCodec
+                            .createRecoveryEnvelope(h.server.wrap, owner, 1, resetEntropy)
+                        getJSONArray("keyEnvelopes").put(envelope.wireJson()
+                            .put("id", "fixture-recovery").put("recipientType", "recovery"))
+                    }
+                }
                 else JSONObject().put("error",if(unsupported)"client_upgrade_required"else if(failAuthentication)"invalid_token"else JSONObject().put("code","upgrade_required").put("details",JSONObject().put("requiredFeatures",JSONArray().put("sync-objects.v2"))))
                     status to body
                 }
@@ -835,6 +870,21 @@ class SyncV2P6ProductTest {
         }
         fun sync(manual:Boolean)=runBlocking{service.syncNow(manual)}
         fun prepareRevoke() = client.useEpoch(session, epoch)
+
+        fun prepareResetRound(): String {
+            val scope = JSONObject().put("repoId", "42".repeat(16)).put("libraryEpoch", "2").put("contentGeneration", "2")
+            resetScope = scope
+            resetSpki = h.manager.devicePublicKeySpki(user, h.id)
+            resetAttestation = CloudProtocolV2.attestation(
+                h.server.wrap, user, epoch, h.id, java.util.Base64.getDecoder().decode(resetSpki))
+            h.account = h.account!!.copy(resetScope = SyncV2Codec.scope(scope))
+            SyncV2ResetSources.stage(h.room.openHelper.writableDatabase, h.manager, user, scope, c.filesDir)
+            settings.bindScope(client.backendBaseUrl, user)
+            settings.libraryEpoch = epoch
+            return client.scopeId(session).also { settings.setResetReady(it, epoch) }
+        }
+
+        suspend fun recoverResetDevice() = service.recoverWithEntropy(resetEntropy.copyOf())
         suspend fun switchAccount(withCloudKey: Boolean = true): String {
             val next = session.copy(userId = nextOwner, accessToken = "other-session")
             account.saveCompletedLogin(LoginProgress("test-login", 1, listOf("otp"), true, next))
@@ -855,6 +905,49 @@ class SyncV2P6ProductTest {
             }
         override fun close(){scope.coroutineContext[kotlinx.coroutines.Job]?.cancel();service.javaClass.getDeclaredField("recordStore").apply{isAccessible=true}.get(service).let{(it as com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordStore).close()}}
     }
+    private val cloudKeyProvider = "sync-v2-cloud-device-fixture"
+
+    @Before fun installCloudKeyProvider() {
+        java.security.Security.addProvider(object : java.security.Provider(cloudKeyProvider, 1.0, "Cloud device fixture") {
+            init {
+                put("KeyStore.AndroidKeyStore",
+                    com.lightningstudio.watchrss.phone.cloud.CloudContentRebuildIntegrationTest.FixtureKeyStore::class.java.name)
+            }
+        })
+    }
+
+    @After fun removeCloudKeyProvider() {
+        java.security.Security.removeProvider(cloudKeyProvider)
+    }
+
+    @Test fun resetRoundConsumesReadyAndRevokedDeviceCanRecoverSameSyncV2Scope() = runBlocking {
+        Server().use { server -> Host(server, "reset-device", bodyChannel = false).use { host ->
+            ServiceEntry(host).use { entry ->
+                val scope = entry.prepareResetRound()
+                host.note("Local data through revocation")
+                assertTrue(entry.service.syncNow(manual = true).completed)
+                assertNull(entry.settings.resetReady(scope))
+                assertNotNull(entry.settings.appliedResetEpoch)
+                assertEquals(1, server.publishes)
+                assertTrue(entry.service.syncNow(manual = true).completed)
+
+                entry.resetDeviceRevoked = true
+                assertTrue(runCatching { entry.service.loadBootstrap() }.exceptionOrNull() is
+                    com.lightningstudio.watchrss.phone.cloud.CloudTrustException)
+                assertFalse(host.manager.hasAccountKey(user))
+                assertNull(entry.settings.appliedResetEpoch)
+                assertNull(host.product.uiPort.value)
+                assertNotNull(entry.service.loadBootstrap().syncV2ResetScope)
+                entry.recoverResetDevice()
+                assertEquals(2, entry.resetDeviceRegistrations)
+                assertTrue(entry.service.syncNow(manual = true).completed)
+                assertNull(entry.settings.resetReady(scope))
+                assertNotNull(entry.settings.appliedResetEpoch)
+                assertEquals("Local data through revocation", host.text())
+            }
+        } }
+    }
+
     @Test fun cloudEntryAtZeroPercentSurvivesLocalKeyRemovalAndServiceRecreation() = runBlocking {
         Server().use { server -> Host(server, "entry-recovery").use { host ->
             val state = MemoryPreferences()

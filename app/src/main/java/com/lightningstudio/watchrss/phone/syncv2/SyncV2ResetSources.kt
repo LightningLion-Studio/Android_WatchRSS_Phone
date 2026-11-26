@@ -51,7 +51,7 @@ internal class SyncV2ResetSources(
         return true
     }
 
-    private fun hasLocalBody(kind: String, id: String): Boolean = when (kind) {
+    fun hasLocalBody(kind: String, id: String): Boolean = when (kind) {
         "article" -> db.controlQuery(
             "SELECT 1 FROM phone_articles WHERE articleId=? AND (length(contentText)>0 OR length(contentHtml)>0)",
             arrayOf(id)

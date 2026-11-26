@@ -187,19 +187,20 @@ class CloudKeyManager(
         syncV2Write(userId, name, archive.toString())
     }
 
-    fun clearAccountKeys(userId: String) {
+    fun clearAccountKeys(userId: String, clearResetArchives: Boolean = false) {
         // Release in-flight holders before taking the storage lock. Their guarded writes take
         // lifetime -> storage locks in that order; reversing it here could deadlock logout.
         accountRelease.filter{it.first==userId}.forEach{it.second()}
-        synchronized(this) { clearAccountKeysLocked(userId) }
+        synchronized(this) { clearAccountKeysLocked(userId, clearResetArchives) }
     }
-    private fun clearAccountKeysLocked(userId: String) {
+    private fun clearAccountKeysLocked(userId: String, clearResetArchives: Boolean) {
         if (loadedPreferences == null) return
         migrateLegacy(userId)
         val names = preferences.all.keys.filter {
             it == currentVersionName(userId) || it == legacyAccountKeyName(userId) || it.startsWith(accountKeyPrefix(userId))
         } + legacyEntries(userId).keys + preferences.all.keys.filter {
-            it.startsWith(syncV2Name(userId,"secret/"))
+            it.startsWith(syncV2Name(userId,"secret/")) ||
+                (clearResetArchives && it.startsWith(syncV2Name(userId, "cloud-reset-keys/")))
         }
         if (names.isEmpty()) return
         val editor = preferences.edit()
@@ -227,28 +228,23 @@ class CloudKeyManager(
         ).also { generated.entropy.fill(0) }
     }
 
-    fun recoverWithWords(
+    internal fun recoverWithEntropy(
         userId: String,
-        words: List<String>,
+        entropy: ByteArray,
         envelopes: List<CloudKeyEnvelope>,
         validate: (Map<Int, ByteArray>) -> Unit
-    ): ByteArray {
+    ) {
         require(envelopes.isNotEmpty()) { "账号没有恢复密钥信封" }
-        val entropy = RecoveryWords.decode(words)
-        return try {
-            val recovered = envelopes.sortedBy(CloudKeyEnvelope::keyVersion).map { envelope ->
-                envelope.keyVersion to CloudKeyEnvelopeCodec.unwrapRecoveryEnvelope(
-                    envelope,
-                    userId,
-                    entropy
-                )
+        val recovered = linkedMapOf<Int, ByteArray>()
+        try {
+            for (envelope in envelopes.sortedBy { it.keyVersion }) {
+                recovered.put(envelope.keyVersion,
+                    CloudKeyEnvelopeCodec.unwrapRecoveryEnvelope(envelope, userId, entropy))?.fill(0)
             }
-            validate(recovered.toMap())
-            saveVerifiedKeys(userId, recovered.toMap())
-            val currentKey = recovered.maxBy { it.first }.second
-            currentKey
+            validate(recovered)
+            saveVerifiedKeys(userId, recovered)
         } finally {
-            entropy.fill(0)
+            recovered.values.forEach { it.fill(0) }
         }
     }
 

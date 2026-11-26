@@ -86,7 +86,10 @@ class ReconnectMainSessionTest {
                             .put("account", JSONObject().put("bound", true).put("userIdHash",
                                 com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec.sha256("owner".toByteArray())))
                         "cursor" -> LibrarySyncPayload.buildCursorResponse("watch", LibrarySyncCursor(0, 0, 0)).apply {
-                            if (checkpoints) put(LibrarySyncPayload.ARTICLE_CHECKPOINT_FEATURE, true)
+                            if (checkpoints) {
+                                assertTrue(q.getBoolean(LibrarySyncPayload.ARTICLE_CHECKPOINT_FEATURE))
+                                put(LibrarySyncPayload.ARTICLE_CHECKPOINT_FEATURE, true)
+                            }
                         }
                         "manifest" -> LibrarySyncPayload.buildManifestResponse("watch", emptyList()).put("supportsReaderPresets", false)
                             .put("supportsNoteManifestV2", false).put("supportsNoteAssetInventory", false)

@@ -66,7 +66,8 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         val awaitingChoice: Boolean = false,
         val pendingAction: Boolean = false,
         val pendingBodies: Boolean = false,
-        val quotaBlocked: Boolean = false
+        val quotaBlocked: Boolean = false,
+        val appliedHead: Boolean = false
     )
     private val mutex=Mutex()
     private val generation=SyncV2Lifetime.Generation()
@@ -220,7 +221,9 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                     (restoreCurrent && !state.isNull("pendingPublish")),
                 pendingBodies = live.bodyResult.pending > 0 || live.bodyResult.errors.isNotEmpty() ||
                     live.hasMissingImportedArticleBody(FileArticleContentStore(context)),
-                quotaBlocked = "quota_exceeded" in live.bodyResult.errors
+                quotaBlocked = "quota_exceeded" in live.bodyResult.errors,
+                appliedHead = !state.isNull("account") && state.optJSONObject("appliedAccount")?.optString("oid") ==
+                    state.getJSONObject("account").getString("oid") && state.isNull("pendingAppliedAck")
             )
         } catch(e:Throwable) {
             if (e !is CancellationException) _uiPort.value?.failed(e)
@@ -467,7 +470,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                     projection.requestConcurrentChoice();return@withinBudget
                 }
                 actions.prepareSigning()
-                projection.prepareWireIndex(vault.signer,keys.read(keys.newestVersion),keys.newestVersion).close()
+                projection.prepareWireIndex(vault.signer,keys.read(keys.newestVersion),keys.newestVersion,resetAdditions).close()
                 if(contentEnabled)bodies?.bindPrepared()
                 if(contentEnabled && client.contentWriteAllowed() && !articles!!.runPage(remaining()))SyncV2Codec.fail("budget_paused")
                 cloud.publishIndex(vault.signer,keys.read(keys.newestVersion),keys.newestVersion,publicationRevision,resetAdditions)

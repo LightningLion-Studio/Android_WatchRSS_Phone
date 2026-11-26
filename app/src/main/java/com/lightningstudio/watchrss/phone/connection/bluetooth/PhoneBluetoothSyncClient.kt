@@ -1866,7 +1866,9 @@ class PhoneBluetoothSyncClient(
             )
         }
         report(PhoneBluetoothSyncStage.CONNECTING, 5, force = true)
+        val checkpoint = currentCoroutineContext()[LibraryArticleCheckpointExchange]
         val wireCursorRequest = session.requestForExchange(cursorRequest)
+        if (checkpoint != null) wireCursorRequest.put(LibrarySyncPayload.ARTICLE_CHECKPOINT_FEATURE, true)
         writeFrameLogged(
             output,
             sessionId,
@@ -1893,7 +1895,6 @@ class PhoneBluetoothSyncClient(
         }
         val peerDeviceId = cursorResponse.optString("deviceId").trim()
             .ifBlank { session.device.remoteDeviceId.ifBlank { session.device.address } }
-        val checkpoint = currentCoroutineContext()[LibraryArticleCheckpointExchange]
         val checkpointEnabled = checkpoint != null && cursorResponse.optBoolean(LibrarySyncPayload.ARTICLE_CHECKPOINT_FEATURE)
         val request = buildManifestRequest(peerDeviceId, cursorResponse)
         if (checkpointEnabled) request.put(LibrarySyncPayload.ARTICLE_CHECKPOINT_FEATURE, true)

@@ -109,6 +109,8 @@ internal fun CloudStorageResetScreen(
     }
     fun close() {
         if (step == CloudResetStep.SUCCESS) service.syncAfterCloudStorageReset()
+        setup?.pendingKey?.fill(0)
+        setup = null
         onClose(result.takeIf { step == CloudResetStep.RESULT })
     }
     BackHandler { if (step != CloudResetStep.RUNNING) close() }
@@ -137,7 +139,9 @@ internal fun CloudStorageResetScreen(
                                 "其他已登录的设备需要用新恢复词重新加入。这台手机上尚未同步的内容会保留，并在重置后重新上传。此操作无法撤销。"
                         )
                         CloudResetStep.WORDS -> setup?.let {
-                            RecoveryWordsDisplay(it.words, application.recoveryWordClipboard, enabled = true)
+                            RecoveryContentPrivacy {
+                                RecoveryWordsDisplay(it.words, application.recoveryWordClipboard, enabled = true)
+                            }
                             Row(
                                 Modifier.fillMaxWidth().toggleable(saved, role = Role.Checkbox) {
                                     remaining = 5
@@ -187,6 +191,8 @@ internal fun CloudStorageResetScreen(
                                 if (step != CloudResetStep.WORDS || !canSubmitCloudReset(saved, remaining)) return@Button
                                 step = CloudResetStep.RUNNING
                                 val attempt = draft.copy(pendingKey = draft.pendingKey.copyOf())
+                                draft.pendingKey.fill(0)
+                                setup = null
                                 scope.launch {
                                     try {
                                         service.executeCloudStorageReset(userId, attempt)
@@ -195,7 +201,6 @@ internal fun CloudStorageResetScreen(
                                     catch (error: Exception) { showFailure(error) }
                                     finally {
                                         attempt.pendingKey.fill(0)
-                                        setup = null
                                     }
                                 }
                             }

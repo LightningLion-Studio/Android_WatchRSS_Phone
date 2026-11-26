@@ -103,7 +103,11 @@ class CloudContentRebuildIntegrationTest {
             EncryptedAccountSessionStore::class.java.getDeclaredField("prefsRef").apply{isAccessible=true}.set(store,MemoryPreferences())
         }
         val env=AccountEnvironment(backendBaseUrl=backend)
-        val account=PhoneAccountRepository(env,sessionStore,PhoneInstallationIdentity(context),PhoneAccountClient(env,LicenseDeviceIdentity(context)),"phone")
+        val account=PhoneAccountRepository(env,sessionStore,PhoneInstallationIdentity(context),PhoneAccountClient(env,LicenseDeviceIdentity(context),httpClient=OkHttpClient.Builder().addInterceptor { chain ->
+            check(chain.request().url.encodedPath.endsWith("/account/logout"))
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(204).message("fixture")
+                .body("".toResponseBody()).build()
+        }.build()),"phone")
         var generation=after
         var sequence=0L
         var revision=0L
@@ -138,6 +142,12 @@ class CloudContentRebuildIntegrationTest {
         var reserveAttempts=0
         var omitGeneration=false
         var bootstrapEpoch=epoch
+        var revoked = false
+        var offerRecovery = false
+        var restoredAttestation: String? = null
+        var registeredAfterRevocation = 0
+        val recoveryEntropy = ByteArray(32) { 19 }
+        var announceReset = false
         var migrationEnabled=false
         val client=PhoneCloudClient(env,http=OkHttpClient.Builder().addInterceptor { chain ->
             synchronized(this) {
@@ -155,7 +165,16 @@ class CloudContentRebuildIntegrationTest {
                     path.endsWith("/ack") -> { if(failAck)throw java.io.IOException("fixture crash after apply before receipt");JSONObject() }
                     path.endsWith("/format-capabilities") -> JSONObject().put("protocol","watchrss-content-evolution").put("version",1)
                         .put("phaseA",JSONObject().put("cloudFormatR48ReadV1",true).put("cloudFormatR48WriteV1",r48WriteEnabled)).put("phaseB",JSONObject().put("cloudFormatMigrationR48V1",migrationEnabled))
-                    path.endsWith("/devices/register") -> JSONObject()
+                    path.endsWith("/devices/register") -> {
+                        if (offerRecovery) {
+                            restoredAttestation = if (revoked) null else body.optString("attestation").takeIf(String::isNotBlank)
+                            registeredAfterRevocation++
+                        }
+                        revoked = false
+                        JSONObject()
+                    }
+                    path.endsWith("/revoke") -> { revoked = true; JSONObject() }
+                    path.endsWith("/key-envelopes") -> JSONObject()
                     path.endsWith("/records") && request.method=="GET" -> {
                         val cursor=request.url.queryParameter("after")!!;afterQueries+=cursor
                         onRecordsGet?.also { onRecordsGet=null;it() }
@@ -236,9 +255,26 @@ class CloudContentRebuildIntegrationTest {
         val recordStore get()=(PhoneCloudSyncService::class.java.getDeclaredField("recordStore").apply{isAccessible=true}.get(service) as PhoneCloudRecordStore)
         fun bootstrap()=JSONObject().put("libraryEpoch",bootstrapEpoch).put("contentGeneration",generation).put("contentEmpty",initialEmpty&&ready.isEmpty()&&recordRows.isEmpty())
             .put("member",JSONObject().put("active",true).put("writable",true).put("readable",true).put("quotaBytes",1000000).put("usedBytes",if(completed>0)777 else 0).put("reservedBytes",if(completed>0)0 else 100))
-            .put("keyVersionFloor",0).put("keyCommitments",JSONArray(keys.keyVersions(accountSession.userId).map { version ->
-                JSONObject().put("keyVersion",version).put("commitment",CloudProtocolV2.commitment(requireNotNull(keys.getAccountKey(accountSession.userId,version)),accountSession.userId,epoch,version)) }))
-            .put("keyEnvelopes",JSONArray()).put("devices",JSONArray().put(JSONObject().put("deviceId","phone").put("platform","phone").put("publicKeySpki",publicKey).put("keyVersion",1).put("lastSequence",sequence)))
+            .put("keyVersionFloor",0).put("keyCommitments",JSONArray(
+                (if (offerRecovery) listOf(1) else keys.keyVersions(accountSession.userId)).map { version ->
+                    val material = if (offerRecovery) key else requireNotNull(keys.getAccountKey(accountSession.userId,version))
+                    JSONObject().put("keyVersion",version).put("commitment",CloudProtocolV2.commitment(material,accountSession.userId,epoch,version))
+                }))
+            .put("keyEnvelopes",JSONArray().apply {
+                if (offerRecovery) put(CloudKeyEnvelopeCodec.createRecoveryEnvelope(key,accountSession.userId,1,recoveryEntropy)
+                    .wireJson().put("recipientType","recovery").put("id","recovery-fixture"))
+            })
+            .put("devices", JSONArray().put(JSONObject().put("deviceId","phone").put("platform","phone")
+                .put("publicKeySpki",publicKey).put("keyVersion",1).put("lastSequence",sequence).apply {
+                    if (revoked) put("revokedAt","2026-01-01T00:00:00Z")
+                    restoredAttestation?.let { put("attestationKeyVersion",1).put("attestation",it) }
+                }))
+            .apply {
+                if (announceReset) {
+                    put("cloudResetAt","2026-01-01T00:00:00Z")
+                    put("syncV2ResetScope",JSONObject().put("repoId","12".repeat(16)).put("libraryEpoch","2").put("contentGeneration","1"))
+                }
+            }
         suspend fun initialize() {
             sessionStore.save(accountSession)
             state.bindScope(env.backendBaseUrl,accountSession.userId);state.ownerUserId=accountSession.userId;state.libraryEpoch=epoch
@@ -260,6 +296,78 @@ class CloudContentRebuildIntegrationTest {
     }
     private suspend fun fixture(stage:String?=null,always:Boolean=false)=Fixture(failStage=stage,alwaysFail=always).also{fixtures+=it;it.initialize()}
     @After fun close(){fixtures.forEach{it.close()};java.security.Security.removeProvider("cloud-r45-fixture")}
+    @Test fun resetReadyLogoutClearsScopeAndAllowsSameAccountRecovery() = runBlocking {
+        val f = fixture()
+        val scope = seedResetAuthorization(f)
+        f.account.logout()
+        assertNull(f.account.session.value)
+        assertResetAuthorizationCleared(f, scope)
+
+        f.account.saveCompletedLogin(LoginProgress("fixture", 1, listOf("sms"), true, session))
+        assertEquals(session.userId, f.account.session.value?.userId)
+        assertFalse(f.service.hasLocalAccountKey())
+        recoverAfterCleanup(f)
+    }
+
+    @Test fun resetBootstrapRevocationClearsScopeAndAllowsRecovery() = runBlocking {
+        val f = fixture()
+        val scope = seedResetAuthorization(f)
+        f.revoked = true
+        f.announceReset = true
+        assertTrue(runCatching { f.service.loadBootstrap() }.exceptionOrNull() is CloudTrustException)
+        assertResetAuthorizationCleared(f, scope)
+        assertEquals(CloudSyncPhase.NEEDS_RECOVERY, f.service.state.value.phase)
+        assertNotNull(f.service.loadBootstrap().syncV2ResetScope)
+
+        // The transport fixture below exercises recovery and a complete legacy sync round.
+        f.announceReset = false
+        recoverAfterCleanup(f)
+    }
+
+    @Test fun firstAppliedResetRoundConsumesReadyAndAccountSwitchClearsAppliedEpoch() = runBlocking {
+        val f = fixture()
+        val scope = seedResetAuthorization(f)
+        f.state.completeResetSync(scope, before)
+        assertEquals(epoch, f.state.resetReady(scope))
+        f.state.completeResetSync(scope, epoch)
+        assertNull(f.state.resetReady(scope))
+        assertEquals(epoch, f.state.appliedResetEpoch)
+        f.account.saveCompletedLogin(LoginProgress("fixture", 1, listOf("sms"), true, session.copy(userId="other")))
+        assertResetAuthorizationCleared(f, scope)
+    }
+
+    private fun seedResetAuthorization(f: Fixture): String {
+        val scope = f.client.scopeId(session)
+        f.state.setResetReady(scope, epoch)
+        f.keys.archiveCloudResetKeys(session.userId, before)
+        f.context.getSharedPreferences("watchrss_tus_uploads", Context.MODE_PRIVATE)
+            .edit().putString("$scope:fixture", "https://test.invalid/upload").commit()
+        return scope
+    }
+
+    private fun assertResetAuthorizationCleared(f: Fixture, scope: String) {
+        assertNull(f.state.resetReady(scope))
+        assertNull(f.state.appliedResetEpoch)
+        assertNull(f.state.libraryEpoch)
+        assertFalse(f.keys.hasAccountKey(session.userId))
+        assertTrue(f.keys.syncV2Read(session.userId, "cloud-reset-keys/$before") == null)
+        assertNull(f.cache.loadPendingManifest(scope))
+        assertEquals("0", f.recordStore.cursor(scope))
+        assertFalse(f.context.getSharedPreferences("watchrss_tus_uploads", Context.MODE_PRIVATE).contains("$scope:fixture"))
+        assertTrue(FixtureKeyStore.deleted > 0)
+    }
+
+    private suspend fun recoverAfterCleanup(f: Fixture) {
+        val wasRevoked = f.revoked
+        f.offerRecovery = true
+        f.service.recoverWithEntropy(f.recoveryEntropy.copyOf())
+        assertTrue(f.service.hasLocalAccountKey())
+        assertFalse(f.revoked)
+        assertEquals(if (wasRevoked) 2 else 1, f.registeredAfterRevocation)
+        assertTrue(f.service.syncNow(manual = true).completed)
+        assertTrue(f.completed > 0)
+    }
+
     private suspend fun assertDeviceSessionFailureKeepsCloudScope(code:String, refreshed:Boolean) {
         val f=fixture();f.recordStore.close()
         var requests=0;var refreshes=0

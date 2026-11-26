@@ -103,13 +103,18 @@ class PhoneCloudClient(
     internal var epochRequestGeneration: () -> Long = { 0L }
     internal var cloudResetSupported: () -> Boolean = { false }
     internal var onCloudReset: (PhoneAccountSession, Long, Boolean) -> Unit = { _, _, _ -> }
+    internal var onDeviceAuthorizationRejected: (PhoneAccountSession, Long) -> Unit = { _, _ -> }
     internal var onEpochMismatch: (PhoneAccountSession, Long) -> Unit = { session, _ -> forgetEpoch(session) }
     internal var onBootstrap: suspend (PhoneAccountSession, CloudBootstrap) -> Unit = { _, _ -> }
     internal var onRecordMetadata: suspend (PhoneAccountSession, JSONObject) -> Unit = { _, _ -> }
     fun scopeId(session: PhoneAccountSession): String = CloudSnapshotCodec.sha256("$backendBaseUrl\n${session.userId}".toByteArray())
     fun useEpoch(session: PhoneAccountSession, epoch: String) { require(epoch.isNotBlank()); epochs[scopeId(session)] = epoch }
     internal fun knownEpoch(session: PhoneAccountSession): String? = epochs[scopeId(session)]
-    fun forgetEpoch(session: PhoneAccountSession) { epochs.remove(scopeId(session)) }
+    fun forgetEpoch(session: PhoneAccountSession) {
+        val scope = scopeId(session)
+        epochs.remove(scope)
+        contentGenerations.remove(scope)
+    }
     fun epoch(session: PhoneAccountSession): String = epochs[scopeId(session)] ?: error("请先读取云资料库纪元")
     internal suspend fun v2Post(session: PhoneAccountSession, path: String, body: JSONObject, expectedEpoch: String? = knownEpoch(session)): JSONObject =
         post(session, path, body, expectedEpoch).use { it.jsonBody() }
@@ -722,6 +727,7 @@ class PhoneCloudClient(
             }
             if (code in setOf("device_revoked", "device_mismatch")) {
                 response.close()
+                onDeviceAuthorizationRejected(session, requestGeneration)
                 throw CloudDeviceAuthorizationException()
             }
         }

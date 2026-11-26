@@ -5,7 +5,9 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Files
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.assetDescriptor
 import kotlinx.coroutines.runBlocking
 import com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles
+import com.lightningstudio.watchrss.phone.data.book.BookSync
 import java.io.File
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -52,6 +54,98 @@ class SyncV2ResetMigrationTest {
             assertFalse(w.projection.prepareResetPublication())
         }
     }
+
+    @Test fun firstPublicationMergesSameIdsAndPreservesLocalPositionAndBodies() = SyncV2P5Fixture(reset = true).use { w ->
+        val url = "https://example.invalid/feed"
+        val source = JSONObject().put("url", url).put("title", "Cloud title").put("description", "Cloud description")
+            .put("createdAt", 19).put("updatedAt", 20).put("sourceDeviceId", "cloud")
+        val folder = JSONObject().put("folderId", "shared-folder").put("name", "Folder").put("sortOrder", 7)
+            .put("updatedAt", 4).put("modifiedBy", "cloud").put("deleted", false).put("deletedAt", 0)
+        val article = JSONObject().put("articleId", "shared-article").put("url", "https://example.invalid/article")
+            .put("sourceDeviceId", "cloud").put("updatedAt", 20).put("title", "Cloud title").put("siteName", "Cloud site")
+            .put("favoriteSaved", true).put("favoriteChangedAt", 20).put("readingProgress", 0.25).put("contentHash", "remote-body")
+        val novelText = "Local book chapter"
+        val fingerprint = BookSync.fingerprint(listOf(BookSync.chapterHash(1, "chapter", novelText)))
+        val bookId = BookSync.id(fingerprint)
+        val book = JSONObject().put("bookId", bookId).put("fingerprint", fingerprint).put("chapterCount", 1)
+            .put("title", "Cloud book").put("deletedChapters", JSONArray()).put("deletionClock", 0)
+            .put("deleted", false).put("deletedAt", 0).put("updatedAt", 20).put("sourceDeviceId", "cloud")
+        val reading = JSONObject().put("bookId", bookId).put("chapterIndex", 1).put("sourceDeviceId", "cloud")
+            .put("isRead", false).put("readingProgress", 0.1).put("readingPositionBytes", 0)
+            .put("readingPositionContentHash", "").put("readingPositionChangedAt", 20)
+            .put("watchLaterSaved", true).put("watchLaterChangedAt", 20)
+        val head = w.commit(listOf(w.note(), source, folder, article, book, reading), w.initial, "0", "normal", null)
+        w.setCurrent(head, "3")
+
+        val apply = SyncV2PhoneApply(w.sql)
+        apply.upsert("phone_rss_sources", listOf("url"), copy(source).put("description", "")
+            .put("createdAt", 5).put("updatedAt", 30).put("sourceDeviceId", "phone").put("title", "Local title"))
+        apply.upsert("note_folders", listOf("folderId"), copy(folder).put("name", "")
+            .put("updatedAt", 30).put("modifiedBy", "phone").put("sortOrder", 2))
+        apply.upsert("phone_articles", listOf("articleId"), copy(article).put("sourceDeviceId", "phone")
+            .put("siteName", "").put("contentText", "Local article body").put("contentHash", "local-body")
+            .put("readingProgress", 0.75).put("readingPositionBytes", 42)
+            .put("readingPositionContentHash", "local-body").put("readingPositionChangedAt", 10)
+            .put("favoriteSaved", false).put("favoriteChangedAt", 0).put("watchLaterSaved", true).put("watchLaterChangedAt", 30))
+        val localBook = copy(book).put("sourceDeviceId", "phone").put("updatedAt", 30)
+            .put("sourceUrl", "https://watchrss.local/import-txt-novel/test")
+        apply.upsert("imported_books", listOf("bookId"), JSONObject().put("bookId", bookId).put("stateJson", localBook.toString()))
+        val bodyRepository = SyncV2BodyRepository(w.sql, w.root)
+        val bookBytes = (JSONObject().put("format", "watchrss-book").put("version", 1).put("title", "Local book")
+            .put("chapterCount", 1).put("sourceUrl", localBook.getString("sourceUrl")).put("kind", "txt").toString() + "\n" +
+            JSONObject().put("chapterIndex", 1).put("title", "chapter").put("contentText", novelText)
+                .put("contentHtml", JSONObject.NULL).put("url", localBook.getString("sourceUrl") + "/chapter/1").toString() + "\n").toByteArray()
+        w.sql.beginTransaction()
+        try {
+            bodyRepository.install("book", bookId, bookBytes)
+            w.sql.setTransactionSuccessful()
+        } finally {
+            w.sql.endTransaction()
+        }
+        val localReading = copy(reading).put("sourceDeviceId", "phone").put("readingPositionBytes", 37)
+            .put("readingPositionContentHash", "chapter-hash").put("readingPositionChangedAt", 10)
+            .put("readingProgress", 0.8).put("watchLaterSaved", false).put("watchLaterChangedAt", 0)
+        apply.upsert("imported_book_reading", listOf("bookId", "chapterIndex"), JSONObject()
+            .put("bookId", bookId).put("chapterIndex", 1).put("stateJson", localReading.toString()))
+
+        w.projection.captureResetSources {}
+        publishMigration(w)
+        assertEquals(1, w.publishCalls)
+        assertEquals(w.current.getString("commitOid"), w.projection.state().body.getJSONObject("appliedAccount").getString("oid"))
+        assertTrue(w.projection.state().body.isNull("pendingChoice"))
+        val merged = w.projection.cloudRows().mapNotNull { row ->
+            val meta = row.getJSONObject("meta")
+            val kind = meta.getString("kind")
+            if (kind == "article" && meta.getString("logicalId") != "shared-article") null
+            else kind to SyncV2Business.join(kind, meta, row.getJSONObject("state"))
+        }.toMap()
+        assertEquals("Local title", merged.getValue("source").getString("title"))
+        assertEquals("Cloud description", merged.getValue("source").getString("description"))
+        assertEquals(5, merged.getValue("source").getInt("createdAt"))
+        assertEquals("Folder", merged.getValue("folder").getString("name"))
+        assertEquals(2, merged.getValue("folder").getInt("sortOrder"))
+        val mergedArticle = merged.getValue("article")
+        assertEquals("Cloud site", mergedArticle.getString("siteName"))
+        assertEquals(42, mergedArticle.getInt("readingPositionBytes"))
+        assertEquals(0.75, mergedArticle.getDouble("readingProgress"), 0.0)
+        assertTrue(mergedArticle.getBoolean("favoriteSaved"))
+        assertTrue(mergedArticle.getBoolean("watchLaterSaved"))
+        val mergedReading = merged.getValue("book-reading")
+        assertEquals(37, mergedReading.getInt("readingPositionBytes"))
+        assertEquals(0.8, mergedReading.getDouble("readingProgress"), 0.0)
+        assertTrue(mergedReading.getBoolean("watchLaterSaved"))
+        assertEquals(localBook.getString("sourceUrl"), merged.getValue("book").getString("sourceUrl"))
+        assertTrue(bookBytes.contentEquals(bodyRepository.file("book", bookId).readBytes()))
+        w.sql.query("SELECT contentText FROM phone_articles WHERE articleId='shared-article'").use {
+            assertTrue(it.moveToFirst())
+            assertEquals("Local article body", it.getString(0))
+        }
+        w.reopen()
+        w.actions().refresh()
+        assertFalse(w.projection.prepareResetPublication())
+    }
+
+    private fun copy(row: JSONObject) = JSONObject(row.toString())
 
     @Test fun committedScanResumesAfterCancellation() = SyncV2P5Fixture(reset = true).use { w ->
         addNote(w, "only-on-b", "durable source")

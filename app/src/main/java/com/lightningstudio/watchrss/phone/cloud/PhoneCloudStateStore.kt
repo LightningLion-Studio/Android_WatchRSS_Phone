@@ -76,6 +76,23 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
     internal fun setResetReady(scopeId: String, epoch: String) {
         check(preferences.edit().putString("reset_ready_$scopeId", epoch).commit())
     }
+    internal val appliedResetEpoch: String?
+        get() = preferences.getString(scoped("applied_reset_epoch"), null)
+
+    internal fun isResetInitialized(scopeId: String, epoch: String): Boolean =
+        resetReady(scopeId) == epoch || appliedResetEpoch == epoch
+
+    internal fun completeResetSync(scopeId: String, epoch: String) = synchronized(preferences) {
+        if (resetReady(scopeId) == epoch) {
+            check(preferences.edit().putString(scoped("applied_reset_epoch"), epoch)
+                .remove("reset_ready_$scopeId").commit())
+        }
+    }
+
+    internal fun clearResetAuthorization(scopeId: String) {
+        check(preferences.edit().remove("reset_ready_$scopeId").remove("reset_pause_$scopeId").commit())
+    }
+
     internal fun resetRateLimit(scopeId: String): Long = preferences.getLong("reset_rate_limit_$scopeId", 0L)
     internal fun setResetRateLimit(scopeId: String, until: Long) {
         check(preferences.edit().putLong("reset_rate_limit_$scopeId", until).commit())

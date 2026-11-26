@@ -113,7 +113,7 @@ class PhoneCloudClient(
             response.jsonBody().memberState()
         }
 
-    suspend fun bootstrap(session: PhoneAccountSession): CloudBootstrap {
+    suspend fun bootstrap(session: PhoneAccountSession, observeResult: Boolean = true): CloudBootstrap {
         val (json, requestedGeneration) = post(session, "/functions/v1/cloud/bootstrap", JSONObject()).use { it.jsonBody() to it.request.tag(CloudContentRequestGeneration::class.java) }
         val result = CloudBootstrap(
             member = json.getJSONObject("member").memberState(),
@@ -124,8 +124,10 @@ class PhoneCloudClient(
             legacyKeyVersions = json.optJSONArray("legacyKeyVersions")?.let { versions -> (0 until versions.length()).map { versions.getInt(it) } } ?: emptyList(),
             contentGeneration = json.nullableString("contentGeneration"), contentClearedAt = json.nullableString("contentClearedAt"),
             contentEmpty = json.optBoolean("contentEmpty"), syncV2 = json.optJSONObject("syncV2"))
-        onBootstrap(session, result)
-        observeContentMetadata(session, json, requestedGeneration)
+        if (observeResult) {
+            onBootstrap(session, result)
+            observeContentMetadata(session, json, requestedGeneration)
+        }
         return result
     }
 

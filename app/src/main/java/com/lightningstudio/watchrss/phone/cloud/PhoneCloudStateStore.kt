@@ -24,6 +24,17 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
         }
     }
     private fun scoped(key: String): String = scope + key
+
+    // Activation history outlives epoch, device identity and session cleanup.
+    internal fun wasCloudSyncEnabled(scopeId: String): Boolean =
+        preferences.getBoolean("cloud_sync_enabled:$scopeId", false)
+
+    internal fun rememberCloudSyncEnabled(scopeId: String): Boolean = synchronized(preferences) {
+        if (wasCloudSyncEnabled(scopeId)) return@synchronized false
+        check(preferences.edit().putBoolean("cloud_sync_enabled:$scopeId", true).commit())
+        true
+    }
+
     private val failedCycleScopes=mutableSetOf<String>()
     internal data class CycleAdmission(val scope:String,val version:Long,val checkpoint:CloudCycleCheckpoint?)
     private fun invalidationVersion()=preferences.getLong(scoped("cycle_invalidation_version"),0)

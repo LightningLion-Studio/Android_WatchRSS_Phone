@@ -68,6 +68,26 @@ class FeatureDebugCardTest {
     }
 
     @Test
+    fun cloudForceIsVisibleEvenWhenTheBucketAndEffectiveSwitchDiffer() {
+        val rollout = FeatureRegistry.cloudSyncEntry.defaults.copy(percent = 100)
+        val state = ClientFeatureDebugState(
+            key = FeatureRegistry.cloudSyncEntry.key,
+            remote = rollout.copy(forced = FeatureOverride.OFF),
+            bucketHit = true,
+            remoteEnabled = false,
+            override = null,
+            enabled = true
+        )
+        compose.setContent { WatchRssPhoneTheme { FeatureDebugCard(state, enabled = state.enabled) {} } }
+        compose.onNodeWithContentDescription(state.key).assertIsOn()
+        compose.onNodeWithText("云端强制关").assertExists()
+        assertEquals("本机强制 · 云端为 关（云端强制关）", state.copy(override = FeatureOverride.ON).status)
+        val forcedOn = state.copy(remote = rollout.copy(forced = FeatureOverride.ON), remoteEnabled = true)
+        assertEquals("云端强制开", forcedOn.status)
+        assertEquals("本机强制 · 云端为 开（云端强制开）", forcedOn.copy(override = FeatureOverride.OFF).status)
+    }
+
+    @Test
     fun missingCloudValueUsesBundledDefaultLabel() {
         val state = ClientFeatureDebugState(
             key = FeatureRegistry.b2.key,

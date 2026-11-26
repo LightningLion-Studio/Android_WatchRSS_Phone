@@ -223,9 +223,14 @@ class EncryptedAccountSessionStore(
         it.getLong("ble_auth_version:$scope", 0L)
     }
 
-    internal fun offlineAuthorizationBlocked(scope: String): Boolean = withPrefs {
-        it.getBoolean("ble_auth_rejected:$scope", false)
-    }
+    internal fun offlineAuthorizationBlocked(scope: String): Boolean =
+        withOfflineAuthorizationStatus(scope) { it }
+
+    internal fun <T> withOfflineAuthorizationStatus(scope: String, action: (Boolean) -> T): T =
+        withPrefs { action(it.getBoolean("ble_auth_rejected:$scope", false)) }
+
+    private val _offlineAuthorizationChanges = MutableStateFlow(0L)
+    internal val offlineAuthorizationChanges: StateFlow<Long> = _offlineAuthorizationChanges
 
     internal fun rejectOfflineAuthorization(scope: String, owner: String, origin: String) {
         // Closing the dedicated socket must not wait for preference I/O.
@@ -243,6 +248,7 @@ class EncryptedAccountSessionStore(
                 }
             }
             check(edit.commit()) { "离线授权失效状态保存失败" }
+            _offlineAuthorizationChanges.value += 1
         }
     }
 

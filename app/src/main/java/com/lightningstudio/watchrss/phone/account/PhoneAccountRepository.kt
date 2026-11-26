@@ -62,6 +62,9 @@ class PhoneAccountRepository(
     private fun offlineScope(owner: String) = com.lightningstudio.watchrss.phone.data.ble.BleDomainStore.hash("${environment.backendBaseUrl}\n$owner")
     internal fun offlineAuthorizationVersion(owner: String) = sessionStore.offlineAuthorizationVersion(offlineScope(owner))
     internal fun offlineAuthorizationBlocked(owner: String) = sessionStore.offlineAuthorizationBlocked(offlineScope(owner))
+    internal fun <T> withOfflineAuthorizationStatus(owner: String, action: (Boolean) -> T): T =
+        sessionStore.withOfflineAuthorizationStatus(offlineScope(owner), action)
+    internal val offlineAuthorizationChanges get() = sessionStore.offlineAuthorizationChanges
     internal fun confirmOnlineAuthorization(owner: String, version: Long) = sessionStore.confirmOnlineAuthorization(offlineScope(owner), version)
 
     internal fun recordAuthenticationResponse(owner: String, status: Int, body: String) =

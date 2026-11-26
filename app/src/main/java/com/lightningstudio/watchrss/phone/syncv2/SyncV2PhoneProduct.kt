@@ -95,12 +95,16 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         }
     }
 
-    internal suspend fun probeHead(owner: List<String>, etag: String?): CloudHeadReply? {
+    internal suspend fun probeHead(
+        owner: List<String>,
+        etag: String?,
+        deviceAuthorization: String? = current()?.deviceAuthorization
+    ): CloudHeadReply? {
         if (!mutex.tryLock()) return null
         return try {
             val live = runtime ?: return null
             if (headOwner(live.account.userId) != owner) return null
-            live.client.accountHead(etag)
+            live.client.accountHead(etag, deviceAuthorization)
         } finally {
             mutex.unlock()
         }

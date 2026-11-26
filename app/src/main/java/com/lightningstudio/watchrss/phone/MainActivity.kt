@@ -249,14 +249,18 @@ class MainActivity : ComponentActivity() {
                 }
                 is AppAccessState.Revoked -> GateMessage("本手机授权已撤销", state.summary.revokeReason ?: "设备名额已被较新的登录占用") { reauthenticate() }
                 is AppAccessState.ReauthenticationRequired -> GateMessage("请重新验证账号", "验证后本手机将成为最新授权设备") { reauthenticate() }
-                is AppAccessState.ValidationError -> GateMessage("授权校验失败", state.message) { lifecycleScope.launch { coordinator.reconcile() } }
+                is AppAccessState.ValidationError -> ValidationActions(state.message)
                 is AppAccessState.Authorized -> {
-                    PaidAccessActivatedCard(capacity = state.summary.capacity)
-                    Text(
-                        if (state.offline) "正在使用离线授权…" else "授权有效",
-                        modifier = Modifier.padding(top = 10.dp),
-                        style = MaterialTheme.typography.bodySmall
-                    )
+                    if (coordinator.isAuthorized) {
+                        PaidAccessActivatedCard(capacity = state.summary.capacity)
+                        Text(
+                            if (state.offline) "正在使用离线授权…" else "授权有效",
+                            modifier = Modifier.padding(top = 10.dp),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    } else {
+                        ValidationActions("需要联网完成账号验证")
+                    }
                 }
             }
             val remoteEnvironment = RemoteEnvironmentStore(this@MainActivity).active()
@@ -340,6 +344,16 @@ class MainActivity : ComponentActivity() {
             Text(it, Modifier.padding(vertical = 12.dp), style = MaterialTheme.typography.bodyMedium)
         }
         Button(onClick = action) { Text(actionLabel) }
+    }
+
+    @androidx.compose.runtime.Composable
+    private fun ValidationActions(message: String) {
+        GateMessage("授权校验失败", message, actionLabel = "重试") {
+            lifecycleScope.launch { coordinator.reconcile() }
+        }
+        OutlinedButton(onClick = ::reauthenticate, modifier = Modifier.padding(top = 12.dp)) {
+            Text("重新登录")
+        }
     }
 
     private fun openAccount() = startActivity(AccountActivity.createIntent(this, finishAfterLogin = true))

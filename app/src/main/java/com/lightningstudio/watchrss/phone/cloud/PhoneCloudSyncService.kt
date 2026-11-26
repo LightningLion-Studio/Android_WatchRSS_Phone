@@ -1368,7 +1368,12 @@ class PhoneCloudSyncService(
                                 val job = currentCoroutineContext()[kotlinx.coroutines.Job]!!
                                 if (!bluetoothFence.startHeadProbe(job)) return@probe null
                                 try {
-                                    if (eligible()) syncV2Product.probeHead(owner, etag) else null
+                                    client.withAccountHeadSession(session.userId) { token ->
+                                        if (eligible()) {
+                                            val header = token?.takeIf { it.isNotBlank() }?.let { "Bearer $it" }
+                                            syncV2Product.probeHead(owner, etag, header)
+                                        } else null
+                                    }
                                 } finally {
                                     bluetoothFence.finishHeadProbe(job)
                                 }

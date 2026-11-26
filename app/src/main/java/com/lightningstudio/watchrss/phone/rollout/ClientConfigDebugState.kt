@@ -31,8 +31,13 @@ internal data class ClientFeatureDebugState(
             val rollout = remote ?: return if (override == null) "包内默认" else "本机强制 · 云端值未取到"
             val hit = if (bucketHit == true) "命中" else "未命中"
             val rolloutStatus = "放量 ${rollout.percent}% · $hit"
-            if (override == null) return "云控 · $rolloutStatus"
+            val source = when (rollout.forced) {
+                FeatureOverride.ON -> "云端强制开"
+                FeatureOverride.OFF -> "云端强制关"
+                null -> rolloutStatus
+            }
+            if (override == null) return if (rollout.forced == null) "云控 · $source" else source
             val cloudEnabled = if (remoteEnabled == true) "开" else "关"
-            return "本机强制 · 云端为 $cloudEnabled（$rolloutStatus）"
+            return "本机强制 · 云端为 $cloudEnabled（$source）"
         }
 }

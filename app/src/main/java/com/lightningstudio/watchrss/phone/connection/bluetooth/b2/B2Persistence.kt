@@ -15,6 +15,7 @@ interface B2Persistence {
         list(scope, namespace).map { it.second }.filter { it.optString("jobId") == jobId }
     suspend fun all(): List<Record>
     suspend fun jobs(): List<Record> = all().filter { it.namespace == "job" }
+    suspend fun retainsForRecovery(scope: String, jobId: String): Boolean = false
     suspend fun requestOwners(): List<Record> = all().filter { it.namespace == "nativeOwner" }
     suspend fun applyRejections(): List<Record> = all().filter { it.namespace.startsWith(B2Retention.REJECTION_PREFIX) }
     suspend fun deleteJobRecords(scope: String, job: String, namespace: String) {

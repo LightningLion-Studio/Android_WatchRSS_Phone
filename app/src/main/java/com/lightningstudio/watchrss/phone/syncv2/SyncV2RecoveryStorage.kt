@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles
 import org.json.JSONArray
@@ -133,41 +134,8 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             true
         } catch(_:Exception) { false }
     fun guardedAlreadyPresent(link: JSONObject): Boolean {
-        val descriptor = link.getJSONObject("descriptor")
-        val kind = descriptor.optString("kind")
-        if (kind == "bookState") return guardedBookAlreadyPresent(link, descriptor)
-        if (kind != "noteAsset") return false
-        val metadata = B2Metadata.validate(descriptor)
-        val id = metadata.getString("storageKey")
-        val revision = BookPackageFiles.Revision(metadata.getString("sha256"), metadata.getLong("size"))
-        return NoteAssetFiles.verifiedOriginal(db, files, id, revision) != null
-    }
-
-    private fun guardedBookAlreadyPresent(link: JSONObject, descriptor: JSONObject): Boolean {
         val archive = SyncV2BluetoothInbox(projection, files)
-        val id = B2Metadata.validate(descriptor).getString("bookId")
-        val closure = link.optJSONObject("bookClosure") ?: return false
-        val metadata = closure.optJSONObject("package") ?: return false
-        val size = descriptor.getLong("size")
-        if (size !in 1..com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Wire.MAX_OBJECT_BYTES) return false
-        val raw = ByteArray(size.toInt())
-        var offset = 0
-        while (offset < raw.size) {
-            val part = archive.read(link.getString("archiveId"), size, offset.toLong(), minOf(262144, raw.size - offset))
-            part.copyInto(raw, offset)
-            offset += part.size
-        }
-        if (SyncV2Codec.hex(SyncV2Codec.sha(raw)) != descriptor.getString("sha256")) return false
-        val incoming = JSONObject(raw.toString(Charsets.UTF_8)).apply { remove("contentAvailable") }
-        com.lightningstudio.watchrss.phone.data.book.BookSync.validateBinary(incoming)
-        if (incoming.getString("bookId") != id || incoming.getBoolean("deleted") ||
-            incoming.getString("fingerprint") != metadata.getString("fingerprint")) return false
-        val current = db.query("SELECT stateJson FROM imported_books WHERE bookId=?", arrayOf(id)).use {
-            if (it.moveToFirst()) JSONObject(it.getString(0)) else null
-        } ?: return false
-        if (SyncV2Codec.canonical(incoming) != SyncV2Codec.canonical(current)) return false
-        val revision = BookPackageFiles.Revision(metadata.getString("packageSha256"), metadata.getLong("packageBytes"))
-        return originals.committedBook(id, incoming)?.revision == revision
+        return guardedAlreadyPresent(db, files, originals, link, archive::read)
     }
 
     fun prepareGuardedAsset(record: JSONObject, link: JSONObject, base: JSONObject, capture: ChoiceCapture, now: Long): Bundle {
@@ -461,6 +429,48 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             // The depot contains private recovery envelopes, never shared cloud/cache/original files.
             for(oid in candidates-live)db.execSQL("DELETE FROM syncv2_recovery_objects WHERE scope=? AND oid=?",arrayOf(scope,oid))
             current.body.put("recoveryTrustedNow",trustedNow)
+        }
+    }
+
+    companion object {
+        internal fun guardedAlreadyPresent(db: SupportSQLiteDatabase, files: File,
+            originals: SyncV2BodyRepository, link: JSONObject,
+            read: (String, Long, Long, Int) -> ByteArray): Boolean {
+            val descriptor = link.getJSONObject("descriptor")
+            val kind = descriptor.optString("kind")
+            if (kind == "bookState") return guardedBookAlreadyPresent(db, originals, link, descriptor, read)
+            if (kind != "noteAsset") return false
+            val metadata = B2Metadata.validate(descriptor)
+            val id = metadata.getString("storageKey")
+            val revision = BookPackageFiles.Revision(metadata.getString("sha256"), metadata.getLong("size"))
+            return NoteAssetFiles.verifiedOriginal(db, files, id, revision) != null
+        }
+
+        private fun guardedBookAlreadyPresent(db: SupportSQLiteDatabase, originals: SyncV2BodyRepository,
+            link: JSONObject, descriptor: JSONObject, read: (String, Long, Long, Int) -> ByteArray): Boolean {
+            val id = B2Metadata.validate(descriptor).getString("bookId")
+            val closure = link.optJSONObject("bookClosure") ?: return false
+            val metadata = closure.optJSONObject("package") ?: return false
+            val size = descriptor.getLong("size")
+            if (size !in 1..com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Wire.MAX_OBJECT_BYTES) return false
+            val raw = ByteArray(size.toInt())
+            var offset = 0
+            while (offset < raw.size) {
+                val part = read(link.getString("archiveId"), size, offset.toLong(), minOf(262144, raw.size - offset))
+                part.copyInto(raw, offset)
+                offset += part.size
+            }
+            if (SyncV2Codec.hex(SyncV2Codec.sha(raw)) != descriptor.getString("sha256")) return false
+            val incoming = JSONObject(raw.toString(Charsets.UTF_8)).apply { remove("contentAvailable") }
+            com.lightningstudio.watchrss.phone.data.book.BookSync.validateBinary(incoming)
+            if (incoming.getString("bookId") != id || incoming.getBoolean("deleted") ||
+                incoming.getString("fingerprint") != metadata.getString("fingerprint")) return false
+            val current = db.query("SELECT stateJson FROM imported_books WHERE bookId=?", arrayOf(id)).use {
+                if (it.moveToFirst()) JSONObject(it.getString(0)) else null
+            } ?: return false
+            if (SyncV2Codec.canonical(incoming) != SyncV2Codec.canonical(current)) return false
+            val revision = BookPackageFiles.Revision(metadata.getString("packageSha256"), metadata.getLong("packageBytes"))
+            return originals.committedBook(id, incoming)?.revision == revision
         }
     }
 }

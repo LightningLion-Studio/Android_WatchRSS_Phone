@@ -120,7 +120,8 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         projection.saveEventCursor(SyncV2Wire.string(events,"cursor"));return events
     }
     /** P2 normal publication only. Rollback/choice/history write paths remain closed. */
-    fun publishIndex(signer:SyncV2Signing,contentKey:ByteArray,keyVersion:Long,scannedRevision:String?=null):JSONObject {
+    fun publishIndex(signer:SyncV2Signing,contentKey:ByteArray,keyVersion:Long,scannedRevision:String?=null,
+        resetAdditions:Boolean=false):JSONObject {
         resumePublish()?.let{return it}
         fun sourceCurrent() {
             if(scannedRevision!=null && (projection.state().revision!=scannedRevision || !projection.isWindowComplete()))SyncV2Codec.fail("source_changed")
@@ -163,6 +164,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             var preservesConflictFacts=false
             var localEdit=false
             if(candidate!=null && (SyncV2Codec.canonical(candidate.first)!=SyncV2Codec.canonical(meta) || SyncV2Codec.canonical(candidate.second)!=SyncV2Codec.canonical(remoteState))) {
+                if (resetAdditions) SyncV2Codec.fail("source_changed")
                 if(meta.getString("kind")=="note" && SyncV2Codec.canonical(candidate.first)==SyncV2Codec.canonical(meta) && st.body.optString("activeGeneration")==account.getString("rollbackGeneration")) {
                     val local=SyncV2Business.join("note",candidate.first,candidate.second);val remote=SyncV2Business.join("note",meta,remoteState)
                     val localSet=SyncV2NoteConflicts.declared(local)

@@ -73,6 +73,12 @@ internal class B2RoomStore(private val db: PhoneCompanionDatabase) : B2Persisten
     }
     override suspend fun all(): List<B2Persistence.Record> = sql.query("SELECT scope,namespace,id,body FROM library_binary_records").use { c -> buildList { while (c.moveToNext()) add(B2Persistence.Record(c.getString(0), c.getString(1), c.getString(2), c.getString(3))) } }
     override suspend fun jobs() = records("job")
+    override suspend fun retainsForRecovery(scope: String, jobId: String): Boolean =
+        sql.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='syncv2_reset_bluetooth_pin'")
+            .use { it.moveToFirst() } &&
+            sql.query("SELECT 1 FROM syncv2_reset_bluetooth_pin WHERE scope=? AND job_id=?",
+                arrayOf(scope, jobId)).use { it.moveToFirst() }
+
     override suspend fun requestOwners() = records("nativeOwner")
     override suspend fun applyRejections(): List<B2Persistence.Record> =
         sql.query("SELECT scope,namespace,id,body FROM library_binary_records WHERE namespace GLOB ?",
@@ -148,5 +154,9 @@ internal class B2RoomStore(private val db: PhoneCompanionDatabase) : B2Persisten
         sql.execSQL("DELETE FROM library_binary_records WHERE scope=? AND namespace=? AND id=?", arrayOf(scope, ns, id))
         if (old != null) sql.execSQL("UPDATE library_binary_budget SET used=used-? WHERE singleton=1", arrayOf(charge(ns, old)))
     }
-    companion object { private val lanes = java.util.WeakHashMap<PhoneCompanionDatabase, Mutex>() }
+    companion object {
+        private val lanes = java.util.WeakHashMap<PhoneCompanionDatabase, Mutex>()
+        internal suspend fun <T> withJournalLane(db: PhoneCompanionDatabase, block: () -> T): T =
+            synchronized(lanes) { lanes.getOrPut(db) { Mutex() } }.withLock { block() }
+    }
 }

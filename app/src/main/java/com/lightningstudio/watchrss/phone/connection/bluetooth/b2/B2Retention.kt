@@ -37,7 +37,8 @@ internal class B2Retention(
         for (record in jobs) {
             val (owner, _, id, body) = record
             val row = B2Json.parse(body, false)
-            if (owner == scope && id == currentId || row.n("expiresAtMillis") >= time(owner)) {
+            if (owner == scope && id == currentId || store.retainsForRecovery(owner, id) ||
+                row.n("expiresAtMillis") >= time(owner)) {
                 legacyRetained = legacyRetained || row.optInt("bindingVersion") < 2
                 continue
             }

@@ -1005,7 +1005,9 @@ class PhoneCloudSyncService(
         cloudResetEntry(bootstrap, hasLocalAccountKey(),
             usesSyncV2 && canOpenCloudSync() && cloudResetAllowed() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S,
             !accountRepository.hasUsableSession || accountRepository.session.value?.userId != userId ||
-                pendingCloudReset(userId) != null)
+                pendingCloudReset(userId) != null || accountRepository.session.value?.let {
+                    settings.resetPause(client.scopeId(it)) == RESET_BLUETOOTH
+                } == true)
 
     internal fun prepareCloudStorageReset(userId: String): RecoveryKeySetup =
         keyManager.createRecoverySetup(requireSession(userId).userId, keyVersion = 1)
@@ -1026,9 +1028,13 @@ class PhoneCloudSyncService(
         val scope = client.scopeId(session)
         val prior = settings.resetPause(scope)
         if (upgrade && prior != RESET_UPGRADE) settings.setResetPause(scope, RESET_UPGRADE)
-        else if (prior != RESET_UPGRADE && prior != RESET_RECOVERY) settings.setResetPause(scope, RESET_RECOVERY)
+        else if (prior != RESET_UPGRADE && prior != RESET_RECOVERY && prior != RESET_BLUETOOTH) settings.setResetPause(scope, RESET_RECOVERY)
         update(CloudSyncPhase.NEEDS_RECOVERY,
-            if (upgrade) "云存储已重置，请升级后输入新的恢复词" else CLOUD_RESET_OTHER_DEVICE,
+            when {
+                upgrade || prior == RESET_UPGRADE -> "云存储已重置，请升级后输入新的恢复词"
+                prior == RESET_BLUETOOTH -> CLOUD_RESET_BLUETOOTH_PENDING
+                else -> CLOUD_RESET_OTHER_DEVICE
+            },
             errorCode = "cloud_reset")
     }
 
@@ -1051,12 +1057,9 @@ class PhoneCloudSyncService(
         verifyLocalKeys(session, bootstrap)
         registerCurrentDevice(session, bootstrap.libraryEpoch)
         storeEnvelopeForCurrentDevice(session, bootstrap.libraryEpoch)
-        withContext(Dispatchers.IO) {
-            checkApprovalOwner(session)
-            stageResetSources(session, bootstrap)
-        }
         initializingCloudReset = session.userId to bootstrap.libraryEpoch
         try {
+            stageResetSources(session, bootstrap)
             val ready = syncV2Product.sync(bootstrap.syncV2, expectedUserId = session.userId, initializeOnly = true)
             if (!ready.enabled) throw CloudResetUiFailure("当前无法初始化新云存储，本机待同步内容已保留")
             synchronized(syncStateLock) {
@@ -1064,6 +1067,14 @@ class PhoneCloudSyncService(
                 settings.setResetReady(client.scopeId(session), bootstrap.libraryEpoch)
                 settings.setResetPause(client.scopeId(session), null)
             }
+        } catch (error: IllegalStateException) {
+            if (error.message != "reset_bluetooth_pending") throw error
+            synchronized(syncStateLock) {
+                checkCloudEpoch(session, bootstrap.libraryEpoch)
+                settings.setResetPause(client.scopeId(session), RESET_BLUETOOTH)
+                update(CloudSyncPhase.NEEDS_RECOVERY, CLOUD_RESET_BLUETOOTH_PENDING, errorCode = "cloud_reset")
+            }
+            throw CloudResetUiFailure(CLOUD_RESET_BLUETOOTH_PENDING)
         } finally { initializingCloudReset = null }
         update(CloudSyncPhase.IDLE, "本机待同步内容已保留", bootstrap.member)
     }
@@ -1201,10 +1212,19 @@ class PhoneCloudSyncService(
 
     private suspend fun stageResetSources(session: PhoneAccountSession, bootstrap: CloudBootstrap?) =
         withContext(Dispatchers.IO) {
-            val database = requireNotNull(syncV2Database).invoke().openHelper.writableDatabase
-            com.lightningstudio.watchrss.phone.syncv2.SyncV2ResetSources.stage(
-                database, keyManager, session.userId, bootstrap?.syncV2ResetScope
-            )
+            checkApprovalOwner(session)
+            val room = requireNotNull(syncV2Database).invoke()
+            com.lightningstudio.watchrss.phone.connection.bluetooth.B2RoomStore.withJournalLane(room) {
+                checkApprovalOwner(session)
+                val database = room.openHelper.writableDatabase
+                val binaryScope = com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Digests
+                    .account(client.backendBaseUrl, session.userId)
+                val sources = com.lightningstudio.watchrss.phone.syncv2.SyncV2ResetSources
+                if (sources.pinUnconfirmedBluetooth(database, appContext.filesDir, binaryScope)) {
+                    throw IllegalStateException("reset_bluetooth_pending")
+                }
+                sources.stage(database, keyManager, session.userId, bootstrap?.syncV2ResetScope, appContext.filesDir)
+            }
         }
 
 
@@ -1739,7 +1759,11 @@ class PhoneCloudSyncService(
                 if (cloudResetPaused(session) || pendingCloudReset(session.userId)?.let {
                     settings.resetReady(client.scopeId(session)) != it.nextEpoch
                 } == true) {
-                    val text = if (pendingCloudReset(session.userId) != null) CLOUD_RESET_UNCONFIRMED else CLOUD_RESET_OTHER_DEVICE
+                    val text = when {
+                        settings.resetPause(client.scopeId(session)) == RESET_BLUETOOTH -> CLOUD_RESET_BLUETOOTH_PENDING
+                        pendingCloudReset(session.userId) != null -> CLOUD_RESET_UNCONFIRMED
+                        else -> CLOUD_RESET_OTHER_DEVICE
+                    }
                     update(CloudSyncPhase.NEEDS_RECOVERY, text, errorCode = "cloud_reset")
                     return@retryDiscardedCloudTransfer empty
                 }
@@ -1802,6 +1826,7 @@ class PhoneCloudSyncService(
                     error is java.net.SocketTimeoutException ||
                         (error is java.io.InterruptedIOException && error.message == "timeout") -> "sync_timeout"
                     error.message == "device_alias_recovery_required" -> "device_alias_recovery_required"
+                    error.message == "reset_record_conflict" -> "reset_record_conflict"
                     else -> null
                 }
                 update(CloudSyncPhase.ERROR, code?.let(SyncV2View::errorText) ?: error.message ?: "云同步失败",
@@ -2920,6 +2945,7 @@ class PhoneCloudSyncService(
     private companion object {
         const val RESET_UPGRADE = "upgrade"
         const val RESET_RECOVERY = "recovery"
+        const val RESET_BLUETOOTH = "bluetooth_pending"
         const val RESET_ATTEMPT = "attempt"
         private const val ACCOUNT_CHANGED = "账号已切换，请重新操作"
         private const val SYNC_V2_ROUND_TIMEOUT_MS = 330_000L

@@ -3,6 +3,9 @@ package com.lightningstudio.watchrss.phone.syncv2
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
 import com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Files
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Metadata
+import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Wire
 import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile
 import com.lightningstudio.watchrss.phone.data.local.FileArticleContentStore
@@ -11,10 +14,11 @@ import com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** Keeps local revisions and original bytes independent of the retired cloud scope. */
-internal class SyncV2ResetSources private constructor(
+internal class SyncV2ResetSources(
     private val db: SupportSQLiteDatabase,
     private val scope: String,
     private val previous: String,
@@ -28,17 +32,71 @@ internal class SyncV2ResetSources private constructor(
 
     override fun close() { previousKey?.fill(0) }
 
-    fun footprint(kind: String, id: String): JSONObject? {
-        val key = previousKey ?: return null
-        return db.controlQuery("""
+    fun acknowledged(kind: String, id: String, current: JSONObject): Boolean {
+        val key = previousKey ?: return false
+        val binding = db.controlQuery("""
             SELECT b.body FROM syncv2_identity_map m
             JOIN syncv2_p5_bindings b ON b.entity_key=m.entity_key AND b.scope=?
             WHERE m.repo_id=? AND m.kind=? AND m.logical_id=?
         """.trimIndent(), arrayOf(previous, previousRepo, kind, id)).use { row ->
             if (!row.moveToFirst()) null else JSONObject(SyncV2Codec.openLocal(key, previous, "p5/binding", row.getBlob(0)))
                 .let { JSONObject(it.getString("json")) }
-                .optJSONObject("localValue")
+        } ?: return false
+        if (!sameFootprint(current, binding.optJSONObject("localValue"))) return false
+        // A metadata acknowledgment does not acknowledge the original body bytes.
+        if (!current.optBoolean("deleted") && kind in setOf("article", "book", "asset")) {
+            return !hasLocalBody(kind, id) ||
+                matchesPublishedBody(kind, id, current, binding.getJSONObject("meta"), binding.optJSONObject("row"))
         }
+        return true
+    }
+
+    private fun hasLocalBody(kind: String, id: String): Boolean = when (kind) {
+        "article" -> db.controlQuery(
+            "SELECT 1 FROM phone_articles WHERE articleId=? AND (length(contentText)>0 OR length(contentHtml)>0)",
+            arrayOf(id)
+        ).use { it.moveToFirst() }
+        "book" -> db.controlQuery(
+            "SELECT 1 FROM imported_books WHERE bookId=? AND packageBytes>0", arrayOf(id)
+        ).use { it.moveToFirst() }
+        "asset" -> NoteAssetFiles.current(db, files, id).isFile
+        else -> false
+    }
+
+    private fun matchesPublishedBody(kind: String, id: String, value: JSONObject, meta: JSONObject, row: JSONObject?): Boolean {
+        if (row == null || row.isNull("recipeOid")) return false
+        val entity = meta.getString("entityKey")
+        val localRevision = when (kind) {
+            "article" -> {
+                val hasSecondaryBody = db.controlQuery(
+                    "SELECT 1 FROM phone_articles WHERE articleId=? AND length(contentText)>0 AND length(contentHtml)>0",
+                    arrayOf(id)
+                ).use { it.moveToFirst() }
+                if (hasSecondaryBody) return false // The article recipe covers the primary format only.
+                SyncV2ArticleBody.source(db, files, id) {}?.sha256?.let { SyncV2ArticleBody.revision(entity, it) }
+            }
+            "book" -> repository.committedBook(id, value)?.revision?.sha256?.let {
+                SyncV2BodyCodec.revision(kind, entity, it)
+            }
+            "asset" -> SyncV2NoteAssetNames.verifiedDigest(db, id)?.let {
+                val revision = BookPackageFiles.Revision(it, NoteAssetFiles.current(db, files, id).length())
+                NoteAssetFiles.verifiedOriginal(db, files, id, revision) {}
+            }?.revision?.sha256?.let { SyncV2BodyCodec.revision(kind, entity, it) }
+            else -> null
+        }
+        return localRevision != null && row.optString("bodyRevision") == localRevision
+    }
+
+    fun requiresSeparateCopy(local: JSONObject, remote: JSONObject): Boolean {
+        if (remote.has(SyncV2NoteWiring.ISOLATED_KEY)) return true
+        val meta = remote.getJSONObject("meta")
+        val kind = meta.getString("kind")
+        val id = meta.getString("logicalId")
+        val value = local.getJSONObject("value")
+        if (!sameFootprint(local.getJSONObject("meta"), meta) ||
+            !sameFootprint(local.getJSONObject("state"), remote.getJSONObject("state"))) return true
+        return !value.optBoolean("deleted") && hasLocalBody(kind, id) &&
+            !matchesPublishedBody(kind, id, value, meta, remote.optJSONObject("row"))
     }
 
     fun needed(kind: String, id: String): Boolean = db.controlQuery(
@@ -48,7 +106,6 @@ internal class SyncV2ResetSources private constructor(
     /** The caller's candidate transaction commits the verified byte references and scan position together. */
     fun capture(kind: String, id: String, hash: String, value: JSONObject, provenance: JSONObject,
         seal: (JSONObject) -> ByteArray) {
-        if (complete()) return
         val exists = db.controlQuery("SELECT 1 FROM syncv2_reset_pending WHERE scope=? AND kind=? AND logical_id=? AND revision_hash=?",
             arrayOf(scope, kind, id, hash)).use { it.moveToFirst() }
         if (exists) return
@@ -81,7 +138,7 @@ internal class SyncV2ResetSources private constructor(
     }
 
     private fun dependency(kind: String, id: String) {
-        db.execSQL("INSERT OR IGNORE INTO syncv2_reset_dependency VALUES(?,?,?)", arrayOf(scope, kind, id))
+        addDependency(db, scope, kind, id)
     }
 
     private fun copyAsset(id: String): String {
@@ -170,6 +227,12 @@ internal class SyncV2ResetSources private constructor(
         return SyncV2Codec.hex(sha.digest())
     }
 
+    fun migrateBluetoothBeforeSwitch() {
+        check(db.inTransaction())
+        if (previous.isEmpty() || complete()) return
+        migrateBluetooth(db, files, previous, scope) { previousKey?.copyOf() }
+    }
+
     fun complete(): Boolean = db.controlQuery("SELECT 1 FROM syncv2_reset_migration WHERE scope=?", arrayOf(scope)).use { it.moveToFirst() }
 
     fun complete(stamp: String) {
@@ -177,8 +240,12 @@ internal class SyncV2ResetSources private constructor(
     }
 
     companion object {
+        private fun addDependency(db: SupportSQLiteDatabase, scope: String, kind: String, id: String) {
+            db.execSQL("INSERT OR IGNORE INTO syncv2_reset_dependency VALUES(?,?,?)", arrayOf(scope, kind, id))
+        }
+
         /** The Room witness and old encrypted queues remain durable through the scope switch. */
-        fun stage(db: SupportSQLiteDatabase, keys: CloudKeyManager, user: String, resetScope: JSONObject?) {
+        fun stage(db: SupportSQLiteDatabase, keys: CloudKeyManager, user: String, resetScope: JSONObject?, files: File) {
             SyncV2Schema.install(db)
             SyncV2UnconfirmedWrite.requireSettled(db)
             val scope = resetScope?.let(SyncV2Codec::scope)
@@ -190,15 +257,122 @@ internal class SyncV2ResetSources private constructor(
                 JOIN syncv2_control control ON control.active_scope=state.scope
                 WHERE state.account_id=? AND state.scope<>?
             """.trimIndent(), arrayOf(account, scope.orEmpty())).use { if (it.moveToFirst()) it.getString(0) else "" }
-            if (previous.isNotEmpty() && db.controlQuery("""
-                SELECT 1 FROM syncv2_legacy_inbox
-                WHERE scope=? AND route='pendingChoice' AND applied=0 LIMIT 1
-            """.trimIndent(), arrayOf(previous)).use { it.moveToFirst() }) {
-                SyncV2Codec.fail("reset_migration_required")
+            if (name == null && previous.isNotEmpty()) {
+                migrateBluetooth(db, files, previous, null) {
+                    val repo = JSONObject(previous).getString("repoId")
+                    keys.syncV2Read(user, "local/$repo")?.let { SyncV2Codec.unhex(JSONObject(it).getString("key"), 32) }
+                }
             }
             if (name != null) {
-                val stamp = SyncV2BusinessWitness.read(db)
-                keys.syncV2Write(user, name, JSONObject().put("previous", previous).put("witness", stamp.encoded()).toString())
+                keys.syncV2Write(user, name, JSONObject().put("previous", previous).toString())
+            }
+        }
+
+        /** Native B2 staging can contain bytes before an inbox entry or Room receipt exists. */
+        internal fun pinUnconfirmedBluetooth(db: SupportSQLiteDatabase, files: File, accountScope: String): Boolean {
+            if (!db.controlQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='library_binary_records'")
+                    .use { it.moveToFirst() }) return false
+            val journal = File(files, "library-binary-v2").takeIf(File::isDirectory)?.let(::B2Files)
+            val pending = mutableListOf<String>()
+            db.controlQuery("SELECT id,body FROM library_binary_records WHERE scope=? AND namespace='job'",
+                arrayOf(accountScope)).use { jobs ->
+                while (jobs.moveToNext()) {
+                    val id = jobs.getString(0)
+                    val job = JSONObject(jobs.getString(1))
+                    if (job.getJSONObject("description").optString("direction") != "watchToPhone" ||
+                        job.optString("state") in setOf("APPLIED", "COMPLETE", "CANCELLED")) continue
+                    val hasNativePart = db.controlQuery("""
+                        SELECT body FROM library_binary_records
+                        WHERE scope=? AND namespace='object' AND instr(body,?)>0
+                    """.trimIndent(), arrayOf(accountScope, """"jobId":"$id"""")).use nativeParts@{ records ->
+                        while (records.moveToNext()) {
+                            val record = JSONObject(records.getString(0))
+                            if (record.optString("jobId") != id) continue
+                            val descriptor = record.getJSONObject("descriptor")
+                            val kind = descriptor.getString("kind")
+                            // Applied book segments can be the only staged copy of an
+                            // incomplete package until the book commit publishes it.
+                            if (!record.isNull("receipt") && kind != B2Wire.BOOK_SEGMENT) continue
+                            val materialized = journal?.jobDataBytes(accountScope, id, listOf(descriptor))?.let { it > 0 } == true
+                            if (!materialized && !(record.isNull("receipt") && record.optBoolean("active"))) continue
+                            if (kind == "noteAsset" && runCatching {
+                                SyncV2RecoveryStorage.guardedAlreadyPresent(db, files, SyncV2BodyRepository(db, files),
+                                    JSONObject().put("descriptor", descriptor)) { _, _, _, _ ->
+                                    SyncV2Codec.fail("reset_bluetooth_pending")
+                                }
+                            }.getOrDefault(false)) continue
+                            return@nativeParts true
+                        }
+                        false
+                    }
+                    if (hasNativePart) pending.add(id)
+                }
+            }
+            if (pending.isEmpty()) return false
+            db.beginTransaction()
+            try {
+                db.execSQL("CREATE TABLE IF NOT EXISTS syncv2_reset_bluetooth_pin(" +
+                    "scope TEXT NOT NULL,job_id TEXT NOT NULL,PRIMARY KEY(scope,job_id))")
+                for (id in pending) db.execSQL("INSERT OR IGNORE INTO syncv2_reset_bluetooth_pin VALUES(?,?)",
+                    arrayOf(accountScope, id))
+                db.setTransactionSuccessful()
+            } finally { db.endTransaction() }
+            return true
+        }
+
+        internal fun migrateBluetooth(db: SupportSQLiteDatabase, files: File, previous: String,
+            target: String?, readKey: () -> ByteArray?) {
+            val repository = SyncV2BodyRepository(db, files)
+            db.controlQuery("""
+                SELECT body,body_hash FROM syncv2_legacy_inbox
+                WHERE scope=? AND route='pendingChoice' AND applied=0 ORDER BY arrival,rowid
+            """.trimIndent(), arrayOf(previous)).use { rows ->
+                if (!rows.moveToFirst()) return
+                val key = readKey() ?: SyncV2Codec.fail("reset_bluetooth_pending")
+                val archiveKey = SyncV2Codec.localRecoveryKey(key, previous)
+                try {
+                    do {
+                        val verified = runCatching {
+                            val envelope = JSONObject(SyncV2Codec.openLocal(key, previous, "legacy", rows.getBlob(0)))
+                            val intent = if (envelope.length() == 1 && envelope.opt("json") is String)
+                                JSONObject(envelope.getString("json")) else envelope
+                            check(revision(intent) == rows.getString(1))
+                            val link = intent.getJSONObject("body").getJSONObject("guarded-transfer")
+                            val descriptor = link.getJSONObject("descriptor")
+                            val metadata = B2Metadata.validate(descriptor)
+                            val (kind, id) = when (descriptor.getString("kind")) {
+                                "noteAsset" -> "asset" to metadata.getString("storageKey")
+                                "bookState" -> "book" to metadata.getString("bookId")
+                                else -> SyncV2Codec.fail("reset_bluetooth_pending")
+                            }
+                            check(SyncV2RecoveryStorage.guardedAlreadyPresent(db, files, repository, link) { archive, size, offset, count ->
+                                SyncV2BluetoothInbox.readArchive(File(files, "syncv2-guarded-inbox"), previous, archiveKey,
+                                    archive, size, offset, count)
+                            })
+                            kind to id
+                        }.getOrNull() ?: SyncV2Codec.fail("reset_bluetooth_pending")
+                        // The checked Room original is the next scope's source. Do not
+                        // transfer an old transport ACK, cursor or encrypted descriptor.
+                        if (target != null) {
+                            val (kind, id) = verified
+                            addDependency(db, target, kind, id)
+                            if (kind == "asset") {
+                                for (owner in NoteAssetFiles.ownerKeys(db, id)) {
+                                    val note = if (owner.startsWith("note:")) owner.removePrefix("note:")
+                                    else db.controlQuery("SELECT noteId FROM note_conflicts WHERE conflictId=?",
+                                        arrayOf(owner.removePrefix("conflict:"))).use {
+                                        if (!it.moveToFirst()) SyncV2Codec.fail("reset_bluetooth_pending")
+                                        it.getString(0)
+                                    }
+                                    addDependency(db, target, "note", note)
+                                }
+                            }
+                        }
+                    } while (rows.moveToNext())
+                } finally {
+                    archiveKey.fill(0)
+                    key.fill(0)
+                }
             }
         }
 
@@ -207,10 +381,32 @@ internal class SyncV2ResetSources private constructor(
                 ?: SyncV2Codec.fail("reset_migration_required")
             val key = previous.takeIf(String::isNotEmpty)?.let {
                 val repo = JSONObject(it).getString("repoId")
-                val encoded = store.read("local/$repo")?.getString("key") ?: SyncV2Codec.fail("reset_migration_required")
+                val encoded = store.read("local/$repo")?.getString("key") ?: run {
+                    migrateBluetooth(db, files, previous, null) { null }
+                    SyncV2Codec.fail("reset_migration_required")
+                }
                 SyncV2Codec.unhex(encoded, 32)
             }
             return SyncV2ResetSources(db, scope, previous, key, files, depot)
+        }
+
+        fun revision(value: JSONObject): String =
+            SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.utf8(SyncV2LocalJson.canonical(value))))
+
+        fun forkNote(scope: String, source: JSONObject): JSONObject {
+            val id = "syncv2-reset-" + SyncV2Codec.hash(JSONArray().put(scope).put(revision(source)))
+            val fork = JSONObject(source.toString()).put("noteId", id)
+            val title = source.getString("title")
+            val suffix = " 副本"
+            if (SyncV2Codec.utf8(title + suffix).size <= 245760) fork.put("title", title + suffix)
+            val original = SyncV2NoteConflicts.declared(source)?.getJSONArray("records") ?: JSONArray()
+            val rebound = JSONArray()
+            for (index in 0 until original.length()) {
+                val conflict = JSONObject(original.getJSONObject(index).toString())
+                val conflictId = SyncV2Codec.hash(JSONArray().put(id).put(conflict.getString("conflictId")))
+                rebound.put(conflict.put("conflictId", conflictId).put("noteId", id))
+            }
+            return fork.put("noteConflicts", SyncV2NoteConflicts.phone(rebound, id))
         }
 
         fun sameFootprint(current: JSONObject, previous: JSONObject?): Boolean =

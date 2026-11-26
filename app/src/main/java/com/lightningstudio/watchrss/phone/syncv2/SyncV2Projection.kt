@@ -47,6 +47,7 @@ internal class SyncV2Projection(
         db.beginTransaction()
         try {
             SyncV2UnconfirmedWrite.requireSettled(db)
+            resetSources?.migrateBluetoothBeforeSwitch()
             val prior=db.controlQuery("SELECT descriptor_pin,account_id,identity FROM syncv2_state WHERE scope=?",arrayOf(scope)).use { c ->
                 if(c.moveToFirst()) Triple(c.getString(0),c.getString(1),c.getBlob(2)) else null
             }
@@ -660,7 +661,7 @@ internal class SyncV2Projection(
     }
     internal fun accountSeal(purpose:String,value:Any?)=seal("p5/$purpose",JSONObject().put("json",SyncV2LocalJson.canonical(value)))
     internal fun accountOpen(purpose:String,bytes:ByteArray)=JSONObject(open("p5/$purpose",bytes).getString("json"))
-    internal fun recoveryKey():ByteArray=SyncV2Codec.hmac(key,SyncV2Codec.lp(SyncV2Codec.utf8("wrss.sync.v2/local-recovery-key"),SyncV2Codec.utf8(scope)))
+    internal fun recoveryKey():ByteArray=SyncV2Codec.localRecoveryKey(key,scope)
     internal fun <T> accountWriter(expected:String,action:(State)->T):T=try{writer(expected,action)}
         catch(_:android.database.sqlite.SQLiteFullException){SyncV2Codec.fail("storage_pressure")}
         catch(_:android.database.sqlite.SQLiteDiskIOException){SyncV2Codec.fail("storage_pressure")}
@@ -848,6 +849,7 @@ internal class SyncV2Projection(
         }
         for(key in listOf("projectionRebuildRequired","tailR1Seq","reconcileStamp","reconcileDomain","reconcileSemantics"))st.body.remove(key)
         st.body.put("reconciledStamp",encoded).put("reconciledSemantics",reconciliationSemantics())
+        st.body.remove("resetForkSources")
         pruneNoteForks()
         refreshPending(st.body)
     }
@@ -1407,6 +1409,65 @@ internal class SyncV2Projection(
         }
     }
 
+    /**
+     * The retired account is never a merge base. Before the first apply in the new
+     * scope, publish only additions and keep every authenticated remote row.
+     */
+    internal fun prepareResetPublication(): Boolean {
+        val migration = resetSources ?: return false
+        if (!migration.complete()) return false
+        val before = state()
+        if (!before.body.isNull("appliedAccount") || !before.body.isNull("pendingPublish") ||
+            !before.body.isNull("pendingAccountAction") || before.body.optString("rollbackGeneration") != "0" ||
+            firstPendingLegacyKey() != null || !isWindowComplete()) return false
+        val remote = cloudRows().indexRows()
+        val collisions = accountLocalRows().filterRows { local ->
+            val meta = local.getJSONObject("meta")
+            val cloud = remote[meta.getString("entityKey")] ?: return@filterRows false
+            migration.requiresSeparateCopy(local, cloud)
+        }
+        if (collisions.any { it.getJSONObject("meta").getString("kind") != "note" }) {
+            SyncV2Codec.fail("reset_record_conflict")
+        }
+        if (collisions.isEmpty() && before.body.isNull("pendingChoice")) return true
+
+        writer(before.version) { st ->
+            val apply = SyncV2PhoneApply(db)
+            for (local in collisions) {
+                val meta = local.getJSONObject("meta")
+                val entity = meta.getString("entityKey")
+                val value = local.getJSONObject("value")
+                val fork = SyncV2ResetSources.forkNote(scope, value)
+                val forkId = fork.getString("noteId")
+                val note = SyncV2Schema.domains.single { it.kind == "note" }
+                val forkEntity = identity.entity("note", forkId)
+                if (candidate("note", forkId) != null || remote.containsKey(forkEntity)) {
+                    SyncV2Codec.fail("reset_record_conflict")
+                }
+                apply.upsert("notes", listOf("noteId"), fork)
+                val conflicts = fork.getJSONObject("noteConflicts").getJSONArray("records")
+                for (index in 0 until conflicts.length()) {
+                    apply.upsert("note_conflicts", listOf("conflictId"), conflicts.getJSONObject(index))
+                }
+                // Keep the unmodified Room source until the signed new account is applied.
+                val suppressed = st.body.optJSONObject("resetForkSources")
+                    ?: JSONObject().also { st.body.put("resetForkSources", it) }
+                suppressed.put(entity, SyncV2ResetSources.revision(value))
+                for (table in listOf("syncv2_candidates", "syncv2_provenance", "syncv2_wire_candidates")) {
+                    db.execSQL("DELETE FROM $table WHERE scope=? AND entity_key=?", arrayOf(scope, entity))
+                }
+                SyncV2CandidateTree(db, scope).remove(entity)
+                accountCatalog.remove("candidate", entity)
+                project(note, forkId, fork, st.revision, ownerBody = st.body, forkEdits = false)
+                // The complete scan already captured the source revision and its original bytes.
+                fault("reset-fork-committed")
+            }
+            st.body.put("tailChoicePending", false)
+            refreshPending(st.body)
+        }
+        return true
+    }
+
     private fun reconciliationSemantics()=SyncV2Codec.hash(JSONArray(SyncV2Schema.domains.map{binding(it,"p1-local-v1")}))
     private fun binding(domain: SyncV2Schema.Domain, capability: String): String = SyncV2Codec.hash(JSONObject()
         .put("schema",SyncV2Schema.semanticBinding(db,listOf(domain.table)+when(domain.table){"notes"->listOf("note_conflicts");"phone_articles"->listOf("article_register_provenance");"imported_books"->listOf("imported_book_chapters");"note_assets"->listOf(SyncV2NoteAssetNames.aliases,SyncV2NoteAssetNames.source);else->emptyList()}))
@@ -1553,8 +1614,11 @@ internal class SyncV2Projection(
     private fun project(d: SyncV2Schema.Domain,id: String,value: JSONObject,revision: String,eventAccount: JSONObject?=null,enqueue:Boolean=false,sourceState:JSONObject?=null,ownerBody:JSONObject?=null,forkEdits:Boolean=true,forceFork:Boolean=false) {
         var id2=id; var value2=value
         val owner=ownerBody?:readState().body
-        if (resetSources != null && enqueue && !resetSources.needed(d.kind, id) &&
-            SyncV2ResetSources.sameFootprint(value, resetSources.footprint(d.kind, id)) &&
+        if (resetSources != null && owner.isNull("appliedAccount") &&
+            owner.optJSONObject("resetForkSources")?.optString(identity.entity(d.kind, id)) ==
+            SyncV2ResetSources.revision(value)) return
+        if (resetSources != null && enqueue && owner.isNull("appliedAccount") && !resetSources.needed(d.kind, id) &&
+            resetSources.acknowledged(d.kind, id, value) &&
             candidate(d.kind, id) == null) return
         if(d.kind=="note"&&forkEdits) owner.optJSONObject("noteIsolation")?.let{iso->
             val source=identity.entity(d.kind,id)
@@ -1604,7 +1668,9 @@ internal class SyncV2Projection(
         val sourceHash=SyncV2Codec.hash(JSONObject().put("meta",objects.meta).put("state",objects.state).put("provenance",provenance))
         val previous=db.controlQuery("SELECT source_hash FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())it.getString(0) else null}
         if(previous==sourceHash) return
-        if (enqueue) resetSources?.capture(d.kind, id2, sourceHash, value2, provenance) { accountSeal("reset-pending", it) }
+        if (enqueue && owner.isNull("appliedAccount")) {
+            resetSources?.capture(d.kind, id2, sourceHash, value2, provenance) { accountSeal("reset-pending", it) }
+        }
         accountCatalog.put("candidate",JSONObject().put("meta",objects.meta).put("state",objects.state))
         val base=eventAccount?.let { JSONObject().put("accountOid",it.getString("oid")).put("generation",it.getString("generation")) }
         if(base!=null) {

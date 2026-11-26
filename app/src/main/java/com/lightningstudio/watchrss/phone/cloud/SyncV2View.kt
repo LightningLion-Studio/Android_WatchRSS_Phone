@@ -40,6 +40,7 @@ internal object SyncV2View {
     fun errorText(code: String): String = when (code) {
         "choice_stale" -> "资料刚有变化，请重新查看后再选。"
         "merge_unavailable" -> "这次修改无法自动合并。"
+        "reset_record_conflict" -> "新云存储中有同 ID 的本机资料。两份资料均已保留，迁移已暂停。"
         "window_expired", "temporarily_unavailable" -> "网络或云端暂时不可用，请稍后重试。"
         "quota_exceeded" -> "云空间已满。"
         "current_library_missing" -> "云端还没有可恢复的 Sync v2 资料库。"

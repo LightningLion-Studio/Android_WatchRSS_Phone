@@ -8,6 +8,7 @@ import com.lightningstudio.watchrss.phone.syncv2.SyncV2Codec
 
 internal const val CLOUD_RESET_CAPABILITY = "cloud_storage_reset_v1"
 internal const val CLOUD_RESET_HEADER = "x-watchrss-cloud-reset-version"
+internal const val CLOUD_RESET_BLUETOOTH_PENDING = "旧云存储有无法核对的待确认蓝牙资料。原件已保留，云同步已暂停。"
 internal const val CLOUD_RESET_OTHER_DEVICE = "云存储已在其他设备上重置，请输入新的恢复词"
 internal const val CLOUD_RESET_UNCONFIRMED = "重置结果暂未确认，请稍后在云同步页查看"
 internal const val CLOUD_RESET_QUOTA = "云存储空间不足，待同步内容已保留在本机"
@@ -90,6 +91,8 @@ internal class CloudResetUiFailure(val text: String) : Exception(text)
 
 internal fun cloudStorageResetError(error: Exception): String {
     if (error is CloudResetUiFailure) return error.text
+    if (error.message == "reset_bluetooth_pending") return CLOUD_RESET_BLUETOOTH_PENDING
+    if (error.message == "reset_record_conflict") return "新云存储中有同 ID 的本机资料。两份资料均已保留，迁移已暂停。"
     if (error is com.lightningstudio.watchrss.phone.syncv2.SyncV2CloudError) {
         return when (error.code) {
             "quota_exceeded" -> CLOUD_RESET_QUOTA

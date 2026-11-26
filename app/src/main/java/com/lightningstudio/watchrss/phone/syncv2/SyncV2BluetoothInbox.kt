@@ -122,38 +122,47 @@ internal class SyncV2BluetoothInbox(private val projection: SyncV2Projection, fi
     }
 
     private fun associatedData(id: String, offset: Long) =
-        SyncV2Codec.utf8("wrss.sync.v2/local/legacy-body/${projection.scope}/$id/$offset")
+        associatedData(projection.scope, id, offset)
 
     fun read(id: String, size: Long, offset: Long, count: Int): ByteArray {
-        SyncV2Codec.unhex(id, 32)
-        if (offset < 0 || offset > size - count || count !in 1..262144) SyncV2Codec.fail("closure_incomplete")
-        val result = ByteArray(count)
         val key = projection.recoveryKey()
-        try {
-            RandomAccessFile(File(directory, "$id.body"), "r").use { file ->
-                val blocks = (size + 65535) / 65536
-                if (file.length() != size + 28 * blocks) SyncV2Codec.fail("closure_incomplete")
-                var written = 0
-                while (written < count) {
-                    val position = offset + written
-                    val index = position / 65536
-                    val base = index * 65536
-                    val within = (position - base).toInt()
-                    val bytes = minOf(65536L, size - base).toInt()
-                    file.seek(index * (65536 + 28L))
-                    val nonce = ByteArray(12).also(file::readFully)
-                    val cipher = ByteArray(bytes + 16).also(file::readFully)
-                    val raw = SyncV2Codec.decrypt(key, nonce, associatedData(id, base), cipher)
-                    val copied = minOf(raw.size - within, count - written)
-                    raw.copyInto(result, written, within, within + copied)
-                    written += copied
+        return try { readArchive(directory, projection.scope, key, id, size, offset, count) }
+        finally { key.fill(0) }
+    }
+
+    companion object {
+        private fun associatedData(scope: String, id: String, offset: Long): ByteArray =
+            SyncV2Codec.utf8("wrss.sync.v2/local/legacy-body/$scope/$id/$offset")
+
+        internal fun readArchive(directory: File, scope: String, key: ByteArray, id: String,
+            size: Long, offset: Long, count: Int): ByteArray {
+            SyncV2Codec.unhex(id, 32)
+            if (offset < 0 || offset > size - count || count !in 1..262144) SyncV2Codec.fail("closure_incomplete")
+            val result = ByteArray(count)
+            try {
+                RandomAccessFile(File(directory, "$id.body"), "r").use { file ->
+                    val blocks = (size + 65535) / 65536
+                    if (file.length() != size + 28 * blocks) SyncV2Codec.fail("closure_incomplete")
+                    var written = 0
+                    while (written < count) {
+                        val position = offset + written
+                        val index = position / 65536
+                        val base = index * 65536
+                        val within = (position - base).toInt()
+                        val bytes = minOf(65536L, size - base).toInt()
+                        file.seek(index * (65536 + 28L))
+                        val nonce = ByteArray(12).also(file::readFully)
+                        val cipher = ByteArray(bytes + 16).also(file::readFully)
+                        val raw = SyncV2Codec.decrypt(key, nonce, associatedData(scope, id, base), cipher)
+                        val copied = minOf(raw.size - within, count - written)
+                        raw.copyInto(result, written, within, within + copied)
+                        written += copied
+                    }
                 }
+                return result
+            } catch (_: IOException) {
+                SyncV2Codec.fail("closure_incomplete")
             }
-            return result
-        } catch (_: IOException) {
-            SyncV2Codec.fail("closure_incomplete")
-        } finally {
-            key.fill(0)
         }
     }
 }

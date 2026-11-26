@@ -155,7 +155,7 @@ class B2Receiver(
             if (cancelJobs) for (b in auth.bindings) {
                 val j = store.get(scope, "job", b.s("jobId")) ?: continue
                 // A late old-controller cancellation cannot cancel a newer connection.
-                if (j.s("connection") != connection || terminal(j)) continue
+                if (j.s("connection") != connection || terminal(j) || store.retainsForRecovery(scope, j.s("jobId"))) continue
                 store.transaction { j.put("state", "CANCELLED"); store.put(scope, "job", j.s("jobId"), j) }
                 objects(j.s("jobId")).forEach { files.release(scope, j.s("jobId"), it.o("descriptor"), keepObject = it.o("descriptor").s("kind") == B2Wire.BOOK_SEGMENT) }
             }
@@ -890,6 +890,7 @@ class B2Receiver(
         }; fault("afterCompleteCommit"); return c
     }
     private suspend fun cancel(j: JSONObject, r: JSONObject): JSONObject {
+        if (!terminal(j) && store.retainsForRecovery(scope, j.s("jobId"))) fail("BUSINESS_REJECTED")
         val result = obj("state" to if (j.s("state") == "COMPLETE") "COMPLETE" else "CANCELLED", "alreadyComplete" to (j.s("state") == "COMPLETE"))
         receiveTransaction { fence(j, r); j.put("state", result.s("state")); store.put(scope, "job", j.s("jobId"), j); bind(j, r, result) }
         if (j.s("state") == "CANCELLED") objects(j.s("jobId")).forEach {

@@ -427,6 +427,9 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             val referenceErrors=if(contentEnabled)life.guard{bodies?.refreshReferences()?:emptyList()}else emptyList()
             val progress=projection.runWindow(budgetMillis=remaining())
             if(progress.paused)SyncV2Codec.fail("budget_paused")
+            val resetAdditions = !restoreCurrent && projection.prepareResetPublication()
+            if (resetAdditions && !projection.isWindowComplete() &&
+                projection.runWindow(budgetMillis = remaining()).paused) SyncV2Codec.fail("budget_paused")
             var st=projection.state()
             if(!st.body.isNull("pendingAccountAction")){
                 if (restoreCurrent) return@withinBudget
@@ -451,14 +454,14 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             if(dirty) {
                 val publicationRevision=st.revision
                 val accountHead=st.body.optJSONObject("account")
-                if(localDirty && accountHead!=null && (st.body.optBoolean("unknownEditBase") || st.body.optJSONObject("editBase")?.optString("accountOid")!=accountHead.getString("oid"))) {
+                if(!resetAdditions && localDirty && accountHead!=null && (st.body.optBoolean("unknownEditBase") || st.body.optJSONObject("editBase")?.optString("accountOid")!=accountHead.getString("oid"))) {
                     projection.requestConcurrentChoice();return@withinBudget
                 }
                 actions.prepareSigning()
                 projection.prepareWireIndex(vault.signer,keys.read(keys.newestVersion),keys.newestVersion).close()
                 if(contentEnabled)bodies?.bindPrepared()
                 if(contentEnabled && client.contentWriteAllowed() && !articles!!.runPage(remaining()))SyncV2Codec.fail("budget_paused")
-                cloud.publishIndex(vault.signer,keys.read(keys.newestVersion),keys.newestVersion,publicationRevision)
+                cloud.publishIndex(vault.signer,keys.read(keys.newestVersion),keys.newestVersion,publicationRevision,resetAdditions)
                 actions.refresh(budgetMillis=remaining())
             } else actions.flushAppliedAck()
             if(contentEnabled) {

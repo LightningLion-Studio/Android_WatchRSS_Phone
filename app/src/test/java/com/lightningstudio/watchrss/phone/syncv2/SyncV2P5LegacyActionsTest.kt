@@ -131,6 +131,12 @@ class SyncV2P5LegacyActionsTest {
             original.parentFile!!.mkdirs()
             original.writeBytes(raw)
             assertTrue(recovery.guardedAlreadyPresent(link))
+            val target = w.identity.scope.put("repoId", "93".repeat(16)).let(SyncV2Codec::scope)
+            SyncV2ResetSources.migrateBluetooth(w.sql, w.root, w.projection.scope, target) { SyncV2Fixtures.localKey.copyOf() }
+            assertEquals(id, w.sql.query("SELECT logical_id FROM syncv2_reset_dependency WHERE scope=? AND kind='book'",
+                arrayOf(target)).use { check(it.moveToFirst()); it.getString(0) })
+            assertArrayEquals(staged.readBytes(), archive.read(link.getString("archiveId"), staged.length(), 0, staged.length().toInt()))
+            assertEquals(0, w.projection.state().body.getJSONObject("applied").length())
             original.writeBytes(raw.copyOf().apply { this[lastIndex] = 0 })
             assertFalse(recovery.guardedAlreadyPresent(link))
         }

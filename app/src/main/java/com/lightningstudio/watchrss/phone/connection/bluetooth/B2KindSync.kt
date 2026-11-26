@@ -77,7 +77,9 @@ internal class B2KindSync(private val store: B2Persistence, private val director
                 }
                 for (binding in bindings) {
                     val job = binding.s("jobId")
-                    val ns = if (binding.s("direction") == "watchToPhone") "job" else "sourceJob"
+                    val receiving = binding.s("direction") == "watchToPhone"
+                    if (receiving && store.retainsForRecovery(account, job)) continue
+                    val ns = if (receiving) "job" else "sourceJob"
                     val row = store.get(account, ns, job)
                     // A source saved before the begin response has no state yet.
                     if (row != null && row.optString("state") != "COMPLETE") {
@@ -92,7 +94,7 @@ internal class B2KindSync(private val store: B2Persistence, private val director
             }
             for (binding in bindings.filter { it.s("direction") == "watchToPhone" }) {
                 val job = binding.s("jobId")
-                if (store.get(account, "job", job)?.s("state") != "CANCELLED") continue
+                if (store.retainsForRecovery(account, job) || store.get(account, "job", job)?.s("state") != "CANCELLED") continue
                 for (row in store.listForJob(account, "object", job)) {
                     val d = row.o("descriptor")
                     files.release(account, job, d)

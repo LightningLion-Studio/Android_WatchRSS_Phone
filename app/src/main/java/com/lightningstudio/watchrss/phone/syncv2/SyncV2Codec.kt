@@ -116,6 +116,9 @@ internal object SyncV2Codec {
         }}
     } catch (_: Exception) { fail("aead_invalid") }
 
+    fun localRecoveryKey(key: ByteArray, scope: String): ByteArray =
+        hmac(key, lp(utf8("wrss.sync.v2/local-recovery-key"), utf8(scope)))
+
     /** Independent device-local key, purpose and scope, never the content/identity key. */
     fun sealLocal(key: ByteArray, scope: String, purpose: String, value: Any?): ByteArray {
         require(key.size == 32)

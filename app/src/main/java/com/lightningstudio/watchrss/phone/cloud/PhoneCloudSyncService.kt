@@ -7,6 +7,7 @@ import com.lightningstudio.watchrss.phone.syncv2.SyncV2CloudError
 import com.lightningstudio.watchrss.phone.syncv2.SyncV2NoteAssetNames
 import com.lightningstudio.watchrss.phone.syncv2.SyncV2PhoneProduct
 import com.lightningstudio.watchrss.phone.network.CloudHttpDeadline
+import com.lightningstudio.watchrss.phone.network.LogoutHttpTimeout
 import kotlinx.coroutines.asContextElement
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -453,18 +454,20 @@ class PhoneCloudSyncService(
             syncV2Product.release()
             releaseCloudDevice(
                 revokeRemote = {
-                    val bootstrap = runCatching { client.bootstrap(session, observeResult = false) }.getOrNull()
-                    val expectedEpoch = bootstrap?.libraryEpoch?.takeIf(String::isNotBlank) ?: client.knownEpoch(session)
-                    if (expectedEpoch != null) {
-                        runCatching { client.revokeDevice(session, deviceId, expectedEpoch) }
-                        legacyDeviceId?.takeIf { it != deviceId }?.let { legacy ->
-                            val remote = bootstrap?.devices?.firstOrNull { it.deviceId == legacy }
-                            val owned = remote != null && runCatching {
-                                remote.publicKeySpki.base64Bytes().contentEquals(
-                                    keyManager.devicePublicKeySpki(session.userId, legacy).base64Bytes()
-                                )
-                            }.getOrDefault(false)
-                            if (owned) runCatching { client.revokeDevice(session, legacy, expectedEpoch) }
+                    CloudHttpDeadline.runOrNull<Unit>(LogoutHttpTimeout.CLOUD_DEVICE_MILLIS) {
+                        val bootstrap = runCatching { client.bootstrap(session, observeResult = false) }.getOrNull()
+                        val expectedEpoch = bootstrap?.libraryEpoch?.takeIf(String::isNotBlank) ?: client.knownEpoch(session)
+                        if (expectedEpoch != null) {
+                            runCatching { client.revokeDevice(session, deviceId, expectedEpoch) }
+                            legacyDeviceId?.takeIf { it != deviceId }?.let { legacy ->
+                                val remote = bootstrap?.devices?.firstOrNull { it.deviceId == legacy }
+                                val owned = remote != null && runCatching {
+                                    remote.publicKeySpki.base64Bytes().contentEquals(
+                                        keyManager.devicePublicKeySpki(session.userId, legacy).base64Bytes()
+                                    )
+                                }.getOrDefault(false)
+                                if (owned) runCatching { client.revokeDevice(session, legacy, expectedEpoch) }
+                            }
                         }
                     }
                 },

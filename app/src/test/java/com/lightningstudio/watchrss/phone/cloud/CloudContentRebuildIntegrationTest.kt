@@ -15,6 +15,8 @@ import kotlinx.coroutines.*
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.json.*
 import org.junit.*
 import org.junit.Assert.*
@@ -23,6 +25,8 @@ import org.robolectric.*
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowNetworkInfo
 import java.util.UUID
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest=Config.NONE, sdk=[35], application=Application::class, shadows=[CloudContentRebuildIntegrationTest.FixtureResources::class])
@@ -84,7 +88,7 @@ class CloudContentRebuildIntegrationTest {
     private val session=PhoneAccountSession("rebuild-owner","***","session","refresh",Long.MAX_VALUE)
     private val key=ByteArray(32) {it.toByte()}
     private val fixtures=mutableListOf<Fixture>()
-    private inner class Fixture(val initialEmpty:Boolean=true, val failStage:String?=null, val alwaysFail:Boolean=false, val backend:String="https://test.invalid", val accountSession:PhoneAccountSession=session) {
+    private inner class Fixture(val initialEmpty:Boolean=true, val failStage:String?=null, val alwaysFail:Boolean=false, val backend:String="https://test.invalid", val accountSession:PhoneAccountSession=session, val http: OkHttpClient = OkHttpClient()) {
         val context:Context=RuntimeEnvironment.getApplication()
         val scope=CoroutineScope(SupervisorJob()+Dispatchers.Default)
         val db = Room.inMemoryDatabaseBuilder(context, PhoneCompanionDatabase::class.java)
@@ -117,10 +121,12 @@ class CloudContentRebuildIntegrationTest {
         var phoneReleased = false
         var releaseBootstrapStatus: Int? = null
         var refreshAttempts = 0
-        val account=PhoneAccountRepository(env,sessionStore,PhoneInstallationIdentity(context),PhoneAccountClient(env,identity,httpClient=OkHttpClient.Builder().addInterceptor { chain ->
+        var networkPaths = emptySet<String>()
+        val account=PhoneAccountRepository(env,sessionStore,PhoneInstallationIdentity(context),PhoneAccountClient(env,identity,httpClient=http.newBuilder().addInterceptor { chain ->
             val request = chain.request()
             val path = request.url.encodedPath
             requestPaths += path
+            if (path in networkPaths) return@addInterceptor chain.proceed(request)
             val body = when {
                 path.endsWith("/account/logout") -> ""
                 path.endsWith("/phone-authorizations/challenge") -> JSONObject()
@@ -182,9 +188,10 @@ class CloudContentRebuildIntegrationTest {
             refreshDeviceSession = { token, owner ->
                 refreshAttempts++
                 coordinator.refreshRejectedDeviceSession(token, owner)
-            }, http=OkHttpClient.Builder().addInterceptor { chain ->
+            }, http=http.newBuilder().addInterceptor { chain ->
             synchronized(this) {
                 val request=chain.request();val path=request.url.encodedPath;requestPaths+=path;httpRequests++;requestBodyBytes+=request.body?.contentLength()?.coerceAtLeast(0) ?: 0
+                if (path in networkPaths) return@addInterceptor chain.proceed(request)
                 if(path.startsWith("/r48-fixture-blob/")) {
                     val sha=path.substringAfterLast('/');r48BlobReads+=sha
                     return@addInterceptor Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("fixture").body(r48Blobs.getValue(sha).toResponseBody()).build()
@@ -410,6 +417,87 @@ class CloudContentRebuildIntegrationTest {
         assertNull(f.coordinator.deviceAccessToken)
         assertNull(f.account.session.value)
         assertResetAuthorizationCleared(f, scope)
+    }
+
+    @Test fun slowCloudRevokeCancelsTheHttpCallAndCompletesLocalLogout() = runBlocking {
+        MockWebServer().use { server ->
+            val cancelled = ConcurrentLinkedQueue<String>()
+            val f = networkLogoutFixture(server, cancelled)
+            val scope = seedResetAuthorization(f)
+            val bootstrap = "/functions/v1/cloud/bootstrap"
+            val revoke = "/functions/v1/cloud/devices/phone/revoke"
+            f.networkPaths = setOf(bootstrap, revoke)
+            server.enqueue(MockResponse().setBody(f.bootstrap().toString()))
+            // Every byte arrives before the read timeout. The error body takes about 13 seconds.
+            server.enqueue(slowLogoutResponse(503, "x".repeat(130)))
+
+            val started = System.nanoTime()
+            assertTrue(f.coordinator.logout())
+            val elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+
+            assertTrue("local logout took ${elapsed}ms", elapsed < 10_000)
+            assertEquals(listOf(revoke), cancelled.toList())
+            assertEquals(listOf(bootstrap, revoke, "/functions/v1/account/phone-authorizations/challenge",
+                "/functions/v1/account/phone-authorizations/release", "/functions/v1/account/logout"), f.requestPaths)
+            assertEquals("Bearer ${f.authorization.deviceAccessToken}",
+                server.takeRequest(1, TimeUnit.SECONDS)?.getHeader("x-watchrss-device-authorization"))
+            assertEquals(revoke, server.takeRequest(1, TimeUnit.SECONDS)?.path)
+            assertNull(f.appAccess.load())
+            assertNull(f.coordinator.deviceAccessToken)
+            assertNull(f.account.session.value)
+            assertResetAuthorizationCleared(f, scope)
+        }
+    }
+
+    @Test fun slowAccountReleaseAndLogoutCancelHttpCallsAndQueueRemoteCleanup() = runBlocking {
+        MockWebServer().use { server ->
+            val cancelled = ConcurrentLinkedQueue<String>()
+            val f = networkLogoutFixture(server, cancelled)
+            val scope = seedResetAuthorization(f)
+            val release = "/functions/v1/account/phone-authorizations/release"
+            val logout = "/functions/v1/account/logout"
+            f.networkPaths = setOf(release, logout)
+            // MockWebServer also throttles reading the signed POST. Allow that short request
+            // through quickly while keeping each response body in flight past the deadline.
+            val padding = "x".repeat(8_000)
+            server.enqueue(slowLogoutResponse(200, """{"released":true,"padding":"$padding"}""", 128))
+            server.enqueue(slowLogoutResponse(503, padding, 128))
+
+            val released = f.coordinator.logout()
+
+            assertEquals(listOf(release, logout), cancelled.toList())
+            assertFalse(released)
+            assertEquals(release, server.takeRequest(1, TimeUnit.SECONDS)?.path)
+            assertEquals(logout, server.takeRequest(1, TimeUnit.SECONDS)?.path)
+            assertTrue(f.revoked)
+            assertEquals(f.identity.deviceId to f.authorization.releaseGrant, f.appAccess.pendingRelease())
+            assertEquals(session.userId, f.sessionStore.pendingRevocation()?.userId)
+            assertNull(f.appAccess.load())
+            assertNull(f.coordinator.deviceAccessToken)
+            assertNull(f.account.session.value)
+            assertResetAuthorizationCleared(f, scope)
+        }
+    }
+
+    private fun slowLogoutResponse(code: Int, body: String, bytesPerPeriod: Long = 1): MockResponse =
+        MockResponse().setResponseCode(code).setBody(body).throttleBody(bytesPerPeriod, 100, TimeUnit.MILLISECONDS)
+
+    private suspend fun networkLogoutFixture(
+        server: MockWebServer,
+        cancelled: ConcurrentLinkedQueue<String>
+    ): Fixture {
+        val http = OkHttpClient.Builder().readTimeout(2, TimeUnit.SECONDS)
+            .eventListener(object : EventListener() {
+                override fun canceled(call: Call) {
+                    cancelled.add(call.request().url.encodedPath)
+                }
+            }).build()
+        return Fixture(backend = server.url("/").toString().trimEnd('/'), http = http).also {
+            fixtures += it
+            it.initialize()
+            it.requireDeviceAuthorization = true
+            it.appAccess.save(it.authorization)
+        }
     }
 
     @Test fun resetBootstrapRevocationClearsScopeAndAllowsRecovery() = runBlocking {

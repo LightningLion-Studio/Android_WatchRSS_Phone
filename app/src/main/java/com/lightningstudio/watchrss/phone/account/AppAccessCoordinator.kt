@@ -18,6 +18,8 @@ import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired
 import com.lightningstudio.watchrss.phone.cloud.CloudDeviceSessionRequest
+import com.lightningstudio.watchrss.phone.network.CloudHttpDeadline
+import com.lightningstudio.watchrss.phone.network.LogoutHttpTimeout
 
 class AppAccessCoordinator(
     private val context: Context,
@@ -392,7 +394,11 @@ class AppAccessCoordinator(
                 val released = accountRepository.logoutWithSessionCheck(expected) {
                     val current = store.load()
                     val released = if (current != null) {
-                        runCatching { accountRepository.releaseAppAccess(current) }.getOrDefault(false)
+                        runCatching {
+                            CloudHttpDeadline.runOrNull(LogoutHttpTimeout.PHONE_AUTHORIZATION_MILLIS) {
+                                accountRepository.releaseAppAccess(current)
+                            } == true
+                        }.getOrDefault(false)
                     } else true
                     if (!released && current != null) {
                         store.queueRelease(identity.deviceId, current.releaseGrant)

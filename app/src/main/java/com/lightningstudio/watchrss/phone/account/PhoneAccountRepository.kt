@@ -10,6 +10,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.lightningstudio.watchrss.phone.connection.bluetooth.AuthorizedBluetoothRequest
+import com.lightningstudio.watchrss.phone.network.CloudHttpDeadline
+import com.lightningstudio.watchrss.phone.network.LogoutHttpTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -293,7 +295,11 @@ class PhoneAccountRepository(
     private suspend fun logoutSession(current: PhoneAccountSession?) {
         if (current != null && !current.isExpired) {
             val queued = runCatching { sessionStore.queueRevocation(current) }.isSuccess
-            val revoked = runCatching { accountClient.logout(current) }.isSuccess
+            val revoked = runCatching {
+                CloudHttpDeadline.runOrNull(LogoutHttpTimeout.ACCOUNT_SESSION_MILLIS) {
+                    accountClient.logout(current)
+                } != null
+            }.getOrDefault(false)
             check(revoked || queued) { "无法安全退出，请检查网络后重试" }
             if (revoked) {
                 if (queued) {

@@ -4,6 +4,8 @@ import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Call
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
@@ -23,9 +25,21 @@ internal class CloudHttpDeadline private constructor(val untilNanos: Long) :
             val parent = currentCoroutineContext()[Key]
             return CloudHttpDeadline(parent?.let { minOf(it.untilNanos, until) } ?: until)
         }
+
+        suspend fun <T> runOrNull(millis: Long, work: suspend () -> T): T? {
+            val deadline = after(millis)
+            return withTimeoutOrNull(millis) { withContext(deadline) { work() } }
+        }
     }
 
     fun expired(): Boolean = untilNanos - System.nanoTime() <= 0
+}
+
+/** Sequential remote phases reserve time for each revocation within 10 seconds. */
+internal object LogoutHttpTimeout {
+    const val CLOUD_DEVICE_MILLIS = 4_000L
+    const val PHONE_AUTHORIZATION_MILLIS = 3_000L
+    const val ACCOUNT_SESSION_MILLIS = 3_000L
 }
 
 internal fun Call.limitToDeadline(untilNanos: Long) {
